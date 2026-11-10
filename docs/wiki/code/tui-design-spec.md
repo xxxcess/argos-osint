@@ -2,7 +2,7 @@
 
 [Code route](index.md) · [Wiki](../../index.md)
 
-Read this contract and the relevant [component catalog](tui-components.md) entries before changing `crates/argos-osint-bin/src/tui/`. Keep the terminal UI simple: no new chrome, motion, or density modes. React Native presentation follows the [Argos look and feel](react-ui.md#argos-look--feel-reference), where component design may vary inside the theme. That latitude does not transfer here. Profile's current presentation, 20-view inventory and acceptance matrix are specified in [profile-analytics-dashboard.md](profile-analytics-dashboard.md). That document supersedes the older 35-widget and focused-only accordion presentation; telemetry/history and [metric semantics](profile-dashboard-and-search.md#metric-dictionary) remain authoritative.
+Read this contract and the relevant [component catalog](tui-components.md) entries before changing `crates/argos-osint-bin/src/tui/`. Keep the terminal UI simple: no new chrome, motion, or density modes. React Native presentation follows the [Fleetworks look and feel](react-ui.md#fleetworks-look-and-feel), where component design may vary inside the theme. That latitude does not transfer here. Profile's current presentation, 20-view inventory and acceptance matrix are specified in [profile-analytics-dashboard.md](profile-analytics-dashboard.md). That document supersedes the older 35-widget and focused-only accordion presentation; telemetry/history and [metric semantics](profile-dashboard-and-search.md#metric-dictionary) remain authoritative.
 
 Name the selected components and layout preset before editing. Extend shared components where necessary, preserve theme tokens and the 20 primary IDs, and use the same rectangles for drawing, focus and pointer targets. Child prompts carry components/preset, exact owned files, read-only references and viewport/interaction/data checks.
 
@@ -53,7 +53,7 @@ Tab/Shift+Tab follow top-left→bottom-right and reveal focus; arrows select row
 
 ## Venture return and Jobs filters
 
-The no-argument CLI owns a persistent Venture session. Closing its TUI or stopping its owned stack restores the terminal/services and returns to Venture; direct `stack up` commands keep their one-shot behavior. Esc in Venture returns one question and preserves valid values, with incompatible later branch answers invalidated. At the root choice Esc exits. See [Venture navigation](../../diagrams/venture-navigation.html). Each selected session runs in a child process; process exit releases its repository and maintenance workers before the parent menu reopens.
+The no-argument CLI owns a persistent Venture session. Closing its TUI or stopping its owned stack restores the terminal/services and returns to Venture; direct `stack up` commands keep their one-shot behavior. Esc in Venture returns one question and preserves valid values, with incompatible later branch answers invalidated. At the root choice Esc exits. Each selected session runs in a child process; process exit releases its repository and maintenance workers before the parent menu reopens.
 
 Jobs filter changes are cohort transitions: clear old rows/detail/selection/scroll and pending owner navigation, then show loading until a snapshot for the new key arrives. Reject old keys; keep data during same-filter background refresh. Status/app/search and loaded state participate in action geometry invalidation. Keyboard and mouse filters use the same transition; zero matching rows are a successful empty result, not a loading placeholder.
 
@@ -74,7 +74,7 @@ sees the final state deterministically. No re-materialization race.
 
 ## Other application presets
 
-The shared data/render separation, geometry, scrolling and measured input apply throughout Argos. Keep orchestration and navigation; a daemon/IPC rewrite is outside UI work.
+The shared data/render separation, geometry, scrolling and measured input apply across the retained terminal source. Keep orchestration and navigation; a daemon/IPC rewrite is outside UI work.
 
 | Screen | Preset / retained behavior | TUI entry points |
 | --- | --- | --- |

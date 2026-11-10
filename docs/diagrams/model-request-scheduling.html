@@ -17,7 +17,7 @@
 </head>
 <body><main>
 <div class="eyebrow">Execution</div><h1>Provider request scheduling</h1>
-<p class="lede">One provider queue paces every Argos model path. HTTP dispatch owns pacing; the route executor owns retries and validation.</p>
+<p class="lede">Provider queues pace model requests within each process. HTTP dispatch owns pacing; the route executor owns retries and validation.</p>
 <div class="frame"><svg xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="model-request-scheduling-title model-request-scheduling-desc" viewBox="0 0 900 740">
 <title id="model-request-scheduling-title">Provider request scheduling</title>
 <desc id="model-request-scheduling-desc">Workflow retries and direct compatibility calls converge on compilation and one process-wide FIFO pacing queue per provider before HTTP sends. Rate limits and overloads extend the provider cooldown. A stalled route falls through to the next route and an interactive wall-clock cap bounds the operation. Validation returns a result or hands failure back to the retry owner.</desc>
@@ -32,8 +32,8 @@
 <path d="M336 496H288V352H336"/>
 </g>
 <rect x="24" y="40" width="240" height="76" rx="6" fill="#ffffff" stroke="#2d3142"/>
-<text x="144.0" y="65" text-anchor="middle" font-family="Geist,system-ui,sans-serif" font-size="14" font-weight="600" fill="#2d3142">Argos model callers</text>
-<text x="144.0" y="85" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="10" fill="#4f5d75">Intel · Recon · Atlas · Brain</text>
+<text x="144.0" y="65" text-anchor="middle" font-family="Geist,system-ui,sans-serif" font-size="14" font-weight="600" fill="#2d3142">Fleetworks model callers</text>
+<text x="144.0" y="85" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="10" fill="#4f5d75">Intel · Brain · shared models</text>
 <text x="144.0" y="103" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="10" fill="#4f5d75">all models and accounts</text>
 <rect x="336" y="40" width="232" height="76" rx="6" fill="#fff3eb" stroke="#eb6c36"/>
 <text x="452.0" y="65" text-anchor="middle" font-family="Geist,system-ui,sans-serif" font-size="14" font-weight="600" fill="#2d3142">Route retry owner</text>

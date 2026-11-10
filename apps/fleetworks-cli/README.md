@@ -26,8 +26,8 @@ effective workspace environment, then `http://127.0.0.1:8080`. Select a
 credential file with `--api-token-file`. Otherwise the client resolves
 `FLEETWORKS_API_TOKEN` or `FLEETWORKS_API_TOKEN_FILE` from process variables
 first and workspace configuration second, then checks `secrets/api-token`.
-Relative token paths start at the workspace root. The unauthenticated legacy
-host is available on loopback.
+Relative token paths start at the workspace root. Venture provisions a private
+API token when it starts the stack.
 
 One-shot commands write JSON to stdout. Use `--json` for compact output and
 `--help` for command arguments. Open the line-oriented Jobs & Logs session

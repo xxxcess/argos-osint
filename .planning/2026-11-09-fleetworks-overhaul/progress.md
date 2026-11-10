@@ -66,6 +66,12 @@ The full service cutover remains open. In particular, Brain and Intel integratio
 - Storage-backed NewsAPI tools now reserve the same daily quota as Atlas. Eleven NewsAPI/CourtListener adapter tests passed, including the new real-storage quota and loopback provider fixture. The two live-provider tests stayed ignored. The local embedded build stopped in RocksDB's bindgen setup because Clang could not find `stdbool.h`. The passing storage and adapter results used server mode.
 - The Compose scope now schedules the same packaged Venture smoke on native Linux AMD64 alongside ARM64. Offline workflow and aggregate fixtures passed. The first hosted AMD64 result is pending.
 
+## Branding, diagrams and brief completion
+
+- The [required check at `4038049`](https://github.com/xxxcess/argos-osint/actions/runs/42781577487) passed, including native Linux and Intel macOS clients, real Intel Rust-BERT, ARM64 service and RabbitMQ checks, and Venture-owned packaged Compose on ARM64 and AMD64.
+- Brief stage output, task state, metadata and the final retained run fence now commit together. Six storage tests passed against SurrealDB 3.3.4. The new test injected a fence failure, verified rollback and retried the same lease. Display and canonical publication still follow in separate commits.
+- The active README, wiki, CLI/dataset guidance and diagrams use Fleetworks and Venture. The old Intel roadmap, investigation harness and superseded figures moved to the archive. Implementation identifiers and verification for compatibility code stay discoverable. All 19 changed active diagram pairs matched and rendered in Inkscape. The repository link and anchor scan reported zero broken references.
+
 ## Retention
 
 This already-tracked plan records the shared cutover and its remaining acceptance work. Keep raw logs, fixtures and intermediate notes out of Git.

@@ -2,7 +2,7 @@
 
 [Concept route](index.md) · [Wiki](../../index.md)
 
-Atlas's `atlas-collection-v3` cycle retains native news discovery, country heat bands, regional coverage and article deduplication. Article admission scores the six strategic domains with a pinned Rust-BERT zero-shot worker. The [Fleetworks Atlas overlay](../../../deploy/atlas-dispatch.md) delivers collection work through RabbitMQ and delegates bounded NLP and classification requests to private services. Legacy Argos uses its local inference path. Retained v1/v2 history remains explicitly versioned. Cycles do not extract claims, assess fidelity, generate briefs, publish Brain claim memories or require vector indexing. Intel and Recon retain their independent on-demand investigative workflows and publication services.
+Atlas's `atlas-collection-v3` cycle retains native news discovery, country heat bands, regional coverage and article deduplication. Article admission scores the six strategic domains with a pinned Rust-BERT zero-shot worker. The [Fleetworks Atlas overlay](../../../deploy/atlas-dispatch.md) delivers collection work through RabbitMQ and delegates bounded NLP and classification requests to private services. Retained v1/v2 history remains explicitly versioned. Cycles do not extract claims, assess fidelity, generate briefs, publish Brain claim memories or require vector indexing. Intel Focus Brief runs on demand through its separate publication pipeline.
 
 The figure describes the local-admission contract. The [classifier code map](../code/classifier.md) separates model setup, foreground admission, historical work and provider monitoring. Verification and measured throughput are separate evidence.
 
@@ -26,7 +26,7 @@ Related means **shared headline/description entities**. Local posting lists crea
 
 [SurrealDB metadata storage](../../../crates/argos-osint-core/src/storage/atlas_metadata.rs) defines `atlas_article_metadata`, `atlas_article_mention` and `atlas_related_article`. Article/run content remains authoritative; stale revisions hide associations, and deletion removes dependent metadata without deleting independently retained Brain evidence. Related pages are bounded, reciprocal and carry true totals and coverage. Local reason text such as `Shared mentions: Acme, Jane Doe` grants no corroboration, premise or assessed graph edge.
 
-Intel places Related beneath Full Article in the middle column. Brain Actor groups expose Claims, Threads and Articles; Claims expose Actors and Sources. Lineage uses exact derivation evidence and legacy source run/call IDs, with canonical explicit URLs as fallback; prose similarity never supplies lineage. Opening a row selects that exact article's Intel Focus Brief, including `unk`, and preserves the prior view for Back. Loading a list makes zero model calls.
+Intel shows Related leads in Focus Brief. Brain retains direct actor, claim, article and source associations. Lineage uses exact derivation evidence and legacy source run/call IDs, with canonical explicit URLs as fallback; prose similarity never supplies lineage. Opening a row selects that exact article's Intel Focus Brief, including `unk`, and preserves the prior view for Back. Loading a list makes zero model calls.
 
 ## Phase 6 and cross-cycle Related
 

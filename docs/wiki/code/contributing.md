@@ -21,7 +21,7 @@ Without that setting, both retain the normal launcher `.next` behavior. The isol
 
 Rust 1.95.0 pinned. Agents always build through `python3 scripts/agent_cargo.py … --locked` (artifacts in `target/agents`; `target/debug` is the user's), with `ARGOS_EMBED` unset (the wrapper removes inherited values). `cargo fmt` runs directly. Local Rust builds and tests target the **host machine's native platform** (`uname -ms`, `rustc -vV | grep '^host:'`) and **embedded storage mode** (`--storage embedded`, default features `embedded,nlp,classifier`).
 
-Use the [Fleetworks scopes](ci.md#fleetworksyml--scoped-branch-checks) for network-client, deployment and service changes. The targeted Venture and client tests do not start a datastore. Run hosted Fleetworks checks for network-service or packaged Compose evidence and the legacy embedded gate for affected legacy runtime paths. Keep local and hosted results separate.
+Use the [Fleetworks scopes](ci.md#fleetworksyml--scoped-branch-checks) for network-client, deployment and service changes. The targeted Venture and client tests do not start a datastore. Run hosted Fleetworks checks for network-service or packaged Compose evidence and the embedded gate for affected compatibility runtime paths. Keep local and hosted results separate.
 
 ### Verification ownership and host resources
 
@@ -71,8 +71,8 @@ Never run the local all-platform, server storage or Rust mutation matrix/baselin
 ## Storage facts
 
 - Fleetworks uses a workspace-specific network datastore. See [Venture storage selections](fleetworks.md#launch-the-compose-stack).
-- Legacy default features `embedded,nlp,classifier`: embedded SurrealDB (RocksDB, in-process) under `<ARGOS_HOME>/storage/surreal`; `ARGOS_HOME` defaults to `~/.argos`.
-- Server mode is opt-in: `--no-default-features --features server,nlp,classifier`, selected by `argos storage init --mode server` or `ARGOS_STORAGE_MODE=server|embedded` (env → `storage/config.json` → embedded).
+- Network service builds use `--no-default-features --features server,nlp,classifier`.
+- The compatibility build and embedded storage contracts use `embedded,nlp,classifier`.
 - Storage is SurrealDB only. CI fails if `rusqlite` or `lancedb` appears in `cargo tree`.
 - Storage tests pick their mode from `ARGOS_SURREAL_MODE` and skip without it (and without `ARGOS_SURREAL_BIN`); run them via `test_surreal.py`.
 

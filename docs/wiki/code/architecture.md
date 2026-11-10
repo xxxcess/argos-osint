@@ -8,447 +8,44 @@
 
 | Component | Owns |
 | --- | --- |
-| [Venture](../../../apps/venture) and [workspace library](../../../crates/fleetworks-workspace) | Workspace settings and explicit legacy import, Compose and host database lifecycle, client launch |
+| [Venture](../../../apps/venture) and [workspace library](../../../crates/fleetworks-workspace) | Workspace settings and explicit configuration import, Compose and host database lifecycle, client launch |
 | [Terminal clients](../../../apps/fleetworks-cli) and [contracts](../../../crates/fleetworks-contracts) | Versioned request/response contracts and API access |
 | [API adapter](../../../crates/argos-osint-api) and [host](../../../crates/argos-api-host) | Authenticated gateway and live streams, schema bootstrap, private Brain and worker roles |
 | [Web app](../../../apps/web-desktop) | React Native Web presentation and same-origin relay to the API |
-| [Core](../../../crates/argos-osint-core) | Domain workflows, storage, provider routing and legacy Recon |
+| [Core](../../../crates/argos-osint-core) | Domain workflows, storage and provider routing |
 | [Broker](../../../crates/fleetworks-broker) | Durable RabbitMQ delivery for Atlas dispatch |
 | [Classifier](classifier.md) | Taxonomy, pinned Rust-BERT inference and separately managed Natural training |
 
 The Compose stack publishes the web relay and authenticated API on loopback by default. The API forwards actor dossiers, retained Intel brief operations and topology to the private Brain service. The existing worker runs brief jobs. Atlas dispatch adds RabbitMQ, a collection worker and private NLP and classifier services. SurrealDB owns job state and domain records. See [service startup and rollout status](fleetworks.md).
 
-## Legacy Argos application
-
-The `argos-osint-bin` crate still provides the direct CLI, Ratatui TUI and local stack supervisor. Its Home launches Intel, Atlas, Brain and Recon. Tools, Models and Profile configure Argos. Jobs and Logs monitor background work.
-
-[![Legacy Argos terminal workspace](../../diagrams/workspace.svg)](../../diagrams/workspace.html)
-
-[README](../../../README.md) · [Glossary](../concepts/glossary.md) · [Figures](../../diagrams.md)
-
-## Investigation flow
-
-[![One Recon turn](../../diagrams/recon-turn.svg)](../../diagrams/recon-turn.html)
-
-Each turn stores a user message and a run with snapshots of Recon, Tool picker, and Synthesis (`recon_run.tool_picker_model`; [run storage](../../../crates/argos-osint-core/src/storage/recon_runs.rs)).
-
-### Pipeline
-
-1. Brain recall
-2. Classifier picks report mode (Verify / Explain / Assess Outlook); keyword heuristic if the role is unset
-3. Recon writes 1–5 directives (`d1`…)
-4. Tool picker orders tools (1 pick per request, up to 13)
-5. Binder grounds every input; executor runs sequentially
-6. Streaming synthesis with a recomputed deadline
-
-### Brain recall
-
-Brain stores five canonical kinds — Actor, Claim, Inference, Link, Related — with typed payloads (`memory_metadata.rs`). Default recall admits Claim/Inference; `storage::recall::RecallQuery.allowed_kinds` admits structural kinds explicitly. Actor identity uses `brain_actors.rs` with `storage/actor_bind.rs` and `storage/actor_dedup.rs` (the [seeded catalog](actor-catalog.md) after activation; historical source-scoped actors and assessed redirects before activation); the Brain browse list projects Claims and normalized Actor-name groups without merging identities. Browse graphs display proven associations; internal observed Links (`──▶`) remain distinct from tentative Related (`┄┄`). The repository lifecycle and deletion paths reconcile retained actor support and dependent edges; operational retention (`job_cleanup`, telemetry prune) never touches Brain tables.
-
-- Recalled memories with sources get a compact **Brain memory resources** packet (article / video / file links plus claim text, ranked by overlap with the prompt).
-- URLs are binder-available (`evidence_id` `brain:…`). They are not listed under picker `known_bindings`.
-- Recon log: **From Brain** vs **From the question**.
-- Up to five claim-ranked links become picker options `brain_scrape:0`…. Picking one is a pre-bound `firecrawl_scrape`.
-- While those options remain and no search URL exists, bare `firecrawl_scrape` is withheld.
-- Binder prefers `brain:` URLs over later search hits (first in batch scrape lists).
-- Large scrape/extract evidence is compacted by Summarization (`compacting evidence`) before the final answer. Local preprocessing can select verbatim page windows before that operation; see [nlp-preprocessing.md](../concepts/nlp-preprocessing.md).
-
-### Directives
-
-Recon infers directives from the prompt, thread subject, previous synthesis, recalled insights, Brain resources, and history titles. It never sees the tool catalog — only binding kinds.
-
-| Field | Rule |
-| --- | --- |
-| `goal` | Imperative, ≤15 words. What to establish. Never which tool. |
-| `entities` | Verbatim spans of the prompt; follow-up with no entity uses `thread_subject` or a span of previous synthesis |
-| `targets` | Binding kinds |
-| `done_when` | Completion test |
-| `query` | Optional search query |
-
-Rejected: goals/entities that name a catalog tool id, provider, or platform API (`directives::PROVIDER_TERMS`), except words that belong to the prompt entity. “Who is Hunter Biden?” stays. “Run Hunter domain search on Acme” is dropped.
-
-Follow-up handoff is a compacted excerpt (~1,200 chars): citations and the evidence trailer stripped; lead findings plus D1–D5 kept. Same excerpt is established findings in the synthesis packet.
-
-Invalid reply: one repair, then fallback (`directives_mode = "directives_fallback"`):
-
-| Id | Goal | Targets |
-| --- | --- | --- |
-| d1 | Establish identity and public roles | person_name, org_name, url (+ identifier kinds named in the prompt) |
-| d2 | Find official accounts and websites | handle, domain, url |
-| d3 | Find affiliated organizations and contact domains | org_name, domain, email |
-
-Old plans with `derived_questions` / `questions_mode` still load.
-
-### Tool picker
-
-[![Tool picker transport](../../diagrams/tool-picker.svg)](../../diagrams/tool-picker.html)
-
-State includes classified mode (`mode_guidance`) and, when present, `brain_resources` plus `brain_scrape:*` candidates.
-
-- One tool per request. Request 1: directives, known bindings, compact eligible catalog, dependency table.
-- That tool leaves the set; next request carries the ordered list.
-- Stop at `min(max_calls, MAX_PICKS)` (`MAX_PICKS` = 13), empty candidates, or `done` (offered only after three picks).
-- Candidates recomputed every pick (`picker::offered_candidates`).
-- Until a primary tool is picked, only primaries are offered (Firecrawl search; SociaVault profile/search when a handle or subject name is known; any primary the prompt can already run).
-- Gap-fillers join after the first primary pick, or immediately for IP / CVE / wallet / coordinates.
-- Every candidate must serve a directive (produced or taken kinds overlap `targets`).
-- `sociavault_google_search` is never an ordering candidate.
-- Duplicate / unknown id: ask once, then deterministic pick for that slot.
-- Order is pick order, then a stable topological fix (`depends_on` from the table plus chat `needs`/`produces`).
-
-| Transport | When | Shape |
-| --- | --- | --- |
-| Decisions | `typesafe/jev-*` or id contains `/jev` | `POST …/alpha/decisions`, one `choice` per remaining tool (+ `done` after 3). Probability = confidence. All picks &lt; 0.45 → discard order, use deterministic fallback. |
-| Chat | everything else | `{ "tool_id", "serves", "needs", "produces", "reason" }` or `{"tool_id":"done"}`. Validate + one repair. |
-
-Picker bounds:
-
-- `MAX_PICKS` picks, one repair each, two fallback picks per turn
-- Picker 429 → no more picker calls; deterministic picker finishes
-- Unconfigured or unreachable picker falls back; the turn continues
-- Confidence, reason, transport, candidate count in `plan_json` (`picks`)
-- Transcript row hides probabilities
-
-Local Firecrawl allowance: `recon_limits.firecrawl_credits` (default 1000; old 200 migrated on load). Independent of the Firecrawl dashboard. Skip reasons name remaining/needed credits, duplicate in-flight, or disabled tool.
-
-### Binder and executor
-
-Same `osint::Executor`, credit holds, cache, and cancel path as manual OSINT.
-
-Fill order:
-
-1. Directive entity when the input can take it (name → Wikidata; query → Firecrawl / SociaVault search).
-2. Accepted bindings for the rest (handle+platform, domain, email, name, URL, IP, CVE, package, wallet, address, coordinates).
-
-A binding is accepted only when its value occurs in a stored observation or the question. It keeps that evidence id.
-
-After each result:
-
-1. Rule extractor
-2. Recon model extraction if a later step still lacks an input, or this tool yielded handles a later step takes (skipped after a 429 this turn)
-3. Model output passes verbatim / ownership / platform checks and merges with rules
-
-Outcome in `plan.binding_notes`.
-
-Every dispatched input is grounded in `plan.grounding`: `{step, input, value, source}` (`d1 entity`, `binding call-…`, `fixed`, …). Missing grounding → skip with `ungrounded input`.
-
-Search queries (`firecrawl_search`, `sociavault_search`, `sociavault_search_users`, `sociavault_google_search`) are never question text.
-
-`grounded_query`:
-
-- Directive entity or accepted binding
-- At most one qualifier from the first target kind: handle → `official account`, domain → `official website`, org_name → `company`, email → `contact`, person_name → none
-- ≤6 words, ≤80 chars
-- No question words, no tool/provider names
-- Recon’s `query` used only if it passes; else `<entity>` or `<entity> <qualifier>`
-- Platform searches send the entity alone
-
-Relevance gate: keep domain / org_name / email / url only when a result containing that value also names a directive entity. Drops go in the binding note.
-
-Failed or starved step: one single-pick fallback (tools that can run now and yield a missing kind).
-
-- Handle named in a directive is a known unverified binding before any tool runs
-- Dispatch error fails the step, not the turn
-- Unresolved list is recomputed after every step
-
-SociaVault:
-
-- One call per question platform with a known handle (`s2a`, `s2b`, …)
-- Missing handle may borrow the subject’s best-supported handle (`inferred`)
-- Per-turn credits: `sociavault_turn_credits_opening` (3) then `_later` (8)
-- Every route costs 1; over budget → defer
-- Endpoint from the question (“reels”, “#tag”, …) is passed as `endpoint`
-
-Weak Firecrawl search (fail / rate / timeout / fewer than `google_fallback_min_results` (3) / all social-or-publisher / dependent still starved) inserts one bound `sociavault_google_search` with the same query. Once per query, only while SociaVault budget remains.
-
-`hunter_email_count` of 0 for the same domain/company skips `hunter_domain_search`. Hunter 451 (`claimed_email`) stores no person data and drops that email binding.
-
-Firecrawl batch scrape and crawl poll `GET /v2/{batch/scrape|crawl}/{id}` every 2 s until timeout; cancel on timeout; keep partial pages.
-
-Public observations are data, never instructions.
-
-- Per-host rate, process concurrency, timeouts, bounded retries/bodies, cache, redirect host policy
-- No active scanning or shell execution
-- Manual calls attach to threads with explicit provenance
-
-### Tool execution bounds and in-flight dedup
-
-`crates/argos-osint-core/src/recon/tool_runner.rs` (`ToolRunner`, constructed from `recon.rs`) owns shared OSINT tool execution with concurrency bounding, per-request timeouts, and atomic in-flight deduplication across Chat and Intel investigations:
-
-- **Concurrency semaphore**: `ToolRunner::MAX_CONCURRENCY = 4` — a `tokio::sync::Semaphore(4)` bounds the number of concurrent OSINT network requests across all tools. `execute_tool_inner` acquires a permit before dispatch and drops it on completion, so no more than four tools run at once.
-- **Per-request timeout**: `ToolRunner::REQUEST_TIMEOUT = 30s`; each tool runs under its own configured timeout (`tool_timeout`), falling back to 30s when the catalog definition sets none. A timeout produces a `failed` result, never zero results.
-- **In-flight deduplication**: while a request for a `cache_key` is in flight, a second caller for the same key waits on the leader's `watch::Receiver` instead of dispatching a duplicate. The leader is tracked in a `Mutex<HashMap<cache_key, watch::Receiver>>` cleared by an `InflightGuard` RAII guard that removes the key on drop, so keys are removed synchronously and deterministically without async-task leakage.
-- **Cancellation**: every call takes an `Arc<AtomicBool>` cancel flag checked before cache lookup, permit acquisition, and execution; a cancelled call is an error, never a zero result.
-
-### Synthesis
-
-Packet: question, classified mode, Brain facts (data, omitted when empty), directives, ordered plan, accepted bindings, this turn’s evidence.
-
-- Headings follow the mode (BLUF, then actors/timeline or claims/corroboration or scenarios/indicators, then gaps).
-- Evaluate each directive. Tool evidence is citable. Brain may inform; it is not a citation id. Tool evidence wins on conflict.
-- Answer the question first, then one `D1:` line per directive (met / partly / not), citations, one narrowing sentence only when unmet.
-- One evidence id per bracket. Validate each `call-…` on its own (`[a, b]`, `[a; b]`, `[a][b]`).
-- Unknown id: one repair, then drop unknowns if at least one valid citation remains. If completed evidence exists and no valid citation is left, keep the bounded uncited answer. New-policy insights come from pre-answer original-evidence assessment; they never infer citations from answer prose. Explicit legacy extraction retries retain their old contract.
-- Stored answers normalize to `[a][b]`. Separate extraction derives atomic Brain claims. Retry with `recon retry-insights`.
-
-## Turn telemetry and streaming synthesis
-
-Elapsed-time clocks are telemetry. They do not skip tools, cut synthesis, or move a turn to the background. Stops come from user cancel, per-request timeouts, call/credit caps, retry exhaustion, and no-progress bounds. Persisted `turn_seconds` / `max_turn_seconds` still load; CLI flags are hidden and emit a deprecation warning.
-
-`plan.deadline_note` may still carry an elapsed/allowance label (`Deadline 6m 10s: 11 calls, ~52k chars evidence`). The TUI status shows stage, retries, and call counts.
-
-- `ask` / `resume` emit `TurnEvent::AnswerDelta`
-- TUI live bubble ~50 ms
-- `argos ask` deltas → stderr; stdout is final JSON
-- Provider that rejects streaming: the shared role executor counts the next attempt
-
-## Tool inputs and bindings
-
-[![Binding and grounding](../../diagrams/recon-bindings.svg)](../../diagrams/recon-bindings.html)
-
-`recon/investigation/tool_io.rs` is the single table (`TOOLS`). Picker catalog, dependencies, binder, filler, rule extractor, starved-step check, and fallback filter all read it.
-
-Subject extraction:
-
-- Strip imperative lead-ins (`recon`, `investigate`, …), social tails, attribute words (`follower count`, `net worth`, …)
-- Person names: 2–4 tokens, no product words
-- Handles only when the subject owns them (profile URL, `@mention` next to a platform, or a keyed account field)
-
-Every binding records `source_tool` (empty for the prompt).
-
-**Hunter inputs** (`restricted_sources` / `allowed_producer`): prompt, Firecrawl, SociaVault, or earlier Hunter. Gap-filler values wait until a primary observation contains the same value. Firecrawl map/crawl: Firecrawl and Hunter sources only.
-
-Gates: `hunter_email_count` before `hunter_domain_search`; `hunter_email_insight` before person/combined enrichment.
-
-Coverage tests:
-
-- Every required input maps to a kind with prompt extractor, producer, and rule extractor
-- Every SociaVault route writes `platform` plus a route input
-- Hunter producers are primary-only
-- `platform_id` is `TOOL_ONLY` (SociaVault profile)
-- Request-builder fixtures cover every route
-
-| Tool | Inputs | Binding kinds | Producers (besides the prompt) | Extractor |
-|---|---|---|---|---|
-| `crtsh_certificates` | domain | domain | domain: 24 — declared: firecrawl_search | domain scanner |
-| `mnemonic_passive_dns` | domain_or_ip | domain or ip | domain: 24; ip: 7 — declared: firecrawl_search | IP scanner; domain scanner |
-| `hackertarget_hostsearch` | domain | domain | domain: 24 — declared: firecrawl_search | domain scanner |
-| `ripestat_network_info` | ip | ip | ip: 7 — declared: mnemonic_passive_dns, hackertarget_hostsearch | IP scanner |
-| `arin_rdap` | ip | ip | ip: 7 — declared: mnemonic_passive_dns, hackertarget_hostsearch | IP scanner |
-| `apnic_rdap` | ip | ip | ip: 7 — declared: mnemonic_passive_dns, hackertarget_hostsearch | IP scanner |
-| `wayback_availability` | url | url or domain (as https URL) | url: 20; domain: 24 | URL scanner; domain scanner |
-| `commoncrawl_urls` | domain | domain | domain: 24 | domain scanner |
-| `arquivo_history` | domain_or_url | domain or url | domain: 24; url: 20 | URL scanner; domain scanner |
-| `github_repositories` | query | handle or package or org_name or person_name | handle: 15; package: 4; org_name: 10; person_name: 6 | entity selection + keyed name fields; package scanner; profile URL + @mention + keyed fields (subject-owned) |
-| `gitlab_projects` | query | handle or package or org_name or person_name | handle: 15; package: 4; org_name: 10; person_name: 6 | entity selection + keyed name fields; package scanner; profile URL + @mention + keyed fields (subject-owned) |
-| `grepapp_code_search` | query | package or domain or org_name | package: 4; domain: 24; org_name: 10 | domain scanner; entity selection + keyed name fields; package scanner |
-| `gleif_entities` | company_name \| lei | org_name | org_name: 10 | entity selection + keyed name fields |
-| `sec_submissions` | cik \| name \| ticker | org_name | org_name: 10 | entity selection + keyed name fields |
-| `wikidata_entities` | name \| qid | org_name or person_name | org_name: 10; person_name: 6 | entity selection + keyed name fields |
-| `keybase_identity` | username \| domain | handle (keybase, else subject's best) or domain | handle: 15; domain: 24 — declared: firecrawl_search, sociavault_profile | domain scanner; profile URL + @mention + keyed fields (subject-owned) |
-| `stackexchange_users` | name | person_name or handle | person_name: 6; handle: 15 | entity selection + keyed name fields; profile URL + @mention + keyed fields (subject-owned) |
-| `wikipedia_users` | username | handle (wikipedia, else subject's best) | handle: 15 — declared: firecrawl_search, sociavault_profile | profile URL + @mention + keyed fields (subject-owned) |
-| `wikipedia_source_reliability` | domain \| url \| publisher | domain, url, org_name, or entity phrase (news context) | evidence only (no bindings) — `context: news` | Admiralty Source Reliability A–F from English WP:RSP via MediaWiki `action=parse`; unlisted → F |
-| `nominatim_geocode` | address_or_place | address | address: 10 | keyed address fields |
-| `census_geocode` | us_address | address | address: 10 | keyed address fields |
-| `overpass_places` | latitude, longitude, radius_m | coordinates (radius_m 500) | coordinates: 2 — declared: nominatim_geocode, census_geocode | lat/lon fields |
-| `blockchain_address` | bitcoin_address | wallet | wallet: 4 | BTC address scanner |
-| `blockstream_address` | bitcoin_address | wallet | wallet: 4 | BTC address scanner |
-| `mempool_address` | bitcoin_address | wallet | wallet: 4 | BTC address scanner |
-| `nvd_cve` | cve_id | cve | cve: 8 | CVE scanner |
-| `osv_package` | ecosystem, package_name, version \| commit | package (ecosystem:name@version) | package: 4 | package scanner |
-| `cve_record` | cve_id | cve | cve: 8 | CVE scanner |
-| `sans_ip_activity` | ip | ip | ip: 7 | IP scanner |
-| `shodan_internetdb` | ip | ip | ip: 7 | IP scanner |
-| `urlscan_search` | domain \| query | domain | domain: 24 | domain scanner |
-| `firecrawl_search` | query | query (directive entity + fixed qualifier, limit 5) | always (built from the directive entity) | n/a; relevance gate on domain/org_name/email/url |
-| `firecrawl_scrape` | url | url | url: 20 — declared: firecrawl_search | URL scanner |
-| `firecrawl_map` | domain \| url | domain (prompt, Firecrawl, or Hunter only) | domain — declared: firecrawl_search, hunter_domain_finder | URL scanner (same-site links, contact/about first) |
-| `firecrawl_batch_scrape` | urls | url list (up to 5, ranked) | url: 20 — declared: firecrawl_map, firecrawl_search | URL scanner |
-| `firecrawl_crawl` (off by default) | domain \| url | domain (prompt, Firecrawl, or Hunter only) | domain — declared: firecrawl_search, hunter_domain_finder | URL scanner |
-| `firecrawl_extract` | url | url | url: 20 — declared: firecrawl_map, firecrawl_search | keyed org/legal name, domain, address, people names |
-| `hunter_domain_finder` | company | org_name | org_name (primary only) — declared: firecrawl_search | keyed domain and company_name (inferred unless perfect_match) |
-| `hunter_email_count` | domain \| company | domain or org_name | primary only — declared: firecrawl_search, hunter_domain_finder | n/a (gates domain search) |
-| `hunter_domain_search` | domain \| company | domain or org_name | primary only — declared: firecrawl_search, hunter_domain_finder | domain scanner; entity selection + keyed name fields |
-| `hunter_email_finder` | domain \| company; full_name \| first_name \| linkedin_handle | domain or org_name; person_name | primary only — declared: firecrawl_search, hunter_domain_search | domain scanner; entity selection + keyed name fields |
-| `hunter_email_verifier` | email | email | primary only — declared: hunter_email_finder, hunter_domain_search | email scanner |
-| `hunter_company_enrichment` (was `hunter_tech_lookup`) | domain | domain | primary only — declared: firecrawl_search, hunter_domain_finder | keyed name, legal name, domain, parent domain, address, social handles |
-| `hunter_email_insight` | email | email | primary only — declared: firecrawl_search, hunter_domain_search | n/a (gates enrichment) |
-| `hunter_person_enrichment` | email \| linkedin_handle | webmail email or LinkedIn handle | primary only — declared: firecrawl_search, hunter_domain_search | keyed full name, employer, employer domain, handles |
-| `hunter_combined_enrichment` | email | company (non-webmail) email | primary only — declared: firecrawl_search, hunter_domain_search | keyed person and company fields |
-| `sociavault_profile` | platform, handle \| user_id | handle + platform, or platform_id + platform (one call per question platform) | handle: 15; platform_id: 1 — declared: firecrawl_search, hunter_company_enrichment, sociavault_search_users | profile URL + @mention + keyed fields (subject-owned); keyed platform_id |
-| `sociavault_search` | platform, query (+ subreddit) | person_name, org_name, or handle as query; platform named in the question, else twitter | always (a name or handle) | handles marked unverified |
-| `sociavault_search_users` | platform, query | as above; default instagram | always (a name or handle) | handles marked unverified |
-| `sociavault_user_content` | platform, handle \| user_id | handle or platform_id + platform (one call per question platform) | handle: 15; platform_id: 1 — declared: sociavault_profile | profile URL + @mention + keyed fields |
-| `sociavault_google_search` | query | query (same as the Firecrawl search it replaces) | inserted by Recon only | domain/URL scanner, entity selection; relevance gate |
-
-| Kind | From the prompt | Tool producers | Rule extractor |
-|---|---|---|---|
-| domain | yes | crt.sh, Whoxy WHOIS history, passive DNS, HackerTarget, RDAP, Shodan, urlscan, Firecrawl (5), Hunter (5), SociaVault (3), Keybase, and others | domain scanner (registrable TLD; social, publisher, file, and webmail hosts dropped) and entity selection on search hits |
-| ip | yes | passive DNS, HackerTarget, urlscan, Firecrawl (7) | IPv4/IPv6 scanner |
-| email | yes | RDAP, Holehe email lookup, grep.app, Firecrawl (5), Hunter (4), SociaVault (3) | email scanner (webmail domains are not company domains) |
-| url | yes | Common Crawl, Arquivo, GitHub, GitLab, Wikidata, Keybase, NVD, urlscan, Firecrawl (6), SociaVault (4), and others (20) | URL scanner (subject-related or own-domain hosts) |
-| handle | yes | Firecrawl (5), Keybase, GitHub, Hunter (3), SociaVault (5) (15) | profile-URL and @mention-near-platform extractor plus keyed account fields (Keybase proofs, SociaVault, Hunter social keys); subject-owned only; platform qualifier kept; SociaVault search results unverified |
-| platform_id | no (`TOOL_ONLY`) | SociaVault profile (1) | keyed `platform_id` (Twitter rest_id, Instagram user id, YouTube channelId) with its platform |
-| person_name | yes | Firecrawl search/extract, Hunter (3), SociaVault Google (6) | entity selection on search hits, first_name+last_name fields; 2–4 tokens, no product words |
-| org_name | yes | RIPEstat, GLEIF, Firecrawl search/extract, Hunter (5), SociaVault Google (10) | entity selection on search hits and keyed name fields |
-| cve | yes | NVD, CVE record, OSV, Shodan, Firecrawl (8) | CVE id scanner |
-| package | yes | Firecrawl search/scrape/batch/crawl (4) | `ecosystem name@version` scanner |
-| wallet | yes | Firecrawl search/scrape/batch/crawl (4) | Bitcoin address scanner |
-| address | yes | GLEIF, SEC, Nominatim, Census, Firecrawl (4), Hunter (2) (10) | keyed address fields (composed parts must all occur) |
-| coordinates | yes | Nominatim, Census (2) | lat/lon fields |
-
-`overpass_places` is reachable via `coordinates` (Nominatim or Census, radius 500 m). No `phone` kind: no catalog tool takes a phone number.
-
-## Primary providers
-
-[![OSINT catalog](../../diagrams/osint-providers.svg)](../../diagrams/osint-providers.html)
-
-Firecrawl, SociaVault, and Hunter are primary. Everything else is a gap-filler.
-
-**SociaVault** — 44 one-credit `GET https://api.sociavault.com/v1/scrape/...` routes in 5 catalog tools. Internal `SOCIAVAULT_ROUTES` maps platform + optional `endpoint`. No followers/following or single-post routes. Unknown endpoints rejected.
-
-| Tool | Routes | Platform: endpoints (default first) |
-|---|---|---|
-| `sociavault_profile` | 10 | facebook: profile; instagram: profile, basic_profile (userId); linkedin: profile, company; threads, tiktok, twitch, twitter: profile; youtube: channel |
-| `sociavault_search` | 12 | instagram: hashtag; linkedin: posts; pinterest: search; reddit: search, subreddit; threads: search; tiktok: keyword, hashtag, top; twitter: search; youtube: search, hashtag |
-| `sociavault_search_users` | 3 | instagram, threads, tiktok: users |
-| `sociavault_user_content` | 18 | facebook: posts, reels; instagram: posts, highlights, reels; pinterest: boards; threads: posts; tiktok: videos, live; twitch: videos, schedule; twitter: tweets, tweets_all (user_id); youtube: videos, community_posts, lives, playlists, shorts |
-| `sociavault_google_search` | 1 | google: search (fallback only) |
-
-**Firecrawl** (`https://api.firecrawl.dev/v2`)
-
-| Tool | Route | Notes |
-| --- | --- | --- |
-| `firecrawl_search` | `POST /search` | sources web/news; github→`developer`/research; `tbs`; location; limit ≤ 10 |
-| `firecrawl_google_search` | `POST /scrape` of Google SERP | named-engine discovery; parser fixtures only, not live-validated |
-| `firecrawl_yandex_search` | `POST /scrape` of Yandex SERP | named-engine discovery; parser fixtures only, not live-validated |
-| `firecrawl_mojeek_search` | `POST /scrape` of Mojeek SERP | named-engine discovery; parser fixtures only, not live-validated |
-| `firecrawl_scrape` | `POST /scrape` | markdown and links |
-| `firecrawl_map` | `POST /map` | same-site; contact/about first; top 25 |
-| `firecrawl_batch_scrape` | `POST /batch/scrape` | 5 default, ≤10 URLs, polled |
-| `firecrawl_crawl` | `POST /crawl` | ≤10 pages, depth 1, off by default, polled |
-| `firecrawl_extract` | `POST /scrape` + schema | 5 credits |
-
-Map and crawl refuse social, publisher, and Q&A hosts.
-
-**Hunter** (`https://api.hunter.io/v2`, read only)
-
-| Tool | Route | Notes |
-| --- | --- | --- |
-| `hunter_domain_finder` | `/domain-finder` | free |
-| `hunter_email_count` | `/email-count` | free |
-| `hunter_domain_search` | domain search | — |
-| `hunter_email_finder` | email finder | — |
-| `hunter_email_verifier` | verifier | 202 retried up to 3 times |
-| `hunter_company_enrichment` | `/companies/find` | alias `hunter_tech_lookup` |
-| `hunter_email_insight` | `/email-insight` | free |
-| `hunter_person_enrichment` | `/people/find` | webmail email or LinkedIn handle |
-| `hunter_combined_enrichment` | `/combined/find` | company email only |
-
-**Whoxy** (`https://api.whoxy.com/`) — `whoxy_whois_history`. Prepaid credit pool (default 0). Cache the full history, then project `from`/`to`/`limit`. Observation dates are not registration dates. Monthly `credit_reset` does not replenish Whoxy.
-
-**Holehe** — `holehe_email_lookup` (`EmailRegistration`). Native Twitter, Spotify, and Pinterest adapters; 120 other catalog services return `unsupported`. Registration is email association, not identity or account control.
-
-Chains:
-
-- prompt → Firecrawl search (Google search after a weak search) → SociaVault search/users → profile → user content
-- Firecrawl search or Hunter domain finder → domain → Firecrawl map → batch scrape / extract
-- domain → Hunter email count → domain search → email finder → verifier
-- domain → company enrichment → social handles → SociaVault profile
-- email → email insight → person (webmail) or combined (company) enrichment
-
-Gap-fillers consume these values and never feed Hunter.
-
-Spec defaults still to confirm: `google_fallback_min_results = 3`, `sociavault_turn_credits_opening = 3` / `_later = 8`, `picker::MAX_PICKS = 13`.
-
 ## Persistence
 
 `@tag:surreal-storage`
 
-SurrealDB is the only current persistence backend. The default embedded engine uses RocksDB under `<ARGOS_HOME>/storage/surreal`; server mode is opt-in. See the [storage map](storage.md) for source, schema and contract-test entry points, and [contributor workflow](contributing.md#storage-facts) for mode selection.
+SurrealDB is the persistence backend. Venture selects a managed Compose disk database, a managed host database in disk or memory mode, or an external disk endpoint. Only service processes open that datastore. [Storage map](storage.md)
 
 [![Persistence stack](../../diagrams/persistence.svg)](../../diagrams/persistence.html)
 
 [storage/bootstrap.rs](../../../crates/argos-osint-core/src/storage/bootstrap.rs) applies module schemas in dependency order and guards the stored schema version. [storage/tx.rs](../../../crates/argos-osint-core/src/storage/tx.rs) owns bounded transaction retries. Publication, provenance and graph projection are implemented under `storage/`; [recall.rs](../../../crates/argos-osint-core/src/storage/recall.rs) serves fenced vector recall with lexical fallback.
 
-Legacy `schema_*.sql` files document the former SQLite layout. They are not the current schema or migration procedure. The current schema version is owned by `storage/bootstrap.rs`; old `store::SCHEMA_VERSION` values do not select the active schema.
 
 ## Model and UI boundaries
 
-[![Models and roles](../../diagrams/model-roles.svg)](../../diagrams/model-roles.html)
+[![Model roles](../../diagrams/model-roles.svg)](../../diagrams/model-roles.html)
 
-All model transports share [provider request scheduling](../concepts/providers.md#provider-wide-request-pacing): independent process-wide FIFO pacing for OpenRouter (20 RPM), Google (10 RPM), and Nvidia (40 RPM), plus provider-wide cooldowns for rate limits and overloads. The [scheduling figure](../../diagrams/model-request-scheduling.html) shows its boundary with route retries, validation, and compatibility callers. Queue time is separate from wire deadlines; automatic stage output/reasoning caps are removed.
+The Models client reads configured role defaults. The [shared provider executor](../concepts/providers.md) resolves primary and fallback routes, tracks attempts and keeps provider credentials server-side. Model scheduling uses process-local FIFO pacing and cooldowns for OpenRouter, Google and Nvidia. Atlas's daily news provider admission uses shared datastore reservations instead. [Model scheduling](../../diagrams/model-request-scheduling.html)
 
-[![TUI shell](../../diagrams/tui-shell.svg)](../../diagrams/tui-shell.html)
-
-- Credentials: `auth.json`. Roles: `config.toml`.
-- Tabs: Defaults, OpenRouter, Google, Nvidia. Defaults lists ordered fallbacks per role (Add / Delete / Move). Refresh model lives on provider tabs only.
-- Old Writer seeds Recon + Synthesis. Tool picker default (`openrouter` / `typesafe/jev-1.13`) seeds only when both fields empty. Empty `fallbacks` lists are added on migration.
-- Sign-in does not assign roles. Legacy OpenAI stays until replaced (Grok is removed); never sent to Google or Nvidia.
-- **Six canonical model roles**: `recon_agent`, `recon_decisions`, `recon_analyst`, `atlas_evaluator`, `atlas_analyst`, `brain_summary` (provider.rs). One-time `migrate_pipeline_roles` migration; `preserve_pipeline_settings` guards: non-TOML bodies pass through, blank role fields preserve archived routes, conflicting non-blank edits bail. `[nlp]` in transfer allowlist; schema-3 config transfer with `migration_exceptions` + `model_variants` inside `model_roles`. TUI Defaults and Model-roles screens edit these six canonical roles directly via `DefaultsRole::role_key()`/`settings_key()` returning canonical routes, with saving through `role_mut(role_key())`; the former Claim-Assessor editor now edits `atlas_analyst` (generation-only; incompatible-fallback gated), the Controller editor offers the Jev decisions model (`recon_decisions` transport), Evidence-Curator and Entity-Resolver editors are labeled ARCHIVED (caller-dependent, retired with `investigation_controller`), model-roles rows show inheritance via canonical keys (e.g. `← atlas_analyst`) and the fast preset follows `brain_summary`; legacy role keys are no longer written by the TUI (it is not a legacy writer).
-- Recon: list, then transcript. Synthesis answers store Brain memory ids used in the prompt. Markdown answer, raised prompt band, collapsed decision/tool rows. Untitled threads named from the first question.
-- Publisher / social / wiki / aggregator hosts stay citations or handles. They never become subject identifiers. Never sent to Hunter.
-- Catalog: 59 tools in `osint.rs` (15 categories). Primary adapters: `osint/providers.rs`. News/legal: `osint/news_legal.rs`.
-- Keys: Firecrawl bearer (`firecrawl_api_key` / `FIRECRAWL_API_KEY`); Hunter `x-api-key`; SociaVault `X-API-Key`. Saved key overrides env. `locked_host` on primary requests.
-
-Answer-step 429: run failed, tool results kept, resume skips completed steps.
-
-## Profile dashboard and config transfer
-
-Profile (internal id `System`) is read-only observability plus one configuration transaction. Widgets, metric denominators and the portable document: [profile-dashboard-and-search.md](profile-dashboard-and-search.md). Keys: [usage.md](../concepts/usage.md#profile).
-
-### Snapshot path
-
-```
-tick (1 Hz) → visible Overview + refresh due (20s / invalidated) → background reader
-            → Store::profile_snapshot → ProfileSnapshot (immutable) → tui/profile.rs renders
-```
-
-- `App::reload_profile` requires visible Profile Overview analytics with no overlay and asks `ProfileView::due()` before starting a read. Automatic refresh is every 20 seconds; manual refresh, filters and fresh Profile entry invalidate freshness. Snapshot delivery applies the same visibility guard, discarding reads completed while hidden without replacing the previous snapshot or timestamp.
-- The background worker uses `Store::open_profile_reader`, a handle to the shared SurrealDB runtime, to keep snapshot reads off the UI thread. A failed visible read keeps the last good snapshot and reports the error instead.
-- `profile_stats::snapshot` performs no writes, no network calls and no model calls; it merges `telemetry_event` with `telemetry_hourly` / `telemetry_daily`, reads a rollup bucket only when the whole bucket predates the raw retention boundary, and returns `N/A` rather than `0` wherever the denominator is zero.
-- Rendering consumes the cached snapshot only. The selected Summary/app page uses Dashboard geometry; expanded measurements use the Report preset.
-
-### Module layout
-
-| File | Owns |
-| --- | --- |
-| `crates/argos-osint-core/src/telemetry.rs` | Event kinds, outcomes, triggers, retention constants, mergeable duration bins |
-| `crates/argos-osint-core/src/profile_stats.rs` | `ProfileSnapshot` and every section aggregate (`snapshot`, `filter_options`) |
-| `crates/argos-osint-core/src/provider_metrics.rs` | Read-only capacity and quota DTOs; no scheduler or admission policy |
-| `crates/argos-osint-bin/src/tui/profile.rs` | `SystemTab`, `Section`, the 35-entry `WIDGETS` registry, filter strip, keys |
-| `crates/argos-osint-bin/src/tui/profile_charts.rs` | The one shared hand-drawn chart renderer |
-| `crates/argos-osint-bin/src/tui/profile_config.rs` | The Configs export/import popups |
-
-Every widget renders through a single entry point (`tui/profile.rs::widget_lines`), and every chart goes through `tui/profile_charts.rs`: stacked bars, ranked bars, trend columns and meters. `ratatui::Chart` / `BarChart` are deliberately unused — a narrow viewport must never panic, and a segment fill has to carry the exact series colour. One renderer also means a widget cannot smuggle in its own geometry, the same precedent as `tui/atlas_table.rs`.
-
-### Config transfer and the commit
-
-`config_transfer::parse_document` validates the whole schema-v1 document, then `apply_import` merges it by stable id into the in-memory snapshot. Publishing is `config_transfer::commit_profile_config`:
-
-```
-ConfigLock::acquire()            # .argos-config.lock, heartbeat + stale takeover, app-wide
-  → commit_files([settings → config.toml,
-                  auth      → auth.json,
-                  quota     → quota.json])
-      commit journal (.argos-config-journal.json) marks state: pending
-      each file: write_secure  (0600 sibling temp file → fsync → atomic rename)
-  → success: generation id +1, reload epoch notifies subscribers
-  → failure: whole batch rolls back from its backups; nothing is published
-```
-
-`config.toml`, `auth.json` and `quota.json` are one configuration, so a provider change moves all three or none of them. The journal holds paths and state only — never a body and never key material — and `config_commit::recover_at_startup()` finishes a rollback left `pending` by a process that died mid-commit; it runs at TUI boot (`App::boot`) and on CLI start. Export uses the same secure primitive, and a failed import writes nothing.
+Profile reads workspace and service health through the API. Venture imports selected provider configuration and model defaults into a new workspace on request. [Workspace configuration](fleetworks.md#try-the-workspace-and-clients)
 
 ## Brain browsing and direct associations
 
-`brain_browse` is a display projection beside the existing Brain storage and recall helpers. Stable rows are Claim(memory ID) or ActorGroup(normalized display name, every member/resolved/redirected ID). Grouping precedes Find and counts and never changes identity resolution. Typed claim/atomic_claim and legacy non-inference insight claims are visible; all other kinds remain internal. TUI aggregate keys cannot pin or delete a member accidentally.
+The private Brain role serves retained reads through the gateway. The internal `brain_browse` projection uses the same Brain storage and recall helpers. Stable rows are Claim(memory ID) or ActorGroup(normalized display name, every member/resolved/redirected ID). Grouping precedes Find and counts and never changes identity resolution. Typed claim and atomic-claim records can appear in the browse projection alongside supported historical claim records.
 
 Direct associations union the actor-reference index, typed Claim payloads and locally repaired retained derivations, exact article mentions/observed endpoints, claim origins and opt-in thread detections. Claims and threads deduplicate by ID; articles deduplicate by canonical URL while retaining exact occurrence/revision receipts. Missing, deleted and stale origins are excluded. Actor Articles counts direct retained mentions, observed links and claim origins regardless of Related eligibility; Claim Sources retain original provenance. The graph covers the entire set; row paging does not cap graph coverage.
 
-Claim publication synchronizes typed actor refs and the reference table inside the publication transaction. Readable names come from retained entity labels, with canonical fallback; entity IDs remain separate. A versioned local backfill repairs machine ID spellings without overwriting analyst names and recovers referenced actors only from retained extraction/spans. Recall-off creates no new thread associations; earlier receipts survive until their origin is deleted or replaced. Enter on a Brain memory or actor group opens the exact topology at one hop; Back returns to the list.
+Claim publication synchronizes typed actor refs and the reference table inside the publication transaction. Readable names come from retained entity labels, with canonical fallback; entity IDs remain separate. A versioned local backfill repairs machine ID spellings without overwriting analyst names and recovers referenced actors only from retained extraction/spans. Recall-off creates no new thread associations; earlier receipts survive until their origin is deleted or replaced. Exact actor and claim identities resolve to their typed topology seeds.
 
-[![Brain browse projection](../../diagrams/brain-browse.svg)](../../diagrams/brain-browse.html)
+[![Brain retained reads](../../diagrams/brain-browse.svg)](../../diagrams/brain-browse.html)
 
 ### Source removal and index eligibility
 
@@ -471,8 +68,6 @@ The shared executor routes the Entity Resolver's bounded `same` / `different` / 
 [![Actor identity maintenance](../../diagrams/actor-identity.svg)](../../diagrams/actor-identity.html)
 
 
-Production browsing loads immutable snapshots through background readers. The list batches Claim selection and claim origins; Actor Graph/Related/totals share one association snapshot. Find filters cached rows. Hidden Brain changes only invalidate its cache, and stale delivery cannot replace newer selection or navigation. Atlas history/pruning/deletion, Intel bulletin/brief/Related reads, Recon history/deletion, Jobs and Logs also keep bulk database work off the terminal event loop. The TUI Store delegates to the shared SurrealDB runtime; commits enqueue durable index work for the elected pool. See the [database responsiveness audit](tui-database-responsiveness.md).
-
 ## Brain Memory Topology and Scope Analysis
 
 `Store::topology_snapshot` (`brain_topology.rs`, `brain_topology_query.rs`) resolves
@@ -484,8 +79,7 @@ references. Unindexed records retain source-scoped identity without writing data
 
 - **Scope and bounds**: All retained/current-cycle scope uses recorded origins. Bounded adjacency traversal and output preserve root/path/edge endpoints and report discovered/omitted/unresolved coverage. Continuation is not implemented: incoming tokens are rejected and no pretend cursor is emitted.
 - **Nodes and relationships**: Exact Actors and explicit ActorGroups remain distinct. Claims, Inferences, derived recorded-attribute Topics, Articles and Sources carry exact recenter seeds and provenance. Direct mentions and evidence do not require similarity. Claim subjects bind canonical Actors; Inferences retain canonical Claim premises and their actor associations, with indexed relational evidence references and canonical index-outbox revisions. Canonical premise IDs remain authoritative across staged replacements; reused local claim IDs cannot rebind historical inferences. Links retain direction/rationale/receipts; Related remains tentative. Publisher identity and duplicate occurrences do not establish independent corroboration.
-- **TUI delivery**: One background read at a time coalesces superseded requests. Generation/seed fences reject late loads; `Store::memories_changed_seq` supplies the mutation sequence. The canvas, inspector, relationship rows and counts render the same snapshot, with no database access during drawing. Shared pure geometry owns visible target rectangles. Selection inspects; explicit recenter pushes history; Back restores its origin.
-- **Background Scope Analysis**: Explicit candidate proposal and link assessment executes on dedicated worker pool `POOL_BRAIN_SCOPE = "brain_scope"` (`scheduler.rs`, `tasks.rs`). The worker uses `Store::open_light`, validates canonical premises/actors, writes inference memory and metadata, and writes qualified Links. These are separate writes rather than an atomic brief publication. Retained-source projections are not eligible canonical premises.
+- **Background Scope Analysis**: Explicit candidate proposal and link assessment executes on background worker pool `POOL_BRAIN_SCOPE = "brain_scope"` (`scheduler.rs`, `tasks.rs`). The worker uses `Store::open_light`, validates canonical premises/actors, writes inference memory and metadata, and writes qualified Links. These are separate writes rather than an atomic brief publication. Retained-source projections are not eligible canonical premises.
 
 - **Neighborhood summary**: Topology reads build an immutable deterministic fallback and a frozen typed packet (`brain_neighborhood_brief.rs`) without queueing generation. The existing explicit Generate action alone admits a deduplicated `topology_neighborhood` request in `POOL_SUMMARY`. Eight additive facets retain the compatible Overview/Connections/Interpretation/Limits prose; sparse facets stay empty with truthful limits. Packet caps are 100 nodes/200 edges, or a stricter caller limit, with closed endpoints and recalculated omission counts after byte pruning. Only complete reference/meaning/qualifier validation permits a seed/options/basis-fenced replacement; failure keeps the fallback. No migration and no canonical writes.
 
@@ -496,7 +90,7 @@ responsive layout, interaction and coverage contracts.
 
 ## Intel reports
 
-Article Recon report execution is historical. `create_report_job`, resume/retry and worker entry reject execution. Startup retirement revokes unfinished report and descendant leases, records durable retirement markers and signals workers. It preserves historical result bundles and provenance, leaves brief chains and article owner generations intact, and fences late report publication. Independent Recon investigations are unchanged.
+Article Recon report execution is historical. `create_report_job`, resume/retry and worker entry reject execution. Startup retirement revokes unfinished report and descendant leases, records durable retirement markers and signals workers. It preserves historical result bundles and provenance, leaves brief chains and article owner generations intact, and fences late report publication.
 
 [![Intel brief stage states](../../diagrams/intel-job-states.svg)](../../diagrams/intel-job-states.html)
 
@@ -504,13 +98,13 @@ Article Recon report execution is historical. `create_report_job`, resume/retry 
 
 [![Atlas news cycle](../../diagrams/atlas-pipeline.svg)](../../diagrams/atlas-pipeline.html)
 
-`atlas-collection-v3` pins the Rust-BERT worker, checkpoint and threshold before new acquisition and admission. Fleetworks delegates inference to the private classifier service. Legacy Argos invokes its local worker. Native discovery reserves the shared daily provider-account quota before fetching. Country heat bands and deduplication apply to acquisition. Every evaluated occurrence has a durable outcome; admitted articles publish one primary and an optional supported secondary domain. Metadata, Related and actor/lifecycle indexing use scoped receipts under the same source and ownership fences. Cycles publish no claims or generated briefs and require no vector work.
+`atlas-collection-v3` pins the Rust-BERT worker, checkpoint and threshold before new acquisition and admission. Fleetworks delegates inference to the private classifier service. Native discovery reserves the shared daily provider-account quota before fetching. Country heat bands and deduplication apply to acquisition. Every evaluated occurrence has a durable outcome; admitted articles publish one primary and an optional supported secondary domain. Metadata, Related and actor/lifecycle indexing use scoped receipts under the same source and ownership fences. Cycles publish no claims or generated briefs and require no vector work.
 
 | Stage | Execution | Unit |
 | --- | --- | --- |
 | Discovery and coverage | GNews/NewsData, then NewsAPI/Currents, with transactional daily quota admission and heat bands | Article |
-| Local admission | Rust-BERT zero-shot scores for six domains in bounded batches. Resume uses the exact saved zero-shot or legacy Natural pin | Article occurrence and immutable outcome |
-| Entities | Complete original title and description. Bounded NLP runs in the private service with the Atlas overlay or locally with legacy Argos. | Article metadata |
+| Local admission | Rust-BERT zero-shot scores for six domains in bounded batches. Resume uses the exact saved model pin | Article occurrence and immutable outcome |
+| Entities | Complete original title and description. Bounded NLP runs in the private service with the Atlas overlay. | Article metadata |
 | Publisher prior | Immutable native WP:RSP index per pass; domain suffix match | Article metadata |
 | Related | Local posting lists and verified spans; shared mentions are tentative leads | Canonical article pair |
 | Actor and lifecycle indexing (phase 6, `STAGE_ACTOR_ARTICLES=12`) | Brain Actor binding, `mentioned_in` Links, at most 20 tentative Related records and current occurrence receipts; bounded pages and conditional publication | Article occurrence |
@@ -571,35 +165,25 @@ Legacy records used `clamp(base × reliability_factor × credibility_factor, 0, 
 
 The process-shared NLP worker, immutable source references and SurrealDB caches are described in [nlp-preprocessing.md](../concepts/nlp-preprocessing.md). Auto is the default; complete investigative coverage retains original evidence windows before assessment. [Evidence flow](../../diagrams/nlp-preprocessing.svg).
 
-## Investigative snapshots
+## Intel brief publication
 
-`investigation/insights.rs` owns the shared extraction, fidelity, readiness and inference contracts; `insight_persist.rs` owns exact refresh dispatch and transactional activation. Source-local entities retain original mentions. `claim_assessor` inherits Synthesis when unset, while explicit routes remain independent. Free-chat execution skips Decisions-only routes in place; finite contracts use the shared Decisions adapter and preserve both label and threshold outcome.
-
-`insight_assessment.rs` compiles ID-addressed batches (at most eight items) with deduplicated evidence and original per-question policies. `insight_wire.rs` hydrates compact IDs/source-absolute spans into server-owned provenance. Complete source-order extraction precedes deduplication and owner caps; full Synthesis coverage follows. Final inference/link decisions share batches. Bounded checkpointed reconciliation visits every original window instead of repeating all premise passages in one oversized merge. Missing mandatory coverage prevents replacement; optional unavailable/rejected items produce a coherent reduced snapshot with explicit gaps, while all-withheld model failures retain prior associations.
-
-`insight_execution.rs` separates immutable work/checkpoint identity from explicit retry epochs and two-operation scheduling slices. Insight output repair consumes the same bounded executor budget (two attempts per route), then advances through compatible declared fallbacks; ordinary callers retain their retry policy. Task/run-linked model attempts carry typed diagnostics. Admission compares stored captured routes; restart resumes queued continuations but never automatically revives exhausted work. Explicit Retry extraction preserves successful compatible checkpoints and refuses deleted, superseded or 72-hour-retired owners. Published Brain state and exact-revision index acknowledgment are independent.
-
-Atlas collection-v1 performs classification and local metadata only; historical extract-v3 claims remain readable. The automatic Intel brief retains complete article acquisition, then analyzes selected claim-specific sentences with explicit selective coverage and fidelity. The shared investigative service continues to require its own complete stage coverage; Recon requires substantive independent roots and fulfilled required tasks. Unsupported analytical prose is withheld.
-
-Historical Intel reports followed acquisition, inventory, collection, assessment, sections/BLUF and finalization. Their immutable bundles remain retained evidence, but no new report-based extraction is admitted or recovered. Body-backed validation and brief indexing no longer give these bundles publication precedence.
-
-Opening Focus Brief persists analysis intent. Its metadata Claims run independently of Full article; inference publication requires a complete retained baseline with matching body/acquisition revisions, validated story coverage and no truncation. Cached visits and subsequent body commits share admission and deduplication. Historical reports do not suppress article publication. The refined display excerpt does not certify the baseline. The automatic brief publishes Claims, Inferences and Links at their respective completed stages; each transaction replaces only that kind and enqueues its canonical index work, preserving previously published kinds if a later stage fails. Previous snapshots remain history during failures. Replaced generations are retired as Superseded with a recorded reason and replacement, never as failures; only the latest generation can publish. `storage/intel.rs` retains historical report results separately from operational jobs. `storage/pipeline_exec.rs` owns retry epochs and streamed execution activity; `storage/refresh.rs` records supersession with replacement job/task and reason.
+Opening Focus Brief persists analysis intent. Claims use the captured title and description. Inferences require a complete, validated Body artifact tied to the current source. Claims, Inferences and Links publish separately, with canonical index work following each eligible publication. Failed later stages preserve earlier published results.
 
 ### Intel brief preparation (intel-brief-v2 dependency graph)
 
 ![Intel brief preparation dependency graph](../../diagrams/intel-brief-chain.svg)
 
-A Focus Brief visit, body-ready event, recovery or **Reload** calls `ensure_intel_brief_pipeline`, which attaches to the one durable `intel_brief` job per article generation (`intel_recon::brief_pipeline`, contract `intel-brief-v2`). Its four tasks are persisted at admission with explicit dependency rows: **Full article** and **Claims** are independent roots, **Inferences** depends on both, and **Links** on Inferences. The dedicated `argos-intel-brief` runner is a two-slot drainer (`brief_stages::drain_parallel`, `STAGE_SLOTS=2`): a slot is reserved before a lease is claimed, each claimed stage runs on its own Tokio task with its own backend over the shared SurrealDB runtime, and only the two dependency-free roots may run together (v1 exclusivity otherwise holds in the repository claim predicates). Roots are bound at admission to `{article_id, metadata, node_revision}` (Claims read the immutable metadata snapshot, never the body); a descendant stays unbound (`input_hash=''`, unclaimable) until `bind_ready` compare-and-sets it exactly once to `{body:{task_id,output_hash},claims:{task_id,output_hash}}`, in either commit order. Every stage carries an immutable `StageContext {job_id, task_id, job_generation, lease_epoch, metadata_snapshot, route_snapshot}` into prompts, model scopes, Body cleanup and fidelity; operation IDs are `{task_id}:e{lease_epoch}:{operation_key}:{payload_hash}` and attempts carry the job generation. A failed root blocks only its descendants (shown `Queued · blocked by X`, transitively); Retry re-queues failed tasks only. Reload supersedes the chain with `force_body`; per-node reuse adopts unchanged roots by node revision and descendants whose prior input hash (prerequisite output hashes + node revision) matches, so a body-only reload makes zero Claims requests. Links always re-reads its live candidate set. An active `intel-brief-v1` chain is fenced and cut over to a new v2 generation on the next visit; canonical Brain IDs keep the `intel-brief-v1` contract so they stay stable.
+A Focus Brief visit, body-ready event, recovery or **Reload** calls `ensure_intel_brief_pipeline`, which attaches to the one durable `intel_brief` job per article generation (`intel_recon::brief_pipeline`, contract `intel-brief-v2`). Admission atomically records the job, all four tasks, captured inputs and run visibility. The dependencies are explicit. **Full article** and **Claims** are independent roots, **Inferences** depends on both, and **Links** on Inferences. The background worker runs a two-slot brief drainer (`brief_stages::drain_parallel`, `STAGE_SLOTS=2`): a slot is reserved before a lease is claimed, each claimed stage runs on its own Tokio task with its own backend over the shared SurrealDB runtime, and only the two dependency-free roots may run together (v1 exclusivity otherwise holds in the repository claim predicates). Roots are bound at admission to `{article_id, metadata, node_revision}` (Claims read the immutable metadata snapshot, never the body); a descendant stays unbound (`input_hash=''`, unclaimable) until `bind_ready` compare-and-sets it exactly once to `{body:{task_id,output_hash},claims:{task_id,output_hash}}`, in either commit order. Every stage carries an immutable `StageContext {job_id, task_id, job_generation, lease_epoch, metadata_snapshot, route_snapshot}` into prompts, model scopes, Body cleanup and fidelity; operation IDs are `{task_id}:e{lease_epoch}:{operation_key}:{payload_hash}` and attempts carry the job generation. A failed root blocks only its descendants (shown `Queued · blocked by X`, transitively); Retry re-queues failed tasks only. Reload supersedes the chain with `force_body`; per-node reuse adopts unchanged roots by node revision and descendants whose prior input hash (prerequisite output hashes + node revision) matches, so a body-only reload makes zero Claims requests. Links always re-reads its live candidate set. An active `intel-brief-v1` chain is fenced and cut over to a new v2 generation on the next visit; canonical Brain IDs keep the `intel-brief-v1` contract so they stay stable.
 
 **Immutable analytical context.** Root inputs capture the current occurrence's authoritative selected domains/definitions, canonical metadata actors and verified aliases. Claims remain metadata-only. Completed Body output binds its immutable body revision locally at inference/Link joins; pending own-chain completion does not create a new semantic generation. Reuse requires the same semantic revision, while changed source/body/domain/prompt/route policy supersedes only affected work. Inference support, extraction fidelity, conditions and counterevidence are distinct. Indexed actor/text discovery has a combined initial cap of 100 raw candidates before hydration/dedup and retains the existing 12-candidate curator packet. A shared country, broad domain or name alone is not confirmed support.
 
-**Degrading and bounded latency.** Inferences fans out one thinking-model request per claim. Each claim's result is checkpointed (`brief_pipeline::checkpoint_*`), a failing claim is recorded rather than failing the stage, and the stage commits `warning: N of M claims could not be analyzed (...)` ("Completed with warnings") so Links runs on the analyzed claims; all claims failing still fails the stage with the provider category. Retry (the brief button and the Jobs panel `r`, both `retry_stage`) resumes failed branches or reopens a warning stage and its descendants, re-asking only the failed claims. Provider calls use a stall-aware chain: a timed-out route falls through to the next route (no resend, no backoff), thinking stages send a per-model reasoning effort with thinking-sized deadlines, and an interactive operation wall-clock cap (600s, 900s thinking) covers queue, pacing, backoff and attempts. A per-stage `StageLedger` adds what one operation cannot see: a stage request budget and route health, so sibling operations (per-batch classification, generation, fidelity, dedup) pass over a route that just failed instead of each re-paying it, and SSE timeout error events count as stalls.
+**Degrading and bounded latency.** Inferences fans out one thinking-model request per claim. Each claim's result is checkpointed (`brief_pipeline::checkpoint_*`), a failing claim is recorded rather than failing the stage, and the stage commits `warning: N of M claims could not be analyzed (...)` ("Completed with warnings") so Links runs on the analyzed claims; all claims failing still fails the stage with the provider category. Retry resumes failed branches or reopens a warning stage and its descendants, re-asking only the failed claims. Provider calls use a stall-aware chain: a timed-out route falls through to the next route (no resend, no backoff), thinking stages send a per-model reasoning effort with thinking-sized deadlines, and an interactive operation wall-clock cap (600s, 900s thinking) covers queue, pacing, backoff and attempts. A per-stage `StageLedger` adds what one operation cannot see: a stage request budget and route health, so sibling operations (per-batch classification, generation, fidelity, dedup) pass over a route that just failed instead of each re-paying it, and SSE timeout error events count as stalls.
 
 - **Full article** reuses retrieval and validation, then cleans locally (`clean_body`): NLP keep-anchors, then Classifier keep/remove decisions over ambiguous blocks only (≤12 blocks per batch, provider output defaults), then verbatim removals and revalidation. Display and analysis consume the one `intel-clean-body-v1` artifact. No model rewrites the body.
 - **Claims** see title/description only; extraction and actor detection are unchanged. **Inferences** use claim-specific evidence (`brief_context`): the local sentence index matches detected actor names and observed spellings, collects the actor's mention sentences and necessary nearby attribution/pronoun context, and retains correction/denial candidates. Each claim is associated with its mentioned actors; claim event terms provide additional local candidates, including event details without repeated actor names. Classifier decisions label bounded candidate batches as support, context, counterevidence or irrelevant. Synthesis receives one claim, its associated actors, and selected original sentences, with stable IDs and UTF-8 spans. After classification succeeds, each claim gets an analysis request or reuses its validated analysis; empty evidence can legitimately produce an empty inference result. Prompts ask for justified antecedents, consequences and outlook, preserve unresolved conditions, and reject unsupported speculation. There is no full-body inference fallback and no arbitrary article-chunk analysis. Every matched candidate reaches bounded Classifier batches. The final analysis retains counterevidence first, then support and context within a 12,000-byte evidence budget, records duplicate/budget omissions and restores source order. An oversized atomic sentence or counterevidence-only overflow fails explicitly. Up to three analysis requests may run concurrently; results retain claim order. **Links** see a local shortlist of related metadata (≤12, self and syndicated copies excluded).
 - **Validation and routing.** Classifier uses the shared native Decisions adapter with constrained chat fallback and captured routes. Each validated context batch is checkpointed against its claim, original body spans, policy/prompt and captured Classifier chain; Retry reuses those decisions before looking up generated-claim checkpoints. An incomplete context classification withholds only that claim's analysis, records `phase=context`, and lets independent claims finish. A failed generation records `phase=generation`. Synthesis uses the Inferences generation route; its validator accepts only the request's claim ID and offered sentence IDs. Restored checkpoints are revalidated, and receipts distinguish a reused analysis from a newly sent request. Provider output/reasoning defaults and pacing apply to every dispatch and retry. After fidelity, exact repeats are removed locally and compact Synthesis ID selection deduplicates paraphrases to at most five distinct inferences. Selection sees at most 12 candidates per pass, carries at most five into the next, and never resends the article body. Fidelity or final selection failure still blocks publication of unvalidated results; all claims failing still fails Stage 3 with the provider category. Cancellation drops in-flight requests. The inference revision includes the selection policy, Classifier route and prompts, so incompatible cached analysis is replaced while compatible Claims remain reusable.
 - **Fidelity.** Claims go to Evidence Curator extraction-fidelity decisions; inferences go to Claim Assessor support decisions in batches (≤12 items; native Jev or constrained chat fallback). Receipts are cached by content, policy and route. Inference support checks include the cited support and counterevidence plus every Classifier-selected counterevidence sentence for that claim, even when generation omits a counter-citation. Those original spans remain in provenance. Items not judged faithful are withheld; a citation existing is never support.
-- **Publication.** Claims, Inferences and Links each publish after their fenced stage completion. `storage/brief_stages.rs::commit` first commits the stage output through `jobs::commit_stage`, then updates the brief projection and requests canonical publication through `storage/brief_publish.rs`. The combined display snapshot (`intel_brief_publication`) advances after each completed kind; canonical Brain publication uses the shared `storage::insight::publish_snapshot_on` and a kind-scoped derivation writer. Claims do not wait for Body, Inferences or Links. The Inferences commit writes only Inferences; the Links commit writes tentative Brain Related article leads and separately validated typed Links. Untouched kinds carry forward without rewriting or re-enqueuing their memories. Historical reports never take precedence. Evidence provenance, live owner checks, generation fencing, stable canonical IDs and transactional rollback remain shared with the insight-refresh lane. Complete retained acquisition and resolvable assessed original passages gate inference publication; the complete local article is retained, but model evidence coverage is explicitly selective. Tentative leads retain their exact candidate revision, interpretation and verification gap. Metadata alone cannot establish independent supports/contradicts. Specific metadata assertions may confirm contextualizes, updates, precedes or conditional potential_impact only after deterministic and semantic gates. The full-story lane supports all six directed kinds with explicit independent acquisition roots for corroboration/contradiction, complete per-side evidence and an actual threshold-passed semantic receipt. Canonical publication reconstructs that bounded decision envelope and current evidence/endpoint revisions in the same transaction; failed or stale proposals cannot retire unrelated still-live confirmed Links. A later stage failure preserves earlier successful publications. A canonical failure rolls back the canonical publication transaction and is reported in the **Publication / Index** footer; it does not turn completed extraction into failure. Published means canonical rows committed; Indexed requires acknowledgment of their current revisions, with pending, disabled and failed index work reported separately. Cached completed artifacts can revalidate publication on a later visit without repeating extraction.
+- **Publication.** Claims, Inferences and Links each publish after their fenced stage completion. `storage/brief_stages.rs::commit` writes the leased stage output, task state, metadata and the final retained run fence in one transaction. It then updates the brief projection and requests canonical publication through `storage/brief_publish.rs`. The combined display snapshot (`intel_brief_publication`) advances after each completed kind; canonical Brain publication uses the shared `storage::insight::publish_snapshot_on` and a kind-scoped derivation writer. Claims do not wait for Body, Inferences or Links. The Inferences commit writes only Inferences; the Links commit writes tentative Brain Related article leads and separately validated typed Links. Untouched kinds carry forward without rewriting or re-enqueuing their memories. Historical reports never take precedence. Evidence provenance, live owner checks, generation fencing, stable canonical IDs and transactional rollback remain shared with the insight-refresh lane. Complete retained acquisition and resolvable assessed original passages gate inference publication; the complete local article is retained, but model evidence coverage is explicitly selective. Tentative leads retain their exact candidate revision, interpretation and verification gap. Metadata alone cannot establish independent supports/contradicts. Specific metadata assertions may confirm contextualizes, updates, precedes or conditional potential_impact only after deterministic and semantic gates. The full-story lane supports all six directed kinds with explicit independent acquisition roots for corroboration/contradiction, complete per-side evidence and an actual threshold-passed semantic receipt. Canonical publication reconstructs that bounded decision envelope and current evidence/endpoint revisions in the same transaction; failed or stale proposals cannot retire unrelated still-live confirmed Links. A later stage failure preserves earlier successful publications. A canonical failure rolls back the canonical publication transaction and is reported in the **Publication / Index** footer; it does not turn completed extraction into failure. Published means canonical rows committed; Indexed requires acknowledgment of their current revisions, with pending, disabled and failed index work reported separately. Cached completed artifacts can revalidate publication on a later visit without repeating extraction.
 
 Operational job retention is 72 hours from immutable creation time, across every state, app and kind. Required article/run/thread/memory ownership is typed; deletion retires entire job trees and revokes leases. Startup cleanup runs before recovery; periodic five-minute sweeps use the same bounded cleanup service. Jobs exposes explicit global Completed, Stopped (cancelled/superseded) and Failed (failed/partial) history clearing; service roots and trees with running tasks or active services are excluded from retention cleanup. Explicit history clearing additionally preserves active task-job descendants, including taskless ones. Manual clearing uses the same retirement fences and preserves published data and pending canonical index work. Stop job handles supported running, queued and retry-scheduled work; durable task cancellation revokes leases and queued work cannot dispatch. Stopped brief chains stay stopped on an ordinary visit; Reload admits a fresh generation. Compact retirement markers prevent late callbacks, retries and stable-ID registration from recreating expired work. Completed report bundles, Brain data and aggregate telemetry survive; pending index consistency work is rebound under fresh service generations. Logs for removed rows display “Job history expired.” See [job lifecycle](../../diagrams/jobs-lifecycle.html).
 
@@ -609,7 +193,6 @@ Recall retrieves 20 unique candidates total by default; the local `insight_recal
 
 Related article eligibility requires **at least two distinct overlapping entity mentions** in the exact source/candidate headline or description. Repetitions and aliases of one normalized name count once; country/category fields do not count as mentions. Atlas ingest persists Related associations; Intel Related reflects those retained pairs and rechecks current revisions. Brain Actor Articles instead counts direct retained actor mentions, observed links and claim origins, without requiring a second article or a two-entity pair. A browse visit adds no name-only or canonical-actor suggestions. Original claim Sources preserve provenance independently. Investigation entity associations require Recall on; later disabling Recall preserves earlier receipts. The local match receipt is `shared-headline-entities-v4-possessive`; changing this policy invalidates only Related matching and the dependent Links shortlist, preserving compatible Body/Claims/Inferences and fidelity checkpoints.
 
-Recon Recall is stored per transcript and defaults off. Captured extraction requests do not grant publication authority: the canonical derivation writer rechecks the live, non-deleted thread through the owning run inside its publication transaction. Both the captured save/recall flags and live opt-in must permit Recon Brain memory/index writes. Legacy claim extraction checks before dispatch and again under its persistence transaction. Transcript-local assessed snapshots and answers remain available while off; earlier opted-in memories remain stored. Article brief publication is independent.
 
 Summary flush and local index worker rows describe long-lived elected services, including idle time, rather than finite requests. Both worker loops refresh service heartbeats periodically while elected; task attempts report actual work and failures separately.
 
@@ -621,59 +204,14 @@ The [local web/API contract](intel-web.md) adds a UI-independent Intel service, 
 
 `@tag:async-runtime`
 
-Argos executes concurrent tasks across Tokio async worker runtimes and dedicated background thread pools. To ensure responsiveness and prevent worker starvation, components adhere to strict async runtime safety rules:
-
-1. **Non-blocking Tokio execution**: Synchronous delays (`std::thread::sleep`), blocking I/O, and CPU-intensive operations are prohibited on Tokio worker threads. Hardware CPU delta sampling is offloaded to the blocking thread pool via `tokio::task::spawn_blocking` in `hardware::profile_fresh_async()` and `hardware::profile_cached_async()`. Synchronous NLP parsing and channel timeouts (`rx.recv_timeout`) in actor deduplication maintenance (`storage/actor_dedup.rs`) are similarly wrapped in `tokio::task::spawn_blocking`.
-2. **Asynchronous network and filesystem operations**: Server readiness probing and startup log checks (`storage/server.rs`) use `tokio::net::TcpStream` and `tokio::fs::read_to_string` rather than blocking `std::net` / `std::fs` calls, ensuring that polling loops (`tokio::time::sleep`) yield cleanly without monopolizing runtime workers.
-3. **Synchronous drop safety**: Rust's `Drop::drop` executes synchronously. Asynchronous operations or detached task spawns (`tokio::spawn`) must never be triggered inside a `Drop` implementation to perform cleanup. For in-flight request deduplication (`recon/tool_runner.rs`), the cache map is guarded by `std::sync::Mutex` rather than an async mutex, enabling `InflightGuard` to synchronously and deterministically remove keys on drop without out-of-band task leakage or panics during runtime shutdown.
-4. **RAII heartbeat task cancellation**: Long-running asynchronous stage pipelines (`storage/brief_stages.rs`, `storage/neighborhood_brief.rs`) spawn lease renewal heartbeat tasks. To guarantee that background tasks are not leaked on early return (`?`), errors, or panics, tasks are wrapped in RAII drop guards (`HeartbeatGuard`). On drop, the guard sets the atomic termination flag (`Ordering::Release` / `Ordering::SeqCst`) and immediately calls `handle.abort()`. When completing normally, the guard's join handle is taken and cleanly awaited.
-5. **RAII cancellation notifier**: `recon.rs` registers each `Arc<AtomicBool>` cancel token in a global `CANCEL_NOTIFIERS` map keyed by allocation address (preventing ABA key collisions on reallocation). A `CancellationNotifierGuard` holds the registration plus an owned `Arc` of the token; on drop — normal return, early exit, `?` propagation, or unwinding — it unregisters the token and purges the entry when no waiters remain. `wait_cancellation` in `recon/tool_runner.rs` holds the guard across its `tokio::select!` wait so a leader's cancellation reliably wakes followers.
-6. **Bounded ordered-write channel**: `storage::runtime` exposes `spawn_ordered`, which enqueues telemetry and state writes onto a single `mpsc` channel with `ORDERED_QUEUE_CAPACITY = 4096`. Writes run one at a time in start order so a later write never lands before an earlier one. If the queue is full, work is dropped with a `warn` telemetry event rather than blocking the caller (non-blocking drop telemetry); `drain()` awaits in-flight writes before process exit. `argos-osint-bin/src/main.rs` bounds shutdown with a 5-second `DRAIN_TIMEOUT` around `storage::runtime::drain()`, so stuck background writes cannot block process exit; on timeout a warning is logged and shutdown proceeds.
-7. **TUI-aware tracing subscriber**: `argos-osint-bin/src/logging.rs` registers `TuiAwareWriter`, a `tracing` writer that suppresses stderr output when `TUI_ACTIVE` is set and stderr is a terminal (the interactive alternate screen), writing normally in CLI mode or redirected output. `init_tracing()` applies an `EnvFilter` and routes all `argos_osint_bin` / `argos_osint_core` tracing through this writer.
+Service hosts run network and storage operations asynchronously. CPU-intensive hardware sampling and synchronous parser work use bounded background execution. Long-running stage leases renew through task-owned heartbeat guards. Durable job and index fences make ownership independent of the lifetime of any one client connection.
 
 ## Process lifecycle and signal handling
 
 `@tag:process-lifecycle`
 
-Child process supervision and application shutdown follow deterministic lifecycle guarantees across CLI, TUI, and server hosts:
+Venture owns the selected workspace's Compose project and any host SurrealDB process it starts. Explicit stop tears down owned resources while retaining workspace state and external datastores. The HTTP host handles SIGINT and SIGTERM and bounds graceful connection draining. See the [Venture guide](fleetworks.md#launch-the-compose-stack).
 
-1. **Child process drop termination**: All managed subprocess commands spawned via Tokio (`cli.rs:dispatch`, `stack/node.rs:NodeEnvironment::command`) configure `.kill_on_drop(true)` on `tokio::process::Command`. If a parent future is dropped, cancelled, or aborted, the operating system kernel immediately signals `SIGKILL` to the child process, preventing orphaned background workers from consuming CPU, memory, or port locks.
-2. **Dual-signal SIGINT/SIGTERM handling**: The CLI session supervisor (`cli.rs`) and API host (`argos-api-host`) listen for both interactive interruptions (`SIGINT` / Ctrl+C) and container supervisor termination signals (`SIGTERM`). On Unix, `tokio::signal::unix::signal(SignalKind::terminate())` intercepts SIGTERM, forwards the termination signal to the running child process via POSIX `libc::kill`, and allows the child to cleanly flush storage and teardown before exiting, preventing premature aborts or unwanted reopening of the interactive Venture launcher.
-3. **Detached child process reaping**: External command executions, such as opening browser URLs via system utilities (`open`, `xdg-open`, `rundll32` in `tui/app.rs`), spawn dedicated background threads (`std::thread::spawn(move || { let _ = child.wait(); })`) to await child termination and reap exit status codes, eliminating zombie (`<defunct>`) entries in POSIX process tables.
-4. **Bounded server graceful shutdown**: HTTP servers (`argos-api-host`) wrap Axum graceful draining in a bounded 15-second deadline via `tokio::time::timeout`. If client connections hang or fail to close during teardown, the server enforces termination after 15 seconds to ensure ports, locks, and resources are promptly released.
-
-### Shared Tokio runtime and worker stack
-
-`crates/argos-osint-bin/src/main.rs` no longer uses `#[tokio::main]`. A plain `fn main()` calls `logging::init_tracing()`, then builds the shared multi-thread runtime explicitly
-(`Builder::new_multi_thread().enable_all().thread_stack_size(8 MiB)`, the
-`WORKER_STACK_BYTES` constant, guarded by a compile-time `assert!` at the
-≥8 MiB floor; a failed build prints `argos: {err:#}` and exits 1) and runs
-`block_on(serve())`. `serve()` keeps the previous
-order: `paths::ensure_home` plus
-`storage::runtime::init` (`Err` ⇒ `argos: {err:#}` + exit 1) →
-`cli::dispatch().await` → a 5 s `DRAIN_TIMEOUT` storage drain with a warning
-on timeout → `Err` ⇒ stderr + exit 1. That one runtime hosts CLI dispatch,
-the TUI and the single storage handle; `argos-api-host` builds its own
-runtime unchanged.
-
-**Why 8 MiB.** lldb showed ~2.08 MB of SurrealDB embedded-engine poll frames
-(`App::send_recon_query` → `recon::Service::ask` → `orchestrate::run_turn` →
-`derive_directives` → `nlp::prepare_mode` → `nlp::surreal_put` →
-`storage::nlp_cache::put` → `Transaction::commit`) for one ordinary
-`nlp_cache` UPSERT on the default 2 MiB Tokio worker stack, aborting the
-process (SIGABRT) when a recon investigation is launched from the Home
-composer. 8 MiB keeps every deep storage call (recon, Atlas, NLP cache) on
-the same worker stack instead of localizing the fix to one write path.
-
-### TUI event loop on a dedicated OS thread
-
-`crates/argos-osint-bin/src/tui/app.rs::run` runs the terminal UI on a dedicated OS thread (`std::thread::Builder::new().name("argos-tui")`) outside the Tokio worker threads, so synchronous crossterm event polling and Ratatui rendering never starve async tasks:
-
-- The thread starts the process heartbeat outside the Tokio-entered context (so `storage::runtime::blocking` works), then calls `runtime.enter()` to execute `run_with_shutdown` on the process runtime.
-- The spawned thread sends its outcome through a `tokio::sync::oneshot` channel.
-- The main task awaits with `tokio::select!`: either the oneshot result (TUI finished normally) or `shutdown_signal()` (SIGINT via `ctrl_c` and SIGTERM via `tokio::signal::unix`). On signal it sets a shutdown `AtomicBool` and waits up to 5 seconds for the TUI thread; on timeout it forces a terminal reset and returns an error.
-
-
-### Atlas background ownership
+## Atlas background ownership
 
 Foreground Atlas pins the classifier identity, stages occurrence inputs, and atomically publishes one-primary/optional-secondary outcomes and hands off durable per-occurrence derivative jobs. Collection completes after acquisition/admission and guaranteed handoff; independent job leases drive Metadata, Related, Actors and checkpointed Reconcile. Current-generation actor readiness, reconciliation readiness and index-outbox delivery remain separate from collection completion. Its terminal transaction creates an independent provider-monitoring job at a frozen observation watermark. The scheduler processes provider monitoring independently of collection. A zero-shot cycle does not enqueue model fitting or promotion. Retained reclassification has its own 64-occurrence activations, original-source captures and task fences; it cannot rewrite original cycle statistics or delete published historical evidence because a new gate rejects an article. [Classifier ownership](classifier.md#historical-admission-and-provider-monitoring) and the [Atlas flow](../../diagrams/atlas-pipeline.html) describe these boundaries.

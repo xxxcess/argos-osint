@@ -41,7 +41,7 @@
 <text x="440" y="106" text-anchor="middle" class="label">Intel web</text>
 <text x="440" y="128" text-anchor="middle" class="note">Same-origin relay</text>
 <rect x="340" y="220" width="200" height="72" rx="6" class="accent"/>
-<text x="440" y="250" text-anchor="middle" class="label">Argos API</text>
+<text x="440" y="250" text-anchor="middle" class="label">Fleetworks API</text>
 <text x="440" y="272" text-anchor="middle" class="note">Bearer and readiness</text>
 <rect x="692" y="76" width="200" height="72" rx="6" class="node"/>
 <text x="792" y="106" text-anchor="middle" class="label">Private Brain</text>

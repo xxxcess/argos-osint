@@ -1,4 +1,4 @@
-# Argos strategic domains — synthetic seed dataset
+# Fleetworks strategic domains — synthetic seed dataset
 
 Place `argos_atlas_strategic_domains.csv` in `<repo>/datasets/`. Version: `strategic-domains-v1-seed-1`. Use with revision 6 of the Atlas cycle performance implementation spec. Do not mix with the old seven-topic dataset. Every statement is fictional synthetic training material, not sourced reporting; never ingest this CSV into live Atlas/Brain evidence.
 

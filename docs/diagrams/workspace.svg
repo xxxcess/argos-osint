@@ -1,34 +1,41 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 460" role="img" aria-labelledby="workspace-title workspace-desc">
-<title id="workspace-title">Legacy Argos terminal workspace</title><desc id="workspace-desc">Home launches four terminal applications over one SurrealDB storage boundary. Intel prepares article briefs; independent Recon investigations remain available. Tools, Models and Profile configure Argos; Jobs and Logs monitor background work.</desc>
-<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker></defs>
-<rect width="960" height="460" fill="#f5f5f5"/>
-<style>text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}.label{font-size:18px}.note{font-size:13px}.line{fill:none;stroke:#4f5d75;stroke-width:2;marker-end:url(#arrow)}</style>
-<rect x="360" y="24" width="240" height="88" rx="6" fill="white" stroke="#eb6c36"/>
-<text x="480.0" y="52" text-anchor="middle" class="label">Home</text>
-<text x="480.0" y="75" text-anchor="middle" class="note">Application launcher</text>
-<path d="M480 112V136H132V160" class="line"/>
-<rect x="32" y="160" width="200" height="88" rx="6" fill="white" stroke="#4f5d75"/>
-<text x="132.0" y="188" text-anchor="middle" class="label">Intel</text>
-<text x="132.0" y="211" text-anchor="middle" class="note">Article briefs</text>
-<path d="M132 248V276H480V304" class="line"/>
-<path d="M480 112V136H364V160" class="line"/>
-<rect x="264" y="160" width="200" height="88" rx="6" fill="white" stroke="#4f5d75"/>
-<text x="364.0" y="188" text-anchor="middle" class="label">Atlas</text>
-<text x="364.0" y="211" text-anchor="middle" class="note">Collect + classify</text>
-<path d="M364 248V276H480V304" class="line"/>
-<path d="M480 112V136H596V160" class="line"/>
-<rect x="496" y="160" width="200" height="88" rx="6" fill="white" stroke="#4f5d75"/>
-<text x="596.0" y="188" text-anchor="middle" class="label">Recon</text>
-<text x="596.0" y="211" text-anchor="middle" class="note">Investigations</text>
-<path d="M596 248V276H480V304" class="line"/>
-<path d="M480 112V136H828V160" class="line"/>
-<rect x="728" y="160" width="200" height="88" rx="6" fill="white" stroke="#4f5d75"/>
-<text x="828.0" y="188" text-anchor="middle" class="label">Brain</text>
-<text x="828.0" y="211" text-anchor="middle" class="note">Memory + topology</text>
-<path d="M828 248V276H480V304" class="line"/>
-<rect x="264" y="304" width="432" height="88" rx="6" fill="white" stroke="#eb6c36"/>
-<text x="480.0" y="332" text-anchor="middle" class="label">SurrealDB</text>
-<text x="480.0" y="355" text-anchor="middle" class="note">Memories · provenance · graph · vectors</text>
-<text x="480.0" y="373" text-anchor="middle" class="note">Embedded by default; server opt-in</text>
-<text x="480" y="428" text-anchor="middle" class="note">Tools · Models · Profile configure Argos; Jobs · Logs monitor work.</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 344" role="img" aria-labelledby="workspace-title workspace-desc">
+<title id="workspace-title">Fleetworks workspace and clients</title>
+<desc id="workspace-desc">Venture resolves one workspace, owns the local stack, and launches independent clients. The six terminal clients and the Intel desktop use the same versioned HTTP API.</desc>
+<defs>
+  <marker id="workspace-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker>
+</defs>
+<style>
+  text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}
+  .heading{font-family:'Instrument Serif',Georgia,serif;font-size:24px}
+  .label{font-size:16px;font-weight:600}
+  .note{font-size:13px}
+  .code{font:12px 'Geist Mono',ui-monospace,monospace}
+  .zone{font-size:12px;font-weight:600;letter-spacing:1px}
+  .node{fill:white;stroke:#4f5d75}
+  .accent{fill:#fff6ed;stroke:#eb6c36}
+  .edge,.flow{fill:none;stroke:#4f5d75;stroke-width:1.5}
+  .edge{marker-end:url(#workspace-arrow)}
+</style>
+<rect width="960" height="344" fill="#f5f5f5"/>
+<text x="40" y="36" class="heading" text-anchor="start">Venture selects a workspace and serves two client surfaces</text>
+<path d="M204 192H260V108H316" class="edge"/>
+<path d="M204 192H316" class="edge"/>
+<path d="M204 192H260V276H316" class="edge"/>
+<path d="M640 192H708" class="edge"/>
+<path d="M640 276H680V208H708" class="edge"/>
+<rect x="40" y="156" width="164" height="72" rx="6" class="accent"/>
+<text x="122" y="189" class="label" text-anchor="middle">Venture</text>
+<text x="122" y="207" class="note" text-anchor="middle">Local stack owner</text>
+<rect x="316" y="72" width="324" height="72" rx="6" class="node"/>
+<text x="478" y="105" class="label" text-anchor="middle">Workspace</text>
+<text x="478" y="123" class="note" text-anchor="middle">Datasets, config, secrets, models, logs, storage</text>
+<rect x="316" y="156" width="324" height="72" rx="6" class="node"/>
+<text x="478" y="189" class="label" text-anchor="middle">Terminal clients</text>
+<text x="478" y="207" class="note" text-anchor="middle">Atlas · Brain · Jobs · Tools · Models · Profile</text>
+<rect x="316" y="240" width="324" height="72" rx="6" class="node"/>
+<text x="478" y="273" class="label" text-anchor="middle">Intel desktop</text>
+<text x="478" y="291" class="note" text-anchor="middle">Bulletin · Focus Brief · actor dossiers · topology</text>
+<rect x="708" y="156" width="212" height="72" rx="6" class="accent"/>
+<text x="814" y="189" class="label" text-anchor="middle">Fleetworks API</text>
+<text x="814" y="207" class="note" text-anchor="middle">Authenticated /api/v1</text>
 </svg>

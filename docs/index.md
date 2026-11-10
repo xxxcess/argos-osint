@@ -1,4 +1,4 @@
-# Argos OSINT wiki
+# Fleetworks wiki
 
 Understand the product, then follow its implementation. This is the maintained entry point for humans and agents; canonical concepts, implementation contracts and workflow guides live under `docs/wiki/`.
 
@@ -9,8 +9,6 @@ Understand the product, then follow its implementation. This is the maintained e
 | Explore code | [Code](wiki/code/index.md) | Crates, module entry points, contracts and verification |
 
 [![Wiki navigation](diagrams/wiki-navigation.svg)](diagrams/wiki-navigation.html)
-
-[Branch-to-main scope](argos-intel-living-spec.md#branch-to-main-scope-2026-10-26) · [Intel web implementation specification](argos-intel-living-spec.md) · [Local web/API contract](wiki/code/intel-web.md)
 
 ## Directory map
 
@@ -23,10 +21,9 @@ Understand the product, then follow its implementation. This is the maintained e
 | [Core crate](../crates/argos-osint-core) | Domain pipelines and storage; [module map](wiki/code/core.md) |
 | [Venture](../apps/venture) and [terminal clients](../apps/fleetworks-cli) | Workspace lifecycle and versioned API clients. [Fleetworks guide](wiki/code/fleetworks.md) |
 | [Deployment](../deploy/README.md) | Local Compose, database profiles and the [Atlas overlay](../deploy/atlas-dispatch.md) |
-| [API adapter](../crates/argos-osint-api) / [host](../crates/argos-api-host) | Legacy Intel HTTP service and authenticated Fleetworks roles. [API contract](wiki/code/intel-web.md) |
+| [API adapter](../crates/argos-osint-api) / [host](../crates/argos-api-host) | Versioned HTTP contracts and authenticated service roles. [API contract](wiki/code/intel-web.md) |
 | [Web app](../apps/web-desktop) / [shared packages](../packages) | Next server/stateless API relay, React Native primitives and typed Query client |
-| [Binary crate](../crates/argos-osint-bin) | Legacy CLI/TUI. [Interface map](wiki/code/interfaces.md) |
-| [scripts/](../scripts) | Builds, storage tests, releases and TUI captures; [workflow](wiki/code/contributing.md) |
+| [scripts/](../scripts) | Builds, storage tests, releases and verification; [workflow](wiki/code/contributing.md) |
 | [.opencode/](../.opencode) | Role/command/skill configuration; [guide](wiki/code/opencode-v2.md) |
 | [.agents/skills/](../.agents/skills) | Repository skills for other agent hosts |
 | [.github/workflows/](../.github/workflows) | CI and release automation; [CI guide](wiki/code/ci.md) |

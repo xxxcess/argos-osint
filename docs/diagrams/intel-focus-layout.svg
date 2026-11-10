@@ -1,1 +1,33 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 470" role="img" aria-labelledby="title desc"><title id="title">Intel Focus Brief layout</title><desc id="desc">React Native scrolls one shell with a header, an eight-column reader (summary, actors, claims, inferences) and a four-column context rail (lifecycle, source and related leads). Core TUI keeps Extracted, Reader and Context columns, with inferences last in the center stack.</desc><rect width="1000" height="470" fill="#f5f5f5"/><style>text{font-family:system-ui,sans-serif;fill:#2d3142}.head{font-size:22px;font-weight:600}.label{font-size:18px}.note{font-size:14px}.rule{stroke:#4f5d75;stroke-width:1.5}</style><text x="40" y="42" class="head">Focus Brief · inferences stay last among evidence</text><path d="M40 70H960M500 90V400" class="rule"/><text x="40" y="113" class="label">React Native · 8:4 reading desk</text><text x="40" y="156" class="note">Reading · summary → actors → claims</text><text x="40" y="186" class="note">Context · lifecycle → controls → source</text><text x="40" y="216" class="note">Context · related leads, not corroboration</text><text x="40" y="246" class="note">Reading · evidence sections collapse</text><path d="M40 268H430" stroke="#eb6c36" stroke-width="3"/><text x="40" y="300" class="head">Analytical inferences</text><text x="40" y="332" class="note">Header · confidence meter + job beacon</text><text x="40" y="362" class="note">Origin · entities · topology action</text><text x="540" y="113" class="label">Core TUI columns</text><text x="540" y="156" class="note">Extracted · confidence, actors, claims</text><text x="540" y="196" class="note">Reader · description, related</text><text x="540" y="236" class="head">Inferences · last</text><text x="540" y="276" class="note">Context · tags, country, jobs</text><path d="M40 410H960" class="rule"/><text x="40" y="440" class="note">Below 900px, context stacks after reading. Inferences stay last among evidence.</text><text x="40" y="462" class="note">Pending, verified empty and unavailable inference states stay on this section.</text></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 344" role="img" aria-labelledby="intel-focus-layout-title intel-focus-layout-desc">
+<title id="intel-focus-layout-title">Intel Focus Brief reading order</title>
+<desc id="intel-focus-layout-desc">The Intel web desktop presents one scrolling Focus Brief. The reading column keeps Inferences last among evidence sections. The context rail moves below reading at widths below 900 pixels.</desc>
+<defs>
+  <marker id="intel-focus-layout-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker>
+</defs>
+<style>
+  text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}
+  .heading{font-family:'Instrument Serif',Georgia,serif;font-size:24px}
+  .label{font-size:16px;font-weight:600}
+  .note{font-size:13px}
+  .code{font:12px 'Geist Mono',ui-monospace,monospace}
+  .zone{font-size:12px;font-weight:600;letter-spacing:1px}
+  .node{fill:white;stroke:#4f5d75}
+  .accent{fill:#fff6ed;stroke:#eb6c36}
+  .edge,.flow{fill:none;stroke:#4f5d75;stroke-width:1.5}
+  .edge{marker-end:url(#intel-focus-layout-arrow)}
+</style>
+<rect width="960" height="344" fill="#f5f5f5"/>
+<text x="40" y="36" class="heading" text-anchor="start">Wide Focus Brief · reading and context</text>
+<rect x="40" y="64" width="880" height="72" rx="6" class="node"/>
+<text x="480" y="97" class="label" text-anchor="middle">Article header</text>
+<text x="480" y="115" class="note" text-anchor="middle">Title, confidence, and job beacon</text>
+<rect x="40" y="164" width="552" height="88" rx="6" class="accent"/>
+<text x="316" y="205" class="label" text-anchor="middle">Reading column</text>
+<text x="316" y="223" class="note" text-anchor="middle">Summary → Actors → Claims → Inferences</text>
+<rect x="620" y="164" width="300" height="88" rx="6" class="node"/>
+<text x="770" y="205" class="label" text-anchor="middle">Context rail</text>
+<text x="770" y="223" class="note" text-anchor="middle">Lifecycle · controls · source · Related</text>
+<rect x="40" y="280" width="880" height="56" rx="6" class="node"/>
+<text x="480" y="305" class="label" text-anchor="middle">Article context</text>
+<text x="480" y="323" class="note" text-anchor="middle">Origin · extracted entities · topology action</text>
+</svg>

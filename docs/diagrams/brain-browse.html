@@ -1,31 +1,62 @@
-<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>Brain browsing and direct associations</title>
-<style>body{margin:0;background:#f5f5f5;color:#2d3142;font-family:system-ui,sans-serif}main{max-width:880px;margin:0 auto;padding:40px 24px}h1{font-family:Georgia,serif;font-weight:400}svg{width:100%;min-width:800px}.frame{overflow-x:auto}</style></head>
-<body><main><h1>Brain browsing and direct associations</h1><div class="frame"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 400" role="img" aria-labelledby="brain-browse-title brain-browse-desc">
-<title id="brain-browse-title">Brain browsing and direct associations</title>
-<desc id="brain-browse-desc">Internal storage and recall remain unchanged. A background reader batches Claims and Actor associations into immutable snapshots. The TUI filters its cached display index and drops stale deliveries. Direct provenance supplies typed association tabs and all graph nodes; grouping never merges identity. Rows navigate to exact records; graph nodes only scroll.</desc>
-<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#4f5d75"/></marker></defs>
-<rect width="800" height="400" fill="#f5f5f5"/>
-<g fill="none" stroke="#4f5d75" marker-end="url(#arrow)">
-<path d="M214 80 H280"/><path d="M214 206 H248 V100 H280"/>
-<path d="M474 80 H518 V54 H570"/><path d="M474 100 H518 V164 H570"/>
-<path d="M764 54 H784 V286 H682"/><path d="M667 206 V246"/>
-<path d="M376 120 V306"/>
-</g>
-<g font-family="Geist,system-ui,sans-serif" font-size="13" fill="#2d3142" text-anchor="middle">
-<rect x="20" y="40" width="194" height="80" rx="6" fill="#fff" stroke="#2d3142"/>
-<text x="117" y="70">Stored Brain records</text><text x="117" y="91" font-size="11" fill="#4f5d75">all kinds · recall unchanged</text>
-<rect x="20" y="156" width="194" height="100" rx="6" fill="#fff" stroke="#2d3142"/>
-<text x="117" y="182">Direct retained provenance</text><text x="117" y="204" font-size="11">claim refs · derivations</text><text x="117" y="223" font-size="11">article occurrences · opt-in threads</text><text x="117" y="242" font-size="11" fill="#4f5d75">direct mentions · current revisions</text>
-<rect x="280" y="40" width="194" height="80" rx="6" fill="#fff4ee" stroke="#eb6c36"/>
-<text x="377" y="66">Background browse reader</text><text x="377" y="87" font-size="11">batched claims · groups · counts</text><text x="377" y="105" font-size="11" fill="#4f5d75">immutable snapshot · stable keys</text>
-<rect x="570" y="18" width="194" height="78" rx="6" fill="#fff" stroke="#2d3142"/>
-<text x="667" y="45">Claim associations</text><text x="667" y="67" font-size="11">Actors · Sources</text><text x="667" y="85" font-size="11" fill="#4f5d75">shared snapshot · tab offsets</text>
-<rect x="570" y="128" width="194" height="78" rx="6" fill="#fff" stroke="#2d3142"/>
-<text x="667" y="153">Actor-group associations</text><text x="667" y="175" font-size="11">Claims · Threads · Articles</text><text x="667" y="194" font-size="11" fill="#4f5d75">shared snapshot · complete graph</text>
-<rect x="488" y="246" width="194" height="80" rx="6" fill="#fff4ee" stroke="#eb6c36"/>
-<text x="585" y="271">Typed row navigation</text><text x="585" y="292" font-size="11">Brain · Recon · Intel</text><text x="585" y="312" font-size="11" fill="#4f5d75">exact destination · Back restores</text>
-<rect x="280" y="306" width="194" height="74" rx="6" fill="#fff" stroke="#2d3142"/>
-<text x="377" y="332">Cached TUI / read-only graph</text><text x="377" y="353" font-size="11">Find · keys · mouse stay responsive</text><text x="377" y="371" font-size="11">late results dropped · scroll only</text>
-</g>
-</svg></div><p>Claims and Actor-name groups are a display projection. Internal records and recall remain stored; only association rows navigate. The background reader never opens a vector index or migrates the database; the event loop uses cached snapshots.</p></main></body></html>
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Private Brain read boundaries</title>
+<style>
+  body{margin:32px;background:#f5f5f5;color:#2d3142;font-family:Geist,system-ui,sans-serif}
+  main{max-width:1060px;margin:auto}h1{font-family:'Instrument Serif',Georgia,serif}
+  svg{width:100%;height:auto}p{line-height:1.6}a{color:#394b65}
+</style>
+</head><body><main>
+<h1>Private Brain read boundaries</h1>
+<p>The Intel desktop and Brain client use the gateway. Retained actor dossiers, Focus Brief details, Related leads, and topology requests reach private Brain and read from the workspace database.</p>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 336" role="img" aria-labelledby="brain-browse-title brain-browse-desc">
+<title id="brain-browse-title">Private Brain read boundaries</title>
+<desc id="brain-browse-desc">The Intel desktop and Brain client use the gateway. Retained actor dossiers, Focus Brief details, Related leads, and topology requests reach private Brain and read from the workspace database.</desc>
+<defs>
+  <marker id="brain-browse-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker>
+</defs>
+<style>
+  text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}
+  .heading{font-family:'Instrument Serif',Georgia,serif;font-size:24px}
+  .label{font-size:16px;font-weight:600}
+  .note{font-size:13px}
+  .code{font:12px 'Geist Mono',ui-monospace,monospace}
+  .zone{font-size:12px;font-weight:600;letter-spacing:1px}
+  .node{fill:white;stroke:#4f5d75}
+  .accent{fill:#fff6ed;stroke:#eb6c36}
+  .edge,.flow{fill:none;stroke:#4f5d75;stroke-width:1.5}
+  .edge{marker-end:url(#brain-browse-arrow)}
+</style>
+<rect width="960" height="336" fill="#f5f5f5"/>
+<text x="40" y="36" class="heading" text-anchor="start">Read retained records through the Fleetworks API</text>
+<path d="M228 116H272" class="edge"/>
+<path d="M460 116H504" class="edge"/>
+<path d="M692 116H736" class="edge"/>
+<path d="M598 152V194H170V224" class="edge"/>
+<path d="M598 194H480V224" class="edge"/>
+<path d="M598 194H790V224" class="edge"/>
+<rect x="40" y="80" width="188" height="72" rx="6" class="node"/>
+<text x="134" y="113" class="label" text-anchor="middle">Intel and Brain clients</text>
+<text x="134" y="131" class="note" text-anchor="middle">Retained read requests</text>
+<rect x="272" y="80" width="188" height="72" rx="6" class="node"/>
+<text x="366" y="113" class="label" text-anchor="middle">API gateway</text>
+<text x="366" y="131" class="note" text-anchor="middle">Authenticated /api/v1</text>
+<rect x="504" y="80" width="188" height="72" rx="6" class="accent"/>
+<text x="598" y="113" class="label" text-anchor="middle">Private Brain</text>
+<text x="598" y="131" class="note" text-anchor="middle">Dedicated internal bearer</text>
+<rect x="736" y="80" width="184" height="72" rx="6" class="node"/>
+<text x="828" y="113" class="label" text-anchor="middle">SurrealDB</text>
+<text x="828" y="131" class="note" text-anchor="middle">Records and provenance</text>
+<rect x="40" y="224" width="260" height="72" rx="6" class="node"/>
+<text x="170" y="257" class="label" text-anchor="middle">Actor dossiers</text>
+<text x="170" y="275" class="note" text-anchor="middle">Canonical actor ID · retained evidence</text>
+<rect x="350" y="224" width="260" height="72" rx="6" class="node"/>
+<text x="480" y="257" class="label" text-anchor="middle">Focus Brief and Related</text>
+<text x="480" y="275" class="note" text-anchor="middle">Article occurrence · tentative leads</text>
+<rect x="660" y="224" width="260" height="72" rx="6" class="node"/>
+<text x="790" y="257" class="label" text-anchor="middle">Topology</text>
+<text x="790" y="275" class="note" text-anchor="middle">Canonical or extracted brief seed</text>
+</svg>
+<p>The Intel web relay keeps workspace credentials on the server. The terminal Brain client exposes actor, brief, and topology reads.</p>
+<p><a href="../wiki/code/architecture.md">Architecture</a> · <a href="../../apps/fleetworks-cli/README.md">Terminal commands</a> · <a href="../diagrams.md">Diagram catalog</a></p>
+</main></body></html>

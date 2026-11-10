@@ -2,7 +2,7 @@
 
 [Code route](index.md) · [Wiki](../../index.md)
 
-Argos uses [Semantic Versioning 2.0.0](https://semver.org/) and
+Fleetworks uses [Semantic Versioning 2.0.0](https://semver.org/) and
 [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/).
 One version covers the main Rust workspace, including the legacy CLI/TUI, the
 Fleetworks host, Venture, the native clients and the shared crates. Each member

@@ -4,7 +4,7 @@
 
 `@tag:surreal-storage`
 
-SurrealDB is the application datastore. Fleetworks uses the [Venture-selected network endpoint](fleetworks.md#launch-the-compose-stack) and keeps the browser and terminal clients outside the storage layer. Legacy Argos uses `embedded,nlp,classifier` by default and opens RocksDB under `<ARGOS_HOME>/storage/surreal`. `ARGOS_HOME` defaults to `~/.argos`. See the [build and storage rules](contributing.md#storage-facts).
+SurrealDB is the application datastore. Services open the [Venture-selected network endpoint](fleetworks.md#launch-the-compose-stack). The browser and terminal clients use the authenticated API.
 
 | Responsibility | Source entry |
 | --- | --- |
@@ -62,9 +62,9 @@ SurrealQL statements, record IDs, indexes and transactions in current repository
 
 Atlas admission reads at most 512 thin headers per page and reserves them in transactions of at most 64 rows. Reservation leaves the durable cursor unchanged; outcome publication advances it for published work, while a guarded empty-page checkpoint handles pages with no claims. Actor derivative reuse additionally validates the actual index receipt revision and checksum under the source fence. See the [classifier](classifier.md) and [actor revision](actor-catalog.md#article-revision-contract-and-repair) contracts.
 
-Stage completion and canonical publication are separate commits: `brief_stages::commit` first commits the leased stage output, then requests publication. A canonical publication failure rolls back that transaction and reports an index/publication failure without undoing completed extraction. Atlas phase-6 batching likewise does not create one 100-article transaction: each occurrence's relationships and receipt commit together, and successful occurrences remain available if another fails.
+Stage completion and canonical publication are separate commits: `brief_stages::commit` first commits the leased stage output, completion metadata and retained run fence, then requests publication. A canonical publication failure rolls back that transaction and reports an index/publication failure without undoing completed extraction. Atlas phase-6 batching likewise does not create one 100-article transaction: each occurrence's relationships and receipt commit together, and successful occurrences remain available if another fails.
 
-The Jobs dashboard reads a bounded page of top-level ids before loading event, task and attempt metrics. Those page metrics are grouped by the selected ids. Running `api_server` and `web_server` rows rank ahead of ordinary work inside the active filters. A single job's event total covers that job and its immediate children, matching the page cohort. See [Intel web](intel-web.md#traffic-in-rust-jobs--logs).
+The Jobs dashboard reads a bounded page of top-level ids before loading event, task and attempt metrics. Those page metrics are grouped by the selected ids. Running `api_server` and `web_server` rows rank ahead of ordinary work inside the active filters. A single job's event total covers that job and its immediate children, matching the page cohort. See [Jobs and Logs](../concepts/usage.md#jobs-and-logs).
 
 Topology snapshots keep their consistent transaction in a worker that owns `BEGIN` through `COMMIT`/`CANCEL`. If the awaiting caller is dropped (for example by the HTTP timeout), the worker stops traversal and awaits rollback through `run_tx`; dropping the request does not drop the open SDK transaction. This cleanup applies to topology snapshots, including brief navigation binding reads; other transaction callers retain their existing behavior. Brief navigation uses `brief_binding_snapshot` and returns after direct node admission; it skips graph-only topic/Related expansion, payload details, association hydration and neighborhood-summary generation.
 

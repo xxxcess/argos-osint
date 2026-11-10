@@ -2,7 +2,7 @@
 
 [Code route](index.md) · [Implementation plan](../../../.planning/2026-11-09-fleetworks-overhaul/task_plan.md)
 
-Venture initializes an isolated workspace, imports selected legacy configuration on request, and owns the local Compose stack. The terminal clients and Intel web relay communicate with the authenticated Argos API. Service processes open the network datastore according to their roles.
+Venture initializes an isolated workspace, imports selected existing configuration on request, and owns the local Compose stack. The terminal clients and Intel web relay communicate with the authenticated Fleetworks API. Service processes open the network datastore according to their roles.
 
 [![Fleetworks service boundaries](../../diagrams/fleetworks.svg)](../../diagrams/fleetworks.html)
 
@@ -20,7 +20,7 @@ Workspace selection uses `--workspace`, `FLEETWORKS_WORKSPACE`, then `.fleetwork
 
 Use `config/workspace.toml` for `[datasets]` bindings and `[environment]` defaults. Dataset paths are relative to the workspace. Use `secrets/environment.toml` for private environment defaults. An explicitly set process variable takes precedence over either file.
 
-For an explicit legacy import, run `venture --workspace ./review-workspace import --from "$HOME/.argos"`. Venture copies selected provider API-key configuration and model defaults to the destination workspace and reports only counts. A conflicting destination is an error. The source configuration and application data stay in the original Argos home.
+For an explicit configuration import, run `venture --workspace ./review-workspace import --from "$HOME/.argos"`. Venture copies selected provider API-key configuration and model defaults to the destination workspace and reports only counts. A conflicting destination is an error. The source configuration and application data stay in the original home.
 
 ## Connect to the API
 
@@ -56,7 +56,7 @@ Then run `argos-api-host --role api` and `argos-api-host --role worker` with the
 
 For a standalone private Brain process, use `argos-api-host --role brain` with the same network storage settings and set `FLEETWORKS_BRAIN_BIND` and `FLEETWORKS_BRAIN_ALLOWED_HOSTS` as needed. Provide a shared `FLEETWORKS_INTERNAL_TOKEN_FILE` to Brain and the gateway API, and set `FLEETWORKS_BRAIN_ORIGIN` on the gateway to the private service origin. The Compose base stack provisions a separate `brain-token` for this connection. Brain handles actor dossiers, retained brief details and actions, Related articles, and topology operations. The existing worker owns background brief execution and the gateway retains live event streams.
 
-The default `combined` role supports the legacy local API and its worker pools. With the Atlas overlay, the private `atlas-worker` consumes durable RabbitMQ deliveries. A transaction in SurrealDB records the job and outbox state before dispatch. Cancellation, retries, and replay of a completed run follow the stored job revision and database identity. The broker carries delivery references and never owns the application records. The private `nlp` and `classifier` roles accept bounded authenticated requests. Use `venture train-legacy` for a separate Natural classifier training run against a snapshot of the selected CSV.
+With the Atlas overlay, the private `atlas-worker` consumes durable RabbitMQ deliveries. A transaction in SurrealDB records the job and outbox state before dispatch. Cancellation, retries, and replay of a completed run follow the stored job revision and database identity. The broker carries delivery references and never owns the application records. The private `nlp` and `classifier` roles accept bounded authenticated requests. Use `venture train-legacy` for a separate Natural classifier training run against a snapshot of the selected CSV.
 
 ## Rollout status
 
@@ -66,10 +66,10 @@ The default `combined` role supports the legacy local API and its worker pools. 
 | Atlas | Durable submission, worker dispatch, cancellation, retry and completed-run replay. The overlay serves NLP and Rust-BERT separately. Storage-backed NewsAPI tools share Atlas's daily NewsAPI quota in SurrealDB. |
 | Brain and Intel | Private Brain owns retained actor, article brief, Related and topology HTTP operations. Background brief execution and live streams still use the existing worker and gateway. |
 | Tools, Models and Profile | Catalog, role-default and workspace/health reads through the client suite. Tool execution and full configuration/export parity remain open. |
-| Interactive terminal | Line-oriented Jobs and Logs session with details, retry and cancellation. Other clients expose commands. Full legacy TUI parity remains open. |
+| Interactive terminal | Line-oriented Jobs and Logs session with details, retry and cancellation. Other clients expose commands. Additional interactive client views remain open. |
 | Service cutover | Further domain extraction, cross-worker model admission and cooldowns, packaged release verification and Recon retirement remain open. |
 
-The [integrated checkpoint at `43e2725`](https://github.com/xxxcess/argos-osint/actions/runs/42778990451) passed native Linux and Intel macOS clients, real Intel Rust-BERT inference, ARM64 server verification, the private Brain relay, the Atlas quota contract, native RabbitMQ dispatch and ARM64 packaged Compose. Consult the [branch runs](https://github.com/xxxcess/argos-osint/actions?query=branch%3Afeat%2Fatlas-zero-shot) for results on newer revisions, including the AMD64 packaged scope. The [implementation plan](../../../.planning/2026-11-09-fleetworks-overhaul/task_plan.md) tracks the remaining acceptance work.
+The [integrated checkpoint at `4038049`](https://github.com/xxxcess/argos-osint/actions/runs/42781577487) passed native Linux and Intel macOS clients, real Intel Rust-BERT inference, ARM64 server verification, the private Brain relay, the Atlas quota contract, native RabbitMQ dispatch and packaged Compose on Linux ARM64 and AMD64. The [implementation plan](../../../.planning/2026-11-09-fleetworks-overhaul/task_plan.md) tracks the remaining acceptance work.
 
 ## Verification
 

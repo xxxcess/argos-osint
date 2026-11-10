@@ -13,7 +13,9 @@ These are dated implementation records, audits and checklists. They may describe
 - [Intel brief provider reliability](brief-provider-reliability.md)
 - [Request-mode / Defaults popup checklist (PR #47)](brief-request-mode-checklist.md)
 - [Brief Inferences: request-mode failures, Atlas test and Defaults popups — test report](brief-request-mode-test-report.md)
+- [Intel web and native platform roadmap — October 2026](intel-web-implementation-2026-10-26.md)
 - [Intel Brief — Sequential Preparation and Extraction — checklist](intel-brief-sequential-preparation-checklist.md)
+- [Investigation harness and interactive research flows](investigation-harness.md)
 - [Model role routing, provider adapters and parallel brief preparation — checklist](model-role-routing-provider-adapters-checklist.md)
 - [Model routing, streamed insights and reliable Brain publication — checklist](model-routing-streamed-insights-checklist.md)
 - [Profile dashboard: chart choices per KPI](profile-dashboard-visuals.md)
@@ -26,6 +28,11 @@ These are dated implementation records, audits and checklists. They may describe
 - [Seeded topology and list density verification](tui-verification-topology-2026-10-15.md)
 - [Argos UI Interaction Audit](ui-interaction-audit.md)
 - [Unified reliability / summarization / semantic pipelines — completion checklist](unified-reliability-semantic-pipelines-checklist.md)
+
+## Historical figures
+
+- [Research turn](diagrams/recon-turn.html), [tool bindings](diagrams/recon-bindings.html), [tool picker](diagrams/tool-picker.html), and [investigation harness](diagrams/investigation-harness.html).
+- [Terminal shell](diagrams/tui-shell.html), [launcher menu](diagrams/venture-navigation.html), and [Intel web launch](diagrams/intel-web.html).
 
 ## Evidence collections
 

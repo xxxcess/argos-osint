@@ -2,7 +2,7 @@
 
 [Code route](index.md) · [Wiki](../../index.md) · [Canonical agent workflow](agent-workflow.md)
 
-This is the repo standard for agents changing terminal presentation or interaction. Read the [design contract](tui-design-spec.md) and affected [component APIs](tui-components.md) before editing. Keep the TUI simple. React Native component creativity belongs in the [Argos look and feel](react-ui.md#argos-look--feel-reference) and does not add terminal chrome. The [Profile implementation session](../../archive/tui-verification-session-2026-10-10.md) records how this procedure was established, including actual screenshots and defects found. The reusable skill is [argos-tui-verify](../../../.opencode/skills/argos-tui-verify/SKILL.md).
+This is the repo standard for agents changing terminal presentation or interaction. Read the [design contract](tui-design-spec.md) and affected [component APIs](tui-components.md) before editing. Keep the TUI simple. React Native component creativity belongs in the [Fleetworks look and feel](react-ui.md#fleetworks-look-and-feel) and does not add terminal chrome. The [Profile implementation session](../../archive/tui-verification-session-2026-10-10.md) records how this procedure was established, including actual screenshots and defects found. The reusable skill is [argos-tui-verify](../../../.opencode/skills/argos-tui-verify/SKILL.md).
 
 ## Plan the contract
 
@@ -18,7 +18,7 @@ For delegated work, assign disjoint file sets. Child prompts carry components/pr
 
 Use `ratatui::backend::TestBackend` with deterministic snapshots, timestamps and fake providers. Render the application including its real shell, theme and registry. Examples in `crates/argos-osint-bin/src/tui/app.rs`: `analytics_fixture`, `analytics_viewports_and_data_states`, `dump_cells` and adjacent interaction tests. Draw before clicking so the registry is current; verify resize refreshes geometry.
 
-Choose screenshot scope from the change and its consumers before capturing. Record the affected Argos app, pages/presets, states, fixture test, include patterns, viewport sizes and why other surfaces are excluded. File names alone do not establish scope: an edit in `ui.rs` or `app.rs` may be local, while a shared helper may affect several apps.
+Choose screenshot scope from the change and its consumers before capturing. Record the affected terminal app, pages/presets, states, fixture test, include patterns, viewport sizes and why other surfaces are excluded. File names alone do not establish scope: an edit in `ui.rs` or `app.rs` may be local, while a shared helper may affect several apps.
 
 | Change | Required visual coverage |
 | --- | --- |

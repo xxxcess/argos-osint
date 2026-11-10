@@ -57,7 +57,7 @@ References: [official V2 agents](https://opencode.ai/v2/docs/agents), [config](h
 
 ## Rust style
 
-Any Rust edit or review under `crates/` loads `argos-rust-style` (Google's Rust Style Guide, with Argos overrides). `argos-osint-core` and `argos-osint-api` follow the library rules; `argos-osint-bin` and `argos-api-host` follow the application rules. Tokio async and the existing crate layout stay in force. `orchestrator` passes the skill into Rust phases; `architect` identifies it in the spec, `rust-coder` applies it directly, and `reviewer`/`tester` review diffs against it. The canonical file is `.opencode/skills/argos-rust-style/SKILL.md`; `.agents/skills/argos-rust-style` is the same skill. `cargo fmt` remains the formatter.
+Any Rust edit or review under `crates/` loads `argos-rust-style` (Google's Rust Style Guide, with repository overrides). `argos-osint-core` and `argos-osint-api` follow the library rules; `argos-osint-bin` and `argos-api-host` follow the application rules. Tokio async and the existing crate layout stay in force. `orchestrator` passes the skill into Rust phases; `architect` identifies it in the spec, `rust-coder` applies it directly, and `reviewer`/`tester` review diffs against it. The canonical file is `.opencode/skills/argos-rust-style/SKILL.md`; `.agents/skills/argos-rust-style` is the same skill. `cargo fmt` remains the formatter.
 
 ## UI/TUI visual verification
 
@@ -65,7 +65,7 @@ Follow the [canonical evidence workflow](agent-workflow.md) and [TUI verificatio
 
 ## React UI skills
 
-React work uses [React UI rules](react-ui.md), including the [Argos look and feel](react-ui.md#argos-look--feel-reference). Stay on the Argos theme and design components creatively inside it. Topology graphs stay on the force-graph canvas. `argos-react-ui` covers design, accessibility and visual evidence; `argos-react-patterns` covers React Native composition, compiler-compatible hooks, Query state and rendering. All React roles retain the enabled Next Compiler and zero-warning Hooks/compiler lint baseline.
+React work uses [React UI rules](react-ui.md), including the [Fleetworks look and feel](react-ui.md#fleetworks-look-and-feel). Stay on the Fleetworks theme and design components creatively inside it. Topology graphs stay on the force-graph canvas. `argos-react-ui` covers design, accessibility and visual evidence; `argos-react-patterns` covers React Native composition, compiler-compatible hooks, Query state and rendering. All React roles retain the enabled Next Compiler and zero-warning Hooks/compiler lint baseline.
 
 `/react-ui-review <scope>` selects `tester` for a read-only review (default: current UI delta). Frontend verification uses the pinned Node/pnpm, offline Playwright fixtures and inspected screenshots; shell Playwright does not require enabling the denied browser tool. Missing image/tool evidence remains pending.
 

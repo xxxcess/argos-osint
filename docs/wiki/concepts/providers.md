@@ -4,57 +4,21 @@
 
 [![Models and roles](../../diagrams/model-roles.svg)](../../diagrams/model-roles.html)
 
-Models (internal id `Providers`) has four tabs: Defaults, OpenRouter, Google, Nvidia.
+Venture loads workspace settings and can import selected API-key configuration and model defaults from an existing home. Process environment variables override workspace defaults. The Models client reads configured routes with `venture client models defaults`. [Workspace configuration](../code/fleetworks.md#try-the-workspace-and-clients)
 
 | Concern | Where |
 | --- | --- |
-| Credentials | `~/.argos/auth.json` (owner-only on Unix) |
-| Role → provider + model | `config.toml` |
+| Private workspace environment defaults | `secrets/environment.toml` |
+| Imported provider credentials and roles | Workspace `auth.json` and `config.toml` |
+| Public workspace defaults | `config/workspace.toml` |
 
-Saving or verifying a connection does not change a role. Old Writer config seeds Recon and Synthesis. Tool picker seeds OpenRouter `typesafe/jev-1.13` only when both fields are empty.
-
-| Provider | Key env | Endpoint |
+| Model provider | Key environment variable | Endpoint |
 | --- | --- | --- |
-| OpenRouter | `OPENROUTER_API_KEY` | optional HTTPS base |
+| OpenRouter | `OPENROUTER_API_KEY` | Optional HTTPS base |
 | Google | `GEMINI_API_KEY`, then `GOOGLE_API_KEY` | `https://generativelanguage.googleapis.com/v1beta/openai` |
 | Nvidia | `NVIDIA_API_KEY` | `https://integrate.api.nvidia.com/v1` |
 
-Verification checks the current draft without saving. Legacy OpenAI in `auth.json` keeps working until replaced and has no new-setup tab. Grok (xAI) is removed: saved Grok connections and routes are ignored on load and dropped on import, with a warning. See `docs/archive/brief-request-mode-test-report.md` for the migration note. Their keys are never sent to Google or Nvidia.
-
-```sh
-argos login
-argos defaults show
-argos defaults set recon --provider openrouter --model <model-id>
-argos defaults set tool-picker --provider openrouter --model typesafe/jev-1.13
-argos defaults set synthesis --provider openrouter --model <model-id>
-argos models --role tool-picker
-argos logout
-```
-
-| Role | Job |
-| --- | --- |
-| Recon | Directives and bindings |
-| Tool picker | One next tool per request |
-| Synthesis | Cited answers and claims |
-| Classifier | Atlas article categories and bounded article-cleanup decisions |
-| Summarization | Graph/path summaries |
-| **Canonical model roles** | **provider.rs canonical roles: recon_agent, recon_decisions, recon_analyst, atlas_evaluator, atlas_analyst, brain_summary** |
-| Investigation harness | curator / resolver / assessor / controller → archived (Phase 1) |
-
-Saving a role writes `config.toml` only. System log records `defaults.<role>: … -> …`. Provider list = accounts on this machine. Model list = what that account may call. A saved model id is kept if the live catalog is down.
-
-Each role has an ordered `fallbacks` list of provider/account/model routes. Migration adds empty lists without changing the primary. Exact duplicates of the primary or of another fallback are rejected; the same model through another provider or account is distinct. Defaults shows priority, provider, and model; Add fallback opens a Google | Nvidia | OpenRouter catalog popup. Catalog browsing never issues inference. Help: `Tried top to bottom after primary retries`.
-
-`argos osint user-agent` sets the public HTTP contact string. Blank → built-in `Argos OSINT/0.1 (…)`. Never send an empty User-Agent.
-
-### Tool picker transport
-
-`defaults show` reports `tool_picker: { provider, model, transport }` (`decisions` or `chat`). Role names: `tool-picker` and `tool_picker`. Pin `typesafe/jev-1.13`; do not pin `~typesafe/jev-latest`. On OpenRouter, the model list always offers `Jev 1.13 (decisions)` first.
-
-| Transport | Models | Request |
-| --- | --- | --- |
-| Decisions | `typesafe/jev-*` or id contains `/jev` | `POST https://openrouter.ai/api/alpha/decisions`, one choice per remaining tool. Confidence &lt; 0.45 → deterministic fallback. |
-| Chat | everything else | `{ "tool_id", "serves", "needs", "produces", "reason" }`. Validate + one repair. Same budget of 2 requests per turn. |
+Each configured role can carry an ordered `fallbacks` list of provider/account/model routes. Route selection preserves account identity, resolves operation capabilities and keeps credentials on the service side. Atlas category admission uses the private Rust-BERT service. Shared decision routes remain available for bounded tasks such as article cleanup and evidence selection.
 
 ## OSINT data providers
 
@@ -133,7 +97,7 @@ Claim Assessor (`claim_assessor`) inherits the Synthesis assignment when unset. 
 
 ## Capability-based route selection
 
-Each operation declares an output contract (`OperationFormat`: bounded decision, generated JSON or prose) next to its scope. A role's resolved chain (primary, inherited defaults, fallbacks) is walked in order and the first route whose actual model and connection support that contract is used. The exact TypeSafe Jev family (`typesafe/jev`, `typesafe/jev-<version>`, `~typesafe/jev-latest`; `provider::is_jev_family`) serves only native OpenRouter Decisions; a Jev route on another provider or without a key is an explicit zero-request capability skip, never a chat request. Generative work with a Jev primary picks the first chat-capable fallback; a chain with no compatible route fails before dispatch with a role-specific error (e.g. "Claim Assessor extraction requires a non-Jev chat fallback"). Roles never borrow another role's routes. Payloads are recompiled per route (native decisions ↔ chat JSON) with one bounded chat repair before the declared fallback. Figure: [investigation-harness](../../diagrams/investigation-harness.html).
+Each operation declares an output contract (`OperationFormat`: bounded decision, generated JSON or prose) next to its scope. A role's resolved chain (primary, inherited defaults, fallbacks) is walked in order and the first route whose actual model and connection support that contract is used. The exact TypeSafe Jev family (`typesafe/jev`, `typesafe/jev-<version>`, `~typesafe/jev-latest`; `provider::is_jev_family`) serves only native OpenRouter Decisions; a Jev route on another provider or without a key is an explicit zero-request capability skip, never a chat request. Generative work with a Jev primary picks the first chat-capable fallback; a chain with no compatible route fails before dispatch with a role-specific error (e.g. "Claim Assessor extraction requires a non-Jev chat fallback"). Roles never borrow another role's routes. Payloads are recompiled per route (native decisions ↔ chat JSON) with one bounded chat repair before the declared fallback.
 
 ## Streaming and deadlines
 
@@ -218,19 +182,19 @@ At stage admission, each route's capabilities are resolved once (`provider_capab
 
 Every model HTTP send passes through `provider_rate_limit`, including streamed and non-streamed completions, native Decisions, transcription when configured on a paced provider, chat fallbacks, output repairs and unsupported-option recovery. The scheduler shares one FIFO queue and monotonic clock per provider across all roles, models, endpoints and accounts in the running Argos process:
 
-| Provider | Argos RPM ceiling | Minimum interval between sends |
+| Provider | Fleetworks RPM ceiling | Minimum interval between sends |
 | --- | --- | --- |
 | OpenRouter | 20 | 3 seconds |
 | Google | 10 | 6 seconds |
 | Nvidia | 40 | 1.5 seconds |
 
-These are Argos scheduling limits, rather than claims about every provider tier. OpenRouter documents 20 RPM for free variants; Google quotas vary by model and project, with separate token and daily limits. See [OpenRouter limits](https://openrouter.ai/docs/api_reference/limits) and [Google limits](https://ai.google.dev/gemini-api/docs/rate-limits). The Nvidia ceiling is the configured application policy. Other providers retain existing admission behavior.
+These are Fleetworks scheduling limits, rather than claims about every provider tier. OpenRouter documents 20 RPM for free variants; Google quotas vary by model and project, with separate token and daily limits. See [OpenRouter limits](https://openrouter.ai/docs/api_reference/limits) and [Google limits](https://ai.google.dev/gemini-api/docs/rate-limits). The Nvidia ceiling is the configured application policy. Other providers retain existing admission behavior.
 
 The first request can start immediately. Idle time earns no burst, and a delayed waiter schedules the following send from its actual admission time. Compilation and authorization precede transport admission. Cancelled waiters release their queue position without reserving quota. Provider queues are independent; a Google cooldown does not stop OpenRouter or Nvidia. Existing two-active-requests-per-account admission and interactive priority remain in the retry executor; transport waiters enter their provider queue in FIFO order.
 
 HTTP 429 and 503 responses delay all queued sends for that provider, including when the failed request was the route's last attempt. `Retry-After` (seconds or HTTP date) is honored without the diagnostic display cap; absent a header, 429 waits 60 seconds and 503 waits 10 seconds. Stream-delivered rate-limit/server errors feed the same clock. Cooldowns only extend existing waits. The retry executor remains the only retry owner: its retry budget and backoff still apply, and transport pacing may delay the next send further. See [OpenRouter retry guidance](https://openrouter.ai/docs/api_reference/errors-and-debugging).
 
-Queue residence is recorded separately from retry backoff and starts no network/output deadline. The `Dispatched` wire mark is emitted only after transport admission, and native Decisions records its send time at the same boundary. Pacing is process-local: separate Argos processes and other applications do not share this clock. It cannot prevent token/day quotas or provider outages.
+Queue residence is recorded separately from retry backoff and starts no network/output deadline. The `Dispatched` wire mark is emitted only after transport admission, and native Decisions records its send time at the same boundary. Pacing is process-local: separate service processes and other applications do not share this clock. It cannot prevent token/day quotas or provider outages.
 
 `StageBudget` rows are retained as legacy sizing metadata for core API compatibility; their `policy()` no longer transmits output or reasoning restrictions. Claims, Inferences and Links still send their `brief_contracts` schema: a strict schema where confirmed, otherwise the forced `submit_result` output tool, otherwise JSON mode or validated text. Compact item/field limits describe the brief's data contract rather than a provider token budget. Output-tool arguments are validated exactly like content.
 

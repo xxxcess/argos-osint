@@ -1,33 +1,59 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <title>Classifier runtime and artifact</title>
-  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <style>
-    :root { --paper:#f5f5f5; --ink:#2d3142; --muted:#4f5d75; --soft:#7a8399; --accent:#eb6c36; --link:#2e5aa8; }
-    html,body { margin:0; background:var(--paper); color:var(--ink); font-family:Geist,system-ui,sans-serif; }
-    main { max-width:980px; margin:0 auto; padding:40px 24px 64px; }
-    .eyebrow { font-family:"Geist Mono",ui-monospace,monospace; font-size:11px; letter-spacing:.18em; text-transform:uppercase; color:var(--muted); }
-    h1 { font-family:"Instrument Serif",serif; font-weight:400; font-size:1.75rem; margin:.4rem 0 .5rem; }
-    p.lede { color:var(--muted); max-width:40rem; margin:0 0 1.25rem; font-size:15px; line-height:1.5; }
-    .frame { overflow-x:auto; }
-    svg { min-width:940px; display:block; }
-  </style>
-</head>
-<body>
-  <main>
-    <div class="eyebrow">Data flow</div>
-    <h1>Classifier runtime and artifact</h1>
-    <p class="lede">Rust owns bounded workers, exact immutable pins and activation. Six independent Natural Bayes models run inside embedded QuickJS; training and provider monitoring remain separate from inference.</p>
-    <div class="frame">
-<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="classifier-runtime-title classifier-runtime-desc" viewBox="0 0 980 520" width="980" height="520">
-<title id="classifier-runtime-title">Classifier runtime and artifact</title><desc id="classifier-runtime-desc">Rust validates compiled JavaScript and immutable model manifests. One bounded QuickJS worker scores six binary Bayes models. Training uses a separate writer; the prior model remains active unless independent quality evidence and activation authorization permit promotion.</desc>
-<defs><marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0 L8 3 L0 6" fill="#4f5d75"/></marker></defs>
-<rect width="980" height="520" fill="#f5f5f5"/>
-<g font-family="Geist,system-ui,sans-serif" fill="#2d3142"><text x="24" y="30" font-size="13">Compiled assets · data-only bridge · no runtime Node dependency</text><rect x="24" y="62" width="270" height="130" rx="5" fill="#fff" stroke="#2d3142"/><text x="40" y="90" font-size="15">Rust classifier home</text><text x="40" y="114" font-size="12" fill="#4f5d75">Validate bundle, model and report</text><text x="40" y="132" font-size="12" fill="#4f5d75">Pin immutable manifest and gates</text><text x="40" y="150" font-size="12" fill="#4f5d75">Bounded queue + cancellation</text><rect x="350" y="62" width="270" height="130" rx="5" fill="#fff" stroke="#eb6c36"/><text x="366" y="90" font-size="15">Owning QuickJS worker</text><text x="366" y="114" font-size="12" fill="#4f5d75">128 MiB heap · 1 MiB stack</text><text x="366" y="132" font-size="12" fill="#4f5d75">One long-lived inference runtime</text><text x="366" y="150" font-size="12" fill="#4f5d75">Tokenize once; batches up to 64</text><rect x="676" y="62" width="270" height="130" rx="5" fill="#fff" stroke="#2d3142"/><text x="692" y="90" font-size="15">Six binary Bayes models</text><text x="692" y="114" font-size="12" fill="#4f5d75">Natural present / absent labels</text><text x="692" y="132" font-size="12" fill="#4f5d75">Frozen binary unigram / bigram features</text><text x="692" y="150" font-size="12" fill="#4f5d75">Independent calibrated relevance</text><path d="M294 127 H345" fill="none" stroke="#4f5d75" marker-end="url(#arrow)"/><path d="M620 127 H671" fill="none" stroke="#4f5d75" marker-end="url(#arrow)"/><rect x="24" y="270" width="270" height="148" rx="5" fill="#fff" stroke="#2d3142"/><text x="40" y="298" font-size="15">Separate training writer</text><text x="40" y="322" font-size="12" fill="#4f5d75">Bounded incremental fitting</text><text x="40" y="340" font-size="12" fill="#4f5d75">Train fit · Calibration gates</text><text x="40" y="358" font-size="12" fill="#4f5d75">Development select · Test final</text><text x="40" y="376" font-size="12" fill="#4f5d75">Family evidence; prior retained on failure</text><rect x="350" y="270" width="270" height="148" rx="5" fill="#fff" stroke="#2d3142"/><text x="366" y="298" font-size="15">Immutable model store</text><text x="366" y="322" font-size="12" fill="#4f5d75">models/&lt;id&gt;/ + checked active pointer</text><text x="366" y="340" font-size="12" fill="#4f5d75">Checksum-validated JSON restore</text><text x="366" y="358" font-size="12" fill="#4f5d75">Atomic activation and rollback</text><text x="366" y="376" font-size="12" fill="#4f5d75">No provider agreement promotion</text><rect x="676" y="270" width="270" height="148" rx="5" fill="#fff" stroke="#eb6c36"/><text x="692" y="298" font-size="15">Admission receipts</text><text x="692" y="322" font-size="12" fill="#4f5d75">One primary + optional second domain</text><text x="692" y="340" font-size="12" fill="#4f5d75">Preserve all six scores and versions</text><text x="692" y="358" font-size="12" fill="#4f5d75">Record ambiguity / OOV / blank</text><text x="692" y="376" font-size="12" fill="#4f5d75">Model faults remain operational</text><path d="M159 197 V265" fill="none" stroke="#4f5d75" marker-end="url(#arrow)"/><path d="M294 344 H345" fill="none" stroke="#4f5d75" marker-end="url(#arrow)"/><path d="M811 197 V265" fill="none" stroke="#4f5d75" marker-end="url(#arrow)"/><text x="24" y="463" font-size="12">Classifier inference and fitting share a reservation ledger; NLP runs in a separate bounded runtime.</text><text x="24" y="487" font-size="12">A cycle and a resumable maintenance job retain the same model revision; a missing saved artifact requires explicit recovery.</text></g>
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pinned Rust-BERT classification</title>
+<style>
+  body{margin:32px;background:#f5f5f5;color:#2d3142;font-family:Geist,system-ui,sans-serif}
+  main{max-width:1060px;margin:auto}h1{font-family:'Instrument Serif',Georgia,serif}
+  svg{width:100%;height:auto}p{line-height:1.6}a{color:#394b65}
+</style>
+</head><body><main>
+<h1>Pinned Rust-BERT classification</h1>
+<p>Atlas requests an exact model pin from the private classifier service before live collection. The service loads a compatible Rust-BERT worker and pinned MNLI checkpoint. Atlas scores batches and applies its admission policy to the returned domain scores.</p>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 340" role="img" aria-labelledby="classifier-runtime-title classifier-runtime-desc">
+<title id="classifier-runtime-title">Pinned Rust-BERT classification</title>
+<desc id="classifier-runtime-desc">Atlas requests an exact model pin from the private classifier service before live collection. The service loads a compatible Rust-BERT worker and pinned MNLI checkpoint. Atlas scores batches and applies its admission policy to the returned domain scores.</desc>
+<defs>
+  <marker id="classifier-runtime-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker>
+</defs>
+<style>
+  text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}
+  .heading{font-family:'Instrument Serif',Georgia,serif;font-size:24px}
+  .label{font-size:16px;font-weight:600}
+  .note{font-size:13px}
+  .code{font:12px 'Geist Mono',ui-monospace,monospace}
+  .zone{font-size:12px;font-weight:600;letter-spacing:1px}
+  .node{fill:white;stroke:#4f5d75}
+  .accent{fill:#fff6ed;stroke:#eb6c36}
+  .edge,.flow{fill:none;stroke:#4f5d75;stroke-width:1.5}
+  .edge{marker-end:url(#classifier-runtime-arrow)}
+</style>
+<rect width="960" height="340" fill="#f5f5f5"/>
+<text x="40" y="36" class="heading" text-anchor="start">Fresh Atlas cycles use the private Rust-BERT service</text>
+<path d="M216 124H272" class="edge"/>
+<path d="M476 124H532" class="edge"/>
+<path d="M720 124H768" class="edge"/>
+<path d="M844 164V216H380V236" class="edge"/>
+<path d="M476 272H532" class="edge"/>
+<rect x="40" y="84" width="176" height="80" rx="6" class="node"/>
+<text x="128" y="121" class="label" text-anchor="middle">Atlas worker</text>
+<text x="128" y="139" class="note" text-anchor="middle">Authenticated batch calls</text>
+<rect x="272" y="84" width="204" height="80" rx="6" class="accent"/>
+<text x="374" y="121" class="label" text-anchor="middle">Private classifier</text>
+<text x="374" y="139" class="note" text-anchor="middle">Verifies the model pin</text>
+<rect x="532" y="84" width="188" height="80" rx="6" class="node"/>
+<text x="626" y="121" class="label" text-anchor="middle">Rust-BERT worker</text>
+<text x="626" y="139" class="note" text-anchor="middle">Platform-compatible binary</text>
+<rect x="768" y="84" width="152" height="80" rx="6" class="node"/>
+<text x="844" y="121" class="label" text-anchor="middle">MNLI model</text>
+<text x="844" y="139" class="note" text-anchor="middle">Pinned checkpoint</text>
+<rect x="272" y="236" width="204" height="72" rx="6" class="node"/>
+<text x="374" y="269" class="label" text-anchor="middle">Domain scores</text>
+<text x="374" y="287" class="note" text-anchor="middle">Six independent scores</text>
+<rect x="532" y="236" width="264" height="72" rx="6" class="accent"/>
+<text x="664" y="269" class="label" text-anchor="middle">Atlas admission</text>
+<text x="664" y="287" class="note" text-anchor="middle">Zero, one, or two qualifying domains</text>
+<text x="558" y="204" class="note" text-anchor="start">Score article titles and descriptions</text>
 </svg>
-    </div>
-  </main>
-</body>
-</html>
+<p>Transport readiness and model readiness are separate. A model pin failure appears in Jobs before article acquisition. The operator supplies the worker and model assets for the deployment architecture.</p>
+<p><a href="../wiki/code/classifier.md">Classifier contract</a> · <a href="../../deploy/atlas-dispatch.md">Atlas deployment</a> · <a href="../diagrams.md">Diagram catalog</a></p>
+</main></body></html>

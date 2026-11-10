@@ -1,4 +1,4 @@
-# Argos OpenCode quick guide
+# Fleetworks OpenCode quick guide
 
 Follow root [AGENTS.md](../AGENTS.md) and the [canonical agent workflow](../docs/wiki/code/agent-workflow.md). User instructions take precedence. These role, model and edit boundaries apply to the selected OpenCode team profile. Other hosts use their own roles and tools.
 
@@ -23,7 +23,7 @@ The parent owns shared plans, assigns disjoint paths and appoints one build owne
 
 ## Quick reference
 
-- **Build and CI:** Follow [contributor commands](../docs/wiki/code/contributing.md) and [cache hygiene](../docs/wiki/code/contributing.md#build-cache-hygiene). Use affected [Fleetworks scopes](../docs/wiki/code/ci.md#fleetworksyml--scoped-branch-checks) and the embedded gate for affected legacy paths. Local Rust uses the host and embedded storage. Server, all-platform and Rust mutation checks and baselines stay hosted.
-- **Testing and design:** Load [Argos testing guidelines](skills/argos-testing/SKILL.md) and the applicable Rust, React and TUI skills. Preserve Compiler and Hooks checks, shared UI primitives and `ForceCanvas` with its list twin. Inspect actual affected figures and [visual fixtures](../docs/wiki/code/tui-verification.md).
+- **Build and CI:** Follow [contributor commands](../docs/wiki/code/contributing.md) and [cache hygiene](../docs/wiki/code/contributing.md#build-cache-hygiene). Use affected [Fleetworks scopes](../docs/wiki/code/ci.md#fleetworksyml--scoped-branch-checks) and the embedded gate for affected compatibility paths. Local Rust uses the host and embedded storage. Server, all-platform and Rust mutation checks and baselines stay hosted.
+- **Testing and design:** Load [repository testing guidelines](skills/argos-testing/SKILL.md) and the applicable Rust, React and TUI skills. Preserve Compiler and Hooks checks, shared UI primitives and `ForceCanvas` with its list twin. Inspect actual affected figures and [visual fixtures](../docs/wiki/code/tui-verification.md).
 - **Plan and handoff:** Use the [named planning format](../docs/wiki/code/planning-artifacts.md#working-format). Record checks and Next Step. Scratch and worktrees belong in `.agent-scratch/`. Commit only with authorization and exact staging.
 - **Navigate and maintain:** Start at the [wiki](../docs/index.md) and [tags](../docs/wiki/tags.md). Use [wiki maintenance](../docs/wiki/maintenance.md) for affected routes, contracts and figure pairs.

@@ -2,13 +2,13 @@
 
 [Code route](index.md) · [Wiki](../../index.md)
 
-Profile (internal id `System`) is the observability and configuration module: an **Overview** dashboard of what Argos actually did, and a **System** tab that keeps the host, path and configuration surfaces. Keys and navigation in [usage.md](../concepts/usage.md#profile). Module layout and the snapshot path in [architecture.md](architecture.md#profile-dashboard-and-config-transfer).
+This contributor reference covers metric and configuration contracts in the retained Ratatui Profile dashboard (`ModuleId::System`). The network Profile client exposes workspace and health reads through the authenticated API. [Fleetworks Profile usage](../concepts/usage.md#profile)
 
 Nothing here invents a number. A metric the installation never collected renders **N/A, never `0`**, and an empty window is an empty section rather than a fabricated baseline. Rendering reads one immutable snapshot: no writes, no network calls, no model calls, and no prompts, article bodies, model outputs or keys.
 
 ## Navigation and presentation
 
-[Usage](../concepts/usage.md#profile) owns navigation and controls. The [analytics dashboard contract](profile-analytics-dashboard.md) owns the primary inventory, geometry, state and interaction rules. This page owns metric semantics, retention and portable configuration; it does not repeat the UI contract.
+The [analytics dashboard contract](profile-analytics-dashboard.md) owns the primary inventory, geometry, state and interaction rules. This page owns metric semantics, retention and portable configuration; it does not repeat the UI contract.
 
 ## Metric dictionary
 
@@ -37,7 +37,7 @@ Aggregation rules that hold for every row:
 | Tool diversity | Rates over scopes with ≥2 eligible tools; scopes below that are marked ineligible rather than scored zero |
 | Directive resolution | Recorded terminal assessments among terminal runs. `unknown` is a category; an answer is never inferred from run completion |
 | Temperature shifts | Signed score-point difference, not percentage change. Latest eligible snapshot versus the preceding comparable one under the same scoring version and eligible collection scope. New, missing or method-incomparable origins are labelled and shown separately, never given an invented zero baseline |
-| Tier shares | Shares across captured origin-cycle snapshots. Tier is ordinal, so the mean is descriptive only. Temperature is Argos's own score |
+| Tier shares | Shares across captured origin-cycle snapshots. Tier is ordinal, so the mean is descriptive only. Temperature is the application's score |
 | Discovery mix | One mutually exclusive disposition per candidate occurrence; pending and unknown are shown separately |
 | Pipeline backlog | Live latest transition per (stage, unit), independent of the historical period. Each row carries the unit label its writer recorded, and units from different stages are never summed. The completed-in-period column is registered but not populated yet |
 | Model sends / requests by role | Actual wire attempts. A logical operation may hold several, so sends are not jobs |
@@ -184,7 +184,7 @@ No-results phrases are matched only inside a recognized engine status region, wi
 
 ## Provider orchestration companion
 
-Limits, shared admission, fair queuing and retry/fallback policy are owned by `ARGOS_PROVIDER_REQUEST_ORCHESTRATION_SPEC.md`. Argos is a **read-only consumer**: `crates/argos-osint-core/src/provider_metrics.rs` publishes the snapshot DTOs the Models widgets render and the quota-setting DTOs the portable configuration shares, and it contains no scheduler, no admission policy and no retry policy.
+Limits, shared admission, fair queuing and retry/fallback policy are owned by `ARGOS_PROVIDER_REQUEST_ORCHESTRATION_SPEC.md`. Profile reads provider metrics: `crates/argos-osint-core/src/provider_metrics.rs` publishes the snapshot DTOs the Models widgets render and the quota-setting DTOs the portable configuration shares, and it contains no scheduler, no admission policy and no retry policy.
 
 Until the companion publishes a snapshot, `provider_metrics::capacity_snapshot` returns `available == false`. Live capacity and queue delay then render **unavailable, never zero** — `models.capacity` says the companion has not published a snapshot, and the status strip shows the queued count as N/A. A missing companion metric is never read as a measured zero.
 

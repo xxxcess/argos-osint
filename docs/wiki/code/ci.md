@@ -4,7 +4,7 @@
 
 Workflows live in `.github/workflows/` (owned by Code Architect).
 
-![CI matrix](../../img/ci-matrix.svg)
+[![Fleetworks CI scopes](../../diagrams/ci-scopes.svg)](../../diagrams/ci-scopes.html)
 
 ## `ci.yml` — build and test matrix
 
@@ -47,7 +47,7 @@ python3 scripts/fleetworks_verify.py plan --base "$(git rev-parse HEAD^)" --head
 
 Push planning compares the given base directly with HEAD. Use `--event pull_request` for a merge-base comparison. Omitting `--base` plans all scopes. The command prints the plan without executing checks and rejects an expected head that differs from the checkout.
 
-A configuration check confirms the Compose model resolves. The packaged smoke runs the actual containers. Review the job steps and exact revision when reporting either result. Fleetworks scopes and the legacy full matrix have separate acceptance responsibilities.
+A configuration check confirms the Compose model resolves. The packaged smoke runs the actual containers. Review the job steps and exact revision when reporting either result. The scoped Fleetworks workflow verifies the network stack. The full matrix covers affected compatibility code and storage engine contracts.
 
 ## Efficient local verification before CI
 
@@ -65,7 +65,7 @@ The workflow checks the standalone `tools/atlas-bert` workspace using Rust 1.95.
 
 The Fleetworks workflow calls the Intel runtime job for classifier changes and manual Fleetworks dispatches. It verifies the event commit and uses the PyTorch 2.1.0 wheel for Intel macOS and Python 3.11. The job builds, links, tests, and exercises the real checkpoint on `x86_64-apple-darwin`. The native Venture and client executables have their own Intel lane.
 
-For runtime verification, run `gh workflow run ci.yml --ref <branch> -f atlas_bert_intel_only=true`. This dispatch skips the standard matrix, links and tests the native Intel executable, prepares the pinned MNLI checkpoint with the same script as local setup, and compares its batched and repeated inference against one-item requests. Direct dispatch of `atlas-bert.yml` supports the same runtime checks with `-f intel_runtime=true`. Run the standard matrix separately for Argos app builds and storage tests. See the [classifier guide](classifier.md) for local setup.
+For runtime verification, run `gh workflow run ci.yml --ref <branch> -f atlas_bert_intel_only=true`. This dispatch skips the standard matrix, links and tests the native Intel executable, prepares the pinned MNLI checkpoint with the same script as local setup, and compares its batched and repeated inference against one-item requests. Direct dispatch of `atlas-bert.yml` supports the same runtime checks with `-f intel_runtime=true`. Run the standard matrix separately for application compatibility builds and storage tests. See the [classifier guide](classifier.md) for local setup.
 
 ## `commit-policy.yml`
 

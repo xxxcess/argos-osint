@@ -2,64 +2,38 @@
 
 [Concept route](index.md) · [Wiki](../../index.md)
 
-Short names used across the TUI, CLI, and store. Source of truth for investigation mechanics is [architecture.md](../code/architecture.md).
+Service and evidence terms used across Fleetworks. See the [architecture](../code/architecture.md) for implementation boundaries.
 
-## Apps and internal IDs
+## Apps and services
 
-The legacy TUI Home launches nine surfaces. Labels on screen differ from `ModuleId` values. See the [Fleetworks guide](../code/fleetworks.md) for network client coverage.
+[![Fleetworks workspace](../../diagrams/workspace.svg)](../../diagrams/workspace.html)
 
-[![Legacy Argos terminal workspace](../../diagrams/workspace.svg)](../../diagrams/workspace.html)
-
-| Label | `ModuleId` | Kind |
-| --- | --- | --- |
-| Intel | `Intel` | Application |
-| Atlas | `Atlas` | Application |
-| Brain | `Brain` | Application |
-| Recon | `Recon` | Application |
-| Jobs | `Jobs` | System |
-| Logs | `Logs` | System |
-| Tools | `Osint` | System |
-| Models | `Providers` | System |
-| Profile | `System` | System |
-
-Only Recon has a composer. Intel Briefing starts a **focus brief job** on an Atlas article; independent Recon investigations retain their own threads.
+| Name | Role |
+| --- | --- |
+| Venture | Initializes the workspace, owns local services and launches terminal clients |
+| Intel | Web workspace for Bulletin, Focus Brief, Actor Dossier and Topology |
+| Atlas | Collects headlines and hands off durable classification and derivative work |
+| Brain | Serves retained actors, brief details, Related articles and topology through a private service |
+| Jobs and Logs | Reads durable work and events, with retry and cancellation for eligible jobs |
+| Tools, Models and Profile | Reads the tool catalog, role defaults, workspace and service health |
 
 ## Model roles
 
-Each role is provider + model plus an ordered `fallbacks` list in `config.toml`. Accounts live in `auth.json`. Saving a key does not change a role.
+A role selects a provider and model with ordered fallbacks in `config.toml`. Provider accounts live in `auth.json`. The shared provider executor owns route resolution and pacing. Live Atlas category admission uses the separate pinned Rust-BERT service. [Providers](providers.md)
 
-[![Models and roles](../../diagrams/model-roles.svg)](../../diagrams/model-roles.html)
+[![Model roles](../../diagrams/model-roles.svg)](../../diagrams/model-roles.html)
 
-| Role | Job |
-| --- | --- |
-| Recon | Directives and bindings |
-| Tool picker | One next tool per request (Jev decisions or chat JSON) |
-| Synthesis | Cited answer |
-| Classifier | Atlas article categories and bounded article-cleanup decisions |
-| Summarization | Graph/path summaries |
-| Evidence curator, Entity resolver, Claim assessor, Investigation controller | Investigation harness |
+## OSINT providers
 
-Legacy OpenAI accounts remain until the user assigns a replacement. New setup tabs are Defaults, OpenRouter, Google, Nvidia.
-
-## Primary OSINT providers
-
-Firecrawl, SociaVault, and Hunter are primary. Everything else is a gap-filler. Hunter inputs come only from the prompt, Firecrawl, SociaVault, or earlier Hunter calls.
-
-[![OSINT catalog](../../diagrams/osint-providers.svg)](../../diagrams/osint-providers.html)
-
-## Bindings
-
-A binding is a typed value (`domain`, `handle`, `url`, …) with an evidence id. `recon/investigation/tool_io.rs` maps every catalog input to a kind, a prompt extractor, a rule extractor, and producers. Ungrounded inputs skip the step.
-
-[![Binding and grounding](../../diagrams/recon-bindings.svg)](../../diagrams/recon-bindings.html)
+Atlas collection and the retained context tools use configured provider accounts. Daily Atlas and storage-backed NewsAPI slots are shared through the datastore. [Provider admission](providers.md#atlas-news-provider-admission)
 
 ## Intel brief jobs and historical reports
 
-A Focus Brief retrieves the full article and extracts Claims, then joins both for claim-specific Inferences. Local actor-mention sentences become candidates; Classifier selects support, context and counterevidence; Synthesis analyzes each claim with its actors and selected original sentences (up to three concurrent analysis requests). Repeated conclusions, including paraphrases, are deduplicated before Links. Claims, Inferences and Links publish separately as each stage completes, through the same index outbox. Article-link leads enter as tentative Related memories with verification gaps. Later failures preserve earlier published results. Its Jobs pane shows durable stage progress and publication/index status. Actors appear above Claims; Claim and Inference records open topology from their exact publication identities. Related beneath Full Article reflects retained ingest associations requiring at least two distinct shared entity mentions.
+A Focus Brief retrieves the full article and extracts Claims, then joins both for claim-specific Inferences. Local actor-mention sentences become candidates; Classifier selects support, context and counterevidence; Synthesis analyzes each claim with its actors and selected original sentences (up to three concurrent analysis requests). Repeated conclusions, including paraphrases, are deduplicated before Links. Claims, Inferences and Links publish separately as each stage completes, through the same index outbox. Article-link leads enter as tentative Related memories with verification gaps. Later failures preserve earlier published results. The web brief and Jobs client expose durable stage progress and publication or index status. Actors appear above Claims; Claim and Inference records open topology from their exact publication identities. Related reflects retained ingest associations requiring at least two distinct shared entity mentions.
 
-Article Recon report execution is retired. Historical `intel_report_job`, attempts, sections and provenance remain stored; admission, resume and retry reject new execution, and unfinished report jobs and descendants are cancelled and fenced. Historical reports do not take precedence over normal brief publication. Independent Recon investigations remain available.
+Historical `intel_report_job` attempts, sections and provenance remain readable as historical records. Focus Brief publishes through the current job chain.
 
-Brain browsing exposes Claims and unique Actor-name groups without merging identities. Actor tabs show Claims, Recall-enabled Threads and directly mentioned retained Articles. Claim tabs show Actors and original Sources; provenance is independent of Related eligibility. Other memory kinds remain stored for recall and internal use.
+Brain retains actor, claim and source associations with their original provenance. Name grouping preserves individual identities, and direct actor associations remain independent of Related eligibility.
 
 ## Brain Memory Topology and Scope Analysis
 
@@ -75,9 +49,9 @@ history. Retained-source entries remain truthful when canonical indexing is abse
 
 ## Persistence
 
-- Fleetworks uses a [workspace-scoped network SurrealDB endpoint](../code/fleetworks.md#launch-the-compose-stack). Legacy Argos defaults to embedded RocksDB under `<ARGOS_HOME>/storage/surreal` and can use a loopback server.
+- Fleetworks uses a [workspace-scoped network SurrealDB endpoint](../code/fleetworks.md#launch-the-compose-stack).
 - Memory, provenance, graph edges and vector indexes live behind the [storage boundary](../code/storage.md).
-- Schema bootstrap and recall behavior are defined by current storage modules; legacy SQL files are historical migration context.
+- Current storage modules define schema bootstrap and recall behavior.
 
 [![Persistence stack](../../diagrams/persistence.svg)](../../diagrams/persistence.html)
 
@@ -93,12 +67,12 @@ An acquisition artifact preserves retrieved Markdown. A derived prose artifact h
 
 ## Source claim, inference and insight lifecycle
 
-A **claim** records what a source asserts, including uncertainty, allegation, denial, attribution and time. It does not assert that Argos independently established the proposition. An **inference** is a new conclusion justified by assessed claims and original evidence, with premise IDs, limitations and rationale. **Fidelity** measures faithful extraction; **relation** describes supports/contradicts/insufficient evidence; neither is a retrieval score or probability.
+A **claim** records what a source asserts, including uncertainty, allegation, denial, attribution and time. It does not assert that Fleetworks independently established the proposition. An **inference** is a new conclusion justified by assessed claims and original evidence, with premise IDs, limitations and rationale. **Fidelity** measures faithful extraction; **relation** describes supports/contradicts/insufficient evidence; neither is a retrieval score or probability.
 
 An **insight snapshot** is immutable original evidence, entity bindings, stage coverage, premise assessments and memory revisions for one owner generation. The owner head can be active, pending, previous, insufficient_evidence or blocked. Pending work keeps previous history visible. Valid-empty assessed output differs from failure. Historic fact/inference/context labels remain legacy records and are not automatically promoted. Source-local candidate IDs prevent homonyms from being merged solely by normalized name.
 
 ## Related article leads
 
-Atlas collection-v2 (with retained v1 compatibility) uses only Classifier model calls and local/native metadata. Related article pairs represent exact compatible shared headline/description mentions with a category-qualified seed. They supply no corroboration or assessed graph edge; Intel Links remain evidence-grounded propositions. Publisher-based Initial confidence is a source prior, independent from evidence confidence. See [Atlas classification and Related articles](atlas-classification-and-related-articles.md).
+Atlas pins the Rust-BERT classifier for each new collection cycle and schedules native metadata work after admission. Related article pairs represent exact compatible shared headline/description mentions with a category-qualified seed. They supply no corroboration or assessed graph edge; Intel Links remain evidence-grounded propositions. Publisher-based Initial confidence is a source prior, independent from evidence confidence. See [Atlas classification and Related articles](atlas-classification-and-related-articles.md).
 
 Actor spelling normalization removes terminal English possessives and collapses whitespace while retaining original mention spans. After [catalog seeding](../code/actor-catalog.md), names and strong aliases resolve only to unambiguous static actor IDs. Historical source-scoped records remain provisional until a reset/reseed. Background identity maintenance repairs historical spelling variants locally and uses contextual Entity Resolver decisions for broader aliases; cross-source redirects require an explicit `same` assessment. Related article overlap remains independent of actor identity.

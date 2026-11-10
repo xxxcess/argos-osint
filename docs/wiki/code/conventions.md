@@ -2,7 +2,7 @@
 
 [Code route](index.md) · [Wiki](../../index.md)
 
-Rules that keep Argos and agent work aligned. Product behavior lives in [architecture.md](architecture.md). Agent navigation starts at [AGENTS.md](../../../AGENTS.md); detailed commands live in [contributing.md](contributing.md).
+Conventions for Fleetworks contributors. Product behavior lives in [architecture.md](architecture.md). Agent navigation starts at [AGENTS.md](../../../AGENTS.md); detailed commands live in [contributing.md](contributing.md).
 
 ## Checks and delivery
 
@@ -12,7 +12,7 @@ Use [contributor workflow](contributing.md) for builds, isolated artifacts, work
 
 All agents follow [tui-verification.md](tui-verification.md) and the repo [argos-tui-verify skill](../../../.opencode/skills/argos-tui-verify/SKILL.md). Use `scripts/tui_review.py` for fresh fixture galleries. Inspect PNGs, action tests and metric tests separately; capture is not visual approval. [Session evidence](../../archive/tui-verification-session-2026-10-10.md) records the defects behind this convention. Keep the viewport/state matrix proportional to affected presets; Profile uses 160×50, 120×40, 100×32, 100×24, 80×24, 60×18 and 40×20. Artifacts are fixture cells/PNG/manifest/review ledger under a named plan; avoid live secrets.
 
-- Layout, hit-test, and Tab order share rectangles. `LayoutRegistry` fills during `draw`. Focus order uses registered targets from the active layout scope. Figure: [tui-shell.html](../../diagrams/tui-shell.html).
+- Layout, hit-test, and Tab order share rectangles. `LayoutRegistry` fills during `draw`. Focus order uses registered targets from the active layout scope.
 - Internal IDs stay `Osint` / `Providers` / `System` even when the labels are Tools / Models / Profile.
 - Empty focused fields keep their placeholder until the user types. Placeholders are never saved. Keys stay masked.
 - Long panes own an offset, a wrapped extent, and a `see more` footer. Offsets are not `u16`-truncated page math.

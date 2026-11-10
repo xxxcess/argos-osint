@@ -4,11 +4,11 @@
 
 @tag:classifier
 
-New Atlas cycles use a local Rust-BERT zero-shot worker. The worker evaluates each article against the six canonical domain definitions and returns independent relevance scores. Atlas admits up to two qualifying domains. Historical admission and provider monitoring have separate durable jobs. The retained Natural engine supports explicit legacy management and exact-pin replay of Natural runs.
+New Atlas cycles use a local Rust-BERT zero-shot worker. The worker evaluates each article against the six canonical domain definitions and returns independent relevance scores. Atlas admits up to two qualifying domains. Historical admission and provider monitoring have separate durable jobs. The retained Natural engine supports explicit Natural training and exact-pin replay of Natural runs.
 
 ## Ownership and public entry points
 
-The feature-independent [taxonomy](../../../crates/argos-osint-core/src/atlas_taxonomy.rs) owns the six stable IDs, display names and domain definitions. The standalone Rust-BERT executable keeps LibTorch separate from the main Argos build. The optional `classifier` Cargo feature adds QuickJS for legacy management and replay independently of `nlp`. Supported default Argos builds enable `embedded,nlp,classifier`.
+The feature-independent [taxonomy](../../../crates/argos-osint-core/src/atlas_taxonomy.rs) owns the six stable IDs, display names and domain definitions. The standalone Rust-BERT executable keeps LibTorch separate from the Fleetworks service host build. The optional `classifier` Cargo feature adds QuickJS for Natural training and replay independently of `nlp`. The Compose service host enables `server,nlp,classifier`.
 
 | Source | Responsibility |
 | --- | --- |
@@ -33,15 +33,15 @@ The neutral [runtime budget](../../../crates/argos-osint-core/src/js_runtime_bud
 
 The [Atlas Compose overlay](../../../deploy/atlas-dispatch.md) runs an authenticated private classifier role. The service keeps the pinned Rust-BERT worker warm and checks exact inference receipts. Supply the Linux worker and checkpoint files under the workspace using paths visible inside the container. The service can report transport readiness before model assets are available. Atlas reports a pin failure on the durable cycle job.
 
-`venture train-legacy` snapshots the selected dataset for one-shot Natural training. Use `--activate` to activate the trained artifact for legacy use. Fresh Atlas cycles use Rust-BERT. The installation steps below are for the local executable used by the legacy `argos` workflow.
+`venture train-legacy` snapshots the selected dataset for one-shot Natural training. Pass `--activate` to select that Natural artifact explicitly. Fresh Atlas cycles use Rust-BERT.
 
 ## Set up the live Rust-BERT classifier
 
-Install the worker and checkpoint on the machine that runs Atlas. The application uses a local CPU worker and a pre-trained English NLI checkpoint. The worker runs offline after installation.
+Prepare the CPU worker and pinned English NLI checkpoint. The Compose classifier requires a Linux executable built for the container architecture. Native Intel macOS setup is useful for direct worker verification. The worker runs offline once its assets are installed.
 
 1. Set up CPU LibTorch 2.1.0 and Python 3.11. The pinned PyTorch wheel supplies both the worker's LibTorch and the one-time model converter. On Intel macOS, install the Xcode Command Line Tools (`xcode-select --install`) and use an x86_64 Python and Rust toolchain. PyTorch 2.1.0 publishes an Intel macOS wheel. [PyTorch release files](https://pypi.org/project/torch/2.1.0/#files) · [tch 0.14.0 setup](https://docs.rs/crate/tch/0.14.0/source/README.md)
 
-   On macOS, run the following in the shell you will use to build the worker and start Argos.
+   On macOS, run the following in the shell you will use to build and run the native worker.
 
    ```sh
    python3.11 -m venv /absolute/path/atlas-bert-venv
@@ -52,7 +52,7 @@ Install the worker and checkpoint on the machine that runs Atlas. The applicatio
    export DYLD_LIBRARY_PATH="$atlas_torch_lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
    ```
 
-   On Intel macOS, `rustc -vV` should report `host: x86_64-apple-darwin`. On Linux use the [PyTorch CPU wheel index](https://download.pytorch.org/whl/cpu) to install `torch==2.1.0` and set `LD_LIBRARY_PATH` in place of `DYLD_LIBRARY_PATH`. For a standalone CPU LibTorch 2.1.0 distribution, set `LIBTORCH` to its absolute root, omit `LIBTORCH_USE_PYTORCH`, and add its `lib` directory to the platform loader path. Keep the same loader environment when launching Argos or Venture.
+   On Intel macOS, `rustc -vV` should report `host: x86_64-apple-darwin`. On Linux use the [PyTorch CPU wheel index](https://download.pytorch.org/whl/cpu) to install `torch==2.1.0` and set `LD_LIBRARY_PATH` in place of `DYLD_LIBRARY_PATH`. For a standalone CPU LibTorch 2.1.0 distribution, set `LIBTORCH` to its absolute root, omit `LIBTORCH_USE_PYTORCH`, and add its `lib` directory to the platform loader path. Keep the same loader environment when running the native worker.
 
 2. From the repository root, prepare the [pinned Typeform DistilBERT MNLI checkpoint](https://huggingface.co/typeform/distilbert-base-uncased-mnli/tree/cfa538a0fddbbd978fefe8966c1aeff7ad409c90). Choose a new model directory.
 
@@ -63,35 +63,25 @@ Install the worker and checkpoint on the machine that runs Atlas. The applicatio
 
    The script verifies the source files and converts the weights with the Rust-BERT 0.22.0 converter and the worker's Cargo lockfile. Keep the resulting `config.json`, `vocab.txt`, and `rust_model.ot` together in the model directory.
 
-3. From the Argos repository root, build the separate worker. Point Argos to this executable or copy it to a stable location.
+3. From the repository root, build the separate worker.
 
    ```sh
    cargo build --release --locked --manifest-path tools/atlas-bert/Cargo.toml \
        --target-dir "$PWD/target/atlas-bert"
    ```
 
-4. Create `zero-shot.json` in the configured `[data_paths].classifier_dir`. The default is `<ARGOS_HOME>/classifier/`, with `~/.argos` as the default Argos home. Use absolute paths and set `worker_path` to the executable file.
+4. For Compose, stage the Linux executable, required LibTorch libraries and model under the Fleetworks workspace. Set the container-visible paths in workspace `classifier/zero-shot.json` as shown in the [Atlas overlay guide](../../../deploy/atlas-dispatch.md). The optional threshold defaults to `0.8` and accepts values in `[0.5, 1)`. Both slots use the same threshold.
 
-   ```json
-   {
-     "worker_path": "/absolute/path/to/argos-osint/target/atlas-bert/release/argos-atlas-bert",
-     "model_dir": "/absolute/path/atlas-distilbert-mnli",
-     "threshold": 0.8
-   }
-   ```
-
-   The optional threshold defaults to `0.8` and accepts values in `[0.5, 1)`. Both slots use the same threshold. Scores rank the eligible domains before the existing one-primary/optional-secondary policy resolves the top two. Keep the checkpoint, worker and threshold stable while a run is paused or resumable.
-
-5. Run `argos classifier status` or choose **5 · Check Atlas classifier** in Venture. A successful worker startup reports **ready**. For a loader or checkpoint error, run the worker directly with the same environment to see its startup diagnostics.
+5. Smoke-test the native worker directly before preparing the packaged assets.
 
    ```sh
    printf '%s\n' '{"texts":["A ministry signed a diplomatic agreement."]}' |
      /absolute/path/to/argos-atlas-bert serve /absolute/path/atlas-distilbert-mnli
    ```
 
-   If Atlas reports a missing configuration, run `argos classifier status --json` from the same shell and Argos home. Its `config_path` is where Atlas looks for `zero-shot.json`, including when a custom classifier directory is configured. Check for `can_infer: true` before starting a fresh cycle.
+   Start Venture with `up --atlas`, submit a cycle through the Atlas client and inspect the returned job through Jobs. The classifier service can report transport readiness before its model assets are available. Atlas verifies the pin before a new collection and records configuration or inference errors on the job.
 
-The status check starts and closes a short-lived worker and does not open storage. Atlas preflight verifies the worker again before a new cycle. A run pins the executable and model bytes and its admission threshold. If a saved zero-shot run requires a superseded pin, restore its original configuration and files before resuming acquisition or admission. Post-admission-only work can resume without loading a classifier once Atlas verifies the completed admission outcomes. A retained Natural run still uses its exact historical Natural artifact.
+A run pins the executable, model bytes and admission threshold. Resume of acquisition or admission requires those exact assets. Proven derivative-only work can resume after the classifier is no longer loaded.
 
 ## Legacy Natural model, bundle and receipt contract
 
@@ -133,36 +123,17 @@ The default v2 release has 1,020 distinct synthetic scenarios and four disjoint 
 
 The frozen v1 seed's 55 positive calibration rows per domain represent eight independent positive families, not 55 independent stories. This does not meet the 20-accepted-family production gate.
 
-## Shared management and launchers
+## Workspace training
+
+Run the optional Natural trainer against a selected workspace dataset.
 
 ```sh
-argos classifier status --json
-argos classifier status --legacy --json
-argos classifier explain --title "Headline" --description "Summary" --json
-argos classifier review export --run retained-run --file review.json
-argos classifier review import --file review.json --review-reference reviewed-batch-1
-argos classifier review approve-mapping --review-reference mapping-review-1
-argos classifier derivative-job --job-id atlas-derivative-ID --action status
-argos classifier train --file /runtime/path/argos_atlas_strategic_domains_v2.csv
-argos classifier train --activate-synthetic-baseline
-argos classifier evaluate --file /runtime/path/argos_atlas_strategic_domains_v2.csv
-argos classifier rollback --model previously-activated-model
-argos classifier reclassify --request-id history-2026-11 --run-id retained-run
-argos classifier history-job --job-id returned-job-id --action status
-argos classifier history-job --job-id returned-job-id --action pause
-argos classifier history-job --job-id returned-job-id --action resume
-argos classifier history-job --job-id returned-job-id --action cancel
+venture --workspace ./review-workspace train-legacy --file datasets/argos_atlas_strategic_domains_v2.csv
 ```
 
-Live status reports `atlas-zero-shot-readiness-v1` with `state`, `can_infer`, the resolved configuration path, the pinned model identity when ready and a diagnostic when unavailable. `classifier explain` uses the same live model and gates.
-
-Legacy status reports `classifier-readiness-v1` with `missing`, `ready`, `training`, `invalid`, `incompatible`, `unavailable`. Dataset state, integrity and active-model state are orthogonal. Training may retain a usable prior model; missing CSV does not invalidate an existing one. A cold or changed artifact is unavailable/verification-pending until its real integrity check completes. Probes do not parse CSV, initialize QuickJS, train, open storage or scan all models. Dataset hashes are cached by actual file fingerprints; explicit train/evaluate and pin revalidate independently.
+Venture snapshots the selected bytes for the training worker. Use `--activate` for explicit activation. [Training and dataset setup](../../../deploy/README.md#train-the-optional-natural-classifier)
 
 Manual training persists a bounded request before returning acceptance. Replaying the same ID/body returns the original operation, even if the CSV later changes or disappears; changed consent/file identity conflicts. Candidate-only completion is successful and distinct from activation, including when an existing pointer is invalid or incompatible. Explicit synthetic repair requires a strictly verified prior activation identity and preserves its history/generation; unreadable or malformed lineage is never treated as an absent prior. A durable terminal result precedes final owner/writer teardown. Readiness reports retryable `writer_busy` and disables new training until the existing writer is free; status observes that transition without creating a lock. Starting the next operation reaps its exact terminal monitor through a bounded retained join. Cancellation and shutdown retain owned worker handles, release only owned leases and preserve the prior model before commit. Evaluation pins once, scores deterministic Test-family representatives with frozen gates and does not fit, calibrate or activate.
-
-Venture checks live Rust-BERT readiness at entry. Key **5**, **Check Atlas classifier**, repeats the check after configuration or installation changes. TUI, API and Web remain available while Atlas reports a missing or invalid classifier before acquisition. Actor seeding remains optional key **4** with its CSV prompt. Key **6**, **Train legacy classifier**, opens the article CSV prompt and activates the resulting synthetic Natural baseline. The default `auto` resolves the configured or bundled CSV again when training starts. Venture offers retraining when the verified current dataset hash differs from the active Natural model's seed hash. After the training child exits, Venture returns to its menu and refreshes that comparison. Fresh Atlas cycles use the Rust-BERT readiness path.
-
-TUI Profile → Configs → Dataset paths edits the actor CSV, legacy article training CSV and shared classifier directory in `config.toml`. Blank values select automatic defaults. Relative saved paths use `ARGOS_HOME`, and `~/` uses the operating-system home. The directory selects both the live zero-shot configuration and the legacy Natural artifact store. The explicit Natural training command remains candidate-only by default. Its progress panel writes to stderr and leaves final JSON on stdout.
 
 The `preflight_cycle` API supplies a private permit retaining a real model pin. Fresh acquisition pins Rust-BERT. Resumed acquisition or admission requires the exact saved pin. Atlas consumes the permit before run mutation, inventory or acquisition. The run-scoped adapter batches inference and persists occurrence/source/model receipts through fenced outcome transactions.
 

@@ -50,6 +50,8 @@ Status: in implementation
 - [x] Separate API serving, schema bootstrap and background workers. Dedicated domain entrypoints and their actions continue below.
 - [ ] Complete service boundaries. Atlas, NLP and classifier roles are wired. The private Brain role serves retained actor, topology and Intel brief HTTP operations. Separate brief execution and live progress, model execution and tool execution remain in scope.
 - [x] Admit Focus Brief jobs, runnable tasks, captured inputs and the retained run fence in one transaction before splitting the worker.
+- [x] Commit each brief stage output, metadata, task state and final retained run fence together.
+- [ ] Make post-commit display, Brain and index publication durable and replayable before splitting the brief worker.
 - [x] Introduce the Atlas RabbitMQ outbox and durable dependency, cancellation and completion fences. Expansion to the remaining service pools is pending.
 - [ ] Centralize provider quota and cooldown admission. Atlas daily collection and storage-backed NewsAPI tools use atomic shared reservations. Shared model/account RPM and cooldowns remain in scope.
 Acceptance: retained pipeline fixture completes across processes; duplicate delivery cannot duplicate committed effects.
@@ -73,16 +75,18 @@ Acceptance: scope fixtures prove narrow changes stay narrow and shared changes w
 
 ### Phase 7 — Documentation and planning reconciliation
 Status: in implementation
-- [ ] Execute the documentation/guidance inventory in acceptance.md; update all applicable maintained surfaces.
+- [x] Rebrand active product documentation as Fleetworks and replace old launcher instructions with Venture setup.
+- [ ] Complete the remaining contributor and planning dispositions in acceptance.md.
 - [ ] Reconcile every existing plan: retain active work, promote lasting decisions, mark superseded direction, remove reviewed obsolete artifacts and repair links.
 - [ ] Retire old SQL migration/cleanup instructions; retain live SurrealQL and useful dependency guards.
-- [ ] Update paired diagrams, tags, indexes, onboarding, release instructions and agent skills/links.
+- [x] Replace stale active diagram pairs, remove the old CI matrix and archive historical figures. Update current tags, indexes, onboarding and release guidance.
 Acceptance: maintained instructions consistently describe Fleetworks and scoped verification; historical evidence is not rewritten as current behavior.
 
 ### Phase 8 — Verification and handoff (separate from implementation)
 Status: pending
 - [ ] Freeze and run agreed affected checks plus full migration parity/recovery suite.
-- [ ] Verify native CLI and container release targets, storage modes and actual packaged artifacts.
+- [x] Verify Venture-owned packaged Compose from source on native Linux AMD64 and ARM64.
+- [ ] Verify published native CLI and container release artifacts and the remaining storage/recovery matrix.
 - [ ] Inspect UI/TUI captures and changed diagram pairs; check documentation links.
 - [ ] Record timing comparison, failures, skips, evidence revision and remaining limitations.
 Acceptance: no unrun test is presented as passed; independent findings are deferred.
@@ -102,4 +106,4 @@ Root agent owns integration, plan summaries and shared build cache. Delegate dis
 TinyFish CLI was unavailable during earlier research; used official RabbitMQ/Lapin pages through web fallback. GitHub connector omitted duration fields; read-only gh API supplied timestamps. No new execution failures during plan creation.
 
 ## Next Step
-Verify both packaged Compose architectures on the selected hosted revision. Make retained brief publication replayable before splitting the brief worker. Continue extracting model and tool execution before retiring Recon. Advance terminal parity and release verification while keeping maintained guidance aligned.
+Make retained brief publication replayable before splitting the brief worker. Continue extracting model and tool execution before retiring Recon. Advance terminal parity and published artifact verification.

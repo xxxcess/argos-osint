@@ -9,6 +9,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -21,15 +22,37 @@ def loopback_ports():
         return api.getsockname()[1], web.getsockname()[1]
 
 
-def readiness(port, token=None):
+def request(port, path, token=None, payload=None):
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=8)
     try:
         headers = {"Authorization": f"Bearer {token}"} if token else {}
-        connection.request("GET", "/api/v1/health/ready", headers=headers)
+        if payload is None:
+            connection.request("GET", path, headers=headers)
+        else:
+            headers["Content-Type"] = "application/json"
+            connection.request("POST", path, json.dumps(payload), headers=headers)
         response = connection.getresponse()
         return response.status, json.loads(response.read())
     finally:
         connection.close()
+
+
+def exercise_atlas(port, token):
+    path = "/api/v1/atlas/cycles"
+    payload = {"request_id": "compose-smoke"}
+    status, receipt = request(port, path, token, payload)
+    assert status == 202 and receipt["job_id"] == "fleet-atlas-job-compose-smoke", (status, receipt)
+    assert request(port, path, token, payload) == (status, receipt)
+    deadline = time.monotonic() + 45
+    while time.monotonic() < deadline:
+        status, value = request(port, f"/api/v1/jobs/detail?id={receipt['job_id']}", token)
+        assert status == 200, (status, value)
+        if value["job"]["state"] == "failed":
+            assert value["job"]["error_summary"] == "atlas_classifier_model_not_configured", value
+            assert value["job"]["attempt_rows"] == 1, value
+            return
+        time.sleep(0.25)
+    raise RuntimeError("Packaged Atlas worker did not settle the fixture delivery")
 
 
 def verify(venture, compose):
@@ -53,17 +76,24 @@ def verify(venture, compose):
             )
 
         try:
-            run("up", "--storage", "compose-disk", "--compose-file", compose, timeout=2400)
+            atlas = compose.with_name("compose.atlas.yml").is_file()
+            overlay = ("--atlas",) if atlas else ()
+            run("up", "--storage", "compose-disk", "--compose-file", compose, *overlay, timeout=2400)
             run("status", "--json")
-            assert readiness(api_port)[0] == 401, "direct API accepted a request without a bearer"
+            ready = "/api/v1/health/ready"
+            assert request(api_port, ready)[0] == 401, "direct API accepted a request without a bearer"
             token = (workspace / "secrets/api-token").read_text().strip()
-            direct_status, direct = readiness(api_port, token)
-            relay_status, relay = readiness(web_port)
+            direct_status, direct = request(api_port, ready, token)
+            relay_status, relay = request(web_port, ready)
             assert direct_status == relay_status == 200, "API or relay readiness failed"
             assert direct == relay and direct.get("ready") and direct.get("storage"), (
                 "web readiness did not reach the same ready API"
             )
             assert (workspace / "storage/surrealdb").is_dir(), "managed disk store is missing"
+            if atlas:
+                assert (workspace / "storage/rabbitmq").is_dir(), "managed RabbitMQ store is missing"
+                exercise_atlas(api_port, token)
+                print("Packaged Atlas dispatch reached the private classifier service")
         finally:
             failed = sys.exc_info()[0] is not None
             try:

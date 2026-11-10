@@ -20,6 +20,7 @@ services:
     environment:
       FLEETWORKS_BROKER_QUEUE: ${FLEETWORKS_BROKER_QUEUE:-fleetworks.atlas}
       FLEETWORKS_NLP_ORIGIN: http://nlp:8080
+      FLEETWORKS_CLASSIFIER_ORIGIN: http://classifier:8080
       FLEETWORKS_INTERNAL_TOKEN_FILE: /run/secrets/internal_token
     volumes:
       - *atlas-entrypoint
@@ -33,8 +34,10 @@ services:
         condition: service_healthy
       nlp:
         condition: service_healthy
+      classifier:
+        condition: service_healthy
 
-  nlp:
+  nlp: &private-engine
     image: ${FLEETWORKS_RUNTIME_IMAGE:-fleetworks-runtime:local}
     build:
       context: ..
@@ -64,6 +67,31 @@ services:
     security_opt: [no-new-privileges:true]
     restart: unless-stopped
     stop_grace_period: 20s
+
+  classifier:
+    <<: *private-engine
+    command: [--role, classifier, --port, "8080"]
+    environment:
+      ARGOS_HOME: /workspace
+      FLEETWORKS_WORKSPACE: /workspace
+      FLEETWORKS_CLASSIFIER_BIND: 0.0.0.0
+      FLEETWORKS_CLASSIFIER_ALLOWED_HOSTS: classifier:8080,127.0.0.1:8080
+      FLEETWORKS_INTERNAL_TOKEN_FILE: /run/secrets/internal_token
+      FLEETWORKS_API_TOKEN_FILE: /run/secrets/internal_token
+      FLEETWORKS_API_HEALTH_HOST: "127.0.0.1:8080"
+      LD_LIBRARY_PATH: /workspace/models/atlas-bert/lib
+    volumes:
+      - type: bind
+        source: ${FLEETWORKS_HOST_WORKSPACE}
+        target: /workspace
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp
+      - /workspace/secrets
+      - /workspace/storage
+
 
   rabbitmq:
     image: rabbitmq:4.2.6@sha256:0f0eeaba114a94a9e4aae6a5bde40de85e0ab3b9ae7fe715a25cac19c4253643

@@ -26,6 +26,8 @@ const WEB_PORT: &str = "FLEETWORKS_WEB_PORT";
 const API_TOKEN_FILE: &str = "FLEETWORKS_API_TOKEN_FILE";
 const ROOT_PASSWORD_FILE: &str = "FLEETWORKS_STORAGE_ROOT_PASSWORD_FILE";
 const RUNTIME_PASSWORD_FILE: &str = "FLEETWORKS_STORAGE_PASSWORD_FILE";
+const BROKER_PASSWORD_FILE: &str = "FLEETWORKS_BROKER_PASSWORD_FILE";
+const INTERNAL_TOKEN_FILE: &str = "FLEETWORKS_INTERNAL_TOKEN_FILE";
 const SETTINGS: &[(&str, Option<&str>)] = &[
     ("FLEETWORKS_STORAGE_NAMESPACE", Some("fleetworks")),
     ("FLEETWORKS_STORAGE_DATABASE", Some("fleetworks")),
@@ -34,6 +36,7 @@ const SETTINGS: &[(&str, Option<&str>)] = &[
     ("FLEETWORKS_API_ALLOWED_HOSTS", None),
     ("FLEETWORKS_API_ALLOWED_ORIGINS", None),
     ("FLEETWORKS_WEB_ORIGIN", None),
+    ("FLEETWORKS_BROKER_QUEUE", None),
 ];
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
@@ -57,6 +60,14 @@ impl StorageMode {
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+struct AtlasStack {
+    file: PathBuf,
+    broker_password: PathBuf,
+    internal_token: PathBuf,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Owner {
     version: u8,
     project: String,
@@ -66,6 +77,8 @@ pub(crate) struct Owner {
     storage: StorageMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     host_storage: Option<HostStorage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    atlas: Option<AtlasStack>,
     endpoint: String,
     api_port: u16,
     web_port: u16,
@@ -118,6 +131,14 @@ impl Owner {
             "Venture ownership file does not match this workspace"
         );
         local_socket(&owner.docker_host)?;
+        if let Some(atlas) = &owner.atlas {
+            ensure!(
+                atlas.file.is_absolute()
+                    && atlas.broker_password.is_absolute()
+                    && atlas.internal_token.is_absolute(),
+                "invalid Atlas Compose ownership"
+            );
+        }
         ensure!(
             owner.host_storage.as_ref().map(|config| config.mode) == owner.storage.host_mode(),
             "Venture ownership has an inconsistent host storage mode"
@@ -238,6 +259,15 @@ impl Owner {
             .arg(&self.project)
             .arg("--file")
             .arg(&self.file);
+        if let Some(atlas) = &self.atlas {
+            command
+                .env_remove("FLEETWORKS_BROKER_PASSWORD")
+                .env_remove("FLEETWORKS_INTERNAL_TOKEN")
+                .env(BROKER_PASSWORD_FILE, &atlas.broker_password)
+                .env(INTERNAL_TOKEN_FILE, &atlas.internal_token)
+                .arg("--file")
+                .arg(&atlas.file);
+        }
         if self.storage == StorageMode::ComposeDisk {
             command.args(["--profile", "disk"]);
         }
@@ -272,6 +302,7 @@ pub(crate) async fn up(
     workspace: &Workspace,
     storage: Option<StorageMode>,
     compose_file: Option<&Path>,
+    atlas: bool,
 ) -> Result<()> {
     let docker_host = docker_host().await?;
     let owned_workspace = workspace.clone();
@@ -282,6 +313,7 @@ pub(crate) async fn up(
             storage,
             compose_file.as_deref(),
             docker_host,
+            atlas,
         )
     })
     .await??;
@@ -324,6 +356,7 @@ fn prepare(
     storage: Option<StorageMode>,
     compose_file: Option<&Path>,
     docker_host: String,
+    atlas: bool,
 ) -> Result<(File, Owner, bool)> {
     let environment = workspace.environment()?;
     workspace.initialize()?;
@@ -344,6 +377,46 @@ fn prepare(
     }
     .context("resolve Compose file (use --compose-file from outside the checkout)")?;
     ensure!(file.is_file(), "Compose file must be a regular file");
+    let prior_atlas = prior.as_ref().and_then(|owner| owner.atlas.as_ref());
+    let atlas = if atlas || prior_atlas.is_some() {
+        let overlay = fs::canonicalize(file.with_file_name("compose.atlas.yml"))
+            .context("resolve the Atlas Compose overlay beside the base file")?;
+        ensure!(
+            overlay.is_file(),
+            "Atlas Compose overlay must be a regular file"
+        );
+        let broker_password = secret(
+            workspace,
+            &environment,
+            BROKER_PASSWORD_FILE,
+            prior_atlas.map(|atlas| atlas.broker_password.as_path()),
+            Some("broker-password"),
+        )?;
+        let broker_value = workspace.read_api_token_file(&broker_password)?;
+        ensure!(
+            (32..=128).contains(&broker_value.len())
+                && broker_value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-._~".contains(&byte)),
+            "invalid Fleetworks broker password file"
+        );
+        let internal_token = secret(
+            workspace,
+            &environment,
+            INTERNAL_TOKEN_FILE,
+            prior_atlas.map(|atlas| atlas.internal_token.as_path()),
+            Some("internal-token"),
+        )?;
+        workspace.read_api_token_file(&internal_token)?;
+        create_storage_dir(workspace, "rabbitmq")?;
+        Some(AtlasStack {
+            file: overlay,
+            broker_password,
+            internal_token,
+        })
+    } else {
+        None
+    };
     let host_storage = storage
         .host_mode()
         .map(|mode| {
@@ -439,21 +512,7 @@ fn prepare(
     );
 
     if storage == StorageMode::ComposeDisk {
-        let data = workspace.root().join("storage/surrealdb");
-        let mut builder = fs::DirBuilder::new();
-        builder.recursive(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        builder
-            .create(&data)
-            .context("create local SurrealDB directory")?;
-        ensure!(
-            fs::symlink_metadata(&data)?.is_dir(),
-            "SurrealDB data path must be a real directory"
-        );
+        create_storage_dir(workspace, "surrealdb")?;
     }
     let (uid, gid) = workspace_ids(workspace)?;
     let mut settings = BTreeMap::new();
@@ -477,6 +536,7 @@ fn prepare(
         docker_host,
         storage,
         host_storage,
+        atlas,
         endpoint,
         api_port,
         web_port,
@@ -668,6 +728,25 @@ fn secret(
     )
 }
 
+fn create_storage_dir(workspace: &Workspace, name: &str) -> Result<()> {
+    let data = workspace.root().join("storage").join(name);
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(&data)
+        .with_context(|| format!("create {name} data directory"))?;
+    ensure!(
+        fs::symlink_metadata(&data)?.is_dir(),
+        "{name} data path must be a real directory"
+    );
+    Ok(())
+}
+
 fn workspace_ids(workspace: &Workspace) -> Result<(u32, u32)> {
     #[cfg(unix)]
     {
@@ -823,6 +902,7 @@ mod tests {
             docker_host: "unix:///tmp/docker.sock".into(),
             storage: StorageMode::ComposeDisk,
             host_storage: None,
+            atlas: None,
             endpoint: super::DISK_URL.into(),
             api_port: 18080,
             web_port: 13000,

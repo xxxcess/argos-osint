@@ -38,23 +38,23 @@ Status: in implementation
 Acceptance: no cleanup destroys a runtime/CI dependency; guidance and scope selection have a single source of truth.
 
 ### Phase 3 — Workspace, storage and shared primitives
-Status: pending
+Status: in implementation
 - [x] Implement workspace resolution, configuration/secrets loading and explicit API-key/model-default import.
-- [ ] Implement managed host memory/disk SurrealDB and external disk-server configuration, authentication and TLS.
+- [x] Implement managed host memory/disk SurrealDB and external disk-server configuration, authentication and TLS.
 - [ ] Extract shared graph, model execution, jobs and cancellation primitives from Recon.
 - [ ] Split contracts/client/UI crates from RocksDB, ONNX and QuickJS dependencies.
 Acceptance: all three storage selections work through a network endpoint; original .argos state remains untouched.
 
 ### Phase 4 — Services and durable execution
-Status: pending
+Status: in implementation
 - [x] Separate API serving, schema bootstrap and background workers. Dedicated domain entrypoints and their actions continue below.
-- [ ] Extract NLP, classifier, Atlas, Brain/Intel, model execution and tool execution boundaries.
-- [ ] Introduce RabbitMQ outbox dispatch and preserve durable dependency/cancellation/completion fences.
+- [ ] Complete service boundaries. Atlas, NLP and classifier roles are wired. Brain/Intel, model execution and tool execution remain in scope.
+- [x] Introduce the Atlas RabbitMQ outbox and durable dependency, cancellation and completion fences. Expansion to the remaining service pools is pending.
 - [ ] Centralize provider quota/cooldown admission; preserve warm engines and bounded batches.
 Acceptance: retained pipeline fixture completes across processes; duplicate delivery cannot duplicate committed effects.
 
 ### Phase 5 — Venture, clients and Compose
-Status: pending
+Status: in implementation
 - [ ] Convert terminal screens to API clients and expose the agreed CLI suite.
 - [x] Add Venture service reconciliation, configuration, visible workspace, health and logs for the managed disk and external Compose profiles.
 - [ ] Add Compose baseline, optional disk SurrealDB profile, development overrides and multi-architecture image outputs.

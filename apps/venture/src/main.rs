@@ -42,6 +42,9 @@ enum Action {
         storage: Option<StorageMode>,
         #[arg(long, value_name = "PATH")]
         compose_file: Option<PathBuf>,
+        /// Start the private Atlas, classifier, NLP and broker services too.
+        #[arg(long)]
+        atlas: bool,
     },
     /// Check readiness against the configured Fleetworks HTTP API.
     Status {
@@ -125,7 +128,8 @@ async fn main() -> Result<()> {
         Action::Up {
             storage,
             compose_file,
-        } => compose::up(&workspace, storage, compose_file.as_deref()).await,
+            atlas,
+        } => compose::up(&workspace, storage, compose_file.as_deref(), atlas).await,
         Action::Status {
             api_origin,
             api_token_file,

@@ -38,5 +38,16 @@ Venture now owns startup, readiness, logs, and shutdown for a local Compose proj
 
 Eight scoped Venture and workspace Rust tests passed, and the native clients rebuilt. Web typecheck, lint, all 331 unit tests, four focused WebSocket tests, and the Next production build guard passed. Compose configuration resolved in both profiles with the pinned local Compose parser. Actual image build and startup are assigned to the hosted packaged smoke.
 
+## Rebuild checkpoints 4–8
+
+- The packaged web build excludes test sources after the hosted Next type-check failure. The production build passed locally with the same source inputs.
+- Venture starts and stops its own SurrealDB in host memory or host disk mode. A native SurrealDB fixture exercised both restarts with simulated Docker commands. Host disk retained the marker. Host memory reset it.
+- Atlas submits stable job and run IDs, publishes durable RabbitMQ deliveries, and fences replay with database identity, revision, and worker lease. Local SurrealDB and RabbitMQ passed submission replay, queued cancellation, completion replay, worker restart, and retry with monotonic attempts.
+- A private warm Compromise NLP service serves ordered, bounded annotation batches. The local TCP test covered request order and cache reuse. An authenticated Rust-BERT service verifies exact model pins and receipts. The offline worker fixture covered both tags and rejection.
+- Venture snapshots the selected CSV for its one-shot Natural training worker. A disposable workspace trained and activated the current dataset and a modified copy. The launcher and the training report agreed on the SHA-256 for each run.
+- Intel macOS passed the native Venture and CLI build at the Atlas dispatch checkpoint. Real checkpoint inference on Intel and packaged Atlas Compose startup have dedicated hosted gates. Treat both as pending until their exact runs finish.
+
+The full service cutover remains open. In particular, Brain and Intel integration, provider quotas, retained interactive terminal parity, release artifacts, and Recon retirement need implementation or acceptance evidence.
+
 ## Retention
 Working task_plan/findings/progress are ignored local planning memory. design.md and acceptance.md are curated review artifacts eligible for Git, not staged or committed here.

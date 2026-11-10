@@ -26,6 +26,14 @@ The clients default to `http://127.0.0.1:8080`. Pass `--api-origin` or set `FLEE
 
 See the [CLI command reference](../../../apps/fleetworks-cli/README.md) for route-specific commands and their API requirements. Use `venture status` for storage-backed readiness and `venture client <app> --help` for an individual CLI.
 
+## Launch the Compose stack
+
+From the repository root, run `target/debug/venture --workspace ./review-workspace up` with a local Docker engine and Docker Compose installed. Venture builds and starts the API, worker, production web relay, and disk-backed SurrealDB. The launcher creates private local credentials and records the Compose project it owns.
+
+Open the web address Venture prints. The default is `http://127.0.0.1:3000`. Set `FLEETWORKS_WEB_PORT` or `FLEETWORKS_API_PORT` to remap the loopback ports. Use `venture status`, `venture logs --follow`, and `venture stop` with the same workspace. Stop retains the database directory.
+
+Use `up --storage external` with an explicit `FLEETWORKS_STORAGE_URL` and root credential file for an existing disk-backed server. See the [deployment guide](../../../deploy/README.md) for environment options and manual Compose startup.
+
 ## Run the network API and workers
 
 Build the service host with network storage enabled.

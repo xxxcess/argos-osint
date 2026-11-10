@@ -166,12 +166,24 @@ impl Workspace {
 
     /// Provision an owner-only random API token when the default token file is absent.
     pub fn initialize_api_token(&self) -> Result<()> {
+        self.initialize_secret_file("api-token").map(|_| ())
+    }
+
+    /// Provision a random, private credential in the workspace secrets directory.
+    /// An existing private credential is reused.
+    pub fn initialize_secret_file(&self, name: &str) -> Result<PathBuf> {
+        ensure!(
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
+            "invalid workspace secret file name"
+        );
         self.initialize()?;
-        let path = self.root.join(DEFAULT_TOKEN_FILE);
+        let path = self.root.join("secrets").join(name);
         if metadata_if_exists(&path)?.is_some() {
-            return self
-                .read_api_token_file(Path::new(DEFAULT_TOKEN_FILE))
-                .map(|_| ());
+            self.read_api_token_file(&path)?;
+            return Ok(path);
         }
         let mut random = [0_u8; 32];
         getrandom::fill(&mut random).map_err(|_| anyhow!("generate workspace API token"))?;
@@ -181,11 +193,12 @@ impl Workspace {
         }
         body.push('\n');
         match persist_new(&path, body.as_bytes()) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => self
-                .read_api_token_file(Path::new(DEFAULT_TOKEN_FILE))
-                .map(|_| ()),
-            Err(error) => Err(error).context("write workspace API token"),
+            Ok(()) => Ok(path),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                self.read_api_token_file(&path)?;
+                Ok(path)
+            }
+            Err(error) => Err(error).context("write workspace secret"),
         }
     }
 

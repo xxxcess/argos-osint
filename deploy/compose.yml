@@ -1,0 +1,182 @@
+x-workspace: &workspace
+  type: bind
+  source: ${FLEETWORKS_HOST_WORKSPACE:?Set FLEETWORKS_HOST_WORKSPACE to the initialized absolute workspace path}
+  target: /workspace
+  bind:
+    create_host_path: false
+
+x-runtime-environment: &runtime-environment
+  ARGOS_HOME: /workspace
+  FLEETWORKS_WORKSPACE: /workspace
+  HOME: /workspace
+  FLEETWORKS_STORAGE_URL: ${FLEETWORKS_STORAGE_URL:-ws://surrealdb:8000}
+  FLEETWORKS_STORAGE_NAMESPACE: ${FLEETWORKS_STORAGE_NAMESPACE:-fleetworks}
+  FLEETWORKS_STORAGE_DATABASE: ${FLEETWORKS_STORAGE_DATABASE:-fleetworks}
+  FLEETWORKS_STORAGE_USERNAME: ${FLEETWORKS_STORAGE_USERNAME:-fleetworks}
+  FLEETWORKS_STORAGE_PASSWORD_FILE: /run/secrets/storage_password
+
+x-runtime: &runtime
+  image: ${FLEETWORKS_RUNTIME_IMAGE:-fleetworks-runtime:local}
+  build:
+    context: ..
+    dockerfile: deploy/Dockerfile
+    target: runtime
+  user: &workspace-user "${FLEETWORKS_UID:?Set FLEETWORKS_UID to the workspace owner's numeric UID}:${FLEETWORKS_GID:?Set FLEETWORKS_GID to the workspace owner's numeric GID}"
+  environment: *runtime-environment
+  volumes:
+    - *workspace
+  # Application roles do not need the workspace's secret files or the managed
+  # database's disk. Each receives only its named credential files below.
+  tmpfs:
+    - /tmp
+    - /workspace/secrets
+    - /workspace/storage
+  secrets:
+    - storage_password
+  extra_hosts:
+    - host.docker.internal=host-gateway
+  init: true
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  stop_grace_period: 30s
+
+services:
+  bootstrap:
+    <<: *runtime
+    command: [--role, bootstrap]
+    restart: "no"
+    environment:
+      <<: *runtime-environment
+      FLEETWORKS_STORAGE_ROOT_USERNAME: ${FLEETWORKS_STORAGE_ROOT_USERNAME:-root}
+      FLEETWORKS_STORAGE_ROOT_PASSWORD_FILE: /run/secrets/storage_root_password
+    volumes:
+      - <<: *workspace
+        read_only: true
+    secrets:
+      - storage_password
+      - storage_root_password
+    depends_on:
+      surrealdb:
+        condition: service_healthy
+        required: false
+
+  api:
+    <<: *runtime
+    command: [--role, api, --port, "8080"]
+    restart: unless-stopped
+    environment:
+      <<: *runtime-environment
+      FLEETWORKS_API_BIND: ${FLEETWORKS_API_BIND:-0.0.0.0}
+      FLEETWORKS_API_ALLOWED_HOSTS: "${FLEETWORKS_API_ALLOWED_HOSTS:-api:8080,127.0.0.1,localhost,127.0.0.1:${FLEETWORKS_API_PORT:-8080},localhost:${FLEETWORKS_API_PORT:-8080}}"
+      FLEETWORKS_API_ALLOWED_ORIGINS: ${FLEETWORKS_API_ALLOWED_ORIGINS:-}
+      FLEETWORKS_API_TOKEN_FILE: /run/secrets/api_token
+      FLEETWORKS_API_HEALTH_HOST: "127.0.0.1:${FLEETWORKS_API_PORT:-8080}"
+    secrets:
+      - storage_password
+      - api_token
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    ports:
+      - target: 8080
+        published: "${FLEETWORKS_API_PORT:-8080}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    healthcheck:
+      test: [CMD, /usr/local/bin/check-fleetworks-api]
+      interval: 5s
+      timeout: 4s
+      start_period: 15s
+      retries: 6
+
+  worker:
+    <<: *runtime
+    command: [--role, worker]
+    restart: unless-stopped
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+
+  web:
+    image: ${FLEETWORKS_WEB_IMAGE:-fleetworks-web:local}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: web
+    user: *workspace-user
+    restart: unless-stopped
+    environment:
+      HOME: /tmp
+      PORT: "3000"
+      FLEETWORKS_WEB_BIND: 0.0.0.0
+      FLEETWORKS_WEB_ORIGIN: "${FLEETWORKS_WEB_ORIGIN:-http://127.0.0.1:${FLEETWORKS_WEB_PORT:-3000}}"
+      FLEETWORKS_API_ORIGIN: http://api:8080
+      FLEETWORKS_API_TOKEN_FILE: /run/secrets/api_token
+    secrets:
+      - api_token
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - target: 3000
+        published: "${FLEETWORKS_WEB_PORT:-3000}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    healthcheck:
+      test: [CMD, node, /usr/local/lib/fleetworks/check-web.mjs]
+      interval: 5s
+      timeout: 4s
+      start_period: 15s
+      retries: 6
+    tmpfs:
+      - /tmp
+      - /opt/fleetworks-web/apps/web-desktop/.next/cache:mode=1777
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 30s
+
+  surrealdb:
+    profiles: [disk]
+    image: ${FLEETWORKS_SURREAL_IMAGE:-fleetworks-surrealdb:3.3.4}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: surrealdb
+    user: *workspace-user
+    restart: unless-stopped
+    environment:
+      FLEETWORKS_STORAGE_ROOT_USERNAME: ${FLEETWORKS_STORAGE_ROOT_USERNAME:-root}
+      FLEETWORKS_STORAGE_ROOT_PASSWORD_FILE: /run/secrets/storage_root_password
+    volumes:
+      - type: bind
+        source: ${FLEETWORKS_HOST_WORKSPACE}/storage/surrealdb
+        target: /data
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp
+      - /logs
+    secrets:
+      - storage_root_password
+    healthcheck:
+      test: [CMD, /surreal, isready, --endpoint, "http://127.0.0.1:8000"]
+      interval: 5s
+      timeout: 4s
+      start_period: 15s
+      retries: 6
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 30s
+
+secrets:
+  api_token:
+    file: ${FLEETWORKS_API_TOKEN_FILE:-${FLEETWORKS_HOST_WORKSPACE}/secrets/api-token}
+  storage_password:
+    file: ${FLEETWORKS_STORAGE_PASSWORD_FILE:-${FLEETWORKS_HOST_WORKSPACE}/secrets/storage-password}
+  storage_root_password:
+    file: ${FLEETWORKS_STORAGE_ROOT_PASSWORD_FILE:-${FLEETWORKS_HOST_WORKSPACE}/secrets/storage-root-password}

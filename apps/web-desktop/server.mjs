@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import next from "next";
 import { createLiveRelay } from "./live-relay.mjs";
+import { configuredWebOrigin, rustUpstream } from "./server-origin.mjs";
 
 const dir = fileURLToPath(new URL(".", import.meta.url));
 process.chdir(dir);
@@ -11,12 +12,17 @@ const port = Number(
 );
 if (!Number.isInteger(port) || port < 1 || port > 65535)
   throw new Error("Invalid port");
+const bind = process.env.FLEETWORKS_WEB_BIND ?? "127.0.0.1";
+const origin = configuredWebOrigin();
+if (bind !== "127.0.0.1" && (bind !== "0.0.0.0" || !origin))
+  throw new Error("Fleetworks web binding requires an explicit loopback origin");
+if (process.env.FLEETWORKS_API_ORIGIN !== undefined) await rustUpstream();
 const dev = process.argv.includes("--dev");
 const server = createServer();
 const app = next({
   dev,
   dir,
-  hostname: "127.0.0.1",
+  hostname: bind,
   port,
   webpack: true,
   turbopack: false,
@@ -52,9 +58,9 @@ server.on("request", (request, response) => {
 });
 await new Promise((resolve, reject) => {
   server.once("error", reject);
-  server.listen(port, "127.0.0.1", resolve);
+  server.listen(port, bind, resolve);
 });
-console.log(`Argos Next server ready at http://127.0.0.1:${port}`);
+console.log(`Argos Next server ready at ${origin ?? `http://127.0.0.1:${port}`}`);
 let closing = false;
 async function shutdown() {
   if (closing) return;

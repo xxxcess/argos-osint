@@ -29,6 +29,7 @@ jobs:
     outputs:
       native: ${{ steps.plan.outputs.native }}
       server: ${{ steps.plan.outputs.server }}
+      compose: ${{ steps.plan.outputs.compose }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -56,7 +57,7 @@ jobs:
 
           event = os.environ["GITHUB_EVENT_NAME"]
           selected = set()
-          all_scopes = {"native", "server"}
+          all_scopes = {"native", "server", "compose"}
           if event not in {"push", "pull_request"} or not re.fullmatch("[0-9a-f]{40}", base) or base == "0" * 40:
               selected.update(all_scopes)
           else:
@@ -66,7 +67,7 @@ jobs:
                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
               )
               if diff.returncode:
-                  print("Diff unavailable. Selecting both scopes.")
+                  print("Diff unavailable. Selecting all scopes.")
                   selected.update(all_scopes)
               else:
                   for path in map(os.fsdecode, diff.stdout.split(b"\0")):
@@ -74,10 +75,14 @@ jobs:
                           continue
                       if path.startswith(("docs/", ".planning/")) and path.endswith((".md", ".svg", ".html")):
                           continue
-                      if path.startswith(("apps/venture/", "apps/fleetworks-cli/")):
+                      if path.startswith("apps/venture/"):
+                          selected.update(all_scopes)
+                      elif path.startswith("apps/fleetworks-cli/"):
                           selected.add("native")
+                      elif path.startswith(("apps/web-desktop/", "deploy/")):
+                          selected.update({"server", "compose"})
                       elif path.startswith(("crates/argos-api-host/", "crates/argos-osint-api/",
-                                            "crates/argos-osint-core/", "crates/fleetworks-broker/", "deploy/")):
+                                            "crates/argos-osint-core/", "crates/fleetworks-broker/")):
                           selected.add("server")
                       else:
                           selected.update(all_scopes)
@@ -147,7 +152,7 @@ jobs:
     needs: scope
     if: needs.scope.outputs.server == 'true'
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -192,6 +197,14 @@ jobs:
           done
           docker compose -f deploy/compose.yml --profile disk config --quiet
           FLEETWORKS_STORAGE_URL=ws://host.docker.internal:8000 docker compose -f deploy/compose.yml config --quiet
+      - name: Exercise packaged Compose through Venture
+        if: needs.scope.outputs.compose == 'true' && hashFiles('deploy/verify.py') != ''
+        timeout-minutes: 60
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/agent_cargo.py build --locked -p fleetworks-venture --bin venture
+          python3 deploy/verify.py --venture target/agents/debug/venture
 
   required:
     name: Fleetworks required

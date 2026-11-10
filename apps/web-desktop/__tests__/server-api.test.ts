@@ -1,6 +1,8 @@
 // @vitest-environment node
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { http, HttpResponse } from "msw";
+import { http, HttpResponse, passthrough } from "msw";
+import { once } from "node:events";
+import { createServer, type IncomingHttpHeaders } from "node:http";
 import { mswServer } from "../../../vitest.setup";
 import { proxyRust } from "../app/server-api";
 
@@ -51,6 +53,70 @@ describe("Next same-origin API → Rust transport", () => {
       next_cursor: "opaque:2",
     });
     expect(response.headers.get("cache-control")).toBe("no-store");
+  });
+
+  it("injects only the server bearer and refuses upstream redirects", async () => {
+    const token = "fleetworks-fixture-token-123456789012";
+    const received: { path: string; headers: IncomingHttpHeaders }[] = [];
+    const upstream = createServer((request, reply) => {
+      received.push({ path: request.url || "", headers: request.headers });
+      if (request.url?.startsWith("/api/v1/days")) {
+        reply.writeHead(302, { location: "/must-not-be-requested" }).end();
+        return;
+      }
+      reply.writeHead(200, { "content-type": "application/json" });
+      reply.end(JSON.stringify({ ready: true }));
+    });
+    upstream.listen(0, "127.0.0.1");
+    await once(upstream, "listening");
+    try {
+      const address = upstream.address();
+      if (!address || typeof address === "string")
+        throw new Error("Missing fixture port");
+      const backend = `http://127.0.0.1:${address.port}`;
+      const publicOrigin = "http://localhost:9000";
+      vi.stubEnv("FLEETWORKS_API_ORIGIN", backend);
+      vi.stubEnv("FLEETWORKS_API_TOKEN", token);
+      vi.stubEnv("FLEETWORKS_WEB_ORIGIN", publicOrigin);
+      mswServer.use(http.all(`${backend}/*`, () => passthrough()));
+      const make = (path: string, origin = publicOrigin) =>
+        new Request(`http://127.0.0.1:3000/api/v1/${path}`, {
+          headers: {
+            host: "localhost:9000",
+            origin,
+            cookie: "private=browser-cookie",
+            authorization: "Bearer browser-controlled",
+            "proxy-authorization": "Basic browser-controlled",
+          },
+        });
+      const response = await proxyRust(make("health/ready"), [
+        "health",
+        "ready",
+      ]);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ ready: true });
+      expect(response.headers.get("authorization")).toBeNull();
+      expect(received[0]).toMatchObject({
+        path: "/api/v1/health/ready",
+        headers: {
+          host: `127.0.0.1:${address.port}`,
+          authorization: `Bearer ${token}`,
+        },
+      });
+      for (const key of ["origin", "cookie", "proxy-authorization"])
+        expect(received[0].headers[key]).toBeUndefined();
+      expect((await proxyRust(make("days", next), ["days"])).status).toBe(403);
+      const redirect = await proxyRust(make("days"), ["days"]);
+      expect(redirect.status).toBe(503);
+      expect(await redirect.text()).not.toContain(token);
+      expect(received.map(({ path }) => path)).toEqual([
+        "/api/v1/health/ready",
+        "/api/v1/days",
+      ]);
+    } finally {
+      upstream.closeAllConnections();
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+    }
   });
 
   it("forwards JSON mutations to the fixed Rust destination", async () => {

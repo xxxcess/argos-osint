@@ -1,3 +1,5 @@
+mod compose;
+
 use std::env;
 use std::ffi::OsString;
 use std::io::{self, Write};
@@ -5,12 +7,16 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, ensure, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use fleetworks_contracts::{Client, API_ORIGIN_ENV, DEFAULT_API_ORIGIN};
+use fleetworks_contracts::{
+    Client, API_ORIGIN_ENV, API_TOKEN_ENV, API_TOKEN_FILE_ENV, DEFAULT_API_ORIGIN,
+};
 use fleetworks_workspace::Workspace;
 use tokio::process::Command;
 
+use crate::compose::{Owner, StorageMode};
+
 #[derive(Parser)]
-#[command(about = "Initialize Fleetworks workspaces and launch network clients")]
+#[command(about = "Manage a local Fleetworks stack and launch network clients")]
 struct Args {
     /// Workspace path. Set this before the command when forwarding client arguments.
     #[arg(long, global = true, value_name = "PATH")]
@@ -28,6 +34,13 @@ enum Action {
         #[arg(long, value_name = "ARGOS_HOME")]
         from: PathBuf,
     },
+    /// Start or reconcile this workspace's local Compose stack.
+    Up {
+        #[arg(long, value_enum)]
+        storage: Option<StorageMode>,
+        #[arg(long, value_name = "PATH")]
+        compose_file: Option<PathBuf>,
+    },
     /// Check readiness against the configured Fleetworks HTTP API.
     Status {
         #[arg(long)]
@@ -37,6 +50,13 @@ enum Action {
         #[arg(long)]
         json: bool,
     },
+    /// Read service logs for the stack this workspace owns.
+    Logs {
+        #[arg(long, short)]
+        follow: bool,
+    },
+    /// Stop this workspace's stack and keep its persistent data.
+    Stop,
     /// Launch a sibling client. Use `venture help client` for launcher help.
     #[command(disable_help_flag = true)]
     Client {
@@ -89,11 +109,17 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
+        Action::Up {
+            storage,
+            compose_file,
+        } => compose::up(&workspace, storage, compose_file.as_deref()).await,
         Action::Status {
             api_origin,
             api_token_file,
             json,
         } => status(&workspace, api_origin, api_token_file.as_deref(), json).await,
+        Action::Logs { follow } => compose::logs(&workspace, follow).await,
+        Action::Stop => compose::stop(&workspace).await,
         Action::Client { kind, arguments } => launch(&workspace, kind, arguments).await,
     }
 }
@@ -105,6 +131,7 @@ async fn status(
     json: bool,
 ) -> Result<()> {
     let environment = workspace.environment()?;
+    let owner = Owner::load(workspace).await?;
     let origin = match api_origin {
         Some(origin) => origin,
         None => environment
@@ -115,12 +142,27 @@ async fn status(
                     .map_err(|_| anyhow!("Fleetworks API origin must be UTF-8"))
             })
             .transpose()?
+            .or_else(|| owner.as_ref().map(Owner::api_origin))
             .unwrap_or_else(|| DEFAULT_API_ORIGIN.into()),
     };
     let token = match api_token_file {
         Some(path) => Some(workspace.read_api_token_file(path)?),
+        None if environment.get(API_TOKEN_ENV).is_none()
+            && environment.get(API_TOKEN_FILE_ENV).is_none()
+            && owner.is_some() =>
+        {
+            owner
+                .as_ref()
+                .map(|owner| workspace.read_api_token_file(owner.token_file()))
+                .transpose()?
+        }
         None => workspace.api_token(&environment)?,
     };
+    if !json {
+        if let Some(owner) = &owner {
+            owner.print_status().await?;
+        }
+    }
     let ready = Client::new(&origin, token.as_deref())?.ready().await?;
     if json {
         let mut output = io::stdout().lock();
@@ -138,7 +180,18 @@ async fn launch(workspace: &Workspace, kind: ClientKind, arguments: Vec<OsString
     let name = kind.binary();
     let executable =
         env::current_exe()?.with_file_name(format!("{name}{}", env::consts::EXE_SUFFIX));
-    let status = Command::new(&executable)
+    let mut command = Command::new(&executable);
+    if let Some(owner) = Owner::load(workspace).await? {
+        let environment = workspace.environment()?;
+        if environment.get(API_ORIGIN_ENV).is_none() {
+            command.env(API_ORIGIN_ENV, owner.api_origin());
+        }
+        if environment.get(API_TOKEN_ENV).is_none() && environment.get(API_TOKEN_FILE_ENV).is_none()
+        {
+            command.env(API_TOKEN_FILE_ENV, owner.token_file());
+        }
+    }
+    let status = command
         .env("FLEETWORKS_WORKSPACE", workspace.root())
         .arg("--workspace")
         .arg(workspace.root())

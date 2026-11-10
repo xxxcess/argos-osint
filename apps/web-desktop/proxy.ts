@@ -1,19 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
+import { incomingWebOrigin } from "./server-origin.mjs";
 
 /** Per-request script nonces protect the server-rendered workspace. */
 export function proxy(request: NextRequest) {
   const host = request.headers.get("host") || request.nextUrl.host;
+  let origin: URL;
   try {
-    if (
-      !["localhost", "127.0.0.1"].includes(new URL(`http://${host}`).hostname)
-    )
-      return new NextResponse("Host refused", { status: 403 });
+    origin = new URL(incomingWebOrigin(host, request.nextUrl.protocol));
   } catch {
     return new NextResponse("Host refused", { status: 403 });
   }
   const nonce = Buffer.from(crypto.randomUUID()).toString("base64");
   const isDev = process.env.NODE_ENV === "development";
-  const csp = `default-src 'none'; script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${isDev ? " 'unsafe-eval'" : ""}; style-src 'self' 'unsafe-inline'; img-src 'self' http: https: data: blob:; font-src 'self'; connect-src 'self' ws://${request.nextUrl.host}${isDev ? " ws://127.0.0.1:* ws://localhost:*" : ""}; base-uri 'none'; frame-ancestors 'none'; form-action 'none'`;
+  const wsProtocol = origin.protocol === "https:" ? "wss:" : "ws:";
+  const csp = `default-src 'none'; script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${isDev ? " 'unsafe-eval'" : ""}; style-src 'self' 'unsafe-inline'; img-src 'self' http: https: data: blob:; font-src 'self'; connect-src 'self' ${wsProtocol}//${origin.host}${isDev ? " ws://127.0.0.1:* ws://localhost:*" : ""}; base-uri 'none'; frame-ancestors 'none'; form-action 'none'`;
   const headers = new Headers(request.headers);
   headers.set("x-nonce", nonce);
   headers.set("Content-Security-Policy", csp);

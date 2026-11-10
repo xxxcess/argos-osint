@@ -1,5 +1,9 @@
 import { WebSocket, WebSocketServer } from "ws";
-import { rustOrigin } from "./server-origin.mjs";
+import {
+  directAgent,
+  incomingWebOrigin,
+  rustUpstream,
+} from "./server-origin.mjs";
 
 /** @tag:api-proxy — Connection-local frame forwarding; no subscriptions or application cache. */
 export function createLiveRelay(port) {
@@ -8,30 +12,39 @@ export function createLiveRelay(port) {
     maxPayload: 16 * 1024,
     perMessageDeflate: false,
   });
-  function upgrade(request, socket, head) {
-    const host = request.headers.host || "";
-    let origin;
+  let closing = false;
+  async function upgrade(request, socket, head) {
     try {
-      origin = new URL(`http://${host}`);
-      if (
-        !["127.0.0.1", "localhost"].includes(origin.hostname) ||
-        Number(origin.port || 80) !== port ||
-        request.headers.origin !== origin.origin ||
-        request.url !== "/api/v1/live"
-      )
+      const origin = incomingWebOrigin(
+        request.headers.host || "",
+        "http:",
+        port,
+      );
+      if (request.headers.origin !== origin || request.url !== "/api/v1/live")
         throw new Error("Origin refused");
     } catch {
       socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
       return;
     }
     let target;
+    let headers;
+    const onSocketError = () => socket.destroy();
+    socket.once("error", onSocketError);
     try {
-      target = new URL("/api/v1/live", rustOrigin());
-      target.protocol = "ws:";
+      const upstream = await rustUpstream();
+      target = new URL("/api/v1/live", upstream.origin);
+      target.protocol = target.protocol === "https:" ? "wss:" : "ws:";
+      if (upstream.authorization)
+        headers = { host: target.host, authorization: upstream.authorization };
     } catch {
       socket.end(
         "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n",
       );
+      return;
+    }
+    socket.off("error", onSocketError);
+    if (closing || socket.destroyed) {
+      socket.destroy();
       return;
     }
     clients.handleUpgrade(request, socket, head, (browser) => {
@@ -39,6 +52,8 @@ export function createLiveRelay(port) {
         maxPayload: 64 * 1024,
         perMessageDeflate: false,
         handshakeTimeout: 10_000,
+        followRedirects: false,
+        ...(headers ? { headers, agent: directAgent(target) } : {}),
       });
       const pending = [];
       let pendingBytes = 0;
@@ -94,6 +109,7 @@ export function createLiveRelay(port) {
   return {
     upgrade,
     close() {
+      closing = true;
       for (const client of clients.clients) client.terminate();
       clients.close();
     },

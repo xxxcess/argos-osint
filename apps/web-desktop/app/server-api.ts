@@ -1,4 +1,11 @@
-import { rustOrigin } from "../server-origin.mjs";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
+import { Readable } from "node:stream";
+import {
+  directAgent,
+  incomingWebOrigin,
+  rustUpstream,
+} from "../server-origin.mjs";
 /** @tag:api-proxy — Server-only Rust transport. Browser requests can never select its destination. */
 const routes = new Map([
   ["health/ready", "GET"],
@@ -38,14 +45,13 @@ export async function proxyRust(
   if (request.method !== method) return failure(405, "Method not allowed");
   const url = new URL(request.url);
   const host = request.headers.get("host");
-  let presented: URL;
+  let presented: string;
   try {
-    presented = new URL(`${url.protocol}//${host || url.host}`);
-    if (
-      !["127.0.0.1", "localhost"].includes(presented.hostname) ||
-      presented.port !== url.port
-    )
-      return failure(403, "Host refused");
+    presented = incomingWebOrigin(
+      host || url.host,
+      url.protocol,
+      Number(url.port || (url.protocol === "https:" ? 443 : 80)),
+    );
   } catch {
     return failure(403, "Host refused");
   }
@@ -53,7 +59,7 @@ export async function proxyRust(
   if (
     // Next can reconstruct request.url with its internal hostname. The
     // browser's origin must match the validated incoming Host instead.
-    (origin && origin !== presented.origin) ||
+    (origin && origin !== presented) ||
     (!origin && request.headers.get("sec-fetch-site") === "cross-site")
   )
     return failure(403, "Origin refused");
@@ -85,16 +91,26 @@ export async function proxyRust(
     body = new TextDecoder().decode(data);
   }
   try {
-    const target = new URL(`/api/v1/${endpoint}`, rustOrigin());
+    const upstream = await rustUpstream();
+    const target = new URL(`/api/v1/${endpoint}`, upstream.origin);
     target.search = url.search;
-    const response = await fetch(target, {
-      method,
-      body,
-      cache: "no-store",
-      redirect: "error",
-      headers: body === undefined ? {} : { "content-type": "application/json" },
-      signal: AbortSignal.any([request.signal, AbortSignal.timeout(55000)]),
-    });
+    const signal = AbortSignal.any([request.signal, AbortSignal.timeout(55000)]);
+    const response = upstream.authorization
+      ? await directRustRequest(
+          target,
+          method,
+          body,
+          signal,
+          upstream.authorization,
+        )
+      : await fetch(target, {
+          method,
+          body,
+          cache: "no-store",
+          redirect: "error",
+          headers: body === undefined ? {} : { "content-type": "application/json" },
+          signal,
+        });
     return new Response(response.body, {
       status: response.status,
       headers: {
@@ -108,4 +124,50 @@ export async function proxyRust(
       "Workspace service unavailable; retry or inspect server diagnostics",
     );
   }
+}
+
+/** Use a dedicated direct HTTP agent when an upstream bearer is present. */
+function directRustRequest(
+  target: URL,
+  method: string,
+  body: string | undefined,
+  signal: AbortSignal,
+  authorization: string,
+): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    const request = target.protocol === "https:" ? httpsRequest : httpRequest;
+    const upstream = request(
+      target,
+      {
+        method,
+        signal,
+        agent: directAgent(target),
+        headers: {
+          host: target.host,
+          authorization,
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+        },
+      },
+      (reply) => {
+        const status = reply.statusCode;
+        if (
+          status === undefined ||
+          status < 200 ||
+          status > 599 ||
+          (status >= 300 && status < 400)
+        ) {
+          reply.destroy();
+          reject(new Error("Invalid Rust API response"));
+          return;
+        }
+        const data =
+          status === 204 || status === 205
+            ? null
+            : (Readable.toWeb(reply) as ReadableStream<Uint8Array>);
+        resolve(new Response(data, { status }));
+      },
+    );
+    upstream.once("error", reject);
+    upstream.end(body);
+  });
 }

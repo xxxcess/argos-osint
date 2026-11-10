@@ -56,7 +56,7 @@ Acceptance: retained pipeline fixture completes across processes; duplicate deli
 ### Phase 5 — Venture, clients and Compose
 Status: pending
 - [ ] Convert terminal screens to API clients and expose the agreed CLI suite.
-- [ ] Add Venture service reconciliation, configuration, visible workspace, health and logs modes.
+- [x] Add Venture service reconciliation, configuration, visible workspace, health and logs for the managed disk and external Compose profiles.
 - [ ] Add Compose baseline, optional disk SurrealDB profile, development overrides and multi-architecture image outputs.
 - [ ] Configure API/web bind addresses, Host/origin policy and service reconnection.
 Acceptance: Venture launches every client and web mode; client exit leaves services running; explicit stop respects service ownership.
@@ -101,4 +101,4 @@ Root agent owns integration, plan summaries and shared build cache. Delegate dis
 TinyFish CLI was unavailable during earlier research; used official RabbitMQ/Lapin pages through web fallback. GitHub connector omitted duration fields; read-only gh API supplied timestamps. No new execution failures during plan creation.
 
 ## Next Step
-Wire the Compose lifecycle and authenticated web relay. Register the transactional Atlas outbox and connect the collection worker after the broker checks.
+Register the transactional Atlas outbox and connect the collection worker. Monitor the hosted packaged Compose smoke and native platform results.

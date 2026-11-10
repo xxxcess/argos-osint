@@ -1834,8 +1834,12 @@ dependencies = [
  "clap",
  "fleetworks-contracts",
  "fleetworks-workspace",
+ "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
  "tokio",
+ "url",
 ]
 
 [[package]]

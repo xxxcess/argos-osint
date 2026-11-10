@@ -32,5 +32,11 @@ The API host now has distinct bootstrap, authenticated API and background worker
 
 The network-enabled build and 13 focused Rust tests passed. The native smoke passed against SurrealDB 3.3.4 in memory and disk modes. It verified privileged bootstrap, scoped runtime login, the API ingress policy, retained reads, worker lifetime, identity reset for memory, and identity retention for disk. Hosted Linux ARM64 and Intel macOS results will be recorded separately. Compose runtime verification remains pending.
 
+## Rebuild checkpoint 3
+
+Venture now owns startup, readiness, logs, and shutdown for a local Compose project. Compose offers a managed disk database and an external database selection, with a separate bootstrap, API, worker and authenticated production web relay. The developer overlay and Venture-managed host storage are pending.
+
+Eight scoped Venture and workspace Rust tests passed, and the native clients rebuilt. Web typecheck, lint, all 331 unit tests, four focused WebSocket tests, and the Next production build guard passed. Compose configuration resolved in both profiles with the pinned local Compose parser. Actual image build and startup are assigned to the hosted packaged smoke.
+
 ## Retention
 Working task_plan/findings/progress are ignored local planning memory. design.md and acceptance.md are curated review artifacts eligible for Git, not staged or committed here.

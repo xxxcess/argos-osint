@@ -1385,119 +1385,145 @@ pub async fn ensure_chain(
     stages: &[StageSpec<'_>],
     now: DateTime<Utc>,
 ) -> Result<Committed<Chain>, TxError> {
-    let now_s = ts(now);
-    run_tx(db, RetryPolicy::default(), |tx| {
-        let now_s = now_s.clone();
-        async move {
-            let guard = rid("brief_chain_guard", article_id);
-            let mut res = run(
-                &tx,
-                tx.query(
-                    "UPSERT $g SET rev = (rev ?? 0) + 1, generation = generation ?? 0 RETURN NONE;
-                     SELECT VALUE generation FROM ONLY $g;
-                     SELECT record::id(job) AS job_id, input_revision, state, generation \
-                     FROM brief_run WHERE article_id = $a ORDER BY generation DESC LIMIT 1;",
-                )
-                .bind(("g", guard.clone()))
-                .bind(("a", article_id.to_string())),
-            )
-            .await?;
-            #[derive(SurrealValue)]
-            struct Run {
-                job_id: String,
-                input_revision: String,
-                state: String,
-                generation: i64,
-            }
-            let counter: Option<i64> = take(&mut res, 1)?;
-            let latest: Vec<Run> = take(&mut res, 2)?;
-            if let Some(run_row) = latest.first() {
-                if run_row.input_revision == input_revision && run_row.state != "superseded" {
-                    return Ok(Chain {
-                        job_id: run_row.job_id.clone(),
-                        generation: run_row.generation,
-                        created: false,
-                    });
-                }
-                if run_row.state == "active" {
-                    bump(&tx, "job_guard", &run_row.job_id).await?;
-                    run(
-                        &tx,
-                        tx.query(
-                            "UPDATE $j SET cancel_requested = true, state = 'superseded', \
-                             finished_at = <datetime>$now, updated_at = <datetime>$now RETURN NONE;
-                             UPDATE task SET state = 'cancelled', lease_epoch += 1, \
-                             lease_owner = '', process_owner = '', lease_until = NONE, finished_at = <datetime>$now, \
-                             updated_at = <datetime>$now WHERE job = $j \
-                             AND state IN ['queued', 'running'] RETURN NONE;
-                             UPDATE brief_run SET state = 'superseded', updated_at = <datetime>$now \
-                             WHERE job = $j RETURN NONE;",
-                        )
-                        .bind(("j", rid("job", &run_row.job_id)))
-                        .bind(("now", now_s.clone())),
-                    )
-                    .await?;
-                }
-            }
-            let generation = counter.unwrap_or(0) + 1;
-            let gen_s = generation.to_string();
-            let job_id = codec::encode(&["brief", article_id, &gen_s]);
-            create_job_in(
-                &tx,
-                &NewJob {
-                    id: &job_id,
-                    kind: "task",
-                    operation: POOL_INTEL_BRIEF,
-                    parent: None,
-                    created_at: now,
-                },
-            )
-            .await?;
-            let ids: Vec<String> = stages
-                .iter()
-                .map(|s| codec::encode(&[&job_id, s.operation]))
-                .collect();
-            for (i, stage) in stages.iter().enumerate() {
-                create_task_in(
-                    &tx,
-                    &NewTask {
-                        id: &ids[i],
-                        job: &job_id,
-                        pool: POOL_INTEL_BRIEF,
-                        operation: stage.operation,
-                        priority: i as i64,
-                        deps: stage.deps.iter().map(|d| ids[*d].as_str()).collect(),
-                        input_hash: input_revision,
-                        created_at: now,
-                    },
-                )
-                .await?;
-            }
-            run(
-                &tx,
-                tx.query(
-                    "CREATE $r SET article_id = $a, generation = $gen, job = $j, \
-                     input_revision = $rev, state = 'active', updated_at = <datetime>$now \
-                     RETURN NONE;
-                     UPDATE $g SET generation = $gen RETURN NONE;",
-                )
-                .bind(("r", rid("brief_run", &codec::encode(&[article_id, &gen_s]))))
-                .bind(("a", article_id.to_string()))
-                .bind(("gen", generation))
-                .bind(("j", rid("job", &job_id)))
-                .bind(("rev", input_revision.to_string()))
-                .bind(("now", now_s.clone()))
-                .bind(("g", guard)),
-            )
-            .await?;
-            Ok(Chain {
-                job_id,
-                generation,
-                created: true,
-            })
-        }
+    run_tx(db, RetryPolicy::default(), |tx| async move {
+        let admission =
+            ensure_chain_in(&tx, article_id, input_revision, stages, now, str::eq).await?;
+        Ok(admission.chain)
     })
     .await
+}
+
+#[derive(SurrealValue)]
+pub(crate) struct ChainRun {
+    pub job_id: String,
+    pub generation: i64,
+    pub input_revision: String,
+    pub state: String,
+}
+
+pub(crate) struct ChainAdmission {
+    pub chain: Chain,
+    pub superseded: Option<ChainRun>,
+}
+
+/// Admit a chain inside the caller's transaction, so its input snapshots can
+/// commit with the runnable tasks. The caller defines equivalent revisions.
+pub(crate) async fn ensure_chain_in(
+    tx: &Tx,
+    article_id: &str,
+    input_revision: &str,
+    stages: &[StageSpec<'_>],
+    now: DateTime<Utc>,
+    same_revision: impl FnOnce(&str, &str) -> bool,
+) -> Result<ChainAdmission, TxError> {
+    let now_s = ts(now);
+    let guard = rid("brief_chain_guard", article_id);
+    let mut res = run(
+        tx,
+        tx.query(
+            "UPSERT $g SET rev = (rev ?? 0) + 1, generation = generation ?? 0 RETURN NONE;
+             SELECT VALUE generation FROM ONLY $g;
+             SELECT record::id(job) AS job_id, input_revision, state, generation \
+             FROM brief_run WHERE article_id = $a ORDER BY generation DESC LIMIT 1;",
+        )
+        .bind(("g", guard.clone()))
+        .bind(("a", article_id.to_string())),
+    )
+    .await?;
+    let counter: Option<i64> = take(&mut res, 1)?;
+    let latest: Vec<ChainRun> = take(&mut res, 2)?;
+    let latest = latest.into_iter().next();
+    if let Some(run_row) = latest.as_ref().filter(|run| {
+        run.state != "superseded" && same_revision(&run.input_revision, input_revision)
+    }) {
+        return Ok(ChainAdmission {
+            chain: Chain {
+                job_id: run_row.job_id.clone(),
+                generation: run_row.generation,
+                created: false,
+            },
+            superseded: None,
+        });
+    }
+    let superseded = latest.filter(|run| run.state == "active");
+    if let Some(run_row) = &superseded {
+        bump(tx, "job_guard", &run_row.job_id).await?;
+        run(
+            tx,
+            tx.query(
+                "UPDATE $j SET cancel_requested = true, state = 'superseded',
+                 finished_at = <datetime>$now, updated_at = <datetime>$now RETURN NONE;
+                 UPDATE task SET state = 'cancelled', lease_epoch += 1,
+                 lease_owner = '', process_owner = '', lease_until = NONE, finished_at = <datetime>$now,
+                 updated_at = <datetime>$now WHERE job = $j
+                 AND state IN ['queued', 'running'] RETURN NONE;
+                 UPDATE brief_run SET state = 'superseded', updated_at = <datetime>$now
+                 WHERE job = $j RETURN NONE;",
+            )
+            .bind(("j", rid("job", &run_row.job_id)))
+            .bind(("now", now_s.clone())),
+        )
+        .await?;
+    }
+    let generation = counter.unwrap_or(0) + 1;
+    let gen_s = generation.to_string();
+    let job_id = codec::encode(&["brief", article_id, &gen_s]);
+    create_job_in(
+        tx,
+        &NewJob {
+            id: &job_id,
+            kind: "task",
+            operation: POOL_INTEL_BRIEF,
+            parent: None,
+            created_at: now,
+        },
+    )
+    .await?;
+    let ids: Vec<String> = stages
+        .iter()
+        .map(|s| codec::encode(&[&job_id, s.operation]))
+        .collect();
+    for (i, stage) in stages.iter().enumerate() {
+        create_task_in(
+            tx,
+            &NewTask {
+                id: &ids[i],
+                job: &job_id,
+                pool: POOL_INTEL_BRIEF,
+                operation: stage.operation,
+                priority: i as i64,
+                deps: stage.deps.iter().map(|d| ids[*d].as_str()).collect(),
+                input_hash: input_revision,
+                created_at: now,
+            },
+        )
+        .await?;
+    }
+    run(
+        tx,
+        tx.query(
+            "CREATE $r SET article_id = $a, generation = $gen, job = $j, \
+             input_revision = $rev, state = 'active', updated_at = <datetime>$now \
+             RETURN NONE;
+             UPDATE $g SET generation = $gen RETURN NONE;",
+        )
+        .bind(("r", rid("brief_run", &codec::encode(&[article_id, &gen_s]))))
+        .bind(("a", article_id.to_string()))
+        .bind(("gen", generation))
+        .bind(("j", rid("job", &job_id)))
+        .bind(("rev", input_revision.to_string()))
+        .bind(("now", now_s.clone()))
+        .bind(("g", guard)),
+    )
+    .await?;
+    Ok(ChainAdmission {
+        chain: Chain {
+            job_id,
+            generation,
+            created: true,
+        },
+        superseded,
+    })
 }
 
 // ---------------------------------------------------------------------------

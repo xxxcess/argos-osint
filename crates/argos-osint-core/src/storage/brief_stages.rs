@@ -29,7 +29,7 @@ use surrealdb::types::SurrealValue;
 use super::codec;
 use super::jobs::{self, rid, ClaimedTask as Leased, Publish, StageSpec};
 use super::repo::Repository;
-use super::tx::{run_tx, RetryPolicy};
+use super::tx::{run_tx, RetryPolicy, Tx, TxError};
 use crate::intel_recon::brief_context::ContextActor;
 use crate::intel_recon::brief_pipeline::{self, BriefInputs};
 use crate::intel_recon::brief_stages::{
@@ -64,15 +64,7 @@ pub fn task_id(job_id: &str, operation: &str) -> String {
     codec::encode(&[job_id, operation])
 }
 
-#[derive(SurrealValue)]
-struct ExistingRun {
-    job_id: String,
-    generation: i64,
-    state: String,
-    input_revision: String,
-}
-
-async fn latest_run(repo: &Repository, article_id: &str) -> Result<Option<ExistingRun>> {
+async fn latest_run(repo: &Repository, article_id: &str) -> Result<Option<jobs::ChainRun>> {
     let mut response = repo
         .db()
         .query(
@@ -82,7 +74,7 @@ async fn latest_run(repo: &Repository, article_id: &str) -> Result<Option<Existi
         .bind(("a", article_id.to_string()))
         .await?
         .check()?;
-    let rows: Vec<ExistingRun> = response.take(0)?;
+    let rows: Vec<jobs::ChainRun> = response.take(0)?;
     Ok(rows.into_iter().find(|run| run.state != "superseded"))
 }
 
@@ -90,20 +82,6 @@ async fn latest_run(repo: &Repository, article_id: &str) -> Result<Option<Existi
 /// article's chain for unchanged inputs, otherwise supersede it and admit
 /// the next generation with its captured stage inputs.
 pub async fn ensure(repo: &Repository, inputs: &BriefInputs) -> Result<jobs::Chain> {
-    // Reopen the same semantic inputs, including a previous explicit reload,
-    // without creating another generation. Changed inputs go through the
-    // authoritative transactional jobs::ensure_chain comparison below.
-    if !inputs.input_revision.contains(":reload:") {
-        if let Some(existing) = latest_run(repo, &inputs.article_id).await? {
-            if same_semantic_revision(&existing.input_revision, &inputs.input_revision) {
-                return Ok(jobs::Chain {
-                    job_id: existing.job_id,
-                    generation: existing.generation,
-                    created: false,
-                });
-            }
-        }
-    }
     let specs: Vec<StageSpec<'_>> = brief_pipeline::STAGES
         .iter()
         .map(|(op, _)| StageSpec {
@@ -114,64 +92,78 @@ pub async fn ensure(repo: &Repository, inputs: &BriefInputs) -> Result<jobs::Cha
                 .collect(),
         })
         .collect();
-    let chain = jobs::ensure_chain(
-        repo.db(),
-        &inputs.article_id,
-        &inputs.input_revision,
-        &specs,
-        Utc::now(),
-    )
-    .await
-    .map_err(|e| anyhow!("ensure brief chain {}: {e}", inputs.article_id))?
-    .value;
-    if chain.created {
-        mirror_runs(repo, &inputs.article_id).await?;
-        let force_body = inputs.input_revision.contains(":reload:");
-        for (index, (operation, _)) in brief_pipeline::STAGES.iter().enumerate() {
-            let input = if brief_pipeline::prerequisites(operation).is_empty() {
-                json!({
-                    "article_id": inputs.article_id,
-                    "force_body": *operation == "intel_brief_body" && force_body,
-                    "metadata": inputs.metadata,
-                    "node_revision": inputs.stage_revisions.get(index).cloned().unwrap_or_default(),
-                })
-                .to_string()
-            } else {
-                String::new()
-            };
-            repo.db()
-                .query("UPSERT $r SET input_json = $i, role_snapshot = $s RETURN NONE")
-                .bind((
-                    "r",
-                    rid("brief_stage_input", &task_id(&chain.job_id, operation)),
-                ))
-                .bind(("i", input))
-                .bind(("s", inputs.role_snapshot.clone()))
-                .await?
-                .check()?;
+    let force_body = inputs.input_revision.contains(":reload:");
+    let now = Utc::now();
+    let committed = run_tx(repo.db(), RetryPolicy::default(), |tx| {
+        let specs = &specs;
+        async move {
+            let admission = jobs::ensure_chain_in(
+                &tx,
+                &inputs.article_id,
+                &inputs.input_revision,
+                specs,
+                now,
+                |saved, requested| {
+                    saved == requested || (!force_body && same_semantic_revision(saved, requested))
+                },
+            )
+            .await?;
+            let chain = admission.chain;
+            if chain.created {
+                if let Some(previous) = admission.superseded {
+                    super::brief::record_run_in(
+                        &tx,
+                        &previous.job_id,
+                        &inputs.article_id,
+                        previous.generation,
+                        "superseded",
+                    )
+                    .await?;
+                }
+                super::brief::record_run_in(
+                    &tx,
+                    &chain.job_id,
+                    &inputs.article_id,
+                    chain.generation,
+                    "active",
+                )
+                .await?;
+                capture_stage_inputs(&tx, &chain.job_id, inputs, force_body).await?;
+            }
+            Ok(chain)
         }
-    }
-    Ok(chain)
+    })
+    .await
+    .map_err(|e| anyhow!("ensure brief chain {}: {e}", inputs.article_id))?;
+    Ok(committed.value)
 }
 
-/// Mirror the article's chain runs into `intel_brief_run`, the fence the
-/// retained Intel display seeds read (`storage::brief::record_run`).
-async fn mirror_runs(repo: &Repository, article_id: &str) -> Result<()> {
-    #[derive(SurrealValue)]
-    struct Row {
-        job_id: String,
-        generation: i64,
-        state: String,
-    }
-    let mut r = repo
-        .db()
-        .query("SELECT record::id(job) AS job_id, generation, state FROM brief_run WHERE article_id = $a")
-        .bind(("a", article_id.to_string()))
-        .await?
-        .check()?;
-    let rows: Vec<Row> = r.take(0)?;
-    for row in rows {
-        super::brief::record_run(repo, &row.job_id, article_id, row.generation, &row.state).await?;
+async fn capture_stage_inputs(
+    tx: &Tx,
+    job_id: &str,
+    inputs: &BriefInputs,
+    force_body: bool,
+) -> Result<(), TxError> {
+    for (index, (operation, _)) in brief_pipeline::STAGES.iter().enumerate() {
+        let input = if brief_pipeline::prerequisites(operation).is_empty() {
+            json!({
+                "article_id": inputs.article_id,
+                "force_body": *operation == "intel_brief_body" && force_body,
+                "metadata": inputs.metadata,
+                "node_revision": inputs.stage_revisions.get(index).cloned().unwrap_or_default(),
+            })
+            .to_string()
+        } else {
+            String::new()
+        };
+        jobs::run(
+            tx,
+            tx.query("CREATE $r SET input_json = $i, role_snapshot = $s RETURN NONE")
+                .bind(("r", rid("brief_stage_input", &task_id(job_id, operation))))
+                .bind(("i", input))
+                .bind(("s", inputs.role_snapshot.clone())),
+        )
+        .await?;
     }
     Ok(())
 }

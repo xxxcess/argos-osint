@@ -49,6 +49,7 @@ Acceptance: all three storage selections work through a network endpoint; origin
 Status: in implementation
 - [x] Separate API serving, schema bootstrap and background workers. Dedicated domain entrypoints and their actions continue below.
 - [ ] Complete service boundaries. Atlas, NLP and classifier roles are wired. The private Brain role serves retained actor, topology and Intel brief HTTP operations. Separate brief execution and live progress, model execution and tool execution remain in scope.
+- [x] Admit Focus Brief jobs, runnable tasks, captured inputs and the retained run fence in one transaction before splitting the worker.
 - [x] Introduce the Atlas RabbitMQ outbox and durable dependency, cancellation and completion fences. Expansion to the remaining service pools is pending.
 - [ ] Centralize provider quota and cooldown admission. Atlas daily collection slots use atomic shared reservations. Standalone NewsAPI admission and shared model/account RPM and cooldowns remain in scope.
 Acceptance: retained pipeline fixture completes across processes; duplicate delivery cannot duplicate committed effects.

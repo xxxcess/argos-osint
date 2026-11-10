@@ -6,9 +6,9 @@ ARG NODE_IMAGE=node:24.22.1-bookworm-slim
 # to load the root credential file before exec'ing SurrealDB.
 FROM busybox:1.37.0-uclibc AS secret_tools
 FROM surrealdb/surrealdb:v3.3.4@sha256:649a60a3b9c0177d9923c938e1c2563e48cde2a9d06ac2c0519714be719b02af AS surrealdb
-COPY --from=secret_tools /bin/busybox /fleetworks-busybox
+COPY --from=secret_tools /bin/busybox /busybox
 COPY --chmod=0555 deploy/start-surreal.sh /usr/local/bin/start-surreal
-ENTRYPOINT ["/fleetworks-busybox", "sh", "/usr/local/bin/start-surreal"]
+ENTRYPOINT ["/busybox", "sh", "/usr/local/bin/start-surreal"]
 
 FROM ${NODE_IMAGE} AS web_source
 RUN npm install --global pnpm@12.15.0

@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, Notify, OnceCell, OwnedSemaphorePermit};
 use url::Url;
 
 use super::{AttemptProgress, AttemptReport, AttemptSpec, Deadlines, Transport};
-use crate::provider::{self, ChatMessage, Completion, SettingsFile, ToolCall, Usage};
+use crate::provider::{self, ChatMessage, Completion, ToolCall, Usage};
 use crate::provider_adapters::{EffectivePolicy, ResponseContract};
 use crate::provider_capabilities::ResolvedCapabilities;
 use crate::provider_chain::Route;
@@ -64,25 +64,19 @@ impl RouteAlias {
 
     fn resolve(&self, workspace: &Path) -> Result<ProviderSecret, ProviderFailure> {
         let auth_path = config_path(workspace, "auth.json")?;
-        let settings_path = config_path(workspace, "config.toml")?;
         let auth = AuthFile::load_from(&auth_path)
             .map_err(|_| configuration("execution accounts unavailable"))?;
-        let settings = SettingsFile::load_from(&settings_path)
-            .map_err(|_| configuration("execution routes unavailable"))?;
-        let (routes, secrets) = crate::model_exec::resolve_operation_routes(
-            &auth,
-            &settings,
-            &self.role,
-            self.operation.as_deref(),
-        );
-        let (route, secret) = routes
-            .get(self.index)
-            .zip(secrets.into_iter().nth(self.index))
-            .ok_or_else(|| configuration("execution route unavailable"))?;
-        if route.skip_reason.is_some()
-            || route.provider != self.provider
-            || route.account != self.account
-            || route.model != self.model
+        // The caller already selected an account and model from its durable
+        // stage snapshot. Resolve that account against the current credential
+        // registry without consulting mutable role defaults or other accounts.
+        let mut secret = provider::account_secret(&auth, &self.account);
+        secret.model.clone_from(&self.model);
+        let missing_key = provider::effective_kind(&secret) != "local"
+            && secret
+                .api_key
+                .as_deref()
+                .is_none_or(|key| key.trim().is_empty());
+        if missing_key
             || route_revision(&secret) != self.revision
             || super::is_subscription(&secret)
         {
@@ -575,11 +569,12 @@ pub(crate) async fn routed_attempt(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::ModelAssignment;
+    use crate::provider::{ModelAssignment, SettingsFile};
     use crate::provider_attempt::mock;
     use futures_util::StreamExt;
 
     const FIXTURE_KEY: &str = "fixture-model-secret-for-wire-test";
+    const FIXTURE_ACCOUNT: &str = "retained-analyst";
 
     fn setup(workspace: &Path, base_url: &str) -> ChatAttempt {
         let secret = ProviderSecret {
@@ -591,7 +586,7 @@ mod tests {
             device: None,
         };
         let mut auth = AuthFile::default();
-        auth.set_account(secret.clone());
+        auth.set_account_keyed(FIXTURE_ACCOUNT, secret.clone());
         std::fs::write(
             workspace.join("auth.json"),
             serde_json::to_vec(&auth).unwrap(),
@@ -601,6 +596,7 @@ mod tests {
         *settings.defaults.role_mut("atlas_analyst").unwrap() = ModelAssignment {
             provider: "local".into(),
             model: secret.model.clone(),
+            account: FIXTURE_ACCOUNT.into(),
             ..ModelAssignment::default()
         };
         settings.save_to(&workspace.join("config.toml")).unwrap();
@@ -631,6 +627,43 @@ mod tests {
             contract: Some(ResponseContract::Prose),
             capabilities: None,
         }
+    }
+
+    #[test]
+    fn captured_route_survives_defaults_edit_but_rejects_account_origin_change() {
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path();
+        let origin = "http://127.0.0.1:41235/v1";
+        let request = setup(root, origin);
+        assert_eq!(request.alias.account, FIXTURE_ACCOUNT);
+        let original = request.alias.resolve(root).unwrap();
+
+        let auth_path = root.join("auth.json");
+        let mut auth = AuthFile::load_from(&auth_path).unwrap();
+        let mut replacement = original.clone();
+        replacement.base_url = "http://127.0.0.1:41236/v1".into();
+        replacement.api_key = Some("replacement-fixture-key".into());
+        auth.set_account_keyed("replacement-analyst", replacement.clone());
+        auth.save_to(&auth_path).unwrap();
+
+        let settings_path = root.join("config.toml");
+        let mut settings = SettingsFile::load_from(&settings_path).unwrap();
+        let current = settings.defaults.role_mut("atlas_analyst").unwrap();
+        current.account = "replacement-analyst".into();
+        current.model = "replacement-model".into();
+        settings.save_to(&settings_path).unwrap();
+
+        let pinned = request.alias.resolve(root).unwrap();
+        assert_eq!(pinned.base_url, origin);
+        assert_eq!(pinned.api_key.as_deref(), Some(FIXTURE_KEY));
+        assert_eq!(pinned.model, "fixture-model");
+
+        auth.set_account_keyed(FIXTURE_ACCOUNT, replacement);
+        auth.save_to(&auth_path).unwrap();
+        assert_eq!(
+            request.alias.resolve(root).unwrap_err().category,
+            Category::Configuration
+        );
     }
 
     #[tokio::test]

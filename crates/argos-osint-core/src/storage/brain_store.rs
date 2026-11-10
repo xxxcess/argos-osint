@@ -160,7 +160,7 @@ pub fn add_user_claim(text: &str, category: &str, source: MemorySource) -> Resul
 pub fn record_thread_actor(thread: &str, name: &str, kind: &str) -> Result<()> {
     let (thread, name, kind) = (thread.to_string(), name.to_string(), kind.to_string());
     runtime::blocking(|repo| async move {
-        let Some(t) = super::recon::get_thread(&repo, &thread)
+        let Some(t) = super::thread_history::get_thread(&repo, &thread)
             .await?
             .filter(|t| t.recall_insights)
         else {

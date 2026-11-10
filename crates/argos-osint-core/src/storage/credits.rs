@@ -8,14 +8,15 @@
 //! overdrawing the pool.
 
 use anyhow::Result;
+use chrono::Utc;
 use surrealdb::engine::any::Any;
 use surrealdb::types::SurrealValue;
 use surrealdb::Surreal;
 
 use super::jobs::{bump, rid, run, take};
 use super::tx::{run_tx, RetryPolicy, Tx, TxError};
+use crate::osint::CreditHold;
 use crate::provider::ReconLimits;
-use crate::recon::CreditHold;
 
 /// Credit ledger schema (idempotent).
 pub const SCHEMA: &str = "DEFINE TABLE IF NOT EXISTS provider_quota SCHEMAFULL;
@@ -38,7 +39,12 @@ DEFINE FIELD IF NOT EXISTS created_at ON credit_reservation TYPE string;
 DEFINE INDEX IF NOT EXISTS credit_reservation_state ON credit_reservation FIELDS state;";
 
 fn now() -> String {
-    chrono::Utc::now().to_rfc3339()
+    Utc::now().to_rfc3339()
+}
+
+pub(crate) fn same_budget_month(stored: &str) -> bool {
+    let now = Utc::now().format("%Y-%m").to_string();
+    stored.starts_with(&now)
 }
 
 #[derive(SurrealValue)]
@@ -97,7 +103,7 @@ async fn touch_in(tx: &Tx, provider: &str, limits: &ReconLimits) -> Result<Quota
         )
         .await?;
     }
-    if policy != "never" && !crate::recon::same_budget_month(&period) {
+    if policy != "never" && !same_budget_month(&period) {
         run(
             tx,
             tx.query("UPDATE $q SET spent = 0, period_start = $now, updated_at = $now RETURN NONE")
@@ -152,7 +158,15 @@ pub async fn reserve_credits(
     cost: u32,
     limits: &ReconLimits,
 ) -> Result<Option<CreditHold>> {
-    reserve_named_credits(db, provider, cost, limits, crate::recon::id("hold"), false).await
+    reserve_named_credits(
+        db,
+        provider,
+        cost,
+        limits,
+        format!("hold-{}", crate::store::new_id()),
+        false,
+    )
+    .await
 }
 
 /// A tool call owns its credit hold independently of Recon recovery.

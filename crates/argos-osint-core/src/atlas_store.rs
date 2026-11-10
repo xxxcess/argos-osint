@@ -380,7 +380,7 @@ impl AtlasStore {
     }
     pub async fn tool_enabled(&self, id: &str) -> Result<bool> {
         dispatch!(self,
-            r => crate::storage::recon_threads::tool_enabled(r, id).await)
+            r => crate::storage::tool_state::tool_enabled(r, id).await)
     }
 
     // ---- work units -------------------------------------------------------

@@ -1849,7 +1849,7 @@ impl SurrealCycleJob {
             };
             let title = format!("Atlas news cycle · {run}");
             let resource = format!("atlas:{run}");
-            let spec = crate::storage::recon_jobs::AppJob {
+            let spec = crate::storage::app_jobs::AppJob {
                 id: &job,
                 operation: "atlas_cycle",
                 app: "atlas",
@@ -1858,7 +1858,7 @@ impl SurrealCycleJob {
                 resource_ref: &resource,
                 parent: None,
             };
-            if let Err(e) = crate::storage::recon_jobs::begin_app_job(&repo, &spec).await {
+            if let Err(e) = crate::storage::app_jobs::begin_app_job(&repo, &spec).await {
                 tracing::warn!("atlas job start not recorded: {e:#} (job {job})");
             }
         });
@@ -1879,7 +1879,7 @@ impl SurrealCycleJob {
             };
             let mut stop = false;
             for (job, done, total) in [(id, done, total), (parent, None, None)] {
-                match crate::storage::recon_jobs::set_job_progress(&repo, &job, phase, done, total)
+                match crate::storage::app_jobs::set_job_progress(&repo, &job, phase, done, total)
                     .await
                 {
                     Ok(flag) => stop |= flag,
@@ -1887,7 +1887,7 @@ impl SurrealCycleJob {
                 }
             }
             if stop {
-                crate::recon::cancel_with_notify(&cancel);
+                crate::cancellation::cancel_with_notify(&cancel);
             }
         });
     }
@@ -1900,7 +1900,7 @@ impl SurrealCycleJob {
             let Ok(repo) = crate::storage::runtime::repository().await else {
                 return;
             };
-            let spec = crate::storage::recon_jobs::AppJob {
+            let spec = crate::storage::app_jobs::AppJob {
                 id: &job,
                 operation: match phase {
                     3 => "atlas_classification",
@@ -1914,7 +1914,7 @@ impl SurrealCycleJob {
                 resource_ref: "",
                 parent: Some(&parent),
             };
-            if let Err(e) = crate::storage::recon_jobs::begin_app_job(&repo, &spec).await {
+            if let Err(e) = crate::storage::app_jobs::begin_app_job(&repo, &spec).await {
                 tracing::warn!("atlas phase job not recorded: {e:#} (job {job})");
             }
         });
@@ -1933,7 +1933,7 @@ impl SurrealCycleJob {
             let Ok(repo) = crate::storage::runtime::repository().await else {
                 return;
             };
-            if let Err(e) = crate::storage::recon_jobs::finish_recon_job(
+            if let Err(e) = crate::storage::app_jobs::finish_app_job(
                 &repo,
                 &id,
                 state,

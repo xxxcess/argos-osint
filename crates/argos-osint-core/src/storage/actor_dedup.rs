@@ -239,7 +239,7 @@ async fn context_in(tx: &Tx, id: &str) -> Result<Value, TxError> {
                 }
             }
         } else if m.origin_kind == "thread" {
-            if let Some(t) = super::recon::get_thread_on(tx.as_ref(), &m.origin_id)
+            if let Some(t) = super::thread_history::get_thread_on(tx.as_ref(), &m.origin_id)
                 .await
                 .map_err(abort)?
             {

@@ -16,8 +16,8 @@ use super::jobs::{rid, run, take};
 use super::recon_runs::{link_evidence_in, now};
 use super::recon_threads::sequence_counter;
 use super::repo::Repository;
+use super::thread_history::Message;
 use super::tx::{run_tx, RetryPolicy};
-use crate::recon::Message;
 
 /// Schema (idempotent).
 pub const SCHEMA: &str = "DEFINE TABLE IF NOT EXISTS extraction_job SCHEMAFULL;

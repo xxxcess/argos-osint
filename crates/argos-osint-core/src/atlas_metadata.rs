@@ -995,7 +995,7 @@ pub(crate) async fn process_derivative(
         });
     }
     let repo = owner.repository();
-    let enabled = crate::storage::recon_threads::tool_enabled(repo, rsp::TOOL_ID).await?;
+    let enabled = crate::storage::tool_state::tool_enabled(repo, rsp::TOOL_ID).await?;
     let raw = crate::storage::pipeline_inputs::app_state_get(repo, rsp::APP_STATE_KEY).await?;
     let index = if enabled {
         raw.as_deref()

@@ -16,12 +16,11 @@ use serde_json::{json, Value};
 use tokio::sync::{watch, Semaphore};
 
 use crate::osint::contracts::IntelligenceCategory;
+use crate::osint::CreditHold;
 use crate::osint::{self, ProviderKeys, ToolDefinition, ToolResult};
 use crate::provider::SettingsFile;
-use crate::recon::backend::ReconStore;
-use crate::recon::{BudgetedOutcome, CreditHold, PlanCall, Run};
 use crate::storage::repo::Repository;
-use crate::storage::{credits, recon_runs, recon_threads, runtime};
+use crate::storage::{credits, runtime, tool_state};
 use crate::telemetry::{self, EventKind, TelemetryEvent, ToolOutcome, Trigger};
 
 /// Who asked for a tool run. Attribution is passed down by the caller and is
@@ -59,19 +58,6 @@ impl ToolAttribution {
             run_id: String::new(),
             thread_id: String::new(),
             turn_id: String::new(),
-            call_id: String::new(),
-        }
-    }
-
-    /// Attribution for the calls of one recon run.
-    pub fn for_run(run: &Run, mode: &str) -> Self {
-        Self {
-            app: "recon".into(),
-            trigger: Trigger::ReconPrompt,
-            mode: mode.to_string(),
-            run_id: run.id.clone(),
-            thread_id: run.thread_id.clone(),
-            turn_id: run.turn_id.clone(),
             call_id: String::new(),
         }
     }
@@ -274,7 +260,7 @@ impl ToolRunner {
         // 1. Cache hit check
         if !refresh {
             if let Ok(repo) = self.repository().await {
-                if let Ok(Some(cached)) = recon_runs::cache_get_fresh(&repo, &cache_key, None).await
+                if let Ok(Some(cached)) = tool_state::cache_get_fresh(&repo, &cache_key, None).await
                 {
                     let projected = osint::project_cached_result(canonical, &inputs, &cached);
                     // A cache hit is served locally: it is not a remote request and
@@ -310,7 +296,7 @@ impl ToolRunner {
             // Follower waits for leader's result
             let wait_res = tokio::select! {
                 res = rx.changed() => res,
-                _ = wait_cancellation(cancel) => {
+                _ = crate::cancellation::wait_cancel(cancel) => {
                     self.note_invocation(InvocationFact {
                         canonical,
                         def,
@@ -352,7 +338,7 @@ impl ToolRunner {
 
         // 3. Check enabled status
         let repo = self.repository().await?;
-        if !recon_threads::tool_enabled(&repo, canonical).await? {
+        if !tool_state::tool_enabled(&repo, canonical).await? {
             self.note_failure(
                 canonical,
                 def,
@@ -406,7 +392,7 @@ impl ToolRunner {
         // 5. Concurrency limit permit & timeout execution
         let permit = tokio::select! {
             p = self.concurrency.acquire() => p.map_err(|e| anyhow!("{e}"))?,
-            _ = wait_cancellation(cancel) => {
+            _ = crate::cancellation::wait_cancel(cancel) => {
                 if reserve_credits {
                     if let (Some((_provider, _)), Some(hold)) = (cost_info, &credit_hold) {
                         let _ = credits::release_credits(repo.db(), hold).await;
@@ -451,7 +437,7 @@ impl ToolRunner {
                     })
                 }
             },
-            _ = wait_cancellation(cancel) => {
+            _ = crate::cancellation::wait_cancel(cancel) => {
                 if reserve_credits {
                     if let (Some((_provider, _)), Some(hold)) = (cost_info, &credit_hold) {
                         let _ = credits::release_credits(repo.db(), hold).await;
@@ -505,7 +491,7 @@ impl ToolRunner {
         let outcome = tool_outcome(&result, timed_out);
         if osint_cacheable(&result) {
             if let Some(ttl) = cache_ttl_for(def, &outcome) {
-                let _ = recon_runs::cache_put(&repo, &cache_key, &result, ttl).await;
+                let _ = tool_state::cache_put(&repo, &cache_key, &result, ttl).await;
             }
         }
 
@@ -528,226 +514,6 @@ impl ToolRunner {
         });
 
         Ok(result)
-    }
-
-    /// Execute a budgeted batch of plan calls with reservation and reconciliation.
-    pub async fn execute_budgeted_calls(
-        &self,
-        run: &Run,
-        calls: &[PlanCall],
-        cancel: &Arc<AtomicBool>,
-    ) -> Result<BudgetedOutcome> {
-        if calls.is_empty() {
-            return Ok(BudgetedOutcome {
-                results: Vec::new(),
-                skipped: Vec::new(),
-            });
-        }
-        let limits = &self.settings.recon_limits;
-        let store = ReconStore::open(&self.db_path).await?;
-        let mut affordable = Vec::new();
-        let mut skipped = Vec::new();
-        let mut holds: Vec<(String, CreditHold)> = Vec::new();
-
-        for call in calls {
-            if cancel.load(Ordering::Relaxed) {
-                return Err(anyhow!("cancelled"));
-            }
-            if !store.tool_enabled(&call.tool_id).await? {
-                skipped.push(format!("{} — disabled in the catalog", call.tool_id));
-                continue;
-            }
-            if store
-                .inflight_duplicate(&call.tool_id, &call.arguments)
-                .await?
-            {
-                skipped.push(format!(
-                    "{} — a duplicate call is already queued or running",
-                    call.tool_id
-                ));
-                continue;
-            }
-            let cache_key = osint::cache_identity(&call.tool_id, &call.arguments);
-            let cached = store.cache_get(&cache_key).await?.is_some();
-            if let Some((provider_name, cost)) =
-                limits.configured_cost_for(&call.tool_id, &call.arguments)
-            {
-                if !cached && cost > 0 {
-                    match store.reserve_credits(provider_name, cost, limits).await? {
-                        Some(hold) => {
-                            holds.push((format!("{}:{}", call.tool_id, call.arguments), hold));
-                        }
-                        None => {
-                            let available = store.credits_available(provider_name, limits).await?;
-                            skipped.push(format!(
-                                "{} — Argos {provider_name} credit allowance is exhausted ({available} left, needs {cost}; local monthly cap, not the provider dashboard)",
-                                call.tool_id
-                            ));
-                            continue;
-                        }
-                    }
-                }
-            }
-            affordable.push(PlanCall {
-                depends_on: Vec::new(),
-                ..call.clone()
-            });
-        }
-        drop(store);
-
-        if affordable.is_empty() {
-            return Ok(BudgetedOutcome {
-                results: Vec::new(),
-                skipped,
-            });
-        }
-
-        let mut results = Vec::new();
-        for call in affordable {
-            if cancel.load(Ordering::Relaxed) {
-                self.release_holds(&holds).await?;
-                return Err(anyhow!("cancelled"));
-            }
-            let store = ReconStore::open(&self.db_path).await?;
-            for value in call
-                .arguments
-                .as_object()
-                .into_iter()
-                .flat_map(|m| m.values())
-                .filter_map(Value::as_str)
-            {
-                for (kind, canonical) in crate::recon::explicit_entities(value) {
-                    let _ = store
-                        .link_entity(&run.thread_id, &kind, &canonical, None)
-                        .await;
-                }
-            }
-            let call_id = store
-                .queue_call(
-                    &call.tool_id,
-                    &call.arguments,
-                    "recon",
-                    Some(&run.id),
-                    Some(&run.thread_id),
-                    Some(&run.turn_id),
-                )
-                .await?;
-            drop(store);
-
-            // Every call is attributed to the run it belongs to, and to the durable
-            // call id that carries the same invocation.
-            let attribution = ToolAttribution::for_run(run, "").with_call_id(&call_id);
-            let res = self
-                .execute_tool_without_reservation_attributed(
-                    &call.tool_id,
-                    call.arguments.clone(),
-                    false,
-                    cancel,
-                    &attribution,
-                )
-                .await;
-            let result = match res {
-                Ok(r) => r,
-                Err(e) if e.to_string() == "cancelled" || e.to_string().contains("cancelled") => {
-                    ToolResult {
-                        tool_id: call.tool_id.clone(),
-                        inputs: call.arguments.clone(),
-                        status: "cancelled".into(),
-                        source_url: String::new(),
-                        retrieved_at: Utc::now().to_rfc3339(),
-                        observations: Value::Null,
-                        raw: String::new(),
-                        error: None,
-                        cached: false,
-                        truncated: false,
-                        credits_charged: 0,
-                        credits_reported: None,
-                    }
-                }
-                Err(e) => ToolResult {
-                    tool_id: call.tool_id.clone(),
-                    inputs: call.arguments.clone(),
-                    status: "failed".into(),
-                    source_url: String::new(),
-                    retrieved_at: Utc::now().to_rfc3339(),
-                    observations: Value::Null,
-                    raw: String::new(),
-                    error: Some(e.to_string()),
-                    cached: false,
-                    truncated: false,
-                    credits_charged: 0,
-                    credits_reported: None,
-                },
-            };
-            let store = ReconStore::open(&self.db_path).await?;
-            store.finish_call(&call_id, &result).await?;
-            if let Some(hosts) = result
-                .observations
-                .get("hostnames")
-                .and_then(Value::as_array)
-            {
-                for host in hosts.iter().filter_map(Value::as_str).take(100) {
-                    for (kind, canonical) in crate::recon::explicit_entities(host) {
-                        let _ = store
-                            .link_entity(&run.thread_id, &kind, &canonical, Some(&call_id))
-                            .await;
-                    }
-                }
-            }
-            results.push((call_id, result));
-        }
-
-        self.settle_holds(&results, holds).await?;
-        Ok(BudgetedOutcome { results, skipped })
-    }
-
-    async fn release_holds(&self, holds: &[(String, CreditHold)]) -> Result<()> {
-        let store = ReconStore::open(&self.db_path).await?;
-        for (_, hold) in holds {
-            store.release_credits(hold).await?;
-        }
-        Ok(())
-    }
-
-    pub async fn settle_holds(
-        &self,
-        results: &[(String, ToolResult)],
-        mut holds: Vec<(String, CreditHold)>,
-    ) -> Result<()> {
-        let store = ReconStore::open(&self.db_path).await?;
-        for (_, result) in results {
-            let signature = format!("{}:{}", result.tool_id, result.inputs);
-            let Some(index) = holds.iter().position(|(sig, _)| sig == &signature) else {
-                continue;
-            };
-            let (_, hold) = holds.swap_remove(index);
-            let spend =
-                matches!(result.status.as_str(), "completed" | "no_results") && !result.cached;
-            if spend {
-                let estimate = hold.trial_credits + hold.allowance_credits;
-                let actual = result.credits_reported.unwrap_or(estimate);
-                store.reconcile_credits(&hold, actual).await?;
-            } else {
-                store.release_credits(&hold).await?;
-            }
-        }
-        for (_, hold) in holds {
-            store.release_credits(&hold).await?;
-        }
-        Ok(())
-    }
-}
-
-async fn wait_cancellation(cancel: &Arc<AtomicBool>) {
-    if cancel.load(Ordering::Relaxed) {
-        return;
-    }
-    let guard = crate::recon::register_cancellation_notifier(cancel);
-    while !cancel.load(Ordering::Relaxed) {
-        tokio::select! {
-            _ = guard.notified() => {},
-            _ = tokio::time::sleep(Duration::from_millis(50)) => {},
-        }
     }
 }
 

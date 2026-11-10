@@ -134,7 +134,7 @@ async fn handle(
         tokio::select! {
             biased;
             _ = &mut signal => {
-                argos_osint_core::recon::cancel_with_notify(&pause);
+                argos_osint_core::cancellation::cancel_with_notify(&pause);
                 let _ = timeout(PAUSE_LIMIT, &mut cycle).await;
                 break (retry("atlas_worker_shutdown"), true);
             }
@@ -143,7 +143,7 @@ async fn handle(
                     repo.db(), &lease, EXECUTION_LEASE_SECS, Utc::now(),
                 ).await;
                 if !matches!(renewal, Ok(true)) {
-                    argos_osint_core::recon::cancel_with_notify(&pause);
+                    argos_osint_core::cancellation::cancel_with_notify(&pause);
                     let _ = timeout(PAUSE_LIMIT, &mut cycle).await;
                     renewal?;
                     // A cancelled or replaced lease cannot settle domain output.

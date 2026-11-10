@@ -21,6 +21,7 @@ pub mod contracts;
 pub mod dataset;
 pub mod dork_generator;
 pub mod holehe;
+pub(crate) mod host_policy;
 pub mod manual;
 mod news_legal;
 mod providers;
@@ -1621,6 +1622,15 @@ pub(crate) fn no_results(id: &str, value: &Value) -> bool {
         .is_some_and(Vec::is_empty)
 }
 
+/// Reserved provider credits awaiting reconciliation or release.
+#[derive(Clone, Debug)]
+pub struct CreditHold {
+    pub id: String,
+    pub provider: String,
+    pub trial_credits: u32,
+    pub allowance_credits: u32,
+}
+
 // ---------------------------------------------------------------------------
 // Best-effort tool telemetry (spec §10)
 // ---------------------------------------------------------------------------
@@ -1632,7 +1642,7 @@ fn note_telemetry(event: crate::telemetry::TelemetryEvent) {
     let path = crate::paths::db_path();
     // Under SurrealDB `telemetry::record` writes to the repository, so the
     // legacy side-store file is neither needed nor created.
-    if !path.exists() && !crate::recon::backend::surreal_selected() {
+    if !path.exists() && !crate::storage::runtime::configured() {
         return;
     }
     let _ = crate::telemetry::record(&path, &event);

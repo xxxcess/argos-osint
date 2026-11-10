@@ -57,6 +57,7 @@ pub mod brain_schema;
 pub mod brain_scope;
 mod brain_source_lifecycle;
 pub mod brain_topology;
+pub mod cancellation;
 pub mod classifier;
 pub mod config_commit;
 pub mod config_transfer;

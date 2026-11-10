@@ -244,7 +244,7 @@ async fn run_tool(
     settings: SettingsFile,
 ) -> anyhow::Result<ToolResult> {
     anyhow::ensure!(
-        crate::storage::recon_threads::tool_enabled(repo, tool).await?,
+        crate::storage::tool_state::tool_enabled(repo, tool).await?,
         "Tool disabled in catalog"
     );
     let runner = runner.for_repository(repo.clone(), settings);

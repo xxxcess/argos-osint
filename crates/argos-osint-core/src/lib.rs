@@ -48,6 +48,7 @@ pub mod brain_actor_dedup;
 pub mod brain_actors;
 pub mod brain_backfill;
 pub mod brain_browse;
+pub mod brain_graph;
 pub mod brain_kinds;
 pub mod brain_neighborhood_brief;
 pub mod brain_neighborhood_brief_exec;

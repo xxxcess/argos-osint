@@ -20,12 +20,13 @@ use super::tx::TxError;
 use crate::brain::{Memory, MemorySource};
 use crate::brain_actors::BindRequest;
 use crate::brain_browse::{ActorGroup, Associations, BrowseRow};
+use crate::brain_graph::MemoryGraph;
 use crate::brain_topology::{TopologyOptions, TopologySeed, TopologySnapshot};
 use crate::memory_metadata::{MemoryKind, MemoryPayload};
 
 /// Whether the `Store` Brain methods run on SurrealDB.
 pub fn on() -> bool {
-    crate::recon::backend::surreal_selected()
+    runtime::configured()
 }
 
 fn tx_err(e: TxError) -> anyhow::Error {
@@ -82,7 +83,7 @@ pub fn actor_group_associations_scoped(
     })
 }
 
-pub fn actor_group_graph(group: &ActorGroup) -> Result<crate::recon::MemoryGraph> {
+pub fn actor_group_graph(group: &ActorGroup) -> Result<MemoryGraph> {
     let group = group.clone();
     runtime::blocking(
         |repo| async move { super::browse_assoc::actor_group_graph(&repo, &group).await },

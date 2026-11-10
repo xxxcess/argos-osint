@@ -847,7 +847,14 @@ pub fn capture_page(url: &str, text: &str) -> serde_json::Value {
 
 /// Whether this process keeps NLP caches and artifacts on SurrealDB.
 fn surreal() -> bool {
-    crate::recon::backend::surreal_selected()
+    #[cfg(feature = "surreal")]
+    {
+        crate::storage::runtime::configured()
+    }
+    #[cfg(not(feature = "surreal"))]
+    {
+        false
+    }
 }
 
 /// SurrealDB feature-cache read; `None` on any storage error.

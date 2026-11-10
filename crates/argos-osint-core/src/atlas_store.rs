@@ -18,7 +18,13 @@ use anyhow::{anyhow, Result};
 use crate::atlas_metadata::ArticleMetadata;
 use crate::store::{AtlasArticleRow, AtlasRunRow};
 
-pub use crate::recon::backend::surreal_selected;
+#[cfg(feature = "surreal")]
+pub use crate::storage::runtime::configured as surreal_selected;
+
+#[cfg(not(feature = "surreal"))]
+pub fn surreal_selected() -> bool {
+    false
+}
 
 /// The Atlas store a caller uses for one unit of work.
 #[derive(Clone)]

@@ -1733,39 +1733,63 @@ where
                     }) as Arc<provider_attempt::ProgressFn>,
                 )
             };
-            let rep = if insight_contract
+            let explicit_policy = insight_contract
                 || scope.response_format == ResponseFormat::StructuredText
                 || summarization
-                || insight_policy.reasoning != crate::request_policy::ReasoningEffort::Default
+                || insight_policy.reasoning != crate::request_policy::ReasoningEffort::Default;
+            let deadlines = if summarization {
+                Deadlines::summarization()
+            } else if explicit_policy {
+                scope.deadlines(transport == Transport::Stream)
+            } else {
+                Deadlines::default()
+            };
+            let default_policy = crate::request_policy::RequestPolicy::default();
+            let policy = if explicit_policy {
+                &insight_policy
+            } else {
+                &default_policy
+            };
+            let spec = provider_attempt::AttemptSpec {
+                observer: Some(observer.as_ref() as &(dyn Fn(&str) + Send + Sync)),
+                progress: progress_sink.as_deref(),
+                contract: explicit_policy.then_some(contract.as_ref()).flatten(),
+                caps: explicit_policy.then_some(admitted.get(route_idx)).flatten(),
+            };
+            let rep = if provider_attempt::remote::supports_operation(scope.operation_key)
+                && provider_attempt::remote::configured()
             {
-                let deadlines = if summarization {
-                    Deadlines::summarization()
-                } else {
-                    scope.deadlines(transport == Transport::Stream)
-                };
+                let attempt = provider_attempt::remote::routed_attempt(
+                    &role,
+                    scope.operation_key,
+                    route_idx,
+                    &route_cloned,
+                    &secret,
+                    &messages_vec,
+                    transport,
+                    deadlines,
+                    policy,
+                    spec,
+                );
+                bounded_by_cap(remaining, &secret, transport, attempt).await
+            } else if explicit_policy {
                 let attempt = provider_attempt::attempt_spec(
                     &secret,
                     &messages_vec,
                     transport,
                     deadlines,
-                    &insight_policy,
-                    provider_attempt::AttemptSpec {
-                        observer: Some(observer.as_ref() as &(dyn Fn(&str) + Send + Sync)),
-                        progress: progress_sink.as_deref(),
-                        contract: contract.as_ref(),
-                        caps: admitted.get(route_idx),
-                    },
+                    policy,
+                    spec,
                 );
                 bounded_by_cap(remaining, &secret, transport, attempt).await
             } else {
-                provider_attempt::attempt_full(
+                provider_attempt::attempt_spec(
                     &secret,
                     &messages_vec,
                     transport,
-                    Deadlines::default(),
-                    Some(observer.as_ref() as &(dyn Fn(&str) + Send + Sync)),
-                    progress_sink.as_deref(),
-                    &crate::request_policy::RequestPolicy::default(),
+                    deadlines,
+                    policy,
+                    spec,
                 )
                 .await
             };

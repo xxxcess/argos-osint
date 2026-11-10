@@ -216,8 +216,30 @@ def exercise(mode, tmp, binary, surreal):
                 exercise_brain(workspace, binary, env, api_port, headers)
                 exercise_private_tools(workspace, binary, env, api_port, headers)
                 exercise_control_jobs(workspace, binary, env, api_port, headers)
+                exercise_execution(workspace, binary, env, headers)
     assert (generations[0] == generations[1]) == (mode == "disk")
     print(f"{mode}: privileged bootstrap, scoped API and worker roles, ingress, retained reads, durable tool execution and database generation passed", flush=True)
+
+
+def exercise_execution(workspace, binary, env, public_headers):
+    port = free_ports(1)[0]
+    token = secrets.token_hex(32)
+    execution_env = {
+        **env,
+        "FLEETWORKS_EXECUTION_TOKEN": token,
+        "FLEETWORKS_EXECUTION_ALLOWED_HOSTS": f"127.0.0.1:{port}",
+    }
+    ready = "/api/v1/health/ready"
+    attempt = "/api/v1/execution/attempt"
+    auth = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    with process([binary, "--role", "execution", "--port", str(port)], execution_env, workspace / "execution.log") as child:
+        assert wait_for(child, port, ready, auth)["service"] == "fleetworks-execution"
+        assert request(port, ready, public_headers)[0] == 401
+        assert request(port, attempt, public_headers, "{}")[0] == 401
+        assert request(port, attempt, {**auth, "Host": "untrusted.test"}, "{}")[0] == 403
+        assert request(port, attempt, auth, "{}")[0] == 400
+        assert request(port, "/api/v1/jobs", auth)[0] == 404
+    print("Execution: private readiness, bearer/Host isolation and typed attempt validation passed", flush=True)
 
 
 def exercise_brain(workspace, binary, env, api_port, public_headers):

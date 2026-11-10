@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 
 use crate::secrets::{DeviceEndpoints, ProviderSecret};
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
@@ -24,7 +24,7 @@ pub struct ChatMessage {
     pub tool_calls: Vec<ToolCall>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,

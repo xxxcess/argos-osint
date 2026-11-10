@@ -2,6 +2,7 @@ mod actor_seed;
 mod atlas_worker;
 mod classifier_service;
 mod classifier_train;
+mod execution_service;
 mod fleetworks;
 mod nlp_service;
 
@@ -55,6 +56,8 @@ enum Role {
     Worker,
     /// Execute and publish durable Focus Brief stages.
     BriefWorker,
+    /// Run private single-attempt model execution for the Brief worker.
+    Execution,
     /// Claim and execute durable Atlas dispatches.
     AtlasWorker,
     /// Warm, private Compromise inference without a database session.
@@ -205,6 +208,31 @@ async fn main() -> Result<()> {
         .await?;
         println!("Fleetworks storage ready");
         return Ok(());
+    }
+    if role == Role::Execution {
+        let (bind, policy, workspace) = tokio::task::spawn_blocking(|| {
+            let (bind, policy) =
+                fleetworks::internal_access_with_token("EXECUTION", "FLEETWORKS_EXECUTION_TOKEN")?;
+            Ok::<_, anyhow::Error>((bind, policy, fleetworks::workspace_path()?))
+        })
+        .await??;
+        let listener = tokio::net::TcpListener::bind(SocketAddr::new(bind, port)).await?;
+        let port = listener.local_addr()?.port();
+        let router = argos_osint_api::guard_network(
+            execution_service::router(workspace),
+            policy,
+            Arc::new(Vec::new()),
+            port,
+        );
+        let result = serve_with_graceful_shutdown_timeout(
+            listener,
+            router,
+            shutdown_signal(),
+            Duration::from_secs(15),
+        )
+        .await;
+        drain_storage().await;
+        return result;
     }
     tokio::task::spawn_blocking(argos_osint_core::provider::SettingsFile::load).await??;
     if role == Role::AtlasWorker {

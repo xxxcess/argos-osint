@@ -204,9 +204,42 @@ services:
     <<: *runtime
     command: [--role, brief-worker]
     restart: unless-stopped
+    environment:
+      <<: *runtime-environment
+      FLEETWORKS_EXECUTION_ORIGIN: http://execution:8080
+      FLEETWORKS_EXECUTION_TOKEN_FILE: /run/secrets/execution_token
+    secrets:
+      - storage_password
+      - execution_token
     depends_on:
       bootstrap:
         condition: service_completed_successfully
+      execution:
+        condition: service_healthy
+
+  execution:
+    <<: *runtime
+    command: [--role, execution, --port, "8080"]
+    restart: unless-stopped
+    environment:
+      <<: *runtime-environment
+      FLEETWORKS_EXECUTION_BIND: 0.0.0.0
+      FLEETWORKS_EXECUTION_ALLOWED_HOSTS: execution:8080
+      FLEETWORKS_EXECUTION_TOKEN_FILE: /run/secrets/execution_token
+      FLEETWORKS_API_TOKEN_FILE: /run/secrets/execution_token
+      FLEETWORKS_API_HEALTH_HOST: execution:8080
+    secrets:
+      - storage_password
+      - execution_token
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, /usr/local/bin/check-fleetworks-api]
+      interval: 5s
+      timeout: 4s
+      start_period: 15s
+      retries: 12
 
   web:
     image: ${FLEETWORKS_WEB_IMAGE:-fleetworks-web:local}
@@ -294,6 +327,8 @@ secrets:
     file: ${FLEETWORKS_CONTROL_TOKEN_FILE:-${FLEETWORKS_HOST_WORKSPACE}/secrets/control-token}
   jobs_token:
     file: ${FLEETWORKS_JOBS_TOKEN_FILE:-${FLEETWORKS_HOST_WORKSPACE}/secrets/jobs-token}
+  execution_token:
+    file: ${FLEETWORKS_EXECUTION_TOKEN_FILE:-${FLEETWORKS_HOST_WORKSPACE}/secrets/execution-token}
   storage_password:
     file: ${FLEETWORKS_STORAGE_PASSWORD_FILE:-${FLEETWORKS_HOST_WORKSPACE}/secrets/storage-password}
   storage_root_password:

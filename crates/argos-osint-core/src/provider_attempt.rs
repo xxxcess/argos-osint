@@ -11,9 +11,12 @@
 // boxing it would only add noise at every construction site.
 #![allow(clippy::result_large_err)]
 
+pub mod remote;
+
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::provider::{self, ChatMessage, Completion};
@@ -25,7 +28,8 @@ use crate::request_policy::RequestPolicy;
 use crate::secrets::ProviderSecret;
 
 /// How the single request is made.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Transport {
     NonStream,
     Stream,
@@ -54,7 +58,8 @@ impl Transport {
 /// `first_output`/`model_inactivity`, when set, bound *meaningful model
 /// output* (answer or reasoning deltas): heartbeat-only traffic never extends
 /// them. `total` caps the whole attempt; receiving data does not extend it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Deadlines {
     pub connect: Duration,
     pub first_response: Duration,
@@ -153,7 +158,8 @@ impl Deadlines {
 }
 
 /// Typed per-attempt progress. Never carries answer or reasoning text.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AttemptProgress {
     /// Request handed to the transport.
     Dispatched,

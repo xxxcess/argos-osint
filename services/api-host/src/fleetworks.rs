@@ -182,7 +182,10 @@ pub(crate) fn internal_access(service: &str) -> Result<(IpAddr, NetworkPolicy)> 
     internal_access_with_token(service, "FLEETWORKS_INTERNAL_TOKEN")
 }
 
-fn internal_access_with_token(service: &str, token_key: &str) -> Result<(IpAddr, NetworkPolicy)> {
+pub(crate) fn internal_access_with_token(
+    service: &str,
+    token_key: &str,
+) -> Result<(IpAddr, NetworkPolicy)> {
     let bind_key = format!("FLEETWORKS_{service}_BIND");
     let host_key = format!("FLEETWORKS_{service}_ALLOWED_HOSTS");
     let bind = value(&bind_key, "127.0.0.1")?

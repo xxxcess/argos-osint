@@ -33,6 +33,7 @@ const PRIVATE_TOKEN_FILES: &[(&str, &str)] = &[
     ("FLEETWORKS_TOOLS_TOKEN_FILE", "tools-token"),
     ("FLEETWORKS_CONTROL_TOKEN_FILE", "control-token"),
     ("FLEETWORKS_JOBS_TOKEN_FILE", "jobs-token"),
+    ("FLEETWORKS_EXECUTION_TOKEN_FILE", "execution-token"),
 ];
 const SETTINGS: &[(&str, Option<&str>)] = &[
     ("FLEETWORKS_STORAGE_NAMESPACE", Some("fleetworks")),

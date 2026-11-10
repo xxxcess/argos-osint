@@ -576,21 +576,24 @@ pub struct TerminalReceipt {
 struct RunHead {
     revision: i64,
     work_generation: i64,
+    lease_active: bool,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RunRevision {
     pub revision: u64,
     pub work_generation: u64,
+    pub(crate) lease_active: bool,
 }
 /// Reads the generations later compared by start_run's guard transaction.
 pub async fn run_revision(repo: &Repository, run_id: &str) -> Result<RunRevision, AdmissionError> {
-    let mut response = db_query(repo.db(),"SELECT (revision ?? 0) AS revision, (work_generation ?? 0) AS work_generation FROM ONLY type::record('atlas_classifier_run', $key)")
+    let mut response = db_query(repo.db(),"SELECT (revision ?? 0) AS revision, (work_generation ?? 0) AS work_generation, ((owner ?? '') != '' AND lease_until != NONE AND lease_until > time::now()) AS lease_active FROM ONLY type::record('atlas_classifier_run', $key)")
         .bind(("key", run_id.to_string())).await.map_err(TxError::from)?.check().map_err(TxError::from)?;
     let row: Option<RunHead> = response.take(0).map_err(TxError::from)?;
     let row = row.unwrap_or(RunHead {
         revision: 0,
         work_generation: 0,
+        lease_active: false,
     });
     Ok(RunRevision {
         revision: u64::try_from(row.revision).map_err(|_| AdmissionError::InvalidRunState {
@@ -601,6 +604,7 @@ pub async fn run_revision(repo: &Repository, run_id: &str) -> Result<RunRevision
                 code: "negative_work_generation".into(),
             }
         })?,
+        lease_active: row.lease_active,
     })
 }
 
@@ -729,6 +733,7 @@ pub async fn start_run(
                 IF ($r.revision ?? 0)!=$revision OR ($r.work_generation ?? 0)!=$work { RETURN {status:'preflight_stale',epoch:0,revision:0}; };
                 IF ($r.owner ?? '')!='' AND $r.lease_until> <datetime>$now { RETURN {status:'lease_lost',epoch:0,revision:0}; };
                 IF $resumed AND $cycle=NONE { RETURN {status:'missing_run',epoch:0,revision:0}; };
+                IF $resumed AND $cycle.state='completed' { RETURN {status:'preflight_stale',epoch:0,revision:0}; };
                 IF !$resumed AND $cycle!=NONE { RETURN {status:'already_exists',epoch:0,revision:0}; };
                 IF $post AND array::len(SELECT VALUE article_id FROM atlas_admission WHERE run_id=$run LIMIT 1)>0 { RETURN {status:'preflight_stale',epoch:0,revision:0}; };
                 IF ($r.pin_json ?? '')!='' AND $r.pin_json!=$pin { RETURN {status:'pinned_revision_changed',epoch:0,revision:0}; };

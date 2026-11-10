@@ -4,12 +4,60 @@ use argos_osint_core::events::EventFilter;
 use argos_osint_core::provider::SettingsFile;
 use argos_osint_core::{intel_service, osint, paths, provider_diag, storage};
 use axum::extract::{Extension, Query, State};
+use axum::http::StatusCode;
 use axum::Json;
+use fleetworks_contracts::{AtlasCycleReceipt, AtlasCycleRequest, ATLAS_CYCLE_OPERATION};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::network::AccessMode;
-use crate::{bad, internal, storage_ready, ApiResult, ApiState};
+use crate::{bad, internal, storage_ready, ApiError, ApiResult, ApiState};
+
+pub(crate) async fn submit_atlas_cycle(
+    State(state): State<ApiState>,
+    Json(request): Json<AtlasCycleRequest>,
+) -> Result<(StatusCode, Json<AtlasCycleReceipt>), ApiError> {
+    use storage::job_dispatch::{self, ATLAS_POOL};
+    use storage::jobs::{NewJob, NewTask};
+    use storage::tx::TxError;
+
+    let cycle = request.receipt().ok_or_else(bad)?;
+    let task_id = cycle.task_id();
+    let now = chrono::Utc::now();
+    job_dispatch::submit(
+        state.repo.db(),
+        &NewJob {
+            id: &cycle.job_id,
+            kind: "task",
+            operation: ATLAS_CYCLE_OPERATION,
+            parent: None,
+            created_at: now,
+        },
+        &NewTask {
+            id: &task_id,
+            job: &cycle.job_id,
+            pool: ATLAS_POOL,
+            operation: ATLAS_CYCLE_OPERATION,
+            priority: 100,
+            deps: vec![],
+            input_hash: &cycle.run_id,
+            created_at: now,
+        },
+    )
+    .await
+    .map_err(|error| match error {
+        TxError::Abort(ref reason)
+            if matches!(
+                reason.as_str(),
+                "dispatch_submission_conflict" | "dispatch_submission_retired"
+            ) =>
+        {
+            ApiError(StatusCode::CONFLICT, "Atlas request ID is already in use")
+        }
+        other => internal(other),
+    })?;
+    Ok((StatusCode::ACCEPTED, Json(cycle)))
+}
 
 pub(crate) async fn tools() -> Json<Value> {
     Json(json!({"tools": osint::registry()}))

@@ -11,9 +11,12 @@ use clap::CommandFactory;
 use clap::FromArgMatches;
 use clap::Parser;
 use clap::Subcommand;
-use fleetworks_contracts::Client;
 use fleetworks_contracts::API_ORIGIN_ENV;
+use fleetworks_contracts::ATLAS_CYCLES_PATH;
 use fleetworks_contracts::DEFAULT_API_ORIGIN;
+use fleetworks_contracts::JOB_CANCEL_PATH;
+use fleetworks_contracts::JOB_RETRY_PATH;
+use fleetworks_contracts::{AtlasCycleRequest, Client};
 use fleetworks_workspace::Workspace;
 use serde_json::json;
 use serde_json::Value;
@@ -109,6 +112,11 @@ fn run<C: Subcommand + Into<Operation>>(name: &'static str) -> Result<()> {
 
 #[derive(Subcommand)]
 enum AtlasCommand {
+    /// Queue a collection cycle. Reuse the request ID when retrying submission.
+    Start {
+        #[arg(long = "request-id", value_parser = parse_cycle_request)]
+        request: AtlasCycleRequest,
+    },
     /// List retained collection days and available categories.
     Days,
     /// List admitted articles for one day.
@@ -123,9 +131,15 @@ enum AtlasCommand {
     },
 }
 
+fn parse_cycle_request(value: &str) -> Result<AtlasCycleRequest, String> {
+    AtlasCycleRequest::new(value.to_owned())
+        .ok_or_else(|| "expected 1–64 ASCII letters, digits, dashes or underscores".into())
+}
+
 impl From<AtlasCommand> for Operation {
     fn from(command: AtlasCommand) -> Self {
         match command {
+            AtlasCommand::Start { request } => Self::Post(ATLAS_CYCLES_PATH, json!(request)),
             AtlasCommand::Days => Self::read("/api/v1/days"),
             AtlasCommand::Articles {
                 day,
@@ -175,6 +189,8 @@ enum JobsCommand {
     Detail { id: String },
     /// Requeue retryable failed tasks for a job.
     Retry { id: String },
+    /// Cancel an active job that supports cancellation.
+    Cancel { id: String },
     /// Read recent operational logs.
     Logs {
         #[arg(long)]
@@ -189,7 +205,8 @@ impl From<JobsCommand> for Operation {
         match command {
             JobsCommand::List => Self::read("/api/v1/jobs"),
             JobsCommand::Detail { id } => Self::query("/api/v1/jobs/detail", json!({"id": id})),
-            JobsCommand::Retry { id } => Self::Post("/api/v1/jobs/retry", json!({"id": id})),
+            JobsCommand::Retry { id } => Self::Post(JOB_RETRY_PATH, json!({"id": id})),
+            JobsCommand::Cancel { id } => Self::Post(JOB_CANCEL_PATH, json!({"id": id})),
             JobsCommand::Logs { job_id, limit } => {
                 let mut query = json!({"limit": limit});
                 if let Some(job_id) = job_id {
@@ -277,4 +294,36 @@ pub fn models() -> Result<()> {
 /// Run the Profile client.
 pub fn profile() -> Result<()> {
     run::<ProfileCommand>("fleetworks-profile")
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+    use fleetworks_contracts::ATLAS_CYCLES_PATH;
+    use serde_json::json;
+
+    use super::{AtlasCommand, Cli, Operation};
+
+    #[test]
+    fn atlas_start_builds_the_versioned_submission() {
+        let args = Cli::<AtlasCommand>::try_parse_from([
+            "fleetworks-atlas",
+            "start",
+            "--request-id",
+            "local_cycle-1",
+        ])
+        .unwrap();
+        let Operation::Post(path, payload) = args.command.into() else {
+            panic!("Atlas start must use HTTP POST");
+        };
+        assert_eq!(path, ATLAS_CYCLES_PATH);
+        assert_eq!(payload, json!({"request_id":"local_cycle-1"}));
+        assert!(Cli::<AtlasCommand>::try_parse_from([
+            "fleetworks-atlas",
+            "start",
+            "--request-id",
+            "invalid/id",
+        ])
+        .is_err());
+    }
 }

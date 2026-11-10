@@ -5,7 +5,7 @@ mod classifier_fixture;
 #[cfg(feature = "classifier")]
 #[path = "support/current_admission.rs"]
 mod current_admission;
-use argos_osint_api::{loopback_url, router, ApiState};
+use argos_osint_api::{loopback_url, network_router, router, ApiState, NetworkPolicy};
 use argos_osint_core::{
     storage::{atlas, open::Target, repo::Repository},
     store::AtlasArticleRow,
@@ -15,6 +15,7 @@ use axum::{
     http::{Request, StatusCode},
     Router,
 };
+use fleetworks_contracts::{ATLAS_CYCLES_PATH, JOB_CANCEL_PATH, JOB_DETAIL_PATH, JOB_RETRY_PATH};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -26,12 +27,26 @@ async fn call(
     origin: Option<&str>,
     body: Value,
 ) -> (StatusCode, Value) {
+    call_as(app, method, path, origin, None, body).await
+}
+
+async fn call_as(
+    app: &Router,
+    method: &str,
+    path: &str,
+    origin: Option<&str>,
+    token: Option<&str>,
+    body: Value,
+) -> (StatusCode, Value) {
     let mut request = Request::builder()
         .method(method)
         .uri(path)
         .header("host", "127.0.0.1:8080");
     if let Some(origin) = origin {
         request = request.header("origin", origin);
+    }
+    if let Some(token) = token {
+        request = request.header("authorization", format!("Bearer {token}"));
     }
     if method == "POST" {
         request = request.header("content-type", "application/json");
@@ -69,6 +84,127 @@ fn rejects_remote_and_credentialed_endpoints() {
         assert!(loopback_url(bad).is_err(), "{bad}");
     }
     assert!(loopback_url("http://127.0.0.1:8080").is_ok());
+}
+
+#[tokio::test]
+async fn atlas_submission_and_job_controls_use_authenticated_durable_ids() {
+    use argos_osint_core::storage::job_dispatch::{self, ATLAS_POOL};
+
+    const TOKEN: &str = "atlas-test-bearer-0123456789abcdefghijkl";
+    let dir = tempfile::tempdir().unwrap();
+    let repo = Repository::connect(
+        &Target::Embedded {
+            path: dir.path().join("db"),
+        },
+        "argos",
+        "dispatch",
+    )
+    .await
+    .unwrap();
+    repo.db()
+        .query("UPSERT storage_meta:identity SET instance_id='fixture-generation' RETURN NONE")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    job_dispatch::enable_pool(repo.db(), ATLAS_POOL)
+        .await
+        .unwrap();
+    let state = ApiState {
+        repo,
+        instance_id: "dispatch-fixture".into(),
+        port: 8080,
+        origins: Arc::new(vec![]),
+    };
+    let app = network_router(
+        state.clone(),
+        NetworkPolicy::new(&["127.0.0.1:8080".into()], TOKEN).unwrap(),
+    );
+    let legacy = router(state);
+    let request = json!({"request_id":"offline_cycle-1"});
+    assert_eq!(
+        call(&legacy, "POST", ATLAS_CYCLES_PATH, None, request.clone())
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        call(&app, "POST", ATLAS_CYCLES_PATH, None, request.clone())
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call_as(
+            &app,
+            "POST",
+            ATLAS_CYCLES_PATH,
+            None,
+            Some(TOKEN),
+            json!({"request_id":"../invalid"})
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let (status, receipt) = call_as(
+        &app,
+        "POST",
+        ATLAS_CYCLES_PATH,
+        None,
+        Some(TOKEN),
+        request.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(
+        receipt,
+        json!({
+            "job_id":"fleet-atlas-job-offline_cycle-1",
+            "run_id":"fleet-atlas-run-offline_cycle-1"
+        })
+    );
+    assert_eq!(
+        call_as(&app, "POST", ATLAS_CYCLES_PATH, None, Some(TOKEN), request).await,
+        (StatusCode::ACCEPTED, receipt.clone())
+    );
+    let job_id = receipt["job_id"].as_str().unwrap();
+    let path = format!("{JOB_DETAIL_PATH}?id={job_id}");
+    assert_eq!(
+        call_as(&app, "GET", &path, None, Some(TOKEN), Value::Null)
+            .await
+            .1["job"]["state"],
+        "queued"
+    );
+    let cancel = json!({"id":job_id});
+    assert_eq!(
+        call(&legacy, "POST", JOB_CANCEL_PATH, None, cancel.clone())
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        call_as(
+            &app,
+            "POST",
+            JOB_CANCEL_PATH,
+            None,
+            Some(TOKEN),
+            cancel.clone()
+        )
+        .await,
+        (StatusCode::OK, json!({"done":true}))
+    );
+    assert_eq!(
+        call_as(&app, "GET", &path, None, Some(TOKEN), Value::Null)
+            .await
+            .1["job"]["state"],
+        "cancelled"
+    );
+    assert_eq!(
+        call_as(&app, "POST", JOB_RETRY_PATH, None, Some(TOKEN), cancel).await,
+        (StatusCode::OK, json!({"requeued":0}))
+    );
 }
 #[tokio::test]
 #[cfg(feature = "classifier")]

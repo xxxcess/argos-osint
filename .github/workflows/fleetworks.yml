@@ -30,6 +30,7 @@ jobs:
       native: ${{ steps.plan.outputs.native }}
       server: ${{ steps.plan.outputs.server }}
       compose: ${{ steps.plan.outputs.compose }}
+      broker: ${{ steps.plan.outputs.broker }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -57,7 +58,7 @@ jobs:
 
           event = os.environ["GITHUB_EVENT_NAME"]
           selected = set()
-          all_scopes = {"native", "server", "compose"}
+          all_scopes = {"native", "server", "compose", "broker"}
           if event not in {"push", "pull_request"} or not re.fullmatch("[0-9a-f]{40}", base) or base == "0" * 40:
               selected.update(all_scopes)
           else:
@@ -76,14 +77,17 @@ jobs:
                       if path.startswith(("docs/", ".planning/")) and path.endswith((".md", ".svg", ".html")):
                           continue
                       if path.startswith("apps/venture/"):
-                          selected.update(all_scopes)
+                          selected.update({"native", "server", "compose"})
                       elif path.startswith("apps/fleetworks-cli/"):
                           selected.add("native")
                       elif path.startswith(("apps/web-desktop/", "deploy/")):
                           selected.update({"server", "compose"})
-                      elif path.startswith(("crates/argos-api-host/", "crates/argos-osint-api/",
-                                            "crates/argos-osint-core/", "crates/fleetworks-broker/")):
-                          selected.add("server")
+                      elif (
+                          path.startswith(("crates/argos-api-host/", "crates/argos-osint-api/",
+                                           "crates/argos-osint-core/", "crates/fleetworks-broker/"))
+                          or path == "scripts/fleetworks_atlas_smoke.py"
+                      ):
+                          selected.update({"server", "broker"})
                       else:
                           selected.update(all_scopes)
           with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
@@ -175,6 +179,7 @@ jobs:
           python3 scripts/agent_cargo.py build --locked -p argos-api-host --bin argos-api-host "${features[@]}"
           file target/agents/debug/argos-api-host | grep -Ei 'ELF 64-bit.*(aarch64|ARM aarch64)'
       - name: Exercise bootstrap and network service roles on loopback
+        id: surreal
         shell: bash
         run: |
           set -euo pipefail
@@ -183,6 +188,42 @@ jobs:
           test -x "$binary"
           python3 scripts/fleetworks_network_smoke.py \
             --host target/agents/debug/argos-api-host --surreal "$binary"
+          printf 'binary=%s\n' "$binary" >> "$GITHUB_OUTPUT"
+      - name: Exercise native Atlas dispatch with RabbitMQ
+        if: needs.scope.outputs.broker == 'true'
+        timeout-minutes: 12
+        env:
+          SURREAL_BIN: ${{ steps.surreal.outputs.binary }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/agent_cargo.py test --locked -p fleetworks-broker --lib
+          export RABBITMQ_DEFAULT_USER=fleetworks
+          export RABBITMQ_DEFAULT_PASS="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+          echo "::add-mask::$RABBITMQ_DEFAULT_PASS"
+          # Match the broker image in deploy/compose.atlas.yml.
+          image='rabbitmq:4.2.6@sha256:0f0eeaba114a94a9e4aae6a5bde40de85e0ab3b9ae7fe715a25cac19c4253643'
+          container="$(docker run --detach --publish 127.0.0.1::5672/tcp \
+            --env RABBITMQ_DEFAULT_USER --env RABBITMQ_DEFAULT_PASS "$image")"
+          trap 'docker rm --force --volumes "$container" >/dev/null 2>&1 || true' EXIT
+          ready=false
+          for _ in {1..30}; do
+            if timeout 5s docker exec "$container" rabbitmq-diagnostics -q check_port_listener 5672 >/dev/null 2>&1; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [[ "$ready" != true ]]; then
+            echo '::error::RabbitMQ did not open its AMQP listener'
+            docker logs --tail 80 "$container" >&2
+            exit 1
+          fi
+          address="$(docker port "$container" 5672/tcp)"
+          [[ "$address" =~ ^127\.0\.0\.1:[1-9][0-9]{0,4}$ ]]
+          export FLEETWORKS_BROKER_URL="amqp://$RABBITMQ_DEFAULT_USER:$RABBITMQ_DEFAULT_PASS@$address/%2f"
+          python3 scripts/fleetworks_atlas_smoke.py \
+            --host target/agents/debug/argos-api-host --surreal "$SURREAL_BIN"
       - name: Validate disk and external Compose configurations
         if: hashFiles('deploy/compose.yml') != ''
         shell: bash
@@ -197,6 +238,11 @@ jobs:
           done
           docker compose -f deploy/compose.yml --profile disk config --quiet
           FLEETWORKS_STORAGE_URL=ws://host.docker.internal:8000 docker compose -f deploy/compose.yml config --quiet
+          if [[ -f deploy/compose.atlas.yml ]]; then
+            mkdir -p "$FLEETWORKS_HOST_WORKSPACE/storage/rabbitmq"
+            printf '%064d\n' 0 > "$FLEETWORKS_HOST_WORKSPACE/secrets/broker-password"
+            docker compose -f deploy/compose.yml -f deploy/compose.atlas.yml --profile disk config --quiet
+          fi
       - name: Exercise packaged Compose through Venture
         if: needs.scope.outputs.compose == 'true' && hashFiles('deploy/verify.py') != ''
         timeout-minutes: 60

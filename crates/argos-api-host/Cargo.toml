@@ -14,6 +14,9 @@ classifier = ["argos-osint-core/classifier", "argos-osint-api/classifier"]
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
+fleetworks-broker = { path = "../fleetworks-broker" }
+tracing.workspace = true
 argos-osint-core = { path = "../argos-osint-core", default-features = false }
 axum = "0.8.8"
 tokio.workspace = true

@@ -250,35 +250,55 @@ async fn collect_inner(
     let mut out = ArticleMetadata::pending(article);
     let started = std::time::Instant::now();
     let mode = nlp::configured_mode();
+    let use_remote = nlp::remote::is_configured();
     out.entity_state = MetadataState::Complete;
     if mode == nlp::Mode::Off {
         out.entity_state = MetadataState::Skipped;
-    } else if !cfg!(feature = "nlp") {
+    } else if !cfg!(feature = "nlp") && !use_remote {
         out.entity_state = MetadataState::Unavailable;
         out.diagnostics
             .push("Local NLP is unavailable in this build".into());
     } else {
-        for (field, text) in [
+        let fields: Vec<_> = [
             ("title", article.title.as_str()),
             ("description", article.description.as_str()),
-        ] {
-            if text.is_empty() {
-                continue;
-            }
+        ]
+        .into_iter()
+        .filter(|(_, text)| !text.is_empty())
+        .map(|(field, text)| {
             let mut source = nlp::Source::derived(
                 &format!("article:{}:{field}", article.id),
                 &out.input_hash,
                 text,
             );
             source.published_at = Some(article.published_at.clone());
+            (field, text, source)
+        })
+        .collect();
+        let sources: Vec<_> = fields.iter().map(|(_, _, source)| source).collect();
+        let annotations = if use_remote {
+            nlp::remote::annotate_configured(&sources, &cancel).await
+        } else {
             let policy = nlp::PreparePolicy {
                 purpose: "atlas-entities".into(),
                 coverage_requirement: nlp::CoverageRequirement::Complete,
                 need_entities: true,
                 byte_budget: usize::MAX,
             };
-            let annotation =
-                nlp::annotate_with_policy(&source, &policy, cancel.clone(), mode, db_path).await;
+            let mut annotations = Vec::with_capacity(sources.len());
+            for source in sources {
+                annotations.push(
+                    nlp::annotate_with_policy(source, &policy, cancel.clone(), mode, db_path).await,
+                );
+            }
+            annotations
+        };
+        let parser = if use_remote {
+            "NLP service"
+        } else {
+            "local NLP"
+        };
+        for ((field, text, source), annotation) in fields.into_iter().zip(annotations) {
             if annotation.status == nlp::Status::Complete && annotation.validate(&source) {
                 for date in &annotation.date_candidates {
                     if let Some(original) = date.span.slice(text) {
@@ -324,7 +344,7 @@ async fn collect_inner(
                     .collect::<Vec<_>>()
                     .join("; ");
                 out.diagnostics.push(format!(
-                    "{field} local NLP: {:?}{}",
+                    "{field} {parser}: {:?}{}",
                     annotation.status,
                     if reasons.is_empty() {
                         String::new()

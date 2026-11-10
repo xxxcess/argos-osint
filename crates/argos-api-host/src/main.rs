@@ -1,4 +1,6 @@
+mod atlas_worker;
 mod fleetworks;
+mod nlp_service;
 
 use anyhow::{ensure, Result};
 use argos_osint_core::storage::{self, home::Layout};
@@ -32,6 +34,10 @@ enum Role {
     Api,
     /// Fleetworks background domain workers.
     Worker,
+    /// Claim and execute durable Atlas dispatches.
+    AtlasWorker,
+    /// Warm, private Compromise inference without a database session.
+    Nlp,
     /// Initialize storage and provision the runtime database account.
     Bootstrap,
 }
@@ -58,6 +64,23 @@ async fn main() -> Result<()> {
         port,
         origins,
     } = Args::parse();
+    if role == Role::Nlp {
+        let (bind, policy, router) = tokio::task::spawn_blocking(|| {
+            let (bind, policy) = fleetworks::internal_access("NLP")?;
+            Ok::<_, anyhow::Error>((bind, policy, nlp_service::router()?))
+        })
+        .await??;
+        let listener = tokio::net::TcpListener::bind(SocketAddr::new(bind, port)).await?;
+        let port = listener.local_addr()?.port();
+        let router = argos_osint_api::guard_network(router, policy, Arc::new(Vec::new()), port);
+        return serve_with_graceful_shutdown_timeout(
+            listener,
+            router,
+            shutdown_signal(),
+            Duration::from_secs(15),
+        )
+        .await;
+    }
     let (layout, network, access) = tokio::task::spawn_blocking(move || {
         let access = if matches!(role, Role::Combined | Role::Api) {
             Some(fleetworks::ApiAccess::from_environment(role, &origins)?)
@@ -94,10 +117,27 @@ async fn main() -> Result<()> {
             runtime_user.expect("bootstrap always supplies a runtime user"),
         )
         .await?;
+        let atlas_dispatch = match std::env::var("FLEETWORKS_ATLAS_DISPATCH").as_deref() {
+            Ok("1") => true,
+            Ok("0") | Err(std::env::VarError::NotPresent) => false,
+            _ => anyhow::bail!("FLEETWORKS_ATLAS_DISPATCH must be 0 or 1"),
+        };
+        storage::job_dispatch::configure_pool(
+            repo.db(),
+            storage::job_dispatch::ATLAS_POOL,
+            atlas_dispatch,
+        )
+        .await?;
         println!("Fleetworks storage ready");
         return Ok(());
     }
     tokio::task::spawn_blocking(argos_osint_core::provider::SettingsFile::load).await??;
+    if role == Role::AtlasWorker {
+        let _beat = start_process_beat().await?;
+        let result = atlas_worker::run(repo, shutdown_signal()).await;
+        drain_storage().await;
+        return result;
+    }
     let http = if let Some(api) = access {
         let listener = tokio::net::TcpListener::bind(SocketAddr::new(api.bind, port)).await?;
         let port = listener.local_addr()?.port();
@@ -145,21 +185,30 @@ async fn main() -> Result<()> {
         })
         .await?;
     }
+    drain_storage().await;
+    served
+}
+
+async fn drain_storage() {
     if tokio::time::timeout(Duration::from_secs(6), storage::runtime::drain())
         .await
         .is_err()
     {
         eprintln!("Core worker shutdown deadline reached; durable leases will recover on restart");
     }
-    served
 }
 
 async fn start_workers() -> Result<(
     argos_osint_core::job_registry::ProcessBeat,
     Vec<argos_osint_core::scheduler::WorkerPool>,
 )> {
-    // Start the existing elected core pools (brief, indexing, summaries and
-    // durable recovery) rather than creating an HTTP-specific executor.
+    let beat = start_process_beat().await?;
+    let workers =
+        argos_osint_core::scheduler::WorkerPool::spawn_default(argos_osint_core::paths::db_path());
+    Ok((beat, workers))
+}
+
+async fn start_process_beat() -> Result<argos_osint_core::job_registry::ProcessBeat> {
     // runtime::blocking requires a plain thread outside Tokio's entered
     // context; spawn_blocking also enters Tokio and would be rejected.
     let (beat_tx, beat_rx) = tokio::sync::oneshot::channel();
@@ -171,10 +220,7 @@ async fn start_workers() -> Result<(
             );
             let _ = beat_tx.send(result);
         })?;
-    let beat = beat_rx.await??;
-    let workers =
-        argos_osint_core::scheduler::WorkerPool::spawn_default(argos_osint_core::paths::db_path());
-    Ok((beat, workers))
+    beat_rx.await?
 }
 
 async fn serve_with_graceful_shutdown_timeout<F>(

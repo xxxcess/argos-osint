@@ -19,6 +19,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use fleetworks_contracts::{AtlasCycleReceipt, ATLAS_CYCLES_PATH, JOB_CANCEL_PATH, JOB_RETRY_PATH};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{sync::Arc, time::Duration};
@@ -55,9 +56,26 @@ pub fn router(state: ApiState) -> Router {
     router_with_access(state, None)
 }
 
-/// Serves the same routes with explicit host, origin and bearer restrictions.
+/// Serves public routes and authenticated job controls with explicit ingress restrictions.
 pub fn network_router(state: ApiState, policy: NetworkPolicy) -> Router {
     router_with_access(state, Some(policy))
+}
+
+/// Apply the same host, origin and bearer policy to a private service router.
+pub fn guard_network(
+    router: Router,
+    policy: NetworkPolicy,
+    origins: Arc<Vec<String>>,
+    port: u16,
+) -> Router {
+    router.layer(middleware::from_fn_with_state(
+        AccessPolicy {
+            port,
+            origins,
+            network: Some(policy),
+        },
+        network::protect,
+    ))
 }
 
 fn router_with_access(state: ApiState, network: Option<NetworkPolicy>) -> Router {
@@ -73,7 +91,7 @@ fn router_with_access(state: ApiState, network: Option<NetworkPolicy>) -> Router
     };
     let sampler = Arc::new(std::sync::Mutex::new(host_metrics::HostSampler::default()));
     let feed = Arc::new(host_metrics::HostFeed::new(sampler.clone()));
-    Router::new()
+    let router = Router::new()
         .route("/api/v1/health/ready", get(ready))
         .route("/api/v1/capabilities", get(capabilities))
         .route("/api/v1/host/metrics", get(host_metrics::read))
@@ -94,14 +112,22 @@ fn router_with_access(state: ApiState, network: Option<NetworkPolicy>) -> Router
         .route("/api/v1/models/defaults", get(operations::model_defaults))
         .route("/api/v1/profile", get(operations::profile))
         .route("/api/v1/jobs/detail", get(job))
-        .route("/api/v1/jobs/retry", post(retry))
+        .route(JOB_RETRY_PATH, post(retry))
         .route("/api/v1/topology", get(topology_web::read).post(topology))
         .route("/api/v1/topology/resolve", post(topology_web::resolve))
         .route("/api/v1/topology/summary", get(topology_summary::read))
         .route(
             "/api/v1/topology/summary/generate",
             post(topology_summary::generate),
-        )
+        );
+    let router = if mode == AccessMode::Bearer {
+        router
+            .route(ATLAS_CYCLES_PATH, post(operations::submit_atlas_cycle))
+            .route(JOB_CANCEL_PATH, post(cancel))
+    } else {
+        router
+    };
+    router
         .layer(axum::Extension(sampler))
         .layer(axum::Extension(feed))
         .layer(axum::Extension(mode))
@@ -172,8 +198,24 @@ async fn storage_ready(repo: &Repository) -> Result<(), ApiError> {
     Ok(())
 }
 async fn capabilities(axum::Extension(mode): axum::Extension<AccessMode>) -> Json<Value> {
+    let mut features = vec![
+        "bulletin",
+        "brief",
+        "related",
+        "jobs",
+        "topology",
+        "live",
+        "article-search",
+        "logs",
+        "tools",
+        "model-defaults",
+        "profile",
+    ];
+    if mode == AccessMode::Bearer {
+        features.extend(["atlas-cycles", "job-cancel"]);
+    }
     Json(
-        json!({"api_version":1,"categories":intel::CATEGORIES,"auth":mode == AccessMode::Bearer,"features":["bulletin","brief","related","jobs","topology","live","article-search","logs","tools","model-defaults","profile"],"live":{"path":"/api/v1/live","channels":["metrics","brief"],"version":1}}),
+        json!({"api_version":1,"categories":intel::CATEGORIES,"auth":mode == AccessMode::Bearer,"features":features,"live":{"path":"/api/v1/live","channels":["metrics","brief"],"version":1}}),
     )
 }
 async fn days(State(s): State<ApiState>) -> ApiResult {
@@ -334,11 +376,49 @@ async fn job(State(s): State<ApiState>, Query(k): Query<JobKey>) -> ApiResult {
         json!({"job":row,"stages":safe_stages(&s.repo, &k.id).await?}),
     ))
 }
-async fn retry(State(s): State<ApiState>, Json(k): Json<JobKey>) -> ApiResult {
+async fn cancel(State(s): State<ApiState>, Json(k): Json<JobKey>) -> ApiResult {
+    use argos_osint_core::job_registry::CancelRequest;
+
     validate_job(&k)?;
-    Ok(Json(
-        json!({"requeued":storage::jobs_view::retry_failed_tasks(s.repo.db(), &k.id).await.map_err(internal)?}),
-    ))
+    match storage::jobs_view::cancel_job(s.repo.db(), &k.id)
+        .await
+        .map_err(internal)?
+    {
+        CancelRequest::Requested => Ok(Json(json!({"done":true}))),
+        CancelRequest::Missing => Err(missing()),
+        CancelRequest::NotCancellable | CancelRequest::NotRunning => Err(ApiError(
+            StatusCode::CONFLICT,
+            "Job is not active and cancellable",
+        )),
+    }
+}
+
+async fn retry(
+    State(s): State<ApiState>,
+    axum::Extension(mode): axum::Extension<AccessMode>,
+    Json(k): Json<JobKey>,
+) -> ApiResult {
+    validate_job(&k)?;
+    let requeued = if let Some(cycle) = AtlasCycleReceipt::from_job_id(&k.id) {
+        if mode != AccessMode::Bearer {
+            return Err(missing());
+        }
+        usize::from(
+            storage::job_dispatch::retry_failed_atlas(
+                s.repo.db(),
+                &cycle.job_id,
+                &cycle.task_id(),
+                chrono::Utc::now(),
+            )
+            .await
+            .map_err(internal)?,
+        )
+    } else {
+        storage::jobs_view::retry_failed_tasks(s.repo.db(), &k.id)
+            .await
+            .map_err(internal)?
+    };
+    Ok(Json(json!({"requeued":requeued})))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

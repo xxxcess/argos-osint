@@ -28,8 +28,9 @@ use super::tx::{run_tx, RetryPolicy, TxError};
 /// staging and rejection-receipt tables plus the canonical `categories`
 /// array, `admitted_at`, the `categories.*` membership index and the two
 /// article full-text indexes — all additive `IF NOT EXISTS` definitions, so
-/// opening a v1 database upgrades it in place without a wipe.
-pub const SCHEMA_VERSION: i64 = 3;
+/// opening a v1 database upgrades it in place without a wipe. v4 adds the
+/// durable dispatch outbox for opt-in worker pools.
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Module schemas in apply order: counters before the outbox; the graph
 /// before lifecycle (which indexes `brain_graph_node`); Atlas before its
@@ -37,7 +38,7 @@ pub const SCHEMA_VERSION: i64 = 3;
 /// before refresh. The event logs (`argos_event`, `investigation_event`)
 /// stand alone; telemetry writes use `profile_view`'s tables, with
 /// `telemetry_meta` after them.
-pub fn schemas() -> [(&'static str, &'static str); 45] {
+pub fn schemas() -> [(&'static str, &'static str); 46] {
     [
         ("counters", super::counters::SCHEMA),
         ("outbox", super::outbox::SCHEMA),
@@ -96,6 +97,7 @@ pub fn schemas() -> [(&'static str, &'static str); 45] {
         ("brain_scope", super::brain_scope::SCHEMA),
         ("brief_stages", super::brief_stages::SCHEMA),
         ("meta", META_SCHEMA),
+        ("job_dispatch", super::job_dispatch::SCHEMA),
     ]
 }
 

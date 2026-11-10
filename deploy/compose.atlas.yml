@@ -1,0 +1,107 @@
+x-atlas-entrypoint: &atlas-entrypoint
+  type: bind
+  source: ./atlas-entrypoint.sh
+  target: /usr/local/lib/fleetworks/atlas-entrypoint.sh
+  read_only: true
+  bind:
+    create_host_path: false
+
+services:
+  bootstrap:
+    environment:
+      FLEETWORKS_ATLAS_DISPATCH: "1"
+
+  atlas:
+    extends:
+      file: compose.yml
+      service: worker
+    entrypoint: ["/bin/sh", /usr/local/lib/fleetworks/atlas-entrypoint.sh, atlas]
+    command: [/usr/local/bin/argos-api-host, --role, atlas-worker]
+    environment:
+      FLEETWORKS_BROKER_QUEUE: ${FLEETWORKS_BROKER_QUEUE:-fleetworks.atlas}
+      FLEETWORKS_NLP_ORIGIN: http://nlp:8080
+      FLEETWORKS_INTERNAL_TOKEN_FILE: /run/secrets/internal_token
+    volumes:
+      - *atlas-entrypoint
+    secrets:
+      - broker_password
+      - internal_token
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      nlp:
+        condition: service_healthy
+
+  nlp:
+    image: ${FLEETWORKS_RUNTIME_IMAGE:-fleetworks-runtime:local}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: runtime
+    user: "${FLEETWORKS_UID:?Set FLEETWORKS_UID}:${FLEETWORKS_GID:?Set FLEETWORKS_GID}"
+    command: [--role, nlp, --port, "8080"]
+    environment:
+      FLEETWORKS_NLP_BIND: 0.0.0.0
+      FLEETWORKS_NLP_ALLOWED_HOSTS: nlp:8080,127.0.0.1:8080
+      FLEETWORKS_INTERNAL_TOKEN_FILE: /run/secrets/internal_token
+      FLEETWORKS_API_TOKEN_FILE: /run/secrets/internal_token
+      FLEETWORKS_API_HEALTH_HOST: "127.0.0.1:8080"
+    secrets:
+      - internal_token
+    healthcheck:
+      test: [CMD, /usr/local/bin/check-fleetworks-api]
+      interval: 5s
+      timeout: 4s
+      start_period: 15s
+      retries: 6
+    tmpfs:
+      - /tmp
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    stop_grace_period: 20s
+
+  rabbitmq:
+    image: rabbitmq:4.2.6@sha256:0f0eeaba114a94a9e4aae6a5bde40de85e0ab3b9ae7fe715a25cac19c4253643
+    user: "${FLEETWORKS_UID:?Set FLEETWORKS_UID}:${FLEETWORKS_GID:?Set FLEETWORKS_GID}"
+    hostname: rabbitmq
+    working_dir: /var/lib/rabbitmq
+    entrypoint: ["/bin/sh", /usr/local/lib/fleetworks/atlas-entrypoint.sh, rabbitmq]
+    command: [rabbitmq-server]
+    environment:
+      HOME: /var/lib/rabbitmq
+      RABBITMQ_NODENAME: rabbit@rabbitmq
+      RABBITMQ_MNESIA_BASE: /var/lib/rabbitmq/mnesia
+    volumes:
+      - *atlas-entrypoint
+      - type: bind
+        source: ${FLEETWORKS_HOST_WORKSPACE:?Set FLEETWORKS_HOST_WORKSPACE}/storage/rabbitmq
+        target: /var/lib/rabbitmq
+        bind:
+          create_host_path: false
+    secrets:
+      - broker_password
+    healthcheck:
+      test: [CMD, rabbitmq-diagnostics, -q, check_running]
+      interval: 5s
+      timeout: 8s
+      start_period: 20s
+      retries: 6
+    tmpfs:
+      - /tmp
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+secrets:
+  internal_token:
+    file: ${FLEETWORKS_INTERNAL_TOKEN_FILE:-${FLEETWORKS_HOST_WORKSPACE}/secrets/internal-token}
+  broker_password:
+    file: ${FLEETWORKS_BROKER_PASSWORD_FILE:-${FLEETWORKS_HOST_WORKSPACE}/secrets/broker-password}

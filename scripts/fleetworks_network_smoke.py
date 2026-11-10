@@ -13,14 +13,18 @@ import subprocess
 import tempfile
 import time
 
-parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("--host", required=True, type=Path, help="path to the network-enabled argos-api-host executable")
-parser.add_argument("--surreal", required=True, type=Path, help="path to the checksum-verified SurrealDB 3.3.4 executable")
-options = parser.parse_args()
-binary = options.host.resolve(strict=True)
-surreal = options.surreal.resolve(strict=True)
-if not subprocess.check_output([surreal, "version"], text=True).startswith("3.3.4"):
-    parser.error("the smoke requires the repository-pinned SurrealDB 3.3.4")
+def binaries(description):
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument("--host", required=True, type=Path, help="path to the network-enabled argos-api-host executable")
+    parser.add_argument("--surreal", required=True, type=Path, help="path to the checksum-verified SurrealDB 3.3.4 executable")
+    options = parser.parse_args()
+    binary = options.host.resolve(strict=True)
+    surreal = options.surreal.resolve(strict=True)
+    if not subprocess.check_output([surreal, "version"], text=True).startswith("3.3.4"):
+        parser.error("the smoke requires the repository-pinned SurrealDB 3.3.4")
+    return binary, surreal
+
+
 safe_env = {
     key: value for key, value in os.environ.items()
     if not key.startswith(("ARGOS_", "FLEETWORKS_", "SURREAL_"))
@@ -98,7 +102,7 @@ def instance_identity(port, password):
     return identity
 
 
-def exercise(mode, tmp):
+def exercise(mode, tmp, binary, surreal):
     workspace = tmp / mode
     workspace.mkdir()
     db_port, api_port, worker_port = free_ports(3)
@@ -147,12 +151,34 @@ def exercise(mode, tmp):
     print(f"{mode}: privileged bootstrap, scoped API and worker roles, ingress, retained reads and database generation passed", flush=True)
 
 
-with tempfile.TemporaryDirectory(prefix="fleetworks-native-network-") as directory:
-    tmp = Path(directory)
-    try:
-        for mode in ("memory", "disk"):
-            exercise(mode, tmp)
-    except Exception:
-        for log in sorted(tmp.glob("*/*.log")):
-            print(log.name, log.read_text()[-1500:])
-        raise
+def exercise_nlp(tmp, binary):
+    port = free_ports(1)[0]
+    token = secrets.token_hex(32)
+    env = {
+        **safe_env,
+        "FLEETWORKS_INTERNAL_TOKEN": token,
+        "FLEETWORKS_NLP_ALLOWED_HOSTS": f"127.0.0.1:{port}",
+    }
+    with process([binary, "--role", "nlp", "--port", str(port)], env, tmp / "nlp.log") as nlp:
+        path = "/api/v1/health/ready"
+        auth = {"Authorization": f"Bearer {token}"}
+        assert wait_for(nlp, port, path, auth) == {
+            "service": "fleetworks-nlp", "api_version": 1, "ready": True,
+        }
+        assert request(port, path)[0] == 401
+        assert request(port, path, {**auth, "Host": "other.test"})[0] == 403
+    print("NLP: warm database-free role and authenticated ingress passed", flush=True)
+
+
+if __name__ == "__main__":
+    binary, surreal = binaries(__doc__)
+    with tempfile.TemporaryDirectory(prefix="fleetworks-native-network-") as directory:
+        tmp = Path(directory)
+        try:
+            for mode in ("memory", "disk"):
+                exercise(mode, tmp, binary, surreal)
+            exercise_nlp(tmp, binary)
+        except Exception:
+            for log in sorted(tmp.rglob("*.log")):
+                print(log.name, log.read_text()[-1500:])
+            raise

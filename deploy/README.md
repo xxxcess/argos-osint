@@ -1,6 +1,6 @@
 # Fleetworks service deployment
 
-This stack runs the production web desktop, authenticated API, background worker pools, and one-shot database bootstrap. Docker Compose v2.20 or newer is required. The web desktop and API publish `127.0.0.1:3000` and `127.0.0.1:8080` by default. Database connections stay inside the Compose network for the managed profile. RabbitMQ dispatch, standalone engine services, and the development web overlay are pending their runtime integration.
+This stack runs the production web desktop, authenticated API, background worker pools, and one-shot database bootstrap. Docker Compose v2.20 or newer is required. The web desktop and API publish `127.0.0.1:3000` and `127.0.0.1:8080` by default. Database connections stay inside the Compose network for the managed profile. Use the [Atlas overlay](atlas-dispatch.md) for RabbitMQ dispatch and the private NLP service.
 
 ## Prepare a workspace
 

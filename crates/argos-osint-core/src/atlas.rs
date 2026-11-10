@@ -2081,7 +2081,7 @@ where
         }
         emit(event);
     };
-    let result = run_atlas_inner(input, tracked_emit, fetch, &tracker).await;
+    let result = run_atlas_inner(input, tracked_emit, fetch, &tracker, None).await;
     // Read the run id first: the tracker guard is never held across an await.
     let tracked_run = tracker
         .lock()
@@ -2298,12 +2298,13 @@ async fn run_atlas_inner<F>(
     emit: impl FnMut(AtlasEvent) + Send,
     fetch: F,
     tracker: &std::sync::Mutex<AtlasJob>,
+    dispatch_id: Option<&str>,
 ) -> Result<Stop>
 where
     F: FnMut(HttpCall) -> FetchFut + Send,
 {
     let store = AtlasStore::open(input.db_path).await?;
-    run_atlas_on_store(input, emit, fetch, tracker, store).await
+    run_atlas_on_store(input, emit, fetch, tracker, store, dispatch_id).await
 }
 
 async fn run_atlas_on_store<F>(
@@ -2312,6 +2313,7 @@ async fn run_atlas_on_store<F>(
     mut fetch: F,
     tracker: &std::sync::Mutex<AtlasJob>,
     store: AtlasStore,
+    dispatch_id: Option<&str>,
 ) -> Result<Stop>
 where
     F: FnMut(HttpCall) -> FetchFut + Send,
@@ -2334,7 +2336,45 @@ where
         synthesizer_fallbacks: _,
         run_id: resume_id,
     } = input;
-    let (run_id, mut cursor, mut stats, _resume_note) = if resume {
+    use crate::storage::classifier_admission as admission;
+    let repo = store
+        .repository()
+        .ok_or_else(|| anyhow!("SurrealDB storage is not configured"))?;
+    let mut dispatch_revision = None;
+    let (run_id, mut cursor, mut stats, resume) = if let Some(id) = dispatch_id {
+        // Read the revision before its checkpoint. A concurrent write after
+        // this read invalidates the guarded startup instead of rolling back
+        // the cursor or reopening a completed run.
+        let revision = admission::run_revision(repo, id).await?;
+        let saved = crate::storage::atlas::run_by_id(repo.db(), id).await?;
+        if saved.as_ref().is_some_and(|run| run.state == "completed") {
+            return Ok(Stop::Finished);
+        }
+        if revision.lease_active {
+            return Err(admission::AdmissionError::LeaseLost.into());
+        }
+        dispatch_revision = Some(revision);
+        match saved {
+            Some(run) if run.state == "running" || resumable(&run) => {
+                let (cursor, stats) = decode_resume_state(&run)?;
+                (run.id, cursor, stats, true)
+            }
+            Some(_) => {
+                return Ok(Stop::Failed(
+                    "The dispatched Atlas run is not resumable".into(),
+                ))
+            }
+            None => (
+                id.to_owned(),
+                Cursor {
+                    from: lookback_from(),
+                    ..Cursor::default()
+                },
+                RunStats::default(),
+                false,
+            ),
+        }
+    } else if resume {
         let run = match resume_id {
             Some(id) => store
                 .list_runs()
@@ -2350,13 +2390,13 @@ where
         if !resumable(&run) {
             return Ok(Stop::Failed("The latest Atlas run is not paused".into()));
         }
-        (run.id, cursor, stats, Some(run.note))
+        (run.id, cursor, stats, true)
     } else {
         let cursor = Cursor {
             from: lookback_from(),
             ..Cursor::default()
         };
-        (new_run_id(), cursor, RunStats::default(), None)
+        (new_run_id(), cursor, RunStats::default(), false)
     };
     let home_path = std::path::absolute(db_path)?
         .parent()
@@ -2365,9 +2405,6 @@ where
         })?
         .to_path_buf();
     let classifier_home = ClassifierHome::new(home_path);
-    let repo = store
-        .repository()
-        .ok_or_else(|| anyhow!("SurrealDB storage is not configured"))?;
     let owner_id = format!("atlas-owner-{}", crate::store::new_id());
     let db_owner = crate::storage::classifier_admission::AdmissionOwner::new(repo.clone());
     let intent = crate::storage::classifier_admission::announce_foreground_intent(
@@ -2393,8 +2430,10 @@ where
     let deadline = tokio::time::Instant::now() + handoff;
     let startup: Result<(CyclePermit, crate::storage::classifier_admission::RunClaim)> = async {
         for attempt in 0..3 {
-            let revision =
-                crate::storage::classifier_admission::run_revision(repo, &run_id).await?;
+            let revision = match dispatch_revision.take() {
+                Some(revision) => revision,
+                None => admission::run_revision(repo, &run_id).await?,
+            };
             let permit = foreground_classifier_preflight(
                 &store,
                 &classifier_home,
@@ -2429,7 +2468,11 @@ where
                 Ok(claim) => return Ok((permit, claim)),
                 Err(crate::storage::classifier_admission::AdmissionError::InvalidRunState {
                     code,
-                }) if code == "preflight_stale" && resume && attempt < 2 => {
+                }) if code == "preflight_stale"
+                    && resume
+                    && dispatch_id.is_none()
+                    && attempt < 2 =>
+                {
                     // Re-read and re-preflight the selected run. A stale permit
                     // is never reused against a changed checkpoint/cohort.
                     let selected = crate::storage::atlas::run_by_id(repo.db(), &run_id)
@@ -2496,8 +2539,10 @@ where
     }
     stats.contract_version = crate::atlas_work::COLLECTION_CONTRACT.into();
     save(&store, &run_id, &cursor, &stats).await?;
-    if let Ok(mut job) = tracker.lock() {
-        job.start(&run_id);
+    if dispatch_id.is_none() {
+        if let Ok(mut job) = tracker.lock() {
+            job.start(&run_id);
+        }
     }
     if cursor.from.is_empty() {
         cursor.from = lookback_from();
@@ -3636,6 +3681,37 @@ pub enum LiveRun {
     Latest,
     /// Resume this run (an older cycle stopped in phase 4/5).
     Run(String),
+    /// Start or resume the exact run assigned by durable Atlas dispatch.
+    /// The dispatcher owns its registry job and delivery cancellation.
+    Dispatch(String),
+}
+
+fn validate_dispatch_id(run_id: &str) -> Result<()> {
+    let valid = run_id
+        .strip_prefix("fleet-atlas-run-")
+        .is_some_and(|request| {
+            (1..=64).contains(&request.len())
+                && request
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        });
+    anyhow::ensure!(valid, "invalid dispatched Atlas run ID");
+    Ok(())
+}
+
+/// Read the exact durable run state assigned to a dispatch.
+pub async fn dispatch_state(
+    repo: &crate::storage::repo::Repository,
+    run_id: &str,
+) -> Result<Option<String>> {
+    validate_dispatch_id(run_id)?;
+    let mut response = repo
+        .db()
+        .query("SELECT VALUE state FROM ONLY type::record('atlas_run', $run)")
+        .bind(("run", run_id.to_owned()))
+        .await?
+        .check()?;
+    Ok(response.take(0)?)
 }
 
 /// Live pipeline. Uses the process HTTP client and paces GNews by one second.
@@ -3651,52 +3727,61 @@ pub async fn run_live(
     synthesizer_fallbacks: &[ProviderSecret],
     emit: impl FnMut(AtlasEvent) + Send,
 ) -> Result<Stop> {
+    let dispatch_id = match &live {
+        LiveRun::Dispatch(id) => {
+            validate_dispatch_id(id)?;
+            Some(id.as_str())
+        }
+        _ => None,
+    };
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(25))
         .build()?;
-    run_atlas(
-        RunInput {
-            db_path,
-            pause,
-            keys,
-            user_agent,
-            pace: true,
-            resume: live != LiveRun::Fresh,
-            feed,
-            classifier,
-            synthesizer,
-            synthesizer_fallbacks,
-            run_id: match &live {
-                LiveRun::Run(id) => Some(id.as_str()),
-                _ => None,
-            },
+    let input = RunInput {
+        db_path,
+        pause,
+        keys,
+        user_agent,
+        pace: true,
+        resume: matches!(&live, LiveRun::Latest | LiveRun::Run(_)),
+        feed,
+        classifier,
+        synthesizer,
+        synthesizer_fallbacks,
+        run_id: match &live {
+            LiveRun::Run(id) => Some(id.as_str()),
+            _ => None,
         },
-        emit,
-        move |call: HttpCall| {
-            let client = client.clone();
-            Box::pin(async move {
-                let mut request = client.get(&call.url);
-                for (name, value) in &call.headers {
-                    request = request.header(name.as_str(), value.as_str());
-                }
-                let response = request.send().await?;
-                let status = response.status().as_u16();
-                let location = response
-                    .headers()
-                    .get(reqwest::header::LOCATION)
-                    .and_then(|value| value.to_str().ok())
-                    .map(str::to_string);
-                let body = response.text().await?;
-                Ok(HttpReply {
-                    status,
-                    body,
-                    location,
-                })
+    };
+    let fetch = move |call: HttpCall| -> FetchFut {
+        let client = client.clone();
+        Box::pin(async move {
+            let mut request = client.get(&call.url);
+            for (name, value) in &call.headers {
+                request = request.header(name.as_str(), value.as_str());
+            }
+            let response = request.send().await?;
+            let status = response.status().as_u16();
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+            let body = response.text().await?;
+            Ok(HttpReply {
+                status,
+                body,
+                location,
             })
-        },
-    )
-    .await
+        })
+    };
+    if let Some(id) = dispatch_id {
+        let tracker = std::sync::Mutex::new(AtlasJob::new(db_path));
+        run_atlas_inner(input, emit, fetch, &tracker, Some(id)).await
+    } else {
+        run_atlas(input, emit, fetch).await
+    }
 }
 
 pub async fn charge_newsapi(store: &AtlasStore) {
@@ -4368,6 +4453,99 @@ mod classifier_preflight_tests {
 
     #[cfg(feature = "embedded")]
     #[tokio::test]
+    async fn dispatch_replay_respects_completion_and_the_exact_run_lease() {
+        use crate::storage::classifier_admission::AdmissionError;
+        use crate::storage::open::Target;
+        use crate::storage::repo::Repository;
+
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("argos.db");
+        let repo = Repository::connect(
+            &Target::Embedded {
+                path: temp.path().join("storage"),
+            },
+            "argos",
+            "dispatch_replay",
+        )
+        .await
+        .unwrap();
+        crate::storage::atlas::apply_schema(repo.db())
+            .await
+            .unwrap();
+        let completed = "fleet-atlas-run-completed";
+        let leased = "fleet-atlas-run-leased";
+        let cursor = serde_json::to_string(&Cursor::default()).unwrap();
+        let stats = serde_json::to_string(&RunStats::default()).unwrap();
+        for run in [completed, leased] {
+            crate::storage::atlas::insert_run(repo.db(), run, &cursor, &stats)
+                .await
+                .unwrap();
+        }
+        crate::storage::atlas::set_state(repo.db(), completed, "completed", "", true)
+            .await
+            .unwrap();
+        repo.db()
+            .query("CREATE type::record('atlas_classifier_run', $run) SET owner='fixture', revision=1, lease_until=time::now()+1h, updated_at=time::now() RETURN NONE")
+            .bind(("run", leased))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let pause = AtomicBool::new(false);
+        let keys = ProviderKeys::default();
+        let input = || RunInput {
+            db_path: &db_path,
+            pause: &pause,
+            keys: &keys,
+            user_agent: "offline-fixture",
+            pace: false,
+            resume: false,
+            feed: &[],
+            classifier: None,
+            synthesizer: None,
+            synthesizer_fallbacks: &[],
+            run_id: None,
+        };
+        let tracker = std::sync::Mutex::new(AtlasJob::new(&db_path));
+        let fetch = |_: HttpCall| -> FetchFut { panic!("replayed delivery must not fetch") };
+        let replay = run_atlas_on_store(
+            input(),
+            |_| {},
+            fetch,
+            &tracker,
+            AtlasStore::from_repository(repo.clone()),
+            Some(completed),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(replay, Stop::Finished));
+        let held = run_atlas_on_store(
+            input(),
+            |_| {},
+            fetch,
+            &tracker,
+            AtlasStore::from_repository(repo.clone()),
+            Some(leased),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            held.downcast_ref::<AdmissionError>(),
+            Some(AdmissionError::LeaseLost)
+        ));
+        assert_eq!(
+            dispatch_state(&repo, completed).await.unwrap().as_deref(),
+            Some("completed")
+        );
+        assert_eq!(
+            dispatch_state(&repo, leased).await.unwrap().as_deref(),
+            Some("running")
+        );
+        assert!(tracker.lock().unwrap().run_id.is_empty());
+    }
+
+    #[cfg(feature = "embedded")]
+    #[tokio::test]
     async fn denied_preflight_spends_no_quota_or_fetches_and_preserves_resume_state() {
         use crate::storage::open::Target;
         use crate::storage::repo::Repository;
@@ -4458,6 +4636,7 @@ mod classifier_preflight_tests {
                 },
                 &tracker,
                 AtlasStore::from_repository(repo.clone()),
+                None,
             )
             .await;
             let error = result.unwrap_err();

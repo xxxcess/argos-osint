@@ -114,6 +114,17 @@ impl ApiAccess {
     }
 }
 
+pub(crate) fn internal_access(service: &str) -> Result<(IpAddr, NetworkPolicy)> {
+    let bind_key = format!("FLEETWORKS_{service}_BIND");
+    let host_key = format!("FLEETWORKS_{service}_ALLOWED_HOSTS");
+    let bind = value(&bind_key, "127.0.0.1")?
+        .parse()
+        .with_context(|| format!("invalid {bind_key}"))?;
+    let hosts = split_csv(&env::var(&host_key).with_context(|| format!("{host_key} is required"))?);
+    let token = read_secret("FLEETWORKS_INTERNAL_TOKEN")?;
+    Ok((bind, NetworkPolicy::new(&hosts, &token)?))
+}
+
 fn split_csv(raw: &str) -> Vec<String> {
     raw.split(',')
         .map(str::trim)
@@ -143,7 +154,7 @@ fn identifier(key: &str, default: &str) -> Result<String> {
     Ok(name)
 }
 
-fn read_secret(key: &str) -> Result<String> {
+pub(crate) fn read_secret(key: &str) -> Result<String> {
     match env::var(key) {
         Ok(secret) => return Ok(secret),
         Err(env::VarError::NotPresent) => (),

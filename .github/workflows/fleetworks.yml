@@ -45,79 +45,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import os
-          import re
-          import subprocess
-          from pathlib import Path
-
-          head = os.environ["FLEETWORKS_HEAD"]
-          base = os.environ.get("FLEETWORKS_BASE", "")
-          actual = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-          if actual != head:
-              raise SystemExit("Checkout does not match the event head")
-
-          event = os.environ["GITHUB_EVENT_NAME"]
-          selected = set()
-          default_scopes = {"native", "server", "compose", "broker"}
-          all_scopes = default_scopes | {"bert"}
-          if event not in {"push", "pull_request"} or not re.fullmatch("[0-9a-f]{40}", base) or base == "0" * 40:
-              selected.update(all_scopes)
-          else:
-              comparison = f"{base}...{head}" if event == "pull_request" else f"{base}..{head}"
-              diff = subprocess.run(
-                  ["git", "diff", "--name-only", "--no-renames", "-z", comparison, "--"],
-                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
-              )
-              if diff.returncode:
-                  print("Diff unavailable. Selecting all scopes.")
-                  selected.update(all_scopes)
-              else:
-                  for path in map(os.fsdecode, diff.stdout.split(b"\0")):
-                      if not path or path in {"README.md", "CHANGELOG.md"}:
-                          continue
-                      if path.startswith(("docs/", ".planning/")) and path.endswith((".md", ".svg", ".html")):
-                          continue
-                      if path.startswith("tools/atlas-bert/") or path in {
-                          ".github/workflows/atlas-bert.yml", "scripts/fixtures/atlas_bert",
-                      }:
-                          selected.add("bert")
-                          continue
-                      if path.startswith((
-                          "crates/argos-osint-core/src/classifier/",
-                          "crates/argos-osint-core/src/atlas_classify",
-                          "crates/argos-osint-core/src/storage/classifier_",
-                          "crates/argos-osint-core/tests/classifier_",
-                          "crates/argos-osint-core/tests/fixtures/classifier/",
-                          "crates/argos-osint-core/tests/storage_classifier_",
-                      )) or path in {
-                          ".github/workflows/fleetworks.yml",
-                          "apps/venture/src/classifier.rs",
-                          "crates/argos-api-host/src/classifier_service.rs",
-                          "crates/argos-api-host/src/classifier_train.rs",
-                          "crates/argos-osint-core/tests/adversarial_classifier_runtime.rs",
-                          "deploy/compose.atlas.yml",
-                      }:
-                          selected.add("bert")
-                      if path.startswith("apps/venture/"):
-                          selected.update({"native", "server", "compose"})
-                      elif path.startswith("apps/fleetworks-cli/"):
-                          selected.add("native")
-                      elif path.startswith(("apps/web-desktop/", "deploy/")):
-                          selected.update({"server", "compose"})
-                      elif (
-                          path.startswith(("crates/argos-api-host/", "crates/argos-osint-api/",
-                                           "crates/argos-osint-core/", "crates/fleetworks-broker/"))
-                          or path == "scripts/fleetworks_atlas_smoke.py"
-                      ):
-                          selected.update({"server", "broker"})
-                      else:
-                          selected.update(default_scopes)
-          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
-              for scope in sorted(all_scopes):
-                  print(f"{scope}={str(scope in selected).lower()}", file=output)
-          print(f"{head}: {', '.join(sorted(selected)) or 'no runtime scopes selected'}")
-          PY
+          python3 -B -m unittest discover -s scripts -p test_fleetworks_verify.py
+          python3 scripts/fleetworks_verify.py plan \
+            --event "$GITHUB_EVENT_NAME" --base "$FLEETWORKS_BASE" \
+            --head "$FLEETWORKS_HEAD" --github-output "$GITHUB_OUTPUT"
 
   native:
     name: Native clients / ${{ matrix.runner }}
@@ -214,6 +145,25 @@ jobs:
           python3 scripts/fleetworks_network_smoke.py \
             --host target/agents/debug/argos-api-host --surreal "$binary"
           printf 'binary=%s\n' "$binary" >> "$GITHUB_OUTPUT"
+      - name: Test shared Atlas provider quota reservations
+        if: needs.scope.outputs.broker == 'true'
+        env:
+          ARGOS_SURREAL_MODE: server
+          ARGOS_SURREAL_REQUIRED: "1"
+          ARGOS_SURREAL_BIN: ${{ steps.surreal.outputs.binary }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset SURREAL_USER SURREAL_PASS
+          test -x "$ARGOS_SURREAL_BIN"
+          log="$RUNNER_TEMP/fleetworks-atlas-quota-test.log"
+          python3 scripts/agent_cargo.py test --locked -p argos-osint-core \
+            --no-default-features --features server,nlp,classifier --test storage_atlas \
+            quota_reservations_share_daily_account_caps -- --exact --nocapture | tee "$log"
+          if ! grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored' "$log"; then
+            echo '::error::The required Atlas quota reservation test did not pass'
+            exit 1
+          fi
       - name: Exercise native Atlas dispatch with RabbitMQ
         if: needs.scope.outputs.broker == 'true'
         timeout-minutes: 12
@@ -282,7 +232,7 @@ jobs:
           export FLEETWORKS_UID="$(id -u)" FLEETWORKS_GID="$(id -g)"
           umask 077
           mkdir -p "$FLEETWORKS_HOST_WORKSPACE"/{secrets,storage/surrealdb}
-          for secret in api-token storage-password storage-root-password; do
+          for secret in api-token brain-token storage-password storage-root-password; do
             printf '%064d\n' 0 > "$FLEETWORKS_HOST_WORKSPACE/secrets/$secret"
           done
           docker compose -f deploy/compose.yml --profile disk config --quiet
@@ -293,11 +243,15 @@ jobs:
             docker compose -f deploy/compose.yml -f deploy/compose.atlas.yml --profile disk config --quiet
           fi
       - name: Exercise packaged Compose through Venture
-        if: needs.scope.outputs.compose == 'true' && hashFiles('deploy/verify.py') != ''
+        if: needs.scope.outputs.compose == 'true'
         timeout-minutes: 60
         shell: bash
         run: |
           set -euo pipefail
+          if [[ ! -f deploy/verify.py ]]; then
+            echo "::error file=deploy/verify.py::Missing selected Compose smoke script"
+            exit 1
+          fi
           python3 scripts/agent_cargo.py build --locked -p fleetworks-venture --bin venture
           python3 deploy/verify.py --venture target/agents/debug/venture
 

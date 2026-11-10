@@ -18,6 +18,7 @@ on:
       - 'deploy/*.sh'
       - 'deploy/check-web.mjs'
       - 'deploy/verify.py'
+      - 'crates/argos-osint-core/src/provider_attempt/remote.rs'
       - 'services/api-host/**'
   workflow_dispatch:
     inputs:

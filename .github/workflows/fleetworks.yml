@@ -203,6 +203,19 @@ jobs:
           python3 scripts/fleetworks_verify.py timed --phase server-test -- \
             python3 scripts/agent_cargo.py test --timings --locked -p argos-api-host -p argos-osint-api \
               "${features[@]}" --bin argos-api-host --lib
+          verify_core_tests() {
+            local phase="$1" filter="$2" log
+            log="$RUNNER_TEMP/fleetworks-$phase.log"
+            python3 scripts/fleetworks_verify.py timed --phase "$phase" -- \
+              python3 scripts/agent_cargo.py test --timings --locked -p argos-osint-core \
+                "${features[@]}" --lib "$filter" | tee "$log"
+            if ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored' "$log"; then
+              echo "::error::The required $filter tests did not pass"
+              exit 1
+            fi
+          }
+          verify_core_tests execution-transport-test provider_attempt::remote::tests
+          verify_core_tests config-commit-test config_commit::tests
       - name: Exercise bootstrap and network service roles on loopback
         id: surreal
         shell: bash

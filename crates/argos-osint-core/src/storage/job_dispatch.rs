@@ -380,7 +380,7 @@ pub struct DeliveryLease {
 /// Delivery disposition before any service work runs.
 #[derive(Debug)]
 pub enum DeliveryClaim {
-    Claimed(DeliveryLease),
+    Claimed(Box<DeliveryLease>),
     /// No work remains for this revision. The consumer may acknowledge it.
     Stale,
     /// The same revision is still queued but not eligible. Requeue delivery.
@@ -485,10 +485,10 @@ pub async fn claim_delivery(
                     .bind(("now", at)),
                 )
                 .await?;
-                Ok(DeliveryClaim::Claimed(DeliveryLease {
+                Ok(DeliveryClaim::Claimed(Box::new(DeliveryLease {
                     task,
                     envelope: envelope.clone(),
-                }))
+                })))
             }
             _ if queued => Ok(DeliveryClaim::Deferred),
             _ => Ok(DeliveryClaim::Stale),

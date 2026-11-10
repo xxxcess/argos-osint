@@ -34,3 +34,6 @@
 **/target
 **/secrets
 **/auth.json
+
+# Next type-checks every TypeScript file copied into the production app.
+**/__tests__

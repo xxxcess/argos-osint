@@ -1,4 +1,5 @@
 mod compose;
+mod host_storage;
 
 use std::env;
 use std::ffi::OsString;
@@ -65,6 +66,8 @@ enum Action {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         arguments: Vec<OsString>,
     },
+    #[command(name = "__host-storage-supervisor", hide = true)]
+    HostStorageSupervisor { generation: String },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -121,6 +124,12 @@ async fn main() -> Result<()> {
         Action::Logs { follow } => compose::logs(&workspace, follow).await,
         Action::Stop => compose::stop(&workspace).await,
         Action::Client { kind, arguments } => launch(&workspace, kind, arguments).await,
+        Action::HostStorageSupervisor { generation } => {
+            let owner = Owner::load(&workspace)
+                .await?
+                .context("missing Venture stack ownership")?;
+            owner.supervise_host_storage(&workspace, generation).await
+        }
     }
 }
 
@@ -160,7 +169,7 @@ async fn status(
     };
     if !json {
         if let Some(owner) = &owner {
-            owner.print_status().await?;
+            owner.print_status(workspace).await?;
         }
     }
     let ready = Client::new(&origin, token.as_deref())?.ready().await?;

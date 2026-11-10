@@ -42,6 +42,17 @@ Open `http://127.0.0.1:3000` in a browser after readiness completes.
 
 The `disk` profile uses the official SurrealDB 3.3.4 image pinned to its multi-platform digest. The database starts with authentication on the private network at `ws://surrealdb:8000`. It persists RocksDB data under `storage/surrealdb/` and syncs every transaction commit. Keep `FLEETWORKS_STORAGE_URL` unset or set to that origin when using the disk profile. `docker compose -f deploy/compose.yml --profile disk down` stops the stack and preserves its workspace data.
 
+## Venture-managed host database
+
+Set `FLEETWORKS_SURREAL_BIN` to an installed SurrealDB 3.3.4 executable or make `surreal` available on `PATH`. Venture launches the authenticated server, waits for readiness, and points the Compose services at the Docker host gateway.
+
+```sh
+venture --workspace "$FLEETWORKS_HOST_WORKSPACE" up --storage host-disk
+venture --workspace "$FLEETWORKS_HOST_WORKSPACE" stop
+```
+
+Use `--storage host-memory` for a disposable database. Host disk persists under `storage/host-surrealdb/`. Both modes use the workspace storage credentials. `FLEETWORKS_HOST_DB_BIND` defaults to `0.0.0.0:8010` to reach Docker's host gateway. Set it to a specific reachable IPv4 interface and port to restrict the listener or run another workspace concurrently. Host SurrealDB diagnostics are in `logs/host-surreal.log`.
+
 ## External database
 
 Set `FLEETWORKS_STORAGE_URL` to a reachable authenticated SurrealDB WebSocket origin. Use `wss://` for a remote TLS endpoint. For a server running on the Docker host, `host.docker.internal` is mapped to the host gateway. The external operator selects disk persistence and provides an existing root username and password for schema bootstrap.

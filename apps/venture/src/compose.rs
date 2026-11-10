@@ -15,6 +15,8 @@ use sha2::{Digest, Sha256};
 use tokio::process::Command;
 use url::Url;
 
+use crate::host_storage::{self, Config as HostStorage, Mode as HostMode};
+
 const DISK_URL: &str = "ws://surrealdb:8000";
 const OWNER_VERSION: u8 = 1;
 const OWNER_LIMIT: u64 = 64 * 1024;
@@ -39,6 +41,18 @@ const SETTINGS: &[(&str, Option<&str>)] = &[
 pub(crate) enum StorageMode {
     ComposeDisk,
     External,
+    HostMemory,
+    HostDisk,
+}
+
+impl StorageMode {
+    fn host_mode(self) -> Option<HostMode> {
+        match self {
+            Self::HostMemory => Some(HostMode::Memory),
+            Self::HostDisk => Some(HostMode::Disk),
+            Self::ComposeDisk | Self::External => None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -50,6 +64,8 @@ pub(crate) struct Owner {
     file: PathBuf,
     docker_host: String,
     storage: StorageMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    host_storage: Option<HostStorage>,
     endpoint: String,
     api_port: u16,
     web_port: u16,
@@ -102,12 +118,27 @@ impl Owner {
             "Venture ownership file does not match this workspace"
         );
         local_socket(&owner.docker_host)?;
+        ensure!(
+            owner.host_storage.as_ref().map(|config| config.mode) == owner.storage.host_mode(),
+            "Venture ownership has an inconsistent host storage mode"
+        );
         match owner.storage {
             StorageMode::ComposeDisk => {
                 ensure!(owner.endpoint == DISK_URL, "invalid owned storage endpoint")
             }
             StorageMode::External => {
                 external_url(&owner.endpoint)?;
+            }
+            StorageMode::HostMemory | StorageMode::HostDisk => {
+                let config = owner
+                    .host_storage
+                    .as_ref()
+                    .context("missing host SurrealDB configuration")?;
+                config.validate()?;
+                ensure!(
+                    config.container_url() == owner.endpoint,
+                    "invalid host SurrealDB endpoint"
+                );
             }
         }
         Ok(Some(owner))
@@ -121,8 +152,35 @@ impl Owner {
         &self.token
     }
 
-    pub(crate) async fn print_status(&self) -> Result<()> {
+    pub(crate) async fn print_status(&self, workspace: &Workspace) -> Result<()> {
+        if let Some(config) = &self.host_storage {
+            host_storage::status(workspace, config).await?;
+        }
         run(self.compose().args(["ps", "--all"]), "inspect services").await
+    }
+
+    pub(crate) async fn supervise_host_storage(
+        &self,
+        workspace: &Workspace,
+        generation: String,
+    ) -> Result<()> {
+        let config = self
+            .host_storage
+            .as_ref()
+            .context("this stack has no managed host storage")?;
+        let root_name = self
+            .settings
+            .get("FLEETWORKS_STORAGE_ROOT_USERNAME")
+            .map(String::as_str)
+            .unwrap_or("root");
+        host_storage::supervise(
+            workspace,
+            config,
+            root_name,
+            &self.root_password,
+            generation,
+        )
+        .await
     }
 
     fn save(&self, workspace: &Workspace) -> Result<()> {
@@ -241,6 +299,9 @@ pub(crate) async fn up(
         })
         .await??;
     }
+    if let Some(config) = &requested.host_storage {
+        host_storage::start(workspace, config).await?;
+    }
     run(
         requested.compose().args([
             "up",
@@ -283,6 +344,17 @@ fn prepare(
     }
     .context("resolve Compose file (use --compose-file from outside the checkout)")?;
     ensure!(file.is_file(), "Compose file must be a regular file");
+    let host_storage = storage
+        .host_mode()
+        .map(|mode| {
+            HostStorage::resolve(
+                workspace,
+                &environment,
+                mode,
+                prior.as_ref().and_then(|owner| owner.host_storage.as_ref()),
+            )
+        })
+        .transpose()?;
     let endpoint = match storage {
         StorageMode::ComposeDisk => {
             if let Some(url) = value(&environment, STORAGE_URL)? {
@@ -303,6 +375,19 @@ fn prepare(
                 })
                 .context("external storage requires FLEETWORKS_STORAGE_URL")?;
             external_url(&url)?
+        }
+        StorageMode::HostMemory | StorageMode::HostDisk => {
+            let config = host_storage
+                .as_ref()
+                .context("missing host SurrealDB configuration")?;
+            let endpoint = config.container_url();
+            if let Some(url) = value(&environment, STORAGE_URL)? {
+                ensure!(
+                    url.trim_end_matches('/') == endpoint,
+                    "FLEETWORKS_STORAGE_URL conflicts with the managed host SurrealDB bind"
+                );
+            }
+            endpoint
         }
     };
     let api_port = configured_port(
@@ -335,7 +420,7 @@ fn prepare(
         &environment,
         ROOT_PASSWORD_FILE,
         prior.as_ref().map(|owner| owner.root_password.as_path()),
-        (storage == StorageMode::ComposeDisk).then_some("storage-root-password"),
+        (storage != StorageMode::External).then_some("storage-root-password"),
     )?;
     let runtime_password = secret(
         workspace,
@@ -391,6 +476,7 @@ fn prepare(
         file,
         docker_host,
         storage,
+        host_storage,
         endpoint,
         api_port,
         web_port,
@@ -441,15 +527,25 @@ pub(crate) async fn stop(workspace: &Workspace) -> Result<()> {
         println!("This workspace has no Venture-owned stack");
         return Ok(());
     };
-    run(
-        owner.compose().args(["down", "--remove-orphans"]),
-        "stop services",
-    )
-    .await?;
-    ensure!(
-        !owner.existing_project().await?,
-        "owned Docker project still has resources"
-    );
+    let compose_result = async {
+        run(
+            owner.compose().args(["down", "--remove-orphans"]),
+            "stop services",
+        )
+        .await?;
+        ensure!(
+            !owner.existing_project().await?,
+            "owned Docker project still has resources"
+        );
+        Ok(())
+    }
+    .await;
+    let host_result = match &owner.host_storage {
+        Some(config) => host_storage::stop(workspace, config).await,
+        None => Ok(()),
+    };
+    compose_result?;
+    host_result?;
     tokio::fs::remove_file(owner_path(workspace))
         .await
         .context("clear stopped Venture ownership")?;
@@ -660,7 +756,7 @@ async fn run(command: &mut Command, operation: &str) -> Result<()> {
     Ok(())
 }
 
-async fn shutdown_signal() {
+pub(crate) async fn shutdown_signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
@@ -726,6 +822,7 @@ mod tests {
             file: first.root().join("compose.yml"),
             docker_host: "unix:///tmp/docker.sock".into(),
             storage: StorageMode::ComposeDisk,
+            host_storage: None,
             endpoint: super::DISK_URL.into(),
             api_port: 18080,
             web_port: 13000,

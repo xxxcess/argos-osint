@@ -1,6 +1,6 @@
 # Verification and documentation acceptance plan
 
-Status: candidate accepted for Intel Mac testing at `37b9250`. The [closeout record](progress.md#2026-11-10--closeout-at-37b9250) records checks run and their scope. Full cutover acceptance is open.
+Status: hosted candidate evidence remains `37b9250`. Local cutover commits through `4c3b074` are recorded in [progress](progress.md#2026-11-10--retained-provider-transports). Full cutover acceptance is open.
 
 ## Verification interface
 Introduce a shared scope-aware entrypoint with plan, local, pr and full modes. plan prints selected checks without executing. Select changed files plus dependents; take the union of scopes. Shared contracts, manifests, lockfiles and build tooling widen coverage; unknown paths fail safe to broad coverage. Required aggregate status must report for every revision and distinguish irrelevant, skipped, failed, cancelled and missing checks.
@@ -36,7 +36,7 @@ Record queue/setup/cache/compile/test/image/upload timings, SHA, runner, feature
 - [ ] Client exit preserves running services; explicit shutdown respects ownership.
 - [x] Both Linux container architectures and all four supported CLI targets pass downloaded-candidate smoke.
 - [x] Packaged Venture activates Natural models for two exact CSV hashes while Atlas selects Rust-BERT.
-- [ ] Verify the published registry artifacts after release.
+- [ ] Verify the published registry artifacts after release. No registry push has run. This machine has no Docker daemon.
 - [ ] Scope-selection fixtures cover docs, UI, TUI, DB, API, lockfiles, shared contracts and unknown paths.
 - [ ] No stale revision or unexecuted check is reported as passed.
 

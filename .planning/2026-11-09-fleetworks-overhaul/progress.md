@@ -116,7 +116,7 @@ The candidate at `37b92505684a7b7c84e0bfb16bc4e74a674f9189` on `feat/atlas-zero-
 
 Verification caught two web CI failures, a queued brief losing its captured model route after a defaults edit, and a configuration write race. The final hosted workflow passed after the fixes. The README, maintained wiki, deployment guides, and architecture diagrams describe the delivered Fleetworks setup.
 
-The [task plan](task_plan.md#follow-up-work) carries the remaining provider transports and credential scoping, retained parity and compatibility retirement, and registry publication. This closes the implementation thread at the verified candidate.
+This closes the hosted candidate thread at `37b9250`. Later commits superseded the provider-transport and research-submission items. See [Retained provider transports](#2026-11-10--retained-provider-transports).
 
 ## 2026-11-10 — Retained provider transports
 
@@ -125,6 +125,8 @@ API-key model attempts from the worker, Brain and brief worker now go through th
 The compatibility desk now refuses to start, retry, or resume a research turn. Historical list and show commands remain. Ten retained client sessions passed, including empty actor discovery, a missing result row, and an unknown model role. The compatibility desk's research-turn tests passed: 20 terminal cases and the adversarial launch case.
 
 The full embedded parity suite and registry publication remain open. Docker is not available on this machine, so image publication was not run.
+
+Two successful hosted Fleetworks runs are comparable. The run at `af20981` took about 16 minutes. The run at `37b9250` took about 15 minutes. Native client jobs stayed under 3 minutes on both. The ARM64 server job was about 11 minutes on both. Compose AMD64 was about 12 minutes, then about 15 minutes. The web job was about 11 minutes, then about 12 minutes. The docs-only run at `9273a02` finished in under a minute and is not part of that comparison. Screenshot review of the retained terminal and a measurement of the current tree are still open.
 
 ## Retention
 

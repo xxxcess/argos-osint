@@ -44,6 +44,14 @@ function stringField(text, key) {
   return match[1];
 }
 
+export function workspaceMemberPaths(cargo) {
+  const members = /\bmembers\s*=\s*\[([^\]]+)\]/.exec(table(cargo, "workspace"));
+  if (!members) throw new Error("Explicit workspace members are required");
+  const paths = [...members[1].replace(/#[^\n]*/g, "").matchAll(/"([^"\n]+)"/g)].map(match => match[1]);
+  if (!paths.length || paths.some(path => /[*?]/.test(path))) throw new Error("Use explicit member paths and update release selectors when adding crates");
+  return paths;
+}
+
 export function checkVersions(root = ROOT, tag) {
   const read = path => readFileSync(join(root, path), "utf8");
   const cargo = read("Cargo.toml");
@@ -54,11 +62,7 @@ export function checkVersions(root = ROOT, tag) {
   if (read("version.txt").trim() !== version) throw new Error("version.txt differs from workspace version");
   if (tag && tag !== `v${version}`) throw new Error(`Expected tag v${version}, received ${tag}`);
 
-  const members = /\bmembers\s*=\s*\[([^\]]+)\]/.exec(table(cargo, "workspace"));
-  if (!members) throw new Error("Explicit workspace members are required");
-  const paths = [...members[1].replace(/#[^\n]*/g, "").matchAll(/"([^"\n]+)"/g)].map(match => match[1]);
-  if (!paths.length || paths.some(path => /[*?]/.test(path))) throw new Error("Use explicit member paths and update release selectors when adding crates");
-  const names = paths.map(path => {
+  const names = workspaceMemberPaths(cargo).map(path => {
     const member = table(read(`${path}/Cargo.toml`), "package");
     if (!/^version\.workspace\s*=\s*true[ \t]*(?:#[^\n]*)?$/m.test(member) || /^version\s*=/m.test(member)) {
       throw new Error(`${path} must inherit version.workspace = true`);

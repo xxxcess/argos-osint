@@ -4,14 +4,14 @@ import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
-import { checkMessage, checkRange, checkVersions, ROOT } from "../../scripts/release_check.mjs";
+import { checkMessage, checkRange, checkVersions, ROOT, workspaceMemberPaths } from "../../scripts/release_check.mjs";
 
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), "argos-release-policy-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
+  const members = workspaceMemberPaths(readFileSync(join(ROOT, "Cargo.toml"), "utf8"));
   for (const path of ["Cargo.toml", "Cargo.lock", "version.txt", ".release-please-manifest.json", "release-please-config.json",
-    "crates/argos-osint-core/Cargo.toml", "crates/argos-osint-bin/Cargo.toml",
-    "crates/argos-osint-api/Cargo.toml", "crates/argos-api-host/Cargo.toml"]) {
+    ...members.map(member => `${member}/Cargo.toml`)]) {
     const dest = join(root, path);
     mkdirSync(join(dest, ".."), { recursive: true });
     cpSync(join(ROOT, path), dest);

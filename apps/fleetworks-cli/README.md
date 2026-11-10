@@ -1,0 +1,34 @@
+# Fleetworks network clients
+
+These terminal commands use the v1 HTTP API. Build them alongside Venture with
+`cargo build --locked -p fleetworks-cli -p fleetworks-venture`.
+
+| Executable | Commands |
+| --- | --- |
+| `fleetworks-atlas` | `days`, `articles DAY [--category CATEGORY] [--limit N] [--cursor CURSOR]` |
+| `fleetworks-brain` | `actor ID`, `brief RUN ID`, `topology SEED` |
+| `fleetworks-jobs` | `list`, `detail ID`, `retry ID`, `logs [--job-id ID] [--limit N]` |
+| `fleetworks-tools` | `list` |
+| `fleetworks-models` | `defaults` |
+| `fleetworks-profile` | `workspace`, `health`, `show` |
+
+Use `--workspace PATH` to override `FLEETWORKS_WORKSPACE` and the default
+`.fleetworks` directory under the current directory. `profile workspace`
+reports the selected absolute path without creating a workspace or contacting
+the API.
+
+The API origin resolves from `--api-origin`, `FLEETWORKS_API_ORIGIN` in the
+effective workspace environment, then `http://127.0.0.1:8080`. Select a
+credential file with `--api-token-file`. Otherwise the client resolves
+`FLEETWORKS_API_TOKEN` or `FLEETWORKS_API_TOKEN_FILE` from process variables
+first and workspace configuration second, then checks `secrets/api-token`.
+Relative token paths start at the workspace root. The unauthenticated legacy
+host is available on loopback.
+
+Successful commands write JSON to stdout. Use `--json` for compact output and
+`--help` for command arguments. Atlas article dates use `YYYY-MM-DD`. Pass
+the returned `next_cursor` into the next request unchanged. Brain topology
+accepts a canonical memory ID or a `brief:RUN/ARTICLE` seed. Tools, model
+defaults, Profile show, and Jobs logs require their corresponding Fleetworks
+API routes. The service rollout and terminal parity are tracked in the
+[implementation plan](../../.planning/2026-11-09-fleetworks-overhaul/task_plan.md).

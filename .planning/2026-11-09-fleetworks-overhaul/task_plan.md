@@ -4,7 +4,7 @@
 Replace the Terminal OSINT research desk with Fleetworks: a Venture-managed collection of isolated network services, terminal clients and React Native Web, with scope-based fast verification.
 
 ## Current Phase
-Planning complete for user review. Implementation is NOT authorized. The user will review this plan before telling us to build.
+Implementation authorized. Rebuild from the committed plan at `158774d` and publish verified slices on `feat/atlas-zero-shot`.
 
 ## Scope
 Docker images, Compose, Venture and the CLI suite, workspace/storage configuration, retained Atlas/Brain/Intel/tool/model functionality, RabbitMQ dispatch, repository reorganization, obsolete Recon removal, documentation/planning reconciliation and agent guidance updates.
@@ -18,7 +18,6 @@ Preserve unrelated changes and existing API-key configurations/model defaults. S
 
 ## Finish line
 All retained capabilities run through Venture with network-only clients; selected storage modes and restart/recovery contracts pass; images and CLI outputs are verified; Recon is unreachable; docs and agent guidance describe the actual delivered architecture. Freeze before final checks, reuse unaffected evidence, and repair only demonstrated in-scope blockers afterward.
-This turn delivers planning files only. Runtime tests, builds, source changes, CI dispatch and historical-document deletion await the user's build instruction.
 
 ## Phases
 
@@ -30,17 +29,17 @@ Status: complete
 Acceptance: user can review scope and implementation order without relying on chat history.
 
 ### Phase 2 — Baseline, guidance transition and contracts
-Status: pending
-- [ ] Record current tree and retained-function acceptance map; preserve dirty files.
+Status: in implementation
+- [x] Record current tree and retained-function acceptance map; preserve dirty files.
 - [ ] Inventory all planning/docs/agent surfaces; assign retain, update, supersede or remove dispositions, preserving unresolved work.
 - [ ] Update canonical execution/testing guidance to distinguish legacy checks from approved Fleetworks checks; do not claim unbuilt features exist.
-- [ ] Establish lightweight versioned HTTP contracts, clients, service ownership and workspace configuration.
+- [x] Establish lightweight versioned HTTP contracts, clients and workspace configuration. Service ownership continues in Phase 4.
 - [ ] Move CI dependency version/checksum provenance out of historical planning files.
 Acceptance: no cleanup destroys a runtime/CI dependency; guidance and scope selection have a single source of truth.
 
 ### Phase 3 — Workspace, storage and shared primitives
 Status: pending
-- [ ] Implement workspace resolution, configuration/secrets loading and explicit API-key/model-default import.
+- [x] Implement workspace resolution, configuration/secrets loading and explicit API-key/model-default import.
 - [ ] Implement managed host memory/disk SurrealDB and external disk-server configuration, authentication and TLS.
 - [ ] Extract shared graph, model execution, jobs and cancellation primitives from Recon.
 - [ ] Split contracts/client/UI crates from RocksDB, ONNX and QuickJS dependencies.
@@ -91,7 +90,7 @@ Acceptance: no unrun test is presented as passed; independent findings are defer
 Root agent owns integration, plan summaries and shared build cache. Delegate disjoint service/client/documentation work when useful. Workflow changes remain Code Architect-owned. Workers report evidence and never independently overwrite shared summaries.
 
 ## Blockers and decisions
-- User review/build instruction is the current boundary; do not implement yet.
+- The previous unpublished integration commit is unavailable. Treat results from that tree as historical and verify the rebuilt source independently.
 - Existing instructions still govern until their approved transition is implemented.
 - Local memory mode is a host SurrealDB server, not embedded storage in each app.
 - External SurrealDB must be disk-backed; persistence cannot be proven from endpoint URL alone.
@@ -102,4 +101,4 @@ Root agent owns integration, plan summaries and shared build cache. Delegate dis
 TinyFish CLI was unavailable during earlier research; used official RabbitMQ/Lapin pages through web fallback. GitHub connector omitted duration fields; read-only gh API supplied timestamps. No new execution failures during plan creation.
 
 ## Next Step
-User reviews this plan and supplies revisions or the explicit instruction to build. Do not begin Phase 2 before that instruction.
+Wire retained service routes and isolate API, bootstrap and background execution roles. Verify the scoped network storage path before enabling orchestration.

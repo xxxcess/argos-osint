@@ -11,6 +11,7 @@ task_plan.md
 findings.md
 progress.md
 .agent-scratch/
+/.fleetworks/
 .agent_scratch/
 .agents/teamwork/
 .planning/**/tui/

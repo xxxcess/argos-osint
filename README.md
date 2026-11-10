@@ -8,6 +8,8 @@ Only Recon has a chat. Everything else is fields, lists, and buttons. Observatio
 
 [Docs](docs/README.md) · [Usage](docs/wiki/concepts/usage.md) · [Figures](docs/diagrams.md) · [Releases](docs/wiki/code/versioning.md) · [Changelog](CHANGELOG.md)
 
+The Fleetworks branch adds Venture, isolated workspace setup, and six terminal clients for the versioned Argos API. See the [Fleetworks guide](docs/wiki/code/fleetworks.md) for current commands and migration status.
+
 [![Argos workspace](docs/diagrams/workspace.svg)](docs/diagrams/workspace.html)
 
 ## Tech stack

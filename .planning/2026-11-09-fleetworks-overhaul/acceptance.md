@@ -1,6 +1,6 @@
 # Verification and documentation acceptance plan
 
-Status: planned checks, not executed results. Static audit only is currently authorized.
+Status: acceptance criteria. The progress log records executed checks and their scope.
 
 ## Verification interface
 Introduce a shared scope-aware entrypoint with plan, local, pr and full modes. plan prints selected checks without executing. Select changed files plus dependents; take the union of scopes. Shared contracts, manifests, lockfiles and build tooling widen coverage; unknown paths fail safe to broad coverage. Required aggregate status must report for every revision and distinguish irrelevant, skipped, failed, cancelled and missing checks.

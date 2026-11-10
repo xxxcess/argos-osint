@@ -8,6 +8,7 @@ Start with the [workspace manifest](../../../Cargo.toml) and [workspace diagram]
 | --- | --- | --- |
 | [argos-osint-core](../../../crates/argos-osint-core/src) | Recon, Atlas, Intel, Brain, providers and NLP | [Core map](core.md) |
 | [Intel HTTP API / host](../../../crates/argos-osint-api) | Local web adapter and readiness-gated process lifecycle | [Intel web](intel-web.md) |
+| [Venture](../../../apps/venture) and [Fleetworks CLI](../../../apps/fleetworks-cli) | Workspace setup and network-only terminal clients | [Fleetworks](fleetworks.md) |
 | [storage](../../../crates/argos-osint-core/src/storage) | Open/bootstrap, repositories, publication, jobs and recall | [Storage map](storage.md) |
 | [argos-osint-bin](../../../crates/argos-osint-bin/src) | CLI, state, rendering and shared components | [Interfaces](interfaces.md) |
 | [core tests](../../../crates/argos-osint-core/tests) and [scripts](../../../scripts) | Offline contracts and verification entry points | [Contributor workflow](contributing.md) |

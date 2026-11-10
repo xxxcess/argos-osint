@@ -5,6 +5,10 @@ members = [
     "crates/argos-osint-bin",
     "crates/argos-osint-api",
     "crates/argos-api-host",
+    "crates/fleetworks-contracts",
+    "crates/fleetworks-workspace",
+    "apps/venture",
+    "apps/fleetworks-cli",
 ]
 
 [workspace.package]

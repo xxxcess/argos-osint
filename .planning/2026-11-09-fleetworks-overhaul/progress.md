@@ -122,7 +122,9 @@ The [task plan](task_plan.md#follow-up-work) carries the remaining provider tran
 
 API-key model attempts from the worker, Brain and brief worker now go through the private execution service. Those processes load route metadata without provider API keys and refuse to save `auth.json`. Local endpoints and the ChatGPT subscription stay in the calling process. The Atlas collector clears the execution origin because it uses news credentials. Bind addresses, Host and origin policy, and web reconnection were already present in the tree.
 
-Compatibility Recon retirement, the full embedded parity suite, retained interactive review and registry publication remain open.
+The compatibility desk now refuses to start, retry, or resume a research turn. Historical list and show commands remain. Ten retained client sessions passed, including empty actor discovery, a missing result row, and an unknown model role. The compatibility desk's research-turn tests passed: 20 terminal cases and the adversarial launch case.
+
+The full embedded parity suite and registry publication remain open. Docker is not available on this machine, so image publication was not run.
 
 ## Retention
 

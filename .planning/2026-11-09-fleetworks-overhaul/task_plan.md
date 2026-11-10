@@ -34,7 +34,7 @@ Status: in implementation
 - [ ] Inventory all planning/docs/agent surfaces; assign retain, update, supersede or remove dispositions, preserving unresolved work.
 - [ ] Update canonical execution/testing guidance to distinguish legacy checks from approved Fleetworks checks; do not claim unbuilt features exist.
 - [x] Establish lightweight versioned HTTP contracts, clients and workspace configuration. Service ownership continues in Phase 4.
-- [ ] Move CI dependency version/checksum provenance out of historical planning files.
+- [x] Move the legacy SurrealDB CI archive pins to a maintained release manifest with an offline validation fixture.
 Acceptance: no cleanup destroys a runtime/CI dependency; guidance and scope selection have a single source of truth.
 
 ### Phase 3 — Workspace, storage and shared primitives

@@ -97,32 +97,27 @@ jobs:
         if: matrix.storage == 'embedded'
         run: bash scripts/local_matrix.sh --storage embedded
 
-      # ---- Server legs: network client only, against a real pinned SurrealDB 3.3.4 server.
-      - name: Pinned SurrealDB hashes match design.md
-        if: matrix.storage == 'server'
-        shell: bash
-        run: |
-          set -euo pipefail
-          hashes=$(grep -oE '"[0-9a-f]{64}"' scripts/test_surreal.py | tr -d '"' | sort -u)
-          test "$(echo "$hashes" | wc -l)" -eq 4
-          for h in $hashes; do
-            grep -q "$h" .planning/2026-10-22-surrealdb/design.md || { echo "hash $h not in design.md"; exit 1; }
-          done
-      - name: Cache SurrealDB 3.3.4 server binary
+      # ---- Server legs: network client only, against the pinned SurrealDB server.
+      - name: Cache the pinned SurrealDB server binary
         if: matrix.storage == 'server'
         uses: actions/cache@v4
         with:
           path: ~/.cache/argos-surreal
-          key: surreal-3.3.4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/test_surreal.py') }}
-      - name: Install SurrealDB 3.3.4 server (SHA-256 verified)
+          key: surreal-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/surrealdb-release.json', 'scripts/test_surreal.py') }}
+      - name: Resolve the pinned SurrealDB server
         if: matrix.storage == 'server'
-        run: python3 scripts/test_surreal.py --mode server --fetch-only
-      # Same entry point as a local run: server-feature clippy + server contracts (no full unit tests).
-      - name: Local matrix leg (server)
-        if: matrix.storage == 'server'
+        id: surreal
         shell: bash
         run: |
           set -euo pipefail
-          bin=$(find ~/.cache/argos-surreal -path '*3.3.4-*' -type f -name surreal | head -n1)
-          test -x "$bin" || { echo "fetched SurrealDB binary not found"; exit 1; }
-          bash scripts/local_matrix.sh --storage server --surreal-bin "$bin"
+          output="$(python3 scripts/test_surreal.py --mode server --fetch-only)"
+          printf '%s\n' "$output"
+          binary="$(printf '%s\n' "$output" | sed -n 's/^test-surreal: server binary //p')"
+          test -x "$binary" || { echo '::error::Pinned SurrealDB executable not found'; exit 1; }
+          printf 'binary=%s\n' "$binary" >> "$GITHUB_OUTPUT"
+      # Same entry point as a local run: server-feature clippy + server contracts (no full unit tests).
+      - name: Local matrix leg (server)
+        if: matrix.storage == 'server'
+        env:
+          SURREAL_BIN: ${{ steps.surreal.outputs.binary }}
+        run: bash scripts/local_matrix.sh --storage server --surreal-bin "$SURREAL_BIN"

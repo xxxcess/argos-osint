@@ -20,7 +20,7 @@ Runs on pushes to `main` and when a PR is opened, reopened or marked ready for r
 Every leg calls the same entry point you run locally, `scripts/local_matrix.sh`:
 
 - **Embedded** (default features `embedded,nlp,classifier`): installs libclang on Linux, then `local_matrix.sh --storage embedded` = `cargo fmt --check` → clippy `-D warnings` → `cargo test --workspace --locked` → `test_surreal.py --mode embedded` (all `storage_*` tests on in-process RocksDB).
-- **Server** (`--no-default-features --features server,nlp,classifier`): checks the pinned SurrealDB hashes in `scripts/test_surreal.py` match `.planning/2026-10-22-surrealdb/design.md`, fetches the SHA-256-verified SurrealDB 3.3.4 binary (cached), then `local_matrix.sh --storage server --surreal-bin <bin>` = clippy on core+bin → `test_surreal.py --mode server`. Unit tests are not rerun here.
+- **Server** uses `--no-default-features --features server,nlp,classifier` and resolves the pinned server from the release manifest. The harness verifies downloaded archives against the manifest's SHA-256 pins. CI caches the binary and passes its exact path to `local_matrix.sh --storage server --surreal-bin <bin>`. That leg runs clippy on core and the CLI, followed by server storage tests. [SurrealDB release manifest](../../../scripts/surrealdb-release.json)
 
 Storage tests are selected by `ARGOS_SURREAL_MODE`; with no mode and no `ARGOS_SURREAL_BIN` they skip, so the plain `cargo test` in the embedded leg doesn't duplicate them. `test_surreal.py` sets `ARGOS_SURREAL_REQUIRED=1`, so a missing server fails instead of skipping.
 

@@ -270,7 +270,7 @@ fn configure_launcher(
                     "storage".into(),
                     "init".into(),
                     "--mode".into(),
-                    "embedded".into(),
+                    "server".into(),
                 ]
             }),
         }));
@@ -304,7 +304,7 @@ fn configure_launcher(
             });
             selection.args.extend(["--api-url".into(), url]);
             adopted = true;
-            ui.message("Storage is managed by the existing API. Its Origin allowlist must permit this web port. TUI display with an adopted API requires this home's server storage; owned APIs can share embedded storage with the TUI.")?;
+            ui.message("Storage is managed by the existing API. Its Origin allowlist must permit this web port. The terminal display for an adopted API requires this home's server storage.")?;
         }
     }
     if target != "--tui" && !adopted {
@@ -319,19 +319,16 @@ fn configure_launcher(
     if !adopted {
         if let Some(mode) = existing {
             ui.message(&format!("Current storage mode: {mode}. Switching an initialized home requires the explicit storage workflow; choose another ARGOS_HOME for a separate store."))?;
-            prompt!("Storage mode [keep/embedded/server]", "keep", |v| v
-                == "keep"
-                || v == mode);
+            let choices = if mode == "embedded" {
+                "keep"
+            } else {
+                "keep/server"
+            };
+            prompt!(&format!("Storage mode [{choices}]"), "keep", |v| {
+                v == "keep" || (v == "server" && mode == "server")
+            });
         } else {
-            let mode = prompt!(
-                "Storage mode [embedded/server]",
-                if cfg!(feature = "embedded") {
-                    "embedded"
-                } else {
-                    "server"
-                },
-                |v| v == "server" || (v == "embedded" && cfg!(feature = "embedded"))
-            );
+            let mode = prompt!("Storage mode [server]", "server", |v| v == "server");
             let mut args = vec![
                 "storage".into(),
                 "init".into(),

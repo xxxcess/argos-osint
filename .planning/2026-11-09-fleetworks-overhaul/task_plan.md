@@ -78,7 +78,7 @@ Status: in implementation
 - [x] Add dependency-aware selection, a required aggregate check and phase timing artifacts.
 - [x] Add ARM64 primary service verification, scoped web and native lanes, and a scheduled full workflow.
 - [x] Reorganize active entrypoints into apps and services, shared crates/packages and deployment assets. Name the Venture and Fleetworks product binaries.
-- [ ] Remove Recon only after retained dependencies are extracted; retire embedded application storage after parity. At `f7d810a` the compatibility CLI and composer refuse to start, retry, or resume a research turn. Historical list and show commands remain. Embedded application storage is still in the compatibility build.
+- [ ] Remove Recon only after retained dependencies are extracted; retire embedded application storage after parity. At `f7d810a` the compatibility CLI and composer refuse to start, retry, or resume a research turn. Historical list and show commands remain. New application setup uses server storage. The embedded engine remains compiled for the compatibility suite and an existing embedded home can be kept.
 Acceptance: scope fixtures prove narrow changes stay narrow and shared changes widen correctly.
 
 ### Phase 7 — Documentation and planning reconciliation
@@ -116,7 +116,7 @@ Root agent owns integration, plan summaries and shared build cache. Delegate dis
 TinyFish CLI was unavailable during earlier research; used official RabbitMQ/Lapin pages through web fallback. GitHub connector omitted duration fields; read-only gh API supplied timestamps. No new execution failures during plan creation. The embedded suite on this tree stopped once in Clippy on a negated broker password check; that check was simplified and the crate was rechecked.
 
 ## Follow-up work
-- Rerun the full embedded parity suite. The earlier local run was interrupted.
-- After that suite passes, retire embedded application storage. Research submission is already refused. Historical list and show commands remain.
-- Publish the registry artifacts and verify the exact published digests. This machine has no Docker daemon.
+- Rerun the full embedded parity suite on GitHub. [CI run](https://github.com/xxxcess/argos-osint/actions/runs/42905611132) is the dispatched matrix for `09b827e`.
+- New application setup uses server storage. The embedded engine remains for the compatibility suite, and an existing embedded home can be kept. Finish removing shared Recon types only after legacy reads are verified.
+- Publish the registry artifacts and verify the exact published digests.
 - Finish the retained interactive UI review for this tree, including screenshot inspection.

@@ -401,7 +401,7 @@ pub async fn dispatch(command: StackCommand) -> Result<()> {
             );
             anyhow::ensure!(
                 storage_selected(&layout)?,
-                "storage is not initialized; run argos storage init --mode embedded (or server)"
+                "storage is not initialized; run argos storage init --mode server or use Venture"
             );
             let listener = TcpListener::bind(("127.0.0.1", port)).await?;
             let mut host = presentation::InlineApi::start_with_origins(listener, origins).await?;
@@ -620,7 +620,7 @@ async fn run(up: Up) -> Result<()> {
             );
             anyhow::ensure!(
                 argos_osint_core::storage::home::load_config(&layout)?.is_some_and(|c| c.mode == argos_osint_core::storage::home::Mode::Server),
-                "TUI with an adopted API requires local server-mode storage; use --terminal logs for embedded storage, or start an owned API to share its repository"
+                "TUI with an adopted API requires local server-mode storage; use --terminal logs, or start an owned API"
             );
         }
     }
@@ -651,7 +651,7 @@ async fn run(up: Up) -> Result<()> {
             argos_osint_core::storage::home::Layout::new(argos_osint_core::paths::ensure_home()?);
         anyhow::ensure!(
             storage_selected(&layout)?,
-            "storage is not initialized; run argos storage init --mode embedded (or your supported server configuration)"
+            "storage is not initialized; run argos storage init --mode server or use Venture"
         );
     }
     let executable = if up.api_url.is_none() && up.terminal == TerminalDisplay::Logs {

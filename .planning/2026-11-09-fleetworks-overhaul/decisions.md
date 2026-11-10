@@ -41,4 +41,4 @@ At `f7d810a` the compatibility `argos` binary refuses `recon new`, `ask`, `ask-n
 
 Core still imports Recon-owned graph shapes in Brain browse, the backend compatibility selector in storage and NLP, investigation rule bindings in OSINT, and read/storage types in retained insight, thread and historical report code. The shared model executor is already outside Recon. Keep old persisted types and read paths where required for Jobs, actor graph, insights or reports. The `intel_recon` module also owns the retained Focus Brief backend, so its name alone does not identify retired functionality.
 
-Embedded application storage remains in the compatibility build until the full embedded parity suite passes. Verify legacy insight and report reads before deleting shared tables or types.
+New application setup uses server storage. The launcher no longer creates an embedded database. `argos storage init --mode embedded` remains for the compatibility suite, and an existing embedded home can be kept. Verify legacy insight and report reads before deleting shared tables or types.

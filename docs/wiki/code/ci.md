@@ -36,12 +36,13 @@ The [Fleetworks workflow](../../../.github/workflows/fleetworks.yml) runs on pus
 | --- | --- |
 | Native clients | Linux x86-64, Apple silicon macOS and Intel macOS tests and executable smoke for Venture and its sibling clients |
 | Server | Linux ARM64 service check, build, unit tests and network bootstrap and readiness smoke |
+| Server images | Linux AMD64 images for the selected client binaries and the web app. Full and nightly runs also build Linux ARM64. Venture and the CLIs share one compile, then each image copies one binary. |
 | Storage and broker | Affected disk storage and brief recovery contracts, plus RabbitMQ-backed Atlas dispatch when selected |
 | Packaged Compose | Venture-owned image startup, authenticated readiness, relay and Atlas smoke on Linux ARM64 and AMD64 |
 | Intel Rust-BERT | Intel macOS worker build, link and real checkpoint inference |
 | Web | Locked install, static and unit checks, production build, relay lifecycle and production Chromium contracts. The development browser profile also runs for selected runtime changes. |
 
-The `Fleetworks required` job runs after scope planning and reports the exact event revision. A selected job must succeed. An unselected job is expected to skip. Failed scope planning and missing, failed, cancelled or unexpectedly skipped selected jobs fail the aggregate. Storage and broker checks depend on the server job. The development browser check depends on the web job.
+The `Fleetworks required` job runs after scope planning and reports the exact event revision. A selected job must succeed. An unselected job is expected to skip. Failed scope planning and missing, failed, cancelled or unexpectedly skipped selected jobs fail the aggregate. Storage and broker checks depend on the server job. The development browser check depends on the web job. The server image job builds only the targets named by the planner.
 
 Full mode adds the pinned server storage suite and an AMD64 packaged development readiness check. The native, server and Compose jobs retain timed-phase JSONL and available Cargo timing HTML for seven days. Each record gives the phase, elapsed time, exit status, revision and machine. Use comparable completed runs for timing comparisons.
 

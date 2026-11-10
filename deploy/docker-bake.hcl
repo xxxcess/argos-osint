@@ -1,5 +1,9 @@
 # Linux server images for the web app, Venture, and each Fleetworks CLI.
 # The client targets share clients_build, so one compile feeds every selected image.
+#
+# Bake resolves local contexts from the working directory. The documented
+# command runs at the repository root, so cwd://. is that checkout. A parent
+# path leaves the checkout and current Buildx rejects the read.
 
 variable "PLATFORM" {
   default = "linux/amd64"
@@ -22,7 +26,7 @@ group "server" {
 }
 
 target "web" {
-  context    = ".."
+  context    = "cwd://."
   dockerfile = "deploy/Dockerfile"
   target     = "web"
   tags       = ["web:local"]
@@ -30,7 +34,7 @@ target "web" {
 }
 
 target "venture" {
-  context    = ".."
+  context    = "cwd://."
   dockerfile = "deploy/Dockerfile"
   target     = "venture"
   tags       = ["venture:local"]
@@ -38,7 +42,7 @@ target "venture" {
 }
 
 target "fleetworks-atlas" {
-  context    = ".."
+  context    = "cwd://."
   dockerfile = "deploy/Dockerfile"
   target     = "fleetworks-atlas"
   tags       = ["fleetworks-atlas:local"]
@@ -46,7 +50,7 @@ target "fleetworks-atlas" {
 }
 
 target "fleetworks-brain" {
-  context    = ".."
+  context    = "cwd://."
   dockerfile = "deploy/Dockerfile"
   target     = "fleetworks-brain"
   tags       = ["fleetworks-brain:local"]
@@ -54,7 +58,7 @@ target "fleetworks-brain" {
 }
 
 target "fleetworks-jobs" {
-  context    = ".."
+  context    = "cwd://."
   dockerfile = "deploy/Dockerfile"
   target     = "fleetworks-jobs"
   tags       = ["fleetworks-jobs:local"]
@@ -62,7 +66,7 @@ target "fleetworks-jobs" {
 }
 
 target "fleetworks-tools" {
-  context    = ".."
+  context    = "cwd://."
   dockerfile = "deploy/Dockerfile"
   target     = "fleetworks-tools"
   tags       = ["fleetworks-tools:local"]
@@ -70,7 +74,7 @@ target "fleetworks-tools" {
 }
 
 target "fleetworks-models" {
-  context    = ".."
+  context    = "cwd://."
   dockerfile = "deploy/Dockerfile"
   target     = "fleetworks-models"
   tags       = ["fleetworks-models:local"]
@@ -78,7 +82,7 @@ target "fleetworks-models" {
 }
 
 target "fleetworks-profile" {
-  context    = ".."
+  context    = "cwd://."
   dockerfile = "deploy/Dockerfile"
   target     = "fleetworks-profile"
   tags       = ["fleetworks-profile:local"]

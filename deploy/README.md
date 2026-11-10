@@ -25,6 +25,8 @@ docker run --rm venture:local --help
 docker run --rm fleetworks-brain:local --help
 ```
 
+Run that bake command from the repository root. The file's build context is that working directory.
+
 Pull-request CI builds the selected targets for Linux AMD64. A full or nightly run also builds Linux ARM64. Registry publication is a separate release step.
 
 The API uses `secrets/api-token` for clients. Private Brain, Tools, Control and Jobs use separate bearer files. The worker, Brain, brief worker and private execution service share the execution bearer. Venture creates `api-token`, `brain-token`, `tools-token`, `control-token`, `jobs-token` and `execution-token` under `secrets/` when it starts the stack. Bootstrap needs `secrets/storage-root-password` and `secrets/storage-password`. Use the existing files when restarting the same database. For a fresh managed database, generate each password file once.

@@ -1797,6 +1797,7 @@ async fn atlas_command(command: AtlasCommand) -> Result<()> {
 }
 
 /// Synthesis tokens go to stderr as they arrive. Stdout stays the final JSON from `print_json`.
+#[allow(dead_code)]
 fn write_turn_event(event: &recon::TurnEvent, out: &mut impl std::io::Write) {
     match event {
         recon::TurnEvent::AnswerDelta(text) | recon::TurnEvent::AnswerReplacement(text) => {

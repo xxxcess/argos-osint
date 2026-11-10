@@ -37,9 +37,9 @@ pub(crate) struct InvestigationCounts {
 /// After a new thread is created on the worker.
 #[derive(Debug, Clone)]
 pub(crate) enum Then {
-    /// Open it in Recon.
-    Open,
-    /// Home launch: open it and ask `question`.
+    /// Home launch: open it and ask `question`. Retained for the compatibility
+    /// terminal tests; the composer no longer constructs it.
+    #[allow(dead_code)]
     Launch { question: String },
     /// A Tools result was attached; open it.
     Attached,

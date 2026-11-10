@@ -928,10 +928,12 @@ enum WorkEvent {
         run_id: String,
         outcome: Result<Option<String>, String>,
     },
+    #[allow(dead_code)]
     ReconStage {
         thread_id: String,
         stage: String,
     },
+    #[allow(dead_code)]
     ReconDone {
         thread_id: String,
         outcome: Result<(), String>,
@@ -961,17 +963,21 @@ enum WorkEvent {
         thread_id: String,
         outcome: Result<(), String>,
     },
+    #[allow(dead_code)]
     AnswerDelta {
         thread_id: String,
         text: String,
     },
+    #[allow(dead_code)]
     AnswerReset {
         thread_id: String,
     },
+    #[allow(dead_code)]
     AnswerReplacement {
         thread_id: String,
         text: String,
     },
+    #[allow(dead_code)]
     AnswerNote {
         thread_id: String,
         text: String,
@@ -3738,11 +3744,6 @@ impl App {
         self.threads.insert(0, thread.clone());
         self.thread_sel = 0;
         let result = match then {
-            surreal_recon::Then::Open => self.enter_investigation(&thread.id).map(|_| {
-                self.input.clear();
-                self.set_focus(Target::Field(FieldId::Composer));
-                "New investigation".to_string()
-            }),
             surreal_recon::Then::Attached => self
                 .enter_investigation(&thread.id)
                 .map(|_| "Recon started from result".to_string()),
@@ -11431,6 +11432,7 @@ pub fn run_with_shutdown(
     }
 }
 
+#[allow(dead_code)]
 fn work_event(thread_id: &str, event: recon::TurnEvent) -> WorkEvent {
     let thread_id = thread_id.to_string();
     match event {

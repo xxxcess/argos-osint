@@ -49,6 +49,9 @@ jobs:
       bert: ${{ steps.plan.outputs.bert }}
       web: ${{ steps.plan.outputs.web }}
       web_dev: ${{ steps.plan.outputs.web_dev }}
+      images: ${{ steps.plan.outputs.images }}
+      image_targets: ${{ steps.plan.outputs.image_targets }}
+      image_arch_json: ${{ steps.plan.outputs.image_arch_json }}
       full: ${{ steps.plan.outputs.full }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -363,6 +366,48 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  images:
+    name: Server images / ${{ matrix.arch }}
+    needs: scope
+    if: needs.scope.outputs.images == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ${{ fromJson(needs.scope.outputs.image_arch_json) }}
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.FLEETWORKS_HEAD }}
+          persist-credentials: false
+      - name: Build selected server images
+        env:
+          IMAGE_TARGETS: ${{ needs.scope.outputs.image_targets }}
+          IMAGE_ARCH: ${{ matrix.arch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$FLEETWORKS_HEAD"
+          test -n "$IMAGE_TARGETS"
+          read -r -a targets <<< "${IMAGE_TARGETS//,/ }"
+          python3 scripts/fleetworks_verify.py timed --phase server-images -- \
+            docker buildx bake -f deploy/docker-bake.hcl \
+            --set "*.platforms=linux/${IMAGE_ARCH}" "${targets[@]}"
+      - name: Smoke selected server images
+        env:
+          IMAGE_TARGETS: ${{ needs.scope.outputs.image_targets }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for target in ${IMAGE_TARGETS//,/ }; do
+            if [[ "$target" == web ]]; then
+              docker run --rm --entrypoint node web:local -e 'process.exit(0)'
+            else
+              docker run --rm "${target}:local" --help >/dev/null
+            fi
+          done
+
   compose:
     name: Packaged Compose / ${{ matrix.name }}
     needs: scope
@@ -448,7 +493,7 @@ jobs:
 
   required:
     name: Fleetworks required
-    needs: [scope, native, server, compose, bert, web]
+    needs: [scope, native, server, compose, bert, web, images]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -462,6 +507,8 @@ jobs:
           BERT_SELECTED: ${{ needs.scope.outputs.bert }}
           WEB_SELECTED: ${{ needs.scope.outputs.web }}
           WEB_DEV_SELECTED: ${{ needs.scope.outputs.web_dev }}
+          IMAGES_SELECTED: ${{ needs.scope.outputs.images }}
+          IMAGE_TARGETS: ${{ needs.scope.outputs.image_targets }}
           BROKER_SELECTED: ${{ needs.scope.outputs.broker }}
           STORAGE_SELECTED: ${{ needs.scope.outputs.storage }}
           NATIVE_RESULT: ${{ needs.native.result }}
@@ -469,6 +516,7 @@ jobs:
           COMPOSE_RESULT: ${{ needs.compose.result }}
           BERT_RESULT: ${{ needs.bert.result }}
           WEB_RESULT: ${{ needs.web.result }}
+          IMAGES_RESULT: ${{ needs.images.result }}
         shell: bash
         run: |
           set -euo pipefail
@@ -501,6 +549,8 @@ jobs:
           verify compose "$COMPOSE_SELECTED" "$COMPOSE_RESULT" || failed=1
           verify bert "$BERT_SELECTED" "$BERT_RESULT" || failed=1
           verify web "$WEB_SELECTED" "$WEB_RESULT" || failed=1
+          verify images "$IMAGES_SELECTED" "$IMAGES_RESULT" || failed=1
+          printf 'Server images: %s\n' "${IMAGE_TARGETS:-none}" >> "$GITHUB_STEP_SUMMARY"
           printf 'Broker selected: %s. Storage selected: %s. Development browser selected: %s.\n' \
             "${BROKER_SELECTED:-missing}" "${STORAGE_SELECTED:-missing}" \
             "${WEB_DEV_SELECTED:-missing}" >> "$GITHUB_STEP_SUMMARY"

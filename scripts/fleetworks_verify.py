@@ -13,7 +13,10 @@ import time
 from pathlib import Path
 
 PRIMARY_SCOPES = frozenset({"native", "server", "storage", "compose", "broker"})
-ALL_SCOPES = PRIMARY_SCOPES | {"bert", "web", "web_dev"}
+ALL_SCOPES = PRIMARY_SCOPES | {"bert", "web", "web_dev", "images"}
+CLI_NAMES = ("atlas", "brain", "jobs", "tools", "models", "profile")
+CLIENT_IMAGES = frozenset({"venture", *(f"fleetworks-{name}" for name in CLI_NAMES)})
+ALL_IMAGES = CLIENT_IMAGES | {"web"}
 BERT_ONLY_PATHS = {".github/workflows/atlas-bert.yml"}
 BERT_SHARED_PATHS = {
     "apps/venture/src/classifier.rs",
@@ -60,7 +63,40 @@ NATIVE_PACKAGES = (
 EVENTS = ("push", "pull_request", "workflow_dispatch", "schedule")
 
 
-def path_scopes(path):
+def client_image(name):
+    return f"fleetworks-{name}"
+
+
+def path_images(path):
+    """Linux server image targets affected by one changed path."""
+    if not path or path.endswith(".md"):
+        return set()
+    if path in SHARED_PRIMARY_PATHS or path.startswith(SHARED_PRIMARY_PREFIXES):
+        return set(CLIENT_IMAGES)
+    if path.startswith("apps/venture/"):
+        return {"venture"}
+    if path.startswith("apps/fleetworks-cli/"):
+        name = Path(path).name
+        if name.startswith("fleetworks-") and name.endswith(".rs"):
+            image = name[:-3]
+            if image in CLIENT_IMAGES:
+                return {image}
+        if name.endswith("_ui.rs") and name[: -len("_ui.rs")] in CLI_NAMES:
+            return {client_image(name[: -len("_ui.rs")])}
+        return {client_image(name) for name in CLI_NAMES}
+    if path in {"deploy/Dockerfile", "deploy/docker-bake.hcl"}:
+        return set(ALL_IMAGES)
+    if (
+        path in WEB_BUILD_PATHS
+        or path.startswith(("patches/", "tests/web/", "apps/web-desktop/", "packages/"))
+        or path == "eslint.config.mjs"
+        or path.startswith("vitest")
+    ):
+        return {"web"}
+    return set()
+
+
+def raw_path_scopes(path):
     if not path or path.endswith(".md") or path == "scripts/fleetworks_doc_links.py":
         return set()
     if path.startswith(("docs/", ".planning/")) and path.endswith((".svg", ".html")):
@@ -91,6 +127,8 @@ def path_scopes(path):
         return {"web", "server", "compose"}
     if path.startswith(("apps/web-desktop/", "packages/")):
         return {"web", "web_dev", "server", "compose"}
+    if path in {"deploy/Dockerfile", "deploy/docker-bake.hcl"}:
+        return scopes | {"server", "compose", "images"}
     if path.startswith("deploy/"):
         return scopes | {"server", "compose"}
     if path in SERVER_STORAGE_PATHS or path.startswith((
@@ -105,6 +143,14 @@ def path_scopes(path):
     return ALL_SCOPES
 
 
+def path_scopes(path):
+    scopes = raw_path_scopes(path)
+    if path_images(path):
+        scopes = set(scopes)
+        scopes.add("images")
+    return scopes
+
+
 def git_paths(*args):
     raw = subprocess.check_output(["git", *args], stderr=subprocess.DEVNULL)
     return map(os.fsdecode, raw.split(b"\0"))
@@ -114,23 +160,39 @@ def valid_sha(value):
     return re.fullmatch(r"[0-9a-f]{40}", value) and value != "0" * 40
 
 
+def images_for(path):
+    selected = path_images(path)
+    if selected or "images" not in path_scopes(path):
+        return selected
+    return set(ALL_IMAGES)
+
+
 def select_scopes(event, base, head, *, worktree=False):
+    scopes, _images, reason = select_plan(event, base, head, worktree=worktree)
+    return scopes, reason
+
+
+def select_plan(event, base, head, *, worktree=False):
     if event in {"workflow_dispatch", "schedule"} or not valid_sha(base):
-        return ALL_SCOPES, "No comparison requested or available"
+        return ALL_SCOPES, set(ALL_IMAGES), "No comparison requested or available"
     separator = "..." if event == "pull_request" else ".."
     diff = ("diff", "--name-only", "--no-renames", "-z")
     scopes = set()
+    images = set()
     try:
         for path in git_paths(*diff, f"{base}{separator}{head}", "--"):
             scopes.update(path_scopes(path))
+            images.update(images_for(path))
         if worktree:
             for path in git_paths(*diff, "HEAD", "--"):
                 scopes.update(path_scopes(path))
+                images.update(images_for(path))
             for path in git_paths("ls-files", "--others", "--exclude-standard", "-z"):
                 scopes.update(path_scopes(path))
+                images.update(images_for(path))
     except (OSError, subprocess.CalledProcessError):
-        return ALL_SCOPES, "Git comparison unavailable"
-    return scopes, None
+        return ALL_SCOPES, set(ALL_IMAGES), "Git comparison unavailable"
+    return scopes, images, None
 
 
 def checkout_head(expected):
@@ -240,15 +302,21 @@ def main():
         if args.command == "dispatch":
             return dispatch(args, actual)
         event = "workflow_dispatch" if args.command == "full" else args.event
-        scopes, reason = select_scopes(event, args.base, actual, worktree=args.command == "local")
+        scopes, images, reason = select_plan(event, args.base, actual, worktree=args.command == "local")
         if reason:
             print(f"{reason}. Selecting all scopes.")
+        full = args.command == "full"
+        arches = ["amd64", "arm64"] if full else ["amd64"]
         if output_path := getattr(args, "github_output", None):
             with output_path.open("a", encoding="utf-8") as output:
                 for scope in sorted(ALL_SCOPES):
                     print(f"{scope}={str(scope in scopes).lower()}", file=output)
-                print(f"full={str(args.command == 'full').lower()}", file=output)
-        print(f"{actual}: {', '.join(sorted(scopes)) or 'no runtime scopes selected'}", flush=True)
+                print(f"full={str(full).lower()}", file=output)
+                print(f"image_targets={','.join(sorted(images))}", file=output)
+                print(f"image_arch_json={json.dumps(arches)}", file=output)
+        selected = ", ".join(sorted(scopes)) or "no runtime scopes selected"
+        built = ", ".join(sorted(images)) or "no server images"
+        print(f"{actual}: {selected}; server images: {built}", flush=True)
         if args.command == "local":
             separator = "..." if event == "pull_request" else ".."
             return run_local(scopes, f"{args.base}{separator}{actual}" if reason is None else None)

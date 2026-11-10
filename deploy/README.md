@@ -15,6 +15,18 @@ venture --workspace "$FLEETWORKS_HOST_WORKSPACE" init
 
 Choose a distinct Compose project name and separate web and API ports for each concurrently running workspace.
 
+## Client and web images
+
+The service containers use the `runtime` image, which contains `argos-api-host`. Venture and each CLI have their own image, and the React Native web app uses the `web` image. A server build compiles the clients once and then copies each binary into its image.
+
+```sh
+docker buildx bake -f deploy/docker-bake.hcl venture fleetworks-brain web
+docker run --rm venture:local --help
+docker run --rm fleetworks-brain:local --help
+```
+
+Pull-request CI builds the selected targets for Linux AMD64. A full or nightly run also builds Linux ARM64. Registry publication is a separate release step.
+
 The API uses `secrets/api-token` for clients. Private Brain, Tools, Control and Jobs use separate bearer files. The worker, Brain, brief worker and private execution service share the execution bearer. Venture creates `api-token`, `brain-token`, `tools-token`, `control-token`, `jobs-token` and `execution-token` under `secrets/` when it starts the stack. Bootstrap needs `secrets/storage-root-password` and `secrets/storage-password`. Use the existing files when restarting the same database. For a fresh managed database, generate each password file once.
 
 ```sh

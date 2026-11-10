@@ -79,3 +79,53 @@ COPY --chmod=0555 deploy/check-api.sh /usr/local/bin/check-fleetworks-api
 WORKDIR /workspace
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/argos-api-host"]
+
+# One server compile for Venture and the six CLIs. Each final target is a
+# separate image so a development cycle can build only the binaries it changed.
+FROM rust:1.95.0-bookworm AS clients_build
+ARG TARGETARCH
+ENV CARGO_INCREMENTAL=0
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY services ./services
+COPY apps/fleetworks-cli ./apps/fleetworks-cli
+COPY apps/venture ./apps/venture
+RUN --mount=type=cache,id=fleetworks-clients-${TARGETARCH},target=/usr/local/cargo/registry \
+    --mount=type=cache,id=fleetworks-clients-target-${TARGETARCH},target=/src/target,sharing=locked \
+    cargo build --release --locked --bins -p fleetworks-cli -p fleetworks-venture
+
+FROM debian:bookworm-slim AS client_base
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /workspace
+USER 65532:65532
+
+FROM client_base AS venture
+COPY --from=clients_build --chmod=0555 /src/target/release/venture /usr/local/bin/venture
+ENTRYPOINT ["/usr/local/bin/venture"]
+
+FROM client_base AS fleetworks-atlas
+COPY --from=clients_build --chmod=0555 /src/target/release/fleetworks-atlas /usr/local/bin/fleetworks-atlas
+ENTRYPOINT ["/usr/local/bin/fleetworks-atlas"]
+
+FROM client_base AS fleetworks-brain
+COPY --from=clients_build --chmod=0555 /src/target/release/fleetworks-brain /usr/local/bin/fleetworks-brain
+ENTRYPOINT ["/usr/local/bin/fleetworks-brain"]
+
+FROM client_base AS fleetworks-jobs
+COPY --from=clients_build --chmod=0555 /src/target/release/fleetworks-jobs /usr/local/bin/fleetworks-jobs
+ENTRYPOINT ["/usr/local/bin/fleetworks-jobs"]
+
+FROM client_base AS fleetworks-tools
+COPY --from=clients_build --chmod=0555 /src/target/release/fleetworks-tools /usr/local/bin/fleetworks-tools
+ENTRYPOINT ["/usr/local/bin/fleetworks-tools"]
+
+FROM client_base AS fleetworks-models
+COPY --from=clients_build --chmod=0555 /src/target/release/fleetworks-models /usr/local/bin/fleetworks-models
+ENTRYPOINT ["/usr/local/bin/fleetworks-models"]
+
+FROM client_base AS fleetworks-profile
+COPY --from=clients_build --chmod=0555 /src/target/release/fleetworks-profile /usr/local/bin/fleetworks-profile
+ENTRYPOINT ["/usr/local/bin/fleetworks-profile"]

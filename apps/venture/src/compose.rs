@@ -28,6 +28,8 @@ const ROOT_PASSWORD_FILE: &str = "FLEETWORKS_STORAGE_ROOT_PASSWORD_FILE";
 const RUNTIME_PASSWORD_FILE: &str = "FLEETWORKS_STORAGE_PASSWORD_FILE";
 const BROKER_PASSWORD_FILE: &str = "FLEETWORKS_BROKER_PASSWORD_FILE";
 const INTERNAL_TOKEN_FILE: &str = "FLEETWORKS_INTERNAL_TOKEN_FILE";
+const BRAIN_TOKEN_FILE: &str = "FLEETWORKS_BRAIN_TOKEN_FILE";
+const BRAIN_TOKEN_NAME: &str = "brain-token";
 const SETTINGS: &[(&str, Option<&str>)] = &[
     ("FLEETWORKS_STORAGE_NAMESPACE", Some("fleetworks")),
     ("FLEETWORKS_STORAGE_DATABASE", Some("fleetworks")),
@@ -248,6 +250,10 @@ impl Owner {
             .env(WEB_PORT, self.web_port.to_string())
             .env(STORAGE_URL, &self.endpoint)
             .env(API_TOKEN_FILE, &self.token)
+            .env(
+                BRAIN_TOKEN_FILE,
+                self.workspace.join("secrets").join(BRAIN_TOKEN_NAME),
+            )
             .env(ROOT_PASSWORD_FILE, &self.root_password)
             .env(RUNTIME_PASSWORD_FILE, &self.runtime_password);
         for (key, _) in SETTINGS {
@@ -488,6 +494,7 @@ fn prepare(
         Some("api-token"),
     )?;
     workspace.read_api_token_file(&token)?;
+    workspace.initialize_secret_file(BRAIN_TOKEN_NAME)?;
     let root_password = secret(
         workspace,
         &environment,

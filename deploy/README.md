@@ -1,6 +1,6 @@
 # Fleetworks service deployment
 
-This stack runs the production web desktop, authenticated API, background worker pools, and one-shot database bootstrap. Docker Compose v2.20 or newer is required. The web desktop and API publish `127.0.0.1:3000` and `127.0.0.1:8080` by default. Database connections stay inside the Compose network for the managed profile. Use the [Atlas overlay](atlas-dispatch.md) for RabbitMQ dispatch and the private NLP service.
+This stack runs the production web desktop, authenticated API, private Brain and Intel routes, background worker pools, and one-shot database bootstrap. Docker Compose v2.20 or newer is required. The web desktop and API publish `127.0.0.1:3000` and `127.0.0.1:8080` by default. Database connections stay inside the Compose network for the managed profile. Use the [Atlas overlay](atlas-dispatch.md) for RabbitMQ dispatch and the private NLP service.
 
 ## Prepare a workspace
 
@@ -15,20 +15,20 @@ venture --workspace "$FLEETWORKS_HOST_WORKSPACE" init
 
 Choose a distinct Compose project name and separate web and API ports for each concurrently running workspace.
 
-The API uses `secrets/api-token`. Bootstrap needs `secrets/storage-root-password` and `secrets/storage-password`. Use the existing files when restarting the same database. For a fresh managed database, generate each password file once.
+The API uses `secrets/api-token` for clients. It uses a separate `secrets/brain-token` to reach the private Brain role. Venture creates both when it starts the stack. Bootstrap needs `secrets/storage-root-password` and `secrets/storage-password`. Use the existing files when restarting the same database. For a fresh managed database, generate each password file once.
 
 ```sh
 (
   umask 077
   set -C
-  for name in storage-root-password storage-password; do
+  for name in brain-token storage-root-password storage-password; do
     file="$FLEETWORKS_HOST_WORKSPACE/secrets/$name"
     [ -e "$file" ] || openssl rand -hex 32 >"$file" || exit
   done
 )
 ```
 
-The `FLEETWORKS_API_TOKEN_FILE`, `FLEETWORKS_STORAGE_ROOT_PASSWORD_FILE`, and `FLEETWORKS_STORAGE_PASSWORD_FILE` settings accept absolute host-side paths. The runtime database password must be 32–256 characters using ASCII letters, digits, or `-._~`. Each container receives its required credentials as files under `/run/secrets`. Bootstrap gets the root and runtime passwords, the API gets the runtime password and bearer token, and the worker gets the runtime password. The managed database reads the root password at startup. The web desktop receives the API token for its server-side HTTP and WebSocket relay.
+The `FLEETWORKS_API_TOKEN_FILE`, `FLEETWORKS_STORAGE_ROOT_PASSWORD_FILE`, and `FLEETWORKS_STORAGE_PASSWORD_FILE` settings accept absolute host-side paths. The runtime database password must be 32–256 characters using ASCII letters, digits, or `-._~`. Each container receives its required credentials as files under `/run/secrets`. Bootstrap gets the root and runtime passwords, the API gets the runtime password and both bearer tokens, the Brain role gets the runtime password and private bearer token, and the worker gets the runtime password. For direct Compose use, set `FLEETWORKS_BRAIN_TOKEN_FILE` to override the private token path. Venture uses the workspace path. The managed database reads the root password at startup. The web desktop receives the API token for its server-side HTTP and WebSocket relay.
 
 ## Managed disk database
 
@@ -72,7 +72,7 @@ Set `FLEETWORKS_WEB_PORT` to change the published web port. Compose sets `FLEETW
 
 Set `FLEETWORKS_API_PORT` to change the published API port and `FLEETWORKS_API_ORIGIN` to point Venture and the native clients at that port. `FLEETWORKS_API_BIND` defaults to `0.0.0.0` inside the container. The Compose host mapping always uses `127.0.0.1`. When overriding `FLEETWORKS_API_ALLOWED_HOSTS`, retain `api:8080` for the web relay and `127.0.0.1:<published API port>` for the direct authenticated readiness probe. Use `FLEETWORKS_API_ALLOWED_ORIGINS` for comma-separated origins if a browser needs direct API access. The web desktop uses its own origin by default.
 
-The Dockerfile supports `linux/amd64` and `linux/arm64`. Build on the target architecture or use a Buildx builder with both platforms available. Select `--target web` for the production Next build on Node 24 and pnpm 12, `--target runtime` for the locked API, worker, and bootstrap binary, or `--target surrealdb` for the managed database image. The Rust runtime includes the current in-process NLP and classifier support. A separate Rust-BERT model/runtime bundle is outside this image.
+The Dockerfile supports `linux/amd64` and `linux/arm64`. Build on the target architecture or use a Buildx builder with both platforms available. Select `--target web` for the production Next build on Node 24 and pnpm 12, `--target runtime` for the locked service host for the API, Brain, worker, and bootstrap roles, or `--target surrealdb` for the managed database image. The Rust runtime includes the current in-process NLP and classifier support. A separate Rust-BERT model/runtime bundle is outside this image.
 
 ## Train the optional Natural classifier
 

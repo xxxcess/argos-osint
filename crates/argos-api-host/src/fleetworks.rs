@@ -5,7 +5,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 
 use anyhow::{anyhow, ensure, Context, Result};
-use argos_osint_api::NetworkPolicy;
+use argos_osint_api::{BrainClient, NetworkPolicy};
 use argos_osint_core::storage::open::{NetworkAccess, Target};
 use argos_osint_core::storage::repo::Repository;
 
@@ -93,6 +93,14 @@ impl ApiAccess {
                 policy: None,
             });
         }
+        if role == Role::Brain {
+            let (bind, policy) = internal_access("BRAIN")?;
+            return Ok(Self {
+                bind,
+                origins: Vec::new(),
+                policy: Some(policy),
+            });
+        }
         let bind = value("FLEETWORKS_API_BIND", "127.0.0.1")?
             .parse()
             .context("invalid FLEETWORKS_API_BIND")?;
@@ -116,6 +124,17 @@ impl ApiAccess {
             origins,
             policy: Some(policy),
         })
+    }
+}
+
+pub(crate) fn brain_client() -> Result<Option<BrainClient>> {
+    match env::var("FLEETWORKS_BRAIN_ORIGIN") {
+        Ok(origin) => Ok(Some(BrainClient::new(
+            &origin,
+            &read_secret("FLEETWORKS_INTERNAL_TOKEN")?,
+        )?)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(_) => Err(anyhow!("invalid encoding in FLEETWORKS_BRAIN_ORIGIN")),
     }
 }
 

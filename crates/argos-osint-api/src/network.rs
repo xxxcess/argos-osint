@@ -87,7 +87,7 @@ impl NetworkPolicy {
     }
 }
 
-fn valid_token(token: &[u8]) -> bool {
+pub(crate) fn valid_token(token: &[u8]) -> bool {
     if !(MIN_TOKEN_LEN..=MAX_TOKEN_LEN).contains(&token.len()) {
         return false;
     }
@@ -104,6 +104,10 @@ fn valid_token(token: &[u8]) -> bool {
 
 /// Validates and canonicalizes an exact HTTP(S) browser origin.
 pub fn network_origin(raw: &str) -> anyhow::Result<String> {
+    Ok(validate_origin(raw)?.origin().ascii_serialization())
+}
+
+pub(crate) fn validate_origin(raw: &str) -> anyhow::Result<url::Url> {
     let origin = url::Url::parse(raw).map_err(|_| anyhow::anyhow!("invalid API origin"))?;
     ensure!(
         matches!(origin.scheme(), "http" | "https")
@@ -115,7 +119,7 @@ pub fn network_origin(raw: &str) -> anyhow::Result<String> {
             && origin.fragment().is_none(),
         "invalid API origin"
     );
-    Ok(origin.origin().ascii_serialization())
+    Ok(origin)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]

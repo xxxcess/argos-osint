@@ -72,17 +72,46 @@ services:
       FLEETWORKS_API_ALLOWED_ORIGINS: ${FLEETWORKS_API_ALLOWED_ORIGINS:-}
       FLEETWORKS_API_TOKEN_FILE: /run/secrets/api_token
       FLEETWORKS_API_HEALTH_HOST: "127.0.0.1:${FLEETWORKS_API_PORT:-8080}"
+      FLEETWORKS_BRAIN_ORIGIN: http://brain:8080
+      FLEETWORKS_INTERNAL_TOKEN_FILE: /run/secrets/brain_token
     secrets:
       - storage_password
       - api_token
+      - brain_token
     depends_on:
       bootstrap:
         condition: service_completed_successfully
+      brain:
+        condition: service_healthy
     ports:
       - target: 8080
         published: "${FLEETWORKS_API_PORT:-8080}"
         host_ip: 127.0.0.1
         protocol: tcp
+    healthcheck:
+      test: [CMD, /usr/local/bin/check-fleetworks-api]
+      interval: 5s
+      timeout: 4s
+      start_period: 15s
+      retries: 6
+
+  brain:
+    <<: *runtime
+    command: [--role, brain, --port, "8080"]
+    restart: unless-stopped
+    environment:
+      <<: *runtime-environment
+      FLEETWORKS_BRAIN_BIND: 0.0.0.0
+      FLEETWORKS_BRAIN_ALLOWED_HOSTS: brain:8080
+      FLEETWORKS_INTERNAL_TOKEN_FILE: /run/secrets/brain_token
+      FLEETWORKS_API_TOKEN_FILE: /run/secrets/brain_token
+      FLEETWORKS_API_HEALTH_HOST: brain:8080
+    secrets:
+      - storage_password
+      - brain_token
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
     healthcheck:
       test: [CMD, /usr/local/bin/check-fleetworks-api]
       interval: 5s
@@ -176,6 +205,8 @@ services:
 secrets:
   api_token:
     file: ${FLEETWORKS_API_TOKEN_FILE:-${FLEETWORKS_HOST_WORKSPACE}/secrets/api-token}
+  brain_token:
+    file: ${FLEETWORKS_BRAIN_TOKEN_FILE:-${FLEETWORKS_HOST_WORKSPACE}/secrets/brain-token}
   storage_password:
     file: ${FLEETWORKS_STORAGE_PASSWORD_FILE:-${FLEETWORKS_HOST_WORKSPACE}/secrets/storage-password}
   storage_root_password:

@@ -42,6 +42,8 @@ enum Role {
     Combined,
     /// Authenticated Fleetworks API process.
     Api,
+    /// Serve retained Brain and Intel HTTP operations on the private network.
+    Brain,
     /// Fleetworks background domain workers.
     Worker,
     /// Claim and execute durable Atlas dispatches.
@@ -124,9 +126,14 @@ async fn main() -> Result<()> {
         )
         .await;
     }
-    let (layout, network, access) = tokio::task::spawn_blocking(move || {
-        let access = if matches!(role, Role::Combined | Role::Api) {
+    let (layout, network, access, brain) = tokio::task::spawn_blocking(move || {
+        let access = if matches!(role, Role::Combined | Role::Api | Role::Brain) {
             Some(fleetworks::ApiAccess::from_environment(role, &origins)?)
+        } else {
+            None
+        };
+        let brain = if role == Role::Api {
+            fleetworks::brain_client()?
         } else {
             None
         };
@@ -135,6 +142,7 @@ async fn main() -> Result<()> {
                 Layout::new(argos_osint_core::paths::ensure_home()?),
                 None,
                 access,
+                brain,
             ))
         } else {
             let network = fleetworks::NetworkStorage::from_environment(role)?;
@@ -142,6 +150,7 @@ async fn main() -> Result<()> {
                 Layout::new(network.workspace.clone()),
                 Some(network),
                 access,
+                brain,
             ))
         }
     })
@@ -191,7 +200,13 @@ async fn main() -> Result<()> {
             origins: Arc::new(api.origins),
         };
         let router = if let Some(policy) = api.policy {
-            argos_osint_api::network_router(state, policy)
+            match (role, brain) {
+                (Role::Brain, _) => argos_osint_api::brain_router(state, policy),
+                (_, Some(brain)) => {
+                    argos_osint_api::network_router_with_brain(state, policy, brain)
+                }
+                (_, None) => argos_osint_api::network_router(state, policy),
+            }
         } else {
             ensure!(
                 api.bind == IpAddr::V4(Ipv4Addr::LOCALHOST),
@@ -199,7 +214,8 @@ async fn main() -> Result<()> {
             );
             argos_osint_api::router(state)
         };
-        println!("Argos API http://{}:{port}", api.bind);
+        let service = if role == Role::Brain { "Brain" } else { "API" };
+        println!("Argos {service} http://{}:{port}", api.bind);
         Some((listener, router))
     } else {
         None

@@ -1,5 +1,6 @@
 //! Versioned local Intel HTTP adapter. @tag:intel-brief
 mod actor_dossier;
+mod brain;
 mod host_metrics;
 mod live;
 mod network;
@@ -24,7 +25,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{sync::Arc, time::Duration};
 
+pub use brain::BrainClient;
 pub use network::{network_origin, NetworkPolicy};
+
+const MAX_REQUEST_BYTES: usize = 16 * 1024;
 
 use network::{AccessMode, AccessPolicy};
 
@@ -53,12 +57,32 @@ pub fn loopback_url(raw: &str) -> anyhow::Result<url::Url> {
 
 /// Serves the existing unauthenticated loopback API.
 pub fn router(state: ApiState) -> Router {
-    router_with_access(state, None)
+    router_with_access(state, None, None)
 }
 
 /// Serves public routes and authenticated job controls with explicit ingress restrictions.
 pub fn network_router(state: ApiState, policy: NetworkPolicy) -> Router {
-    router_with_access(state, Some(policy))
+    router_with_access(state, Some(policy), None)
+}
+
+/// Serves the public API and sends Brain and Intel HTTP operations to a private service.
+pub fn network_router_with_brain(
+    state: ApiState,
+    policy: NetworkPolicy,
+    brain: BrainClient,
+) -> Router {
+    router_with_access(state, Some(policy), Some(brain))
+}
+
+/// Serves the private Brain and Intel HTTP operations with storage-backed readiness.
+pub fn brain_router(state: ApiState, policy: NetworkPolicy) -> Router {
+    let port = state.port;
+    let router = brain::routes()
+        .route("/api/v1/health/ready", get(brain::ready))
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
+        .layer(middleware::from_fn(request_timeout))
+        .with_state(state);
+    guard_network(router, policy, Arc::new(Vec::new()), port)
 }
 
 /// Apply the same host, origin and bearer policy to a private service router.
@@ -78,7 +102,11 @@ pub fn guard_network(
     ))
 }
 
-fn router_with_access(state: ApiState, network: Option<NetworkPolicy>) -> Router {
+fn router_with_access(
+    state: ApiState,
+    network: Option<NetworkPolicy>,
+    brain: Option<BrainClient>,
+) -> Router {
     let mode = if network.is_some() {
         AccessMode::Bearer
     } else {
@@ -91,21 +119,21 @@ fn router_with_access(state: ApiState, network: Option<NetworkPolicy>) -> Router
     };
     let sampler = Arc::new(std::sync::Mutex::new(host_metrics::HostSampler::default()));
     let feed = Arc::new(host_metrics::HostFeed::new(sampler.clone()));
+    let brain_routes = brain::routes();
+    let brain_routes = if let Some(brain) = brain {
+        brain_routes.route_layer(middleware::from_fn_with_state(brain, brain::forward))
+    } else {
+        brain_routes
+    };
     let router = Router::new()
         .route("/api/v1/health/ready", get(ready))
         .route("/api/v1/capabilities", get(capabilities))
         .route("/api/v1/host/metrics", get(host_metrics::read))
         .route("/api/v1/live", get(live::upgrade))
         .route("/api/v1/days", get(days))
-        .route("/api/v1/actors/detail", get(actor_dossier::read))
         .route("/api/v1/articles", get(articles))
         .route("/api/v1/articles/search", get(article_search))
         .route("/api/v1/articles/counts", get(article_counts))
-        .route("/api/v1/articles/detail", get(detail))
-        .route("/api/v1/articles/related", get(related))
-        .route("/api/v1/brief/ensure", post(ensure))
-        .route("/api/v1/brief/reload", post(reload))
-        .route("/api/v1/brief/stages", get(stages))
         .route("/api/v1/jobs", get(jobs))
         .route("/api/v1/logs", get(operations::logs))
         .route("/api/v1/tools", get(operations::tools))
@@ -113,13 +141,7 @@ fn router_with_access(state: ApiState, network: Option<NetworkPolicy>) -> Router
         .route("/api/v1/profile", get(operations::profile))
         .route("/api/v1/jobs/detail", get(job))
         .route(JOB_RETRY_PATH, post(retry))
-        .route("/api/v1/topology", get(topology_web::read).post(topology))
-        .route("/api/v1/topology/resolve", post(topology_web::resolve))
-        .route("/api/v1/topology/summary", get(topology_summary::read))
-        .route(
-            "/api/v1/topology/summary/generate",
-            post(topology_summary::generate),
-        );
+        .merge(brain_routes);
     let router = if mode == AccessMode::Bearer {
         router
             .route(ATLAS_CYCLES_PATH, post(operations::submit_atlas_cycle))
@@ -131,7 +153,7 @@ fn router_with_access(state: ApiState, network: Option<NetworkPolicy>) -> Router
         .layer(axum::Extension(sampler))
         .layer(axum::Extension(feed))
         .layer(axum::Extension(mode))
-        .layer(DefaultBodyLimit::max(16 * 1024))
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
         .layer(middleware::from_fn(request_timeout))
         .layer(middleware::from_fn_with_state(access, network::protect))
         .with_state(state)

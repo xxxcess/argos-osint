@@ -147,8 +147,36 @@ def exercise(mode, tmp, binary, surreal):
                         assert worker.poll() is None, "background process did not stay up"
                         with socket.socket() as probe:
                             assert probe.connect_ex(("127.0.0.1", worker_port)) != 0, "worker published an HTTP listener"
+            if attempt == 1 and mode == "memory":
+                exercise_brain(workspace, binary, env, api_port, headers)
     assert (generations[0] == generations[1]) == (mode == "disk")
     print(f"{mode}: privileged bootstrap, scoped API and worker roles, ingress, retained reads and database generation passed", flush=True)
+
+
+def exercise_brain(workspace, binary, env, api_port, public_headers):
+    brain_port = free_ports(1)[0]
+    token = secrets.token_hex(32)
+    brain_env = {
+        **env,
+        "FLEETWORKS_INTERNAL_TOKEN": token,
+        "FLEETWORKS_BRAIN_ALLOWED_HOSTS": f"127.0.0.1:{brain_port}",
+    }
+    api_env = {**brain_env, "FLEETWORKS_BRAIN_ORIGIN": f"http://127.0.0.1:{brain_port}"}
+    auth = {"Authorization": "Bearer " + token}
+    ready = "/api/v1/health/ready"
+    detail = "/api/v1/articles/detail?run=missing-run&id=missing-article"
+    with process([binary, "--role", "api", "--port", str(api_port)], api_env, workspace / "api-brain.log") as api:
+        wait_for(api, api_port, ready, public_headers)
+        with process([binary, "--role", "brain", "--port", str(brain_port)], brain_env, workspace / "brain.log") as brain:
+            assert wait_for(brain, brain_port, ready, auth)["service"] == "fleetworks-brain"
+            assert request(brain_port, ready, public_headers)[0] == 401
+            assert request(brain_port, "/api/v1/jobs", auth)[0] == 404
+            private = request(brain_port, detail, auth)
+            assert private[0] == 404, private
+            assert request(api_port, detail, public_headers) == private
+        assert request(api_port, detail, public_headers)[0] == 502
+        assert request(api_port, "/api/v1/tools", public_headers)[0] == 200
+    print("Brain: private readiness, bearer isolation, retained route relay and outage isolation passed", flush=True)
 
 
 def exercise_nlp(tmp, binary):

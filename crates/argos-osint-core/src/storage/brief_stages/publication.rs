@@ -242,6 +242,7 @@ async fn current_source(tx: &Tx, captured: &Value, article_id: &str) -> Result<b
     let Some(run_id) = captured["run_id"].as_str() else {
         return Ok(true);
     };
+    crate::storage::atlas_delete::guard_occurrence_removal_in(tx, run_id).await?;
     crate::storage::classifier_admission::derivative_source_guards_in(
         tx,
         &[crate::atlas_classify::OccurrenceKey {

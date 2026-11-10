@@ -14,8 +14,8 @@ use tokio::runtime::Handle;
 
 use super::{
     artifact, calibration, ClassificationReceipt, ClassifierError, ClassifierService,
-    ClassifierStatus, ClassifyInput, DomainCalibration, DomainId, GateSet, InferenceEngine,
-    ModelId, ModelSnapshot, Provenance, RawDomainScore, WorkControl,
+    ClassifierStatus, ClassifyInput, DomainId, GateSet, InferenceEngine, ModelId, ModelSnapshot,
+    Provenance, RawDomainScore, WorkControl,
 };
 
 const PROTOCOL: &str = "argos-atlas-bert-v1";
@@ -109,7 +109,7 @@ impl Bundle {
     ) -> Result<ClassifierService, ClassifierError> {
         let id = ModelId::parse(&self.snapshot.model_id)
             .ok_or_else(|| ClassifierError::InvalidArtifact("invalid zero-shot model ID".into()))?;
-        let gates = gates(self.config.threshold);
+        let gates = calibration::zero_shot_gates(self.config.threshold);
         let manifest_sha256 = self.manifest_sha256.clone();
         let snapshot = self.snapshot.clone();
         let process = runtime.block_on(controlled(
@@ -179,19 +179,6 @@ fn bundle_hashes(config: &Config) -> Result<(String, String), ClassifierError> {
         .as_bytes(),
     );
     Ok((artifact_sha256, manifest_sha256))
-}
-
-fn gates(threshold: f64) -> GateSet {
-    GateSet {
-        version: calibration::ZERO_SHOT_GATE_VERSION.into(),
-        domains: DomainId::ALL.map(|domain| DomainCalibration {
-            domain,
-            sigmoid: Some([1.0, 0.0]),
-            knots: Vec::new(),
-            threshold,
-            min_informative_features: 0,
-        }),
-    }
 }
 
 struct Worker {
@@ -442,7 +429,7 @@ mod tests {
         let model_id = ModelId::parse(&format!("bert-{}", "a".repeat(59))).unwrap();
         let input =
             ClassifyInput::new("item", "A report", "Article description", Some("en".into()));
-        let gates = gates(0.8);
+        let gates = calibration::zero_shot_gates(0.8);
         let raw = raw_scores([0.95, 0.82, 0.81, 0.79, 0.0, 0.2]);
         let receipt = calibration::apply_gates(&input, &raw, &model_id, &gates).unwrap();
         receipt.validate().unwrap();

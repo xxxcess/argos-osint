@@ -40,6 +40,7 @@ pub(crate) mod promotion;
 pub mod provider_capture;
 pub mod provider_labels;
 pub mod readiness;
+pub mod remote;
 pub mod review;
 #[cfg(feature = "classifier")]
 pub(crate) mod runtime_proof;
@@ -1069,10 +1070,9 @@ impl ClassifierService {
     /// Checks availability first (a disabled feature reports
     /// [`ClassifierError::Unavailable`] even for an oversized batch), then
     /// the [`INFERENCE_BATCH_SIZE`] bound ([`ClassifierError::BatchTooLarge`]).
-    /// With the `classifier` feature off — or with the feature on but no
-    /// engine installed — this returns [`ClassifierError::Unavailable`]; it
-    /// never panics and never falls back to the remote classifier. Metrics
-    /// update only on success. Accounting failure does not block inference;
+    /// If no engine was installed when the service was pinned, this returns
+    /// [`ClassifierError::Unavailable`]. Metrics update only on success.
+    /// Accounting failure does not block inference;
     /// dropped updates are traced and [`Self::metrics`] reports a typed error.
     ///
     /// # Errors

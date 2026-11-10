@@ -98,6 +98,19 @@ pub struct GateSet {
     pub domains: [DomainCalibration; 6],
 }
 
+pub(super) fn zero_shot_gates(threshold: f64) -> GateSet {
+    GateSet {
+        version: ZERO_SHOT_GATE_VERSION.into(),
+        domains: DomainId::ALL.map(|domain| DomainCalibration {
+            domain,
+            sigmoid: Some([1.0, 0.0]),
+            knots: Vec::new(),
+            threshold,
+            min_informative_features: 0,
+        }),
+    }
+}
+
 impl ReceiptPolicy for GateSet {
     fn receipt(
         &self,

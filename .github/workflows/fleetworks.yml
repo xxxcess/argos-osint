@@ -11,8 +11,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: fleetworks-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: fleetworks-${{ github.event_name }}-${{ github.event_name == 'push' && github.sha || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 env:
   FLEETWORKS_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -31,6 +31,7 @@ jobs:
       server: ${{ steps.plan.outputs.server }}
       compose: ${{ steps.plan.outputs.compose }}
       broker: ${{ steps.plan.outputs.broker }}
+      bert: ${{ steps.plan.outputs.bert }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -58,7 +59,8 @@ jobs:
 
           event = os.environ["GITHUB_EVENT_NAME"]
           selected = set()
-          all_scopes = {"native", "server", "compose", "broker"}
+          default_scopes = {"native", "server", "compose", "broker"}
+          all_scopes = default_scopes | {"bert"}
           if event not in {"push", "pull_request"} or not re.fullmatch("[0-9a-f]{40}", base) or base == "0" * 40:
               selected.update(all_scopes)
           else:
@@ -76,6 +78,27 @@ jobs:
                           continue
                       if path.startswith(("docs/", ".planning/")) and path.endswith((".md", ".svg", ".html")):
                           continue
+                      if path.startswith("tools/atlas-bert/") or path in {
+                          ".github/workflows/atlas-bert.yml", "scripts/fixtures/atlas_bert",
+                      }:
+                          selected.add("bert")
+                          continue
+                      if path.startswith((
+                          "crates/argos-osint-core/src/classifier/",
+                          "crates/argos-osint-core/src/atlas_classify",
+                          "crates/argos-osint-core/src/storage/classifier_",
+                          "crates/argos-osint-core/tests/classifier_",
+                          "crates/argos-osint-core/tests/fixtures/classifier/",
+                          "crates/argos-osint-core/tests/storage_classifier_",
+                      )) or path in {
+                          ".github/workflows/fleetworks.yml",
+                          "apps/venture/src/classifier.rs",
+                          "crates/argos-api-host/src/classifier_service.rs",
+                          "crates/argos-api-host/src/classifier_train.rs",
+                          "crates/argos-osint-core/tests/adversarial_classifier_runtime.rs",
+                          "deploy/compose.atlas.yml",
+                      }:
+                          selected.add("bert")
                       if path.startswith("apps/venture/"):
                           selected.update({"native", "server", "compose"})
                       elif path.startswith("apps/fleetworks-cli/"):
@@ -89,7 +112,7 @@ jobs:
                       ):
                           selected.update({"server", "broker"})
                       else:
-                          selected.update(all_scopes)
+                          selected.update(default_scopes)
           with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
               for scope in sorted(all_scopes):
                   print(f"{scope}={str(scope in selected).lower()}", file=output)
@@ -165,7 +188,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt
-      - name: Check and build the ARM64 server
+      - name: Check, build, and test the ARM64 server
         shell: bash
         run: |
           set -euo pipefail
@@ -178,6 +201,8 @@ jobs:
           python3 scripts/agent_cargo.py check --locked -p argos-api-host "${features[@]}"
           python3 scripts/agent_cargo.py build --locked -p argos-api-host --bin argos-api-host "${features[@]}"
           file target/agents/debug/argos-api-host | grep -Ei 'ELF 64-bit.*(aarch64|ARM aarch64)'
+          python3 scripts/agent_cargo.py test --locked -p argos-api-host -p argos-osint-api \
+            "${features[@]}" --bin argos-api-host --lib
       - name: Exercise bootstrap and network service roles on loopback
         id: surreal
         shell: bash
@@ -252,9 +277,19 @@ jobs:
           python3 scripts/agent_cargo.py build --locked -p fleetworks-venture --bin venture
           python3 deploy/verify.py --venture target/agents/debug/venture
 
+  bert:
+    name: Atlas BERT runtime / Intel macOS
+    needs: scope
+    if: needs.scope.outputs.bert == 'true'
+    uses: ./.github/workflows/atlas-bert.yml
+    with:
+      head: ${{ github.event.pull_request.head.sha || github.sha }}
+      intel_only: true
+      intel_runtime: true
+
   required:
     name: Fleetworks required
-    needs: [scope, native, server]
+    needs: [scope, native, server, bert]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -264,8 +299,10 @@ jobs:
           SCOPE_RESULT: ${{ needs.scope.result }}
           NATIVE_SELECTED: ${{ needs.scope.outputs.native }}
           SERVER_SELECTED: ${{ needs.scope.outputs.server }}
+          BERT_SELECTED: ${{ needs.scope.outputs.bert }}
           NATIVE_RESULT: ${{ needs.native.result }}
           SERVER_RESULT: ${{ needs.server.result }}
+          BERT_RESULT: ${{ needs.bert.result }}
         shell: bash
         run: |
           set -euo pipefail
@@ -283,5 +320,6 @@ jobs:
           failed=0
           verify native "$NATIVE_SELECTED" "$NATIVE_RESULT" || failed=1
           verify server "$SERVER_SELECTED" "$SERVER_RESULT" || failed=1
-          echo "Fleetworks revision `$FLEETWORKS_HEAD`" >> "$GITHUB_STEP_SUMMARY"
+          verify bert "$BERT_SELECTED" "$BERT_RESULT" || failed=1
+          printf 'Fleetworks revision `%s`\n' "$FLEETWORKS_HEAD" >> "$GITHUB_STEP_SUMMARY"
           exit "$failed"

@@ -13,6 +13,9 @@ on:
         default: false
   workflow_call:
     inputs:
+      head:
+        description: Exact commit to verify
+        type: string
       intel_only:
         type: boolean
         default: false
@@ -24,10 +27,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: atlas-bert-${{ github.ref }}
-  cancel-in-progress: true
+  group: atlas-bert-${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 env:
+  ATLAS_BERT_HEAD: ${{ inputs.head || github.event.pull_request.head.sha || github.sha }}
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
 
@@ -39,8 +43,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ env.ATLAS_BERT_HEAD }}
           lfs: false
           persist-credentials: false
+      - name: Verify the checked-out commit
+        run: test "$(git rev-parse HEAD)" = "$ATLAS_BERT_HEAD"
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt
@@ -50,6 +57,8 @@ jobs:
         # doc-only checks the Rust API without linking LibTorch or loading a model.
         run: cargo check --locked --manifest-path tools/atlas-bert/Cargo.toml --all-targets --features rust-bert/doc-only
   macos-intel:
+    # Fleetworks calls the full runtime on PRs. The direct PR run checks Linux types only.
+    if: ${{ github.event_name != 'pull_request' || inputs.intel_only || inputs.intel_runtime }}
     runs-on: macos-15-intel
     timeout-minutes: 35
     env:
@@ -59,8 +68,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ env.ATLAS_BERT_HEAD }}
           lfs: false
           persist-credentials: false
+      - name: Verify the checked-out commit
+        run: test "$(git rev-parse HEAD)" = "$ATLAS_BERT_HEAD"
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: x86_64-apple-darwin

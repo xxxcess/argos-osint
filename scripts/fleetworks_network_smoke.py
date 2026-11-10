@@ -170,6 +170,28 @@ def exercise_nlp(tmp, binary):
     print("NLP: warm database-free role and authenticated ingress passed", flush=True)
 
 
+def exercise_classifier(tmp, binary):
+    port = free_ports(1)[0]
+    token = secrets.token_hex(32)
+    workspace = tmp / "classifier-home"
+    workspace.mkdir()
+    env = {
+        **safe_env, "ARGOS_HOME": str(workspace), "FLEETWORKS_WORKSPACE": str(workspace),
+        "FLEETWORKS_INTERNAL_TOKEN": token,
+        "FLEETWORKS_CLASSIFIER_ALLOWED_HOSTS": f"127.0.0.1:{port}",
+    }
+    with process([binary, "--role", "classifier", "--port", str(port)], env, tmp / "classifier.log") as worker:
+        path = "/api/v1/health/ready"
+        auth = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        ready = wait_for(worker, port, path, auth)
+        assert ready["service"] == "fleetworks-classifier" and ready["ready"]
+        assert ready["model_state"] == "unverified" and ready["active_model"] is None
+        assert request(port, path)[0] == 401
+        status, error = request(port, "/api/v1/classifier/pin", auth, '{"version":1,"requested":null}')
+        assert status == 424 and error["error"] == "classifier_model_not_configured", (status, error)
+    print("Classifier: database-free authenticated role, distinct transport and model state passed", flush=True)
+
+
 if __name__ == "__main__":
     binary, surreal = binaries(__doc__)
     with tempfile.TemporaryDirectory(prefix="fleetworks-native-network-") as directory:
@@ -178,6 +200,7 @@ if __name__ == "__main__":
             for mode in ("memory", "disk"):
                 exercise(mode, tmp, binary, surreal)
             exercise_nlp(tmp, binary)
+            exercise_classifier(tmp, binary)
         except Exception:
             for log in sorted(tmp.rglob("*.log")):
                 print(log.name, log.read_text()[-1500:])

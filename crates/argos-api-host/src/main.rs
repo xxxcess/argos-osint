@@ -1,4 +1,5 @@
 mod atlas_worker;
+mod classifier_service;
 mod classifier_train;
 mod fleetworks;
 mod nlp_service;
@@ -47,6 +48,8 @@ enum Role {
     AtlasWorker,
     /// Warm, private Compromise inference without a database session.
     Nlp,
+    /// Serve pinned Rust-BERT inference without a database session.
+    Classifier,
     /// Train the optional Natural classifier from a workspace dataset.
     TrainClassifier,
     /// Initialize storage and provision the runtime database account.
@@ -92,10 +95,22 @@ async fn main() -> Result<()> {
         file.is_none() && expected_sha256.is_none() && !activate,
         "classifier training options require --role train-classifier"
     );
-    if role == Role::Nlp {
-        let (bind, policy, router) = tokio::task::spawn_blocking(|| {
-            let (bind, policy) = fleetworks::internal_access("NLP")?;
-            Ok::<_, anyhow::Error>((bind, policy, nlp_service::router()?))
+    if matches!(role, Role::Nlp | Role::Classifier) {
+        let (bind, policy, router) = tokio::task::spawn_blocking(move || {
+            let (engine, router) = if role == Role::Nlp {
+                ("NLP", nlp_service::router()?)
+            } else {
+                ensure!(
+                    cfg!(feature = "classifier"),
+                    "this build does not include the classifier engine"
+                );
+                let home = argos_osint_core::classifier::readiness::ClassifierHome::new(
+                    fleetworks::workspace_path()?,
+                );
+                ("CLASSIFIER", classifier_service::router(home))
+            };
+            let (bind, policy) = fleetworks::internal_access(engine)?;
+            Ok::<_, anyhow::Error>((bind, policy, router))
         })
         .await??;
         let listener = tokio::net::TcpListener::bind(SocketAddr::new(bind, port)).await?;

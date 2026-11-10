@@ -225,13 +225,8 @@ fn outcome(lease: &DeliveryLease, result: Result<CycleResult>) -> DeliveryOutcom
         Ok(CycleResult::Retry(reason)) => retry(reason),
         Ok(CycleResult::Failed(reason)) => DeliveryOutcome::Failed { reason },
         Err(error) => match error.downcast_ref::<CyclePreflightError>() {
-            Some(CyclePreflightError::Classifier {
-                source: ClassifierError::Busy,
-                ..
-            }) => retry("atlas_classifier_busy"),
-            Some(
-                CyclePreflightError::Classifier { .. } | CyclePreflightError::MissingPinnedRevision,
-            ) => DeliveryOutcome::Failed {
+            Some(CyclePreflightError::Classifier { source, .. }) => classifier_failure(source),
+            Some(CyclePreflightError::MissingPinnedRevision) => DeliveryOutcome::Failed {
                 reason: "atlas_classifier_unavailable",
             },
             Some(_) => DeliveryOutcome::Failed {
@@ -252,6 +247,31 @@ fn outcome(lease: &DeliveryLease, result: Result<CycleResult>) -> DeliveryOutcom
                 );
                 retry("atlas_cycle_error")
             }
+        },
+    }
+}
+
+fn classifier_failure(source: &ClassifierError) -> DeliveryOutcome<'static> {
+    match source {
+        ClassifierError::Busy => retry("atlas_classifier_busy"),
+        ClassifierError::Timeout => retry("atlas_classifier_timeout"),
+        ClassifierError::BridgeProtocol { code, .. }
+            if code == "remote_classifier_model_not_configured" =>
+        {
+            DeliveryOutcome::Failed {
+                reason: "atlas_classifier_model_not_configured",
+            }
+        }
+        ClassifierError::BridgeProtocol { code, .. }
+            if matches!(
+                code.as_str(),
+                "remote_classifier_unreachable" | "remote_classifier_unavailable"
+            ) =>
+        {
+            retry("atlas_classifier_service_unavailable")
+        }
+        _ => DeliveryOutcome::Failed {
+            reason: "atlas_classifier_unavailable",
         },
     }
 }

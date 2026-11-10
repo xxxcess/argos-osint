@@ -487,6 +487,26 @@ impl ClassifierHome {
         snapshot: &ModelSnapshot,
         expected_manifest_sha256: &str,
     ) -> Result<(), ClassifierError> {
+        if snapshot.algorithm_version == super::ZERO_SHOT_ALGORITHM_VERSION
+            && super::remote::is_configured()
+        {
+            return super::remote::validate_configured(
+                snapshot,
+                expected_manifest_sha256,
+                &self.inner.cancel,
+            )
+            .await;
+        }
+        self.validate_local_saved_pin_integrity(snapshot, expected_manifest_sha256)
+            .await
+    }
+
+    /// Rechecks the exact local artifact without starting a model runtime.
+    pub async fn validate_local_saved_pin_integrity(
+        &self,
+        snapshot: &ModelSnapshot,
+        expected_manifest_sha256: &str,
+    ) -> Result<(), ClassifierError> {
         if !cfg!(feature = "classifier") {
             return Err(ClassifierError::Unavailable);
         }
@@ -633,6 +653,25 @@ impl ClassifierHome {
             snapshot.algorithm_version != super::ZERO_SHOT_ALGORITHM_VERSION
         }) {
             return self.pin_natural(requested).await;
+        }
+        if super::remote::is_configured() {
+            return super::remote::pin_configured(requested, &self.inner.cancel).await;
+        }
+        self.pin_atlas_local(requested).await
+    }
+
+    /// Pins Rust-BERT from this home even if a private remote is configured.
+    /// The private classifier server must use this entrypoint to own the model.
+    pub async fn pin_atlas_local(
+        &self,
+        requested: Option<&ModelSnapshot>,
+    ) -> Result<PinnedClassifier, ClassifierError> {
+        if requested.is_some_and(|snapshot| {
+            snapshot.algorithm_version != super::ZERO_SHOT_ALGORITHM_VERSION
+        }) {
+            return Err(ClassifierError::Incompatible(
+                "expected a Rust-BERT snapshot".into(),
+            ));
         }
         #[cfg(not(feature = "classifier"))]
         return Err(ClassifierError::Unavailable);
@@ -2172,6 +2211,7 @@ impl fmt::Display for CyclePreflightError {
                 write!(f, "Atlas classifier blocked ({}; {code}): {source}.", status.as_str())?;
                 match (code.as_str(), source) {
                     ("classifier_unavailable", ClassifierError::MissingZeroShotConfig(_)) => f.write_str(" Set worker_path and model_dir there, then check Atlas classifier in Venture (5)."),
+                    ("classifier_unavailable", ClassifierError::BridgeProtocol { operation, .. }) if operation == super::remote::OPERATION => f.write_str(" Check the Fleetworks classifier service and its model configuration."),
                     ("classifier_unavailable", _) => f.write_str(" Run argos classifier status to check the local Rust-BERT setup."),
                     ("pinned_classifier_unavailable", _) => f.write_str(" Restore the saved classifier revision to resume, or explicitly reclassify under a new revision."),
                     _ => Ok(()),

@@ -1,4 +1,5 @@
 mod atlas_worker;
+mod classifier_train;
 mod fleetworks;
 mod nlp_service;
 
@@ -24,6 +25,14 @@ struct Args {
     origins: Vec<String>,
     #[arg(long, value_enum, default_value_t = Role::Combined)]
     role: Role,
+    /// Private workspace CSV snapshot selected by Venture for one-shot training.
+    #[arg(long, required_if_eq("role", "train-classifier"))]
+    file: Option<std::path::PathBuf>,
+    #[arg(long, required_if_eq("role", "train-classifier"))]
+    expected_sha256: Option<String>,
+    /// Activate the synthetic Natural baseline after successful training.
+    #[arg(long)]
+    activate: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -38,6 +47,8 @@ enum Role {
     AtlasWorker,
     /// Warm, private Compromise inference without a database session.
     Nlp,
+    /// Train the optional Natural classifier from a workspace dataset.
+    TrainClassifier,
     /// Initialize storage and provision the runtime database account.
     Bootstrap,
 }
@@ -63,7 +74,24 @@ async fn main() -> Result<()> {
         role,
         port,
         origins,
+        file,
+        expected_sha256,
+        activate,
     } = Args::parse();
+    if role == Role::TrainClassifier {
+        return classifier_train::run(
+            fleetworks::workspace_path()?,
+            file.expect("required for classifier training"),
+            expected_sha256.expect("required for classifier training"),
+            activate,
+            shutdown_signal(),
+        )
+        .await;
+    }
+    ensure!(
+        file.is_none() && expected_sha256.is_none() && !activate,
+        "classifier training options require --role train-classifier"
+    );
     if role == Role::Nlp {
         let (bind, policy, router) = tokio::task::spawn_blocking(|| {
             let (bind, policy) = fleetworks::internal_access("NLP")?;

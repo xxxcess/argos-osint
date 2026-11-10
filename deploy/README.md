@@ -73,3 +73,13 @@ Set `FLEETWORKS_WEB_PORT` to change the published web port. Compose sets `FLEETW
 Set `FLEETWORKS_API_PORT` to change the published API port and `FLEETWORKS_API_ORIGIN` to point Venture and the native clients at that port. `FLEETWORKS_API_BIND` defaults to `0.0.0.0` inside the container. The Compose host mapping always uses `127.0.0.1`. When overriding `FLEETWORKS_API_ALLOWED_HOSTS`, retain `api:8080` for the web relay and `127.0.0.1:<published API port>` for the direct authenticated readiness probe. Use `FLEETWORKS_API_ALLOWED_ORIGINS` for comma-separated origins if a browser needs direct API access. The web desktop uses its own origin by default.
 
 The Dockerfile supports `linux/amd64` and `linux/arm64`. Build on the target architecture or use a Buildx builder with both platforms available. Select `--target web` for the production Next build on Node 24 and pnpm 12, `--target runtime` for the locked API, worker, and bootstrap binary, or `--target surrealdb` for the managed database image. The Rust runtime includes the current in-process NLP and classifier support. A separate Rust-BERT model/runtime bundle is outside this image.
+
+## Train the optional Natural classifier
+
+After `venture up`, place the current CSV under workspace `datasets/` and run
+
+```sh
+venture --workspace "$FLEETWORKS_HOST_WORKSPACE" train-legacy
+```
+
+Pass `--file datasets/another.csv` to select a different dataset, or configure `[datasets].articles` in workspace `config/workspace.toml`. Venture snapshots the selected bytes. The training worker checks that SHA-256 and reports it with the resulting model. Pass `--activate` to activate a synthetic Natural baseline explicitly. Atlas admission uses the separate Rust-BERT service.

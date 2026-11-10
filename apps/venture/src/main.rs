@@ -1,3 +1,4 @@
+mod classifier;
 mod compose;
 mod host_storage;
 
@@ -58,6 +59,15 @@ enum Action {
     },
     /// Stop this workspace's stack and keep its persistent data.
     Stop,
+    /// Train the legacy Natural classifier on the current workspace CSV.
+    TrainLegacy {
+        /// Override the workspace article dataset.
+        #[arg(long, value_name = "PATH")]
+        file: Option<PathBuf>,
+        /// Explicitly activate the trained synthetic baseline for legacy use.
+        #[arg(long, visible_alias = "activate-synthetic-baseline")]
+        activate: bool,
+    },
     /// Launch a sibling client. Use `venture help client` for launcher help.
     #[command(disable_help_flag = true)]
     Client {
@@ -123,6 +133,9 @@ async fn main() -> Result<()> {
         } => status(&workspace, api_origin, api_token_file.as_deref(), json).await,
         Action::Logs { follow } => compose::logs(&workspace, follow).await,
         Action::Stop => compose::stop(&workspace).await,
+        Action::TrainLegacy { file, activate } => {
+            classifier::train(&workspace, file, activate).await
+        }
         Action::Client { kind, arguments } => launch(&workspace, kind, arguments).await,
         Action::HostStorageSupervisor { generation } => {
             let owner = Owner::load(&workspace)

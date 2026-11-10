@@ -30,14 +30,7 @@ impl NetworkStorage {
             cfg!(feature = "server"),
             "Fleetworks roles require the server build feature"
         );
-        let workspace = env::var_os("FLEETWORKS_WORKSPACE")
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-            .context("FLEETWORKS_WORKSPACE must be absolute")?;
-        ensure!(
-            env::var_os("ARGOS_HOME").as_deref() == Some(workspace.as_os_str()),
-            "ARGOS_HOME must select the same Fleetworks workspace"
-        );
+        let workspace = workspace_path()?;
         let endpoint =
             env::var("FLEETWORKS_STORAGE_URL").context("FLEETWORKS_STORAGE_URL is required")?;
         let namespace = identifier("FLEETWORKS_STORAGE_NAMESPACE", "fleetworks")?;
@@ -65,6 +58,18 @@ impl NetworkStorage {
             runtime_user,
         })
     }
+}
+
+pub(crate) fn workspace_path() -> Result<PathBuf> {
+    let workspace = env::var_os("FLEETWORKS_WORKSPACE")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .context("FLEETWORKS_WORKSPACE must be absolute")?;
+    ensure!(
+        env::var_os("ARGOS_HOME").as_deref() == Some(workspace.as_os_str()),
+        "ARGOS_HOME must select the same Fleetworks workspace"
+    );
+    Ok(workspace)
 }
 
 pub(crate) struct ApiAccess {

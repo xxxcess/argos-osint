@@ -22,6 +22,7 @@ axum = "0.8.8"
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 url.workspace = true
 argos-osint-api = { path = "../argos-osint-api", default-features = false }
 clap.workspace = true

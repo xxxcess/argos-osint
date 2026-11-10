@@ -212,7 +212,7 @@ impl Owner {
         command
     }
 
-    fn compose(&self) -> Command {
+    pub(crate) fn compose(&self) -> Command {
         let mut command = self.docker();
         command
             .env_remove("COMPOSE_PROFILES")

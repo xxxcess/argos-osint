@@ -52,7 +52,7 @@ The full service cutover remains open. In particular, Brain and Intel integratio
 ## 2026-11-10 — Cutover continuation
 
 - GitHub Actions at `2934b1f` passed native Linux and Intel macOS, real Rust-BERT inference, the ARM64 server, and native RabbitMQ dispatch. Packaged Compose failed when the SurrealDB image invoked BusyBox under an unsupported executable name.
-- `fea751a` fixes the startup paths. A local fixture reproduced the old failure with the configured BusyBox image binary and exercised valid, empty, and oversized credentials through the corrected script. The [packaged rerun](https://github.com/xxxcess/argos-osint/actions/runs/42777729999) owns container startup evidence.
+- `fea751a` fixes the startup paths. A local fixture reproduced the old failure with the configured BusyBox image binary and exercised valid, empty, and oversized credentials through the corrected script. The [ARM64 packaged rerun](https://github.com/xxxcess/argos-osint/actions/runs/42777729999) passed Venture startup, authenticated readiness, web relay, Atlas delivery and owned shutdown at `fea751a`.
 - A private Brain role serves retained actor, topology and Intel brief HTTP operations. The gateway uses a separate bearer token. Background brief work and live streams still run in the existing worker and gateway.
 - The interactive Jobs client supports listing, details, logs, retry and cancellation. Venture's web mode attaches to Jobs or follows Compose logs. Exiting the terminal keeps the owned stack.
 - Atlas collection reserves daily per-account quota in SurrealDB before dispatch and transfers the slot to the fallback account when the transfer succeeds. Standalone NewsAPI and provider-wide model quotas and cooldowns remain open.

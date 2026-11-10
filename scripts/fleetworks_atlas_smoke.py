@@ -27,9 +27,14 @@ def exercise(tmp, binary, surreal):
     }
     worker_env = {
         **env,
-        "FLEETWORKS_BROKER_URL": os.environ["FLEETWORKS_BROKER_URL"],
         "FLEETWORKS_BROKER_QUEUE": "fleetworks.atlas.smoke." + secrets.token_hex(8),
     }
+    if "FLEETWORKS_BROKER_URL_FILE" in os.environ:
+        worker_env["FLEETWORKS_BROKER_URL_FILE"] = str(
+            Path(os.environ["FLEETWORKS_BROKER_URL_FILE"]).resolve(strict=True)
+        )
+    else:
+        worker_env["FLEETWORKS_BROKER_URL"] = os.environ["FLEETWORKS_BROKER_URL"]
     db = [surreal, "start", "--no-banner", "--log", "warn", "--bind", f"127.0.0.1:{database_port}", "memory"]
     auth = {"Authorization": "Bearer " + token, "Content-Type": "application/json"}
     root = base64.b64encode(f"root:{root_key}".encode()).decode()

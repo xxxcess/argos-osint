@@ -91,6 +91,15 @@ The full service cutover remains open. In particular, Brain and Intel integratio
 - The [scoped run at `9af6e50`](https://github.com/xxxcess/argos-osint/actions/runs/42798161278) passed native clients on Linux and both macOS architectures, real Intel Rust-BERT, and the ARM64 server lane. The web unit job exposed inherited browser isolation settings. The correction is pushed separately at `616a82f`.
 - The [candidate run at `9af6e50`](https://github.com/xxxcess/argos-osint/actions/runs/42798161375) independently verified downloaded CLI packages on all four architectures. Container artifact verification and the additional packaged host-storage restart checks require hosted results.
 
+## Model attempt boundary and retained history
+
+- The private execution service now performs eligible Focus Brief generation attempts. It resolves provider credentials on the server, returns bounded typed progress and final results, and aborts its upstream attempt if the caller disconnects. The brief worker retains its account lease, retry chain and publication fence. Direct transports and subscription routes remain separate.
+- Retained cancellation, application jobs, tool state, credit holds and historical reads now use shared modules. The compatibility commands retain their existing imports and archived record formats. Full retirement remains gated on compatibility and retained-service verification.
+- All four private execution transport tests and five shared cancellation tests passed locally. The scoped compatibility storage and host integration suite runs separately.
+- The original [candidate run at `9af6e50`](https://github.com/xxxcess/argos-osint/actions/runs/42798161375) passed image archive startup on both Linux architectures. The AMD64 candidate smoke now also exercises host-memory reset, host-disk retention and external-disk ownership across Venture restarts. The exact extended smoke has its own hosted result.
+- The [web fix at `6b4d03f`](https://github.com/xxxcess/argos-osint/actions/runs/42800879060) passed hosted live relay, runtime restart and browser hot reload. The broader browser suite is recorded separately.
+- The Natural training worker activated the checked-in CSV at SHA-256 `625f10150ba413f2fcae49ef425f9829004daaf9e69e49eecf66f7598de80d93` and a changed copy at the same path. Atlas remained on Rust-BERT.
+
 ## Retention
 
 This already-tracked plan records the shared cutover and its remaining acceptance work. Keep raw logs, fixtures and intermediate notes out of Git.

@@ -43,7 +43,7 @@ Status: in implementation
 - [x] Implement managed host memory/disk SurrealDB and external disk-server configuration, authentication and TLS.
 - [x] Move shared model execution out of Recon and update retained consumers to use the shared module.
 - [x] Extract shared Brain graph types from Recon and move retained storage selection to the common runtime.
-- [ ] Remove remaining retained job, tool-binding and historical record dependencies from Recon.
+- [x] Extract retained application jobs, cancellation, tool state, credit records, and historical reads from Recon.
 - [x] Split the default Venture and terminal client build graph from RocksDB, ONNX and QuickJS.
 Acceptance: all three storage selections work through a network endpoint; original .argos state remains untouched.
 
@@ -52,7 +52,8 @@ Status: in implementation
 - [x] Separate API serving, schema bootstrap and background workers. Dedicated domain entrypoints and their actions continue below.
 - [x] Wire private Atlas, NLP, classifier, Brain and Tools roles, with brief execution in its own worker.
 - [x] Separate private Control configuration and Jobs operations from the gateway.
-- [ ] Move retained provider transport into the dedicated model execution service.
+- [x] Run Focus Brief claims, inferences and links chat attempts in the private execution service.
+- [ ] Move remaining retained provider transports and narrow worker access to provider credentials.
 - [x] Admit Focus Brief jobs, runnable tasks, captured inputs and the retained run fence in one transaction before splitting the worker.
 - [x] Commit each brief stage output, metadata, task state and final retained run fence together.
 - [x] Persist and replay brief display, Brain and index publication from completed stages.
@@ -112,4 +113,4 @@ Root agent owns integration, plan summaries and shared build cache. Delegate dis
 TinyFish CLI was unavailable during earlier research; used official RabbitMQ/Lapin pages through web fallback. GitHub connector omitted duration fields; read-only gh API supplied timestamps. No new execution failures during plan creation.
 
 ## Next Step
-Review the exact candidate and scoped workflow results. Finish the dedicated model service and retained dependency extraction before retiring the compatibility Recon entrypoints.
+Review the exact candidate, scoped web and compatibility results. Finish the remaining model transport cutover and verify retained parity before retiring the compatibility Recon entrypoints.

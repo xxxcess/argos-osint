@@ -114,6 +114,8 @@ test(
         env: {
           ...process.env,
           NODE_ENV: "development",
+          // The copied app already owns an isolated cache and lock directory.
+          ARGOS_WEB_TEST_DEV: "0",
           ARGOS_RUST_API_ORIGIN: `http://127.0.0.1:${backend.address().port}`,
         },
         stdio: ["ignore", "pipe", "pipe"],

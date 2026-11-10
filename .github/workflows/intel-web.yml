@@ -83,15 +83,20 @@ jobs:
       - name: Install test browser
         run: pnpm exec playwright install --with-deps chromium
       - name: Verify live relay and runtime lifecycle
+        env:
+          # Generated routes in the isolated output still require app-local pnpm modules.
+          NODE_PATH: ${{ github.workspace }}/apps/web-desktop/node_modules
         run: pnpm test:live
       - name: Run offline browser contracts
         env:
+          NODE_PATH: ${{ github.workspace }}/apps/web-desktop/node_modules
           ARGOS_WEB_CAPTURE_DIR: test-results/export-ui
           PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/export
         run: pnpm test:e2e --reporter=list,html --output=test-results/export
       - name: Run development browser contracts
         if: inputs.head == '' || inputs.development
         env:
+          NODE_PATH: ${{ github.workspace }}/apps/web-desktop/node_modules
           ARGOS_WEB_PROFILE: dev
           ARGOS_WEB_CAPTURE_DIR: test-results/dev-ui
           PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/dev

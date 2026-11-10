@@ -6,6 +6,7 @@ import http.client
 import json
 import os
 import re
+import secrets
 import socket
 import subprocess
 import sys
@@ -22,9 +23,9 @@ IMAGE_OVERRIDES = (
 )
 
 
-def fixture_ports(host_storage=False):
+def fixture_ports(separate_database=False):
     addresses = ["127.0.0.1", "127.0.0.1"]
-    if host_storage:
+    if separate_database:
         # A Linux container connects through the host gateway, beyond loopback.
         addresses.append("0.0.0.0")
     with contextlib.ExitStack() as resources:
@@ -49,6 +50,65 @@ def request(port, path, token=None, payload=None):
         return response.status, json.loads(response.read())
     finally:
         connection.close()
+
+
+def external_ready(database, port):
+    if database.poll() is not None:
+        return False
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
+    try:
+        connection.request("GET", "/health")
+        return connection.getresponse().status == 200
+    except (OSError, http.client.HTTPException):
+        return False
+    finally:
+        connection.close()
+
+
+@contextlib.contextmanager
+def external_database(directory, environment, surreal, port):
+    server_env = {name: value for name, value in environment.items() if not name.startswith("SURREAL_")}
+    version = subprocess.check_output([surreal, "version"], env=server_env, text=True, timeout=5).split()
+    if version[:1] != ["3.3.4"]:
+        raise RuntimeError("The external fixture requires the repository-pinned SurrealDB 3.3.4")
+    password = secrets.token_hex(32)
+    server_env.update(SURREAL_USER="root", SURREAL_PASS=password)
+    backend = f'rocksdb://{directory / "external-surrealdb"}?versioned=false&sync=every'
+    with tempfile.NamedTemporaryFile(mode="w", dir=directory, encoding="utf-8") as credential, (
+        directory / "external-surreal.log"
+    ).open("w+b") as log:
+        credential.write(password + "\n")
+        credential.flush()
+        environment.update(
+            FLEETWORKS_STORAGE_URL=f"ws://host.docker.internal:{port}",
+            FLEETWORKS_STORAGE_ROOT_USERNAME="root",
+            FLEETWORKS_STORAGE_ROOT_PASSWORD_FILE=credential.name,
+        )
+        with subprocess.Popen(
+            [surreal, "start", "--no-banner", "--log", "warn", "--bind", f"0.0.0.0:{port}", backend],
+            env=server_env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+        ) as database:
+            try:
+                deadline = time.monotonic() + 35
+                while not external_ready(database, port):
+                    if database.poll() is not None or time.monotonic() >= deadline:
+                        raise RuntimeError("External SurrealDB did not become ready")
+                    time.sleep(0.15)
+                yield database
+            except Exception:
+                log.seek(max(0, log.tell() - 4096))
+                details = log.read(4096).decode(errors="replace").replace(password, "[redacted]")
+                if details:
+                    print(details, file=sys.stderr)
+                raise
+            finally:
+                if database.poll() is None:
+                    database.terminate()
+                    try:
+                        database.wait(timeout=22)
+                    except subprocess.TimeoutExpired:
+                        database.kill()
+                        database.wait()
 
 
 def exercise_atlas(port, token):
@@ -117,8 +177,8 @@ def check_container_images(workspace, environment, expected):
 
 
 def verify(venture, compose, dev=False, *, no_build=False, image_ids=None, storage="compose-disk", surreal=None):
-    host_storage = storage != "compose-disk"
-    api_port, web_port, *db_ports = fixture_ports(host_storage)
+    separate_database = storage != "compose-disk"
+    api_port, web_port, *db_ports = fixture_ports(separate_database)
     environment = {
         name: value for name, value in os.environ.items()
         if not name.startswith(("ARGOS_", "FLEETWORKS_", "COMPOSE_"))
@@ -130,15 +190,23 @@ def verify(venture, compose, dev=False, *, no_build=False, image_ids=None, stora
     )
     if no_build:
         environment.update({name: os.environ[name] for name in IMAGE_OVERRIDES if name in os.environ})
-    if host_storage:
+    if storage in ("host-memory", "host-disk"):
         environment.update(
             FLEETWORKS_HOST_DB_BIND=f"0.0.0.0:{db_ports[0]}",
             FLEETWORKS_SURREAL_BIN=str(surreal),
         )
-        if image_ids is not None:
-            image_ids = {service: image for service, image in image_ids.items() if service != "surrealdb"}
-    with tempfile.TemporaryDirectory(prefix="fleetworks-compose-") as directory:
-        workspace = Path(directory) / "workspace"
+    if separate_database and image_ids is not None:
+        image_ids = {service: image for service, image in image_ids.items() if service != "surrealdb"}
+    with tempfile.TemporaryDirectory(prefix="fleetworks-compose-") as directory, contextlib.ExitStack() as resources:
+        directory = Path(directory)
+        workspace = directory / "workspace"
+        database = None
+        if storage == "external":
+            database = resources.enter_context(external_database(directory, environment, surreal, db_ports[0]))
+
+        def check_external_survived():
+            if database is not None and not external_ready(database, db_ports[0]):
+                raise RuntimeError("External SurrealDB did not stay ready after Venture stop")
 
         def run(*args, check=True, timeout=60):
             return subprocess.run(
@@ -182,8 +250,9 @@ def verify(venture, compose, dev=False, *, no_build=False, image_ids=None, stora
                 assert (workspace / "storage/rabbitmq").is_dir(), "managed RabbitMQ store is missing"
                 exercise_atlas(api_port, token)
                 print("Packaged Atlas dispatch reached the private classifier service")
-            if host_storage:
+            if separate_database:
                 run("stop", timeout=150)
+                check_external_survived()
                 token = start()
                 status, value = request(api_port, result_path, token)
                 if storage == "host-memory":
@@ -191,8 +260,8 @@ def verify(venture, compose, dev=False, *, no_build=False, image_ids=None, stora
                     exercise_tools(api_port, token)
                     print("Host memory reset its tool result and accepted new work after restart")
                 else:
-                    assert (status, value) == (200, completed), "host disk lost its tool result after restart"
-                    print("Host disk retained its completed tool result after restart")
+                    assert (status, value) == (200, completed), f"{storage} lost its tool result after restart"
+                    print(f"{storage} retained its completed tool result after restart")
         finally:
             failed = sys.exc_info()[0] is not None
             try:
@@ -202,6 +271,8 @@ def verify(venture, compose, dev=False, *, no_build=False, image_ids=None, stora
                 print(f"Could not collect Compose logs: {error}", file=sys.stderr)
             finally:
                 run("stop", check=not failed, timeout=150)
+            if not failed:
+                check_external_survived()
         mode = "development" if dev else "production"
         print(f"Venture {mode} Compose startup, bearer isolation, web relay and owned shutdown passed ({storage})")
 
@@ -213,13 +284,13 @@ def main():
     parser.add_argument("--dev", action="store_true", help="verify the development web override")
     parser.add_argument("--no-build", action="store_true", help="use preloaded images without building or pulling")
     parser.add_argument("--image-ids", type=Path, help="expected Docker image ID for each Compose service as JSON")
-    parser.add_argument("--storage", choices=("compose-disk", "host-memory", "host-disk"), default="compose-disk")
-    parser.add_argument("--surreal", type=Path, help="pinned SurrealDB executable for host storage modes")
+    parser.add_argument("--storage", choices=("compose-disk", "host-memory", "host-disk", "external"), default="compose-disk")
+    parser.add_argument("--surreal", type=Path, help="pinned SurrealDB executable for host or external storage")
     args = parser.parse_args()
     if args.storage == "compose-disk" and args.surreal is not None:
-        parser.error("--surreal requires a host storage mode")
+        parser.error("--surreal requires host or external storage")
     if args.storage != "compose-disk" and args.surreal is None:
-        parser.error("host storage modes require --surreal")
+        parser.error("host and external storage modes require --surreal")
     image_ids = None
     if args.image_ids:
         if not args.no_build:

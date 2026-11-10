@@ -188,7 +188,7 @@ def verify(directory, manifest_digest, cli_directory, cli_digest, revision, targ
         environment = {**os.environ, **overrides}
         subprocess.run(smoke, cwd=ROOT, env=environment, check=True)
         if surreal is not None:
-            for storage in ("host-memory", "host-disk"):
+            for storage in ("host-memory", "host-disk", "external"):
                 subprocess.run(
                     [*smoke, "--storage", storage, "--surreal", str(surreal)],
                     cwd=ROOT, env=environment, check=True,
@@ -209,7 +209,7 @@ def main():
     check.add_argument("--manifest-sha256", required=True)
     check.add_argument("--cli-directory", type=Path, required=True)
     check.add_argument("--cli-sha256", required=True)
-    check.add_argument("--surreal", type=Path, help="pinned SurrealDB for optional host-memory and host-disk smokes")
+    check.add_argument("--surreal", type=Path, help="pinned SurrealDB for optional host and external storage smokes")
     args = parser.parse_args()
     try:
         if not re.fullmatch(r"[0-9a-f]{40}", args.revision):

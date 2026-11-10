@@ -166,7 +166,7 @@ jobs:
           artifact-ids: ${{ needs.package_images.outputs.artifact-id }}
           path: ${{ runner.temp }}/fleetworks-image-candidate
           digest-mismatch: error
-      - name: Resolve pinned SurrealDB for host storage checks
+      - name: Resolve pinned SurrealDB for host and external storage checks
         if: inputs.target == 'x86_64-unknown-linux-gnu'
         id: surreal
         shell: bash

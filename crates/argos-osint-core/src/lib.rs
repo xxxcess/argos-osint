@@ -81,6 +81,7 @@ pub mod job_registry;
 pub mod jobs_view;
 pub(crate) mod js_runtime_budget;
 pub mod memory_metadata;
+pub mod model_exec;
 pub mod nlp;
 pub mod osint;
 pub mod paths;

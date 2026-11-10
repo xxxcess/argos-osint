@@ -11,7 +11,7 @@ pub use graph::{
 };
 pub mod diversity;
 pub(crate) mod investigation;
-pub mod model_exec;
+pub use crate::model_exec;
 mod orchestrate;
 mod picker;
 pub mod tool_runner;

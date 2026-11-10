@@ -519,7 +519,7 @@ async fn execute_stage<T: serde::de::DeserializeOwned + Serialize>(
     db_path: &std::path::Path,
     validate: impl Fn(&T) -> Result<()> + Send + Sync,
 ) -> Result<T> {
-    use crate::recon::model_exec::execute_chat;
+    use crate::model_exec::execute_chat;
     let mut dictionary = std::collections::BTreeMap::new();
     super::insight_wire::compact(&mut user, &mut dictionary)?;
     if let Some(contract) = user.get_mut("output_contract") {
@@ -669,7 +669,7 @@ async fn execute_stage<T: serde::de::DeserializeOwned + Serialize>(
             let state = if cancel.load(std::sync::atomic::Ordering::Acquire) {
                 "cancelled"
             } else if error
-                .downcast_ref::<crate::recon::model_exec::ModelOperationError>()
+                .downcast_ref::<crate::model_exec::ModelOperationError>()
                 .is_some_and(|e| e.can_withhold())
             {
                 "exhausted"
@@ -1601,7 +1601,7 @@ async fn admit_brain_evidence(
             if input.snapshot.owner_kind == "recon" {
                 scope = scope.with_run(&input.snapshot.owner_id);
             }
-            let result = crate::recon::model_exec::evaluate_text_choices(
+            let result = crate::model_exec::evaluate_text_choices(
                 auth,
                 settings,
                 &scope,
@@ -1615,7 +1615,7 @@ async fn admit_brain_evidence(
             if let Err(error) = &result {
                 if cancel.load(std::sync::atomic::Ordering::Acquire)
                     || !error
-                        .downcast_ref::<crate::recon::model_exec::ModelOperationError>()
+                        .downcast_ref::<crate::model_exec::ModelOperationError>()
                         .is_some_and(|e| e.can_withhold())
                 {
                     return Err(result.unwrap_err());
@@ -2762,7 +2762,7 @@ pub fn validate_inference(
 pub(super) fn activity_sink(
     db_path: &std::path::Path,
     task_id: &str,
-) -> std::sync::Arc<dyn Fn(crate::recon::model_exec::ModelExecEvent) + Send + Sync> {
+) -> std::sync::Arc<dyn Fn(crate::model_exec::ModelExecEvent) + Send + Sync> {
     let db_path = db_path.to_path_buf();
     let task_id = task_id.to_string();
     let last = std::sync::Mutex::new((String::new(), None::<std::time::Instant>));
@@ -2918,11 +2918,9 @@ mod tests {
             } else {
                 settings.defaults.synthesis = assignment;
             }
-            let scope = crate::recon::model_exec::OperationScope::new(
-                "fixture-extraction",
-                "claim_assessor",
-            );
-            let (text, _) = crate::recon::model_exec::execute_chat(
+            let scope =
+                crate::model_exec::OperationScope::new("fixture-extraction", "claim_assessor");
+            let (text, _) = crate::model_exec::execute_chat(
                 &auth,
                 &settings,
                 &scope,

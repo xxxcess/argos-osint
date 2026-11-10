@@ -21,11 +21,11 @@ use serde_json::Value;
 use crate::brain_neighborhood_brief::{
     validate_generated, NeighborhoodBrief, NeighborhoodInput, PACKET_BYTES_MAX,
 };
-use crate::provider::ChatMessage;
-use crate::provider_adapters::ResponseContract;
-use crate::recon::model_exec::{
+use crate::model_exec::{
     execute_chat, resolve_operation_routes, ModelOperationError, OperationScope, RoleRuntime,
 };
+use crate::provider::ChatMessage;
+use crate::provider_adapters::ResponseContract;
 use crate::summarization::{
     sha_hex, CoverageMeta, SummarizationMode, SummaryRequest, SummaryResult,
 };

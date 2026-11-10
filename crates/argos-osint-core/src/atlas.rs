@@ -317,7 +317,7 @@ impl CycleTelemetry {
         let mut tel = Self::new(db, run_id, mode, started_at);
         tel.repo = store.repository().cloned();
         #[cfg(feature = "surreal")]
-        if crate::recon::backend::legacy_side_store_path(db).is_none() && !run_id.is_empty() {
+        if crate::storage::runtime::legacy_side_store_path(db).is_none() && !run_id.is_empty() {
             let mut seqs = std::collections::HashMap::new();
             if let Some(repo) = tel.repo.as_ref() {
                 tel.candidates = crate::storage::telemetry::count_ids_with_prefix(

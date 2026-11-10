@@ -41,7 +41,8 @@ Acceptance: no cleanup destroys a runtime/CI dependency; guidance and scope sele
 Status: in implementation
 - [x] Implement workspace resolution, configuration/secrets loading and explicit API-key/model-default import.
 - [x] Implement managed host memory/disk SurrealDB and external disk-server configuration, authentication and TLS.
-- [ ] Extract shared graph, model execution, jobs and cancellation primitives from Recon.
+- [x] Move shared model execution out of Recon and update retained consumers to use the shared module.
+- [ ] Extract the remaining shared graph, jobs and cancellation primitives from Recon.
 - [ ] Split contracts/client/UI crates from RocksDB, ONNX and QuickJS dependencies.
 Acceptance: all three storage selections work through a network endpoint; original .argos state remains untouched.
 
@@ -106,4 +107,4 @@ Root agent owns integration, plan summaries and shared build cache. Delegate dis
 TinyFish CLI was unavailable during earlier research; used official RabbitMQ/Lapin pages through web fallback. GitHub connector omitted duration fields; read-only gh API supplied timestamps. No new execution failures during plan creation.
 
 ## Next Step
-Make retained brief publication replayable before splitting the brief worker. Continue extracting model and tool execution before retiring Recon. Advance terminal parity and published artifact verification.
+Make retained brief publication replayable before splitting the brief worker. Separate service-level model and tool execution before retiring Recon. Advance terminal parity and published artifact verification.

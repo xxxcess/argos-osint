@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::recon::model_exec::ModelExecEvent;
+use crate::model_exec::ModelExecEvent;
 
 /// Locally measured phase of one stage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

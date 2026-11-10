@@ -621,9 +621,9 @@ impl BlockDecider for RuntimeDecider<'_> {
                 Some(ctx) => ctx.operation_id("cleanup", &payload),
                 None => format!("{}:clean-body:{payload}", self.runtime.job_id),
             };
-            let scope = crate::recon::model_exec::OperationScope::new(&operation_id, "classifier")
+            let scope = crate::model_exec::OperationScope::new(&operation_id, "classifier")
                 .with_budget(crate::request_policy::CLEANUP_FALLBACK_BUDGET)
-                .with_format(crate::recon::model_exec::ResponseFormat::BoundedDecision);
+                .with_format(crate::model_exec::ResponseFormat::BoundedDecision);
             let scope = match &self.runtime.stage {
                 Some(ctx) => ctx.scope(scope),
                 None => scope,
@@ -634,7 +634,7 @@ impl BlockDecider for RuntimeDecider<'_> {
             } else {
                 scope
             };
-            let (ranges, _) = crate::recon::model_exec::execute_decisions_or_chat(
+            let (ranges, _) = crate::model_exec::execute_decisions_or_chat(
                 &self.runtime.auth,
                 &self.runtime.settings,
                 &scope,

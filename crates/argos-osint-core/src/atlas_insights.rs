@@ -2025,9 +2025,9 @@ async fn ask_claims(
         "atlas-claims:{}",
         crate::nlp::cache::key(&serde_json::json!([system, user, settings.defaults]))
     );
-    let scope = crate::recon::model_exec::OperationScope::new(&id, "claim_assessor");
+    let scope = crate::model_exec::OperationScope::new(&id, "claim_assessor");
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let (text, report) = crate::recon::model_exec::execute_chat(
+    let (text, report) = crate::model_exec::execute_chat(
         &auth,
         &settings,
         &scope,
@@ -2040,8 +2040,7 @@ async fn ask_claims(
         false,
     )
     .await?;
-    let (_, secrets) =
-        crate::recon::model_exec::resolve_role_routes(&auth, &settings, "claim_assessor");
+    let (_, secrets) = crate::model_exec::resolve_role_routes(&auth, &settings, "claim_assessor");
     let history: Vec<String> = report
         .history
         .iter()

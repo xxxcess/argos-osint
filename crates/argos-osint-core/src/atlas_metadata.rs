@@ -735,7 +735,7 @@ async fn inventory_index(
         match rsp::warm_with_store_json_for_db(
             stored.as_deref(),
             user_agent,
-            crate::recon::backend::legacy_side_store_path(db).map(std::path::Path::to_path_buf),
+            crate::storage::runtime::legacy_side_store_path(db).map(std::path::Path::to_path_buf),
         )
         .await
         {
@@ -806,7 +806,7 @@ async fn inventory_worker(
     let Some(first) = receiver.recv().await else {
         return Ok(());
     };
-    let legacy_db = crate::recon::backend::legacy_side_store_path(&db);
+    let legacy_db = crate::storage::runtime::legacy_side_store_path(&db);
     let enabled = store.tool_enabled(rsp::TOOL_ID).await?;
     let entity_job = metadata_job(
         &db,

@@ -1402,7 +1402,7 @@ pub async fn inputs_for_article_with_auth(
         ),
     ] {
         let (resolved, secrets) =
-            crate::recon::model_exec::resolve_operation_routes(auth, settings, role, operation);
+            crate::model_exec::resolve_operation_routes(auth, settings, role, operation);
         let projection: Vec<_> = resolved
             .iter()
             .zip(&secrets)

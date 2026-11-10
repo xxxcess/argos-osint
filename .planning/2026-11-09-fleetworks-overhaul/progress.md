@@ -72,6 +72,8 @@ The full service cutover remains open. In particular, Brain and Intel integratio
 - Brief stage output, task state, metadata and the final retained run fence now commit together. Six storage tests passed against SurrealDB 3.3.4. The new test injected a fence failure, verified rollback and retried the same lease. Display and canonical publication still follow in separate commits.
 - The active README, wiki, CLI/dataset guidance and diagrams use Fleetworks and Venture. The old Intel roadmap, investigation harness and superseded figures moved to the archive. Implementation identifiers and verification for compatibility code stay discoverable. All 19 changed active diagram pairs matched and rendered in Inkscape. The repository link and anchor scan reported zero broken references.
 
+- Retained Atlas, Brain and Intel callers now import the shared model executor directly. The old Recon import forwards to the same implementation. Local server-mode checks passed 29 model routing and format tests, the real storage runtime fixture, and 19 API and host tests. Process isolation and shared model admission remain open.
+
 ## Retention
 
 This already-tracked plan records the shared cutover and its remaining acceptance work. Keep raw logs, fixtures and intermediate notes out of Git.

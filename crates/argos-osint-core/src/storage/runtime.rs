@@ -9,6 +9,7 @@
 //! `block_on`.
 
 use std::future::Future;
+use std::path::Path;
 use std::sync::OnceLock;
 
 use anyhow::{anyhow, bail, Result};
@@ -105,6 +106,11 @@ pub fn configured() -> bool {
         }
         Selection::Network { .. } => true,
     }
+}
+
+/// Keep optional side-store writes out of a configured SurrealDB runtime.
+pub fn legacy_side_store_path(db_path: &Path) -> Option<&Path> {
+    (!configured()).then_some(db_path)
 }
 
 fn entry() -> Result<&'static Entry> {

@@ -420,7 +420,7 @@ fn noul_no_carries_one_minus_p_and_choice_probability_is_not_confidence() {
 #[test]
 fn chat_fallback_reports_its_actual_kind_without_probabilities() {
     use super::ContractAdapter;
-    use crate::recon::model_exec::DecisionsAdapter;
+    use crate::model_exec::DecisionsAdapter;
     let contract = template_claim_relation();
     let state = DecisionState::new();
     let adapter = ContractAdapter {

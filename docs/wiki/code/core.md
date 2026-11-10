@@ -8,7 +8,7 @@ All paths below belong to [argos-osint-core/src](../../../crates/argos-osint-cor
 
 `@tag:recon-flow` · `@tag:recon-bindings`
 
-Shared model and tool infrastructure still resides under [recon/](../../../crates/argos-osint-core/src/recon). The [tool contracts](../../../crates/argos-osint-core/src/recon/investigation/tool_io.rs) retain typed bindings, source spans and validated producer relationships. The [provider guide](../concepts/providers.md) covers current route selection, pacing and admission.
+[model_exec.rs](../../../crates/argos-osint-core/src/model_exec.rs) owns shared model execution, including route fallback, cancellation, and attempt reporting. The tool executor and [tool contracts](../../../crates/argos-osint-core/src/recon/investigation/tool_io.rs) still share the investigation infrastructure for typed bindings, source spans, and validated producer relationships. The [provider guide](../concepts/providers.md) covers current route selection, pacing and admission.
 
 ## Discovery services composition
 

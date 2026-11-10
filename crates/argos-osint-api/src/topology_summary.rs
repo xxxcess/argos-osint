@@ -58,7 +58,7 @@ async fn view(state: ApiState, key: SummaryKey, generate: bool) -> ApiResult {
     // Local settings/auth file access and route resolution stay off Tokio.
     // No provider/model request runs in this adapter.
     let fingerprint = tokio::task::spawn_blocking(|| {
-        let runtime = argos_osint_core::recon::model_exec::RoleRuntime::new(
+        let runtime = argos_osint_core::model_exec::RoleRuntime::new(
             argos_osint_core::secrets::AuthFile::load().unwrap_or_default(),
             argos_osint_core::provider::SettingsFile::load().unwrap_or_default(),
         );

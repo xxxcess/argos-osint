@@ -1528,7 +1528,7 @@ where
             .iter()
             .map(|secret| {
                 // The capability cache is on the legacy store only: skipped under SurrealDB.
-                let cache = db_path.and_then(super::backend::legacy_side_store_path);
+                let cache = db_path.and_then(crate::storage::runtime::legacy_side_store_path);
                 crate::provider_capabilities::admit(secret, cache)
             })
             .collect(),
@@ -2276,7 +2276,7 @@ where
             .iter()
             .map(|secret| {
                 // The capability cache is on the legacy store only: skipped under SurrealDB.
-                let cache = db_path.and_then(super::backend::legacy_side_store_path);
+                let cache = db_path.and_then(crate::storage::runtime::legacy_side_store_path);
                 crate::provider_capabilities::admit(secret, cache)
             })
             .collect(),
@@ -3122,9 +3122,7 @@ mod pipeline_text_contract_tests {
 }
 
 #[cfg(test)]
-#[path = "model_exec_routing_tests.rs"]
 mod routing_tests;
 
 #[cfg(test)]
-#[path = "model_exec_format_tests.rs"]
 mod format_tests;

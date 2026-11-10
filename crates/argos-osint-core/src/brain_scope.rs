@@ -70,18 +70,18 @@ pub fn resolve_scope_secret(auth: &AuthFile, settings: &SettingsFile) -> Option<
     }
     #[cfg(not(test))]
     {
-        crate::recon::model_exec::select_role_secret(
+        crate::model_exec::select_role_secret(
             auth,
             settings,
             "synthesis",
-            crate::recon::model_exec::OperationFormat::GeneratedJson,
+            crate::model_exec::OperationFormat::GeneratedJson,
         )
         .or_else(|| {
-            crate::recon::model_exec::select_role_secret(
+            crate::model_exec::select_role_secret(
                 auth,
                 settings,
                 "recon",
-                crate::recon::model_exec::OperationFormat::GeneratedJson,
+                crate::model_exec::OperationFormat::GeneratedJson,
             )
         })
     }

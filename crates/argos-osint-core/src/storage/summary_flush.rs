@@ -311,7 +311,7 @@ pub async fn drain(
     let mut out = Vec::new();
     let mut load = Some(secret);
     let mut secret: Option<ProviderSecret> = None;
-    let mut topology_runtime: Option<crate::recon::model_exec::RoleRuntime> = None;
+    let mut topology_runtime: Option<crate::model_exec::RoleRuntime> = None;
     for n in 0..8 {
         let now = Utc::now();
         let op_key = format!(
@@ -340,7 +340,7 @@ pub async fn drain(
         };
         if req.mode == SummarizationMode::TopologyNeighborhood {
             let runtime = topology_runtime.get_or_insert_with(|| {
-                crate::recon::model_exec::RoleRuntime::new(
+                crate::model_exec::RoleRuntime::new(
                     crate::secrets::AuthFile::load().unwrap_or_default(),
                     crate::provider::SettingsFile::load().unwrap_or_default(),
                 )

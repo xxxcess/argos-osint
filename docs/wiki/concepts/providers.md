@@ -18,6 +18,19 @@ Venture loads workspace settings and can import selected API-key configuration a
 | Google | `GEMINI_API_KEY`, then `GOOGLE_API_KEY` | `https://generativelanguage.googleapis.com/v1beta/openai` |
 | Nvidia | `NVIDIA_API_KEY` | `https://integrate.api.nvidia.com/v1` |
 
+The current Models roles are independent pipeline assignments:
+
+| Role key | Responsibility |
+| --- | --- |
+| `recon_agent` | Recon directives, grounded queries and extraction |
+| `recon_decisions` | Recon tool selection and bounded assessment gates |
+| `recon_analyst` | Recon findings, inferences and reports |
+| `atlas_evaluator` | Atlas admission, support and selection decisions |
+| `atlas_analyst` | Atlas claims, inferences, related leads and prose |
+| `brain_summary` | Shared readable knowledge summaries |
+
+The defaults API advertises this catalog in `roles`; the Models CLI displays these roles and their routes. Older role fields remain readable for one-time migration and inspection. Migration freezes each new assignment independently; an explicitly empty pipeline role stays unconfigured rather than inheriting from another role. Legacy names are not active Models CLI settings.
+
 Each configured role can carry an ordered `fallbacks` list of provider/account/model routes. Route selection preserves account identity, resolves operation capabilities and keeps credentials on the service side. Atlas category admission uses the private Rust-BERT service. Shared decision routes remain available for bounded tasks such as article cleanup and evidence selection.
 
 ## OSINT data providers
@@ -66,7 +79,7 @@ Shared chain (`provider_chain`): primary **4** attempts (waits 10s, 20s, 30s bef
 - Admission wait does not consume an attempt
 - Honor provider Retry-After / account cooldowns in addition to base waits
 - `complete()` is one streaming request; `complete_one()` is one non-stream request. Hidden stream-to-nonstream retries were removed so the chain owns the budget
-- Summarization uses the same primary budget of 4; a transport switch inside that budget still counts as a request
+- Summary generation uses the same primary budget of 4; a transport switch inside that budget still counts as a request
 - Successful fallback is informational and does not mark a cycle Partial
 - Provider 429 / 503 defer picker calls; deterministic order when no primaries remain
 
@@ -93,11 +106,11 @@ Recon limits: `news_calls_per_turn` 2, `legal_calls_per_turn` 3. Spec defaults s
 
 ## Investigative assessment routes
 
-Claim Assessor (`claim_assessor`) inherits the Synthesis assignment when unset. An explicit assignment and its ordered fallbacks take precedence. Extraction and inference use `model_exec::execute_chat`, which skips Decisions-only models without changing route order. Fidelity, corroboration and identity contracts use `DecisionService::evaluate_shared` through the same admission, cancellation and fallback executor; native Jev decisions and chat adapters compile and parse the same finite contract. Cached stage receipts record the actual successful route. Changing captured route contracts invalidates refresh reuse.
+Recon assessments use `recon_decisions`; Atlas and Brief support assessments use `atlas_evaluator`. Brief Claims, Inferences and Links generation use `atlas_analyst`. Each role has its own primary route and ordered fallbacks. Extraction and inference use `model_exec::execute_chat`, which skips Decisions-only models without changing route order. Fidelity, corroboration and identity contracts use `DecisionService::evaluate_shared` through the same admission, cancellation and fallback executor; native Jev decisions and chat adapters compile and parse the same finite contract. Cached stage receipts record the actual successful route. Changing captured route contracts invalidates refresh reuse.
 
 ## Capability-based route selection
 
-Each operation declares an output contract (`OperationFormat`: bounded decision, generated JSON or prose) next to its scope. A role's resolved chain (primary, inherited defaults, fallbacks) is walked in order and the first route whose actual model and connection support that contract is used. The exact TypeSafe Jev family (`typesafe/jev`, `typesafe/jev-<version>`, `~typesafe/jev-latest`; `provider::is_jev_family`) serves only native OpenRouter Decisions; a Jev route on another provider or without a key is an explicit zero-request capability skip, never a chat request. Generative work with a Jev primary picks the first chat-capable fallback; a chain with no compatible route fails before dispatch with a role-specific error (e.g. "Claim Assessor extraction requires a non-Jev chat fallback"). Roles never borrow another role's routes. Payloads are recompiled per route (native decisions ↔ chat JSON) with one bounded chat repair before the declared fallback.
+Each operation declares an output contract (`OperationFormat`: bounded decision, generated JSON or prose) next to its scope. A role's resolved chain (primary and ordered fallbacks) is walked in order and the first route whose actual model and connection support that contract is used. The exact TypeSafe Jev family (`typesafe/jev`, `typesafe/jev-<version>`, `~typesafe/jev-latest`; `provider::is_jev_family`) serves only native OpenRouter Decisions; a Jev route on another provider or without a key is an explicit zero-request capability skip, never a chat request. Generative work with a Jev primary picks the first chat-capable fallback; a chain with no compatible route fails before dispatch with a pipeline-role capability error. Roles never borrow another role's routes. Payloads are recompiled per route (native decisions ↔ chat JSON) with one bounded chat repair before the declared fallback.
 
 ## Streaming and deadlines
 
@@ -105,11 +118,11 @@ Insight stages stream. Typed `AttemptProgress` events (dispatched, headers recei
 
 **Thinking stages (Brief Inferences).** Inferences always uses thinking models. Its stage budget sends a reasoning *effort* (never a token ceiling), which each adapter resolves per model: Gemini Flash `low` (thinking is mandatory), Nemotron Super `low`, Ultra `medium`, Gemma `high` (binary on), and Nemotron lightning `enable_thinking=true`. Exact OpenRouter Super/Ultra profiles send `reasoning.effort=low`/`medium` on the first dispatch. Background refresh reads the model catalog's `reasoning.supported_efforts`; endpoint support for the `reasoning` parameter alone never establishes valid effort values. Catalog vocabulary overrides the profile, so swapping models does not inherit Ultra's or Super's controls. A model with no confirmed control (for example DeepSeek) omits the field and records `unsupported-policy:reasoning=efficient`. Non-thinking stages (Claims, Links, cleanup, fidelity) keep the provider default and are never forced off. Thinking stages stream with headers 60s / first output 300s / model inactivity 120s / total 600s (non-streamed: headers 540s / total 600s) because a model that hides its reasoning may emit nothing until the answer; a stall moves to the next route rather than waiting longer, and the operation wall-clock cap bounds total time.
 
-An available catalog entry does not establish generation availability. In the 2026-10-16 configured-provider reproduction, Ultra stalled both through OpenRouter and directly through NVIDIA, while Gemini returned 503. Super generated valid thinking-mode inferences through both providers. For that profile, point **both** `intel_brief_inferences.generate` and `intel_brief_links.generate` at the existing Summarization chain, whose primary and last fallback are Super. This is an operation override, not a change to the Synthesis role or a shipped default. See [the reproduction and configuration procedure](../../archive/brief-provider-reliability.md).
+An available catalog entry does not establish generation availability. The historical 2026-10-16 configured-provider reproduction found Ultra stalls through OpenRouter and NVIDIA and Gemini 503 responses; Super generated valid thinking-mode inferences. That reproduction linked Inferences and Links to the then-named Summarization chain. It is dated evidence, not a shipped default or current role-setting instruction. See [the archived reproduction](../../archive/brief-provider-reliability.md).
 
 ## Brief operation overrides and the focused path
 
-`defaults.operation_overrides` routes one Intel brief operation (`intel_brief_claims.generate`, `…inferences.generate`, `…inferences.assess`, `…links.generate`, …) to a specific provider/model without changing its logical role; empty entries inherit. Models → Defaults shows the effective Brief operation routes. `defaults.focused_oversized_brief` (default false) enables the measured focused oversized-story Inferences path; changing it reruns Inferences and Links only.
+`defaults.operation_overrides` routes one Intel brief operation (`intel_brief_claims.generate`, `…inferences.generate`, `…inferences.assess`, `…links.generate`, …) to a specific provider/model without changing its logical role; empty entries inherit. The Models CLI displays canonical role chains; operation overrides remain part of workspace settings. `defaults.focused_oversized_brief` (default false) enables the measured focused oversized-story Inferences path; changing it reruns Inferences and Links only.
 
 ## Provider adapters and resolved capabilities
 
@@ -211,25 +224,25 @@ Atlas workers reserve a logical fetch in a shared SurrealDB counter for the prov
 - Score: an ordered array of 2–10 level descriptions, with no range or option object. The native probability-weighted level is zero-based. It maps linearly onto the application scale `min..=max` and is kept fractional (`score_value`). It is rounded only for the legacy display (`score`).
 - Answer types, distribution keys, bounds and sums are all validated. Chat fallbacks return validated labels with no fabricated probabilities, and `ContractAdapter::parse_chat_as` reports the structured mode that actually ran.
 
-## Operation overrides, the Brief fast preset and portable schema 2
+## Operation overrides, the Brief fast preset and portable profiles
 
-`defaults.operation_overrides` values are an `OperationOverride` union: an ordinary `ModelAssignment`, or a deny-unknown-fields reference `{route_role = "summarization"}`. A reference resolves the named role's *current* chain in `RoleDefaults::resolve_operation`, so a later Summarization model swap is followed without copied IDs. Only the nine canonical role keys are valid targets. Operation keys, `decision_model`, unknown roles and mixed objects (a `route_role` beside assignment fields) are rejected when the TOML is parsed. `reset_operation` removes the key and never edits the referenced role.
+`defaults.operation_overrides` values are an `OperationOverride` union: an ordinary `ModelAssignment`, or a deny-unknown-fields reference `{route_role = "brain_summary"}`. A reference resolves the named role's *current* chain in `RoleDefaults::resolve_operation`, so a later `brain_summary` model swap is followed without copied IDs. Only the six canonical pipeline role keys are valid targets. Operation keys, `decision_model`, unknown roles and mixed objects (a `route_role` beside assignment fields) are rejected when the TOML is parsed. `reset_operation` removes the key and never edits the referenced role.
 
-The **Brief fast preset** (Defaults → *Apply fast preset* / *Reset fast preset*) points `intel_brief_claims.generate` and `intel_brief_links.generate` at Summarization. Their logical roles do not change, and Inference support and bounded gates keep their configured routes. The preset ships unset. It is not recommended until the held-out comparison in [benchmarks/brief-fast-preset-heldout.md](../../benchmarks/brief-fast-preset-heldout.md) has been measured with a valid key. Reset removes only the preset's own references and leaves any explicit assignment you set on those operations.
+The **Brief fast preset** links `intel_brief_claims.generate` and `intel_brief_links.generate` to `brain_summary`. Their logical roles do not change, and Inference support and bounded gates keep their configured routes. The preset ships unset. It is not recommended until the held-out comparison in [benchmarks/brief-fast-preset-heldout.md](../../benchmarks/brief-fast-preset-heldout.md) has been measured with a valid key. Reset removes only the preset's own references and leaves any explicit assignment you set on those operations.
 
-**Editing one operation.** On Defaults, *Op ▸* selects a Brief operation (Claims, Inferences, Inference support, Links). *Save for op* stores the current Provider/Model fields as that operation's explicit override; *Reset op* removes it so the operation inherits its logical role again. The details panel lists every operation with its source (inherited / explicit override / linked by the fast preset), its response contract (`generated_json` for the generation steps, `bounded_decision` for Inference support) and its adapter with capability evidence (strict schema, JSON mode, tools, and the provenance chain such as `conservative → profile`). A changed route moves only that operation's node revision; the next visit re-runs that node and whatever depends on its output.
+**Editing one operation.** Configure the operation's explicit assignment or canonical `route_role` reference in workspace settings or a portable Profile document. Removing its entry restores the logical pipeline role; it does not edit that role's saved chain. The current Models CLI edits role defaults, not individual operation overrides.
 
-Portable profile documents (`config_transfer`) gain **schema 2** (`docs/schemas/profile-config-v2.schema.json`). It adds two fields, both rejected under schema 1:
+Portable profile documents retain schema 1/2 compatibility. Schema 2 added routing features rejected under schema 1:
 - override role references;
 - an optional route `account_id`: the internal account-map key, validated against a `providers[]` entry of the same provider kind.
 
-Export writes schema 1 unless either feature is used. Import keeps the document's account-map key instead of collapsing it onto the provider kind. No secret travels in routing fields.
+Current exports use schema 3 when pipeline roles or reasoning variants are present; older exports use schema 2 for routing features and schema 1 otherwise. Schema 1/2 role names are migration input, not extra current roles. Import preserves account-map keys instead of collapsing them onto provider kinds. No secret travels in routing fields.
 
 `check_role_compatibility` is contract-based and makes no network request:
-- Bounded-decision chains (Tool Picker, the decision roles, `*.assess`) accept native decisions models and chat models whose labels are validated locally, so Tool Picker J→N→F→NL is valid.
-- Generation chains (Recon, Synthesis, Summarization, `*.generate`) are rejected only when every route, fallbacks included, is a decisions model.
+- Bounded-decision chains (`recon_decisions`, `atlas_evaluator`, `*.assess`) accept native decisions models and chat models whose labels are validated locally.
+- Generation chains (`recon_agent`, `recon_analyst`, `atlas_analyst`, `brain_summary`, `*.generate`) are rejected only when every route, fallbacks included, is a decisions model.
 - Unknown text models stay valid with conservative capabilities.
-- The TUI fallback picker applies the same rule.
+- Role changes preserve the operation output contract; a fallback cannot change role ownership.
 
 ## Per-attempt usage, wire timings and task epochs
 
@@ -246,4 +259,4 @@ Rules for these fields:
 - Brief stages bind each model operation to the task's lease epoch (`OperationScope::with_task_epoch`). The task epoch is part of the operation identity; attempt generation comes from the job generation. A retried task uses a new operation identity.
 - Do not query the retired `intel_brief_stage_timings` table. Current stage progress uses `brief_activity` and `brief_stage_meta`; provider attempt timing lives in `recon_model_attempt`.
 
-Brain Actor identity maintenance uses the existing Entity Resolver role for bounded identity decisions through the shared executor (native Decisions or chat). It processes a local name/acronym shortlist independently of Atlas cycles; absent configuration leaves local spelling repair active and makes no identity model requests. See [actor identity maintenance](../code/architecture.md#actor-identity-maintenance).
+Brain Actor identity maintenance uses `atlas_evaluator` for bounded identity decisions through the shared executor (native Decisions or chat). It processes a local name/acronym shortlist independently of Atlas cycles; absent configuration leaves local spelling repair active and makes no identity model requests. See [actor identity maintenance](../code/architecture.md#actor-identity-maintenance).

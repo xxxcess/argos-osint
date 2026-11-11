@@ -31,6 +31,7 @@ use crate::model_exec;
 
 const LEASE_MINUTES: i64 = 10;
 const IDENTIFIER: [&str; 3] = ["account", "domain", "ip"];
+const IDENTITY_MODEL_ROLE: &str = "atlas_evaluator";
 
 fn abort(e: impl std::fmt::Display) -> TxError {
     TxError::Abort(e.to_string())
@@ -760,7 +761,7 @@ pub async fn drain(
     if model_exec::select_role_secret(
         auth,
         settings,
-        "entity_resolver",
+        IDENTITY_MODEL_ROLE,
         model_exec::OperationFormat::BoundedDecision,
     )
     .is_none()
@@ -777,7 +778,7 @@ pub async fn drain(
             continue;
         }
         let op = format!("actor-dedup:{}:{}:{lease_owner}", c.key(), c.input_hash);
-        let scope = model_exec::OperationScope::new(&op, "entity_resolver")
+        let scope = model_exec::OperationScope::new(&op, IDENTITY_MODEL_ROLE)
             .with_format(model_exec::ResponseFormat::BoundedDecision)
             .with_input_revision(&c.input_hash)
             .with_budget(crate::request_policy::ACTOR_IDENTITY_BUDGET);
@@ -825,4 +826,53 @@ pub async fn drain(
         }
     }
     Ok(done)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::IDENTITY_MODEL_ROLE;
+    use crate::model_exec::{self, OperationFormat};
+    use crate::provider::{ModelAssignment, SettingsFile};
+    use crate::secrets::{AuthFile, ProviderSecret};
+
+    #[test]
+    fn identity_worker_uses_current_evaluator_and_honors_explicit_clear() {
+        let mut auth = AuthFile::default();
+        auth.set_account(ProviderSecret {
+            kind: "local".into(),
+            base_url: "http://127.0.0.1:1/v1".into(),
+            model: "account-default".into(),
+            api_key: None,
+            stt_model: None,
+            device: None,
+        });
+        let assignment = |model: &str| ModelAssignment {
+            provider: "local".into(),
+            model: model.into(),
+            ..Default::default()
+        };
+        let mut settings = SettingsFile::default();
+        settings.defaults.atlas_evaluator = Some(assignment("current-evaluator"));
+        settings.defaults.entity_resolver = assignment("retired-resolver");
+        settings.defaults.classifier = assignment("retired-classifier");
+        let selected = model_exec::select_role_secret(
+            &auth,
+            &settings,
+            IDENTITY_MODEL_ROLE,
+            OperationFormat::BoundedDecision,
+        )
+        .expect("configured evaluator route");
+        assert_eq!(selected.model, "current-evaluator");
+        settings.defaults.atlas_evaluator = Some(ModelAssignment::default());
+        assert!(
+            model_exec::select_role_secret(
+                &auth,
+                &settings,
+                IDENTITY_MODEL_ROLE,
+                OperationFormat::BoundedDecision,
+            )
+            .is_none(),
+            "an explicitly cleared current role must not borrow retired routes"
+        );
+    }
 }

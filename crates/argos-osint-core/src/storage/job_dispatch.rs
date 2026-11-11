@@ -130,7 +130,8 @@ pub async fn ensure_queue_transport(db: &Surreal<Any>, pool: &str) -> Result<(),
         let mut reply = jobs::run(&tx, tx.query(
             "RETURN (SELECT VALUE transport FROM ONLY $p);
              RETURN count(SELECT VALUE id FROM task WHERE pool=$pool
-               AND state NOT IN ['completed','failed','cancelled','superseded'] LIMIT 1)>0;"
+               AND (state NOT IN ['completed','failed','cancelled','superseded']
+                    OR job.state NOT IN ['completed','succeeded','failed','partial','cancelled','paused','superseded']) LIMIT 1)>0;"
         ).bind(("p", jobs::rid("job_dispatch_pool", pool))).bind(("pool", pool.to_owned()))).await?;
         let transport: Option<String> = jobs::take(&mut reply, 0)?;
         match transport.as_deref() {

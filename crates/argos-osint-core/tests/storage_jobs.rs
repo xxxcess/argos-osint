@@ -20,6 +20,74 @@ const LEASE: i64 = 30;
 /// Per pool, one claim in eight (jobs::HEAD_EVERY) starts at the head.
 const HEAD_BOUND: usize = 8;
 
+#[tokio::test]
+async fn embedded_queue_transport_requires_legacy_tasks_to_drain() {
+    use argos_osint_core::storage::job_dispatch;
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let db = fresh(&server, "queue_transport_cutover").await;
+    let now = Utc::now();
+    jobs::create_job(
+        &db,
+        &job("legacy", None, now),
+        &[task(
+            "legacy-task",
+            "legacy",
+            job_dispatch::ATLAS_POOL,
+            0,
+            now,
+        )],
+    )
+    .await
+    .unwrap();
+    db.query(job_dispatch::SCHEMA)
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert!(matches!(
+        job_dispatch::ensure_queue_transport(&db, job_dispatch::ATLAS_POOL).await,
+        Err(TxError::Abort(reason)) if reason == "drain_existing_atlas_jobs_before_queue_cutover"
+    ));
+    db.query("UPDATE $task SET state='completed'")
+        .bind((
+            "task",
+            surrealdb::types::RecordId::new("task", "legacy-task"),
+        ))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert!(
+        job_dispatch::ensure_queue_transport(&db, job_dispatch::ATLAS_POOL)
+            .await
+            .is_err(),
+        "a finished task does not prove its job has drained"
+    );
+    db.query("UPDATE job:legacy SET state='completed'")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    job_dispatch::ensure_queue_transport(&db, job_dispatch::ATLAS_POOL)
+        .await
+        .unwrap();
+    job_dispatch::ensure_queue_transport(&db, job_dispatch::ATLAS_POOL)
+        .await
+        .unwrap();
+    db.query("UPDATE job_dispatch_pool:atlas_cycle SET transport='future_transport'")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert!(
+        job_dispatch::ensure_queue_transport(&db, job_dispatch::ATLAS_POOL)
+            .await
+            .is_err()
+    );
+}
+
 /// Held by every test that runs many concurrent clients. Their bounds
 /// (retry p99, the oldest-task claim position) are defined for one test's
 /// 8 clients; run in parallel, three such tests put 24 clients on the box,

@@ -7,7 +7,7 @@ services:
     extends:
       file: compose.yml
       service: worker
-    command: [/usr/local/bin/argos-api-host, --role, atlas-worker]
+    command: [--role, atlas-worker]
     environment:
       FLEETWORKS_QUEUE_NAME: ${FLEETWORKS_QUEUE_NAME:-fleetworks.atlas}
       FLEETWORKS_NLP_ORIGIN: http://nlp:8080

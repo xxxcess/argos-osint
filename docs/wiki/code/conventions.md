@@ -20,7 +20,7 @@ All agents follow [tui-verification.md](tui-verification.md) and the repo [argos
 
 ## Schema
 
-Current storage is SurrealDB. Read [bootstrap.rs](../../../crates/argos-osint-core/src/storage/bootstrap.rs), the affected module schemas and [storage contracts](storage.md) before changing persistence. Bootstrap applies schemas in dependency order and guards the stored version; do not copy legacy SQLite `user_version` migration instructions. Document compatibility/migration decisions and verify them through the storage harness. Never delete legacy secrets when saving a new provider account.
+Domain storage is SurrealDB; the Jobs service owns SQLite operational logs. Read [bootstrap.rs](../../../crates/argos-osint-core/src/storage/bootstrap.rs), the affected module schemas and [storage contracts](storage.md) before changing persistence. Bootstrap applies schemas in dependency order and guards the stored version; do not copy legacy SQLite `user_version` migration instructions. Document compatibility/migration decisions and verify them through the storage harness. Never delete legacy secrets when saving a new provider account.
 
 ## Tests
 

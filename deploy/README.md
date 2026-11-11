@@ -1,6 +1,10 @@
 # Fleetworks service deployment
 
-Docker Compose v2.20+ runs the web desktop, authenticated API, private services, workers, and database bootstrap. Web and API default to `127.0.0.1:3000` and `127.0.0.1:8080`. The [Atlas overlay](atlas-dispatch.md) adds AMQP dispatch, NLP, and the classifier.
+Docker Compose v2.20+ runs the web desktop, authenticated API, private services, workers, and database bootstrap. Web and API default to `127.0.0.1:3000` and `127.0.0.1:8080`. The [Atlas overlay](atlas-dispatch.md) adds the Atlas dispatch worker, NLP, and the classifier.
+
+On macOS, Venture also searches the Docker Desktop CLI directories under `/Applications` and `~/Applications` when running Docker.
+
+Rust image builds use one Cargo job and 256 core code-generation units to limit memory use. Local Compose builds use core optimization level 1. Set `FLEETWORKS_CORE_OPT_LEVEL=3` for full optimization with more build memory. Direct Docker builds default to level 3 and accept these settings as build arguments. If memory is exhausted, increase Docker Desktop's memory under Settings → Resources → Memory and retry. BuildKit retains completed dependencies.
 
 ## Prepare a workspace
 
@@ -50,7 +54,7 @@ Set `FLEETWORKS_API_TOKEN_FILE`, `FLEETWORKS_STORAGE_ROOT_PASSWORD_FILE`, or `FL
 ## Managed disk database
 
 ```sh
-mkdir -p "$FLEETWORKS_HOST_WORKSPACE/storage/surrealdb"
+mkdir -p "$FLEETWORKS_HOST_WORKSPACE/storage/surrealdb" "$FLEETWORKS_HOST_WORKSPACE/storage/jobs"
 docker compose -f deploy/compose.yml --profile disk up --build --detach --wait
 venture --workspace "$FLEETWORKS_HOST_WORKSPACE" status
 ```
@@ -58,6 +62,12 @@ venture --workspace "$FLEETWORKS_HOST_WORKSPACE" status
 Open `http://127.0.0.1:3000` in a browser after readiness completes.
 
 The `disk` profile runs the digest-pinned SurrealDB 3.3.4 image at `ws://surrealdb:8000`, with authenticated RocksDB storage under `storage/surrealdb/` and sync on every commit. Keep `FLEETWORKS_STORAGE_URL` unset or set to that origin. Use the same Compose command with `down` to stop services and retain data.
+
+## Operational storage
+
+The Jobs process alone owns `storage/jobs/`: SQLite operational logs in `jobs.sqlite3` and the embedded RocksDB dispatch queue in `queue/`. Other services connect through authenticated Jobs HTTP. Preserve the entire directory across restarts; do not open it from another process or mount it into workers. No RabbitMQ server, Erlang installation or broker credential is required.
+
+Domain job/task transitions remain fenced in SurrealDB during the SQLite scheduler cutover. The embedded queue transports dispatches; it does not independently authorize execution. For a workspace previously using RabbitMQ, drain existing Atlas jobs with the previous stack, then stop it before upgrading. Venture retains shutdown compatibility for legacy owned processes and preserves their files. Pending legacy dispatches fail closed rather than silently disappearing. See [Atlas dispatch](atlas-dispatch.md) and the [job persistence target and rollout phases](../docs/wiki/code/jobs-persistence.md).
 
 ## Web development
 
@@ -75,35 +85,33 @@ A new interactive `venture up` offers `local-net` by default, alongside `local-p
 
 ## Local network services
 
-Use `local-net` for SurrealDB and RabbitMQ you run independently, such as containers publishing ports on your Docker host. Set the connection settings in `config/workspace.toml` or in the launch environment. File paths in workspace settings can be relative to the workspace.
+Use `local-net` for SurrealDB you run independently, such as containers publishing ports on your Docker host. Set the connection settings in `config/workspace.toml` or in the launch environment. File paths in workspace settings can be relative to the workspace.
 
 ```toml
 [environment]
 FLEETWORKS_STORAGE_URL = "ws://host.docker.internal:8000"
 FLEETWORKS_STORAGE_ROOT_PASSWORD_FILE = "secrets/local-net-surreal-root"
-FLEETWORKS_BROKER_URL_FILE = "secrets/local-net-amqp-url"
 ```
 
 Put the existing SurrealDB root password in its owner-only file. Override `FLEETWORKS_STORAGE_ROOT_USERNAME` if needed. For an existing runtime account, set `FLEETWORKS_STORAGE_PASSWORD_FILE` to its password file.
 
-With `--atlas`, the owner-only broker file must contain an authenticated URL such as `amqp://worker:password@host.docker.internal:5672/fleetworks`. Percent-encode special characters in credentials and virtual hosts. Both endpoints must be reachable from Docker. `venture stop` leaves these services running.
+The SurrealDB endpoint must be reachable from Docker. `venture stop` leaves that external service running. Atlas dispatch uses the Jobs service’s embedded disk queue; no RabbitMQ configuration is required.
 
 ## Venture-managed host processes
 
-`venture up --storage local-process` starts authenticated SurrealDB and native RabbitMQ on the host. API services and workers run in Compose and connect through the host gateway. Add `--atlas` for AMQP dispatch.
+`venture up --storage local-process` starts authenticated SurrealDB on the host. API services and workers run in Compose and connect through the host gateway. Add `--atlas` for the Atlas worker and private NLP/classifier services.
 
-Install SurrealDB 3.3.4 and `rabbitmq-server` with compatible Erlang on `PATH`. The local startup check used RabbitMQ 4.2.6 with Erlang/OTP 27.
+Install SurrealDB 3.3.4 on `PATH`, or set its executable override below.
 
 | Service | Executable override | Bind setting and default | Data directory |
 | --- | --- | --- | --- |
 | SurrealDB | `FLEETWORKS_SURREAL_BIN` | `FLEETWORKS_HOST_DB_BIND=0.0.0.0:8010` | `storage/host-surrealdb/` |
-| RabbitMQ | `FLEETWORKS_RABBITMQ_BIN` | `FLEETWORKS_HOST_BROKER_BIND=0.0.0.0:5672` | `storage/host-rabbitmq/` |
 
-Bind addresses must be reachable from Docker. Keep the generated broker password across restarts. Logs are `logs/host-surreal.log` and `logs/host-rabbitmq.log`. `venture stop` stops both processes and retains data.
+The bind address must be reachable from Docker. Logs are in `logs/host-surreal.log`. `venture stop` stops the owned process and retains data.
 
 ## Venture-managed host database
 
-`--storage host-disk` and `--storage host-memory` manage SurrealDB with the executable, bind, credentials, and logs described above. Disk mode persists under `storage/host-surrealdb/`. Memory mode is disposable. Atlas uses its bundled RabbitMQ with either mode.
+`--storage host-disk` and `--storage host-memory` manage SurrealDB with the executable, bind, credentials, and logs described above. Disk mode persists under `storage/host-surrealdb/`. Memory mode is disposable. Atlas uses the Jobs service’s embedded disk queue with either mode.
 
 ## External database
 
@@ -132,7 +140,7 @@ The [Fleetworks Compose checks](../docs/wiki/code/ci.md#fleetworksyml--scoped-br
 
 Load the images for every selected service into the local Docker engine, then use `venture up --no-build` or `venture web --no-build`. Venture passes `--no-build --pull never` to Compose, so the selected tags must already exist locally. The ordinary startup still builds images. Repeat `--no-build` on subsequent starts when using those images.
 
-Set `FLEETWORKS_RUNTIME_IMAGE`, `FLEETWORKS_WEB_IMAGE`, and `FLEETWORKS_SURREAL_IMAGE` for preloaded tags. Atlas needs `FLEETWORKS_RABBITMQ_IMAGE` when using the bundled broker. For an artifact smoke, run `python3 deploy/verify.py --venture path/to/venture --no-build --image-ids path/to/service-images.json`. The JSON maps every selected Compose service, including `bootstrap`, to its expected image ID.
+Set `FLEETWORKS_RUNTIME_IMAGE`, `FLEETWORKS_WEB_IMAGE`, and `FLEETWORKS_SURREAL_IMAGE` for preloaded tags. For an artifact smoke, run `python3 deploy/verify.py --venture path/to/venture --no-build --image-ids path/to/service-images.json`. The JSON maps every selected Compose service, including `bootstrap`, to its expected image ID.
 
 To exercise Venture-managed host storage with the same images, add `--storage host-memory --surreal /path/to/surreal` or `--storage host-disk --surreal /path/to/surreal`. Use the checksum-verified SurrealDB 3.3.4 executable. Each smoke uses a fresh workspace and a temporary host-gateway database port. It omits the Compose `surrealdb` service from the expected image IDs and verifies that a completed Tools result disappears in memory mode or survives in disk mode after a Venture stop and restart.
 
@@ -145,3 +153,9 @@ venture --workspace "$FLEETWORKS_HOST_WORKSPACE" train-legacy
 ```
 
 Pass `--file datasets/another.csv` to select a different dataset, or configure `[datasets].articles` in workspace `config/workspace.toml`. Venture snapshots the selected bytes. The training worker checks that SHA-256 and reports it with the resulting model. Pass `--activate` to activate a synthetic Natural baseline explicitly. Atlas admission uses the separate Rust-BERT service.
+
+### Jobs SQLite storage
+
+Jobs exclusively owns `<workspace>/storage/jobs/jobs.sqlite3`, mounted at `/var/lib/fleetworks-jobs` with the workspace owner's UID. Venture creates this directory; direct Compose users must create `storage/jobs/` first. Keep it on local storage. Other services send operational logs through the private Jobs bearer connection; they never open its database. Preserve the directory across container replacement. Use SQLite's backup API or stop Jobs before copying its database and WAL files.
+
+The current integration moves standalone logs. Scheduling, attempts, recovery and telemetry remain in SurrealDB until the drain-first scheduler migration and publication fences are complete. Historical SurrealDB logs are retained there.

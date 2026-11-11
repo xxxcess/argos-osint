@@ -4,16 +4,17 @@
 
 `@tag:surreal-storage`
 
-SurrealDB is the application datastore. Services open the [Venture-selected network endpoint](fleetworks.md#launch-the-compose-stack). The browser and terminal clients use the authenticated API.
+SurrealDB owns domain data. Jobs is moving operational state to SQLite and delivery to embedded RocksDB; see the [planned ownership and rollout scopes](jobs-persistence.md). Services open the [Venture-selected network endpoint](fleetworks.md#launch-the-compose-stack). The browser and terminal clients use the authenticated API.
 
 | Responsibility | Source entry |
 | --- | --- |
 | Module boundary and engine opening | [storage/mod.rs](../../../crates/argos-osint-core/src/storage/mod.rs), [open.rs](../../../crates/argos-osint-core/src/storage/open.rs) |
 | Schema ordering and version guard | [bootstrap.rs](../../../crates/argos-osint-core/src/storage/bootstrap.rs), [schema/](../../../crates/argos-osint-core/src/storage/schema) |
+| Jobs-owned operational stores | [fleetworks-jobs](../../../crates/fleetworks-jobs), [planned persistence contract](jobs-persistence.md) |
 | Retrying transactions | [tx.rs](../../../crates/argos-osint-core/src/storage/tx.rs) |
 | Memory publication and graph projection | [publisher.rs](../../../crates/argos-osint-core/src/storage/publisher.rs), [memory.rs](../../../crates/argos-osint-core/src/storage/memory.rs), [graph.rs](../../../crates/argos-osint-core/src/storage/graph.rs) |
 | Vector and lexical recall | [embeddings.rs](../../../crates/argos-osint-core/src/storage/embeddings.rs), [recall.rs](../../../crates/argos-osint-core/src/storage/recall.rs) |
-| Durable jobs | [jobs.rs](../../../crates/argos-osint-core/src/storage/jobs.rs) |
+| Transitional SurrealDB job execution | [jobs.rs](../../../crates/argos-osint-core/src/storage/jobs.rs) |
 | Atlas dispatch outbox | [job_dispatch.rs](../../../crates/argos-osint-core/src/storage/job_dispatch.rs) |
 | Jobs dashboard page | [jobs_view.rs](../../../crates/argos-osint-core/src/storage/jobs_view.rs), [jobs view contracts](../../../crates/argos-osint-core/tests/storage_jobs_view.rs) |
 | Contract verification | [tests/](../../../crates/argos-osint-core/tests), [shared harness](../../../crates/argos-osint-core/tests/support), [test_surreal.py](../../../scripts/test_surreal.py) |
@@ -24,7 +25,7 @@ Run storage contracts through the harness; a skipped test is not a pass. Agents 
 
 ## Fleetworks network storage
 
-Bootstrap authenticates as the database root, applies the schema and provisions a database-scoped Editor account for API and worker processes. Runtime processes verify the exact schema version. Disk modes retain the database identity across restarts. A fresh memory store has a new identity, so Atlas rejects deliveries tied to a previous store. The outbox is transactional with job submission, while RabbitMQ transports wake-up messages. See the [network startup instructions](fleetworks.md#run-the-network-api-and-workers) and the [Atlas deployment guide](../../../deploy/atlas-dispatch.md).
+Bootstrap authenticates as the database root, applies the schema and provisions a database-scoped Editor account for API and worker processes. Runtime processes verify the exact schema version. Disk modes retain the database identity across restarts. A fresh memory store has a new identity, so Atlas rejects deliveries tied to a previous store. The outbox is transactional with job submission, while the Jobs-owned embedded queue transports wake-up messages. See the [network startup instructions](fleetworks.md#run-the-network-api-and-workers) and the [Atlas deployment guide](../../../deploy/atlas-dispatch.md).
 
 ## Recall and source lifecycle
 

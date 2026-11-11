@@ -47,12 +47,12 @@ The [Fleetworks workflow](../../../.github/workflows/fleetworks.yml) is the buil
 | Native clients | Linux x86-64, Apple silicon macOS, and Intel macOS tests and executable smoke for Venture and its sibling clients |
 | Server | Linux ARM64 service check, build, unit tests, and network bootstrap and readiness smoke |
 | Server images | Linux AMD64 images for the selected client binaries and the web app. Full and nightly runs also build Linux ARM64. Venture and the CLIs share one compile, then each image copies one binary. Each image is tagged `name:<version.txt>` and `name:local`. The version tag is the workspace SemVer with no leading `v`. |
-| Storage and broker | Affected disk storage and brief recovery contracts, plus RabbitMQ-backed Atlas dispatch when selected |
+| Storage and queue | Affected disk storage and brief recovery contracts, plus Jobs-owned embedded queue Atlas dispatch when selected |
 | Packaged Compose | Venture-owned image startup, authenticated readiness, relay, and Atlas smoke on Linux ARM64 and AMD64 |
 | Intel Rust-BERT | Linux worker type check, then Intel macOS build, link, and real checkpoint inference |
 | Web | Locked install, static and unit checks, production build, relay lifecycle, and production Chromium contracts. The development browser profile also runs for selected runtime changes. |
 
-The `Fleetworks required` job runs after scope planning and reports the exact event revision. A selected job must succeed. An unselected job is expected to skip. Failed scope planning and missing, failed, cancelled, or unexpectedly skipped selected jobs fail the aggregate. Storage and broker checks depend on the server job. The development browser check depends on the web job. The server image job builds only the targets named by the planner.
+The `Fleetworks required` job runs after scope planning and reports the exact event revision. A selected job must succeed. An unselected job is expected to skip. Failed scope planning and missing, failed, cancelled, or unexpectedly skipped selected jobs fail the aggregate. Storage and queue checks depend on the server job. The development browser check depends on the web job. The server image job builds only the targets named by the planner.
 
 Full mode adds the pinned server storage suite and an AMD64 packaged development readiness check. The native, server, and Compose jobs retain timed-phase JSONL and available Cargo timing HTML for seven days. Each record gives the phase, elapsed time, exit status, revision, and machine. Use comparable completed runs for timing comparisons.
 
@@ -149,7 +149,7 @@ gh workflow run fleetworks-candidate.yml --ref <branch> -f head=<sha>
 
 The workflow uploads a CLI archive and its SHA-256 for each target and retains them for 14 days. A separate native job downloads the exact CLI artifact by ID, verifies its archive and file hashes, checks the revision, version, and executable architecture, and runs the installed Venture and client binaries.
 
-Each Linux target also exports the runtime, web, SurrealDB, and pinned RabbitMQ images. Verification downloads the exact image artifact and CLI artifact by ID, checks archive digests and native image IDs, then starts the downloaded Venture and images with `--no-build`. The smoke checks the image ID of every created service. The image archive is limited to 1 GiB compressed and 3 GiB uncompressed. The AMD64 job checks restart behavior for both Venture-managed host modes and an independently started external disk database with the pinned SurrealDB executable. These Actions artifacts verify release candidates. Public release distribution and registry manifest digest verification are separate. [Release policy](versioning.md#release-candidates)
+Each Linux target also exports the runtime, web and SurrealDB images. Verification downloads the exact image artifact and CLI artifact by ID, checks archive digests and native image IDs, then starts the downloaded Venture and images with `--no-build`. The smoke checks the image ID of every created service. The image archive is limited to 1 GiB compressed and 3 GiB uncompressed. The AMD64 job checks restart behavior for both Venture-managed host modes and an independently started external disk database with the pinned SurrealDB executable. These Actions artifacts verify release candidates. Public release distribution and registry manifest digest verification are separate. [Release policy](versioning.md#release-candidates)
 
 ### `commit-policy.yml`
 

@@ -1,6 +1,6 @@
-# Atlas dispatch with RabbitMQ
+# Atlas dispatch with an embedded queue
 
-Add `compose.atlas.yml` to the [base stack](README.md) to start the Atlas worker, its private RabbitMQ broker, and separate warm NLP and classifier services. The overlay enables the Atlas dispatch pool during database bootstrap. SurrealDB owns jobs, delivery revisions, and results. RabbitMQ carries durable wake-up messages and keeps a separate dead-letter queue. The web and API remain the only host-published services.
+Add `compose.atlas.yml` to the [base stack](README.md) to start the Atlas worker and separate warm NLP and classifier services. Jobs owns the disk-backed RocksDB queue and exposes authenticated private delivery operations. SurrealDB currently owns job/task revisions, execution leases and domain results; the queue carries wake-ups and retains dead letters. The web and API remain the only host-published services. The [job persistence contract](../docs/wiki/code/jobs-persistence.md) distinguishes the implemented transport foundation from the planned SQLite scheduler cutover.
 
 ## Start with Venture
 
@@ -8,33 +8,33 @@ Add `compose.atlas.yml` to the [base stack](README.md) to start the Atlas worker
 venture --workspace "$FLEETWORKS_HOST_WORKSPACE" up --storage compose-disk --atlas
 ```
 
-Venture records the overlay in the workspace's ownership file and reuses it for status, logs, restarts, and stop. With `--storage local-net`, Atlas uses the RabbitMQ URL in `FLEETWORKS_BROKER_URL_FILE`. With `--storage local-process`, Atlas uses the RabbitMQ process Venture starts on the host. The other storage modes use the bundled broker. Use `venture stop` before changing an owned workspace between the base and Atlas stacks. [Connection and startup settings](README.md#choose-a-storage-target)
+Venture records the overlay for status, logs, restarts and stop. Every storage mode uses the same embedded queue; `local-net` needs only a reachable SurrealDB and `local-process` starts only SurrealDB on the host. No AMQP URL, RabbitMQ server or Erlang installation is needed. Stop the owned stack before changing its configuration. [Storage settings](README.md#choose-a-storage-target)
 
 ## Start directly with Compose
 
-Prepare the workspace and its storage credentials as described in the [deployment guide](README.md#prepare-a-workspace). Keep `FLEETWORKS_UID` and `FLEETWORKS_GID` set to the workspace owner so the broker can write its database and Erlang cookie. Create the broker data directory and owner-only credential files for RabbitMQ and the private NLP service.
+Prepare the workspace and credentials in the [deployment guide](README.md#prepare-a-workspace). Keep the workspace owner’s numeric UID/GID so Jobs can write its data directory. Create the private NLP token:
 
 ```sh
-mkdir -p "$FLEETWORKS_HOST_WORKSPACE/storage/rabbitmq"
+mkdir -p "$FLEETWORKS_HOST_WORKSPACE/storage/jobs"
 (
   umask 077
   set -C
-  for name in broker-password internal-token; do
-    file="$FLEETWORKS_HOST_WORKSPACE/secrets/$name"
-    [ -e "$file" ] || openssl rand -hex 32 >"$file" || exit
-  done
+  file="$FLEETWORKS_HOST_WORKSPACE/secrets/internal-token"
+  [ -e "$file" ] || openssl rand -hex 32 >"$file"
 )
 docker compose -f deploy/compose.yml -f deploy/compose.atlas.yml \
   --profile disk up --build --detach --wait
 ```
 
-For an external SurrealDB, configure its URL and credentials first and omit `--profile disk`. The Atlas overlay itself is the opt-in. To stop it, use the same Compose files, project name, and storage profile with `down`.
+For external SurrealDB, configure its URL/credentials first and omit `--profile disk`. Stop using the same Compose files, project name and profile with `down`.
 
-RabbitMQ persists its queue data and user state under `storage/rabbitmq/`. Reuse the same password file when restarting that broker. To provide a different file path, set `FLEETWORKS_BROKER_PASSWORD_FILE` to an absolute host path. Both containers read the same file. They write their derived config or endpoint into private temporary files at startup. The default broker user and virtual host are `fleetworks`, and the queue is `fleetworks.atlas`. Use `FLEETWORKS_BROKER_QUEUE` if an alternate queue is needed.
+Jobs persists SQLite logs and the RocksDB queue under `storage/jobs/`. Only Jobs opens those files. Atlas connects through `FLEETWORKS_JOBS_ORIGIN` and `FLEETWORKS_JOBS_TOKEN_FILE`; Compose supplies both. `FLEETWORKS_QUEUE_NAME` defaults to `fleetworks.atlas`. A successful enqueue is durable before the domain outbox is marked published. Delivery visibility leases, acknowledgments, requeues and dead letters are separate from the authoritative execution lease.
 
-The worker runs `argos-api-host --role atlas-worker` with the same network storage settings as the background worker. Its wrapper sets `FLEETWORKS_BROKER_URL_FILE` to the generated endpoint file. When invoking that role directly, point the same variable at an owner-only file containing the authenticated AMQP endpoint.
+## Upgrade an existing RabbitMQ workspace
 
-After switching a workspace back to the base stack, bootstrap disables new Atlas dispatch and preserves queued work. Reapply the overlay to resume processing. Stop the overlay first so its broker and worker are removed before starting the base stack.
+Drain existing Atlas jobs with the previous stack and then run `venture stop` before starting the new stack. Already-published Rabbit messages cannot be recovered by merely restarting the domain outbox relay. Startup rejects pending legacy dispatches until they drain. Old queue data and credentials are retained; Venture can still stop a legacy native broker supervisor. The old network-broker overlay is only a shutdown compatibility placeholder and is never selected for a new owner.
+
+Switching back to the base stack disables new Atlas dispatch at bootstrap and preserves queued work. Stop the overlay first; reapply it to resume dispatch.
 
 Once the worker is running, submit a cycle through Venture. Reusing the same request ID returns the original job and run IDs.
 

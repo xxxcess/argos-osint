@@ -13,16 +13,16 @@
 | [API adapter](../../../crates/argos-osint-api) and [host](../../../services/api-host) | Authenticated gateway and live streams, schema bootstrap, private Brain and worker roles |
 | [Web app](../../../apps/web-desktop) | React Native Web presentation and same-origin relay to the API |
 | [Core](../../../crates/argos-osint-core) | Domain workflows, storage and provider routing |
-| [Broker](../../../crates/fleetworks-broker) | Durable RabbitMQ delivery for Atlas dispatch |
+| [Jobs persistence](../../../crates/fleetworks-jobs) | SQLite operational state and embedded RocksDB delivery primitives |
 | [Classifier](classifier.md) | Taxonomy, pinned Rust-BERT inference and separately managed Natural training |
 
-The Compose stack publishes the web relay and API on loopback. The API forwards retained routes to private Brain, Tools, Control, and Jobs and owns live streams. The brief worker runs stages and publication. Atlas uses RabbitMQ with a collection worker and private NLP and classifier services. SurrealDB owns job state and domain records. [Service startup and roles](fleetworks.md)
+The Compose stack publishes the web relay and API on loopback. The API forwards retained routes to private Brain, Tools, Control, and Jobs and owns live streams. The brief worker runs stages and publication. Atlas uses a Jobs-owned embedded delivery queue with a collection worker and private NLP and classifier services. SurrealDB owns job execution state and domain records. Jobs exclusively owns disk-backed SQLite operational logs; scheduler cutover is pending the domain handoff and fencing migration. [Service startup and roles](fleetworks.md)
 
 ## Persistence
 
 `@tag:surreal-storage`
 
-Service processes share Venture's selected SurrealDB endpoint. `local-net` uses existing services. `local-process` manages disk-backed SurrealDB and RabbitMQ on the host. Compose disk, host disk/memory, and remote database modes are also available. [Storage map](storage.md)
+Service processes share Venture's selected SurrealDB endpoint. `local-net` uses existing services. `local-process` manages disk-backed SurrealDB on the host. Compose disk, host disk/memory, and remote database modes are also available. [Storage map](storage.md) · [Planned Jobs ownership and rollout scopes](jobs-persistence.md)
 
 [![Persistence stack](../../diagrams/persistence.svg)](../../diagrams/persistence.html)
 
@@ -210,7 +210,7 @@ Service hosts run network and storage operations asynchronously. CPU-intensive h
 
 `@tag:process-lifecycle`
 
-Venture owns the selected workspace's Compose project and supervises the native SurrealDB and RabbitMQ processes it starts. Explicit stop tears down owned resources, preserves workspace data, and leaves independently managed endpoints running. The HTTP host handles SIGINT and SIGTERM and bounds graceful connection draining. See the [Venture guide](fleetworks.md#launch-the-compose-stack).
+Venture owns the selected workspace's Compose project and supervises the native SurrealDB process it starts; legacy Rabbit ownership remains readable for shutdown. Explicit stop tears down owned resources, preserves workspace data, and leaves independently managed endpoints running. The HTTP host handles SIGINT and SIGTERM and bounds graceful connection draining. See the [Venture guide](fleetworks.md#launch-the-compose-stack).
 
 ## Atlas background ownership
 

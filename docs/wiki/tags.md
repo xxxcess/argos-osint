@@ -11,6 +11,7 @@ Tags connect a documented concern to its implementation across directory boundar
 | `@tag:discovery-services` | [Discovery services](code/storage.md) | [article_discovery.rs](../../crates/argos-osint-core/src/storage/article_discovery.rs), [actor_catalog.rs](../../crates/argos-osint-core/src/storage/actor_catalog.rs) |
 | `@tag:brain-memory` | [Brain](code/core.md#brain) | [brain.rs](../../crates/argos-osint-core/src/brain.rs) |
 | `@tag:osint-providers` | [Providers](code/core.md#providers-and-tool-adapters) | [providers.rs](../../crates/argos-osint-core/src/osint/providers.rs) |
+| `@tag:jobs-persistence` | [Jobs persistence](code/jobs-persistence.md) | [jobs_client.rs](../../crates/argos-osint-core/src/storage/jobs_client.rs), [Jobs store](../../crates/fleetworks-jobs) |
 | `@tag:surreal-storage` | [Storage](code/storage.md) | [storage/mod.rs](../../crates/argos-osint-core/src/storage/mod.rs) |
 | `@tag:tui-components` | [Terminal fixtures](code/tui-verification.md) | [components.rs](../../crates/argos-osint-bin/src/tui/components.rs) |
 | `@tag:async-runtime` | [Architecture](code/architecture.md#async-runtime-safety) | [hardware.rs](../../crates/argos-osint-core/src/hardware.rs) |

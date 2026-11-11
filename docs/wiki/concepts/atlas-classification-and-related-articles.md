@@ -2,7 +2,7 @@
 
 [Concept route](index.md) · [Wiki](../../index.md)
 
-Atlas's `atlas-collection-v3` cycle retains native news discovery, country heat bands, regional coverage and article deduplication. Article admission scores the six strategic domains with a pinned Rust-BERT zero-shot worker. The [Fleetworks Atlas overlay](../../../deploy/atlas-dispatch.md) delivers collection work through RabbitMQ and delegates bounded NLP and classification requests to private services. Retained v1/v2 history remains explicitly versioned. Cycles do not extract claims, assess fidelity, generate briefs, publish Brain claim memories or require vector indexing. Intel Focus Brief runs on demand through its separate publication pipeline.
+Atlas's `atlas-collection-v3` cycle retains native news discovery, country heat bands, regional coverage and article deduplication. Article admission scores the six strategic domains with a pinned Rust-BERT zero-shot worker. The [Fleetworks Atlas overlay](../../../deploy/atlas-dispatch.md) delivers collection work through the Jobs-owned embedded disk queue and delegates bounded NLP and classification requests to private services. Retained v1/v2 history remains explicitly versioned. Cycles do not extract claims, assess fidelity, generate briefs, publish Brain claim memories or require vector indexing. Intel Focus Brief runs on demand through its separate publication pipeline.
 
 The figure describes the local-admission contract. The [classifier code map](../code/classifier.md) separates model setup, foreground admission, historical work and provider monitoring. Verification and measured throughput are separate evidence.
 
@@ -71,3 +71,5 @@ An admitted occurrence atomically hands off an independent durable derivative jo
 Restaging or rejection cannot discard cleanup already owed by a committed actor publication. A live task can resume that bounded cleanup independently of the old classifier receipt, and replacement actor publication waits until the prior frontier drains. Explicit pause/cancel still controls its own task; later work uses its own lease. Fresh rejected occurrences create no derivative job.
 
 Actor-ready and reconcile-ready use current admitted occurrences as separate denominators. Neither means the index outbox has been delivered. Changed source revisions invalidate current readiness. Scheduler startup resumes pending tasks, with foreground priority and fair service for older derivatives. A two-second dispatch budget bounds new dispatch, not an already-running transaction’s wall time.
+
+[Planned persistence boundaries and migration scopes](../code/jobs-persistence.md) separate SQLite operational state, RocksDB delivery and SurrealDB domain admission/publication.

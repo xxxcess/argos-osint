@@ -28,13 +28,14 @@ Open a file under `docs/diagrams/` in a browser for the HTML page. Matching `.sv
 | Brain recall | Architecture | [brain-recall.html](diagrams/brain-recall.html) | [brain-recall.svg](diagrams/brain-recall.svg) |
 | Model routing | Data flow | [model-roles.html](diagrams/model-roles.html) | [model-roles.svg](diagrams/model-roles.svg) |
 | Provider request scheduling | Data flow | [model-request-scheduling.html](diagrams/model-request-scheduling.html) | [model-request-scheduling.svg](diagrams/model-request-scheduling.svg) |
+| Planned Jobs persistence and embedded delivery | Data flow | [jobs-persistence.html](diagrams/jobs-persistence.html) | [jobs-persistence.svg](diagrams/jobs-persistence.svg) |
 | Network storage selections | Architecture | [persistence.html](diagrams/persistence.html) | [persistence.svg](diagrams/persistence.svg) |
 | Durable jobs and terminal operations | State machine | [jobs-lifecycle.html](diagrams/jobs-lifecycle.html) | [jobs-lifecycle.svg](diagrams/jobs-lifecycle.svg) |
 | Fleetworks documentation routes | Hierarchy | [wiki-navigation.html](diagrams/wiki-navigation.html) | [wiki-navigation.svg](diagrams/wiki-navigation.svg) |
 | Fleetworks development scopes | Data flow | [ci-scopes.html](diagrams/ci-scopes.html) | [ci-scopes.svg](diagrams/ci-scopes.svg) |
 | Agent handoffs | Process | [agent-team.html](diagrams/agent-team.html) | [agent-team.svg](diagrams/agent-team.svg) |
 
-The catalog covers current Fleetworks contracts. Earlier design figures and dated verification evidence are collected in [the archive](archive/index.md).
+The catalog covers current Fleetworks contracts and explicitly labeled target architectures. The [Jobs persistence plan](wiki/code/jobs-persistence.md) distinguishes implemented foundations from the pending authority cutover. Earlier design figures and dated verification evidence are collected in [the archive](archive/index.md).
 
 ## When to draw
 

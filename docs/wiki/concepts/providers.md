@@ -233,7 +233,7 @@ Export writes schema 1 unless either feature is used. Import keeps the document'
 
 ## Per-attempt usage, wire timings and task epochs
 
-[Recon job storage](../../../crates/argos-osint-core/src/storage/recon_jobs.rs) defines the current SurrealDB attempt telemetry and operation epoch fields. [Storage bootstrap](../../../crates/argos-osint-core/src/storage/bootstrap.rs) applies them; see the [storage map](../code/storage.md).
+[Recon job storage](../../../crates/argos-osint-core/src/storage/recon_jobs.rs) defines the current SurrealDB attempt telemetry and operation epoch fields. Their [planned Jobs migration](../code/jobs-persistence.md) must move accounting and Profile readers together while retaining domain admission safeguards. [Storage bootstrap](../../../crates/argos-osint-core/src/storage/bootstrap.rs) applies them; see the [storage map](../code/storage.md).
 
 | SurrealDB table | Fields |
 | --- | --- |

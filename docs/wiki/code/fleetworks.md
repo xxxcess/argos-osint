@@ -2,7 +2,7 @@
 
 [Code route](index.md) · [Architecture](architecture.md) · [Deployment guide](../../../deploy/README.md)
 
-Venture initializes an isolated workspace, imports selected configuration on request, and owns its local Compose stack. Terminal clients and the Intel web relay use the authenticated API. Service processes share the network datastore. Interactive launches show the Fleetworks ASCII emblem. Set `NO_COLOR` for monochrome output.
+Venture initializes an isolated workspace, imports selected configuration on request, and owns its local Compose stack. Terminal clients and the Intel web relay use the authenticated API. Domain services share the network datastore; Jobs owns a separate disk-backed SQLite log store. Interactive launches show the Fleetworks ASCII emblem. Set `NO_COLOR` for monochrome output.
 
 [![Fleetworks service boundaries](../../diagrams/fleetworks.svg)](../../diagrams/fleetworks.html)
 
@@ -32,8 +32,8 @@ See the [CLI command reference](../../../apps/fleetworks-cli/README.md) for rout
 
 Run `venture --workspace ./review-workspace up` from the repository root with a local Docker engine and Docker Compose installed. A new interactive setup defaults to `local-net`; a new non-interactive setup uses `compose-disk`. Pass `--storage` to select a target explicitly. Venture prepares credentials and records project ownership before starting managed host processes and the Compose API, private services, workers, and web relay.
 
-- `local-net` connects to running SurrealDB and, with `--atlas`, RabbitMQ. Set `FLEETWORKS_STORAGE_URL` and `FLEETWORKS_STORAGE_ROOT_PASSWORD_FILE`. Add `FLEETWORKS_BROKER_URL_FILE` for Atlas. Use `host.docker.internal` for ports published on the Docker host.
-- `local-process` starts and supervises a disk-backed SurrealDB 3.3.4 process and a native RabbitMQ process on the host. Venture supplies their connection settings to the stack and preserves their workspace data on stop.
+- `local-net` connects to running SurrealDB. Set `FLEETWORKS_STORAGE_URL` and `FLEETWORKS_STORAGE_ROOT_PASSWORD_FILE`. Jobs owns its local embedded stores. Use `host.docker.internal` for ports published on the Docker host.
+- `local-process` starts and supervises a disk-backed SurrealDB 3.3.4 process on the host. Venture supplies their connection settings to the stack and preserves their workspace data on stop.
 - `remote` is the interactive choice for `--storage external`. Venture checks the configured SurrealDB URL at `/health` before recording the stack.
 - `compose-disk`, `host-disk`, and `host-memory` select the Compose disk database, a Venture-managed host disk database, or a disposable host database.
 
@@ -43,7 +43,7 @@ Use `venture web` to start the stack and open Jobs and Logs, or `venture web --t
 
 Use `up --dev --storage local-net` or `web --dev --storage local-net` for Next development mode. Venture remembers the profile for status, logs and stop. Use `up --no-build` for preloaded images. [Development setup](../../../deploy/README.md#web-development)
 
-Add `--atlas` to start the Atlas worker, Compromise NLP, and Rust-BERT classifier services with the broker for the selected mode. Submit a durable cycle with `venture client atlas start --request-id <id>`. Use a new request ID for each new collection. The [Atlas deployment guide](../../../deploy/atlas-dispatch.md) explains the provider and model files required for a live cycle.
+Add `--atlas` to start the Atlas worker, Compromise NLP, and Rust-BERT classifier services with delivery through Jobs. Submit a durable cycle with `venture client atlas start --request-id <id>`. Use a new request ID for each new collection. The [Atlas deployment guide](../../../deploy/atlas-dispatch.md) explains the provider and model files required for a live cycle.
 
 ## Run the network API and workers
 
@@ -66,14 +66,14 @@ Standalone private services use the same workspace and network storage settings.
 | `brain` | Actor dossiers, retained briefs and actions, Related articles, topology | `FLEETWORKS_INTERNAL_TOKEN_FILE` |
 | `tools` | Tool catalog, submission and results | `FLEETWORKS_TOOLS_TOKEN_FILE` |
 | `control` | Model defaults, Profile and configuration exports | `FLEETWORKS_CONTROL_TOKEN_FILE` |
-| `jobs` | Job and log reads, retry and cancellation | `FLEETWORKS_JOBS_TOKEN_FILE` |
+| `jobs` | Job reads, retry/cancellation, and SQLite operational logs | `FLEETWORKS_JOBS_TOKEN_FILE` |
 | `execution` | Retained API-key model attempts | `FLEETWORKS_EXECUTION_TOKEN_FILE` |
 
 Set `FLEETWORKS_BRAIN_ORIGIN`, `FLEETWORKS_TOOLS_ORIGIN`, `FLEETWORKS_CONTROL_ORIGIN`, and `FLEETWORKS_JOBS_ORIGIN` on the gateway. Set `FLEETWORKS_EXECUTION_ORIGIN` on Brain, the worker and brief worker. The gateway owns live event streams; the brief worker owns stage validation and publication. Profile identifies Control's process, while gateway readiness identifies the gateway.
 
 Execution resolves captured provider accounts from workspace configuration and streams progress and results. Its callers load route metadata without provider API keys and cannot write `auth.json`; local endpoints and the ChatGPT subscription execute in the caller. Role-default edits apply to new work, and endpoint changes invalidate captured routes. Callers own retries and validation.
 
-With `--atlas`, `atlas-worker` consumes RabbitMQ deliveries after SurrealDB records the job and outbox transaction. Stored job revisions and database identity govern cancellation, retries and completed-run replay. The `nlp` and `classifier` roles accept authenticated requests. Use `venture train-legacy` to train the Natural classifier against a snapshot of the selected CSV.
+With `--atlas`, `atlas-worker` consumes Jobs-owned embedded queue deliveries after SurrealDB records the transitional job and outbox transaction. Stored job revisions and database identity govern cancellation, retries and completed-run replay. The `nlp` and `classifier` roles accept authenticated requests. Use `venture train-legacy` to train the Natural classifier against a snapshot of the selected CSV.
 
 ## Rollout status
 
@@ -86,8 +86,16 @@ With `--atlas`, `atlas-worker` consumes RabbitMQ deliveries after SurrealDB reco
 | Interactive terminal | Six line-oriented clients via `venture client <app>`; explicit subcommands provide one-shot output |
 | Model execution | Shared provider pacing, per-account admission and private execution for retained API-key attempts |
 
-Check the selected revision's workflow results for verification evidence. The [CI guide](ci.md#fleetworksyml--scoped-branch-checks) describes native, server, image, Compose, broker, web and classifier checks.
+Check the selected revision's workflow results for verification evidence. The [CI guide](ci.md#fleetworksyml--scoped-branch-checks) describes native, server, image, Compose, queue, web and classifier checks.
 
 ## Verification
 
 Use [the network smoke](../../../scripts/fleetworks_network_smoke.py) with the built host and the repository-pinned SurrealDB 3.3.4 binary. It creates isolated memory and disk fixtures and checks authenticated startup, retained routes and restart behavior.
+
+## Operational persistence migration
+
+The Jobs process exclusively opens `FLEETWORKS_JOBS_SQLITE_PATH` (default: `<workspace>/storage/jobs/jobs.sqlite3`). Venture mounts `storage/jobs/` only into Jobs at `/var/lib/fleetworks-jobs`; other processes use its authenticated HTTP endpoint. WAL mode and FULL synchronization persist acknowledged writes. Stop retains the database.
+
+Standalone operational logs use SQLite. Existing SurrealDB log history remains in the domain database; investigation traces and transactional job lifecycle events retain their existing storage. Job scheduling, leases, attempts, recovery and Profile telemetry still use SurrealDB. The SQLite crate supplies scheduling primitives, but production scheduler cutover is pending the domain handoff/fencing port. Drain existing jobs before switching new submissions; do not copy active leases across stores.
+
+The target pairs SQLite job state with a RocksDB queue embedded in Jobs, replacing RabbitMQ. See [ownership, rollout scopes and acceptance](jobs-persistence.md) before treating the scheduler migration as complete.

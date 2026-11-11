@@ -1,17 +1,17 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Durable jobs and terminal operations</title>
+<title>Durable jobs and terminal operations · planned target</title>
 <style>
   body{margin:32px;background:#f5f5f5;color:#2d3142;font-family:Geist,system-ui,sans-serif}
   main{max-width:1060px;margin:auto}h1{font-family:'Instrument Serif',Georgia,serif}
   svg{width:100%;height:auto}p{line-height:1.6}a{color:#394b65}
 </style>
 </head><body><main>
-<h1>Durable jobs and terminal operations</h1>
-<p>The Jobs client reads durable job and task state and bounded logs through the versioned API. A worker takes a lease before execution. Supported cancel and retry commands change state in the database.</p>
+<h1>Durable jobs and terminal operations · planned target</h1>
+<p>Planned target: Jobs / SQLite owns claims, attempts, retries, cancellation and progress. Clients inspect these through versioned HTTP. Domain publication must reconcile fences and applied receipts before a conflicting cancellation or takeover becomes effective.</p>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 384" role="img" aria-labelledby="jobs-lifecycle-title jobs-lifecycle-desc">
-<title id="jobs-lifecycle-title">Durable jobs and terminal operations</title>
-<desc id="jobs-lifecycle-desc">The Jobs client reads durable job and task state and bounded logs through the versioned API. A worker takes a lease before execution. Supported cancel and retry commands change state in the database.</desc>
+<title id="jobs-lifecycle-title">Durable jobs and terminal operations · planned target</title>
+<desc id="jobs-lifecycle-desc">The Jobs client reads durable job and task state and bounded logs through the versioned API. A worker takes a lease before execution. The planned Jobs/SQLite authority owns transitions; domain-owned fences and receipts protect publication. Current production scheduling still uses SurrealDB.</desc>
 <defs>
   <marker id="jobs-lifecycle-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker>
 </defs>
@@ -28,7 +28,7 @@
   .edge{marker-end:url(#jobs-lifecycle-arrow)}
 </style>
 <rect width="960" height="384" fill="#f5f5f5"/>
-<text x="40" y="36" class="heading" text-anchor="start">Inspect work and act on supported states</text>
+<text x="40" y="36" class="heading" text-anchor="start">Planned Jobs / SQLite execution authority</text>
 <path d="M228 116H272" class="edge"/>
 <path d="M460 116H736" class="edge"/>
 <path d="M366 152V204H364V232" class="edge"/>
@@ -40,21 +40,21 @@
 <text x="134" y="131" class="note" text-anchor="middle">Wait for eligible work</text>
 <rect x="272" y="80" width="188" height="72" rx="6" class="accent"/>
 <text x="366" y="113" class="label" text-anchor="middle">Running</text>
-<text x="366" y="131" class="note" text-anchor="middle">Worker owns a task lease</text>
+<text x="366" y="131" class="note" text-anchor="middle">Jobs execution lease</text>
 <rect x="736" y="80" width="184" height="72" rx="6" class="node"/>
 <text x="828" y="113" class="label" text-anchor="middle">Completed</text>
-<text x="828" y="131" class="note" text-anchor="middle">Retained output and events</text>
+<text x="828" y="131" class="note" text-anchor="middle">Domain receipt + outcome</text>
 <rect x="504" y="232" width="188" height="72" rx="6" class="node"/>
 <text x="598" y="265" class="label" text-anchor="middle">Failed</text>
 <text x="598" y="283" class="note" text-anchor="middle">Reason in detail and logs</text>
 <rect x="264" y="232" width="200" height="72" rx="6" class="node"/>
 <text x="364" y="265" class="label" text-anchor="middle">Cancel supported work</text>
-<text x="364" y="283" class="note" text-anchor="middle">Stop queued or running jobs</text>
+<text x="364" y="283" class="note" text-anchor="middle">Fence before acknowledgment</text>
 <rect x="728" y="232" width="192" height="72" rx="6" class="accent"/>
 <text x="824" y="265" class="label" text-anchor="middle">Retry eligible work</text>
 <text x="824" y="283" class="note" text-anchor="middle">Requeue failed tasks</text>
-<text x="40" y="364" class="note" text-anchor="start">Inspect job detail and logs from the interactive session or one-shot commands.</text>
+<text x="40" y="364" class="note" text-anchor="start">Target: Jobs / SQLite owns transitions. Current scheduling remains in SurrealDB.</text>
 </svg>
-<p>Use venture client jobs tui for the terminal session. Use list, detail, and logs as one-shot commands. The session asks for confirmation before a retry or cancellation.</p>
+<p>The state model remains useful during migration, but SQLite primitives alone do not establish scheduler parity. Queue redelivery is at least once; stage effects must be idempotent. <a href="../wiki/code/jobs-persistence.md">Rollout scopes and acceptance</a>.</p>
 <p><a href="../../apps/fleetworks-cli/README.md">Terminal commands</a> · <a href="../wiki/code/fleetworks.md">Fleetworks guide</a> · <a href="../diagrams.md">Diagram catalog</a></p>
 </main></body></html>

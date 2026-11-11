@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 484" role="img" aria-labelledby="fleetworks-title fleetworks-desc">
-<title id="fleetworks-title">Fleetworks service boundaries</title>
-<desc id="fleetworks-desc">Venture manages the local Compose stack. Terminal clients and the Intel web relay call the authenticated API. The API relays retained operations to private Brain, Tools, Control and Jobs. SurrealDB holds domain records and durable job state. The optional Atlas worker publishes and consumes RabbitMQ deliveries and calls the private NLP and classifier services.</desc>
+<title id="fleetworks-title">Fleetworks service boundaries · planned target</title>
+<desc id="fleetworks-desc">Venture manages the local Compose stack. Terminal clients and the Intel web relay call the authenticated API. The API relays retained operations to private Brain, Tools, Control and Jobs. Planned ownership: SurrealDB holds domain records and publication fences; Jobs owns SQLite operational state and an embedded RocksDB queue. The optional Atlas worker uses authenticated Jobs HTTP delivery and calls the private NLP and classifier services.</desc>
 <defs>
   <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker>
 </defs>
@@ -18,7 +18,7 @@
 <rect x="320" y="332" width="596" height="108" rx="6" fill="#ebedf1"/>
 <text x="40" y="52" class="zone">HOST</text>
 <text x="340" y="52" class="zone">LOCAL COMPOSE STACK</text>
-<text x="336" y="352" class="zone">ATLAS OVERLAY</text>
+<text x="336" y="352" class="zone">EMBEDDED DELIVERY + OPTIONAL ATLAS</text>
 
 <path d="M240 112H308" class="edge"/>
 <path d="M240 256H340" class="edge"/>
@@ -45,18 +45,20 @@
 <text x="440" y="272" text-anchor="middle" class="note">Bearer and readiness</text>
 <rect x="692" y="76" width="200" height="72" rx="6" class="node"/>
 <text x="792" y="106" text-anchor="middle" class="label">Private services</text>
-<text x="792" y="128" text-anchor="middle" class="note">Brain · Tools · Control · Jobs</text>
+<text x="792" y="122" text-anchor="middle" class="note">Brain · Tools · Control · Jobs</text>
+<text x="792" y="141" text-anchor="middle" class="note">Jobs: SQLite + queue</text>
 <rect x="692" y="220" width="200" height="72" rx="6" class="node"/>
 <text x="792" y="250" text-anchor="middle" class="label">SurrealDB</text>
-<text x="792" y="272" text-anchor="middle" class="note">Records, jobs and outbox</text>
+<text x="792" y="272" text-anchor="middle" class="note">Domain records + fences</text>
 
 <rect x="336" y="368" width="152" height="60" rx="6" class="node"/>
-<text x="412" y="393" text-anchor="middle" class="label">RabbitMQ</text>
-<text x="412" y="413" text-anchor="middle" class="note">Durable delivery</text>
+<text x="412" y="393" text-anchor="middle" class="label">Jobs queue</text>
+<text x="412" y="413" text-anchor="middle" class="note">Embedded RocksDB</text>
 <rect x="512" y="368" width="160" height="60" rx="6" class="node"/>
 <text x="592" y="393" text-anchor="middle" class="label">Atlas worker</text>
 <text x="592" y="413" text-anchor="middle" class="note">Publish and consume</text>
 <rect x="696" y="368" width="200" height="60" rx="6" class="node"/>
 <text x="796" y="393" text-anchor="middle" class="label">Private inference</text>
 <text x="796" y="413" text-anchor="middle" class="note">Compromise and Rust-BERT</text>
+<text x="40" y="474" class="note">Planned authority split; production scheduling still uses SurrealDB.</text>
 </svg>

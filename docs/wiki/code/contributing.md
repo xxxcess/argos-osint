@@ -81,7 +81,7 @@ A pull request into any branch other than `main` runs the selected Fleetworks ch
 - Fleetworks uses a workspace-specific network datastore. See [Venture storage selections](fleetworks.md#launch-the-compose-stack).
 - Network service builds use `--no-default-features --features server,nlp,classifier`.
 - The compatibility build and embedded storage contracts use `embedded,nlp,classifier`.
-- Storage is SurrealDB only. CI fails if `rusqlite` or `lancedb` appears in `cargo tree`.
+- Domain storage uses SurrealDB. Only `fleetworks-jobs` may directly depend on SQLite (`rusqlite`); CI enforces that boundary and rejects LanceDB.
 - Storage tests pick their mode from `ARGOS_SURREAL_MODE` and skip without it (and without `ARGOS_SURREAL_BIN`); run them via `test_surreal.py`.
 
 

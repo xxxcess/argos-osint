@@ -12,13 +12,13 @@ Start with the [README](../../README.md), [concepts](concepts/index.md), and [gl
 
 ## Run a workspace
 
-Install Rust 1.95.0, Docker, and Compose v2.20+. The [quick start](../../README.md#quick-start) runs a Compose disk stack. Local development typically uses `venture up --dev --storage local-net` with existing SurrealDB and RabbitMQ. [Workspace setup](code/fleetworks.md) · [Deployment settings](../../deploy/README.md)
+Install Rust 1.95.0, Docker, and Compose v2.20+. The [quick start](../../README.md#quick-start) runs a Compose disk stack. Local development typically uses `venture up --dev --storage local-net` with existing SurrealDB. [Workspace setup](code/fleetworks.md) · [Deployment settings](../../deploy/README.md)
 
 `venture web` starts services and opens Jobs and Logs. `venture client <app>` launches a client. `venture stop` stops owned services and preserves workspace data.
 
 ## How a request moves
 
-Clients call the gateway API, which routes retained operations to private services. Workers run durable jobs against SurrealDB. Retained API-key model calls use private execution. [Service boundaries](code/architecture.md#fleetworks-service-boundaries) · [Role configuration](code/fleetworks.md#run-the-network-api-and-workers)
+Clients call the gateway API, which routes retained operations to private services. Workers use Jobs-owned embedded delivery. Scheduling still uses SurrealDB during the [SQLite/RocksDB cutover](code/jobs-persistence.md). Retained API-key model calls use private execution. [Service boundaries](code/architecture.md#fleetworks-service-boundaries) · [Role configuration](code/fleetworks.md#run-the-network-api-and-workers)
 
 ## Product surfaces
 
@@ -67,7 +67,7 @@ Use the [repository map](../index.md#directory-map) for the directory index.
 | [crates/argos-osint-core](../../crates/argos-osint-core) | Domain workflows and storage |
 | [crates/argos-osint-api](../../crates/argos-osint-api) | Versioned HTTP contracts |
 | [services/api-host](../../services/api-host) | Authenticated host and private roles |
-| [crates/fleetworks-broker](../../crates/fleetworks-broker) | RabbitMQ delivery for Atlas |
+| [crates/fleetworks-jobs](../../crates/fleetworks-jobs) | SQLite operational storage and embedded RocksDB queue |
 | [deploy](../../deploy) | Compose files, images, and smoke scripts |
 | [scripts](../../scripts) | Build, storage, release, and CI planning tools |
 | [tools/atlas-bert](../../tools/atlas-bert) | Standalone Rust-BERT worker |

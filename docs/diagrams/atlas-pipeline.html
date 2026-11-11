@@ -1,17 +1,17 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Atlas collection, admission, and derivatives</title>
+<title>Atlas collection, admission, and derivatives · planned target</title>
 <style>
   body{margin:32px;background:#f5f5f5;color:#2d3142;font-family:Geist,system-ui,sans-serif}
   main{max-width:1060px;margin:auto}h1{font-family:'Instrument Serif',Georgia,serif}
   svg{width:100%;height:auto}p{line-height:1.6}a{color:#394b65}
 </style>
 </head><body><main>
-<h1>Atlas collection, admission, and derivatives</h1>
-<p>Atlas submits a durable cycle through the Fleetworks API. RabbitMQ wakes the worker, and SurrealDB owns delivery state and outcomes. Rust-BERT admits up to two qualifying domains; admitted occurrences schedule independent derivative work.</p>
+<h1>Atlas collection, admission, and derivatives · planned target</h1>
+<p>Planned target: submit operational work to Jobs / SQLite, relay its committed intent into Jobs / RocksDB, and claim delivery over authenticated HTTP. Rust-BERT domain admission and derivative publication keep their SurrealDB correctness boundary.</p>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 402" role="img" aria-labelledby="atlas-pipeline-title atlas-pipeline-desc">
-<title id="atlas-pipeline-title">Atlas collection, admission, and derivatives</title>
-<desc id="atlas-pipeline-desc">Atlas submits a durable cycle through the Fleetworks API. RabbitMQ wakes the worker, and SurrealDB owns delivery state and outcomes. Rust-BERT admits up to two qualifying domains; admitted occurrences schedule independent derivative work.</desc>
+<title id="atlas-pipeline-title">Atlas collection, admission, and derivatives · planned target</title>
+<desc id="atlas-pipeline-desc">Atlas submits a durable cycle through the Fleetworks API. In the planned target, Jobs stores operational state in SQLite and wakes workers through its embedded RocksDB queue; SurrealDB retains domain fences and receipts. Rust-BERT admits up to two qualifying domains; admitted occurrences schedule independent derivative work.</desc>
 <defs>
   <marker id="atlas-pipeline-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker>
 </defs>
@@ -28,7 +28,7 @@
   .edge{marker-end:url(#atlas-pipeline-arrow)}
 </style>
 <rect width="960" height="402" fill="#f5f5f5"/>
-<text x="40" y="36" class="heading" text-anchor="start">Atlas overlay · durable collection</text>
+<text x="40" y="36" class="heading" text-anchor="start">Planned Atlas dispatch and domain admission</text>
 <path d="M224 112H272" class="edge"/>
 <path d="M468 112H516" class="edge"/>
 <path d="M700 112H748" class="edge"/>
@@ -41,13 +41,13 @@
 <text x="132" y="127" class="note" text-anchor="middle">Request ID → job + run</text>
 <rect x="272" y="72" width="196" height="80" rx="6" class="accent"/>
 <text x="370" y="109" class="label" text-anchor="middle">Store job and outbox</text>
-<text x="370" y="127" class="note" text-anchor="middle">One SurrealDB transaction</text>
+<text x="370" y="127" class="note" text-anchor="middle">SQLite + enqueue intent</text>
 <rect x="516" y="72" width="184" height="80" rx="6" class="node"/>
-<text x="608" y="109" class="label" text-anchor="middle">RabbitMQ delivery</text>
-<text x="608" y="127" class="note" text-anchor="middle">Confirmed publish</text>
+<text x="608" y="109" class="label" text-anchor="middle">Jobs / RocksDB queue</text>
+<text x="608" y="127" class="note" text-anchor="middle">Durable HTTP publication</text>
 <rect x="748" y="72" width="172" height="80" rx="6" class="node"/>
 <text x="834" y="109" class="label" text-anchor="middle">Claim delivery</text>
-<text x="834" y="127" class="note" text-anchor="middle">Database-fenced lease</text>
+<text x="834" y="127" class="note" text-anchor="middle">Jobs + queue lease epochs</text>
 <rect x="748" y="252" width="172" height="80" rx="6" class="node"/>
 <text x="834" y="289" class="label" text-anchor="middle">Fetch providers</text>
 <text x="834" y="307" class="note" text-anchor="middle">Daily quota reservation</text>
@@ -56,13 +56,13 @@
 <text x="608" y="307" class="note" text-anchor="middle">Pinned domain scoring</text>
 <rect x="272" y="252" width="196" height="80" rx="6" class="accent"/>
 <text x="370" y="289" class="label" text-anchor="middle">Record outcome</text>
-<text x="370" y="307" class="note" text-anchor="middle">Admission + handoff</text>
+<text x="370" y="307" class="note" text-anchor="middle">Domain fence + receipt</text>
 <rect x="40" y="252" width="184" height="80" rx="6" class="node"/>
 <text x="132" y="280" class="label" text-anchor="middle">Run derivatives</text>
 <text x="132" y="298" class="note" text-anchor="middle">Metadata · Related · actors</text>
 <text x="132" y="316" class="note" text-anchor="middle">Reconcile in background</text>
-<text x="40" y="376" class="note" text-anchor="start">Monitor collection and derivative readiness separately. Related articles are leads for a later Focus Brief.</text>
+<text x="40" y="376" class="note" text-anchor="start">Target: SQLite authority. Current scheduling and domain fences remain in SurrealDB.</text>
 </svg>
-<p>A repeated request ID returns the existing job and run. The worker validates database identity and the delivery revision before execution. The private NLP service annotates uncached metadata. Rejected or unqualified occurrences stay out of admitted feeds.</p>
+<p>The Atlas queue adapter is an integration step; its transitional outbox and execution authority remain in SurrealDB. The final SQLite scheduler must preserve request replay, generation fences, admission handoff and publication receipts. <a href="../wiki/code/jobs-persistence.md">Rollout scopes</a>.</p>
 <p><a href="../../deploy/atlas-dispatch.md">Atlas deployment</a> · <a href="../wiki/concepts/atlas-classification-and-related-articles.md">Atlas classification and Related</a> · <a href="../diagrams.md">Diagram catalog</a></p>
 </main></body></html>

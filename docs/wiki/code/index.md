@@ -2,14 +2,14 @@
 
 [Wiki](../../index.md) · [Explore concepts](../concepts/index.md)
 
-Start with the [workspace manifest](../../../Cargo.toml) and [service diagram](../../diagrams/fleetworks.html). Venture manages the stack and launches its clients. The core crate owns domain workflows and the repository. SurrealDB is the persistence backend.
+Start with the [workspace manifest](../../../Cargo.toml) and [service diagram](../../diagrams/fleetworks.html). Venture manages the stack and launches its clients. The core crate owns domain workflows and the repository. SurrealDB retains domain persistence; [Jobs persistence](jobs-persistence.md) describes the SQLite/RocksDB target and remaining cutover.
 
 | Branch | What to inspect | Next page |
 | --- | --- | --- |
 | [Core](../../../crates/argos-osint-core/src) | Atlas, Intel, Brain, providers and NLP | [Core map](core.md) |
 | [HTTP adapter](../../../crates/argos-osint-api) · [Service host](../../../services/api-host) | Versioned API, authenticated gateway, private Brain, readiness and worker roles | [Intel web](intel-web.md) |
 | [Venture](../../../apps/venture) · [Terminal clients](../../../apps/fleetworks-cli) | Workspace setup, service lifecycle and versioned HTTP clients | [Interfaces](interfaces.md) |
-| [Compose](../../../deploy) · [Broker](../../../crates/fleetworks-broker) | Local service graph and Atlas RabbitMQ delivery | [Deployment](../../../deploy/README.md) |
+| [Compose](../../../deploy) · [Jobs stores](../../../crates/fleetworks-jobs) | Local service graph and embedded durable delivery | [Deployment](../../../deploy/README.md) |
 | [Storage](../../../crates/argos-osint-core/src/storage) | Open/bootstrap, repositories, publication, jobs and recall | [Storage map](storage.md) |
 | [Intel UI](../../../packages/intel) · [Web server](../../../apps/web-desktop) | Browser navigation, Query client and same-origin relay | [React UI rules](react-ui.md) |
 | [Core tests](../../../crates/argos-osint-core/tests) · [Scripts](../../../scripts) | Offline contracts and verification entry points | [Contributor workflow](contributing.md) |

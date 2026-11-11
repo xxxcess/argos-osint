@@ -166,7 +166,7 @@ job's digest, and executes the extracted binaries. Review all four jobs for the
 requested commit before using their candidates.
 
 On both native Linux targets, a separate archive carries the runtime, web,
-SurrealDB and pinned RabbitMQ images. The image manifest records the archive
+and SurrealDB images. The image manifest records the archive
 checksum and exact Docker image IDs. A fresh job loads the archive and uses the
 downloaded Venture binary to start the stack without building or pulling. The
 smoke checks each Compose container against the expected loaded image ID.

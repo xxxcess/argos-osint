@@ -42,7 +42,7 @@ Set up the provider credentials and a Rust-BERT worker and model for the contain
 
 ### Choose storage and import settings
 
-For development with existing SurrealDB and RabbitMQ, configure their endpoints and run `venture up --dev --storage local-net`. `--storage local-process` starts disk-backed SurrealDB and RabbitMQ on the host. `venture import --from` copies provider keys and model defaults into a fresh workspace. [Setup and storage modes](docs/wiki/code/fleetworks.md)
+For development with existing SurrealDB, configure its endpoint and run `venture up --dev --storage local-net`. `--storage local-process` starts disk-backed SurrealDB on the host. `venture import --from` copies provider keys and model defaults into a fresh workspace. [Setup and storage modes](docs/wiki/code/fleetworks.md)
 
 ## Applications and services
 
@@ -56,7 +56,7 @@ For development with existing SurrealDB and RabbitMQ, configure their endpoints 
 
 [![Fleetworks service boundaries](docs/diagrams/fleetworks.svg)](docs/diagrams/fleetworks.html)
 
-Venture and the terminal clients use Rust, Tokio, and Clap. Axum serves the versioned HTTP API, and Next.js runs the React Native Web desktop through a same-origin relay. SurrealDB owns job, delivery, and application state. The Atlas overlay uses RabbitMQ for delivery and runs Compromise NLP and Rust-BERT behind private endpoints. See the [architecture](docs/wiki/code/architecture.md) and [rollout status](docs/wiki/code/fleetworks.md#rollout-status) for service ownership and open work.
+Venture and the terminal clients use Rust, Tokio, and Clap. Axum serves the versioned HTTP API, and Next.js runs the React Native Web desktop through a same-origin relay. The [planned persistence split](docs/wiki/code/jobs-persistence.md) gives Jobs SQLite operational state and a RocksDB delivery queue, with SurrealDB retaining domain records. The embedded delivery integration replaces RabbitMQ; production scheduler and telemetry migration remain pending. The Atlas overlay runs Compromise NLP and Rust-BERT behind private endpoints. See the [architecture](docs/wiki/code/architecture.md) and [rollout status](docs/wiki/code/fleetworks.md#rollout-status) for service ownership and open work.
 
 ## Development
 

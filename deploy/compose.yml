@@ -21,6 +21,8 @@ x-runtime: &runtime
     context: ..
     dockerfile: deploy/Dockerfile
     target: runtime
+    args:
+      FLEETWORKS_CORE_OPT_LEVEL: ${FLEETWORKS_CORE_OPT_LEVEL:-1}
   user: &workspace-user "${FLEETWORKS_UID:?Set FLEETWORKS_UID to the workspace owner's numeric UID}:${FLEETWORKS_GID:?Set FLEETWORKS_GID to the workspace owner's numeric GID}"
   environment: *runtime-environment
   volumes:
@@ -116,6 +118,8 @@ services:
     restart: unless-stopped
     environment:
       <<: *runtime-environment
+      FLEETWORKS_JOBS_ORIGIN: http://jobs:8080
+      FLEETWORKS_JOBS_TOKEN_FILE: /run/secrets/jobs_token
       FLEETWORKS_BRAIN_BIND: 0.0.0.0
       FLEETWORKS_BRAIN_ALLOWED_HOSTS: brain:8080
       FLEETWORKS_INTERNAL_TOKEN_FILE: /run/secrets/brain_token
@@ -124,10 +128,13 @@ services:
       FLEETWORKS_EXECUTION_ORIGIN: http://execution:8080
       FLEETWORKS_EXECUTION_TOKEN_FILE: /run/secrets/execution_token
     secrets:
+      - jobs_token
       - storage_password
       - brain_token
       - execution_token
     depends_on:
+      jobs:
+        condition: service_healthy
       bootstrap:
         condition: service_completed_successfully
       execution:
@@ -145,15 +152,20 @@ services:
     restart: unless-stopped
     environment:
       <<: *runtime-environment
+      FLEETWORKS_JOBS_ORIGIN: http://jobs:8080
+      FLEETWORKS_JOBS_TOKEN_FILE: /run/secrets/jobs_token
       FLEETWORKS_TOOLS_BIND: 0.0.0.0
       FLEETWORKS_TOOLS_ALLOWED_HOSTS: tools:8080
       FLEETWORKS_TOOLS_TOKEN_FILE: /run/secrets/tools_token
       FLEETWORKS_API_TOKEN_FILE: /run/secrets/tools_token
       FLEETWORKS_API_HEALTH_HOST: tools:8080
     secrets:
+      - jobs_token
       - storage_password
       - tools_token
-    depends_on: &private-api-startup
+    depends_on:
+      jobs:
+        condition: service_healthy
       bootstrap:
         condition: service_completed_successfully
     healthcheck: &private-api-healthcheck
@@ -169,15 +181,22 @@ services:
     restart: unless-stopped
     environment:
       <<: *runtime-environment
+      FLEETWORKS_JOBS_ORIGIN: http://jobs:8080
+      FLEETWORKS_JOBS_TOKEN_FILE: /run/secrets/jobs_token
       FLEETWORKS_CONTROL_BIND: 0.0.0.0
       FLEETWORKS_CONTROL_ALLOWED_HOSTS: control:8080
       FLEETWORKS_CONTROL_TOKEN_FILE: /run/secrets/control_token
       FLEETWORKS_API_TOKEN_FILE: /run/secrets/control_token
       FLEETWORKS_API_HEALTH_HOST: control:8080
     secrets:
+      - jobs_token
       - storage_password
       - control_token
-    depends_on: *private-api-startup
+    depends_on:
+      jobs:
+        condition: service_healthy
+      bootstrap:
+        condition: service_completed_successfully
     healthcheck: *private-api-healthcheck
 
   jobs:
@@ -191,10 +210,21 @@ services:
       FLEETWORKS_JOBS_TOKEN_FILE: /run/secrets/jobs_token
       FLEETWORKS_API_TOKEN_FILE: /run/secrets/jobs_token
       FLEETWORKS_API_HEALTH_HOST: jobs:8080
+      FLEETWORKS_JOBS_SQLITE_PATH: /var/lib/fleetworks-jobs/jobs.sqlite3
+      FLEETWORKS_JOBS_QUEUE_PATH: /var/lib/fleetworks-jobs/queue
+    volumes:
+      - *workspace
+      - type: bind
+        source: ${FLEETWORKS_HOST_WORKSPACE}/storage/jobs
+        target: /var/lib/fleetworks-jobs
+        bind:
+          create_host_path: false
     secrets:
       - storage_password
       - jobs_token
-    depends_on: *private-api-startup
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
     healthcheck: *private-api-healthcheck
 
   worker:
@@ -203,12 +233,17 @@ services:
     restart: unless-stopped
     environment:
       <<: *runtime-environment
+      FLEETWORKS_JOBS_ORIGIN: http://jobs:8080
+      FLEETWORKS_JOBS_TOKEN_FILE: /run/secrets/jobs_token
       FLEETWORKS_EXECUTION_ORIGIN: http://execution:8080
       FLEETWORKS_EXECUTION_TOKEN_FILE: /run/secrets/execution_token
     secrets:
+      - jobs_token
       - storage_password
       - execution_token
     depends_on:
+      jobs:
+        condition: service_healthy
       bootstrap:
         condition: service_completed_successfully
       execution:
@@ -220,12 +255,17 @@ services:
     restart: unless-stopped
     environment:
       <<: *runtime-environment
+      FLEETWORKS_JOBS_ORIGIN: http://jobs:8080
+      FLEETWORKS_JOBS_TOKEN_FILE: /run/secrets/jobs_token
       FLEETWORKS_EXECUTION_ORIGIN: http://execution:8080
       FLEETWORKS_EXECUTION_TOKEN_FILE: /run/secrets/execution_token
     secrets:
+      - jobs_token
       - storage_password
       - execution_token
     depends_on:
+      jobs:
+        condition: service_healthy
       bootstrap:
         condition: service_completed_successfully
       execution:
@@ -237,15 +277,20 @@ services:
     restart: unless-stopped
     environment:
       <<: *runtime-environment
+      FLEETWORKS_JOBS_ORIGIN: http://jobs:8080
+      FLEETWORKS_JOBS_TOKEN_FILE: /run/secrets/jobs_token
       FLEETWORKS_EXECUTION_BIND: 0.0.0.0
       FLEETWORKS_EXECUTION_ALLOWED_HOSTS: execution:8080
       FLEETWORKS_EXECUTION_TOKEN_FILE: /run/secrets/execution_token
       FLEETWORKS_API_TOKEN_FILE: /run/secrets/execution_token
       FLEETWORKS_API_HEALTH_HOST: execution:8080
     secrets:
+      - jobs_token
       - storage_password
       - execution_token
     depends_on:
+      jobs:
+        condition: service_healthy
       bootstrap:
         condition: service_completed_successfully
     healthcheck:

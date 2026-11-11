@@ -3,7 +3,6 @@
 
 use std::env;
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::future;
 use std::io::{self, Read};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
 use std::path::{Path, PathBuf};
@@ -329,6 +328,10 @@ pub(crate) async fn start(
     config: &Config,
     broker: Option<&Broker>,
 ) -> Result<()> {
+    ensure!(
+        broker.is_none(),
+        "stop the legacy RabbitMQ stack before starting the embedded queue stack"
+    );
     let control = Control::load(workspace).await?;
     let identity = config.identity(broker)?;
     let mut supervisor: Option<(String, std::process::Child)> = None;
@@ -505,6 +508,10 @@ pub(crate) async fn supervise(
     generation: String,
 ) -> Result<()> {
     ensure!(
+        broker.is_none(),
+        "legacy RabbitMQ supervision is shutdown-only"
+    );
+    ensure!(
         valid_generation(&generation),
         "invalid host SurrealDB generation"
     );
@@ -547,7 +554,7 @@ async fn run_server(
     config: &Config,
     root_name: &str,
     root_password: &Path,
-    broker: Option<&Broker>,
+    _broker: Option<&Broker>,
     control: &Control,
     state: &mut State,
 ) -> Result<()> {
@@ -620,58 +627,24 @@ async fn run_server(
         .kill_on_drop(true)
         .spawn()
         .context("start host SurrealDB")?;
-    let mut broker_child = match broker {
-        Some(broker) => match broker.config.spawn(workspace, &broker.password).await {
-            Ok(child) => Some(child),
-            Err(error) => {
-                finish_child(&mut child, "SurrealDB").await?;
-                return Err(error);
-            }
-        },
-        None => None,
-    };
-    let result = watch_children(
-        config,
-        broker,
-        control,
-        state,
-        &mut child,
-        &mut broker_child,
-    )
-    .await;
-    let (surreal_stopped, broker_stopped) =
-        tokio::join!(finish_child(&mut child, "SurrealDB"), async {
-            match &mut broker_child {
-                Some(child) => finish_child(child, "RabbitMQ").await,
-                None => Ok(()),
-            }
-        });
-    result.and(surreal_stopped).and(broker_stopped)
+    let result = watch_child(config, control, state, &mut child).await;
+    let stopped = finish_child(&mut child, "SurrealDB").await;
+    result.and(stopped)
 }
 
-async fn watch_children(
+async fn watch_child(
     config: &Config,
-    broker: Option<&Broker>,
     control: &Control,
     state: &mut State,
     child: &mut Child,
-    broker_child: &mut Option<Child>,
 ) -> Result<()> {
-    let deadline = Instant::now() + startup_timeout(broker) - Duration::from_secs(5);
+    let deadline = Instant::now() + START_TIMEOUT - Duration::from_secs(5);
     let signal = crate::compose::shutdown_signal();
     tokio::pin!(signal);
     loop {
         tokio::select! {
             result = child.wait() => {
                 bail!("host SurrealDB exited ({}); see logs/host-surreal.log", result?);
-            }
-            result = async {
-                match broker_child.as_mut() {
-                    Some(child) => child.wait().await,
-                    None => future::pending().await,
-                }
-            } => {
-                bail!("host RabbitMQ exited ({}); see logs/host-rabbitmq.log", result?);
             }
             _ = &mut signal => return Ok(()),
             _ = sleep(POLL) => {
@@ -681,19 +654,13 @@ async fn watch_children(
                     return Ok(());
                 }
                 if !state.ready {
-                    if dependencies_ready(config, broker).await
-                        && child.try_wait()?.is_none()
-                        && match broker_child.as_mut() {
-                            Some(child) => child.try_wait()?.is_none(),
-                            None => true,
-                        }
-                    {
+                    if dependencies_ready(config, None).await && child.try_wait()?.is_none() {
                         state.ready = true;
                         let control = control.clone();
                         let body = serde_json::to_vec(state)?;
                         tokio::task::spawn_blocking(move || control.write("state.json", &body)).await??;
                     } else if Instant::now() >= deadline {
-                        bail!("host dependencies did not become ready; see logs/host-surreal.log and logs/host-rabbitmq.log");
+                        bail!("host SurrealDB did not become ready; see logs/host-surreal.log");
                     }
                 }
             }

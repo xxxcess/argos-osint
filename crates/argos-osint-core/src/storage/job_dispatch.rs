@@ -13,6 +13,8 @@ use super::tx::{run_tx, RetryPolicy, Tx, TxError};
 pub const SCHEMA: &str = r#"
 DEFINE TABLE IF NOT EXISTS job_dispatch_pool SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS enabled ON job_dispatch_pool TYPE bool;
+DEFINE FIELD IF NOT EXISTS transport ON job_dispatch_pool TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS transport_revision ON job_dispatch_pool TYPE int DEFAULT 0;
 DEFINE TABLE IF NOT EXISTS job_dispatch_outbox SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS generation ON job_dispatch_outbox TYPE string;
 DEFINE FIELD IF NOT EXISTS task ON job_dispatch_outbox TYPE record<task>;
@@ -113,6 +115,37 @@ fn invalid(code: &str) -> TxError {
 /// database identity. Legacy pools retain their existing claim paths.
 pub async fn enable_pool(db: &Surreal<Any>, pool: &str) -> Result<(), TxError> {
     configure_pool(db, pool, true).await
+}
+
+/// Records the embedded queue transport only after the previous transport has
+/// drained. Published Rabbit deliveries are not visible to the new queue, so
+/// switching while any task remains unfinished would strand work.
+pub async fn ensure_queue_transport(db: &Surreal<Any>, pool: &str) -> Result<(), TxError> {
+    if !valid_pool(pool) {
+        return Err(invalid("invalid_dispatch_pool"));
+    }
+    run_tx(db, RetryPolicy::default(), |tx| async move {
+        jobs::run(&tx, tx.query("UPSERT $p SET enabled=enabled ?? false, transport_revision=(transport_revision ?? 0)+1 RETURN NONE")
+            .bind(("p", jobs::rid("job_dispatch_pool", pool)))).await?;
+        let mut reply = jobs::run(&tx, tx.query(
+            "RETURN (SELECT VALUE transport FROM ONLY $p);
+             RETURN count(SELECT VALUE id FROM task WHERE pool=$pool
+               AND state NOT IN ['completed','failed','cancelled','superseded'] LIMIT 1)>0;"
+        ).bind(("p", jobs::rid("job_dispatch_pool", pool))).bind(("pool", pool.to_owned()))).await?;
+        let transport: Option<String> = jobs::take(&mut reply, 0)?;
+        match transport.as_deref() {
+            Some("jobs_rocksdb_v1") => return Ok(()),
+            Some(_) => return Err(invalid("unsupported_dispatch_transport")),
+            None => {}
+        }
+        if jobs::take::<Option<bool>>(&mut reply, 1)? == Some(true) {
+            return Err(invalid("drain_existing_atlas_jobs_before_queue_cutover"));
+        }
+        jobs::run(&tx, tx.query("UPDATE $p SET transport='jobs_rocksdb_v1' RETURN NONE")
+            .bind(("p", jobs::rid("job_dispatch_pool", pool)))).await?;
+        Ok(())
+    }).await?;
+    Ok(())
 }
 
 /// Allow or pause new submissions, retries and relay claims for this pool.

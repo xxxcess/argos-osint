@@ -4,7 +4,9 @@ mod classifier_service;
 mod classifier_train;
 mod execution_service;
 mod fleetworks;
+mod jobs_service;
 mod nlp_service;
+mod queue_client;
 
 use anyhow::{ensure, Result};
 use argos_osint_core::storage::{self, home::Layout};
@@ -200,6 +202,13 @@ async fn main() -> Result<()> {
             Ok("0") | Err(std::env::VarError::NotPresent) => false,
             _ => anyhow::bail!("FLEETWORKS_ATLAS_DISPATCH must be 0 or 1"),
         };
+        if atlas_dispatch {
+            storage::job_dispatch::ensure_queue_transport(
+                repo.db(),
+                storage::job_dispatch::ATLAS_POOL,
+            )
+            .await?;
+        }
         storage::job_dispatch::configure_pool(
             repo.db(),
             storage::job_dispatch::ATLAS_POOL,
@@ -209,6 +218,20 @@ async fn main() -> Result<()> {
         println!("Fleetworks storage ready");
         return Ok(());
     }
+    let jobs_store = if role == Role::Jobs {
+        let workspace = fleetworks::workspace_path()?;
+        let store = jobs_service::open(workspace.clone()).await?;
+        let queue = jobs_service::open_queue(workspace).await?;
+        storage::jobs_client::install_local(store.clone())?;
+        storage::jobs_client::install_queue(queue.clone())?;
+        Some((store, queue))
+    } else {
+        if role != Role::Combined {
+            tokio::task::spawn_blocking(storage::jobs_client::initialize_remote_from_environment)
+                .await??;
+        }
+        None
+    };
     if role == Role::Execution {
         let (bind, policy, workspace) = tokio::task::spawn_blocking(|| {
             let (bind, policy) =
@@ -255,7 +278,16 @@ async fn main() -> Result<()> {
                 Role::Brain => argos_osint_api::brain_router(state, policy),
                 Role::Tools => argos_osint_api::tools_router(state, policy),
                 Role::Control => argos_osint_api::control_router(state, policy),
-                Role::Jobs => argos_osint_api::jobs_router(state, policy),
+                Role::Jobs => {
+                    let (store, queue) = jobs_store.expect("Jobs owns the operational datastores");
+                    let internal = argos_osint_api::guard_network(
+                        jobs_service::router(store, queue),
+                        policy.clone(),
+                        Arc::new(Vec::new()),
+                        port,
+                    );
+                    argos_osint_api::jobs_router(state, policy).merge(internal)
+                }
                 _ => argos_osint_api::network_router_with_private_services(state, policy, services),
             }
         } else {

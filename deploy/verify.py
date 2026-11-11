@@ -20,7 +20,6 @@ IMAGE_OVERRIDES = (
     "FLEETWORKS_RUNTIME_IMAGE",
     "FLEETWORKS_WEB_IMAGE",
     "FLEETWORKS_SURREAL_IMAGE",
-    "FLEETWORKS_RABBITMQ_IMAGE",
 )
 
 
@@ -283,7 +282,7 @@ def verify(
             if train_legacy_dataset is not None:
                 exercise_legacy_training(workspace, train_legacy_dataset, run)
             if atlas:
-                assert (workspace / "storage/rabbitmq").is_dir(), "managed RabbitMQ store is missing"
+                assert (workspace / "storage/jobs/queue").is_dir(), "embedded queue store is missing"
                 exercise_atlas(api_port, token)
                 print("Packaged Atlas dispatch reached the private classifier service")
             if separate_database:

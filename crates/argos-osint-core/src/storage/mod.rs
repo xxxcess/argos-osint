@@ -65,6 +65,7 @@ pub mod intel_brief_view;
 pub mod investigation;
 pub mod job_dispatch;
 pub mod jobs;
+pub mod jobs_client;
 pub mod jobs_store;
 pub mod jobs_view;
 pub mod lifecycle;

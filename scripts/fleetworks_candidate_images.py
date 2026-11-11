@@ -18,7 +18,6 @@ IMAGE_ENV = {
     "runtime": "FLEETWORKS_RUNTIME_IMAGE",
     "web": "FLEETWORKS_WEB_IMAGE",
     "surrealdb": "FLEETWORKS_SURREAL_IMAGE",
-    "rabbitmq": "FLEETWORKS_RABBITMQ_IMAGE",
 }
 MAX_ARCHIVE_BYTES = 1024 ** 3
 MAX_IMAGE_BYTES = 3 * MAX_ARCHIVE_BYTES
@@ -110,16 +109,8 @@ def save_images(archive, tags):
 def package(directory, revision, target):
     platform = verify_daemon(target)
     tags = image_tags(revision, platform)
-    upstream = compose_images({})["rabbitmq"]
-    if not re.search(r"@sha256:[0-9a-f]{64}$", upstream):
-        raise ValueError("Atlas RabbitMQ source must be pinned by digest")
-    for role in ("runtime", "web", "surrealdb"):
+    for role in IMAGE_ENV:
         docker("build", "--platform", platform, "--file", ROOT / "deploy/Dockerfile", "--target", role, "--tag", tags[role], ROOT)
-    docker("pull", "--platform", platform, upstream)
-    rabbitmq_id = docker("image", "inspect", "--format", "{{.Id}}", upstream, output=True).strip()
-    if not IMAGE_ID.fullmatch(rabbitmq_id):
-        raise ValueError("Pulled RabbitMQ lacks a Docker image ID")
-    docker("image", "tag", rabbitmq_id, tags["rabbitmq"])
     images = inspect_images(tags, platform)
     directory.mkdir(parents=True, exist_ok=True)
     archive = directory / "images.tar.gz"
@@ -129,7 +120,7 @@ def package(directory, revision, target):
     manifest = {
         "format": 1, "revision": revision, "target": target, "platform": platform,
         "archive": {"sha256": archive_digest, "bytes": archive.stat().st_size},
-        "images": images, "rabbitmq_source": upstream,
+        "images": images,
     }
     path = directory / "images.json"
     path.write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8")

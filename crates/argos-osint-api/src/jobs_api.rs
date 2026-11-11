@@ -23,6 +23,13 @@ pub(crate) fn routes() -> Router<ApiState> {
 }
 
 pub(crate) async fn ready(State(state): State<ApiState>) -> ApiResult {
+    if argos_osint_core::storage::jobs_client::configured() {
+        argos_osint_core::storage::jobs_client::execute(
+            argos_osint_core::storage::jobs_client::LogCommand::Ready,
+        )
+        .await
+        .map_err(crate::internal)?;
+    }
     crate::private_ready(state, "fleetworks-jobs").await
 }
 

@@ -12,7 +12,7 @@ import sys
 import time
 from pathlib import Path
 
-PRIMARY_SCOPES = frozenset({"native", "server", "storage", "compose", "broker"})
+PRIMARY_SCOPES = frozenset({"native", "server", "storage", "compose", "queue"})
 ALL_SCOPES = PRIMARY_SCOPES | {"bert", "web", "web_dev", "images"}
 CLI_NAMES = ("atlas", "brain", "jobs", "tools", "models", "profile")
 CLIENT_IMAGES = frozenset({"venture", *(f"fleetworks-{name}" for name in CLI_NAMES)})
@@ -47,7 +47,6 @@ SERVER_PREFIXES = (
     "crates/argos-api-host/",
     "crates/argos-osint-api/",
     "crates/argos-osint-core/",
-    "crates/fleetworks-broker/",
     "services/",
 )
 SERVER_STORAGE_PATHS = {
@@ -106,9 +105,9 @@ def raw_path_scopes(path):
     if path in SHARED_PRIMARY_PATHS or path.startswith(SHARED_PRIMARY_PREFIXES):
         return PRIMARY_SCOPES
     if path in {"scripts/test_surreal.py", "scripts/test_surreal_release.py", "scripts/surrealdb-release.json"}:
-        return {"server", "storage", "broker"}
+        return {"server", "storage", "queue"}
     if path == "scripts/fixtures/atlas_bert":
-        return {"bert", "server", "broker", "web", "web_dev"}
+        return {"bert", "server", "queue", "web", "web_dev"}
     if path == "scripts/fleetworks_network_smoke.py":
         return {"server"}
     if path in WEB_BUILD_PATHS or path.startswith("patches/"):
@@ -132,12 +131,13 @@ def raw_path_scopes(path):
     if path.startswith("deploy/"):
         return scopes | {"server", "compose"}
     if path in SERVER_STORAGE_PATHS or path.startswith((
+        "crates/fleetworks-jobs/",
         "crates/argos-osint-core/src/storage/", "crates/argos-osint-core/tests/storage_",
         "crates/argos-osint-core/src/intel_recon/brief_",
     )):
-        return scopes | {"server", "storage", "broker"}
+        return scopes | {"server", "storage", "queue"}
     if path.startswith(SERVER_PREFIXES) or path == "scripts/fleetworks_atlas_smoke.py":
-        return scopes | {"server", "broker"}
+        return scopes | {"server", "queue"}
 
     # A pull request runs only lanes named by its changed paths. These files are
     # checked by the scope job, the main-merge embedded workflow, or a dispatch.

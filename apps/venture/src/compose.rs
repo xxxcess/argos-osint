@@ -16,7 +16,6 @@ use sha2::{Digest, Sha256};
 use tokio::process::Command;
 use url::Url;
 
-use crate::host_broker;
 use crate::host_storage::{self, Broker as HostBroker, Config as HostStorage, Mode as HostMode};
 
 const DISK_URL: &str = "ws://surrealdb:8000";
@@ -47,6 +46,8 @@ const SETTINGS: &[(&str, Option<&str>)] = &[
     ("FLEETWORKS_API_ALLOWED_HOSTS", None),
     ("FLEETWORKS_API_ALLOWED_ORIGINS", None),
     ("FLEETWORKS_WEB_ORIGIN", None),
+    ("FLEETWORKS_QUEUE_NAME", None),
+    // Legacy owner decoding only; new launch preparation skips this setting.
     ("FLEETWORKS_BROKER_QUEUE", None),
 ];
 
@@ -178,7 +179,7 @@ impl Owner {
                                 && (owner.storage != StorageMode::LocalProcess
                                     || broker.url_file == host_broker_url_path(workspace))
                         }
-                        _ => false,
+                        (None, None) => true,
                     },
                 "invalid Atlas Compose ownership"
             );
@@ -188,7 +189,7 @@ impl Owner {
             "Venture ownership has an inconsistent host storage mode"
         );
         ensure!(
-            owner.host_broker.is_some() == (owner.storage == StorageMode::LocalProcess),
+            owner.host_broker.is_none() || owner.storage == StorageMode::LocalProcess,
             "Venture ownership has an inconsistent host broker configuration"
         );
         if let Some(broker) = &owner.host_broker {
@@ -279,9 +280,8 @@ impl Owner {
     }
 
     fn docker(&self) -> Command {
-        let mut command = Command::new("docker");
+        let mut command = docker_command();
         command
-            .kill_on_drop(true)
             .env_remove("DOCKER_CONTEXT")
             .env_remove("DOCKER_HOST")
             .env_remove("DOCKER_TLS")
@@ -474,8 +474,8 @@ fn select_storage_target(
 
 fn prompt_storage_target() -> Result<StorageMode> {
     println!("Choose the storage target for this stack.");
-    println!("  local-net      Use SurrealDB and optional Atlas RabbitMQ on your local network");
-    println!("  local-process  Start disk-backed SurrealDB and RabbitMQ on this host");
+    println!("  local-net      Use SurrealDB on your local network");
+    println!("  local-process  Start disk-backed SurrealDB on this host");
     println!("  remote         Connect to a remote SurrealDB server");
     loop {
         let choice = prompt_line("Storage target [local-net]: ")?;
@@ -594,31 +594,10 @@ fn prepare(
     } else {
         None
     };
-    let host_broker = if storage == StorageMode::LocalProcess {
-        let previous = prior.as_ref().and_then(|owner| owner.host_broker.as_ref());
-        let config = host_broker::Config::resolve(
-            workspace,
-            &environment,
-            previous.map(|broker| &broker.config),
-        )?;
-        let password = broker_password(
-            workspace,
-            &environment,
-            previous.map(|broker| broker.password.as_path()),
-        )?;
-        Some(HostBroker { config, password })
-    } else {
-        None
-    };
+    let host_broker = None;
     let prior_atlas = prior.as_ref().and_then(|owner| owner.atlas.as_ref());
     let atlas = if atlas || prior_atlas.is_some() {
-        Some(prepare_atlas(
-            workspace,
-            &environment,
-            &file,
-            storage,
-            prior_atlas,
-        )?)
+        Some(prepare_atlas(workspace, &environment, &file, prior_atlas)?)
     } else {
         None
     };
@@ -730,12 +709,16 @@ fn prepare(
         "invalid Fleetworks runtime password file"
     );
 
+    create_storage_dir(workspace, "jobs")?;
     if storage == StorageMode::ComposeDisk {
         create_storage_dir(workspace, "surrealdb")?;
     }
     let (uid, gid) = workspace_ids(workspace)?;
     let mut settings = BTreeMap::new();
     for &(name, default) in SETTINGS {
+        if name == "FLEETWORKS_BROKER_QUEUE" {
+            continue;
+        }
         if let Some(setting) = value(&environment, name)?
             .or_else(|| {
                 prior
@@ -774,11 +757,6 @@ fn prepare(
             "stop the owned stack before changing its configuration"
         );
     }
-    if let (Some(broker), Some(_)) = (&requested.host_broker, &requested.atlas) {
-        let password = workspace.read_api_token_file(&broker.password)?;
-        let url = broker.config.container_url(&password);
-        write_host_broker_url(workspace, &url)?;
-    }
     Ok((lock, requested, prior.is_some()))
 }
 
@@ -786,7 +764,6 @@ fn prepare_atlas(
     workspace: &Workspace,
     environment: &Environment,
     compose_file: &Path,
-    storage: StorageMode,
     prior: Option<&AtlasStack>,
 ) -> Result<AtlasStack> {
     let file = compose_overlay(compose_file, "compose.atlas.yml")?;
@@ -798,45 +775,10 @@ fn prepare_atlas(
         Some("internal-token"),
     )?;
     workspace.read_api_token_file(&internal_token)?;
-    let (broker_password, network_broker) = if storage.network_broker() {
-        let url_file = if storage == StorageMode::LocalNet {
-            let path = secret(
-                workspace,
-                environment,
-                BROKER_URL_FILE,
-                prior
-                    .and_then(|atlas| atlas.network_broker.as_ref())
-                    .map(|broker| broker.url_file.as_path()),
-                None,
-            )?;
-            let endpoint = workspace
-                .read_api_token_file(&path)
-                .context("read FLEETWORKS_BROKER_URL_FILE")?;
-            validate_broker_url(&endpoint)?;
-            path
-        } else {
-            ensure!(
-                environment.get(BROKER_URL_FILE).is_none()
-                    && environment.get("FLEETWORKS_BROKER_URL").is_none(),
-                "local-process supplies its own RabbitMQ URL"
-            );
-            host_broker_url_path(workspace)
-        };
-        let overlay = compose_overlay(compose_file, "compose.atlas-network-broker.yml")?;
-        (None, Some(NetworkBroker { overlay, url_file }))
-    } else {
-        let password = broker_password(
-            workspace,
-            environment,
-            prior.and_then(|atlas| atlas.broker_password.as_deref()),
-        )?;
-        create_storage_dir(workspace, "rabbitmq")?;
-        (Some(password), None)
-    };
     Ok(AtlasStack {
         file,
-        broker_password,
-        network_broker,
+        broker_password: None,
+        network_broker: None,
         internal_token,
     })
 }
@@ -848,46 +790,9 @@ fn compose_overlay(base: &Path, name: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn broker_password(
-    workspace: &Workspace,
-    environment: &Environment,
-    prior: Option<&Path>,
-) -> Result<PathBuf> {
-    let file = secret(
-        workspace,
-        environment,
-        BROKER_PASSWORD_FILE,
-        prior,
-        Some("broker-password"),
-    )?;
-    let password = workspace.read_api_token_file(&file)?;
-    ensure!(
-        (32..=128).contains(&password.len())
-            && password
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"-._~".contains(&byte)),
-        "invalid Fleetworks broker password file"
-    );
-    Ok(file)
-}
-
+// Kept solely to validate and stop owners created by the previous launcher.
 fn host_broker_url_path(workspace: &Workspace) -> PathBuf {
     workspace.root().join("secrets/host-broker-url")
-}
-
-fn write_host_broker_url(workspace: &Workspace, url: &str) -> Result<()> {
-    let path = host_broker_url_path(workspace);
-    match fs::symlink_metadata(&path) {
-        Ok(_) if workspace.read_api_token_file(&path)? == url => return Ok(()),
-        Ok(_) => (),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => (),
-        Err(error) => return Err(error).context("inspect host broker URL file"),
-    }
-    let mut staged = tempfile::NamedTempFile::new_in(workspace.root().join("secrets"))?;
-    writeln!(staged, "{url}")?;
-    staged.as_file().sync_all()?;
-    staged.persist(&path).map_err(|error| error.error)?;
-    Ok(())
 }
 
 fn validate_distinct_host_ports(storage: &HostStorage, broker: &HostBroker) -> Result<()> {
@@ -1132,20 +1037,6 @@ fn storage_origin(raw: &str, local_net: bool) -> Result<String> {
     Ok(url.to_string())
 }
 
-fn validate_broker_url(raw: &str) -> Result<()> {
-    let url = Url::parse(raw).map_err(|_| anyhow!("invalid FLEETWORKS_BROKER_URL_FILE"))?;
-    ensure!(
-        matches!(url.scheme(), "amqp" | "amqps")
-            && url.host_str().is_some_and(|host| !loopback_host(host))
-            && !url.username().is_empty()
-            && url.password().is_some_and(|password| !password.is_empty())
-            && url.port() != Some(0)
-            && url.fragment().is_none(),
-        "FLEETWORKS_BROKER_URL_FILE must contain an authenticated amqp:// or amqps:// URL reachable from Docker"
-    );
-    Ok(())
-}
-
 fn loopback_host(host: &str) -> bool {
     let host = host.trim_end_matches('.');
     host.eq_ignore_ascii_case("localhost")
@@ -1165,23 +1056,43 @@ async fn docker_host() -> Result<String> {
             return local_socket(&host);
         }
     }
-    let output = Command::new("docker")
+    let output = docker_command()
         .args([
             "context",
             "inspect",
             "--format",
             "{{.Endpoints.docker.Host}}",
         ])
-        .kill_on_drop(true)
         .output()
         .await
-        .context("inspect the local Docker context")?;
+        .context("inspect the local Docker context (install Docker and make its CLI available)")?;
     ensure!(
         output.status.success(),
         "could not inspect the local Docker context"
     );
     let stdout = String::from_utf8(output.stdout).context("invalid Docker socket")?;
     local_socket(stdout.trim())
+}
+
+fn docker_command() -> Command {
+    let mut command = Command::new("docker");
+    command.kill_on_drop(true);
+    #[cfg(target_os = "macos")]
+    {
+        let search_path = env::var_os("PATH").unwrap_or_default();
+        let mut directories: Vec<_> = env::split_paths(&search_path).collect();
+        directories.push(PathBuf::from(
+            "/Applications/Docker.app/Contents/Resources/bin",
+        ));
+        if let Some(home) = env::var_os("HOME") {
+            directories
+                .push(PathBuf::from(home).join("Applications/Docker.app/Contents/Resources/bin"));
+        }
+        if let Ok(search_path) = env::join_paths(directories) {
+            command.env("PATH", search_path);
+        }
+    }
+    command
 }
 
 fn local_socket(raw: &str) -> Result<String> {
@@ -1231,7 +1142,7 @@ mod tests {
 
     use super::{
         external_url, interpret_storage_choice, lifecycle_lock, local_net_url, local_socket,
-        owner_path, project_name, remote_health_url, validate_broker_url, Owner, StorageMode,
+        owner_path, project_name, remote_health_url, Owner, StorageMode,
     };
 
     #[test]
@@ -1281,18 +1192,25 @@ mod tests {
         assert!(local_net_url("ws://192.168.64.2:8000").is_ok());
         assert!(local_net_url("ws://127.0.0.1:8000").is_err());
         assert!(local_net_url("ws://surreal.internal/rpc").is_err());
-        assert!(validate_broker_url(
-            "amqps://worker:fixture%40password@host.docker.internal:5671/atlas%2Fdev"
-        )
-        .is_ok());
-        for invalid in [
-            "amqp://worker:fixture-secret@localhost:5672/atlas",
-            "http://worker:fixture-secret@rabbit.internal:5672/atlas",
-            "amqp://rabbit.internal:5672/atlas",
-        ] {
-            let error = validate_broker_url(invalid).unwrap_err();
-            assert!(!error.to_string().contains("fixture-secret"));
-        }
+    }
+
+    #[test]
+    fn new_atlas_configuration_needs_only_the_internal_service_token() {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = Workspace::resolve(Some(temporary.path())).unwrap();
+        workspace.initialize().unwrap();
+        let base = workspace.root().join("compose.yml");
+        fs::write(&base, "services: {}\n").unwrap();
+        fs::write(base.with_file_name("compose.atlas.yml"), "services: {}\n").unwrap();
+        let atlas =
+            super::prepare_atlas(&workspace, &workspace.environment().unwrap(), &base, None)
+                .unwrap();
+        assert!(atlas.broker_password.is_none());
+        assert!(atlas.network_broker.is_none());
+        assert!(atlas.internal_token.is_file());
+        assert!(!workspace.root().join("secrets/broker-password").exists());
+        assert!(!workspace.root().join("secrets/host-broker-url").exists());
+        assert!(!workspace.root().join("storage/rabbitmq").exists());
     }
 
     #[test]
@@ -1361,6 +1279,22 @@ mod tests {
                 OsStr::new("--file"),
                 dev_file.as_os_str()
             ]));
+
+        fs::remove_file(owner_path(&first)).unwrap();
+        owner.atlas = Some(super::AtlasStack {
+            file: first.root().join("compose.atlas.yml"),
+            broker_password: Some(first.root().join("secrets/broker-password")),
+            network_broker: None,
+            internal_token: first.root().join("secrets/internal-token"),
+        });
+        owner.save(&first).unwrap();
+        let legacy = Owner::read(&first).unwrap().unwrap();
+        assert_eq!(legacy, owner);
+        assert!(legacy
+            .compose()
+            .as_std()
+            .get_envs()
+            .any(|(key, value)| key == OsStr::new(super::BROKER_PASSWORD_FILE) && value.is_some()));
 
         fs::copy(owner_path(&first), owner_path(&second)).unwrap();
         assert!(Owner::read(&second).is_err());

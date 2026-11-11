@@ -8,6 +8,7 @@ members = [
     "crates/fleetworks-contracts",
     "crates/fleetworks-workspace",
     "crates/fleetworks-broker",
+    "crates/fleetworks-jobs",
     "apps/venture",
     "apps/fleetworks-cli",
 ]

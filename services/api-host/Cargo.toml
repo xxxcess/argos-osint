@@ -15,7 +15,8 @@ classifier = ["argos-osint-core/classifier", "argos-osint-api/classifier"]
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
-fleetworks-broker = { path = "../../crates/fleetworks-broker" }
+fleetworks-jobs = { path = "../../crates/fleetworks-jobs" }
+reqwest.workspace = true
 tracing.workspace = true
 argos-osint-core = { path = "../../crates/argos-osint-core", default-features = false }
 axum = "0.8.8"
@@ -27,3 +28,6 @@ url.workspace = true
 argos-osint-api = { path = "../../crates/argos-osint-api", default-features = false }
 clap.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

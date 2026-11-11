@@ -1,8 +1,7 @@
-"""Verify native Atlas dispatch against a disposable SurrealDB and RabbitMQ."""
+"""Verify native Atlas dispatch against a disposable SurrealDB and Jobs-owned SQLite/RocksDB."""
 
 import base64
 import json
-import os
 from pathlib import Path
 import secrets
 import subprocess
@@ -13,8 +12,8 @@ from fleetworks_network_smoke import binaries, free_ports, process, request, saf
 
 
 def exercise(tmp, binary, surreal):
-    database_port, api_port = free_ports(2)
-    root_key, runtime_key, token = (secrets.token_hex(32) for _ in range(3))
+    database_port, api_port, jobs_port = free_ports(3)
+    root_key, runtime_key, token, jobs_token = (secrets.token_hex(32) for _ in range(4))
     db_env = {**safe_env, "SURREAL_USER": "root", "SURREAL_PASS": root_key}
     env = {
         **safe_env,
@@ -25,16 +24,22 @@ def exercise(tmp, binary, surreal):
         "FLEETWORKS_API_TOKEN": token,
         "FLEETWORKS_API_ALLOWED_HOSTS": f"127.0.0.1:{api_port}",
     }
+    jobs_env = {
+        **env,
+        "FLEETWORKS_JOBS_BIND": "127.0.0.1",
+        "FLEETWORKS_JOBS_ALLOWED_HOSTS": f"127.0.0.1:{jobs_port}",
+        "FLEETWORKS_JOBS_TOKEN": jobs_token,
+        "FLEETWORKS_JOBS_SQLITE_PATH": str(tmp / "jobs.sqlite3"),
+        "FLEETWORKS_JOBS_QUEUE_PATH": str(tmp / "queue"),
+    }
+    env.update({
+        "FLEETWORKS_JOBS_ORIGIN": f"http://127.0.0.1:{jobs_port}",
+        "FLEETWORKS_JOBS_TOKEN": jobs_token,
+    })
     worker_env = {
         **env,
-        "FLEETWORKS_BROKER_QUEUE": "fleetworks.atlas.smoke." + secrets.token_hex(8),
+        "FLEETWORKS_QUEUE_NAME": "fleetworks.atlas.smoke." + secrets.token_hex(8),
     }
-    if "FLEETWORKS_BROKER_URL_FILE" in os.environ:
-        worker_env["FLEETWORKS_BROKER_URL_FILE"] = str(
-            Path(os.environ["FLEETWORKS_BROKER_URL_FILE"]).resolve(strict=True)
-        )
-    else:
-        worker_env["FLEETWORKS_BROKER_URL"] = os.environ["FLEETWORKS_BROKER_URL"]
     db = [surreal, "start", "--no-banner", "--log", "warn", "--bind", f"127.0.0.1:{database_port}", "memory"]
     auth = {"Authorization": "Bearer " + token, "Content-Type": "application/json"}
     root = base64.b64encode(f"root:{root_key}".encode()).decode()
@@ -78,7 +83,12 @@ def exercise(tmp, binary, surreal):
             env={**env, "FLEETWORKS_STORAGE_ROOT_PASSWORD": root_key, "FLEETWORKS_ATLAS_DISPATCH": "1"},
             check=True, timeout=35,
         )
-        with process([binary, "--role", "api", "--port", str(api_port)], env, tmp / "api.log") as api:
+        with process([binary, "--role", "jobs", "--port", str(jobs_port)], jobs_env, tmp / "jobs.log") as jobs, \
+             process([binary, "--role", "api", "--port", str(api_port)], env, tmp / "api.log") as api:
+            jobs_auth = {"Authorization": "Bearer " + jobs_token, "Content-Type": "application/json"}
+            wait_for(jobs, jobs_port, "/api/v1/health/ready", jobs_auth)
+            assert request(jobs_port, "/internal/jobs/queue", body="{}")[0] == 401
+            assert request(jobs_port, "/internal/jobs/queue", jobs_auth, "{}")[0] == 422
             wait_for(api, api_port, "/api/v1/health/ready", auth)
             assert post(atlas_path, {"request_id": "fixture"}, {"Content-Type": "application/json"})[0] == 401
             assert post(atlas_path, {"request_id": "bad/id"})[0] == 400
@@ -98,7 +108,7 @@ def exercise(tmp, binary, surreal):
             replay_run = replay["run_id"]
             # A previous activation committed the Atlas result and then exited
             # before settling the dispatch. No live providers or models are
-            # necessary to exercise that exact replay over the real broker.
+            # necessary to exercise that exact replay through the embedded queue.
             sql(f"CREATE type::record('atlas_run','{replay_run}') SET state='completed', started_at='2026-01-01T00:00:00Z', finished_at='2026-01-01T00:00:00Z';")
 
             for attempt in (1, 2):
@@ -115,12 +125,12 @@ def exercise(tmp, binary, surreal):
             assert state(cancel_id)["state"] == "cancelled", state(cancel_id)
             assert state(cancel_id)["attempt_rows"] == 0
             assert post(atlas_path, {"request_id": "fixture"}) == (202, receipt)
-            # Exact attempt identity and confirm count stay stable across a
+            # Exact attempt identity and durable publish count stay stable across a
             # worker restart and explicit retry. The fixture has no classifier,
             # so no news provider is contacted and no article is persisted.
             assert sql(f"SELECT VALUE number FROM attempt WHERE task=type::record('task','{job_id}-collect') ORDER BY number;") == [1, 2]
             assert sql(f"SELECT VALUE revision FROM job_dispatch_outbox WHERE job=type::record('job','{job_id}') AND published_at!=NONE ORDER BY revision;") == [0, 3]
-    print("Atlas: authenticated replay, queued cancellation, broker confirms, completion replay and monotonic retry across restart passed", flush=True)
+    print("Atlas: authenticated replay, queued cancellation, durable embedded enqueue, completion replay and monotonic retry across restart passed", flush=True)
 
 
 if __name__ == "__main__":

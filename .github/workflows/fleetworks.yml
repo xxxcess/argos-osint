@@ -46,7 +46,7 @@ jobs:
       native: ${{ steps.plan.outputs.native }}
       server: ${{ steps.plan.outputs.server }}
       compose: ${{ steps.plan.outputs.compose }}
-      broker: ${{ steps.plan.outputs.broker }}
+      queue: ${{ steps.plan.outputs.queue }}
       storage: ${{ steps.plan.outputs.storage }}
       bert: ${{ steps.plan.outputs.bert }}
       web: ${{ steps.plan.outputs.web }}
@@ -257,7 +257,7 @@ jobs:
               --test storage_provider_pacer --test storage_provider_account --test storage_credits \
               --test storage_actor_catalog --test storage_atlas_delete
       - name: Test shared Atlas provider quota reservations
-        if: needs.scope.outputs.broker == 'true' && needs.scope.outputs.full != 'true'
+        if: needs.scope.outputs.queue == 'true' && needs.scope.outputs.full != 'true'
         env:
           ARGOS_SURREAL_MODE: server
           ARGOS_SURREAL_REQUIRED: "1"
@@ -275,64 +275,16 @@ jobs:
             echo '::error::The required Atlas quota reservation test did not pass'
             exit 1
           fi
-      - name: Exercise native Atlas dispatch with RabbitMQ
-        if: needs.scope.outputs.broker == 'true'
+      - name: Exercise SQLite jobs and embedded queue dispatch
+        if: needs.scope.outputs.queue == 'true'
         timeout-minutes: 12
         env:
           SURREAL_BIN: ${{ steps.surreal.outputs.binary }}
         shell: bash
         run: |
           set -euo pipefail
-          python3 scripts/agent_cargo.py test --locked -p fleetworks-broker --lib
-          umask 077
-          broker_tmp="$(mktemp -d "$RUNNER_TEMP/fleetworks-rabbitmq.XXXXXX")"
-          container="${broker_tmp##*/}"
-          trap 'docker rm --force --volumes "$container" >/dev/null 2>&1 || true; rm -rf -- "$broker_tmp"' EXIT
-          mkdir -m 0700 "$broker_tmp/data"
-          python3 -c 'import secrets; print(secrets.token_hex(32))' > "$broker_tmp/broker-password"
-          printf '::add-mask::%s\n' "$(<"$broker_tmp/broker-password")"
-          # Match the broker entrypoint, ownership and image in deploy/compose.atlas.yml.
-          image='rabbitmq:4.2.6@sha256:0f0eeaba114a94a9e4aae6a5bde40de85e0ab3b9ae7fe715a25cac19c4253643'
-          docker run --detach --name "$container" --hostname rabbitmq \
-            --user "$(id -u):$(id -g)" --workdir /var/lib/rabbitmq \
-            --publish 127.0.0.1::5672/tcp --init --read-only --cap-drop ALL \
-            --security-opt no-new-privileges:true --tmpfs /tmp \
-            --env HOME=/var/lib/rabbitmq --env RABBITMQ_NODENAME=rabbit@rabbitmq \
-            --env RABBITMQ_MNESIA_BASE=/var/lib/rabbitmq/mnesia \
-            --mount "type=bind,src=$broker_tmp/data,dst=/var/lib/rabbitmq" \
-            --mount "type=bind,src=$broker_tmp/broker-password,dst=/run/secrets/broker_password,readonly" \
-            --mount "type=bind,src=$PWD/deploy/atlas-entrypoint.sh,dst=/usr/local/lib/fleetworks/atlas-entrypoint.sh,readonly" \
-            --entrypoint /bin/sh "$image" /usr/local/lib/fleetworks/atlas-entrypoint.sh rabbitmq rabbitmq-server
-          address="$(docker port "$container" 5672/tcp)"
-          [[ "$address" =~ ^127\.0\.0\.1:[1-9][0-9]{0,4}$ ]]
-          if ! python3 - "${address##*:}" <<'PY'
-          import socket
-          import sys
-          import time
-
-          deadline = time.monotonic() + 60
-          while time.monotonic() < deadline:
-              try:
-                  with socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=1) as conn:
-                      conn.sendall(b"AMQP\x00\x00\x09\x01")
-                      with conn.makefile("rb") as response:
-                          start = response.read(11)
-                      if start[:3] == b"\x01\x00\x00" and start[7:] == b"\x00\x0a\x00\x0a":
-                          sys.exit(0)
-              except OSError:
-                  pass
-              time.sleep(0.25)
-          sys.exit(1)
-          PY
-          then
-            echo '::error::RabbitMQ did not open its AMQP listener'
-            docker logs --tail 80 "$container" >&2
-            exit 1
-          fi
-          printf 'amqp://fleetworks:%s@%s/fleetworks\n' \
-            "$(<"$broker_tmp/broker-password")" "$address" > "$broker_tmp/amqp-url"
-          export FLEETWORKS_BROKER_URL_FILE="$broker_tmp/amqp-url"
-          python3 scripts/fleetworks_verify.py timed --phase broker-smoke -- \
+          python3 scripts/agent_cargo.py test --locked -p fleetworks-jobs
+          python3 scripts/fleetworks_verify.py timed --phase queue-smoke -- \
             python3 scripts/fleetworks_atlas_smoke.py \
               --host target/agents/debug/argos-api-host --surreal "$SURREAL_BIN"
       - name: Validate disk and external Compose configurations
@@ -343,7 +295,7 @@ jobs:
           export FLEETWORKS_HOST_WORKSPACE="$(mktemp -d "$RUNNER_TEMP/fleetworks-compose.XXXXXX")"
           export FLEETWORKS_UID="$(id -u)" FLEETWORKS_GID="$(id -g)"
           umask 077
-          mkdir -p "$FLEETWORKS_HOST_WORKSPACE"/{secrets,storage/surrealdb}
+          mkdir -p "$FLEETWORKS_HOST_WORKSPACE"/{secrets,storage/surrealdb,storage/jobs}
           for secret in api-token brain-token control-token execution-token jobs-token tools-token storage-password storage-root-password; do
             printf '%064d\n' 0 > "$FLEETWORKS_HOST_WORKSPACE/secrets/$secret"
           done
@@ -353,8 +305,7 @@ jobs:
             docker compose -f deploy/compose.yml -f deploy/compose.dev.yml --profile disk config --quiet
           fi
           if [[ -f deploy/compose.atlas.yml ]]; then
-            mkdir -p "$FLEETWORKS_HOST_WORKSPACE/storage/rabbitmq"
-            printf '%064d\n' 0 > "$FLEETWORKS_HOST_WORKSPACE/secrets/broker-password"
+            printf '%064d\n' 0 > "$FLEETWORKS_HOST_WORKSPACE/secrets/internal-token"
             docker compose -f deploy/compose.yml -f deploy/compose.atlas.yml --profile disk config --quiet
           fi
       - name: Retain server phase timings
@@ -517,7 +468,7 @@ jobs:
           WEB_DEV_SELECTED: ${{ needs.scope.outputs.web_dev }}
           IMAGES_SELECTED: ${{ needs.scope.outputs.images }}
           IMAGE_TARGETS: ${{ needs.scope.outputs.image_targets }}
-          BROKER_SELECTED: ${{ needs.scope.outputs.broker }}
+          QUEUE_SELECTED: ${{ needs.scope.outputs.queue }}
           STORAGE_SELECTED: ${{ needs.scope.outputs.storage }}
           NATIVE_RESULT: ${{ needs.native.result }}
           SERVER_RESULT: ${{ needs.server.result }}
@@ -542,10 +493,10 @@ jobs:
             esac
           }
           failed=0
-          for value in "$BROKER_SELECTED" "$STORAGE_SELECTED"; do
+          for value in "$QUEUE_SELECTED" "$STORAGE_SELECTED"; do
             case "$value:$SERVER_SELECTED" in
               true:true|false:true|false:false) ;;
-              *) echo '::error::Broker and storage scopes need the server gate'; failed=1 ;;
+              *) echo '::error::Queue and storage scopes need the server gate'; failed=1 ;;
             esac
           done
           case "$WEB_DEV_SELECTED:$WEB_SELECTED" in
@@ -559,7 +510,7 @@ jobs:
           verify web "$WEB_SELECTED" "$WEB_RESULT" || failed=1
           verify images "$IMAGES_SELECTED" "$IMAGES_RESULT" || failed=1
           printf 'Server images: %s\n' "${IMAGE_TARGETS:-none}" >> "$GITHUB_STEP_SUMMARY"
-          printf 'Broker selected: %s. Storage selected: %s. Development browser selected: %s.\n' \
-            "${BROKER_SELECTED:-missing}" "${STORAGE_SELECTED:-missing}" \
+          printf 'Queue selected: %s. Storage selected: %s. Development browser selected: %s.\n' \
+            "${QUEUE_SELECTED:-missing}" "${STORAGE_SELECTED:-missing}" \
             "${WEB_DEV_SELECTED:-missing}" >> "$GITHUB_STEP_SUMMARY"
           exit "$failed"

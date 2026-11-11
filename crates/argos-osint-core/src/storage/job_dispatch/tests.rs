@@ -94,6 +94,14 @@ async fn published_deliveries_recover_and_fence_stale_workers() {
     assert!(mark_published(db, &relay, after_relay_expiry)
         .await
         .unwrap());
+    assert!(
+        matches!(
+            super::ensure_queue_transport(db, ATLAS_POOL).await,
+            Err(crate::storage::tx::TxError::Abort(reason))
+                if reason == "drain_existing_atlas_jobs_before_queue_cutover"
+        ),
+        "published legacy deliveries must drain before switching transport"
+    );
 
     let mut stale_generation = relay.envelope.clone();
     stale_generation.workspace_generation = "old-store".into();
@@ -219,4 +227,12 @@ async fn published_deliveries_recover_and_fence_stale_workers() {
         .unwrap();
     assert_eq!(row.state, "completed");
     assert_eq!(row.result_ref, "atlas-run");
+    super::ensure_queue_transport(db, ATLAS_POOL).await.unwrap();
+    super::ensure_queue_transport(db, ATLAS_POOL).await.unwrap();
+    db.query("UPDATE job_dispatch_pool:atlas_cycle SET transport='future_transport'")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert!(super::ensure_queue_transport(db, ATLAS_POOL).await.is_err());
 }

@@ -98,7 +98,7 @@ enum Action {
 
 #[derive(ClapArgs)]
 struct StackOptions {
-    /// Database and broker setup. Omit this on a new terminal to choose a mode.
+    /// Database setup. Omit this on a new terminal to choose a mode.
     #[arg(long, value_enum)]
     storage: Option<StorageMode>,
     #[arg(long, value_name = "PATH")]

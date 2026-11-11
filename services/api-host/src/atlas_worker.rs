@@ -1,4 +1,4 @@
-//! RabbitMQ is a wake-up transport. SurrealDB owns dispatch revisions,
+//! The Jobs-owned RocksDB queue is a wake-up transport. SurrealDB owns dispatch revisions,
 //! execution leases and terminal outcomes.
 
 use std::future::Future;
@@ -6,6 +6,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::queue_client::{Client, Disposition, Received};
 use anyhow::{anyhow, ensure, Result};
 use argos_osint_core::atlas::{self, LiveRun, Stop};
 use argos_osint_core::classifier::readiness::CyclePreflightError;
@@ -18,7 +19,7 @@ use argos_osint_core::storage::job_dispatch::{
 };
 use argos_osint_core::storage::repo::Repository;
 use chrono::Utc;
-use fleetworks_broker::{Broker, Disposition, Received};
+use sha2::{Digest, Sha256};
 use tokio::time::{interval, sleep, timeout, MissedTickBehavior};
 
 const EXECUTION_LEASE_SECS: i64 = 45;
@@ -27,25 +28,17 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 const PAUSE_LIMIT: Duration = Duration::from_secs(10);
 
 pub(crate) async fn run(repo: Repository, signal: impl Future<Output = ()>) -> Result<()> {
-    let endpoint = crate::fleetworks::read_secret("FLEETWORKS_BROKER_URL")?;
-    let queue =
-        std::env::var("FLEETWORKS_BROKER_QUEUE").unwrap_or_else(|_| "fleetworks.atlas".into());
+    job_dispatch::ensure_queue_transport(repo.db(), ATLAS_POOL).await?;
+    let broker = tokio::task::spawn_blocking(Client::from_environment).await??;
     let owner = format!("atlas-worker-{}", argos_osint_core::store::new_id());
     tokio::pin!(signal);
     loop {
-        let broker = tokio::select! {
-            _ = &mut signal => return Ok(()),
-            result = Broker::connect(&endpoint, &queue) => result,
-        };
-        let result = match broker {
-            Ok(broker) => consume(&repo, &broker, &owner, signal.as_mut()).await,
-            Err(error) => Err(error.into()),
-        };
+        let result = consume(&repo, &broker, &owner, signal.as_mut()).await;
         match result {
             Ok(()) => return Ok(()),
             Err(error) => tracing::warn!(
                 error = %argos_osint_core::provider_diag::sanitize(&error.to_string()),
-                "Atlas broker session interrupted"
+                "Atlas durable queue session interrupted"
             ),
         }
         tokio::select! {
@@ -57,11 +50,12 @@ pub(crate) async fn run(repo: Repository, signal: impl Future<Output = ()>) -> R
 
 async fn consume(
     repo: &Repository,
-    broker: &Broker,
+    broker: &Client,
     owner: &str,
     mut signal: std::pin::Pin<&mut impl Future<Output = ()>>,
 ) -> Result<()> {
-    let mut consumer = broker.consumer(1).await?;
+    let mut poll = interval(Duration::from_millis(250));
+    poll.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut relay = interval(Duration::from_secs(1));
     relay.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
@@ -72,12 +66,21 @@ async fn consume(
                 let now = Utc::now();
                 job_dispatch::recover_expired(repo.db(), ATLAS_POOL, now).await?;
                 if let Some(claim) = job_dispatch::claim_ready(repo.db(), ATLAS_POOL, owner, now).await? {
-                    broker.publish(&serde_json::to_vec(&claim.envelope)?).await?;
+                    let envelope = &claim.envelope;
+                    let identity = serde_json::to_vec(&(
+                        &envelope.workspace_generation, &envelope.task_id, envelope.revision,
+                    ))?;
+                    let id = format!("{:x}", Sha256::digest(&identity));
+                    broker.publish(id, serde_json::to_vec(envelope)?).await?;
                     job_dispatch::mark_published(repo.db(), &claim, Utc::now()).await?;
                 }
             }
-            delivery = consumer.next() => {
-                let received = delivery?.ok_or_else(|| anyhow!("Atlas subscription ended"))?;
+            _ = poll.tick() => {
+                let received = tokio::select! {
+                    _ = &mut signal => return Ok(()),
+                    received = broker.claim(owner) => received?,
+                };
+                let Some(received) = received else { continue };
                 if handle(repo, owner, received, signal.as_mut()).await? {
                     return Ok(());
                 }
@@ -139,6 +142,13 @@ async fn handle(
                 break (retry("atlas_worker_shutdown"), true);
             }
             _ = heartbeat.tick() => {
+                let queue_renewal = received.renew().await;
+                if !matches!(queue_renewal, Ok(true)) {
+                    argos_osint_core::cancellation::cancel_with_notify(&pause);
+                    let _ = timeout(PAUSE_LIMIT, &mut cycle).await;
+                    queue_renewal?;
+                    return Err(anyhow!("Atlas queue delivery lease lost"));
+                }
                 let renewal = job_dispatch::renew_delivery(
                     repo.db(), &lease, EXECUTION_LEASE_SECS, Utc::now(),
                 ).await;

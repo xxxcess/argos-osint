@@ -53,15 +53,38 @@ jobs:
           key: embedded
           workspaces: . -> target/agents
           cache-on-failure: true
-      - name: No SQLite or LanceDB in the dependency graph
+      - name: Restrict SQLite to Jobs persistence and forbid LanceDB
         shell: bash
         run: |
           set -euo pipefail
-          for c in rusqlite lancedb; do
-            if cargo tree --workspace --all-features -e normal,build -i "$c" --locked >/dev/null 2>&1; then
-              echo "::error::$c is still in the dependency graph"; exit 1
-            fi
-          done
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          result = subprocess.run(
+              ["cargo", "metadata", "--all-features", "--locked", "--format-version", "1"],
+              check=True, stdout=subprocess.PIPE,
+          )
+          metadata = json.loads(result.stdout)
+          packages = {package["id"]: package for package in metadata["packages"]}
+          jobs_manifest = Path(metadata["workspace_root"]) / "crates/fleetworks-jobs/Cargo.toml"
+          errors = []
+          for package in packages.values():
+              if package["name"] == "lancedb":
+                  errors.append("lancedb is forbidden in the dependency graph")
+          for node in metadata["resolve"]["nodes"]:
+              owner = packages[node["id"]]
+              for dependency in node["deps"]:
+                  if packages[dependency["pkg"]]["name"] != "rusqlite":
+                      continue
+                  if Path(owner["manifest_path"]) != jobs_manifest:
+                      errors.append(f'{owner["name"]} directly depends on rusqlite; only fleetworks-jobs may do so')
+          for error in errors:
+              print(f"::error::{error}")
+          sys.exit(bool(errors))
+          PY
       - name: Install libclang (RocksDB bindgen)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libclang-dev

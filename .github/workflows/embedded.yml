@@ -24,6 +24,9 @@ permissions:
 
 jobs:
   embedded:
+    # Push events are limited to main above. This refuses a pull_request or
+    # feature-branch push if one is added later without the same limit.
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     name: ${{ matrix.platform.name }} / embedded
     strategy:
       fail-fast: false

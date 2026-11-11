@@ -74,7 +74,7 @@ env -u ARGOS_SURREAL_MODE -u ARGOS_SURREAL_BIN -u ARGOS_SURREAL_REQUIRED \
 
 The gate runs format, Clippy, workspace tests, CLI smoke and required embedded storage. Parent mode variables stay unset so mode-selected storage runs once. Targeted storage tests set mode and required execution explicitly. Some native-only fixtures execute in both phases.
 
-Fleetworks hosts the server, image, and client checks for the branch. Embedded compatibility runs on merges to `main` and by `gh workflow run embedded.yml --ref <branch>`. Dispatch `mutation.yml` for hosted mutation evidence. Once changes are published, inspect the checks for the exact revision with `gh pr checks`, `gh run list` or `gh run view --log-failed`. `.github` remains Code Architect-owned. MiniLM requires explicit opt-in.
+A pull request into any branch other than `main` runs the selected Fleetworks checks and commit policy. It does not run the four-platform embedded builds. Those run on the push to `main` and by `gh workflow run embedded.yml --ref <branch>`. Dispatch `mutation.yml` for hosted mutation evidence. Once changes are published, inspect the checks for the exact revision with `gh pr checks`, `gh run list` or `gh run view --log-failed`. `.github` remains Code Architect-owned. MiniLM requires explicit opt-in.
 
 ## Storage facts
 

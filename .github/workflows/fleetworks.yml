@@ -1,5 +1,7 @@
 name: Fleetworks
 
+# Development checks for pull requests and the listed branch pushes.
+# The four-platform embedded suite is embedded.yml and does not run here.
 on:
   push:
     branches: [main, feat/atlas-zero-shot]

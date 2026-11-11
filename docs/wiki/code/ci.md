@@ -6,13 +6,33 @@ Workflows live in `.github/workflows/` (owned by Code Architect). Branch work us
 
 | Cycle | Workflow | When it runs |
 | --- | --- | --- |
-| Development and test | [fleetworks.yml](../../../.github/workflows/fleetworks.yml) | Pushes to `main` and `feat/atlas-zero-shot`, pull requests, nightly `17 6 * * *`, and manual dispatch |
-| Main merge | [embedded.yml](../../../.github/workflows/embedded.yml) | Pushes to `main`, and `gh workflow run embedded.yml --ref <branch>` |
+| Development and test | [fleetworks.yml](../../../.github/workflows/fleetworks.yml) | Every pull request, pushes to `main` and `feat/atlas-zero-shot`, nightly `17 6 * * *`, and manual dispatch |
+| Main merge | [embedded.yml](../../../.github/workflows/embedded.yml) | Pushes to `main` only, plus `gh workflow run embedded.yml --ref <branch>` |
 | Called by Fleetworks | [intel-web.yml](../../../.github/workflows/intel-web.yml), [atlas-bert.yml](../../../.github/workflows/atlas-bert.yml) | The selected Fleetworks scope, or a direct dispatch |
 | Release review | [fleetworks-candidate.yml](../../../.github/workflows/fleetworks-candidate.yml) | Manual dispatch of a published ref |
 | Diagnostics | [mutation.yml](../../../.github/workflows/mutation.yml) | Manual dispatch after an embedded run |
 | Catalog | [datasets.yml](../../../.github/workflows/datasets.yml) | Dataset, `.gitattributes`, or its own workflow changes, plus manual dispatch |
 | Policy and release | [commit-policy.yml](../../../.github/workflows/commit-policy.yml), [release-please.yml](../../../.github/workflows/release-please.yml) | Pull requests and pushes to `main`; Release Please also accepts dispatch on `main` |
+
+## Checks for a merge that is not into `main`
+
+A pull request into `nightly`, `feat/atlas-zero-shot`, or any base other than `main` does not run the embedded compatibility builds. Those four platform legs stay on the push to `main` and on an explicit dispatch. The pull request runs the shorter development checks:
+
+| Check | Non-main pull request |
+| --- | --- |
+| Fleetworks scopes selected for the changed paths | Yes. Native clients, the Linux ARM64 server, selected server images, Compose, web, and Rust-BERT run only when the planner selects them. |
+| Commit policy | Yes. |
+| Dataset integrity | Only when the diff touches `datasets/`, `.gitattributes`, or `datasets.yml`. |
+| Embedded compatibility | No. |
+| Mutation diagnostics | No. |
+| Release candidates | No. |
+| Release Please | No. |
+
+Pushing the merge commit to `nightly` does not start a second Fleetworks run and does not start embedded builds. Dispatch embedded only when that branch needs hosted compatibility evidence before it reaches `main`:
+
+```sh
+gh workflow run embedded.yml --ref <branch>
+```
 
 [![Fleetworks development scopes](../../diagrams/ci-scopes.svg)](../../diagrams/ci-scopes.html)
 

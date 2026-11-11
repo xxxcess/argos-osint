@@ -190,6 +190,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt
+      - name: Install libclang for the embedded delivery queue
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
       - name: Check, build, and test the ARM64 server
         shell: bash
         run: |

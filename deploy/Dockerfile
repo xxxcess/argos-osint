@@ -62,6 +62,9 @@ ARG CARGO_BUILD_JOBS=1
 ARG FLEETWORKS_CORE_CODEGEN_UNITS=256
 ARG FLEETWORKS_CORE_OPT_LEVEL=3
 ENV CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libclang-dev \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates

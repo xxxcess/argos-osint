@@ -88,5 +88,13 @@ jobs:
       - name: Install libclang (RocksDB bindgen)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libclang-dev
+      - name: Select Xcode libclang for RocksDB bindgen
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang_dir="$(dirname "$(xcrun --find clang)")/../lib"
+          test -f "$clang_dir/libclang.dylib"
+          printf 'LIBCLANG_PATH=%s\n' "$clang_dir" >> "$GITHUB_ENV"
       - name: Local matrix leg (embedded)
         run: bash scripts/local_matrix.sh --storage embedded

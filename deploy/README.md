@@ -6,6 +6,12 @@ On macOS, Venture also searches the Docker Desktop CLI directories under `/Appli
 
 Rust image builds use one Cargo job and 256 core code-generation units to limit memory use. Local Compose builds use core optimization level 1. Set `FLEETWORKS_CORE_OPT_LEVEL=3` for full optimization with more build memory. Direct Docker builds default to level 3 and accept these settings as build arguments. If memory is exhausted, increase Docker Desktop's memory under Settings → Resources → Memory and retry. BuildKit retains completed dependencies.
 
+## Choose a development loop
+
+Venture and the CLIs run on the host; service roles, web and the managed database run from the `runtime`, `web` and `surrealdb` Dockerfile targets. Rebuild only the image whose code changed: CLI changes need a host build only, service changes rebuild `runtime`, web source edits reload in the [development container](#web-development), and Dockerfile or dependency changes rebuild the affected target with [Buildx bake](#client-and-web-images). See the [contributor loop guide](../docs/wiki/code/contributing.md#development-loops-local-cli-and-docker) for the full order of checks. Use a separate workspace, `COMPOSE_PROJECT_NAME` and ports for each concurrent stack.
+
+[![Dockerfile targets and packaged image loop](../docs/diagrams/dev-loop-images.svg)](../docs/diagrams/dev-loop-images.html)
+
 ## Prepare a workspace
 
 Run from the repository root. Use an absolute workspace path that Docker can mount. The numeric UID and GID must be able to read its owner-only credential files and write its data directories.

@@ -11,6 +11,7 @@ use tokio::runtime::Runtime;
 
 use crate::Operation;
 
+#[derive(Clone, Copy)]
 pub(crate) struct Session<'a> {
     pub client: &'a Client,
     pub runtime: &'a Runtime,
@@ -61,6 +62,14 @@ pub(crate) fn confirmed(
 ) -> Result<bool> {
     let answer = prompt(input, output, question)?;
     Ok(answer.as_deref().map(str::trim) == Some("yes"))
+}
+
+/// Split captured writer output into plain lines for the full-screen detail pane.
+pub(crate) fn lines(buffer: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(buffer)
+        .lines()
+        .map(str::to_owned)
+        .collect()
 }
 
 pub(crate) fn rows<'a>(reply: &'a Value, key: &str) -> Result<&'a [Value]> {

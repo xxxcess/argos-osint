@@ -41,6 +41,8 @@ Later launches reuse the recorded configuration. Open the printed web address, `
 
 Use `venture web` to start the stack and open Jobs and Logs, or `venture web --terminal logs` to follow Compose output. Both accept the `up` options. Attach to an existing stack with `venture client jobs tui` to inspect jobs and logs or confirm retry and cancellation. Exiting the terminal session leaves the stack running.
 
+The six `tui` client commands render a full-screen ratatui view on a terminal and keep their line session for pipes ([details](../../../apps/fleetworks-cli/README.md#full-screen-tui-sessions)). Native clients and Venture are built on the host, while service roles run from the `runtime` image that `up` rebuilds. See the [development loops](contributing.md#development-loops-local-cli-and-docker) for choosing between CLI, web-dev and image iteration.
+
 Use `up --dev --storage local-net` or `web --dev --storage local-net` for Next development mode. Venture remembers the profile for status, logs and stop. Use `up --no-build` for preloaded images. [Development setup](../../../deploy/README.md#web-development)
 
 Add `--atlas` to start the Atlas worker, Compromise NLP, and Rust-BERT classifier services with delivery through Jobs. Submit a durable cycle with `venture client atlas start --request-id <id>`. Use a new request ID for each new collection. The [Atlas deployment guide](../../../deploy/atlas-dispatch.md) explains the provider and model files required for a live cycle.

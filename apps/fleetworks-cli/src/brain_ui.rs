@@ -13,6 +13,7 @@ use tokio::runtime::Runtime;
 use crate::terminal;
 use crate::terminal::write_field;
 use crate::terminal::Session;
+use crate::tui::{Prompt, Step, View};
 use crate::BrainCommand;
 
 const HELP: &str = "find NAME            Look up an exact retained actor name
@@ -251,4 +252,182 @@ fn write_more(count: usize, output: &mut impl Write) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+/// Ratatui Brain screen: actor search results with dossier, brief and topology detail.
+pub(crate) struct BrainView<'a> {
+    session: Session<'a>,
+    actors: Vec<(String, String)>,
+    detail: Vec<String>,
+    heading: String,
+}
+
+impl<'a> BrainView<'a> {
+    pub fn new(client: &'a Client, runtime: &'a Runtime) -> Self {
+        Self {
+            session: Session { client, runtime },
+            actors: Vec::new(),
+            detail: vec![
+                "Press / to find an exact actor name or a to search aliases.".into(),
+                "Press b for a retained brief and t for topology.".into(),
+            ],
+            heading: "Brain".into(),
+        }
+    }
+
+    fn show(&mut self, heading: &str, buffer: &[u8]) {
+        self.heading = heading.into();
+        self.detail = terminal::lines(buffer);
+    }
+
+    fn search(&mut self, alias: bool, query: &str) -> Result<Step> {
+        let reply = self.session.request(BrainCommand::Search {
+            query: query.into(),
+            alias,
+            limit: 10,
+        })?;
+        let mut buffer = Vec::new();
+        let ids = write_search(&reply, &mut buffer)?;
+        let rows = terminal::rows(&reply, "rows")?;
+        self.actors = ids
+            .into_iter()
+            .zip(rows)
+            .map(|(id, row)| {
+                let label = terminal::text(terminal::field(row, "label"), 240);
+                let kind = terminal::text(terminal::field(row, "kind"), 80);
+                (id, format!("{label}  [{kind}]"))
+            })
+            .collect();
+        self.show("Search", &buffer);
+        Ok(Step::status(format!("{} actor(s)", self.actors.len())))
+    }
+
+    fn actor(&mut self, index: usize) -> Result<Step> {
+        let Some((id, _)) = self.actors.get(index) else {
+            return Ok(Step::none());
+        };
+        let reply = self
+            .session
+            .request(BrainCommand::Actor { id: id.clone() })?;
+        let mut buffer = Vec::new();
+        write_actor(&reply, &mut buffer)?;
+        self.show("Actor", &buffer);
+        Ok(Step::none())
+    }
+}
+
+impl View for BrainView<'_> {
+    fn title(&self) -> String {
+        "Brain".into()
+    }
+
+    fn hints(&self) -> &'static str {
+        "/ find · a aliases · b brief · t topology"
+    }
+
+    fn list_title(&self) -> &'static str {
+        "Actors"
+    }
+
+    fn detail_title(&self) -> String {
+        self.heading.clone()
+    }
+
+    fn rows(&self) -> Vec<String> {
+        self.actors.iter().map(|(_, row)| row.clone()).collect()
+    }
+
+    fn detail(&self) -> Vec<String> {
+        self.detail.clone()
+    }
+
+    fn refresh(&mut self) -> Result<Step> {
+        Ok(Step::status("Ready. Press / to search."))
+    }
+
+    fn select(&mut self, _index: usize) -> Result<Step> {
+        Ok(Step::none())
+    }
+
+    fn activate(&mut self, index: usize) -> Result<Step> {
+        self.actor(index)
+    }
+
+    fn key(&mut self, key: char, index: usize) -> Result<Step> {
+        Ok(match key {
+            '/' => Step::prompt(Prompt::input(
+                "find",
+                "Find an exact retained actor name",
+                "",
+            )),
+            'a' => Step::prompt(Prompt::input(
+                "aliases",
+                "Search exact and prefix aliases",
+                "",
+            )),
+            'b' => Step::prompt(Prompt::input("brief", "Brief RUN_ID ARTICLE_ID", "")),
+            't' => Step::prompt(Prompt::input(
+                "topology",
+                "Topology seed: memory ID or brief:RUN/ARTICLE",
+                self.actors
+                    .get(index)
+                    .map(|(id, _)| id.clone())
+                    .unwrap_or_default(),
+            )),
+            _ => Step::none(),
+        })
+    }
+
+    fn submit(&mut self, tag: &'static str, value: &str) -> Result<Step> {
+        match tag {
+            "find" => self.search(false, value),
+            "aliases" => self.search(true, value),
+            "brief" => {
+                let [run, id] = value.split_whitespace().collect::<Vec<_>>()[..] else {
+                    bail!("expected RUN_ID and ARTICLE_ID");
+                };
+                let reply = self.session.request(BrainCommand::Brief {
+                    run: run.into(),
+                    id: id.into(),
+                })?;
+                let mut buffer = Vec::new();
+                write_brief(&reply, &mut buffer)?;
+                self.show("Brief", &buffer);
+                Ok(Step::none())
+            }
+            "topology" => {
+                let reply = self
+                    .session
+                    .request(BrainCommand::Topology { seed: value.into() })?;
+                let mut buffer = Vec::new();
+                write_topology(&reply, &mut buffer)?;
+                self.show("Topology", &buffer);
+                Ok(Step::none())
+            }
+            _ => Ok(Step::none()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod view_tests {
+    use super::*;
+    use crate::tui::testing::{capture, offline};
+    use crate::tui::Shell;
+
+    #[test]
+    fn brain_screen_renders_results_and_seeds_topology_with_the_selection() {
+        let (client, runtime) = offline();
+        let mut view = BrainView::new(&client, &runtime);
+        view.actors = vec![("actor:1".into(), "Acme Corp  [org]".into())];
+        view.detail = vec!["Acme Corp".into(), "  Actor actor:1".into()];
+        assert_eq!(view.rows(), ["Acme Corp  [org]"]);
+        let prompt = view.key('t', 0).unwrap().prompt.unwrap();
+        assert_eq!(
+            (prompt.tag, prompt.initial.as_str()),
+            ("topology", "actor:1")
+        );
+        assert!(view.submit("brief", "only-run").is_err());
+        capture("brain", &mut Shell::new(), &view);
+    }
 }

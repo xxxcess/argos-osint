@@ -32,6 +32,11 @@ Open a file under `docs/diagrams/` in a browser for the HTML page. Matching `.sv
 | Network storage selections | Architecture | [persistence.html](diagrams/persistence.html) | [persistence.svg](diagrams/persistence.svg) |
 | Durable jobs and terminal operations | State machine | [jobs-lifecycle.html](diagrams/jobs-lifecycle.html) | [jobs-lifecycle.svg](diagrams/jobs-lifecycle.svg) |
 | Fleetworks documentation routes | Hierarchy | [wiki-navigation.html](diagrams/wiki-navigation.html) | [wiki-navigation.svg](diagrams/wiki-navigation.svg) |
+| Development iteration loops | Process | [dev-loops.html](diagrams/dev-loops.html) | [dev-loops.svg](diagrams/dev-loops.svg) |
+| Local CLI and TUI development loop | Process | [dev-loop-cli.html](diagrams/dev-loop-cli.html) | [dev-loop-cli.svg](diagrams/dev-loop-cli.svg) |
+| Runtime service image development loop | Process | [dev-loop-runtime.html](diagrams/dev-loop-runtime.html) | [dev-loop-runtime.svg](diagrams/dev-loop-runtime.svg) |
+| Web development container and browser loop | Data flow | [dev-loop-web.html](diagrams/dev-loop-web.html) | [dev-loop-web.svg](diagrams/dev-loop-web.svg) |
+| Dockerfile targets and packaged image loop | Architecture | [dev-loop-images.html](diagrams/dev-loop-images.html) | [dev-loop-images.svg](diagrams/dev-loop-images.svg) |
 | Fleetworks development scopes | Data flow | [ci-scopes.html](diagrams/ci-scopes.html) | [ci-scopes.svg](diagrams/ci-scopes.svg) |
 | Agent handoffs | Process | [agent-team.html](diagrams/agent-team.html) | [agent-team.svg](diagrams/agent-team.svg) |
 

@@ -7,6 +7,7 @@ mod models_ui;
 mod profile_ui;
 mod terminal;
 mod tools_ui;
+mod tui;
 
 use std::io;
 use std::io::Write;
@@ -111,6 +112,22 @@ impl Operation {
             .build()?;
         let client = Client::new(&origin, token.as_deref())?;
         if let Self::Interactive(view) = self {
+            if tui::available() {
+                let mut screen: Box<dyn tui::View + '_> = match view {
+                    Interactive::Atlas => Box::new(atlas_ui::AtlasView::new(&client, &runtime)),
+                    Interactive::Brain => Box::new(brain_ui::BrainView::new(&client, &runtime)),
+                    Interactive::Jobs => Box::new(jobs_ui::JobsView::new(&client, &runtime)),
+                    Interactive::Tools => Box::new(tools_ui::ToolsView::new(&client, &runtime)),
+                    Interactive::Models => Box::new(models_ui::ModelsView::new(&client, &runtime)),
+                    Interactive::Profile => Box::new(profile_ui::ProfileView::new(
+                        &client,
+                        &runtime,
+                        workspace.root(),
+                    )),
+                };
+                tui::run(screen.as_mut())?;
+                return Ok(None);
+            }
             let input = io::stdin().lock();
             let output = io::stdout().lock();
             match view {

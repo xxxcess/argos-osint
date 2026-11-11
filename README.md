@@ -66,6 +66,22 @@ Use the [contributor workflow](docs/wiki/code/contributing.md) to select checks 
 python3 scripts/fleetworks_verify.py plan --base "$(git rev-parse HEAD^)" --head "$(git rev-parse HEAD)"
 ```
 
+### Iteration loops
+
+Venture and the terminal clients run natively. The API, services, workers, web relay and managed SurrealDB run in Docker. Choose the shortest loop for what you changed.
+
+[![Fleetworks development loops](docs/diagrams/dev-loops.svg)](docs/diagrams/dev-loops.html)
+
+| Change | Loop |
+| --- | --- |
+| Venture or a `fleetworks-*` CLI | `cargo build --locked -p fleetworks-venture -p fleetworks-cli --bins`, unit tests, then `venture client <app>` against a running stack. No image rebuild. |
+| Service roles (`argos-api-host`) | `venture up` rebuilds the `runtime` image from source. BuildKit caches dependencies. |
+| Web app and `packages/*/src` | `venture up --dev --storage local-net`. Source is mounted and reloads on save. |
+| Dependencies, Dockerfile, Compose | `docker buildx bake -f deploy/docker-bake.hcl <target>`, then `python3 deploy/verify.py`. `venture up --no-build` uses preloaded images. |
+| Packaging or release | Push and read the hosted CI results for that revision. |
+
+Run host checks first, then the affected container loop, then hosted CI. [Full loop guide](docs/wiki/code/contributing.md#development-loops-local-cli-and-docker)
+
 Web contributors can find setup and verification in the [Intel web guide](docs/wiki/code/intel-web.md) and the [React test guide](docs/wiki/code/react-ui-testing.md). The [CI guide](docs/wiki/code/ci.md) covers hosted platform and package verification. Agents start at [AGENTS.md](AGENTS.md).
 
 For more, browse the [concepts](docs/wiki/concepts/index.md), [code map](docs/wiki/code/index.md), or [diagram catalog](docs/diagrams.md).

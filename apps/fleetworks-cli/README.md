@@ -30,8 +30,27 @@ Relative token paths start at the workspace root. Venture provisions a private
 API token when it starts the stack.
 
 One-shot commands write JSON to stdout. Use `--json` for compact output and
-`--help` for command arguments. Open the line-oriented Jobs & Logs session
-with `venture client jobs tui` or `fleetworks-jobs tui`. Use `list` to refresh
+`--help` for command arguments.
+
+### Full-screen `tui` sessions
+
+`tui` on every client (`venture client <app> tui` or `fleetworks-<app> tui`)
+opens a ratatui screen when stdin and stdout are terminals: a list pane and a
+detail pane (side by side from 100 columns, one pane at a time below that, and
+a size notice under 60×18). `Tab` switches panes, `↑↓`/`j`/`k` select, `Enter`
+opens, `PgUp`/`PgDn` and the wheel scroll, mouse clicks select rows, `r`
+refreshes and `q` quits. Each app adds hotkeys, listed in its footer: Jobs `l`/`L`
+logs, `t` retry, `c` cancel; Atlas `[` `]` day, `c` category, `n` next page, `s`
+start; Brain `/` find, `a` aliases, `b` brief, `t` topology; Tools `/` filter,
+`x` run, `R` result; Models `e` set, `x` clear; Profile `e` export. Every
+mutation first opens a modal and needs an explicit `y`; Enter never confirms.
+`--json` is rejected for `tui`.
+
+When either side is not a terminal (pipes, CI, scripts) `tui` keeps the
+line-oriented session described below, so existing automation is unchanged.
+
+Open the line-oriented Jobs & Logs session
+with `venture client jobs tui` or `fleetworks-jobs tui` without a terminal. Use `list` to refresh
 the jobs, `detail #1` to open the first job, and `logs #1` to read its recent
 events. Retry and cancel require explicit confirmation in this session.
 Enter `quit` to close the session.

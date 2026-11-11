@@ -23,6 +23,64 @@ Rust 1.95.0 is pinned. Agents build through `python3 scripts/agent_cargo.py … 
 
 For Fleetworks client, service, deployment or web work, start with the [scope planner](ci.md#fleetworksyml--scoped-branch-checks). `local` runs the selected host-native iteration checks and includes working-tree paths. Venture and client unit tests need no datastore. Run the selected hosted checks for platform, server and packaged evidence. Use the embedded gate for affected compatibility and embedded-storage behavior.
 
+### Development loops: local CLI and Docker
+
+Fleetworks has two execution surfaces. The terminal clients and Venture run natively on the host. The API, private services, workers, web relay and managed SurrealDB run in Docker through `deploy/compose.yml`. Pick the shortest loop that exercises the code you changed, then widen. The commands below are the fast paths; deployment details stay in the [deployment guide](../../../deploy/README.md).
+
+[![Fleetworks development loops](../../diagrams/dev-loops.svg)](../../diagrams/dev-loops.html)
+
+| Changed code | Loop | Rebuild needed |
+| --- | --- | --- |
+| Venture, `fleetworks-*` CLIs, shared client crates | **1. Local CLI** | Host `cargo` build only |
+| `argos-api-host` roles, core, storage, jobs (service side) | **2. Runtime image** | `runtime` image |
+| `apps/web-desktop/app`, `packages/{ui,intel,api-client}/src` | **3. Web dev container** | None; files reload |
+| Web dependencies, relay, Next config, Dockerfile, Compose, SurrealDB wrapper | **4. Image build** | `web`, `runtime` or `surrealdb` image |
+| Platform, packaging or release behavior | **5. Hosted CI** | Pushed revision |
+
+**1. Local CLI loop (no container rebuild).** Build the host binaries and run them against a disposable workspace. Client and Venture unit tests need no datastore.
+
+[![Local CLI and TUI development loop](../../diagrams/dev-loop-cli.svg)](../../diagrams/dev-loop-cli.html)
+
+```sh
+python3 scripts/agent_cargo.py build --locked -p fleetworks-venture -p fleetworks-cli --bins
+python3 scripts/agent_cargo.py test --locked -p fleetworks-venture -p fleetworks-cli
+./target/agents/debug/venture --workspace ./.fleetworks status
+./target/agents/debug/venture --workspace ./.fleetworks client jobs --help
+```
+
+Users build into `target/debug` with plain `cargo build --locked` as in the README. Agents never write there. Running `venture client <app>` against an already running stack exercises a CLI change against real services without rebuilding any image.
+
+**2. Runtime image loop (service changes).** Service roles run from the `runtime` image, so a host build alone does not change them. `venture up` and `docker compose -f deploy/compose.yml up --build` rebuild the image from source. Compose sets core optimization level 1 for faster local builds; the Dockerfile default is 3. BuildKit cache mounts retain Cargo dependencies, so repeat builds recompile only changed crates. Use `local-net` (existing SurrealDB) or `compose-disk` for storage, then confirm with `venture status`, `venture logs --follow` and `venture client <app>`. For a server-feature check without containers, use the `server,nlp,classifier` graph in [Targeted local Rust builds](#targeted-local-rust-builds-and-tests-fast-iteration).
+
+[![Runtime service image development loop](../../diagrams/dev-loop-runtime.svg)](../../diagrams/dev-loop-runtime.html)
+
+**3. Web dev container loop.** `venture up --dev --storage local-net` runs the `web_dev` stage with `compose.dev.yml`. It mounts `apps/web-desktop/app/` and `packages/*/src/` read-only and Next reloads on save. Rebuild only after dependency, relay or Next configuration changes. Stop the stack before switching between dev and production profiles. Browser checks use isolated output as described under [Build and test](#build-and-test).
+
+[![Web development container and browser loop](../../diagrams/dev-loop-web.svg)](../../diagrams/dev-loop-web.html)
+
+**4. Image build loop.** Build a single target to validate packaging without running the stack, then smoke it.
+
+[![Dockerfile targets and packaged image loop](../../diagrams/dev-loop-images.svg)](../../diagrams/dev-loop-images.html)
+
+```sh
+export VERSION="$(tr -d '[:space:]' < version.txt)"
+docker buildx bake -f deploy/docker-bake.hcl web                # one image
+docker buildx bake -f deploy/docker-bake.hcl venture fleetworks-brain
+docker build -f deploy/Dockerfile --target runtime -t fleetworks-runtime:local .
+docker build -f deploy/Dockerfile --target surrealdb -t fleetworks-surrealdb:3.3.4 .
+python3 deploy/verify.py --venture path/to/venture [--dev] [--no-build --image-ids ids.json]
+```
+
+`venture up --no-build` starts with preloaded images (`FLEETWORKS_RUNTIME_IMAGE`, `FLEETWORKS_WEB_IMAGE`, `FLEETWORKS_SURREAL_IMAGE`). All client images share one compile, so build only the targets you changed.
+
+**5. Hosted CI.** Preview the selected lanes with `python3 scripts/fleetworks_verify.py plan`, push, and inspect results for the exact revision as described in [CI](ci.md#fleetworksyml--scoped-branch-checks). Compose and packaged smokes on AMD64 and ARM64 run here.
+
+[![Fleetworks development scopes](../../diagrams/ci-scopes.svg)](../../diagrams/ci-scopes.html)
+
+Stable iteration order: static checks and unit tests (loop 1), then the affected container loop (2 to 4), then hosted CI (5). Do not jump to image builds for changes a host build and unit test can verify.
+
+**Resource and isolation rules.** Docker and Compose runs are heavy and shared. Use a dedicated workspace and `COMPOSE_PROJECT_NAME` per checkout, and remap `FLEETWORKS_WEB_PORT` and `FLEETWORKS_API_PORT` when another stack is running. Never stop, rebuild or remove the user's running stack, volumes or images. Check `docker system df` and free disk before image builds. Raise Docker Desktop memory if a Rust image build is killed.
+
 ### Verification ownership and host resources
 
 One integration/build owner uses a stable feature graph and resource-based concurrency; see [execution policy](agent-workflow.md#coordinate-work-that-can-actually-run-in-parallel). Freeze edits before builds and reuse unaffected evidence. Workspace bin tests activate core fixtures; switching to core-only commands may rebuild dependencies.

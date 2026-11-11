@@ -88,7 +88,8 @@ def exercise(tmp, binary, surreal):
             jobs_auth = {"Authorization": "Bearer " + jobs_token, "Content-Type": "application/json"}
             wait_for(jobs, jobs_port, "/api/v1/health/ready", jobs_auth)
             assert request(jobs_port, "/internal/jobs/queue", body="{}")[0] == 401
-            assert request(jobs_port, "/internal/jobs/queue", jobs_auth, "{}")[0] == 422
+            invalid = request(jobs_port, "/internal/jobs/queue", jobs_auth, "{}")
+            assert invalid == (400, {"error": "jobs_invalid_request"}), invalid
             wait_for(api, api_port, "/api/v1/health/ready", auth)
             assert post(atlas_path, {"request_id": "fixture"}, {"Content-Type": "application/json"})[0] == 401
             assert post(atlas_path, {"request_id": "bad/id"})[0] == 400

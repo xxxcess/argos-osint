@@ -180,6 +180,7 @@ impl Owner {
                                     || broker.url_file == host_broker_url_path(workspace))
                         }
                         (None, None) => true,
+                        (Some(_), Some(_)) => false,
                     },
                 "invalid Atlas Compose ownership"
             );

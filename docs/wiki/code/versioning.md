@@ -119,7 +119,7 @@ Release Please publishes the tag and release notes. The
 [Fleetworks workflow](ci.md#fleetworksyml--scoped-branch-checks) separately
 verifies native builds and Venture-managed Compose startup from an exact
 source revision. The separate [candidate workflow](../../../.github/workflows/fleetworks-candidate.yml)
-produces downloadable native bundles and Linux image archives for release review. [Deployment guide](../../../deploy/README.md)
+produces downloadable native bundles and Linux image archives for release review. Development server images are tagged with the same workspace SemVer, read from `version.txt` with no leading `v`, and also keep a `:local` alias. Git tags keep the `v` prefix. [Deployment guide](../../../deploy/README.md)
 
 The release PR updates:
 

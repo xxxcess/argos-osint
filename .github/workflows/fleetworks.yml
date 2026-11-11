@@ -392,6 +392,9 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$FLEETWORKS_HEAD"
           test -n "$IMAGE_TARGETS"
+          VERSION="$(tr -d '[:space:]' < version.txt)"
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
+          export VERSION
           read -r -a targets <<< "${IMAGE_TARGETS//,/ }"
           python3 scripts/fleetworks_verify.py timed --phase server-images -- \
             docker buildx bake -f deploy/docker-bake.hcl \
@@ -402,12 +405,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          VERSION="$(tr -d '[:space:]' < version.txt)"
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
           for target in ${IMAGE_TARGETS//,/ }; do
             if [[ "$target" == web ]]; then
-              docker run --rm --entrypoint node web:local -e 'process.exit(0)'
+              docker run --rm --entrypoint node "web:${VERSION}" -e 'process.exit(0)'
             else
-              docker run --rm "${target}:local" --help >/dev/null
+              docker run --rm "${target}:${VERSION}" --help >/dev/null
             fi
+            docker image inspect "${target}:local" >/dev/null
           done
 
   compose:

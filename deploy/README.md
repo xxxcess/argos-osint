@@ -20,10 +20,13 @@ Choose a distinct Compose project name and separate web and API ports for each c
 The service containers use the `runtime` image, which contains `argos-api-host`. Venture and each CLI have their own image, and the React Native web app uses the `web` image. A server build compiles the clients once and then copies each binary into its image.
 
 ```sh
+export VERSION="$(tr -d '[:space:]' < version.txt)"
 docker buildx bake -f deploy/docker-bake.hcl venture fleetworks-brain web
-docker run --rm venture:local --help
-docker run --rm fleetworks-brain:local --help
+docker run --rm "venture:${VERSION}" --help
+docker run --rm "fleetworks-brain:${VERSION}" --help
 ```
+
+`version.txt` is the workspace SemVer. Image tags use that value with no leading `v`. Each image also keeps a `:local` alias. Git release tags keep the `v` prefix.
 
 Run that bake command from the repository root. The file's build context is that working directory.
 

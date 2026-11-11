@@ -46,7 +46,7 @@ The [Fleetworks workflow](../../../.github/workflows/fleetworks.yml) is the buil
 | --- | --- |
 | Native clients | Linux x86-64, Apple silicon macOS, and Intel macOS tests and executable smoke for Venture and its sibling clients |
 | Server | Linux ARM64 service check, build, unit tests, and network bootstrap and readiness smoke |
-| Server images | Linux AMD64 images for the selected client binaries and the web app. Full and nightly runs also build Linux ARM64. Venture and the CLIs share one compile, then each image copies one binary. |
+| Server images | Linux AMD64 images for the selected client binaries and the web app. Full and nightly runs also build Linux ARM64. Venture and the CLIs share one compile, then each image copies one binary. Each image is tagged `name:<version.txt>` and `name:local`. The version tag is the workspace SemVer with no leading `v`. |
 | Storage and broker | Affected disk storage and brief recovery contracts, plus RabbitMQ-backed Atlas dispatch when selected |
 | Packaged Compose | Venture-owned image startup, authenticated readiness, relay, and Atlas smoke on Linux ARM64 and AMD64 |
 | Intel Rust-BERT | Linux worker type check, then Intel macOS build, link, and real checkpoint inference |

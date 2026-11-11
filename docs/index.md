@@ -14,6 +14,7 @@ Understand the product, then follow its implementation. This is the maintained e
 
 | Location | Purpose / next stop |
 | --- | --- |
+| [Walkthrough](wiki/walkthrough.md) | Reading order for the product, checkout, and checks |
 | [README.md](../README.md) | Product overview and quick start |
 | [docs/archive/](archive/index.md) | Historical checklists, investigations and verification reports |
 | [docs/wiki/](wiki/index.md) | Two routes, searchable tags and wiki maintenance |

@@ -2,7 +2,7 @@
 
 Fleetworks collects public-source intelligence, connects evidence to actors and articles, and prepares cited Focus Briefs. Venture manages the local services that power the Intel web desktop and six terminal clients.
 
-[Setup and usage](docs/wiki/code/fleetworks.md) · [Deployment](deploy/README.md) · [CLI reference](apps/fleetworks-cli/README.md) · [Wiki](docs/index.md) · [Releases](docs/wiki/code/versioning.md)
+[Walkthrough](docs/wiki/walkthrough.md) · [Setup and usage](docs/wiki/code/fleetworks.md) · [Deployment](deploy/README.md) · [CLI reference](apps/fleetworks-cli/README.md) · [Wiki](docs/index.md) · [Releases](docs/wiki/code/versioning.md)
 
 ## Quick start
 

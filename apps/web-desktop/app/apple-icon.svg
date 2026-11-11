@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Fleetworks">
+  <rect width="256" height="256" fill="#111111"/>
+  <g fill="none" stroke="#C6A56E" stroke-width="2.4" stroke-linejoin="round">
+    <polygon points="128,28 140,50 116,50"/>
+    <polygon points="78,52 90,74 66,74"/>
+    <polygon points="178,52 190,74 166,74"/>
+    <polygon points="210,92 222,114 198,114"/>
+    <polygon points="46,92 58,114 34,114"/>
+  </g>
+  <circle cx="128" cy="168" r="62" fill="#C4A265"/>
+  <circle cx="128" cy="132" r="50" fill="#111111"/>
+  <circle cx="128" cy="124" r="40" fill="#F3EEE4"/>
+</svg>

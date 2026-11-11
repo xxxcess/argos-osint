@@ -16,8 +16,9 @@ const mono = JetBrains_Mono({
   variable: "--intel-mono",
 });
 export const metadata = {
-  title: "ARGOS · Intel",
+  title: "Fleetworks · Intel",
   description: "Local intelligence bulletin and evidence workspace",
+  icons: { icon: "/fleetworks-mark.svg", apple: "/fleetworks-mark.svg" },
 };
 export default async function Layout({
   children,

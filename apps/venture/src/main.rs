@@ -1,10 +1,11 @@
 mod classifier;
 mod compose;
 mod host_storage;
+mod splash;
 
 use std::env;
 use std::ffi::OsString;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, ensure, Context, Result};
@@ -18,7 +19,10 @@ use tokio::process::Command;
 use crate::compose::{Owner, StorageMode};
 
 #[derive(Parser)]
-#[command(about = "Manage a local Fleetworks stack and launch network clients")]
+#[command(
+    about = "Manage a local Fleetworks stack and launch network clients",
+    before_help = splash::MARK
+)]
 struct Args {
     /// Workspace path. Set this before the command when forwarding client arguments.
     #[arg(long, global = true, value_name = "PATH")]
@@ -37,6 +41,10 @@ enum Action {
         from: PathBuf,
     },
     /// Start or reconcile this workspace's local Compose stack.
+    ///
+    /// A new interactive setup asks for a host SurrealDB or a remote URL.
+    /// `--storage` selects the target without a prompt. A non-interactive
+    /// setup with no prior target uses the Compose disk database.
     Up(StackOptions),
     /// Start the web stack and attach this terminal to Jobs or service logs.
     Web {
@@ -89,6 +97,7 @@ enum Action {
 
 #[derive(ClapArgs)]
 struct StackOptions {
+    /// Database for the stack. Omit this on a new terminal to choose local or remote.
     #[arg(long, value_enum)]
     storage: Option<StorageMode>,
     #[arg(long, value_name = "PATH")]
@@ -150,6 +159,9 @@ impl ClientKind {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    if io::stderr().is_terminal() && !matches!(args.action, Action::HostStorageSupervisor { .. }) {
+        eprintln!("{}", splash::MARK);
+    }
     let workspace = Workspace::resolve(args.workspace.as_deref())?;
     eprintln!("Workspace {}", workspace.root().display());
     match args.action {

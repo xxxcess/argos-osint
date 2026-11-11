@@ -105,11 +105,10 @@ pub(crate) fn execute(connection: &Connection, command: &Command) -> Result<Resp
             let mut statement = connection.prepare(&format!(
                 "SELECT {TASK_COLUMNS} FROM tasks WHERE job_id=?1 ORDER BY created_at,id"
             ))?;
-            Response::Tasks(
-                statement
-                    .query_map([job_id], task)?
-                    .collect::<rusqlite::Result<Vec<_>>>()?,
-            )
+            let rows = statement
+                .query_map([job_id], task)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Response::Tasks(rows)
         }
         Command::Attempts { job_id } => {
             let mut statement = connection.prepare("SELECT a.task_id,a.epoch,a.owner,a.state,a.started_at,a.finished_at,a.error FROM attempts a JOIN tasks t ON t.id=a.task_id WHERE t.job_id=?1 ORDER BY a.started_at,a.task_id,a.epoch")?;

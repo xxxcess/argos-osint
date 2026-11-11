@@ -134,7 +134,7 @@ Start the local production web stack through Venture.
 
 ```sh
 cargo build --locked -p fleetworks-venture -p fleetworks-cli --bins
-target/debug/venture --workspace ./review-workspace web
+target/debug/venture --workspace ./review-workspace web --storage compose-disk
 ```
 
 Open the printed URL after readiness. Use the same workspace for `status`, `logs` and `stop`. [Venture lifecycle and storage selection](fleetworks.md#launch-the-compose-stack)

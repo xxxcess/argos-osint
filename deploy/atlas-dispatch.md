@@ -1,14 +1,14 @@
-# Atlas dispatch with managed RabbitMQ
+# Atlas dispatch with RabbitMQ
 
 Add `compose.atlas.yml` to the [base stack](README.md) to start the Atlas worker, its private RabbitMQ broker, and separate warm NLP and classifier services. The overlay enables the Atlas dispatch pool during database bootstrap. SurrealDB owns jobs, delivery revisions, and results. RabbitMQ carries durable wake-up messages and keeps a separate dead-letter queue. The web and API remain the only host-published services.
 
 ## Start with Venture
 
 ```sh
-venture --workspace "$FLEETWORKS_HOST_WORKSPACE" up --atlas
+venture --workspace "$FLEETWORKS_HOST_WORKSPACE" up --storage compose-disk --atlas
 ```
 
-Venture provisions the broker credentials and records the overlay in the workspace's ownership file. It reuses the overlay for status, logs, restarts, and stop. Use `venture stop` before changing an owned workspace between the base and Atlas stacks.
+Venture records the overlay in the workspace's ownership file and reuses it for status, logs, restarts, and stop. With `--storage local-net`, Atlas uses the RabbitMQ URL in `FLEETWORKS_BROKER_URL_FILE`. With `--storage local-process`, Atlas uses the RabbitMQ process Venture starts on the host. The other storage modes use the bundled broker. Use `venture stop` before changing an owned workspace between the base and Atlas stacks. [Connection and startup settings](README.md#choose-a-storage-target)
 
 ## Start directly with Compose
 

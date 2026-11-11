@@ -1,7 +1,7 @@
 # Fleetworks
 
 <p align="center">
-  <img src="assets/brand/fleetworks-logo.jpg" alt="Fleetworks" width="280">
+  <img src="assets/brand/fleetworks-logo.jpg" alt="Fleetworks emblem with five gold rays, an ivory disc, and a gold crescent" width="960">
 </p>
 
 Fleetworks collects public-source intelligence, connects evidence to actors and articles, and prepares cited Focus Briefs. Venture manages the local services that power the Intel web desktop and six terminal clients.
@@ -10,15 +10,15 @@ Fleetworks collects public-source intelligence, connects evidence to actors and 
 
 ## Quick start
 
-Install Rust **1.95.0**, Docker, and Docker Compose **v2.20 or newer**. Run from the repository root. The workspace defaults build Venture and its network clients.
+Install Rust **1.95.0**, Docker, and Docker Compose **v2.20 or newer**. Run from the repository root.
 
 ```sh
 cargo build --locked -p fleetworks-venture -p fleetworks-cli --bins
-./target/debug/venture --workspace ./.fleetworks up
+./target/debug/venture --workspace ./.fleetworks up --storage compose-disk
 ./target/debug/venture --workspace ./.fleetworks status
 ```
 
-Open the web address printed by Venture. The defaults are `http://127.0.0.1:3000` for Intel and `http://127.0.0.1:8080` for the API. Venture initializes the workspace, creates private credentials, and starts the Compose project. Use the same workspace for client commands and shutdown.
+Venture initializes the workspace, creates credentials, and starts the stack. Open `http://127.0.0.1:3000` for Intel. The API defaults to `http://127.0.0.1:8080`. Interactive launches show the Fleetworks ASCII emblem.
 
 ```sh
 ./target/debug/venture --workspace ./.fleetworks client jobs tui
@@ -27,14 +27,14 @@ Open the web address printed by Venture. The defaults are `http://127.0.0.1:3000
 ./target/debug/venture --workspace ./.fleetworks stop
 ```
 
-Use `venture web` to start the stack with Jobs and Logs open in the terminal. Pass `--terminal logs` to follow service output instead. Closing the terminal view leaves the services running.
+Use the same workspace for every command. `venture web` starts the stack and opens Jobs and Logs. Add `--terminal logs` to follow service output. Exiting the terminal view leaves services running.
 
 ### Collect articles with Atlas
 
 Start a new or stopped stack with `up --atlas` and submit a cycle through the Atlas client. Each new cycle needs a unique request ID.
 
 ```sh
-./target/debug/venture --workspace ./.fleetworks up --atlas
+./target/debug/venture --workspace ./.fleetworks up --storage compose-disk --atlas
 ./target/debug/venture --workspace ./.fleetworks client atlas start --request-id review-1
 ```
 
@@ -42,7 +42,7 @@ Set up the provider credentials and a Rust-BERT worker and model for the contain
 
 ### Choose storage and import settings
 
-Venture defaults to disk-backed SurrealDB in Compose. It can also manage a host SurrealDB process in disk or memory mode, or connect to an authenticated external disk server. Use `venture import --from` to copy existing provider keys and model defaults into a fresh workspace. See the [workspace guide](docs/wiki/code/fleetworks.md) for commands and storage settings.
+For development with existing SurrealDB and RabbitMQ, configure their endpoints and run `venture up --dev --storage local-net`. `--storage local-process` starts disk-backed SurrealDB and RabbitMQ on the host. `venture import --from` copies provider keys and model defaults into a fresh workspace. [Setup and storage modes](docs/wiki/code/fleetworks.md)
 
 ## Applications and services
 

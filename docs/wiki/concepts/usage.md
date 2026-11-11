@@ -6,7 +6,7 @@ Build Venture and its sibling clients from the repository root. The web app and 
 
 ```sh
 cargo build --locked -p fleetworks-venture -p fleetworks-cli --bins
-target/debug/venture --workspace ./review-workspace web
+target/debug/venture --workspace ./review-workspace web --storage compose-disk
 ```
 
 Open the web address Venture prints. The default is `http://127.0.0.1:3000`. Venture opens Jobs and Logs in the terminal. Use `web --terminal logs` to follow Compose service output instead. Leaving the terminal view keeps the stack running. Use `venture --workspace ./review-workspace stop` to stop the owned stack.
@@ -23,10 +23,10 @@ The brief shows the source description, identified actors, claims, inferences an
 
 ## Atlas
 
-Add `--atlas` when starting Venture to enable durable news collection. Prepare the provider configuration and pinned Rust-BERT files before starting a live cycle. [Atlas setup](../../../deploy/atlas-dispatch.md)
+Add `--atlas` when starting Venture to enable durable news collection. Stop an already running base stack before enabling Atlas. Prepare the provider configuration and pinned Rust-BERT files before starting a live cycle. [Atlas setup](../../../deploy/atlas-dispatch.md)
 
 ```sh
-target/debug/venture --workspace ./review-workspace up --atlas
+target/debug/venture --workspace ./review-workspace up --storage compose-disk --atlas
 target/debug/venture --workspace ./review-workspace client atlas start --request-id morning-cycle
 target/debug/venture --workspace ./review-workspace client atlas days
 target/debug/venture --workspace ./review-workspace client atlas articles 2026-11-10 --category security

@@ -1,0 +1,11 @@
+services:
+  atlas:
+    environment:
+      FLEETWORKS_BROKER_URL_FILE: /run/secrets/broker_password
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+        required: false
+
+  rabbitmq:
+    profiles: [venture-managed-broker]

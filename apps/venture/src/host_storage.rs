@@ -1,7 +1,9 @@
-//! Detached host SurrealDB supervisor. Only the owning process signals the child.
+//! Detached host dependency supervisor. Only the owner signals the children.
+//! @tag:process-lifecycle
 
 use std::env;
 use std::fs::{self, File, OpenOptions, TryLockError};
+use std::future;
 use std::io::{self, Read};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
 use std::path::{Path, PathBuf};
@@ -16,6 +18,8 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
 use tokio::time::{sleep, timeout, Instant};
+
+use crate::host_broker;
 
 const VERSION: &str = "3.3.4";
 const DEFAULT_BIND: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 8010);
@@ -35,7 +39,7 @@ pub(crate) enum Mode {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Config {
     pub(crate) mode: Mode,
-    bind: SocketAddrV4,
+    pub(crate) bind: SocketAddrV4,
     binary: PathBuf,
 }
 
@@ -105,8 +109,29 @@ impl Config {
         }
     }
 
-    fn identity(&self) -> Result<String> {
-        Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(self)?)))
+    fn identity(&self, broker: Option<&Broker>) -> Result<String> {
+        let body = match broker {
+            Some(broker) => serde_json::to_vec(&(self, broker))?,
+            None => serde_json::to_vec(self)?,
+        };
+        Ok(format!("{:x}", Sha256::digest(body)))
+    }
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Broker {
+    pub(crate) config: host_broker::Config,
+    pub(crate) password: PathBuf,
+}
+
+impl Broker {
+    pub(crate) fn validate(&self) -> Result<()> {
+        ensure!(
+            self.password.is_absolute(),
+            "invalid host RabbitMQ password path"
+        );
+        self.config.validate()
     }
 }
 
@@ -233,7 +258,7 @@ fn read_small(path: &Path) -> Result<Option<Vec<u8>>> {
     Ok(Some(body))
 }
 
-fn private_dir(path: &Path) -> Result<()> {
+pub(crate) fn private_dir(path: &Path) -> Result<()> {
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
     {
@@ -261,7 +286,7 @@ fn private_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn private_log(path: &Path) -> Result<File> {
+pub(crate) fn private_log(path: &Path) -> Result<File> {
     let mut options = OpenOptions::new();
     options.create(true).append(true);
     #[cfg(unix)]
@@ -271,33 +296,53 @@ fn private_log(path: &Path) -> Result<File> {
         match fs::symlink_metadata(path) {
             Ok(metadata) => ensure!(
                 metadata.is_file() && metadata.permissions().mode() & 0o077 == 0,
-                "host SurrealDB log must be a private regular file"
+                "host service log must be a private regular file"
             ),
             Err(error) if error.kind() == io::ErrorKind::NotFound => (),
-            Err(error) => return Err(error).context("inspect host SurrealDB log"),
+            Err(error) => return Err(error).context("inspect host service log"),
         }
     }
-    options.open(path).context("open host SurrealDB log")
+    options.open(path).context("open host service log")
 }
 
-pub(crate) async fn start(workspace: &Workspace, config: &Config) -> Result<()> {
+pub(crate) fn check_binds(config: &Config, broker: Option<&Broker>) -> Result<()> {
+    // A collision probe does not confer ownership of a listener.
+    TcpListener::bind(config.bind)
+        .context("host SurrealDB bind is already in use or unavailable")?;
+    if let Some(broker) = broker {
+        TcpListener::bind(broker.config.bind)
+            .context("host RabbitMQ bind is already in use or unavailable")?;
+    }
+    Ok(())
+}
+
+fn startup_timeout(broker: Option<&Broker>) -> Duration {
+    if broker.is_some() {
+        Duration::from_secs(60)
+    } else {
+        START_TIMEOUT
+    }
+}
+
+pub(crate) async fn start(
+    workspace: &Workspace,
+    config: &Config,
+    broker: Option<&Broker>,
+) -> Result<()> {
     let control = Control::load(workspace).await?;
-    let identity = config.identity()?;
+    let identity = config.identity(broker)?;
     let mut supervisor: Option<(String, std::process::Child)> = None;
-    let deadline = Instant::now() + START_TIMEOUT;
+    let deadline = Instant::now() + startup_timeout(broker);
     loop {
         match control.observe().await? {
             Observation::Unowned(lock) => {
                 if let Some((_, child)) = &mut supervisor {
                     if child.try_wait()?.is_some() {
-                        bail!("host SurrealDB supervisor exited; see logs/host-surreal-supervisor.log");
+                        bail!("host dependency supervisor exited; see logs/host-surreal-supervisor.log");
                     }
                     drop(lock);
                 } else {
-                    // This socket is only a collision check. It never confers
-                    // ownership of the process currently listening on the port.
-                    TcpListener::bind(config.bind)
-                        .context("host SurrealDB bind is already in use or unavailable")?;
+                    check_binds(config, broker)?;
                     // The coordinator still holds the stack lifecycle lock.
                     // Release the probe lock before the child tries to own it.
                     drop(lock);
@@ -314,9 +359,9 @@ pub(crate) async fn start(workspace: &Workspace, config: &Config) -> Result<()> 
                 {
                     ensure!(
                         state.identity == identity,
-                        "another Venture host SurrealDB configuration owns this workspace"
+                        "another Venture host dependency configuration owns this workspace"
                     );
-                    if state.ready && healthy(config).await {
+                    if state.ready && dependencies_ready(config, broker).await {
                         if let Some((_, mut child)) = supervisor {
                             std::thread::spawn(move || {
                                 let _ = child.wait();
@@ -330,7 +375,7 @@ pub(crate) async fn start(workspace: &Workspace, config: &Config) -> Result<()> 
         }
         ensure!(
             Instant::now() < deadline,
-            "host SurrealDB did not become ready; see logs/host-surreal-supervisor.log"
+            "host dependencies did not become ready; see logs/host-surreal-supervisor.log"
         );
         sleep(POLL).await;
     }
@@ -366,13 +411,17 @@ fn launch(workspace: &Workspace, control_dir: &Path) -> Result<(String, std::pro
     Ok((generation, child))
 }
 
-pub(crate) async fn status(workspace: &Workspace, config: &Config) -> Result<()> {
+pub(crate) async fn status(
+    workspace: &Workspace,
+    config: &Config,
+    broker: Option<&Broker>,
+) -> Result<()> {
     let control = Control::load(workspace).await?;
-    let identity = config.identity()?;
+    let identity = config.identity(broker)?;
     let status = match control.observe().await? {
         Observation::Unowned(_) => "stopped",
         Observation::Owned(Some(state)) if state.ready && state.identity == identity => {
-            if healthy(config).await {
+            if dependencies_ready(config, broker).await {
                 "ready"
             } else {
                 "unavailable"
@@ -384,12 +433,19 @@ pub(crate) async fn status(workspace: &Workspace, config: &Config) -> Result<()>
         "Host SurrealDB {:?} {} ({status})",
         config.mode, config.bind
     );
+    if let Some(broker) = broker {
+        println!("Host RabbitMQ {} ({status})", broker.config.bind);
+    }
     Ok(())
 }
 
-pub(crate) async fn stop(workspace: &Workspace, config: &Config) -> Result<()> {
+pub(crate) async fn stop(
+    workspace: &Workspace,
+    config: &Config,
+    broker: Option<&Broker>,
+) -> Result<()> {
     let control = Control::load(workspace).await?;
-    let identity = config.identity()?;
+    let identity = config.identity(broker)?;
     let deadline = Instant::now() + STOP_TIMEOUT;
     let mut signalled = None;
     loop {
@@ -404,12 +460,23 @@ pub(crate) async fn stop(workspace: &Workspace, config: &Config) -> Result<()> {
                     .is_ok_and(|result| result.is_err()),
                     "host SurrealDB address still has a listener without a Venture supervisor"
                 );
+                if let Some(broker) = broker {
+                    ensure!(
+                        timeout(
+                            Duration::from_secs(1),
+                            TcpStream::connect(broker.config.probe_addr())
+                        )
+                        .await
+                        .is_ok_and(|result| result.is_err()),
+                        "host RabbitMQ address still has a listener without a Venture supervisor"
+                    );
+                }
                 return Ok(());
             }
             Observation::Owned(Some(state)) => {
                 ensure!(
                     state.identity == identity,
-                    "Venture does not own this host SurrealDB configuration"
+                    "Venture does not own this host dependency configuration"
                 );
                 if signalled.as_deref() != Some(state.generation.as_str()) {
                     let control = control.clone();
@@ -423,7 +490,7 @@ pub(crate) async fn stop(workspace: &Workspace, config: &Config) -> Result<()> {
         }
         ensure!(
             Instant::now() < deadline,
-            "host SurrealDB supervisor did not finish stopping"
+            "host dependency supervisor did not finish stopping"
         );
         sleep(POLL).await;
     }
@@ -434,6 +501,7 @@ pub(crate) async fn supervise(
     config: &Config,
     root_name: &str,
     root_password: &Path,
+    broker: Option<&Broker>,
     generation: String,
 ) -> Result<()> {
     ensure!(
@@ -443,7 +511,7 @@ pub(crate) async fn supervise(
     let control = Control::load(workspace).await?;
     let initial = State {
         generation,
-        identity: config.identity()?,
+        identity: config.identity(broker)?,
         ready: false,
     };
     let control_for_start = control.clone();
@@ -460,6 +528,7 @@ pub(crate) async fn supervise(
         config,
         root_name,
         root_password,
+        broker,
         &control,
         &mut state,
     )
@@ -478,6 +547,7 @@ async fn run_server(
     config: &Config,
     root_name: &str,
     root_password: &Path,
+    broker: Option<&Broker>,
     control: &Control,
     state: &mut State,
 ) -> Result<()> {
@@ -495,13 +565,13 @@ async fn run_server(
         output.status.success() && version.split_ascii_whitespace().next() == Some(VERSION),
         "host SurrealDB executable must report version {VERSION}"
     );
-    let workspace = workspace.clone();
+    let data_workspace = workspace.clone();
     let mode = config.mode;
     let (backend, log) = tokio::task::spawn_blocking(move || -> Result<(String, File)> {
         let backend = match mode {
             Mode::Memory => "memory".to_owned(),
             Mode::Disk => {
-                let path = workspace.root().join("storage/host-surrealdb");
+                let path = data_workspace.root().join("storage/host-surrealdb");
                 private_dir(&path)?;
                 let path = path
                     .to_str()
@@ -513,7 +583,7 @@ async fn run_server(
                 format!("rocksdb://{path}?versioned=false&sync=every")
             }
         };
-        let log = private_log(&workspace.root().join("logs/host-surreal.log"))?;
+        let log = private_log(&data_workspace.root().join("logs/host-surreal.log"))?;
         Ok((backend, log))
     })
     .await??;
@@ -550,7 +620,44 @@ async fn run_server(
         .kill_on_drop(true)
         .spawn()
         .context("start host SurrealDB")?;
-    let deadline = Instant::now() + START_TIMEOUT - Duration::from_secs(5);
+    let mut broker_child = match broker {
+        Some(broker) => match broker.config.spawn(workspace, &broker.password).await {
+            Ok(child) => Some(child),
+            Err(error) => {
+                finish_child(&mut child, "SurrealDB").await?;
+                return Err(error);
+            }
+        },
+        None => None,
+    };
+    let result = watch_children(
+        config,
+        broker,
+        control,
+        state,
+        &mut child,
+        &mut broker_child,
+    )
+    .await;
+    let (surreal_stopped, broker_stopped) =
+        tokio::join!(finish_child(&mut child, "SurrealDB"), async {
+            match &mut broker_child {
+                Some(child) => finish_child(child, "RabbitMQ").await,
+                None => Ok(()),
+            }
+        });
+    result.and(surreal_stopped).and(broker_stopped)
+}
+
+async fn watch_children(
+    config: &Config,
+    broker: Option<&Broker>,
+    control: &Control,
+    state: &mut State,
+    child: &mut Child,
+    broker_child: &mut Option<Child>,
+) -> Result<()> {
+    let deadline = Instant::now() + startup_timeout(broker) - Duration::from_secs(5);
     let signal = crate::compose::shutdown_signal();
     tokio::pin!(signal);
     loop {
@@ -558,22 +665,35 @@ async fn run_server(
             result = child.wait() => {
                 bail!("host SurrealDB exited ({}); see logs/host-surreal.log", result?);
             }
-            _ = &mut signal => return finish_child(&mut child).await,
+            result = async {
+                match broker_child.as_mut() {
+                    Some(child) => child.wait().await,
+                    None => future::pending().await,
+                }
+            } => {
+                bail!("host RabbitMQ exited ({}); see logs/host-rabbitmq.log", result?);
+            }
+            _ = &mut signal => return Ok(()),
             _ = sleep(POLL) => {
                 let stop_control = control.clone();
                 let generation = state.generation.clone();
                 if tokio::task::spawn_blocking(move || stop_control.stop_requested(&generation)).await?? {
-                    return finish_child(&mut child).await;
+                    return Ok(());
                 }
                 if !state.ready {
-                    if healthy(config).await && child.try_wait()?.is_none() {
+                    if dependencies_ready(config, broker).await
+                        && child.try_wait()?.is_none()
+                        && match broker_child.as_mut() {
+                            Some(child) => child.try_wait()?.is_none(),
+                            None => true,
+                        }
+                    {
                         state.ready = true;
                         let control = control.clone();
                         let body = serde_json::to_vec(state)?;
                         tokio::task::spawn_blocking(move || control.write("state.json", &body)).await??;
                     } else if Instant::now() >= deadline {
-                        finish_child(&mut child).await?;
-                        bail!("host SurrealDB did not become ready; see logs/host-surreal.log");
+                        bail!("host dependencies did not become ready; see logs/host-surreal.log and logs/host-rabbitmq.log");
                     }
                 }
             }
@@ -581,7 +701,10 @@ async fn run_server(
     }
 }
 
-async fn finish_child(child: &mut Child) -> Result<()> {
+async fn finish_child(child: &mut Child, service: &str) -> Result<()> {
+    if child.try_wait()?.is_some() {
+        return Ok(());
+    }
     if let Some(pid) = child.id() {
         // The supervisor still owns this unreaped child, so the PID cannot
         // refer to a different process. Controller files never supply a PID.
@@ -600,7 +723,25 @@ async fn finish_child(child: &mut Child) -> Result<()> {
             }
         }
     }
-    child.kill().await.context("stop owned SurrealDB child")
+    child
+        .kill()
+        .await
+        .with_context(|| format!("stop owned {service} child"))
+}
+
+async fn dependencies_ready(config: &Config, broker: Option<&Broker>) -> bool {
+    if !healthy(config).await {
+        return false;
+    }
+    match broker {
+        Some(broker) => timeout(
+            Duration::from_secs(1),
+            TcpStream::connect(broker.config.probe_addr()),
+        )
+        .await
+        .is_ok_and(|result| result.is_ok()),
+        None => true,
+    }
 }
 
 async fn healthy(config: &Config) -> bool {

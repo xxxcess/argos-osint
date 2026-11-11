@@ -134,4 +134,4 @@ secrets:
   internal_token:
     file: ${FLEETWORKS_INTERNAL_TOKEN_FILE:-${FLEETWORKS_HOST_WORKSPACE}/secrets/internal-token}
   broker_password:
-    file: ${FLEETWORKS_BROKER_PASSWORD_FILE:-${FLEETWORKS_HOST_WORKSPACE}/secrets/broker-password}
+    file: ${FLEETWORKS_COMPOSE_BROKER_CREDENTIAL_FILE:-${FLEETWORKS_BROKER_PASSWORD_FILE:-${FLEETWORKS_HOST_WORKSPACE}/secrets/broker-password}}

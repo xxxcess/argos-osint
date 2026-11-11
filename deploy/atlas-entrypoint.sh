@@ -1,6 +1,14 @@
 #!/bin/sh
 set -eu
 
+role=$1
+shift
+
+if [ "$role" = atlas ] && [ -n "${FLEETWORKS_BROKER_URL_FILE:-}" ]; then
+    unset FLEETWORKS_BROKER_URL
+    exec "$@"
+fi
+
 secret=/run/secrets/broker_password
 
 invalid_secret() {
@@ -21,8 +29,6 @@ case "$password" in
     *[!A-Za-z0-9._~-]*) invalid_secret ;;
 esac
 
-role=$1
-shift
 umask 077
 private=$(mktemp -d /tmp/fleetworks-broker.XXXXXXXX)
 case "$role" in

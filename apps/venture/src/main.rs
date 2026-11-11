@@ -1,5 +1,6 @@
 mod classifier;
 mod compose;
+mod host_broker;
 mod host_storage;
 mod splash;
 
@@ -42,7 +43,7 @@ enum Action {
     },
     /// Start or reconcile this workspace's local Compose stack.
     ///
-    /// A new interactive setup asks for a host SurrealDB or a remote URL.
+    /// A new interactive setup offers local-net, local-process, or remote storage.
     /// `--storage` selects the target without a prompt. A non-interactive
     /// setup with no prior target uses the Compose disk database.
     Up(StackOptions),
@@ -97,12 +98,12 @@ enum Action {
 
 #[derive(ClapArgs)]
 struct StackOptions {
-    /// Database for the stack. Omit this on a new terminal to choose local or remote.
+    /// Database and broker setup. Omit this on a new terminal to choose a mode.
     #[arg(long, value_enum)]
     storage: Option<StorageMode>,
     #[arg(long, value_name = "PATH")]
     compose_file: Option<PathBuf>,
-    /// Start the private Atlas, classifier, NLP and broker services too.
+    /// Start the private Atlas, classifier and NLP services too.
     #[arg(long)]
     atlas: bool,
     /// Serve web sources from the checkout with live reload.
@@ -160,7 +161,7 @@ impl ClientKind {
 async fn main() -> Result<()> {
     let args = Args::parse();
     if io::stderr().is_terminal() && !matches!(args.action, Action::HostStorageSupervisor { .. }) {
-        eprintln!("{}", splash::MARK);
+        splash::print();
     }
     let workspace = Workspace::resolve(args.workspace.as_deref())?;
     eprintln!("Workspace {}", workspace.root().display());

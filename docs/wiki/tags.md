@@ -14,7 +14,7 @@ Tags connect a documented concern to its implementation across directory boundar
 | `@tag:surreal-storage` | [Storage](code/storage.md) | [storage/mod.rs](../../crates/argos-osint-core/src/storage/mod.rs) |
 | `@tag:tui-components` | [Terminal fixtures](code/tui-verification.md) | [components.rs](../../crates/argos-osint-bin/src/tui/components.rs) |
 | `@tag:async-runtime` | [Architecture](code/architecture.md#async-runtime-safety) | [hardware.rs](../../crates/argos-osint-core/src/hardware.rs) |
-| `@tag:process-lifecycle` | [Venture lifecycle](code/architecture.md#process-lifecycle-and-signal-handling) | [compose.rs](../../apps/venture/src/compose.rs) |
+| `@tag:process-lifecycle` | [Venture lifecycle](code/architecture.md#process-lifecycle-and-signal-handling) | [compose.rs](../../apps/venture/src/compose.rs), [host_storage.rs](../../apps/venture/src/host_storage.rs) |
 | `@tag:api-timeouts` | [Intel web](code/intel-web.md#api-contract) | [lib.rs](../../crates/argos-osint-api/src/lib.rs) |
 | `@tag:abort-signal` | [Intel web](code/intel-web.md#async-presentation) | [index.tsx](../../packages/api-client/src/index.tsx) |
 | `@tag:testing` | [Testing](code/react-ui.md#react-component-testing-real-component-pattern) | [UI tests](../../packages/ui/__tests__/) / [Intel tests](../../packages/intel/__tests__/) |

@@ -8,10 +8,10 @@
 </style>
 </head><body><main>
 <h1>Venture startup and ownership</h1>
-<p>Venture initializes the chosen workspace, reconciles its owned Compose project, and checks storage-backed API readiness before returning or attaching a terminal.</p>
+<p>Venture initializes the workspace, selects a storage mode, reconciles its owned services, and checks storage-backed API readiness before returning or attaching a terminal.</p>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 360" role="img" aria-labelledby="venture-navigation-title venture-navigation-desc">
 <title id="venture-navigation-title">Venture startup and ownership</title>
-<desc id="venture-navigation-desc">Venture initializes the chosen workspace, reconciles its owned Compose project, and checks storage-backed API readiness before returning or attaching a terminal.</desc>
+<desc id="venture-navigation-desc">Venture initializes the workspace, selects a storage mode, reconciles its owned services, and checks storage-backed API readiness before returning or attaching a terminal.</desc>
 <defs>
   <marker id="venture-navigation-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker>
 </defs>
@@ -40,7 +40,7 @@
 <text x="134" y="131" class="note" text-anchor="middle">--workspace or default</text>
 <rect x="272" y="80" width="188" height="72" rx="6" class="accent"/>
 <text x="366" y="113" class="label" text-anchor="middle">Start services</text>
-<text x="366" y="131" class="note" text-anchor="middle">up or web</text>
+<text x="366" y="131" class="note" text-anchor="middle">up or web with storage mode</text>
 <rect x="504" y="80" width="188" height="72" rx="6" class="node"/>
 <text x="598" y="113" class="label" text-anchor="middle">Confirm readiness</text>
 <text x="598" y="131" class="note" text-anchor="middle">Compose + storage API</text>
@@ -58,6 +58,6 @@
 <text x="824" y="287" class="note" text-anchor="middle">status · logs · stop</text>
 <text x="40" y="336" class="note" text-anchor="start">Exiting the terminal leaves the stack running. venture stop stops its owned services and retains workspace data.</text>
 </svg>
-<p>Use --atlas when starting a workspace that needs Atlas collection. Stop the owned stack before changing its storage selection or enabling or disabling the Atlas overlay.</p>
+<p>Local Net connects to running SurrealDB and RabbitMQ endpoints. Local Process starts both on the host and preserves their data on stop. Use --atlas when the workspace needs Atlas collection. Stop the owned stack before changing its storage mode or Atlas overlay.</p>
 <p><a href="../wiki/code/fleetworks.md">Fleetworks guide</a> · <a href="../../deploy/README.md">Deployment guide</a> · <a href="../diagrams.md">Diagram catalog</a></p>
 </main></body></html>

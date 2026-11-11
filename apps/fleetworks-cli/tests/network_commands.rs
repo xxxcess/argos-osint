@@ -645,7 +645,7 @@ quit
                 "GET /api/v1/models/defaults",
                 &[],
                 None,
-                json!({"defaults":{"atlas_analyst":{
+                json!({"defaults":{"synthesis":{"model":"retired-model","provider":"fixture"},"atlas_analyst":{
                     "model":"primary","provider":"fixture","account":"operator",
                     "fallbacks":[{"model":"backup","provider":"fixture"}],
                 }}}),
@@ -662,6 +662,10 @@ quit
         ],
     )
     .await?;
+    assert!(!stdout.contains("retired-model"));
+    assert!(!stdout.contains("synthesis"));
+    assert!(stdout.contains("recon_decisions"));
+    assert!(stdout.contains("brain_summary"));
     for expected in [
         "atlas_analyst",
         "Primary  fixture / primary",
@@ -716,5 +720,47 @@ async fn profile_tui_distinguishes_local_workspace_and_remote_health() -> Result
     ] {
         assert!(stdout.contains(expected), "missing {expected:?}");
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn models_defaults_json_uses_the_server_role_catalog() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let origin = format!("http://{}", listener.local_addr()?);
+    let mut client = tokio::process::Command::new(env!("CARGO_BIN_EXE_fleetworks-models"));
+    client
+        .kill_on_drop(true)
+        .arg("--workspace")
+        .arg(workspace.path())
+        .args(["--api-origin", &origin, "defaults", "--json"]);
+    let fixture = respond(
+        &listener,
+        json!({"roles":["future_role","atlas_analyst"],"defaults":{
+            "future_role":{"model":"next","provider":"fixture"},
+            "atlas_analyst":{"model":"current","fallbacks":[{"model":"backup"}]},
+            "synthesis":{"model":"retired"}
+        }}),
+    );
+    let (output, request) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(client.output(), fixture)
+    })
+    .await?;
+    request?;
+    let output = output?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let reply: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(reply["roles"], json!(["future_role", "atlas_analyst"]));
+    assert_eq!(reply["defaults"].as_object().unwrap().len(), 2);
+    assert_eq!(reply["defaults"]["future_role"]["model"], "next");
+    assert_eq!(
+        reply["defaults"]["atlas_analyst"]["fallbacks"][0]["model"],
+        "backup"
+    );
+    assert!(reply["defaults"].get("synthesis").is_none());
     Ok(())
 }

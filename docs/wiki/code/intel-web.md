@@ -97,7 +97,7 @@ The Fleetworks API requires a bearer token and uses explicit Host and Origin all
 | POST `jobs/retry`                    | `{id}`; requeue eligible failed work. Atlas job retries use the durable dispatch contract and require network authentication. |
 | POST `jobs/cancel`                   | Fleetworks only. `{id}`; request cancellation of active, cancellable work. |
 | GET `logs`                          | Optional `job_id` and `limit` (1–100). Recent durable event summaries with provider diagnostics sanitized. |
-| GET `tools`, `models/defaults`, `profile` | Tool registry, configured model defaults and API workspace/readiness projections. |
+| GET `tools`, `models/defaults`, `profile` | Tool registry, configured model defaults and API workspace/readiness projections. Model defaults include an authoritative `roles` catalog; retained legacy assignments remain migration metadata. |
 | POST `atlas/cycles`                  | Fleetworks only. `{request_id}`; accept durable work and return stable job/run IDs. Use the same request ID to recover an uncertain submission. |
 | GET `topology`                       | `seed=<Brain memory ID>`; Rust infers actor/claim/inference kind and rebuilds the bounded neighborhood                                                                        |
 | POST `topology/resolve`              | Read-only compatibility resolution from a fully sourced brief item to an existing Brain memory ID; 409 while indexing is pending                                              |

@@ -58,6 +58,7 @@ struct Cli<C: Subcommand> {
 
 enum Operation {
     Workspace,
+    ModelsDefaults,
     Interactive(Interactive),
     Get(&'static str, Option<Value>),
     Post(&'static str, Value),
@@ -129,6 +130,9 @@ impl Operation {
 
     async fn request(self, client: &Client) -> Result<Value> {
         match self {
+            Self::ModelsDefaults => {
+                models_ui::project_defaults(client.get("/api/v1/models/defaults").await?)
+            }
             Self::Get(route, None) => Ok(client.get(route).await?),
             Self::Get(route, Some(query)) => Ok(client.get_with_query(route, &query).await?),
             Self::Post(route, body) => Ok(client.post(route, &body).await?),
@@ -371,7 +375,7 @@ impl From<ModelsCommand> for Operation {
     fn from(command: ModelsCommand) -> Self {
         match command {
             ModelsCommand::Tui => Self::Interactive(Interactive::Models),
-            ModelsCommand::Defaults => Self::read("/api/v1/models/defaults"),
+            ModelsCommand::Defaults => Self::ModelsDefaults,
             ModelsCommand::Set {
                 role,
                 provider,

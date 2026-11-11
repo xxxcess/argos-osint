@@ -13,7 +13,46 @@ use tokio::runtime::Runtime;
 use crate::terminal::{self, field, text, Session};
 use crate::ModelsCommand;
 
-const HELP: &str = "defaults [ROLE]                     Show saved routes
+// Older servers did not advertise their role catalog. Their current pipeline
+// contract has these six roles; new servers supply the authoritative list.
+const LEGACY_SERVER_ROLES: [&str; 6] = [
+    "recon_agent",
+    "recon_decisions",
+    "recon_analyst",
+    "atlas_evaluator",
+    "atlas_analyst",
+    "brain_summary",
+];
+
+/// Projects only active roles, retaining the server's catalog order.
+pub(crate) fn project_defaults(mut reply: Value) -> Result<Value> {
+    let roles: Vec<String> = match reply.get("roles") {
+        Some(roles) => {
+            serde_json::from_value(roles.clone()).context("invalid API model role catalog")?
+        }
+        None => LEGACY_SERVER_ROLES
+            .iter()
+            .map(|role| (*role).to_owned())
+            .collect(),
+    };
+    let saved = reply["defaults"]
+        .as_object()
+        .context("invalid API model defaults")?;
+    let defaults = roles
+        .iter()
+        .map(|role| {
+            (
+                role.clone(),
+                saved.get(role).cloned().unwrap_or(Value::Null),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    reply["defaults"] = Value::Object(defaults);
+    reply["roles"] = serde_json::to_value(roles)?;
+    Ok(reply)
+}
+
+const HELP: &str = "defaults [ROLE]                     List current roles and saved routes
 set ROLE PROVIDER MODEL [ACCOUNT]    Confirm a primary route change
 clear ROLE                           Confirm clearing all saved routes for a role
 help | quit                          Show commands or close this session";
@@ -81,12 +120,14 @@ fn defaults(session: &Session<'_>, role: Option<&str>, output: &mut impl Write) 
     let values = reply["defaults"]
         .as_object()
         .context("invalid API model defaults")?;
-    let assignments = values
-        .iter()
-        .filter(|(_, route)| route.get("model").is_some());
+    let roles = reply["roles"]
+        .as_array()
+        .context("invalid API model role catalog")?;
     let mut found = false;
-    for (name, route) in assignments {
-        if role.is_some_and(|wanted| name.as_str() != wanted) {
+    for role_name in roles {
+        let name = role_name.as_str().context("invalid API model role")?;
+        let route = &values[name];
+        if role.is_some_and(|wanted| name != wanted) {
             continue;
         }
         found = true;

@@ -64,7 +64,11 @@ catalog and `detail #1` to inspect required inputs and restrictions.
 `result CALL_ID` shows the status and a bounded observations preview.
 
 Open Models with `venture client models tui` to read saved primary and fallback
-routes. Use `defaults ROLE` to select a role. Open Profile with
+routes. The current roles are `recon_agent`, `recon_decisions`, `recon_analyst`,
+`atlas_evaluator`, `atlas_analyst`, and `brain_summary`. Both interactive and JSON
+output use the server role catalog, with compatibility for older servers.
+Unconfigured current roles remain visible; retained legacy assignments are not
+listed as active roles. Use `defaults ROLE` to select a role. Open Profile with
 `venture client profile tui` to inspect the local `workspace`, service
 `health`, and service profile with `show`.
 
@@ -79,7 +83,7 @@ returns only the relative path and schema version. Choose a new name for
 another export. The interactive form prompts for confirmation.
 
 The interactive sessions use ordinary terminal input and output and close on
-`quit` or end of input. Use the one-shot commands for complete JSON responses.
+`quit` or end of input. Use the one-shot commands for JSON responses.
 
 Atlas article dates use `YYYY-MM-DD`. Pass
 the returned `next_cursor` into the next request unchanged. Brain topology

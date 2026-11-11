@@ -661,7 +661,7 @@ pub(crate) const LEGACY_ROLE_KEYS: [&str; 9] = [
 ];
 
 /// A deny-unknown-fields reference to a role's route chain
-/// (`{"route_role":"summarization"}`). It resolves the named role directly
+/// (`{"route_role":"brain_summary"}`). It resolves the named role directly
 /// and so follows that role's future model swaps without copied IDs.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

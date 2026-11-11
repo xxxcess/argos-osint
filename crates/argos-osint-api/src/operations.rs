@@ -1,7 +1,7 @@
 //! Read projections for the Fleetworks operational clients.
 
 use argos_osint_core::events::EventFilter;
-use argos_osint_core::provider::SettingsFile;
+use argos_osint_core::provider::{self, RoleDefaults, SettingsFile};
 use argos_osint_core::{intel_service, osint, paths, provider_diag, storage};
 use axum::extract::{Extension, Query, State};
 use axum::http::StatusCode;
@@ -68,7 +68,14 @@ pub(crate) async fn model_defaults() -> ApiResult {
         .await
         .map_err(|_| internal("model defaults read task failed"))?
         .map_err(|_| internal("could not read model defaults"))?;
-    Ok(Json(json!({"defaults": settings.defaults})))
+    Ok(Json(model_defaults_response(&settings.defaults)))
+}
+
+fn model_defaults_response(defaults: &RoleDefaults) -> Value {
+    // Legacy assignments remain available for migration inspection. Clients
+    // render active roles from this authoritative catalog instead of guessing
+    // from every persisted object that happens to contain a model field.
+    json!({"roles": provider::CANONICAL_ROLE_KEYS, "defaults": defaults})
 }
 
 pub(crate) async fn profile(
@@ -137,4 +144,54 @@ pub(crate) async fn logs(
     .await
     .map_err(|_| internal("log projection task failed"))?;
     Ok(Json(json!({"rows": rows})))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::model_defaults_response;
+    use argos_osint_core::provider::RoleDefaults;
+    use serde_json::json;
+
+    #[test]
+    fn model_defaults_advertises_current_roles_without_discarding_migration_data() {
+        let defaults: RoleDefaults = serde_json::from_value(json!({
+            "recon_agent": {"provider":"local", "model":"current-agent"},
+            "recon": {"provider":"local", "model":"legacy-agent"},
+            "migration_exceptions": ["Review archived assignment"],
+            "text_contract_version": "fixture-contract",
+            "archived_operation_overrides": {
+                "retired-operation": {"route_role":"brain_summary"}
+            }
+        }))
+        .unwrap();
+        let response = model_defaults_response(&defaults);
+        assert_eq!(
+            response["roles"],
+            json!([
+                "recon_agent",
+                "recon_decisions",
+                "recon_analyst",
+                "atlas_evaluator",
+                "atlas_analyst",
+                "brain_summary"
+            ])
+        );
+        assert_eq!(
+            response["defaults"]["recon_agent"]["model"],
+            "current-agent"
+        );
+        assert_eq!(response["defaults"]["recon"]["model"], "legacy-agent");
+        assert_eq!(
+            response["defaults"]["migration_exceptions"],
+            json!(["Review archived assignment"])
+        );
+        assert_eq!(
+            response["defaults"]["text_contract_version"],
+            "fixture-contract"
+        );
+        assert_eq!(
+            response["defaults"]["archived_operation_overrides"]["retired-operation"]["route_role"],
+            "brain_summary"
+        );
+    }
 }

@@ -38,8 +38,8 @@ Resolve pending publication proposals before acknowledging conflicting cancellat
 
 | Scope | Required result | Current boundary |
 | --- | --- | --- |
-| SQLite ownership | Persisted operational primitives, standalone logs, private HTTP and Jobs-only disk mount | Implemented foundation; verification tracked separately |
-| Embedded delivery | RocksDB queue, Atlas adapter, visibility recovery, Rabbit-free startup and deployment references | Integration in progress |
+| SQLite ownership | Persisted operational primitives, standalone logs, private HTTP and Jobs-only disk mount | Implemented; focused persistence and HTTP checks pass |
+| Embedded delivery | RocksDB queue, Atlas adapter, visibility recovery, Rabbit-free startup and deployment references | Native Atlas smoke passes; Docker image/deployment gate pending |
 | Operational authority | Route scheduling, attempts, process heartbeat/recovery, retry/cancel and dashboard reads through Jobs together | Planned; production scheduling still uses SurrealDB |
 | Domain handoff | Admission intents, publication reconciliation, cancellation/expiry/generation fences | Planned; existing domain transactions remain authoritative |
 | Telemetry | Move writes, hourly/daily rollups, retention and Profile readers together | Planned; do not move only writers |

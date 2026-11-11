@@ -93,7 +93,11 @@ COPY apps/fleetworks-cli ./apps/fleetworks-cli
 COPY apps/venture ./apps/venture
 RUN --mount=type=cache,id=fleetworks-clients-${TARGETARCH},target=/usr/local/cargo/registry \
     --mount=type=cache,id=fleetworks-clients-target-${TARGETARCH},target=/src/target,sharing=locked \
-    cargo build --release --locked --bins -p fleetworks-cli -p fleetworks-venture
+    cargo build --release --locked --bins -p fleetworks-cli -p fleetworks-venture \
+    && mkdir -p /out \
+    && for binary in venture fleetworks-atlas fleetworks-brain fleetworks-jobs fleetworks-tools fleetworks-models fleetworks-profile; do \
+         install -D "target/release/${binary}" "/out/${binary}"; \
+       done
 
 FROM debian:bookworm-slim AS client_base
 RUN apt-get update \
@@ -103,29 +107,29 @@ WORKDIR /workspace
 USER 65532:65532
 
 FROM client_base AS venture
-COPY --from=clients_build --chmod=0555 /src/target/release/venture /usr/local/bin/venture
+COPY --from=clients_build --chmod=0555 /out/venture /usr/local/bin/venture
 ENTRYPOINT ["/usr/local/bin/venture"]
 
 FROM client_base AS fleetworks-atlas
-COPY --from=clients_build --chmod=0555 /src/target/release/fleetworks-atlas /usr/local/bin/fleetworks-atlas
+COPY --from=clients_build --chmod=0555 /out/fleetworks-atlas /usr/local/bin/fleetworks-atlas
 ENTRYPOINT ["/usr/local/bin/fleetworks-atlas"]
 
 FROM client_base AS fleetworks-brain
-COPY --from=clients_build --chmod=0555 /src/target/release/fleetworks-brain /usr/local/bin/fleetworks-brain
+COPY --from=clients_build --chmod=0555 /out/fleetworks-brain /usr/local/bin/fleetworks-brain
 ENTRYPOINT ["/usr/local/bin/fleetworks-brain"]
 
 FROM client_base AS fleetworks-jobs
-COPY --from=clients_build --chmod=0555 /src/target/release/fleetworks-jobs /usr/local/bin/fleetworks-jobs
+COPY --from=clients_build --chmod=0555 /out/fleetworks-jobs /usr/local/bin/fleetworks-jobs
 ENTRYPOINT ["/usr/local/bin/fleetworks-jobs"]
 
 FROM client_base AS fleetworks-tools
-COPY --from=clients_build --chmod=0555 /src/target/release/fleetworks-tools /usr/local/bin/fleetworks-tools
+COPY --from=clients_build --chmod=0555 /out/fleetworks-tools /usr/local/bin/fleetworks-tools
 ENTRYPOINT ["/usr/local/bin/fleetworks-tools"]
 
 FROM client_base AS fleetworks-models
-COPY --from=clients_build --chmod=0555 /src/target/release/fleetworks-models /usr/local/bin/fleetworks-models
+COPY --from=clients_build --chmod=0555 /out/fleetworks-models /usr/local/bin/fleetworks-models
 ENTRYPOINT ["/usr/local/bin/fleetworks-models"]
 
 FROM client_base AS fleetworks-profile
-COPY --from=clients_build --chmod=0555 /src/target/release/fleetworks-profile /usr/local/bin/fleetworks-profile
+COPY --from=clients_build --chmod=0555 /out/fleetworks-profile /usr/local/bin/fleetworks-profile
 ENTRYPOINT ["/usr/local/bin/fleetworks-profile"]

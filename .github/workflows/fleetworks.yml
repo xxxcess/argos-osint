@@ -285,7 +285,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 scripts/agent_cargo.py test --locked -p fleetworks-jobs
+          # Keep the server feature graph: a Jobs-only selection rebuilds RocksDB's C++ archive.
+          python3 scripts/agent_cargo.py test --locked -p argos-api-host -p fleetworks-jobs \
+            --no-default-features --features server,nlp,classifier
           python3 scripts/fleetworks_verify.py timed --phase queue-smoke -- \
             python3 scripts/fleetworks_atlas_smoke.py \
               --host target/agents/debug/argos-api-host --surreal "$SURREAL_BIN"

@@ -4,8 +4,9 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{anyhow, ensure, Context, Result};
 use clap::ValueEnum;
@@ -325,6 +326,12 @@ pub(crate) async fn up(
     dev: bool,
     no_build: bool,
 ) -> Result<()> {
+    let prior = Owner::load(workspace).await?;
+    let (storage, storage_url) = select_storage_target(
+        storage,
+        prior.as_ref().map(|owner| owner.storage),
+        io::stdin().is_terminal(),
+    )?;
     let docker_host = docker_host().await?;
     let owned_workspace = workspace.clone();
     let compose_file = compose_file.map(Path::to_owned);
@@ -332,6 +339,7 @@ pub(crate) async fn up(
         prepare(
             &owned_workspace,
             storage,
+            storage_url.as_deref(),
             compose_file.as_deref(),
             docker_host,
             atlas,
@@ -339,6 +347,9 @@ pub(crate) async fn up(
         )
     })
     .await??;
+    if requested.storage == StorageMode::External {
+        probe_remote_storage(&requested.endpoint).await?;
+    }
     if !owned {
         ensure!(
             !requested.existing_project().await?,
@@ -375,9 +386,118 @@ pub(crate) async fn up(
     Ok(())
 }
 
+fn select_storage_target(
+    requested: Option<StorageMode>,
+    prior: Option<StorageMode>,
+    interactive: bool,
+) -> Result<(StorageMode, Option<String>)> {
+    if let Some(mode) = requested.or(prior) {
+        return Ok((mode, None));
+    }
+    if !interactive {
+        return Ok((StorageMode::ComposeDisk, None));
+    }
+    prompt_storage_target()
+}
+
+fn prompt_storage_target() -> Result<(StorageMode, Option<String>)> {
+    println!("Choose the storage target for this stack.");
+    println!("  local   SurrealDB on this host, reachable from Docker services");
+    println!("  remote  SurrealDB on the internet");
+    loop {
+        let choice = prompt_line("Storage target [local]: ")?;
+        match interpret_storage_choice(&choice) {
+            StorageChoice::Local => return Ok((StorageMode::HostDisk, None)),
+            StorageChoice::Remote => {
+                return Ok((StorageMode::External, Some(prompt_remote_url()?)))
+            }
+            StorageChoice::Invalid => println!("Enter local or remote."),
+        }
+    }
+}
+
+fn prompt_remote_url() -> Result<String> {
+    loop {
+        let raw = prompt_line("SurrealDB URL (wss://host:port): ")?;
+        if raw.is_empty() {
+            println!("Enter the remote SurrealDB URL.");
+            continue;
+        }
+        match external_url(&raw) {
+            Ok(url) => return Ok(url),
+            Err(error) => println!("{error:#}"),
+        }
+    }
+}
+
+fn prompt_line(label: &str) -> Result<String> {
+    print!("{label}");
+    io::stdout().flush().context("write storage prompt")?;
+    let mut line = String::new();
+    io::stdin()
+        .read_line(&mut line)
+        .context("read storage choice")?;
+    Ok(line.trim().to_owned())
+}
+
+enum StorageChoice {
+    Local,
+    Remote,
+    Invalid,
+}
+
+fn interpret_storage_choice(line: &str) -> StorageChoice {
+    match line.trim().to_ascii_lowercase().as_str() {
+        "" | "local" => StorageChoice::Local,
+        "remote" => StorageChoice::Remote,
+        _ => StorageChoice::Invalid,
+    }
+}
+
+fn remote_health_url(endpoint: &str) -> Result<Url> {
+    let mut url = Url::parse(endpoint).context("invalid storage URL")?;
+    let scheme = match url.scheme() {
+        "wss" => "https",
+        "ws" => "http",
+        _ => anyhow::bail!("storage URL must use ws or wss"),
+    };
+    url.set_scheme(scheme)
+        .map_err(|()| anyhow!("invalid storage health URL"))?;
+    url.set_path("health");
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url)
+}
+
+async fn probe_remote_storage(endpoint: &str) -> Result<()> {
+    let health = remote_health_url(endpoint)?;
+    let host = health
+        .host_str()
+        .unwrap_or("the remote database")
+        .to_owned();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .context("prepare the SurrealDB connectivity check")?;
+    let response = client
+        .get(health)
+        .send()
+        .await
+        .with_context(|| format!("SurrealDB at {host} is not reachable"))?;
+    ensure!(
+        response.status().is_success(),
+        "SurrealDB at {host} is not operational ({})",
+        response.status()
+    );
+    println!("SurrealDB at {host} is reachable");
+    Ok(())
+}
+
 fn prepare(
     workspace: &Workspace,
-    storage: Option<StorageMode>,
+    storage: StorageMode,
+    storage_url: Option<&str>,
     compose_file: Option<&Path>,
     docker_host: String,
     atlas: bool,
@@ -387,9 +507,6 @@ fn prepare(
     workspace.initialize()?;
     let lock = lifecycle_lock(workspace)?;
     let prior = Owner::read(workspace)?;
-    let storage = storage
-        .or_else(|| prior.as_ref().map(|owner| owner.storage))
-        .unwrap_or(StorageMode::ComposeDisk);
     let file = match compose_file {
         Some(path) => fs::canonicalize(path),
         None => match environment.get("FLEETWORKS_COMPOSE_FILE") {
@@ -475,14 +592,17 @@ fn prepare(
             DISK_URL.to_owned()
         }
         StorageMode::External => {
-            let url = value(&environment, STORAGE_URL)?
-                .or_else(|| {
-                    prior
-                        .as_ref()
-                        .filter(|owner| owner.storage == storage)
-                        .map(|owner| owner.endpoint.clone())
-                })
-                .context("external storage requires FLEETWORKS_STORAGE_URL")?;
+            let url = match storage_url {
+                Some(url) => url.to_owned(),
+                None => value(&environment, STORAGE_URL)?
+                    .or_else(|| {
+                        prior
+                            .as_ref()
+                            .filter(|owner| owner.storage == storage)
+                            .map(|owner| owner.endpoint.clone())
+                    })
+                    .context("external storage requires FLEETWORKS_STORAGE_URL")?,
+            };
             external_url(&url)?
         }
         StorageMode::HostMemory | StorageMode::HostDisk => {
@@ -899,7 +1019,8 @@ mod tests {
     use fleetworks_workspace::Workspace;
 
     use super::{
-        external_url, lifecycle_lock, local_socket, owner_path, project_name, Owner, StorageMode,
+        external_url, interpret_storage_choice, lifecycle_lock, local_socket, owner_path,
+        project_name, remote_health_url, Owner, StorageChoice, StorageMode,
     };
 
     #[test]
@@ -918,6 +1039,31 @@ mod tests {
         }
         assert!(local_socket("unix:///tmp/docker.sock").is_ok());
         assert!(local_socket("ssh://fixture").is_err());
+    }
+
+    #[test]
+    fn storage_prompt_accepts_local_or_remote() {
+        assert!(matches!(
+            interpret_storage_choice("local"),
+            StorageChoice::Local
+        ));
+        assert!(matches!(interpret_storage_choice(""), StorageChoice::Local));
+        assert!(matches!(
+            interpret_storage_choice(" remote "),
+            StorageChoice::Remote
+        ));
+        assert!(matches!(
+            interpret_storage_choice("compose-disk"),
+            StorageChoice::Invalid
+        ));
+    }
+
+    #[test]
+    fn remote_health_check_uses_the_storage_origin() {
+        let health = remote_health_url("wss://surreal.example.test:8000").unwrap();
+        assert_eq!(health.as_str(), "https://surreal.example.test:8000/health");
+        let host = remote_health_url("ws://host.docker.internal:8010/").unwrap();
+        assert_eq!(host.as_str(), "http://host.docker.internal:8010/health");
     }
 
     #[test]

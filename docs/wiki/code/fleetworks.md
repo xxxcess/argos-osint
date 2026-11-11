@@ -30,7 +30,7 @@ See the [CLI command reference](../../../apps/fleetworks-cli/README.md) for rout
 
 ## Launch the Compose stack
 
-From the repository root, run `target/debug/venture --workspace ./review-workspace up` with a local Docker engine and Docker Compose installed. Venture builds and starts the API, private Brain, Tools, Control and Jobs services, brief worker, private model execution, other background workers, production web relay and disk-backed SurrealDB. The launcher creates private local credentials and records the Compose project it owns.
+From the repository root, run `target/debug/venture --workspace ./review-workspace up` with a local Docker engine and Docker Compose installed. On a new interactive setup, Venture asks for the storage target. `local` starts SurrealDB 3.3.4 on this host and points the Docker services at `host.docker.internal`. `remote` asks for a `wss://` URL and checks that the database answers `/health` before the stack is recorded. A non-interactive setup with no prior target uses the Compose disk database. Pass `--storage` to select a target without a prompt. Venture then builds and starts the API, private Brain, Tools, Control and Jobs services, brief worker, private model execution, other background workers, and the production web relay. The launcher creates private local credentials and records the Compose project it owns.
 
 Open the web address Venture prints. The default is `http://127.0.0.1:3000`. Set `FLEETWORKS_WEB_PORT` or `FLEETWORKS_API_PORT` to remap the loopback ports. Use `venture status`, `venture logs --follow`, and `venture stop` with the same workspace. Stop retains the database directory.
 
@@ -40,7 +40,7 @@ Use `up --dev` or `web --dev` to run Next development mode from this checkout. V
 
 Add `--atlas` to start the private RabbitMQ, Compromise NLP, and Rust-BERT classifier services. Submit a durable cycle with `venture client atlas start --request-id <id>`. Use a new request ID for each new collection. The [Atlas deployment guide](../../../deploy/atlas-dispatch.md) explains the provider and model files required for a live cycle.
 
-Use `up --storage host-disk` or `up --storage host-memory` to let Venture own an installed SurrealDB 3.3.4 host process. Use `up --storage external` with an explicit `FLEETWORKS_STORAGE_URL` and root credential file for an existing disk-backed server. See the [deployment guide](../../../deploy/README.md) for environment options and manual Compose startup.
+Use `up --storage host-disk` for the local host database, or `up --storage external` with `FLEETWORKS_STORAGE_URL` for a remote server. Both paths are what the interactive `local` and `remote` choices record. `up --storage host-memory` is a disposable host database. See the [deployment guide](../../../deploy/README.md) for environment options and manual Compose startup.
 
 ## Run the network API and workers
 

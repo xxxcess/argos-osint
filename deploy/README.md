@@ -69,6 +69,10 @@ When running Compose directly, append `-f deploy/compose.dev.yml` after `-f depl
 
 Run `python3 deploy/verify.py --venture path/to/venture --dev` for a packaged development readiness and shutdown smoke check. The separate [browser development fixtures](../docs/wiki/code/react-ui-testing.md) exercise reload and live updates.
 
+## Choose a storage target
+
+A new `venture up` in a terminal asks whether the stack should use a local or remote SurrealDB. `local` runs SurrealDB 3.3.4 on the host at `0.0.0.0:8010` and gives the Docker services `ws://host.docker.internal:8010`. `remote` asks for a `wss://` origin and requests `https://<host>/health` before saving the stack. The check must succeed, so an unreachable or unhealthy database does not become the workspace target. Repeat runs keep the recorded target. `--storage compose-disk` remains the non-interactive default.
+
 ## Venture-managed host database
 
 Set `FLEETWORKS_SURREAL_BIN` to an installed SurrealDB 3.3.4 executable or make `surreal` available on `PATH`. Venture launches the authenticated server, waits for readiness, and points the Compose services at the Docker host gateway.
@@ -82,7 +86,7 @@ Use `--storage host-memory` for a disposable database. Host disk persists under 
 
 ## External database
 
-Set `FLEETWORKS_STORAGE_URL` to a reachable authenticated SurrealDB WebSocket origin. Use `wss://` for a remote TLS endpoint. For a server running on the Docker host, `host.docker.internal` is mapped to the host gateway. The external operator selects disk persistence and provides an existing root username and password for schema bootstrap.
+Set `FLEETWORKS_STORAGE_URL` to a reachable authenticated SurrealDB WebSocket origin, or enter that URL at the interactive remote prompt. Use `wss://` for a remote TLS endpoint. Venture requests `/health` on that origin and continues only when the response succeeds. For a server running on the Docker host, `host.docker.internal` is mapped to the host gateway. The external operator selects disk persistence and provides an existing root username and password for schema bootstrap.
 
 ```sh
 export FLEETWORKS_STORAGE_URL=wss://surreal.example.test:8000

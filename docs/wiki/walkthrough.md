@@ -14,7 +14,7 @@ Read the [product overview](../../README.md), then the [concept route](concepts/
 
 Install Rust 1.95.0, Docker, and Docker Compose v2.20 or newer. The [README quick start](../../README.md#quick-start) builds Venture and its clients and starts the default stack. The [workspace guide](code/fleetworks.md) covers initialization, configuration import, client commands, storage modes, and the current rollout. The [deployment guide](../../deploy/README.md) covers Compose profiles, credentials, and the client and web images. Live Atlas collection uses the [Atlas overlay](../../deploy/atlas-dispatch.md).
 
-From a built checkout, `venture up` starts the API, private services, workers, web relay, and disk-backed SurrealDB. `venture client <app>` opens one of the six clients. `venture web` adds the interactive Jobs and Logs session. `venture stop` keeps the database directory.
+From a built checkout, `venture up` starts the API, private services, workers, and web relay. The first interactive start asks for a host SurrealDB or a remote `wss://` database, and a remote choice is checked before it is saved. `venture client <app>` opens one of the six clients. `venture web` adds the interactive Jobs and Logs session. `venture stop` keeps the database directory.
 
 ## How a request moves
 

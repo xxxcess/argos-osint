@@ -21,6 +21,90 @@ const LEASE: i64 = 30;
 const HEAD_BOUND: usize = 8;
 
 #[tokio::test]
+async fn dispatch_pool_configuration_upgrades_legacy_records() {
+    use argos_osint_core::storage::job_dispatch;
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let db = server.raw_root("argos", "legacy_dispatch_pool").await;
+    jobs::apply_schema(&db).await.unwrap();
+    // Persist a pool before the required transport revision field existed.
+    db.query(
+        "DEFINE TABLE storage_meta SCHEMALESS;
+        CREATE storage_meta:identity SET instance_id='fixture-store';
+        DEFINE TABLE job_dispatch_pool SCHEMAFULL;
+        DEFINE FIELD enabled ON job_dispatch_pool TYPE bool;
+        CREATE job_dispatch_pool:atlas_cycle SET enabled=true;",
+    )
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+    db.query(job_dispatch::SCHEMA)
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    job_dispatch::configure_pool(&db, job_dispatch::ATLAS_POOL, false)
+        .await
+        .unwrap();
+    assert!(
+        !scalar::<bool>(
+            &db,
+            "RETURN (SELECT VALUE enabled FROM ONLY job_dispatch_pool:atlas_cycle)"
+        )
+        .await
+    );
+    assert_eq!(
+        scalar::<i64>(
+            &db,
+            "RETURN (SELECT VALUE transport_revision FROM ONLY job_dispatch_pool:atlas_cycle)"
+        )
+        .await,
+        0
+    );
+
+    job_dispatch::ensure_queue_transport(&db, job_dispatch::ATLAS_POOL)
+        .await
+        .unwrap();
+    db.query("UPDATE job_dispatch_pool:atlas_cycle SET transport_revision=7")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    for enabled in [true, false, true] {
+        job_dispatch::configure_pool(&db, job_dispatch::ATLAS_POOL, enabled)
+            .await
+            .unwrap();
+        assert_eq!(
+            scalar::<bool>(
+                &db,
+                "RETURN (SELECT VALUE enabled FROM ONLY job_dispatch_pool:atlas_cycle)"
+            )
+            .await,
+            enabled
+        );
+        assert_eq!(
+            scalar::<i64>(
+                &db,
+                "RETURN (SELECT VALUE transport_revision FROM ONLY job_dispatch_pool:atlas_cycle)"
+            )
+            .await,
+            7
+        );
+        assert_eq!(
+            scalar::<String>(
+                &db,
+                "RETURN (SELECT VALUE transport FROM ONLY job_dispatch_pool:atlas_cycle)"
+            )
+            .await,
+            "jobs_rocksdb_v1"
+        );
+    }
+}
+
+#[tokio::test]
 async fn embedded_queue_transport_requires_legacy_tasks_to_drain() {
     use argos_osint_core::storage::job_dispatch;
     let Some(server) = Server::start() else {

@@ -126,6 +126,8 @@ venture --workspace "$FLEETWORKS_HOST_WORKSPACE" up --storage external
 
 All modes default `FLEETWORKS_STORAGE_NAMESPACE`, `FLEETWORKS_STORAGE_DATABASE`, and `FLEETWORKS_STORAGE_USERNAME` to `fleetworks`. Bootstrap provisions the runtime account. Reuse its matching password with an existing database.
 
+Bootstrap preserves retained data when upgrading pool metadata. Its first configuration update initializes a missing `transport_revision` to `0`, preserving existing revisions and transport markers. Update the runtime image if bootstrap reports `Expected int but found NONE` for this field; resetting the database is unnecessary.
+
 ## Web, API, and image settings
 
 Set `FLEETWORKS_WEB_PORT` to change the published web port. Compose sets `FLEETWORKS_WEB_ORIGIN` to the corresponding `http://127.0.0.1` origin. An override must use the exact loopback address and published port opened by the browser. The web relay reaches the API on the private `http://api:8080` origin, and its readiness probe checks that relay path.

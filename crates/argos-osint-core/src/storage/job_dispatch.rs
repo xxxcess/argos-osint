@@ -167,7 +167,9 @@ pub async fn configure_pool(db: &Surreal<Any>, pool: &str, enabled: bool) -> Res
         }
         jobs::run(
             &tx,
-            tx.query("UPSERT $pool SET enabled=$enabled RETURN NONE")
+            // DEFAULT only initializes new records. Pools retained from the
+            // previous schema need this field initialized on their first update.
+            tx.query("UPSERT $pool SET enabled=$enabled, transport_revision=transport_revision ?? 0 RETURN NONE")
                 .bind(("pool", jobs::rid("job_dispatch_pool", pool)))
                 .bind(("enabled", enabled)),
         )

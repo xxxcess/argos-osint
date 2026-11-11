@@ -40,7 +40,7 @@ The figure is the development cycle. Embedded compatibility, release candidates,
 
 ## `fleetworks.yml` — scoped branch checks
 
-The [Fleetworks workflow](../../../.github/workflows/fleetworks.yml) is the build and test cycle for client, service, image, Compose, web, and classifier changes. It runs the full selection on the default branch once the scheduled workflow is present there. The [shared planner](../../../scripts/fleetworks_verify.py) selects jobs from the event commit and changed paths. Markdown and documentation figures skip runtime scopes. Shared Rust contracts widen selection. Unknown paths, planner edits, and unavailable comparisons select all scopes. The workflow cancels stale pull-request and dispatch runs. Pushes complete.
+The [Fleetworks workflow](../../../.github/workflows/fleetworks.yml) is the build and test cycle for client, service, image, Compose, web, and classifier changes. It runs the full selection on the default branch once the scheduled workflow is present there. The [shared planner](../../../scripts/fleetworks_verify.py) selects jobs from the pull request's changed paths, or from the two commits on a push. Markdown, documentation figures, workflow files, and the compatibility CLI do not add a Fleetworks lane. Shared Rust contracts widen selection. A full or nightly dispatch, and a comparison that cannot be read, select every lane. The workflow cancels stale pull-request and dispatch runs. Pushes complete.
 
 | Scope | Hosted evidence |
 | --- | --- |

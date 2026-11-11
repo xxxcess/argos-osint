@@ -50,9 +50,11 @@ class PathScopesTests(unittest.TestCase):
             "crates/fleetworks-contracts/src/lib.rs": {"native", "server", "storage", "compose", "broker", "images"},
             "packages/api-client/src/index.ts": {"web", "server", "compose", "images"},
             "scripts/surrealdb-release.json": {"server", "storage", "broker"},
-            ".github/workflows/fleetworks.yml": ALL_SCOPES,
-            "scripts/fleetworks_verify.py": ALL_SCOPES,
-            "new/unknown/build input": ALL_SCOPES,
+            ".github/workflows/fleetworks.yml": set(),
+            ".github/workflows/embedded.yml": set(),
+            "scripts/fleetworks_verify.py": set(),
+            "crates/argos-osint-bin/src/cli.rs": set(),
+            "new/unknown/build input": set(),
         }
         for path, expected in cases.items():
             with self.subTest(path=path):
@@ -159,9 +161,9 @@ class GitScopeTests(unittest.TestCase):
         self.assert_scopes(self.plan(self.start, head=head, mode="pr"), {"web", "server", "compose", "images"}, images={"web"})
         self.assert_scopes(self.plan(self.start, head=head, mode="full"), ALL_SCOPES, full=True, images=ALL_IMAGES)
 
-    def test_unknown_workflow_edit_selects_every_server_image(self):
-        head = self.commit(".github/workflows/fleetworks.yml")
-        self.assert_scopes(self.plan(self.start, head=head), ALL_SCOPES, images=ALL_IMAGES)
+    def test_workflow_edit_does_not_select_unrelated_lanes(self):
+        head = self.commit(".github/workflows/fleetworks.yml", ".github/workflows/embedded.yml")
+        self.assert_scopes(self.plan(self.start, head=head), set())
 
     def test_local_selection_adds_worktree_changes(self):
         file = self.repo / "apps/fleetworks-cli/src/jobs.rs"

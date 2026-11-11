@@ -139,8 +139,33 @@ def raw_path_scopes(path):
     if path.startswith(SERVER_PREFIXES) or path == "scripts/fleetworks_atlas_smoke.py":
         return scopes | {"server", "broker"}
 
-    # Unknown files and planner or workflow edits may affect every lane.
-    return ALL_SCOPES
+    # A pull request runs only lanes named by its changed paths. These files are
+    # checked by the scope job, the main-merge embedded workflow, or a dispatch.
+    if path.startswith((
+        "crates/argos-osint-bin/",
+        ".opencode/",
+        ".agents/",
+        "scripts/fleetworks_candidate",
+        "scripts/test_fleetworks_candidate",
+    )) or path in {
+        ".github/workflows/fleetworks.yml",
+        ".github/workflows/embedded.yml",
+        ".github/workflows/mutation.yml",
+        ".github/workflows/datasets.yml",
+        ".github/workflows/commit-policy.yml",
+        ".github/workflows/release-please.yml",
+        ".github/workflows/fleetworks-candidate.yml",
+        ".github/workflows/fleetworks-candidate-target.yml",
+        ".gitignore",
+        "release-please-config.json",
+        ".release-please-manifest.json",
+        "scripts/fleetworks_verify.py",
+        "scripts/test_fleetworks_verify.py",
+        "scripts/release_check.mjs",
+    }:
+        return set()
+
+    return set()
 
 
 def path_scopes(path):

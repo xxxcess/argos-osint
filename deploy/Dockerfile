@@ -58,7 +58,10 @@ ENTRYPOINT ["node", "server.mjs"]
 
 FROM rust:1.95.0-bookworm AS build
 ARG TARGETARCH
-ENV CARGO_INCREMENTAL=0
+ARG CARGO_BUILD_JOBS=1
+ARG FLEETWORKS_CORE_CODEGEN_UNITS=256
+ARG FLEETWORKS_CORE_OPT_LEVEL=3
+ENV CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
@@ -68,6 +71,8 @@ COPY apps/venture ./apps/venture
 RUN --mount=type=cache,id=fleetworks-registry-${TARGETARCH},target=/usr/local/cargo/registry \
     --mount=type=cache,id=fleetworks-target-${TARGETARCH},target=/src/target,sharing=locked \
     cargo build --release --locked -p argos-api-host --no-default-features --features server,nlp,classifier \
+        --config "profile.release.package.argos-osint-core.codegen-units=${FLEETWORKS_CORE_CODEGEN_UNITS}" \
+        --config "profile.release.package.argos-osint-core.opt-level=${FLEETWORKS_CORE_OPT_LEVEL}" \
     && install -D target/release/argos-api-host /out/argos-api-host
 
 FROM debian:bookworm-slim AS runtime
@@ -84,7 +89,8 @@ ENTRYPOINT ["/usr/local/bin/argos-api-host"]
 # separate image so a development cycle can build only the binaries it changed.
 FROM rust:1.95.0-bookworm AS clients_build
 ARG TARGETARCH
-ENV CARGO_INCREMENTAL=0
+ARG CARGO_BUILD_JOBS=1
+ENV CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates

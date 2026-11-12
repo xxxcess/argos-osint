@@ -264,7 +264,10 @@ fn disk_free_bytes(directory: &Path) -> Option<u64> {
         return None;
     }
     let result = unsafe { result.assume_init() };
-    (result.f_bavail as u64).checked_mul(result.f_frsize as u64)
+    // Field widths vary across Unix; retain the u64 overflow boundary.
+    let available = u128::from(result.f_bavail);
+    let fragment_size = u128::from(result.f_frsize);
+    u64::try_from(available * fragment_size).ok()
 }
 #[cfg(not(unix))]
 fn disk_free_bytes(_directory: &Path) -> Option<u64> {

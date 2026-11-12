@@ -185,7 +185,7 @@ async fn ingress(State(service): State<Service>, mut request: Request, next: Nex
         request.uri().path(),
         BATCH_PATH | START_PATH | PROMOTE_PATH | REPAIR_PATH | RETIRE_PATH
     );
-    if (!read && !write) || (mutating && !write) {
+    if (mutating || !read) && !write {
         return failure(StatusCode::FORBIDDEN, "private_permission_denied");
     }
     let Ok(_permit) = Arc::clone(&service.requests).try_acquire_owned() else {
@@ -242,7 +242,7 @@ async fn query(State(service): State<Service>, body: Bytes) -> Response {
     }
     let request: ActorIndexQuery = match decode(&body) {
         Ok(value) => value,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let engine = match service.engine.snapshot() {
         Ok(Some(engine)) => engine,
@@ -326,7 +326,7 @@ async fn repair(
         return failure(StatusCode::PAYLOAD_TOO_LARGE, "control_body_limit");
     }
     if let Err(response) = admit_pace(&service) {
-        return response;
+        return *response;
     }
     let task = tokio::task::spawn_blocking(move || {
         let _permit = permit;
@@ -370,7 +370,7 @@ async fn retire(
         return failure(StatusCode::PAYLOAD_TOO_LARGE, "control_body_limit");
     }
     if let Err(response) = admit_pace(&service) {
-        return response;
+        return *response;
     }
     let Ok(queries) =
         Arc::clone(&service.queries).try_acquire_many_owned(service.config.query_capacity as u32)
@@ -413,7 +413,7 @@ async fn write<T: Serialize + Send + 'static>(
         Err(error) => return index_failure(error),
     };
     if let Err(response) = admit_pace(&service) {
-        return response;
+        return *response;
     }
     let task = tokio::task::spawn_blocking(move || {
         let _permit = permit;
@@ -437,7 +437,7 @@ async fn write<T: Serialize + Send + 'static>(
     }
 }
 
-fn admit_pace(service: &Service) -> Result<(), Response> {
+fn admit_pace(service: &Service) -> Result<(), Box<Response>> {
     match service.pace.lock() {
         Ok(mut pace) => {
             if pace
@@ -447,21 +447,25 @@ fn admit_pace(service: &Service) -> Result<(), Response> {
                 )
                 .is_err()
             {
-                return Err(retry(StatusCode::TOO_MANY_REQUESTS, "write_paced"));
+                return Err(Box::new(retry(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "write_paced",
+                )));
             }
         }
         Err(_) => {
-            return Err(failure(
+            return Err(Box::new(failure(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "pace_state_poisoned",
-            ))
+            )))
         }
     }
     Ok(())
 }
 
-fn decode<T: DeserializeOwned>(body: &[u8]) -> Result<T, Response> {
-    serde_json::from_slice(body).map_err(|_| failure(StatusCode::BAD_REQUEST, "invalid_json"))
+fn decode<T: DeserializeOwned>(body: &[u8]) -> Result<T, Box<Response>> {
+    serde_json::from_slice(body)
+        .map_err(|_| Box::new(failure(StatusCode::BAD_REQUEST, "invalid_json")))
 }
 fn result_response<T: Serialize>(result: Result<T, IndexError>) -> Response {
     match result {

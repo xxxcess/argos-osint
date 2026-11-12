@@ -737,19 +737,20 @@ impl Engine {
             .control
             .lock()
             .map_err(|_| IndexError::unavailable("writer_state_poisoned"))?;
-        if state.manifest.active == request.replacement_generation && state.pending.is_none() {
-            if state.active.visible.checkpoint >= request.catchup_checkpoint {
-                if request.writer_epoch < state.active.visible.writer_epoch {
-                    return Err(IndexError::conflict("stale_writer_epoch"));
-                }
-                if request.writer_epoch > state.active.visible.writer_epoch {
-                    let mut next = state.active.committed.clone();
-                    next.writer_epoch = request.writer_epoch;
-                    state.active.commit(next)?;
-                    self.publish(&state.active)?;
-                }
-                return Ok(state.active.view());
+        if state.manifest.active == request.replacement_generation
+            && state.pending.is_none()
+            && state.active.visible.checkpoint >= request.catchup_checkpoint
+        {
+            if request.writer_epoch < state.active.visible.writer_epoch {
+                return Err(IndexError::conflict("stale_writer_epoch"));
             }
+            if request.writer_epoch > state.active.visible.writer_epoch {
+                let mut next = state.active.committed.clone();
+                next.writer_epoch = request.writer_epoch;
+                state.active.commit(next)?;
+                self.publish(&state.active)?;
+            }
+            return Ok(state.active.view());
         }
         if state.manifest.active != request.expected_generation {
             return Err(IndexError::conflict("active_generation_changed"));

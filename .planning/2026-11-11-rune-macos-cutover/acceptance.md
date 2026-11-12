@@ -103,6 +103,8 @@ Detailed command output is retained in ignored local verification logs. This cur
 
 ## Commit ledger
 
+- `f8c216c` — committed saved connections, scoped Jobs/Logs, real paging and affected contracts/fixtures/plans (88 files). Scoped native119, strict native/backend Clippy, latest ARM source check and selected final captures pass. The clean Intel debug app/archive built and passed independent bundle verification; full embedded and Docker/platform gates remain separate.
+
 - `f311350` — committed saved-profile reset CAS/recovery and fresh configuration revision-zero verification (5 files), with 29 synthetic reset and 4 deployment verification cases passing. Production reset remains sealed and unexecuted.
 
 - `1272a0b` — committed affected canonical guides, 20 exact HTML/SVG pairs and curated local evidence (53 files). All changed pairs passed XML/accessibility/parity checks and were rendered/inspected; 1,689 relative documentation links pass. This is documentation evidence, not a runtime/platform gate.
@@ -124,7 +126,7 @@ The focused required-embedded logs/reset check passes ten executed cases: five A
 
 The profile/log renderer generated 52 captures, with 14 selected captures covering all 13 scene names inspected. The final Jobs/preserved-view renderer generated 40 captures, with 11 selected captures covering all ten chosen scenes inspected. Current representative saved-profile and loaded-Logs PNGs match their prior bytes exactly. The 450-row Table has 268 layout nodes in the recorded debug diagnostic; single contended frames do not establish production responsiveness. Generated but uninspected variants and real GUI behavior remain separate. All 20 affected HTML/SVG pairs were checked, rendered and inspected.
 
-The actual debug app archive, full native embedded matrix and isolated Docker journey remain pending. Physical-Mac, hosted CI/download, real Linux inference artifacts, trusted publication, terminal retirement and actual reset/layout obligations remain open. Source completion and scoped synthetic checks do not imply full cutover acceptance.
+The actual clean-source debug app archive now passes build and independent verification; the full native embedded matrix stopped before tests on search-service lint blockers. Minimal search and fixture repairs now pass strict all-target workspace Clippy (3m42s); the required runtime phases will resume. The isolated Docker journey remains pending. Physical-Mac, hosted CI/download, real Linux inference artifacts, trusted publication, terminal retirement and actual reset/layout obligations remain open. Source completion and scoped synthetic checks do not imply full cutover acceptance.
 
 ## Committed tooling checkpoint
 
@@ -133,3 +135,11 @@ The native renderer verifier passed its 10 offline cases and actually generated 
 The tool-only source has 64 passing Python cases: platform 7, candidate 16, planner 16, image candidate 5, native verifier 10, Linux worker verifier 10. Seven guidance/policy checks pass. The default host build helper now omits Cargo's explicit target argument, and unknown build inputs conservatively select checks/images. Three changed workflows pass the Code Architect's static actionlint check; real hosted Linux inference and Mac artifact jobs remain pending. This checkpoint excludes the still-changing UI/backend/reset/deployment smoke increments.
 
 - `fa52b0c` — committed the independent native/Linux verification, planner and agent-guidance checkpoint: 64 tool Python cases, 7 policy cases and actual 52-capture generation. The new UI layout, reset adapter, operational backend and deployment driver remain in the next source increment. No push or publication.
+
+## Local debug app artifact
+
+Source `f8c216c2b3cdfcfa6b4f22098fdf5f18f75f312f`, clean tree, version0.2.1, debug, `x86_64-apple-darwin`, repository toolchain1.95.0 and exact Rune pin. The build used the implicit shared host debug graph. The archive is `Fleetworks-0.2.1-f8c216c2b3cd-local-1794495750731160000.1-x86_64-apple-darwin.zip` (34,616,869 bytes). SHA256: `57dabfec3889346b18301bc1900af224cfb31acb285c877b21a626d0daf84594`.
+
+The separate verify-native invocation checked archive/source/profile/Rune identity, safe extraction, bundle file hashes/permissions, Info.plist, Mach-O architecture and linked libraries. All passed. Declared minimum macOS is13.0; actual minimum-OS behavior is unverified. This is an unsigned local review app. GUI launch, signing/notarization, hosted download checks and the second physical Mac remain pending.
+
+The full workspace lint retry passes after minimal search-service control-flow/error-layout/portable-probe repairs and three equivalent Jobs fixture initializers. HTTP response contents, auth/pacing semantics, promotion behavior and assertions are unchanged. The original matrix failure remains recorded; runtime acceptance still requires the remaining canonical matrix stages.

@@ -452,8 +452,10 @@ mod tests {
         assert_eq!(overflow.apps.len(), 32);
         assert!(!overflow.apps_complete);
         assert_eq!(overflow.apps.last().map(String::as_str), Some("app-31"));
-        let mut filter = LogFilters::default();
-        filter.app = "app-32".into();
+        let filter = LogFilters {
+            app: "app-32".into(),
+            ..Default::default()
+        };
         let narrowed = store
             .scoped_log_page(ScopedLogRead::new(
                 vec!["allowed".into()],
@@ -590,8 +592,10 @@ mod tests {
         assert_eq!(follow.rows.len(), 1);
         assert_eq!(follow.rows[0].row.id, "new-a");
         assert_eq!(follow.counts.total, 3);
-        let mut filter = LogFilters::default();
-        filter.text = "foreign private".into();
+        let filter = LogFilters {
+            text: "foreign private".into(),
+            ..Default::default()
+        };
         let private = store
             .scoped_log_page(ScopedLogRead::new(
                 ids,
@@ -608,8 +612,10 @@ mod tests {
         // Retained/direct-store rows can exceed the normal EventRow append
         // bound. Their unprojected suffix cannot influence public search.
         store.log_append(json!({"id":"oversized-summary","ts":"2026-11-12T12:02:00Z","job_id":"a-root","app":"brain","severity":"info","message":format!("{}nonprojected-suffix", "a".repeat(1000))})).await?;
-        let mut suffix_filter = LogFilters::default();
-        suffix_filter.text = "nonprojected-suffix".into();
+        let suffix_filter = LogFilters {
+            text: "nonprojected-suffix".into(),
+            ..Default::default()
+        };
         let hidden_suffix = store
             .scoped_log_page(ScopedLogRead::new(
                 vec!["a-root".into()],

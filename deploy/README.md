@@ -87,7 +87,7 @@ Native uses `secrets/native-token` for registration and permitted operations. A 
 
 Jobs alone opens `storage/jobs/`: SQLite operational logs and its embedded RocksDB dispatch queue. Other services use authenticated private Jobs HTTP. Preserve the entire directory across restarts. SurrealDB retains domain records and current scheduler state; the separate [SQLite scheduler cutover](../docs/wiki/code/jobs-persistence.md) remains incomplete. Search has its own owned index directory and database/source identity.
 
-No ordinary build/startup command imports old credentials, resets configuration, deletes data or rotates epochs. Historical RabbitMQ deployments require a drain and shutdown using the previous installation before a new deployment; pending old deliveries are not silently reconstructed. Retired launchers are not current recovery tools. Keep old data and receipts for explicit operator recovery.
+Setup starts with a fresh deployment directory and new operational stores. There are no pre-existing jobs or queue data to migrate. Subsequent starts retain the deployment's credentials, configuration, epochs and acknowledged work; ordinary startup never resets them.
 
 ## Web and development
 

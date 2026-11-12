@@ -1,5 +1,7 @@
 # Embedded Jobs persistence checkpoint
 
+Historical verification record. The user's 2026-11-12 fresh-deployment decision supersedes the rollout/drain prerequisites below; see the [current persistence contract](../../docs/wiki/code/jobs-persistence.md). Test names, results and limitations remain evidence for their original revision.
+
 Validated source checkpoint: `7f579d7` on `feat/atlas-zero-shot`.
 
 ## Delivered boundary

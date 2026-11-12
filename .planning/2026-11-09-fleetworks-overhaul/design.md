@@ -1,6 +1,6 @@
 # Fleetworks proposed design
 
-Status: approved design. The task plan tracks implementation and acceptance separately.
+Status: historical design. Current entry points and storage ownership are documented in the [Fleetworks guide](../../docs/wiki/code/fleetworks.md) and [Jobs persistence contract](../../docs/wiki/code/jobs-persistence.md). The user's 2026-11-12 fresh-deployment decision supersedes the former delivery-service design and migration assumptions below. The original design is retained as historical context.
 
 ## Product and build outputs
 Venture is the system entry point. Ship venture and fleetworks-brain, fleetworks-atlas, fleetworks-jobs (Jobs & Logs), fleetworks-tools, fleetworks-models and fleetworks-profile. Preserve React Native Web and Intel articles/briefs/actors/topology. Remove the existing Recon research pipeline after extracting shared dependencies.

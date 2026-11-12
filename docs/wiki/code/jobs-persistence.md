@@ -6,16 +6,16 @@
 
 ## Planned ownership
 
-Fleetworks is moving operational job traffic out of the domain datastore and replacing RabbitMQ with a disk-backed queue embedded in Jobs. This is a target architecture; the rollout table below identifies unfinished integration.
+Jobs owns SQLite operational logs and a disk-backed RocksDB delivery queue. Moving scheduling and the remaining operational job traffic out of the domain datastore is still planned; the rollout table below identifies unfinished integration.
 
 | Owner | Authoritative data | Boundary |
 | --- | --- | --- |
 | Jobs / SQLite | Jobs, tasks, attempts, execution leases, retries, cancellation, progress, logs, operational telemetry and enqueue intents | Authenticated Jobs HTTP; SQL never exposed to clients |
 | Jobs / RocksDB | Delivery messages, visibility leases, acknowledgments, delayed requeues and dead letters | Embedded in the same Jobs process; workers use queue HTTP operations |
 | Domain services / SurrealDB | Articles, actors, evidence, briefs, results, business admission/accounting, domain publication fences and applied-operation receipts | Existing domain repositories and service APIs |
-| Direct Docker deployment | Explicit backend paths, purpose credentials, service lifecycle and storage endpoint | No native app deployment ownership, RabbitMQ server or external broker configuration |
+| Direct Docker deployment | Explicit backend paths, purpose credentials, service lifecycle and storage endpoint | Native app connects through the gateway; Jobs owns its operational stores |
 
-Only Jobs opens either operational database. Other containers must not mount its data directory. Both stores persist beneath workspace `storage/jobs/`; stop and container replacement retain them. `local-net` selects the existing **domain** SurrealDB endpoint; local job storage remains owned by Jobs. `local-process` manages domain SurrealDB; it does not need a native broker in the target architecture.
+Only Jobs opens either operational database. Other containers must not mount its data directory. Both stores persist beneath deployment `storage/jobs/`; stop and container replacement retain them. Domain services use the configured network SurrealDB endpoint while Jobs keeps exclusive ownership of its local operational files.
 
 [![Planned Jobs persistence](../../diagrams/jobs-persistence.svg)](../../diagrams/jobs-persistence.html)
 
@@ -39,15 +39,15 @@ Resolve pending publication proposals before acknowledging conflicting cancellat
 | Scope | Required result | Current boundary |
 | --- | --- | --- |
 | SQLite ownership | Persisted operational primitives, standalone logs, private HTTP and Jobs-only disk mount | Implemented; focused persistence and HTTP checks pass |
-| Embedded delivery | RocksDB queue, Atlas adapter, visibility recovery, Rabbit-free startup and deployment references | Native Atlas smoke passes; Docker image/deployment gate pending |
+| Embedded delivery | RocksDB queue, Atlas adapter, visibility recovery and standalone deployment | Native Atlas smoke passes; Docker image/deployment gate pending |
 | Operational authority | Route scheduling, attempts, process heartbeat/recovery, retry/cancel and dashboard reads through Jobs together | Planned; production scheduling still uses SurrealDB |
 | Domain handoff | Admission intents, publication reconciliation, cancellation/expiry/generation fences | Planned; existing domain transactions remain authoritative |
 | Telemetry | Move writes, hourly/daily rollups, retention and Profile readers together | Planned; do not move only writers |
-| Cutover | Persisted drain proof and backend generation, then enable new SQLite submissions | Drain-first policy selected; no live lease copying |
+| Initialization | Fresh operational stores, validated service boundary and persisted backend generation | Fresh deployment selected; full SQLite scheduling authority remains planned |
 
-Drain existing queued/running work through the old backend before switching new submissions. Previously published Rabbit messages are absent from the new queue: an empty unpublished outbox alone does not prove drain. Check unfinished tasks, execution leases, outstanding deliveries and pending publication effects. Preserve old records, credentials and data; retain legacy ownership decoding so an old managed stack can still be stopped. Never run both schedulers against the same job generation.
+Setup assumes a fresh deployment with new operational stores. There are no pre-existing jobs or deliveries to migrate or drain. The future SQLite scheduler must initialize a persisted backend generation and enable submissions only after its domain handoff and fencing contracts are implemented. A job generation has one scheduling authority.
 
-Historical standalone SurrealDB logs are retained in their original store; the current log adapter does not copy them automatically. The final dashboard/history disposition must be explicit before job reads switch.
+After initial setup, restarts preserve acknowledged jobs, logs, pending intents and publication receipts. Startup reconciles unfinished work; an unavailable service or empty query result never authorizes replacing stores or resetting generations. Move dashboard readers with their corresponding operational writers.
 
 ## Scaling and acceptance
 
@@ -55,6 +55,6 @@ The first deployment has one Jobs owner and multiple remote worker processes. Ro
 
 Treat performance as a measured outcome. Compare core-domain write latency under concurrent enqueue, lease, progress, log and telemetry load; record job throughput, delivery latency, memory, queue depth, outbox lag and recovery time. Backpressure and retention must bound growth.
 
-Acceptance requires disk reopen and process-kill recovery, single-owner claim races, stale epoch rejection, duplicate publication/ack replay, delayed retries, dead letters, cross-store handoff crash points and drain/restart fencing. Exercise cancellation, expiry and source replacement during domain publication. Run synthetic isolated HTTP/startup fixtures; keep the user's stack untouched. A primitive store test is not evidence that full scheduler isolation is complete.
+Acceptance requires fresh initialization, disk reopen and process-kill recovery, single-owner claim races, stale epoch rejection, duplicate publication/ack replay, delayed retries, dead letters, cross-store handoff crash points and restart fencing. Exercise cancellation, expiry and source replacement during domain publication. Run synthetic isolated HTTP/startup fixtures; keep the user's stack untouched. A primitive store test is not evidence that full scheduler isolation is complete.
 
 Implementation entry points: [operational store](../../../crates/fleetworks-jobs), [Jobs host](../../../services/api-host/src/jobs_service.rs), [log adapter](../../../crates/argos-osint-core/src/storage/jobs_client.rs), and [transitional domain dispatch](../../../crates/argos-osint-core/src/storage/job_dispatch.rs).

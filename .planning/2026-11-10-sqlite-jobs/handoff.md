@@ -2,7 +2,7 @@
 
 ## Agreed outcome and current boundary
 
-User selected SQLite as durable authoritative storage for **all operational job data**: scheduling, tasks, attempts, leases, retries, progress, logs and operational telemetry. SurrealDB retains product/domain data and the minimum domain intents, publication fences and applied-operation receipts required for atomic domain correctness. The user subsequently selected a Jobs-owned RocksDB embedded delivery queue to replace RabbitMQ, paired with SQLite operational state. Only the Jobs service opens SQLite, on a persistent local volume. Workers and other services use authenticated private HTTP. Existing Surreal jobs must **drain before new jobs switch**; do not migrate live leases by copying rows.
+User selected SQLite as durable authoritative storage for **all operational job data**: scheduling, tasks, attempts, leases, retries, progress, logs and operational telemetry. SurrealDB retains product/domain data and the minimum domain intents, publication fences and applied-operation receipts required for atomic domain correctness. Delivery uses a Jobs-owned RocksDB embedded queue paired with SQLite operational state. Only the Jobs service opens SQLite, on a persistent local volume. Workers and other services use authenticated private HTTP. On 2026-11-12 the user confirmed a fresh deployment with no existing jobs or queue data to migrate; earlier drain-first rollout requirements are superseded.
 
 The verified checkpoint includes SQLite store primitives, standalone operational `argos_event` logs, the Jobs-owned RocksDB queue and the Atlas HTTP delivery adapter. This is **not full job isolation**. The scheduler, domain-integrated task transitions, process recovery, `job_event` lifecycle logs, attempts and telemetry remain Surreal-backed. Never describe generic store methods as an active production scheduler merely because they exist. Verification outcomes belong in acceptance/progress records; this handoff makes no pass claim.
 
@@ -45,31 +45,31 @@ Use Jobs-owned durable publication proposals, domain-owned generation fences and
 
 Before accepting new claims after restart, reconcile unresolved proposals. Already applied domain receipts finish the SQLite transition idempotently; unapplied proposals must pass persisted lease-expiry, cancellation, source-generation and ownership authority before publication. A proposal cannot extend an expired lease merely by being queued. Brief generation/source replacement and deletion fences remain domain checks. Preserve the existing rule that interrupted paid calls are not blindly reissued.
 
-This protocol requires integration tests at the real boundary. Do not replace current fences with best-effort RPC checks or claim exactly-once effects from RabbitMQ acknowledgments.
+This protocol requires integration tests at the real boundary. Do not replace current fences with best-effort RPC checks or claim exactly-once effects from delivery acknowledgments.
 
 ### 4. Move telemetry and its readers together
 
 Port `storage::telemetry` writes, prune/coverage/prefix queries and Profile rollup/read paths together. Existing writes update raw rows and hourly/daily rollups atomically with first-seen idempotence. Moving writes alone silently empties Profile analytics. Similarly preserve lifecycle log ordering/filtering and job detail attempt data when removing Surreal operational tables.
 
-### 5. Drain and switch
+### 5. Initialize a fresh deployment
 
-Persist a workspace-level cutover state with explicit preflight, draining and SQLite-active states. Preflight validates writable persistent SQLite storage, schema, authenticated service availability and fencing protocol. During draining, pause new domain job admission into the old backend (retain durable incoming intents for later submission); let existing jobs finish or explicitly terminate through their existing guarded control path. Verify no running/queued/reconciling tasks, unresolved leases, unacknowledged delivery work or pending domain publications remain. A simple running-count check is insufficient.
+Initialize fresh persistent operational stores and a backend generation. Preflight validates writable SQLite storage, schema, authenticated service availability and the complete domain handoff/fencing protocol before enabling SQLite job submissions. The deployment has no pre-existing work to migrate or drain. Keep one scheduling authority for each job generation.
 
-Activate new-job submission only after drain proof and a durable backend-generation change. Old deliveries carry the old workspace/backend generation and must be acknowledged as stale without execution. Restart resumes the recorded phase; it must not infer a fresh switch from empty tables. Do not reset or delete old operational records automatically. Retain read-only historical access or an explicit verified archive/import contract; decide and document this before changing dashboard reads. Rollback before activation may resume the old backend; rollback after new SQLite jobs exist requires its own drain, never dual scheduling.
+After initial setup, restart preserves the recorded generation, acknowledged work, pending intents and publication receipts. Reconcile unfinished effects before new claims; stale-generation deliveries cannot execute. An empty query result or unavailable service never authorizes reinitialization, deleting operational records or running both scheduling backends.
 
 ## Acceptance before declaring full isolation
 
 - Disk reopen and process-kill recovery preserve acknowledged jobs/logs, receipts, attempts and pending outbox work; incompatible schema fails startup.
 - Multiple workers racing a claim produce one owner/epoch. Expired owners cannot renew, finish, publish or resurrect authority. Dependency order, bounded retries and cancellation of descendants match current behavior.
-- Lost responses to submit/claim/finish/cancel/dispatch reuse stable keys and return original committed results. Duplicate Rabbit deliveries do not duplicate execution effects.
+- Lost responses to submit/claim/finish/cancel/dispatch reuse stable keys and return original committed results. Duplicate queue deliveries do not duplicate execution effects.
 - Crash tests cover before/after domain intent commit, SQLite acceptance, domain publication receipt and SQLite finalization. Cancellation, lease expiry, takeover, generation replacement and source deletion race publication through controlled barriers.
 - Process recovery preserves the existing rule that datastore/service unavailability is not proof of dead workers. No false orphan recovery after outages.
 - Logs retain redaction/bounds, filters, descendant selection, cursors, counts, apps and retention. Profile raw/rollup values retain first-seen idempotence and coverage behavior.
-- Drain tests prove new admission is paused, durable intents are retained, restart resumes its phase, old-generation deliveries cannot execute and post-activation rollback cannot run both schedulers.
+- Fresh-start and restart tests prove the generation is initialized once, acknowledged work and durable intents survive restart, stale-generation deliveries cannot execute and only one scheduler has authority.
 - Authorized isolated startup smoke uses synthetic workspace/credentials and leaves the user's stack untouched. A concurrent synthetic job/log load test measures core-domain write latency and verifies operational polling/leases/progress no longer write Surreal job tables. Shared host/disk contention still exists; do not promise physical isolation.
 
 Only after these integration contracts pass should docs call SQLite the authoritative production job backend or remove Surreal operational schema/compatibility paths.
 
 ## Updated scope: embedded transport
 
-See docs/wiki/code/jobs-persistence.md for canonical ownership and phases. Native Queue uses the existing compatible Surreal RocksDB binding, sync WAL, indexed ready/inflight/dead state, owner/epoch visibility and idempotent mutation receipts. Atlas transitions to Jobs HTTP queue while existing Surreal execution fences remain. New Venture launches no longer need Rabbit; old ownership metadata and shutdown access remain. The transport marker jobs_rocksdb_v1 refuses initial switch with unfinished Atlas tasks. These changes do not complete the full SQLite scheduler and telemetry port.
+See [Jobs persistence](../../docs/wiki/code/jobs-persistence.md) for canonical ownership and phases. The embedded queue uses the existing compatible Surreal RocksDB binding, sync WAL, indexed ready/inflight/dead state, owner/epoch visibility and idempotent mutation receipts. Atlas uses the Jobs HTTP queue while existing Surreal execution fences remain. Direct Docker setup provisions a fresh backend. These changes do not complete the full SQLite scheduler and telemetry port; existing runtime compatibility guards are unchanged by this documentation decision.

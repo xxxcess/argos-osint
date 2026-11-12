@@ -4,6 +4,8 @@ This review covers the tracked plans, archive, maintained contributor guidance a
 
 ## Maintained surfaces
 
+Current delivery disposition (2026-11-12): the [Jobs-owned embedded queue](../../docs/wiki/code/jobs-persistence.md) and [direct Docker deployment](../../deploy/README.md) are authoritative. Setup starts fresh with no existing jobs or queue data to migrate. Former delivery-service choices and drain prerequisites in this plan are superseded; revision-bound test results remain historical evidence.
+
 | Surface | Disposition |
 | --- | --- |
 | Root README, docs and wiki indexes, CLI and deployment guides | Use Fleetworks and Venture for current onboarding. Historical Intel launcher and research material lives in the [archive](../../docs/archive/index.md). Keep compatibility package names and flags that still have consumers. |

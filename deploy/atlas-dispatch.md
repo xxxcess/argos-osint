@@ -12,13 +12,13 @@ docker compose --env-file "$REVIEW_WORKSPACE/compose.env" \
   --project-name "$REVIEW_PROJECT" up --no-build --pull never --detach --wait
 ```
 
-Add `-f deploy/compose.yml` only when a Web origin/port was explicitly provisioned and its image built. Use the same selected Compose files, env file and project for `ps`, `logs`, restart and `down`. Stop before changing topology. The native app never starts this deployment. No AMQP URL, RabbitMQ server or Erlang installation is needed.
+Add `-f deploy/compose.yml` only when a Web origin/port was explicitly provisioned and its image built. Use the same selected Compose files, env file and project for `ps`, `logs`, restart and `down`. Stop before changing topology. The native app never starts this deployment.
 
 Jobs persists SQLite logs and the RocksDB queue under `storage/jobs/`. Only Jobs opens those files. Atlas connects through `FLEETWORKS_JOBS_ORIGIN` and `FLEETWORKS_JOBS_TOKEN_FILE`; Compose supplies both. `FLEETWORKS_QUEUE_NAME` defaults to `fleetworks.atlas`. A successful enqueue is durable before the domain outbox is marked published. Delivery visibility leases, acknowledgments, requeues and dead letters are separate from the authoritative execution lease.
 
-## Upgrade an existing RabbitMQ workspace
+## Dispatch and restart
 
-Drain existing Atlas jobs using the previous installation, then shut down its owned processes before starting the new deployment. Already-published Rabbit messages cannot be recovered merely by restarting the domain outbox relay. Startup rejects pending legacy dispatches instead of discarding them. Preserve old queue data, credentials and ownership evidence for explicit recovery; retired launchers are not current shutdown tools.
+The deployment starts with new Jobs stores and no queue migration prerequisite. Keep those stores and their credentials across subsequent restarts so acknowledged deliveries and pending work remain recoverable.
 
 Switching back to the base stack disables new Atlas dispatch at bootstrap and preserves queued work. Stop the overlay first; reapply it to resume dispatch.
 

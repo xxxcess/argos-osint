@@ -7,15 +7,15 @@ Source: [design.md](design.md); delivery: [handoff.md](handoff.md). Updated Nove
 | Area | Actual result | Limits / next affected check |
 | --- | --- | --- |
 | Cache cleanup | COMPLETE;10.76GiB freed from57 proven obsolete agent incremental sessions | Preserved user target/debug, useful shared debug dependencies/fingerprints/binaries, active work and global caches |
-| Native/contracts/workspaces | PASS: 63:24 contracts + 22 native + 7 workspace unit + 10 workspace integration;59.85s debug compile | Includes new queued cancel/failed Atlas retry handlers. Rebind/retirement/Trash integration is newer work; ARM/current installed-app verification pending |
-| Core persistence | PASS: 15 recorded cases: registry 5, setup 5, actions 3, activity 2 | Actual registration/admission/replay/privacy/retirement proof. New reset barrier and durable rebuild source now require their affected fixtures |
-| Backend/search compilation | PASS unified host+search server/nlp/classifier debug check;1m32s,0warnings | Later reset process-cache/barrier, startup wiring and durable pump integration await next check |
+| Native/contracts/workspaces | PASS: 63:24 contracts + 22 native + 7 workspace unit + 10 workspace integration;59.85s debug compile | Includes queued cancel/failed Atlas retry handlers. Rebind/retirement/Trash integration is implemented; its 71-case affected suite is RUNNING. Newest ARM/current installed-app verification pending |
+| Core persistence | PASS: 25 recorded cases: registry 5, setup 5, actions 3, activity 2, network configuration 1, reset barrier 1, outbox 4, rebuild 4 | Latest 10 cases passed using required pinned server harness; embedded reset/cache-owner fixtures and exact task-fenced seed increment remain pending |
+| Backend/search compilation | PASS unified host+search server/nlp/classifier debug check;1m26s,0warnings | Includes schema 8, durable rebuild pump, canonical reindex route and reset startup/cache owners. New seed pressure/fencing and Natural activation are later increments |
 | API unit behavior | PASS: 44 unique cases:40 unchanged initial passes + 4 affected Brain/dataset module passes | Initial run42/44; fixed real registry prerequisite and canonical temporary parent. Embedded gateway/worker and newest owner/reset fixtures pending |
 | Search service | PASS: 13:9 real disk/recovery/generation cases + 2 HTTP/pacing cases + 2 pressure unit cases | Host Mac evidence; actual DB→outbox→Linux index→gateway, rebuild pump and measured Linux load remain pending |
 | Web | Selected 8 Playwright journeys PASS;6 PNG states inspected; isolated production build/typecheck/compiler check PASS | Connect/HttpOnly/stale-tab/logout plus retained brief/topology/list/focus. Full acceptance matrix remains open |
 | Python tooling | Platform 7, candidate 16, planner 15, native-review 2, reset 17, verifier 3, candidate-images 5 passed on recorded revisions | Real packaged download, Linux image build/start/inference and final changed-tool reruns remain pending |
-| Native visual evidence |2 baseline Brain captures + 3 new Tools/Atlas/Profile PNG/tree pairs generated and inspected | Current action captures and complete page/state/size/material/accessibility inventory pending |
-| Docs | Native connection/workspace guides and main routes updated; Fleetworks HTML/SVG pair updated and inspected | Remaining affected guides/tags/figure pairs and retirement references are tracked inphase4-design.md |
+| Native visual evidence |2 baseline Brain + 3 Tools/Atlas/Profile + 2 action PNG/tree pairs inspected | Cancel preview and wide retry receipt inspected; compact retry viewport does not show receipt. Corrected lifecycle fixtures and complete state/size/material/accessibility matrix pending |
+| Docs | Native connection/workspace guides and main routes updated; Fleetworks HTML/SVG pair updated and inspected | Remaining affected guides/tags/figure pairs and retirement references are tracked in [phase4-design.md](phase4-design.md) |
 
 Counts exclude zero-test targets, ignored/filtered companion targets and duplicate reruns. New source invalidates only affected evidence. Reset preparation is deliberately unsupported in production while full legacy retirement is incomplete; no real installation, credential or running stack has been reset.
 
@@ -55,13 +55,13 @@ Counts exclude zero-test targets, ignored/filtered companion targets and duplica
 | Gates | Implemented source | Still required |
 | --- | --- | --- |
 | A01–A03 | Pinned Rune/kit, API-only eight-page shell, one runtime/client, global drafts and context fences; initial Intel+ARM compilation | Complete endpoint disposition and page parity; newest ARM build and installed matching hardware |
-| A04–A07 | Protected OS-home/default/direct-child manager, durable registration-attempt journal, canonical IDs, real registry/session/rebind/retirement backend, central web gate | Native rebind/retirement/identity-guarded Trash integration and actual platform journeys |
+| A04–A07 | Protected OS-home/default/direct-child manager, durable registration-attempt journal, canonical IDs, real registry/session/rebind/retirement backend, central web gate | 71-case native lifecycle suite and actual platform journeys; OS effects remain unexecuted |
 | A08–A09 | Durable creator/request associations at real admission; scoped membership before counts/limits/facets; shared private payload closed; supported queued cancel/failed Atlas retry plus native confirmations | Whole-node/descendant log/export/live completeness and expanded real API/worker journeys |
 | A10–A11 | Typed read-only readiness, current-format global configuration CRUD, raw bounded uploads, durable seed/Natural training without auto-activation, safe maintenance result metadata | Real upload/seed/train journey, complete training observations and separate exact-candidate activation |
-| A12–A15 | Private Tantivy service, transactional source intent, canonical result filtering, leases/visible ACK, disk recovery and pressure policy | Linked durable rebuild/seed pressure/fairness fixtures, real Linux recovery/load evidence and both architectures |
+| A12–A15 | Private Tantivy service, transactional source intent, canonical result filtering, leases/visible ACK, disk recovery and pressure policy | Durable rebuild/outbox 8 focused fixtures passed; exact claimed-task seed fencing, bounded local parser/RSS increment, real Linux recovery/load and both architectures remain pending |
 | A16 | Native theme/shared production fixtures; web color-only palette and retained canvas/list interactions | Native system preferences/material fallbacks, all affected state captures and physical accessibility |
 | A17–A20 | Platform/planner/packaging tools, backend-only review recipe, exact-SHA CI source | Actual packages/downloads/installed dual-Mac launch, minimum OS, real Linux artifacts; signing/publication separate |
-| A21–A23 | Reset inventory/tool, sealed coordinator, purpose/fingerprint/epoch/write barriers and real owner adapters; terminal/import compatibility retained | Positive embedded reset/recovery tests, startup integration, external parity before retirement, separately authorized real reset |
+| A21–A23 | Reset inventory/tool, sealed coordinator, purpose/fingerprint/epoch/write barriers and real owner adapters; terminal/import compatibility retained | Startup integration compiles and server barrier fixture passes. Positive embedded reset/recovery/cache-owner tests, external parity before retirement and separately authorized real reset remain pending |
 | A24–A25 | Named plans, source/doc inventories, cache-first agent guidance, growing canonical docs and paired figures | Complete affected docs/diagram/agent routing, final source freeze and required verification gates |
 
 ## Actual commands and verification policy
@@ -90,10 +90,15 @@ Browser work uses repository Playwright with `ARGOS_WEB_TEST_DEV=1`; user fronte
 
 ## Active work and finish line
 
-1. Integrate and verify the reset new-work barrier/process-cache/startup owners and durable actor rebuild/pump. Schema 8 will reject incomplete earlier runtime metadata; explicit bootstrap preserves domain/index identities.
-2. Finish native authenticated rebind/retirement/guarded Trash and separate Natural candidate activation; test affected handlers and inspect captures.
+1. Preserve the verified schema 8/reset-startup/rebuild checkpoint. Complete exact claimed-task seed fences, bounded parser/local resource probes and exact-candidate activation as separately verified increments; do not relabel these as already passed.
+2. Finish the running 71-case native lifecycle check, then integrate system preference/freshness/material states and inspect affected production-view captures. Native activation remains disabled until its real backend consumer is verified.
 3. Run the required embedded gate and actual isolated Docker source-to-visible/recovery/pressure journeys. Finish affected docs/paired diagrams and tooling checks.
 4. Commit coherent verified source checkpoints. Preserve the baseline scheduler commit. Do not stage scratch or unrelated changes.
 5. Keep exact-SHA publication, downloaded dual-Mac/minimum-OS GUI evidence, terminal retirement and real reset/layout receipts explicit. No full cutover claim until every applicable gate above is supported.
 
 Detailed command output is retained in ignored local verification logs. This curated tracker records results independently of those scratch files. Result vocabulary is PASS, FAIL, BLOCKED, SKIPPED or PENDING, with scope and limitations.
+
+## Commit ledger
+
+- `294a634` — committed curated source spec, endpoint/reset/docs inventories, acceptance/handoff/decisions and requested cache-first agent guidance. No push. Local scratch and working-memory files remain ignored.
+- Next source checkpoint: coherent manifests, native/contracts/workspaces, authority/context/configuration and backend/search integration after affected checks. Unreferenced or later unverified increments are excluded; current pending tests remain explicit.

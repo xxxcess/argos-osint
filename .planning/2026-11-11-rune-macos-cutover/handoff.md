@@ -153,12 +153,14 @@ Retain `.planning/2026-11-09-fleetworks-overhaul/{design,decisions,acceptance}.m
 
 ## Current delivery checkpoint — November 12, 2026
 
-Implementation is active across Phases 1–4; Phase 5 retirement/external cutover remains pending. See [acceptance.md](acceptance.md) for the current63 native, 15 Core, 44 API, 13 search and 8 browser scoped results and their revision limits. Initial planning language above defines the finish line; it is not evidence that the remaining work passed.
+Implementation is active across Phases 1–4; Phase 5 retirement/external cutover remains pending. See [acceptance.md](acceptance.md) for the 63 native, 25 Core, 44 API, 13 search and 8 browser scoped results and their revision limits. Initial planning language above defines the finish line; it is not evidence that the remaining work passed.
 
-Current owners: native_foundation finishes native lifecycle/actions; native_delivery_tools links durable search rebuild/pressure/fairness; cutover_contracts finishes reset barriers/owners and prepares separate Natural activation. Root owns shared integration, all builds, source freeze, curated plans and commits. No worker stages or commits.
+Current owners: native_foundation holds the 71-case lifecycle checkpoint frozen and prepares system preferences/material/freshness; native_delivery_tools integrates bounded local parsing/RSS and exact claimed-task seed fences; cutover_contracts prepares explicit exact-candidate Natural activation. Reset startup and durable rebuild have compiled, and their focused server fixtures passed; required embedded and Linux evidence remain separate. Root owns shared integration, all builds, source freeze, curated plans and commits. No worker stages or commits.
 
 ## Immediate next action
 
-Freeze the linked reset/rebuild checkpoint, wire actual startup owners/canonical reindex route and schema 8, then run focused affected backend checks and persistence fixtures. Native queued-action 63-test checkpoint passed; capture those actions before releasing its source for lifecycle work. Complete the embedded gate, isolated Docker journeys and affected documentation after those decisive fixtures.
+Complete the running native lifecycle suite (expected 71 cases), preserving the verified 63-case action checkpoint. Latest unified host/search check passed in 1m26s with zero warnings; 10 new required-server cases passed for strict network reads, reset admission barrier, transactional outbox and durable rebuild. Integrate exact task-fenced bounded seed execution and separate explicit activation, then run their affected checks before the required embedded gate, isolated Docker journeys and final affected documentation.
 
 The user explicitly authorized local commits and requested current planning updates. Commit reviewable checkpoints, without pushing or publishing. Actual reset, layout transition, installed dual-Mac validation and terminal retirement remain separately gated; preserve all unrelated work and the baseline scheduler fix.
+
+Local commit `294a634` records the curated plans and requested cache-first build guidance. Root owns subsequent source commits and records actual validation limits with each checkpoint; no push or publication has occurred.

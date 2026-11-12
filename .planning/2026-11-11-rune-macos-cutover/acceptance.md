@@ -2,25 +2,26 @@
 
 Source: [design.md](design.md); delivery: [handoff.md](handoff.md). Updated November 12, 2026. Implementation remains in progress. Passing checkpoints below are scoped evidence, not complete cutover acceptance. Local commits are now authorized; push, publication, actual user reset/layout transition and installed dual-Mac validation remain separate.
 
-## Latest verified checkpoints
+## Current implementation and verification — 2026-11-12 15:59 UTC
 
-| Area | Actual result | Limits / next affected check |
+| Area | Actual status | Remaining / limitation |
 | --- | --- | --- |
-| Cache cleanup | COMPLETE;10.76GiB freed from57 proven obsolete agent incremental sessions | Preserved user target/debug, useful shared debug dependencies/fingerprints/binaries, active work and global caches |
-| Native/contracts/workspaces | PASS:84:26 contracts +37native +11workspace unit +10workspace integration on the activation/lifecycle checkpoint | Includes queued cancel/failed Atlas retry and rebind/retirement/guarded Trash. Fixture invalidation failure corrected; affected app26+workspace21 pass with contract24 reused. Five added appearance/freshness tests pass; cfg0/missing assertion passed its 2-case contract rerun. Native/matte appearance PNGs inspected; 6newactivationUItests pass; their captures, full matrix and newest ARM/installed-app evidence pending |
-| Core persistence | PASS: 29 persistence + 4 bounded-parser/activation unit cases on recorded checkpoints | Latest18-case required-server rerun passed, including genuine Natural training/activation, ambiguity retirement fence, config-change exact replay and claimed-task cancellation/takeover. Embedded reset/cache-owner and API journeys pending |
-| Backend/search compilation | PASS unified host+search server/nlp/classifier debug check;1m41s,0warnings | Includes schema 8, durable pump/reset startup plus bounded parser/local pressure/exact seed task fences and explicit activation/auxiliary drains. Latest18 persistence cases pass; parser/domain4, worker6 and affectedAPI5 cases pass; embedded/public/broker/Linux journeys pending |
-| API unit behavior | PASS:45 unique cases on recorded checkpoints; latest5 affected discovery/readiness and1 real capture/save/acceptance guard regression pass | Initial run42/44; fixed real registry prerequisite and canonical temporary parent. Embedded gateway/worker and newest owner/reset fixtures pending |
-| Native worker | PASS: 6 focused lane, parser/hash, pressure/cooldown/async-wait and safe-failure cases;5m cached compile | Actual broker/Linux delivery and measured loaded resource behavior remain pending |
-| Search service | PASS: 13:9 real disk/recovery/generation cases + 2 HTTP/pacing cases + 2 pressure unit cases | Host Mac evidence; actual DB→outbox→Linux index→gateway, rebuild pump and measured Linux load remain pending |
-| Web | Selected 8 Playwright journeys PASS;6 PNG states inspected; isolated production build/typecheck/compiler check PASS | Connect/HttpOnly/stale-tab/logout plus retained brief/topology/list/focus. Full acceptance matrix remains open |
-| Python tooling | PASS current65: platform7, candidate16, planner15, native-review2, reset17, verifier3, candidate-images5 | Real packaged download, Linux image build/start/inference and final changed-tool reruns remain pending |
-| Native visual evidence |2 baseline Brain + 3 Tools/Atlas/Profile + 2 action + 2 appearance PNG/tree pairs inspected | Cancel preview and wide retry receipt inspected; compact retry viewport does not show receipt. Native/matte toolbar comparison inspected; remaining lifecycle states and full size/material/accessibility matrix pending |
-| Docs | Native connection/workspace guides and main routes updated; Fleetworks HTML/SVG pair updated and inspected | Remaining affected guides/tags/figure pairs and retirement references are tracked in [phase4-design.md](phase4-design.md) |
+| Source checkpoints | COMMITTED: main native/activity source `f8c216c`; workspace verification repairs `d7636c0` | Full cutover acceptance is still open; no push/publication |
+| Cache cleanup | COMPLETE: 10.76 GiB freed from 57 proven obsolete agent sessions | User `target/debug`, useful shared caches, active work and global caches preserved |
+| Native/contracts/workspaces | PASS: 119 unique scoped cases (32 contracts + 61 desktop + 16 workspace unit + 10 integration); six affected paging cases reran after the equivalent guard fix | Physical GUI, minimum OS and installed-platform journeys remain pending |
+| Native lint / ARM source | PASS: native all-target Clippy 11.15s; latest ARM source check 2m01s | Cross-compilation is not physical ARM acceptance |
+| Backend scoped behavior | PASS: six focused Logs cases, six new Jobs paging cases and ten focused required-embedded Logs/reset cases | Evidence overlaps; do not add these into a new total. Full runtime/Docker verification remains pending |
+| Full canonical matrix | FORMAT PASS (9s), WORKSPACE LINT PASS (3.28s); workspace TEST BUILD RUNNING on `d7636c0` | Current build reached Core after SurrealDB; test execution, storage CLI smoke and required storage phase are not complete |
+| Native debug artifact | PASS: clean Intel debug app/archive from `f8c216c`; independent safe extraction, bundle/hash/permissions/Mach-O/library checks passed | Unsigned review artifact; GUI launch, second Mac artifact and physical minimum-OS checks not performed |
+| Search / worker / persistence baseline | Prior scoped checkpoints record 13 host search, six worker, 33 Core and 45 API cases | Current search/fixture lint repairs pass workspace lint; runtime rerun is part of the running matrix. Actual Linux recovery/load/inference remains pending |
+| Web | PASS: eight selected Playwright journeys, six inspected PNGs and isolated production build/type/compiler checks on unchanged source `0fb1a0a` | Real public ingress/backend/platform acceptance remains separate |
+| Tooling / guidance | PASS: 99 Python cases across nine suites, seven guidance/policy cases; Rune skill/alias validated | Hosted artifact execution/download and real Linux inference remain pending |
+| Native visual evidence | Final run: 40 generated, 11 selected inspected across ten scenes; prior profile/log run: 52 generated, 14 selected inspected | Generated variants are not all visually approved; real OS input/accessibility remains pending |
+| Docs / diagrams | 20 affected HTML/SVG pairs checked, rendered and inspected; 1,688 relative links pass | Consumer retirement stays gated on replacement/platform parity |
+| Isolated Docker | Preflight/recipe/static checks prepared; actual build/start/journeys PENDING | Fresh owned project/workspace/ports required; user's stack/images are protected |
+| Actual cutover | PENDING: hosted CI, matching physical Macs, retirement, actual reset/layout and trusted publication | Production reset support remains sealed; no real user installation or credentials reset |
 
-Native scoped Clippy --all-targets -Dwarnings passes after9reported fixes; the final84-case affected rerun passes without compiler warnings. Current tooling rerun executes all65cases across7suites.
-
-Counts exclude zero-test targets, ignored/filtered companion targets and duplicate reruns. New source invalidates only affected evidence. Reset preparation is deliberately unsupported in production while full legacy retirement is incomplete; no real installation, credential or running stack has been reset.
+The active task checklist has been reconciled with these results. Completed source items and scoped checks are separate from unexecuted runtime/platform gates. Counts exclude zero-case targets and duplicate reruns. The earlier scoped checkpoints remain evidence for their recorded revisions; they do not replace the running full matrix.
 
 ## Contract and phase gates
 
@@ -107,7 +108,7 @@ Detailed command output is retained in ignored local verification logs. This cur
 
 - `f311350` — committed saved-profile reset CAS/recovery and fresh configuration revision-zero verification (5 files), with 29 synthetic reset and 4 deployment verification cases passing. Production reset remains sealed and unexecuted.
 
-- `1272a0b` — committed affected canonical guides, 20 exact HTML/SVG pairs and curated local evidence (53 files). All changed pairs passed XML/accessibility/parity checks and were rendered/inspected; 1,689 relative documentation links pass. This is documentation evidence, not a runtime/platform gate.
+- `1272a0b` — committed affected canonical guides, 20 exact HTML/SVG pairs and curated local evidence (53 files). All changed pairs passed XML/accessibility/parity checks and were rendered/inspected; 1,688 relative documentation links pass. This is documentation evidence, not a runtime/platform gate.
 
 - `e3e84c0` — committed the84-native/33-Core/45-API/6-worker/15-Venture/13-search/65-Python scoped source checkpoint, plans/diagrams/deployment/tooling/CI source. Required embedded/Linux/installed-artifact acceptance remains pending. Future A09 files and saved-profile parity were excluded.
 
@@ -122,7 +123,7 @@ Native profiles, Logs and Jobs paging pass 119 scoped cases: 32 contracts, 61 de
 
 The log backend passes six focused cases: three SQLite persistence/deadline/projection, two opaque cursor and one real required-server cohort case, including the 513-job narrowing boundary. Jobs paging passes six new backend cases: two cursor-cache units, two required-embedded Core and two public API fixtures. Its initial affected build took 8m31s; the integration build reused that graph in 15.33s, with API runtime 16.23s and Core 19.81s. Strict all-target Core/API/host/bin Clippy now passes; the final warm retry took 50.33s. Reported lint repairs preserve assertions and protocol behavior, without suppressions.
 
-The focused required-embedded logs/reset check passes ten executed cases: five API owner/reset/cursor, one actual public-gateway/private-Jobs-SQLite page/export/follow and four Core fence/drain/reprovision/replay cases. These overlap the narrower evidence above and are not summed into a new total. The actual cache-header failure was repaired to `no-store, private`; the affected rerun passed. Python tooling passes 99 cases across nine suites, including 29 synthetic reset cases. Seven guidance/policy checks and 1,689 relative documentation references pass. Production reset remains sealed and unexecuted.
+The focused required-embedded logs/reset check passes ten executed cases: five API owner/reset/cursor, one actual public-gateway/private-Jobs-SQLite page/export/follow and four Core fence/drain/reprovision/replay cases. These overlap the narrower evidence above and are not summed into a new total. The actual cache-header failure was repaired to `no-store, private`; the affected rerun passed. Python tooling passes 99 cases across nine suites, including 29 synthetic reset cases. Seven guidance/policy checks and 1,688 relative documentation references pass. Production reset remains sealed and unexecuted.
 
 The profile/log renderer generated 52 captures, with 14 selected captures covering all 13 scene names inspected. The final Jobs/preserved-view renderer generated 40 captures, with 11 selected captures covering all ten chosen scenes inspected. Current representative saved-profile and loaded-Logs PNGs match their prior bytes exactly. The 450-row Table has 268 layout nodes in the recorded debug diagnostic; single contended frames do not establish production responsiveness. Generated but uninspected variants and real GUI behavior remain separate. All 20 affected HTML/SVG pairs were checked, rendered and inspected.
 

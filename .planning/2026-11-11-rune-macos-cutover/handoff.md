@@ -8,14 +8,17 @@ The user-supplied consolidated specification is preserved verbatim in [design.md
 
 | Item | Recorded status |
 | --- | --- |
-| Source reviewed | `feat/atlas-zero-shot`, `7fb262b062275d0bd159fb4c7ba18be7321c4e4b`; clean at session start, one commit ahead of the locally tracked upstream |
-| Spec source baseline | `f8bc447c86f59c369a9259c6d0739681fadd1e94`; implementation-start HEAD adds one scheduler lease-election serialization fix; retain it |
-| Rune and rune-kit | Same candidate revision `205b8d4f7e60fa6248b83bfbbb4c6a06096c59ff`; pinned in the implementation; initial Intel and ARM compilation passed on Rust1.95; newest ARM and installed GUI evidence remain pending |
-| Tantivy | Spec candidate `0.27.0`; locked in the implementation; current host disk/HTTP/pressure cases passed; real Linux and durable-pump evidence remain pending |
-| Planning | Prepared from supplied spec and current source by one integration owner with independent runtime and surface research |
-| Product implementation / verification | Phases 1–4 active; scoped local/native/browser/isolated-Docker verification and local commits authorized; current results in acceptance.md |
-| Real Mac download/launch / publication | Pending / not performed |
-| Real configuration reset / layout transition | Pending external deployment actions; no user installation, credentials or running stack changed |
+| Original source baseline | `7fb262b062275d0bd159fb4c7ba18be7321c4e4b`; retain the scheduler lease-election fix |
+| Current source | `d7636c0` on `feat/atlas-zero-shot`; main native/activity increment `f8c216c`; no push/publication |
+| Spec source baseline | `f8bc447c86f59c369a9259c6d0739681fadd1e94`; supplied design remains unchanged |
+| Rune and rune-kit | Exact shared pin `205b8d4f7e60fa6248b83bfbbb4c6a06096c59ff`; current native119, strict lint and ARM source check pass |
+| Tantivy | Locked `0.27.0`; prior 13 host cases recorded; current workspace lint passes; actual Linux journey/recovery/load pending |
+| Planning | Phase checkboxes and top-level status reconciled at 2026-11-12 15:59 UTC; root owns updates |
+| Product source | Main Phases 1–4 implementation committed; source-level reset/docs work complete, actual retirement/cutover pending |
+| Current required gate | Format/lint PASS; full workspace test build RUNNING on `d7636c0`; storage CLI smoke and required embedded-storage phase pending |
+| Native review app | Clean Intel debug app/archive from `f8c216c` built and independently verified; unsigned, GUI not launched |
+| Hosted / physical platforms | Exact-SHA hosted artifacts/download and both matching-hardware/minimum-OS GUI checks pending |
+| Actual reset / layout transition | Pending separate deployment action; production support sealed; no real user credentials or running stack changed |
 
 Use [decisions.md](decisions.md) for contracts and risks and [acceptance.md](acceptance.md) for verified and pending evidence. The ignored `task_plan.md`, local research/progress and cleanup inventory are working memory; this durable handoff does not depend on them. Preserve the recorded baseline as local commits advance; do not confuse a dirty worktree with an exact published artifact.
 
@@ -155,12 +158,14 @@ Retain `.planning/2026-11-09-fleetworks-overhaul/{design,decisions,acceptance}.m
 
 Implementation is active across Phases 1–4; Phase 5 retirement/external cutover remains pending. See [acceptance.md](acceptance.md) for the 84 native, 33 Core, 45 API, 6 worker, 15 Venture, 13 search and 8 browser scoped results and their revision limits. Initial planning language above defines the finish line; it is not evidence that the remaining work passed.
 
-Current owners: native_foundation integrates the additive native Jobs filters, real cursor paging, stale-request fences and affected scenes. cutover_contracts has frozen Core/API paging and bounded cursor modules; native_delivery_tools has frozen two Core and two public API fixtures. Root owns shared exports, all builds, source freeze, curated plans and commits. Workers do not stage, commit or run competing builds.
+Current ownership: all implementation workers are idle with edits frozen. Root owns the single running matrix, integration, plans and commits. Wake a worker only for a demonstrated in-scope failure; do not start another broad audit.
 
 ## Immediate next action
 
-Strict all-target Core/API/host/bin Clippy now passes (final warm retry50.33s). Native profiles/Logs/Jobs paging pass 119 scoped cases, strict native Clippy and the latest ARM source check (2m01s). The six affected paging cases passed again after an equivalent ticket-guard lint repair. Source increment f8c216c is committed and its clean Intel debug app/archive passes build and independent bundle verification. The strict whole-workspace lint retry now passes (3m42s) after minimal search/fixture repairs; the required full embedded matrix will resume; the isolated Docker source-to-visible/seed/train/activation/recovery journey follows.
+Finish the running canonical embedded matrix on `d7636c0`. Formatting passed in 9s and strict all-target workspace lint reused the cache in 3.28s; workspace tests are currently compiling Core after SurrealDB. Test execution, storage CLI smoke and the required embedded-storage phase remain pending. After this gate, run the fresh isolated Docker source-to-visible/seed/train/activation/recovery journey.
 
-Executed evidence also includes six new backend paging cases, six focused log backend cases, ten focused required-embedded logs/reset cases (including four positive Core reset cases and actual owner recovery), 99 Python cases, seven guidance/policy checks and 1,689 relative documentation links. The final renderer generated 40 captures; 11 selected captures covering all 10 chosen scenes were inspected. The prior profile/log run generated 52 captures with 14 selected captures inspected. Current representative profile/log PNGs match their prior bytes exactly. All 20 changed diagram pairs passed XML/accessibility/parity and were rendered/inspected. These scoped checks do not imply full matrix, Docker, installed-hardware or real-reset acceptance.
+The native implementation already passes 119 scoped cases, strict native lint, latest ARM source check and selected visual inspection. Its clean Intel debug app/archive from `f8c216c` passed independent bundle verification. Native source did not change in the workspace lint follow-up, so its evidence is preserved.
 
-The user explicitly authorized scoped local builds/tests, native fixtures, browser checks, isolated Docker integration and local commits. Root checkpoint ledger: native/backend `e3e84c0`, tooling/guidance `fa52b0c`, docs/figures `1272a0b`, reset/profile recovery and fresh revision `f311350`, scoped activity source `f8c216c`. No push or publication. Preserve unrelated work, useful caches and the baseline scheduler fix. Actual reset, layout transition, installed dual-Mac validation and terminal retirement remain separately gated.
+Executed evidence also includes six new backend paging cases, six focused log backend cases, ten focused required-embedded logs/reset cases (including four positive Core reset cases and actual owner recovery), 99 Python cases, seven guidance/policy checks and 1,688 relative documentation links. The final renderer generated 40 captures; 11 selected captures covering all 10 chosen scenes were inspected. The prior profile/log run generated 52 captures with 14 selected captures inspected. Current representative profile/log PNGs match their prior bytes exactly. All 20 changed diagram pairs passed XML/accessibility/parity and were rendered/inspected. These scoped checks do not imply full matrix, Docker, installed-hardware or real-reset acceptance.
+
+The user explicitly authorized scoped local builds/tests, native fixtures, browser checks, isolated Docker integration and local commits. Root checkpoint ledger: native/backend `e3e84c0`, tooling/guidance `fa52b0c`, docs/figures `1272a0b`, reset/profile recovery and fresh revision `f311350`, scoped activity source `f8c216c`, workspace lint follow-up `d7636c0`. No push or publication. Preserve unrelated work, useful caches and the baseline scheduler fix. Actual reset, layout transition, installed dual-Mac validation and terminal retirement remain separately gated.

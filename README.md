@@ -20,7 +20,7 @@ python3 scripts/fleetworks_candidate.py build-native --target host --profile deb
 
 The helper prints the app and manifest paths. Add `--open` to launch it. The app opens offline setup and connects to an existing gateway; backend and Intel Web startup are separate operator actions.
 
-1. Provision a backend using the [isolated native-review recipe](deploy/README.md#isolated-native-backend-review), using the direct Docker commands below. Backend deployment requires Docker and Docker Compose **v2.20 or newer**.
+1. Start the backend with the [Docker Compose quick start below](#backend-for-the-native-app). Backend deployment requires Docker and Docker Compose **v2.20 or newer**.
 2. In **Workstation**, add a named connection with the gateway origin and its private Native-purpose token file. **Test** checks compatibility; **Connect** establishes the connection. Saved profiles keep protected file references, and reconnect is explicit.
 3. Select a current LAN/VPN interface and an owned workspace to register request context. Activity and mutations use that registration and the credential's permissions.
 
@@ -28,24 +28,38 @@ Native workspaces are protected children of `~/.fleetworks`, with a `default` ch
 
 When the gateway advertises an Intel Web URL, **Open Intel Web** opens its Connect form and copies the registered Connect ID. The browser uses its own server credential and session; the Connect ID alone is not a credential. See [connection and browser handoff](docs/wiki/code/native-connections.md#browser-handoff).
 
-### Independent Docker backend
+### Backend for the native app
 
-Docker and Docker Compose **v2.20 or newer** run the Linux backend separately from the native app. Provision a new isolated deployment directory and build its backend images from the repository root:
+Start Docker Desktop or your local Docker engine, then run these commands from the repository root. The backend includes the gateway, private services, workers, SurrealDB, Jobs storage and actor search.
+
+**First-time setup:** create the `native-local` deployment and build its three backend images. Run initialization once; later starts reuse its credentials and data.
 
 ```sh
-export REVIEW_NAME=native-local
 export PLATFORM="$(python3 scripts/fleetworks_verify.py platform --format docker)"
-python3 deploy/native_review.py init --name "$REVIEW_NAME" --api-port 18091 --platform "$PLATFORM"
-export REVIEW_WORKSPACE="$(python3 deploy/native_review.py value --name "$REVIEW_NAME" --field workspace)"
-export REVIEW_PROJECT="$(python3 deploy/native_review.py value --name "$REVIEW_NAME" --field project)"
-export IMAGE_TAG="$(python3 deploy/native_review.py value --name "$REVIEW_NAME" --field image_tag)"
+python3 deploy/native_review.py init --name native-local --api-port 18091 --platform "$PLATFORM"
+export IMAGE_TAG="$(python3 deploy/native_review.py value --name native-local --field image_tag)"
 export VERSION="$(tr -d '[:space:]' < version.txt)"
 docker buildx bake -f deploy/docker-bake.hcl --load backend
-docker compose --env-file "$REVIEW_WORKSPACE/compose.env" -f deploy/compose.native-review.yml \
-  --project-name "$REVIEW_PROJECT" up --no-build --pull never --detach --wait
 ```
 
-Use `http://127.0.0.1:18091` and the deployment's protected `secrets/native-token` file in the native connection editor. This backend-only recipe starts no browser frontend. Keep the same env file, Compose file and project for `ps`, `logs` and `down`; stopping preserves backend data. Concurrent deployments need distinct directories, project names and ports. The native protected container is separate from the deployment directory. [Deployment, credentials and optional Web](deploy/README.md)
+**Start the backend:** use this command after setup and whenever you want to start it again. It also works from a fresh terminal at the repository root.
+
+```sh
+docker compose --env-file .agent-scratch/native-review/native-local/compose.env \
+  -f deploy/compose.native-review.yml --project-name fleetworks-native-review-native-local \
+  up --no-build --pull never --detach --wait
+```
+
+In the native app's **Workstation** connection editor, use:
+
+| Field | Value |
+| --- | --- |
+| Gateway origin | `http://127.0.0.1:18091` |
+| Token file | `.agent-scratch/native-review/native-local/secrets/native-token` under this checkout |
+
+Choose **Test**, then **Connect**. This recipe runs the backend independently from the app. Atlas collection uses the [additional overlay below](#collect-articles-with-atlas); Intel Web is an optional separate deployment.
+
+To inspect or stop the backend, use the same Compose command prefix with `ps`, `logs --follow` or `down` in place of `up --no-build --pull never --detach --wait`. Stop preserves backend data. For concurrent deployments, choose a different name and API port during initialization and use that deployment's matching env file and project. [Full deployment guide](deploy/README.md#isolated-native-backend-review)
 
 Venture, the six terminal clients and the legacy `argos` executable are retired. Their historical evidence remains available in the [retirement disposition](docs/archive/cli-retirement.md). Backend service executables and administrative support tools remain supported.
 

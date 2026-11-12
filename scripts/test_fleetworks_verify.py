@@ -33,6 +33,9 @@ class PathScopesTests(unittest.TestCase):
             "apps/fleetworks-cli/src/brain_ui.rs": {"native", "images"},
             "apps/fleetworks-desktop/src/views/brain.rs": {"desktop"},
             "apps/fleetworks-desktop/resources/Info.plist": {"desktop"},
+            "scripts/fleetworks_native_verify.py": {"desktop"},
+            "scripts/test_fleetworks_native_verify.py": {"desktop"},
+            ".github/workflows/fleetworks-native.yml": {"desktop"},
             "apps/venture/src/main.rs": {"native", "server", "compose", "images"},
             "apps/venture/src/classifier.rs": {"native", "server", "compose", "bert", "images"},
             "apps/web-desktop/server.mjs": {"web", "web_dev", "server", "compose", "images"},
@@ -69,7 +72,9 @@ class PathScopesTests(unittest.TestCase):
             ".github/workflows/embedded.yml": set(),
             "scripts/fleetworks_verify.py": set(),
             "crates/argos-osint-bin/src/cli.rs": set(),
-            "new/unknown/build input": set(),
+            "scripts/fleetworks_config_reset.py": set(),
+            "scripts/test_fleetworks_config_reset.py": set(),
+            "new/unknown/build input": set(ALL_SCOPES),
         }
         for path, expected in cases.items():
             with self.subTest(path=path):
@@ -184,6 +189,10 @@ class GitScopeTests(unittest.TestCase):
                 self.assert_scopes(self.plan(base), ALL_SCOPES, images=ALL_IMAGES)
         self.assert_scopes(self.plan(self.start, event="workflow_dispatch"), ALL_SCOPES, images=ALL_IMAGES)
         self.assert_scopes(self.plan(self.start, event="schedule"), ALL_SCOPES, images=ALL_IMAGES)
+
+    def test_unknown_committed_build_input_selects_checks_and_all_images(self):
+        head = self.commit("new-engine/Cargo.toml")
+        self.assert_scopes(self.plan(self.start, head=head), ALL_SCOPES, images=ALL_IMAGES)
 
     def test_pr_and_full_produce_distinct_hosted_plans(self):
         head = self.commit("apps/web-desktop/app/page.tsx")

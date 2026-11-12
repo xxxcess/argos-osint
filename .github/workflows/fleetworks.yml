@@ -518,14 +518,12 @@ jobs:
           retention-days: 7
 
   bert:
-    name: Atlas BERT runtime / Intel macOS
+    name: Atlas BERT runtime / Linux AMD64 and ARM64
     needs: scope
     if: needs.scope.outputs.bert == 'true'
     uses: ./.github/workflows/atlas-bert.yml
     with:
       head: ${{ github.event.pull_request.head.sha || github.sha }}
-      intel_only: false
-      intel_runtime: true
 
   web:
     name: Scoped web

@@ -1,137 +1,194 @@
-name: Atlas BERT worker checks
+name: Atlas BERT Linux worker checks
 
 on:
   workflow_dispatch:
     inputs:
-      intel_runtime:
-        description: Build and test the Intel worker with the pinned MNLI checkpoint
-        type: boolean
-        default: false
+      head:
+        description: Exact full source SHA (defaults to dispatched revision)
+        type: string
+        required: false
   workflow_call:
     inputs:
       head:
-        description: Exact commit to verify
+        description: Exact full source SHA
         type: string
-      intel_only:
-        type: boolean
-        default: false
-      intel_runtime:
-        type: boolean
-        default: false
+        required: true
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
-  group: atlas-bert-${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'push' && github.sha || github.ref }}
+  group: atlas-bert-${{ github.workflow }}-${{ github.event_name }}-${{ inputs.head || github.ref }}
   cancel-in-progress: ${{ github.event_name != 'push' }}
 
 env:
   ATLAS_BERT_HEAD: ${{ inputs.head || github.event.pull_request.head.sha || github.sha }}
-  CARGO_TERM_COLOR: always
+  CARGO_TERM_COLOR: never
   CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  PYTHONDONTWRITEBYTECODE: 1
 
 jobs:
-  check:
-    if: ${{ !inputs.intel_only }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
+  # Engine work is native Linux only. embedded.yml retains separate legacy
+  # macOS compatibility gates until their reviewed retirement criteria pass.
+  runtime:
+    name: Native Linux ${{ matrix.arch }} / real checkpoint and bundle
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    # Match deploy/Dockerfile's Debian bookworm/glibc2.36 runtime. No QEMU or
+    # Ubuntu24/glibc2.39 host binary is accepted as deployment-compatible.
+    container: python:3.11-bookworm
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ env.ATLAS_BERT_HEAD }}
           lfs: false
           persist-credentials: false
-      - name: Verify the checked-out commit
-        run: test "$(git rev-parse HEAD)" = "$ATLAS_BERT_HEAD"
-      - uses: dtolnay/rust-toolchain@1.95.0
-        with:
-          components: rustfmt
-      - name: Check worker formatting
-        run: cargo fmt --manifest-path tools/atlas-bert/Cargo.toml --check
-      - name: Check worker types
-        # doc-only checks the Rust API without linking LibTorch or loading a model.
-        run: cargo check --locked --manifest-path tools/atlas-bert/Cargo.toml --all-targets --features rust-bert/doc-only
-  macos-intel:
-    # A direct dispatch always reaches this job. Fleetworks asks for the runtime build.
-    if: ${{ github.event_name != 'pull_request' || inputs.intel_only || inputs.intel_runtime }}
-    runs-on: macos-15-intel
-    timeout-minutes: 35
-    env:
-      CARGO_BUILD_TARGET: x86_64-apple-darwin
-      CARGO_PROFILE_DEV_DEBUG: 0
-      LIBTORCH_USE_PYTORCH: '1'
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ env.ATLAS_BERT_HEAD }}
-          lfs: false
-          persist-credentials: false
-      - name: Verify the checked-out commit
-        run: test "$(git rev-parse HEAD)" = "$ATLAS_BERT_HEAD"
-      - uses: dtolnay/rust-toolchain@1.95.0
-        with:
-          targets: x86_64-apple-darwin
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.11'
-          architecture: x64
-      - name: Install Intel macOS PyTorch wheel
-        run: >-
-          python -m pip install --only-binary=:all: 'torch==2.1.0' 'numpy==1.26.4'
-      - name: Check native worker types on Intel macOS
-        if: ${{ !inputs.intel_runtime }}
-        run: cargo check --locked --manifest-path tools/atlas-bert/Cargo.toml --all-targets --target x86_64-apple-darwin
-      - name: Build, link, and test the Intel worker
-        if: ${{ inputs.intel_runtime }}
+      - name: Resolve exact source and repository toolchain
+        id: pin
+        shell: bash
         run: |
           set -euo pipefail
-          test "$(uname -m)" = x86_64
-          cargo build --locked --manifest-path tools/atlas-bert/Cargo.toml --target x86_64-apple-darwin
-          file tools/atlas-bert/target/x86_64-apple-darwin/debug/argos-atlas-bert |
-            grep -F 'Mach-O 64-bit executable x86_64'
-          export DYLD_LIBRARY_PATH="$(python -c 'import pathlib, torch; print(pathlib.Path(torch.__file__).parent / "lib")')"
-          cargo test --locked --manifest-path tools/atlas-bert/Cargo.toml --target x86_64-apple-darwin
-      - name: Prepare the pinned Typeform DistilBERT MNLI checkpoint
-        if: ${{ inputs.intel_runtime }}
-        run: bash tools/atlas-bert/scripts/prepare-model.sh "$RUNNER_TEMP/atlas-bert-model"
-      - name: Run real checkpoint inference on Intel macOS
-        if: ${{ inputs.intel_runtime }}
-        run: |
-          set -euo pipefail
-          export DYLD_LIBRARY_PATH="$(python -c 'import pathlib, torch; print(pathlib.Path(torch.__file__).parent / "lib")')"
+          [[ "$ATLAS_BERT_HEAD" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$ATLAS_BERT_HEAD"
           python - <<'PY'
-          import json
-          import math
           import os
           from pathlib import Path
-          import subprocess
+          import re
+          import tomllib
+          channel = tomllib.loads(Path("rust-toolchain.toml").read_text())["toolchain"]["channel"]
+          if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", channel):
+              raise SystemExit("An exact repository toolchain pin is required")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print("version=" + channel, file=output)
+          PY
+      - name: Provision isolated Debian build tools
+        shell: bash
+        env:
+          TOOLCHAIN: ${{ steps.pin.outputs.version }}
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "${{ matrix.arch == 'amd64' && 'x86_64' || 'aarch64' }}"
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev binutils curl ca-certificates
+          curl --fail --silent --show-error --location --retry 3 https://sh.rustup.rs -o "$RUNNER_TEMP/rustup-init.sh"
+          sh "$RUNNER_TEMP/rustup-init.sh" -y --no-modify-path --profile minimal --default-toolchain "$TOOLCHAIN" --component rustfmt
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: atlas-bert-bookworm-${{ matrix.arch }}-${{ steps.pin.outputs.version }}-${{ hashFiles('tools/atlas-bert/Cargo.lock') }}
+          workspaces: tools/atlas-bert -> ../../target/agents
+          cache-on-failure: true
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - name: Install exact matching CPU Torch wheel inside Linux only
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheel="$(python tools/atlas-bert/scripts/verify_linux.py wheel --target '${{ matrix.target }}')"
+          python -m pip install --only-binary=:all: "$wheel" 'numpy==1.26.4'
+      - name: Check formatting and synthetic verification contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --manifest-path tools/atlas-bert/Cargo.toml --check
+          python -m unittest discover -s tools/atlas-bert/scripts -p test_verify_linux.py -v
+      - name: Build link test real checkpoint and verify extracted bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/atlas-bert/scripts/verify_linux.py run --agent --require-clean \
+            --target '${{ matrix.target }}' --revision "$ATLAS_BERT_HEAD" \
+            --output "$RUNNER_TEMP/atlas-bert-linux-${{ matrix.arch }}"
+      - name: Upload immutable worker native libraries and verified model bundle
+        id: bundle
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: atlas-bert-bundle-${{ matrix.arch }}-${{ env.ATLAS_BERT_HEAD }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/atlas-bert-linux-${{ matrix.arch }}/atlas-bert-linux-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Bind evidence to exact artifact ID and digest
+        shell: bash
+        env:
+          BUNDLE_ID: ${{ steps.bundle.outputs.artifact-id }}
+          BUNDLE_URL: ${{ steps.bundle.outputs.artifact-url }}
+          BUNDLE_DIGEST: ${{ steps.bundle.outputs.artifact-digest }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          path = Path(os.environ["RUNNER_TEMP"]) / "atlas-bert-linux-${{ matrix.arch }}" / "evidence.json"
+          evidence = json.loads(path.read_text())
+          if evidence["status"] != "passed" or not os.environ["BUNDLE_ID"]:
+              raise SystemExit("A verified bundle and immutable artifact ID are required")
+          evidence["actions_artifact"] = {"id": os.environ["BUNDLE_ID"], "url": os.environ["BUNDLE_URL"], "digest": os.environ["BUNDLE_DIGEST"]}
+          path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              print("### Atlas BERT native Linux ${{ matrix.arch }}", file=summary)
+              print("Source: `" + evidence["source_sha"] + "`", file=summary)
+              print("[Immutable bundle](" + os.environ["BUNDLE_URL"] + ")", file=summary)
+              print("Archive SHA256: `" + evidence["archive"]["sha256"] + "`", file=summary)
+              print("Native build/link/unit and real checkpoint/extracted-bundle inference passed. Gateway integration and publication are separate.", file=summary)
+          PY
+      - name: Retain bounded evidence and command diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: atlas-bert-evidence-${{ matrix.arch }}-${{ env.ATLAS_BERT_HEAD }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/atlas-bert-linux-${{ matrix.arch }}/evidence.json
+            ${{ runner.temp }}/atlas-bert-linux-${{ matrix.arch }}/*.log
+          if-no-files-found: error
+          retention-days: 14
 
-          worker = Path("tools/atlas-bert/target/x86_64-apple-darwin/debug/argos-atlas-bert").resolve()
-          model = Path(os.environ["RUNNER_TEMP"]) / "atlas-bert-model"
-          election = "Parliament voted to amend election law and the electoral commission updated the ballot rules."
-          research = "Researchers published an experiment improving error correction on a silicon quantum processor."
-          batches = [[election, research], [research], [election], [election, research]]
-          output = subprocess.run(
-              [worker, "serve", model],
-              input="".join(json.dumps({"texts": batch}) + "\n" for batch in batches),
-              stdout=subprocess.PIPE,
-              text=True,
-              timeout=180,
-              check=True,
-          ).stdout
-          ready, *responses = (json.loads(line) for line in output.splitlines())
-          assert ready == {"protocol": "argos-atlas-bert-v1"}, ready
-          assert len(responses) == len(batches), responses
-          for batch, response in zip(batches, responses):
-              assert len(response["scores"]) == len(batch), response
-              for row in response["scores"]:
-                  assert len(row) == 6 and all(math.isfinite(score) and 0 <= score <= 1 for score in row), row
-          first, research_only, election_only, repeated = (response["scores"] for response in responses)
-          for batch_row, single_row, repeated_row in zip(first, [election_only[0], research_only[0]], repeated):
-              for batch_score, single_score, repeated_score in zip(batch_row, single_row, repeated_row):
-                  assert math.isclose(batch_score, single_score, abs_tol=1e-5), (batch_row, single_row)
-                  assert math.isclose(batch_score, repeated_score, abs_tol=1e-5), (batch_row, repeated_row)
-          assert first[0][0] > first[1][0] and first[1][5] > first[0][5], first
-          print("Intel Atlas worker passed the handshake, six-domain score order, and batch/repeat checks.")
+  required:
+    name: Required native Linux classifier runtimes
+    needs: runtime
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require both native runtime legs
+        env:
+          RUNTIME_RESULT: ${{ needs.runtime.result }}
+        run: test "$RUNTIME_RESULT" = success
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: atlas-bert-evidence-*-${{ env.ATLAS_BERT_HEAD }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence
+      - name: Reject missing mismatched or failed runtime evidence
+        env:
+          EXPECTED_HEAD: ${{ env.ATLAS_BERT_HEAD }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          manifests = list(Path("evidence").glob("*/evidence.json"))
+          found = set()
+          for path in manifests:
+              value = json.loads(path.read_text())
+              arch = value["arch"]
+              if arch in found or arch not in ("amd64", "arm64") or value["source_sha"] != os.environ["EXPECTED_HEAD"] or value["status"] != "passed" or not value.get("actions_artifact", {}).get("id"):
+                  raise SystemExit("Mismatched or failed Linux runtime evidence")
+              if value["dirty"] or value["unit_tests_passed"] < 1 or any(value[key]["status"] != "passed" for key in ("build_inference", "extracted_inference")):
+                  raise SystemExit("Missing real runtime checks")
+              found.add(arch)
+          if found != {"amd64", "arm64"} or len(manifests) != 2:
+              raise SystemExit("Both native Linux architectures must supply evidence")
+          print("Both native Linux classifier runtimes verified for " + os.environ["EXPECTED_HEAD"])
           PY

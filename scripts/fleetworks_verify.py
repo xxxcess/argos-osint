@@ -143,6 +143,8 @@ def raw_path_scopes(path):
         return {"native"}
     if path.startswith("apps/fleetworks-desktop/"):
         return {"desktop"}
+    if path in {"scripts/fleetworks_native_verify.py", "scripts/test_fleetworks_native_verify.py", ".github/workflows/fleetworks-native.yml"}:
+        return {"desktop"}
     if path.startswith("services/search-index/"):
         return {"server"}
     if path.startswith("apps/web-desktop/app/api/"):
@@ -186,11 +188,15 @@ def raw_path_scopes(path):
         ".release-please-manifest.json",
         "scripts/fleetworks_verify.py",
         "scripts/test_fleetworks_verify.py",
+        "scripts/fleetworks_config_reset.py",
+        "scripts/test_fleetworks_config_reset.py",
         "scripts/release_check.mjs",
     }:
         return set()
 
-    return set()
+    # Unknown code/build inputs must not turn into an empty successful plan.
+    # Explicit policy-only helpers above are still tested by the scope job.
+    return set(ALL_SCOPES)
 
 
 def path_scopes(path):
@@ -328,6 +334,9 @@ def dispatch(args, head):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
+    import fleetworks_native_verify
+
+    fleetworks_native_verify.add_parser(commands)
     host = commands.add_parser("platform", help="report physical host targets without building or starting services")
     host.add_argument("--format", choices=("rust", "docker", "json"), default="json")
     for name, help_text, default_event in (
@@ -354,6 +363,8 @@ def main():
     args = parser.parse_args()
 
     try:
+        if args.command == "native-ui":
+            return fleetworks_native_verify.execute(args)
         if args.command == "platform":
             import fleetworks_platform
 

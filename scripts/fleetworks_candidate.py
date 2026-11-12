@@ -189,18 +189,20 @@ def apple_versions(version, bundle_version=None):
     return short, bundle_version
 
 
-def cargo_native_command(target, profile, *, agent=False, root=ROOT):
+def cargo_native_command(target, profile, *, agent=False, root=ROOT, implicit_host=False):
     if target not in NATIVE_TARGETS or profile not in ("debug", "release"):
         raise ValueError("Unsupported native target or profile")
     command = ([sys.executable, str(root / "scripts/agent_cargo.py")] if agent else ["cargo"])
     command += ["build", "--locked", "-p", NATIVE_BINARY, "--bin", NATIVE_BINARY,
-                "--target", target, "--message-format=json-render-diagnostics"]
+                "--message-format=json-render-diagnostics"]
+    if not implicit_host:
+        command += ["--target", target]
     if profile == "release":
         command.append("--release")
     return command
 
 
-def cargo_executable(output):
+def cargo_executable(output, *, name=NATIVE_BINARY, kind="bin"):
     """Resolve the scoped executable from successful Cargo JSON output."""
     found = set()
     finished = False
@@ -220,11 +222,11 @@ def cargo_executable(output):
             location, package_version = package_id.rsplit("#", 1)
             package_matches = bool(re.fullmatch(VERSION_PATTERN, package_version)) and \
                 Path(urllib.parse.unquote(urllib.parse.urlparse(location).path)).name == NATIVE_BINARY
-        if message.get("reason") == "compiler-artifact" and target.get("name") == NATIVE_BINARY \
-                and "bin" in target.get("kind", []) and package_matches and message.get("executable"):
+        if message.get("reason") == "compiler-artifact" and target.get("name") == name \
+                and kind in target.get("kind", []) and package_matches and message.get("executable"):
             found.add(message["executable"])
     if not finished or len(found) != 1:
-        raise ValueError("Successful Cargo output must identify exactly one fleetworks-desktop executable")
+        raise ValueError(f"Successful Cargo output must identify exactly one {name} executable")
     executable = Path(found.pop())
     if not executable.is_absolute():
         raise ValueError("Cargo executable path must be absolute")
@@ -594,7 +596,7 @@ def native_main(args):
         raise ValueError("--open cannot launch an artifact for the other physical Mac architecture")
     toolchain = validate_toolchain(info)
     destination = native_output(args.output, target, args.profile)
-    command = cargo_native_command(target, args.profile, agent=args.agent) if args.command == "build-native" else None
+    command = cargo_native_command(target, args.profile, agent=args.agent, implicit_host=args.target == "host") if args.command == "build-native" else None
     if args.dry_run:
         print(json.dumps({"target": target, "platform": info.as_dict(), "profile": args.profile,
                           "build_command": command, "app": str(destination / NATIVE_APP),

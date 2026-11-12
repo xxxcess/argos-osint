@@ -32,6 +32,7 @@ Start with the [workspace manifest](../../../Cargo.toml). The native macOS app c
 | Model and provider scheduling | [Providers](../concepts/providers.md) |
 | Rust style | [Repository Rust style](../../../.opencode/skills/argos-rust-style/SKILL.md) · [Conventions](conventions.md#rust-style) |
 | React UI and fixture review | [Design rules](react-ui.md) · [Browser checks](react-ui-testing.md) |
+| Native Runtime captures and inspection | [Selected native UI verification](native-verification.md) |
 | Retained Ratatui source | [Contributor verification](tui-verification.md) |
 | Agent coordination | [Execution policy](agent-workflow.md) · [OpenCode](opencode-v2.md) |
 | Docs and figures | [Wiki maintenance](../maintenance.md) · [Diagram catalog](../../diagrams.md) |

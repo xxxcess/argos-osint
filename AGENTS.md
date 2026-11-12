@@ -1,6 +1,6 @@
 # Fleetworks agent orientation
 
-Fleetworks uses Venture to run network services, native terminal clients, and the React Native Web desktop.
+Fleetworks has a Rune macOS API client, an independently operated Linux backend, and the React Native Web desktop. Venture retains external deployment controls and compatibility terminal clients until their parity gates close. Native Backend pages share deployment resources; Workstation pages manage local identity and registered activity.
 
 - Start at [docs/index.md](docs/index.md), then the [Fleetworks guide](docs/wiki/code/fleetworks.md) or the relevant concept or code route. Read [contributing](docs/wiki/code/contributing.md) and [conventions](docs/wiki/code/conventions.md) before edits/checks. Preserve unrelated work. `.github` changes belong to Code Architect.
 - Follow [scope and finish-line rules](docs/wiki/code/agent-workflow.md#scope-and-finish-line): pin the requested outcome, non-goals and acceptance; review risks early; freeze before final checks. Defer unrelated findings. Late fixes require a demonstrated in-scope blocker and an affected check, not another broad audit. Honor wrap-up immediately.
@@ -11,6 +11,7 @@ Fleetworks uses Venture to run network services, native terminal clients, and th
 - Multi-phase work uses a concise [named plan](docs/wiki/code/planning-artifacts.md#working-format); separate implementation from verification. Scratch belongs in `.agent-scratch/`, unstaged.
 - Update only affected docs/tags/contracts/diagram pairs in the same change. Trace cross-cutting concerns with [tags](docs/wiki/tags.md); follow [wiki maintenance](docs/wiki/maintenance.md).
 - Rust changes load `argos-rust-style`. Repository async rules and layout override conflicting upstream platform rules. `cargo fmt` remains the formatter.
+- Rune changes load [fleetworks-rune-verify](.opencode/skills/fleetworks-rune-verify/SKILL.md) and follow [native verification](docs/wiki/code/native-verification.md). Use actual views/Runtime and selected PNG/tree/scripts in the shared debug cache; native view-only work does not install or build backend engines. Linux storage/search changes select their own required gates. Native has no Docker/service ownership or topology renderer.
 - React work loads `argos-react-ui` and, for components/state/performance, `argos-react-patterns`. Follow [React rules/theme](docs/wiki/code/react-ui.md): terminal desk plus HUD/glass, shared primitives/tokens, Compiler/Hooks lint, affected fixture screenshots. Topology uses `ForceCanvas` and its list twin.
 - Browser verification uses repository Playwright. Set `ARGOS_WEB_TEST_DEV=1` for isolated test output/locks under `.agent-scratch/next-web-tests`; preserve the user's frontend and `.next` locks.
 - TUI changes load `argos-tui-verify`; follow [design](docs/wiki/code/tui-design-spec.md), [components](docs/wiki/code/tui-components.md), [verification](docs/wiki/code/tui-verification.md), and [Profile analytics](docs/wiki/code/profile-analytics-dashboard.md) when affected. Keep thin borders, ACCENT focus and SELECT selection; inspect captured PNGs.

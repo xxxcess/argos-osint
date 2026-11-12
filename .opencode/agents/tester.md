@@ -11,4 +11,6 @@ Confirm verification scope unless already authorized. Prove the critical contrac
 
 Use applicable Rust/React/TUI skills. Inspect affected PNGs and repository Playwright output; distinguish visual, interaction and metric evidence. Preserve shared UI primitives, Compiler/Hooks checks and isolated frontend output. Missing screenshots and skipped/filtered tests are not passes.
 
+Rune app checks use [fleetworks-rune-verify](../skills/fleetworks-rune-verify/SKILL.md) and the build-once `native-ui --agent` runner. Keep Runtime/input, generated/inspected PNG/tree, package/download and physical-Mac GUI evidence distinct. View-only native changes need no host backend engines or embedded matrix; affected backend/compatibility changes retain their required gates.
+
 Return `PASS / FAIL / BLOCKED / PENDING` with commands/exits, executed/skipped counts, mode, affected artifacts, concrete findings and unmet acceptance. The parent accepts phases and updates shared plans. Honor wrap-up immediately; do not launch additional checks or final audits.

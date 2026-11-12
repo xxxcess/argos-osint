@@ -9,6 +9,7 @@ Workflows live in `.github/workflows/` (owned by Code Architect). Branch work us
 | Development and test | [fleetworks.yml](../../../.github/workflows/fleetworks.yml) | Every pull request, pushes to `main` and `feat/atlas-zero-shot`, nightly `17 6 * * *`, and manual dispatch |
 | Main merge | [embedded.yml](../../../.github/workflows/embedded.yml) | Pushes to `main` only, plus `gh workflow run embedded.yml --ref <branch>` |
 | Called by Fleetworks | [intel-web.yml](../../../.github/workflows/intel-web.yml), [atlas-bert.yml](../../../.github/workflows/atlas-bert.yml) | The selected Fleetworks scope, or a direct dispatch |
+| Native app review | [fleetworks-native.yml](../../../.github/workflows/fleetworks-native.yml) | Reused by both selected Mac legs in Fleetworks |
 | Release review | [fleetworks-candidate.yml](../../../.github/workflows/fleetworks-candidate.yml) | Manual dispatch of a published ref |
 | Diagnostics | [mutation.yml](../../../.github/workflows/mutation.yml) | Manual dispatch after an embedded run |
 | Catalog | [datasets.yml](../../../.github/workflows/datasets.yml) | Dataset, `.gitattributes`, or its own workflow changes, plus manual dispatch |
@@ -40,16 +41,17 @@ The figure is the development cycle. Embedded compatibility, release candidates,
 
 ## `fleetworks.yml` — scoped branch checks
 
-The [Fleetworks workflow](../../../.github/workflows/fleetworks.yml) is the build and test cycle for client, service, image, Compose, web, and classifier changes. It runs the full selection on the default branch once the scheduled workflow is present there. The [shared planner](../../../scripts/fleetworks_verify.py) selects jobs from the pull request's changed paths, or from the two commits on a push. Markdown, documentation figures, workflow files, and the compatibility CLI do not add a Fleetworks lane. Shared Rust contracts widen selection. A full or nightly dispatch, and a comparison that cannot be read, select every lane. The workflow cancels stale pull-request and dispatch runs. Pushes complete.
+The [Fleetworks workflow](../../../.github/workflows/fleetworks.yml) is the build and test cycle for client, service, image, Compose, web, and classifier changes. It runs the full selection on the default branch once the scheduled workflow is present there. The [shared planner](../../../scripts/fleetworks_verify.py) selects jobs from the pull request's changed paths, or from the two commits on a push. Markdown and documentation figures do not add a Fleetworks lane. The native app's workflow and verifier inputs select its desktop lane; other workflow inputs follow the planner's explicit rules. Shared Rust contracts widen selection. A full or nightly dispatch, and a comparison that cannot be read, select every lane. The workflow cancels stale pull-request and dispatch runs. Pushes complete.
 
 | Scope | Hosted evidence |
 | --- | --- |
 | Native clients | Linux x86-64, Apple silicon macOS, and Intel macOS tests and executable smoke for Venture and its sibling clients |
+| Native app | Both physical Mac architectures: scoped desktop tests, selected shared-view Runtime/PNG/tree captures, complete app ZIP packaging and verification of exact downloaded artifact bytes |
 | Server | Linux ARM64 service check, build, unit tests, and network bootstrap and readiness smoke |
 | Server images | Linux AMD64 images for the selected client binaries and the web app. Full and nightly runs also build Linux ARM64. Venture and the CLIs share one compile, then each image copies one binary. Each image is tagged `name:<version.txt>` and `name:local`. The version tag is the workspace SemVer with no leading `v`. |
 | Storage and queue | Affected disk storage and brief recovery contracts, plus Jobs-owned embedded queue Atlas dispatch when selected |
 | Packaged Compose | Venture-owned image startup, authenticated readiness, relay, and Atlas smoke on Linux ARM64 and AMD64 |
-| Intel Rust-BERT | Linux worker type check, then Intel macOS build, link, and real checkpoint inference |
+| Linux Rust-BERT | Native Linux AMD64 and ARM64 build, link, units, pinned checkpoint inference and extracted runtime bundle verification |
 | Web | Locked install, static and unit checks, production build, relay lifecycle, and production Chromium contracts. The development browser profile also runs for selected runtime changes. |
 
 The `Fleetworks required` job runs after scope planning and reports the exact event revision. A selected job must succeed. An unselected job is expected to skip. Failed scope planning and missing, failed, cancelled, or unexpectedly skipped selected jobs fail the aggregate. Storage and queue checks depend on the server job. The development browser check depends on the web job. The server image job builds only the targets named by the planner.
@@ -75,6 +77,12 @@ python3 scripts/fleetworks_verify.py dispatch full --ref <branch>
 
 A Compose configuration check confirms the merged model resolves. The packaged smoke starts the actual containers. Report both by revision and distinguish source-built smoke evidence from published release-artifact verification.
 
+## Native app review evidence
+
+The selected desktop scope invokes the same reusable workflow on `macos-15-intel` and `macos-15` with the corresponding explicit target. An explicit native component request selects both legs. The workflow verifies the exact checkout, pinned Rust/Rune source and physical architecture; the app does not require Node, Docker or backend engines to build. It runs the [selected native UI verifier](native-verification.md), packages the complete `.app`, then downloads by artifact ID and verifies archive hashes, bundle permissions, architecture, libraries and source identity.
+
+App ZIPs and fixture evidence have separate artifact URLs and 14-day retention. Missing or failed selected legs fail the required aggregate. The workflow has read-only credentials and creates unsigned review artifacts; signing, notarization and publication remain separate. Generated PNGs and verified downloaded bytes do not establish visual approval, Launch Services/input/accessibility behavior or minimum-OS support. Record those checks on matching hardware independently.
+
 ## `embedded.yml` — main merge compatibility
 
 [embedded.yml](../../../.github/workflows/embedded.yml) builds the compatibility suite on four platforms. It runs when commits land on `main`. A pull request does not run it. Dispatch it for a branch:
@@ -90,7 +98,7 @@ gh workflow run embedded.yml --ref <branch>
 | macOS arm64 | `macos-15` |
 | macOS Intel | `macos-15-intel` |
 
-Each leg uses Rust 1.95.0, skips debuginfo, and has a 90-minute timeout. Linux installs libclang, then every leg runs `scripts/local_matrix.sh --storage embedded`: `cargo fmt --check`, Clippy `-D warnings`, `cargo test --workspace --locked`, and `test_surreal.py --mode embedded` on in-process RocksDB. The default features are `embedded,nlp,classifier`. The workflow also fails if `rusqlite` or `lancedb` appears in the locked dependency graph.
+Each leg uses Rust 1.95.0, skips debuginfo, and has a 90-minute timeout. Linux installs libclang, then every leg runs `scripts/local_matrix.sh --storage embedded`: `cargo fmt --check`, Clippy `-D warnings`, `cargo test --workspace --locked`, and `test_surreal.py --mode embedded` on in-process RocksDB. The default features are `embedded,nlp,classifier`. The workflow rejects `lancedb` and direct `rusqlite` dependencies outside the Jobs owner.
 
 `Swatinem/rust-cache` keeps one embedded cache per runner OS and covers `target/agents`, where `scripts/agent_cargo.py` builds. A newer dispatch on the same branch cancels the older dispatch. Main pushes complete.
 
@@ -127,15 +135,19 @@ Worker lifecycle and ordered-queue fixtures own isolated test processes, private
 
 ## `atlas-bert.yml` — classifier worker checks
 
-Fleetworks calls this workflow for selected classifier changes and full dispatches. The call checks worker formatting and `rust-bert/doc-only` types on Linux, then builds, links, tests, and exercises the real checkpoint on `x86_64-apple-darwin`. It verifies the event commit and uses the PyTorch 2.1.0 wheel for Intel macOS and Python 3.11.
+Fleetworks calls this workflow for selected classifier changes and full dispatches. Both native runners (`ubuntu-24.04` and `ubuntu-24.04-arm`) build inside `python:3.11-bookworm`, matching the deployment image's Debian 12/glibc 2.36 ABI. The repository supplies the exact Rust toolchain. There is no macOS engine install, emulation or doc-only substitute for a runtime leg. The separate legacy macOS embedded engine matrix remains intentionally retained until its retirement acceptance gates pass.
+
+The [Linux worker helper](../../../tools/atlas-bert/scripts/verify_linux.py) selects official SHA256-pinned Python 3.11 CPU wheels: PyTorch 2.1.0+cpu on AMD64 and 2.1.0 on ARM64. Both are listed in the [official CPU index](https://download.pytorch.org/whl/cpu/torch/). `torch-sys` 0.14.0's [version check](https://docs.rs/crate/torch-sys/0.14.0/source/build.rs) requires 2.1.0; the helper refuses version-check bypasses. Native build/link and nonzero unit tests precede the unchanged pinned Typeform DistilBERT MNLI checkpoint preparation. Real inference checks its protocol, six-domain ordering, finite bounded scores, singleton/batch consistency and repeat consistency.
+
+Each leg packages the worker, matching wheel/native dependencies, Torch license, verified model assets, launcher, file hashes and source/toolchain/ABI manifest. ELF architecture and actual GLIBC/GLIBCXX/CXXABI symbol requirements must fit bookworm. The helper extracts the archive, checks its complete inventory and hashes, rejects Torch/OpenMP resolution outside the bundle, and repeats real checkpoint inference from that extracted payload. Baseline bookworm glibc/libgcc/libstdc++ remain runtime requirements. Actions retain each immutable per-architecture bundle and bounded evidence for 14 days; evidence binds source SHA, artifact ID/digest and archive SHA256. The aggregate rejects either failed/skipped leg or missing/mismatched architecture evidence. These are configured gates; actual native Linux execution on both architectures remains pending cutover evidence. Gateway/source-to-visible and load integration are separate tests.
 
 For a direct runtime run:
 
 ```sh
-gh workflow run atlas-bert.yml --ref <branch> -f intel_runtime=true
+gh workflow run atlas-bert.yml --ref <branch> -f head=<full-source-sha>
 ```
 
-See the [classifier guide](classifier.md) for local setup. The native Venture and client executables have their own Intel lane in Fleetworks.
+The supplied SHA must be checked out exactly. No workflow is dispatched by editing these files, and Actions artifacts are review evidence rather than a public release. See the [classifier guide](classifier.md) for existing operator setup. The Fleetworks desktop's two Mac lanes build its app/contracts/workspace safety tests without installing backend engines.
 
 ## Release, policy, and diagnostics
 

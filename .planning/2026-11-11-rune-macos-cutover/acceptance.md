@@ -93,7 +93,7 @@ Browser work uses repository Playwright with `ARGOS_WEB_TEST_DEV=1`; user fronte
 
 ## Active work and finish line
 
-1. Preserve the verified schema 8/reset-startup/rebuild checkpoint. Complete exact claimed-task seed fences, bounded parser/local resource probes and exact-candidate activation as separately verified increments; do not relabel these as already passed.
+1. Preserve source checkpoint e3e84c0 and its84native/33Core/45API/6worker/15Venture/13search/65Python evidence. Verify next scoped operational-log integration, saved local connection profiles and the build-once native renderer verifier as separate increments.
 2. Preserve the passed 78-case appearance/lifecycle checkpoint; finish affected captures and integrate exact-candidate native activation only after its backend consumer checks. Native activation remains disabled until its real backend consumer is verified.
 3. Run the required embedded gate and actual isolated Docker source-to-visible/recovery/pressure journeys. Finish affected docs/paired diagrams and tooling checks.
 4. Commit coherent verified source checkpoints. Preserve the baseline scheduler commit. Do not stage scratch or unrelated changes.
@@ -103,7 +103,25 @@ Detailed command output is retained in ignored local verification logs. This cur
 
 ## Commit ledger
 
+- `e3e84c0` — committed the84-native/33-Core/45-API/6-worker/15-Venture/13-search/65-Python scoped source checkpoint, plans/diagrams/deployment/tooling/CI source. Required embedded/Linux/installed-artifact acceptance remains pending. Future A09 files and saved-profile parity were excluded.
+
 - `294a634` — committed curated source spec, endpoint/reset/docs inventories, acceptance/handoff/decisions and requested cache-first agent guidance. No push. Local scratch and working-memory files remain ignored.
 - `062471c` — committed the latest backend/Core verification and remaining-gate refresh; no push.
 - `0fb1a0a` — committed verified web Connect authority/session/context behavior and palette, with 61 frontend/fixture files. Scoped unit/Node/compiler/type/build checks,8 browser journeys and6 inspected PNGs are its recorded evidence; real public ingress/backend integration remains pending.
 - Next source checkpoint: coherent manifests, native/contracts/workspaces, authority/context/configuration and backend/search integration after affected checks. Unreferenced or later unverified increments are excluded; current pending tests remain explicit.
+
+## Next source checkpoint
+
+The scoped log backend passes 6 new executed cases: 3 SQLite persistence/deadline/projection cases, 2 API cursor cases, and 1 real required-server membership/cohort fixture. The 513-job cap and selected child/descendant behavior ran; zero-test companion targets are excluded. Unified host/search compilation passed without warnings. The first affected test build took 10m21s; the exact Core fixture rerun reused that graph in 2.13s and passed in 49.90s.
+
+The app/contracts/workspace checkpoint passed all 112 cases (32 contracts, 54 app, 16 workspace unit and 10 integration) and scoped Clippy. The initial focus API mismatch, clipped-pointer fixtures and queued focus-event assertion were corrected without weakening their contracts. Later real captures demonstrated missing Jobs/Logs tabs, visible form labels and virtualized large-list rendering; those narrow UI changes are now being completed and need their own affected rerun.
+
+Current Python tooling passes 99 cases across 9 suites. This includes the 64 tool cases detailed below, 6 deployment cases and 29 reset cases. Seven guidance/policy cases and 185 affected documentation/guidance links pass. The Rune skill and alias validate. The first real renderer invocation generated 52 captures; inspection findings remain explicit. The public Docker journey and actual Linux worker artifact execution are pending.
+
+These increments remain separate from source checkpoint `e3e84c0`. Source completion, a clean build and synthetic fixtures do not imply full cutover acceptance. Production reset is sealed; physical-Mac, CI/download, retirement and actual reset obligations remain open.
+
+## Tooling checkpoint ready for local commit
+
+The native renderer verifier passed its 10 offline cases and actually generated 52 captures from the fresh compiler-reported executable, using the implicit shared host debug graph. This records generation; inspection found Jobs/Logs tab and visible-label gaps, and the large-list debug capture showed 532.81ms/1,482 layout nodes, so affected UI work remains open. The app/workspace/contract checkpoint passed 112 tests and scoped Clippy before these latest UI repairs.
+
+The tool-only source has 64 passing Python cases: platform 7, candidate 16, planner 16, image candidate 5, native verifier 10, Linux worker verifier 10. Seven guidance/policy checks pass. The default host build helper now omits Cargo's explicit target argument, and unknown build inputs conservatively select checks/images. Three changed workflows pass the Code Architect's static actionlint check; real hosted Linux inference and Mac artifact jobs remain pending. This checkpoint excludes the still-changing UI/backend/reset/deployment smoke increments.

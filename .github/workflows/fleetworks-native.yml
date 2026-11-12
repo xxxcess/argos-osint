@@ -97,97 +97,30 @@ jobs:
           workspaces: . -> target/agents
           cache-on-failure: true
           save-if: ${{ github.event_name != 'pull_request' }}
-      - name: Run scoped desktop tests and build one fixture executable
+      - name: Run scoped desktop unit tests
         shell: bash
         run: |
           set -euo pipefail
           evidence="$RUNNER_TEMP/fleetworks-native-evidence"
           mkdir -p "$evidence"
-          cargo fmt -p fleetworks-desktop -- --check
+          cargo fmt -p fleetworks-desktop -p fleetworks-workspace -p fleetworks-contracts -- --check
           python3 scripts/agent_cargo.py test --locked -p fleetworks-desktop \
-            --target "$NATIVE_TARGET" | tee "$evidence/unit-tests.log"
+            -p fleetworks-workspace -p fleetworks-contracts -- --test-threads=1 \
+            | tee "$evidence/unit-tests.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$evidence/unit-tests.log"
-          python3 scripts/agent_cargo.py build --locked -p fleetworks-desktop \
-            --example native_fixture --target "$NATIVE_TARGET" \
-            --message-format=json-render-diagnostics > "$evidence/cargo-fixture.jsonl"
-      - name: Render the actual shared views and scripted actor selection
+      - name: Generate selected actual shared-view fixture evidence
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-          import platform
-          import re
-          import struct
-          import subprocess
-          import tempfile
-          import sys
-          sys.path.insert(0, "scripts")
-          from fleetworks_candidate import locked_rune_revision, sha256
-
-          output = Path(os.environ["RUNNER_TEMP"]) / "fleetworks-native-evidence"
-          messages = [json.loads(line) for line in (output / "cargo-fixture.jsonl").read_text().splitlines() if line.strip()]
-          executables = {item["executable"] for item in messages
-                         if item.get("reason") == "compiler-artifact"
-                         and item.get("target", {}).get("name") == "native_fixture"
-                         and "example" in item.get("target", {}).get("kind", [])
-                         and item.get("executable")}
-          if len(executables) != 1 or not any(item.get("reason") == "build-finished" and item.get("success") is True for item in messages):
-              raise SystemExit("A successful build must identify exactly one native_fixture executable")
-          executable = Path(executables.pop())
-          if not executable.is_absolute() or not executable.is_file():
-              raise SystemExit("Fixture compiler-artifact path is unavailable")
-          scenes = ["workstation-offline", "atlas-offline", "brain-search-ready", "brain-dossier",
-                    "brain-search-indexing", "brain-search-error", "tools-offline", "models-setup",
-                    "profile-setup", "workspaces-offline", "jobs-offline"]
-          records = []
-          with tempfile.TemporaryDirectory(prefix="fleetworks-fixture-home-", dir=os.environ["RUNNER_TEMP"]) as home:
-              environment = {**os.environ, "HOME": home}
-              listing = subprocess.run([str(executable), "--list-scenes"], env=environment,
-                                       check=True, text=True, capture_output=True, timeout=30)
-              (output / "scenes.txt").write_text(listing.stdout)
-              if not set(scenes).issubset(set(re.findall(r"[A-Za-z0-9_-]+", listing.stdout))):
-                  raise SystemExit("Selected scene names are missing; zero/unmatched captures cannot pass")
-              cases = [(scene, size, scale, None) for scene in scenes for size, scale in [("1280x800", 2), ("640x480", 1)]]
-              cases.append(("brain-search-ready", "1280x800", 2,
-                            "apps/fleetworks-desktop/tests/fixtures/scripts/brain-search-open.json"))
-              for scene, size, scale, script in cases:
-                  label = f"{scene}-{size}-{scale}x" + ("-selection" if script else "")
-                  png, tree = output / (label + ".png"), output / (label + ".tree.json")
-                  command = [str(executable), "--scene", scene, "--size", size, "--scale", str(scale),
-                             "--at", "1.0" if script else "0", "--snap", str(png), "--tree", str(tree)]
-                  if script:
-                      command += ["--script", script, "--trace", str(output / (label + ".trace.jsonl"))]
-                  result = subprocess.run(command, env=environment, text=True, capture_output=True, timeout=90)
-                  (output / (label + ".log")).write_text(result.stdout + result.stderr)
-                  if result.returncode:
-                      raise SystemExit(f"Rune renderer failed for {label}; missing adapter/render support is not a pass")
-                  header = png.read_bytes()[:24] if png.is_file() else b""
-                  if len(header) < 24 or header[:8] != b"\x89PNG\r\n\x1a\n":
-                      raise SystemExit(f"Missing/invalid rendered PNG for {label}")
-                  expected = tuple(int(value) * scale for value in size.split("x"))
-                  if struct.unpack(">II", header[16:24]) != expected:
-                      raise SystemExit(f"Rendered dimensions do not match selected profile for {label}")
-                  tree_text = tree.read_text() if tree.is_file() else ""
-                  if not tree_text or not json.loads(tree_text) or "fixture-marker" not in tree_text:
-                      raise SystemExit(f"Missing/invalid production-view fixture tree for {label}")
-                  if script and "dossier-name" not in tree_text:
-                      raise SystemExit("Scripted actor selection did not reach the dossier view")
-                  records.append({"scene": scene, "size": size, "scale": scale, "script": script,
-                                  "png": png.name, "png_sha256": sha256(png), "tree": tree.name,
-                                  "exit": result.returncode, "png_generated": True,
-                                  "visual_inspection": "pending", "gui_launch": "not_run"})
-          manifest = {"source_revision": os.environ["FLEETWORKS_HEAD"], "dirty": False,
-                      "rune_revision": locked_rune_revision(), "target": os.environ["NATIVE_TARGET"],
-                      "os": platform.platform(), "fixture_sha256": sha256(executable),
-                      "renderer": "Rune headless renderer; adapter diagnostics retained in per-capture logs",
-                      "fonts": "pinned Rune embedded-fonts build feature", "theme": "Fleetworks charcoal/gold/ivory",
-                      "virtual_clock": True, "unit_tests": "passed; see unit-tests.log", "captures": records,
-                      "visual_inspection": "pending", "downloaded_app_gui_launch": "pending"}
-          (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-          PY
+          python3 scripts/fleetworks_verify.py native-ui --agent --require-clean \
+            --revision "$FLEETWORKS_HEAD" --output "$RUNNER_TEMP/fleetworks-native-evidence/fixtures" \
+            --scene workstation-offline --scene atlas-offline --scene brain-search-ready \
+            --scene brain-dossier --scene brain-search-indexing --scene brain-search-error \
+            --scene tools-offline --scene models-setup --scene profile-setup \
+            --scene workspaces-offline --scene jobs-offline \
+            --size 1280x800 --size 640x480 --scale 1 --scale 2 \
+            --script brain-search-ready=apps/fleetworks-desktop/tests/fixtures/scripts/brain-search-open.json \
+            --script-expect-key brain-search-ready=dossier-name
       - name: Build and package the complete local-review app
         id: package
         shell: bash

@@ -235,6 +235,12 @@ class NativeAppTests(unittest.TestCase):
         self.assertIn("--locked", command)
         self.assertIn("--release", command)
         self.assertNotIn("--workspace", command)
+        host_debug = cargo_native_command("x86_64-apple-darwin", "debug", agent=True, root=self.root, implicit_host=True)
+        self.assertIn("--locked", host_debug)
+        self.assertNotIn("--target", host_debug)
+        self.assertNotIn("--release", host_debug)
+        explicit_debug = cargo_native_command("x86_64-apple-darwin", "debug", agent=True, root=self.root)
+        self.assertEqual(explicit_debug[explicit_debug.index("--target") + 1], "x86_64-apple-darwin")
         self.assertEqual(apple_versions("0.2.1-beta.1+review"), ("0.2.1", "1.2.1"))
         with self.assertRaisesRegex(ValueError, "numeric bundle version"):
             apple_versions("0.2.1", "0.2.1-beta")

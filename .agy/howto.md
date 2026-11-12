@@ -15,6 +15,7 @@ Use [lite](lite-team.md) for bounded changes and [heavy](heavy-team.md) for inde
 - Respect the user's approved verification scope. Use scoped Fleetworks checks for its clients and services. Use native embedded storage and its final gate for affected compatibility paths. Hosted CI owns server and platform matrices and mutation execution. Missing evidence stays unverified.
 - Follow the [development loops](../docs/wiki/code/contributing.md#development-loops-local-cli-and-docker). Workers edit only. The build owner runs the host CLI loop first, then at most one Docker image or web-dev loop for the affected target, using a dedicated workspace, `COMPOSE_PROJECT_NAME` and ports. Never stop or rebuild the user's stack. Docker evidence is unverified until run and authorized.
 - Keep existing source/UI conventions, React Compiler, accessible topology/list twin and offline fixtures. Use canonical instructions for visual previews and final evidence.
+- Rune app work follows [fleetworks-rune-verify](../.opencode/skills/fleetworks-rune-verify/SKILL.md) and [native verification](../docs/wiki/code/native-verification.md): same-view Runtime/input, selected PNG/tree/scripts and actual inspection. Native stays API-only; backend-global resources and registered origin are distinct. Retained terminal, Linux engine/integration and physical-Mac GUI evidence keep their own gates.
 
 ## Handoff
 

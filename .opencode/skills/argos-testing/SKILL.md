@@ -41,6 +41,12 @@ Exercise opt-in fixtures before using them as evidence. Preserve meaningful asse
 - Browser verification uses the repository Playwright runner. Set `ARGOS_WEB_TEST_DEV=1`; Next output/locks belong under `.agent-scratch/next-web-tests`. Never stop the user's frontend or remove its lock. Retain bounded traces/screenshots/errors for failed affected cases.
 - Load applicable React/TUI skills. Use deterministic terminal state/cell fixtures, terminal restoration checks and actual PNG inspection. Generated images alone are not visual evidence; snapshots alone do not prove interactions. Missing visual evidence remains pending.
 
+## Rune client and Linux backend
+
+- Rune changes follow [fleetworks-rune-verify](../fleetworks-rune-verify/SKILL.md) and [native verification](../../../docs/wiki/code/native-verification.md). Test actual `State`/handlers with Rune Runtime, then select real-view PNG/tree/script captures through `fleetworks_verify.py native-ui --agent`. Use the shared debug graph, actual scene inventory and synthetic effects. Preserve two-node/child/deployment privacy, stale-reply, credential and protected-path cases when affected.
+- Native UI, transport, package validation, inspected captures and matching-hardware GUI/input/accessibility are separate evidence. Native view-only work needs neither terminal captures nor a backend engine installation. Retained compatibility or embedded-storage changes still require their applicable gate below.
+- Linux backend/search changes require real isolated domain/outbox/index/gateway/dossier and restart/lease/pressure checks when affected. Native PNGs, optional Natural training and doc-only Rust-BERT compilation cannot establish real Linux model inference. Both Linux architectures and both physical Mac architectures remain explicit platform evidence.
+
 ## Execution restrictions
 
 Use the designated combined integration tree and one build owner. Worktrees are edit/format-only. Follow the [stable graph/resource policy](../../../docs/wiki/code/agent-workflow.md#keep-one-reusable-build-graph) and [cache hygiene](../../../docs/wiki/code/contributing.md#build-cache-hygiene); never bypass locks or clean active/user/global caches.

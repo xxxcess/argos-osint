@@ -15,7 +15,7 @@ The user-supplied consolidated specification is preserved verbatim in [design.md
 | Tantivy | Locked `0.27.0`; prior 13 host cases recorded; current workspace lint passes; actual Linux journey/recovery/load pending |
 | Planning | Phase checkboxes and top-level status reconciled at 2026-11-12 15:59 UTC; root owns updates |
 | Product source | Main Phases 1–4 implementation committed; source-level reset/docs work complete, actual retirement/cutover pending |
-| Current required gate | Format/lint PASS; full workspace test build RUNNING on `d7636c0`; storage CLI smoke and required embedded-storage phase pending |
+| Current required gate | Format/lint PASS; full workspace test build PAUSED for capacity after safe reclamation on `d7636c0`; storage CLI smoke and required embedded-storage phase pending |
 | Native review app | Clean Intel debug app/archive from `f8c216c` built and independently verified; unsigned, GUI not launched |
 | Hosted / physical platforms | Exact-SHA hosted artifacts/download and both matching-hardware/minimum-OS GUI checks pending |
 | Actual reset / layout transition | Pending separate deployment action; production support sealed; no real user credentials or running stack changed |
@@ -162,10 +162,14 @@ Current ownership: all implementation workers are idle with edits frozen. Root o
 
 ## Immediate next action
 
-Finish the running canonical embedded matrix on `d7636c0`. Formatting passed in 9s and strict all-target workspace lint reused the cache in 3.28s; workspace tests are currently compiling Core after SurrealDB. Test execution, storage CLI smoke and the required embedded-storage phase remain pending. After this gate, run the fresh isolated Docker source-to-visible/seed/train/activation/recovery journey.
+Quantify the remaining output/reserve and safely reclaim only proven obsolete agent artifacts before resuming the matrix on `d7636c0`. The first reclamation freed7.10GiB, but remaining growth exceeded that estimate; the owned build is stopped at about12GiB free. Formatting passed in 9s and strict all-target workspace lint reused the cache in 3.28s; The prior API/CLI build interruption was a disk-reserve pause, not an assertion failure; completed outputs and all current replacements were preserved. Test execution, storage CLI smoke and the required embedded-storage phase remain pending. After this gate, build the affected Docker images without starting services and hand the native app and service runtime verification to the user.
 
 The native implementation already passes 119 scoped cases, strict native lint, latest ARM source check and selected visual inspection. Its clean Intel debug app/archive from `f8c216c` passed independent bundle verification. Native source did not change in the workspace lint follow-up, so its evidence is preserved.
 
 Executed evidence also includes six new backend paging cases, six focused log backend cases, ten focused required-embedded logs/reset cases (including four positive Core reset cases and actual owner recovery), 99 Python cases, seven guidance/policy checks and 1,688 relative documentation links. The final renderer generated 40 captures; 11 selected captures covering all 10 chosen scenes were inspected. The prior profile/log run generated 52 captures with 14 selected captures inspected. Current representative profile/log PNGs match their prior bytes exactly. All 20 changed diagram pairs passed XML/accessibility/parity and were rendered/inspected. These scoped checks do not imply full matrix, Docker, installed-hardware or real-reset acceptance.
 
 The user explicitly authorized scoped local builds/tests, native fixtures, browser checks, isolated Docker integration and local commits. Root checkpoint ledger: native/backend `e3e84c0`, tooling/guidance `fa52b0c`, docs/figures `1272a0b`, reset/profile recovery and fresh revision `f311350`, scoped activity source `f8c216c`, workspace lint follow-up `d7636c0`. No push or publication. Preserve unrelated work, useful caches and the baseline scheduler fix. Actual reset, layout transition, installed dual-Mac validation and terminal retirement remain separately gated.
+
+## Current verification owner
+
+The user has taken ownership of native app and Docker service runtime verification. The agent finishes builds and automated tests and hands off the exact native archive, Docker image tags/IDs, commands and results. Do not launch the app or start services as an agent verification step. Manual/platform/cutover acceptance remains open until verified.

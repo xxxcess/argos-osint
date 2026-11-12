@@ -7,10 +7,57 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from native_review import TOKEN_NAMES, provision, review_path
+from native_review import TOKEN_NAMES, expose_root_environment, provision, review_path
 
 
 class NativeReviewTests(unittest.TestCase):
+    def test_root_environment_is_private_and_review_alias_follows_atomic_edits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            receipt = provision(root, "local", 18091, "linux/amd64", "a" * 40, root_env=True)
+            target = root / "compose.env"
+            alias = Path(receipt["workspace"]) / "compose.env"
+            self.assertTrue(target.is_file())
+            self.assertFalse(target.is_symlink())
+            self.assertTrue(alias.is_symlink())
+            self.assertEqual(alias.resolve(), target.resolve())
+            self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
+            replacement = root / "replacement.env"
+            replacement.write_text(target.read_text().replace("'18091'", "'18093'"))
+            replacement.chmod(0o600)
+            replacement.replace(target)
+            self.assertIn("FLEETWORKS_API_PORT='18093'", alias.read_text())
+
+    def test_existing_root_environment_is_never_overwritten(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "compose.env"
+            target.write_text("existing operator settings\n")
+            with self.assertRaises(FileExistsError):
+                provision(root, "local", 18091, "linux/amd64", "a" * 40, root_env=True)
+            self.assertEqual(target.read_text(), "existing operator settings\n")
+            self.assertFalse(review_path(root, "local").exists())
+            target.unlink()
+            target.symlink_to(root / "missing.env")
+            with self.assertRaises(FileExistsError):
+                provision(root, "local", 18091, "linux/amd64", "a" * 40, root_env=True)
+            self.assertTrue(target.is_symlink())
+            self.assertFalse(review_path(root, "local").exists())
+
+    def test_existing_review_can_expose_settings_without_changing_credentials(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            receipt = provision(root, "local", 18091, "linux/amd64", "a" * 40)
+            workspace = Path(receipt["workspace"])
+            before = {path.name: path.read_bytes() for path in (workspace / "secrets").iterdir()}
+            original = (workspace / "compose.env").read_bytes()
+            exposed = expose_root_environment(root, "local")
+            self.assertEqual(exposed.read_bytes(), original)
+            self.assertEqual({path.name: path.read_bytes() for path in (workspace / "secrets").iterdir()}, before)
+            with self.assertRaises(FileExistsError):
+                expose_root_environment(root, "local")
+            self.assertEqual(exposed.read_bytes(), original)
+
     def test_private_distinct_purpose_files_and_stable_restart_settings(self):
         with tempfile.TemporaryDirectory() as directory:
             receipt = provision(Path(directory), "fixture", 18091, "linux/arm64", "a" * 40)

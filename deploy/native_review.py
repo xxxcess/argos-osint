@@ -43,7 +43,30 @@ def private_file(path, value):
         os.fsync(output.fileno())
 
 
-def provision(root, name, api_port, platform, revision, *, web_port=None, images=None):
+def expose_root_environment(root, name):
+    """Keep one editable root config with the review path pointing to it."""
+    root = root.resolve(strict=True)
+    workspace = review_path(root, name)
+    source = workspace / "compose.env"
+    target = root / "compose.env"
+    if target.exists() or target.is_symlink():
+        raise FileExistsError("Repo-root compose.env already exists")
+    if source.is_symlink() or not source.is_file():
+        raise ValueError("Expected the review's generated regular env file")
+    contents = source.read_text(encoding="utf-8")
+    private_file(target, contents)
+    try:
+        source.unlink()
+        source.symlink_to(os.path.relpath(target, workspace))
+    except OSError:
+        if not source.exists() and not source.is_symlink():
+            private_file(source, contents)
+        target.unlink()
+        raise
+    return target
+
+
+def provision(root, name, api_port, platform, revision, *, web_port=None, images=None, root_env=False):
     if not 1024 <= api_port <= 65535:
         raise ValueError("Choose an unused unprivileged API port")
     if web_port is not None and (not 1024 <= web_port <= 65535 or web_port == api_port):
@@ -57,6 +80,8 @@ def provision(root, name, api_port, platform, revision, *, web_port=None, images
         if set(images) - allowed or any(not re.fullmatch(r"[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9._-]+", value) for value in images.values()):
             raise ValueError("Review image overrides must be explicit tagged images")
     workspace = review_path(root, name)
+    if root_env and ((root / "compose.env").exists() or (root / "compose.env").is_symlink()):
+        raise FileExistsError("Repo-root compose.env already exists")
     if any(character in str(workspace) for character in "'\\\r\n"):
         raise ValueError("Review repository path cannot contain quotes, backslashes or line breaks")
     workspace.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -101,6 +126,8 @@ def provision(root, name, api_port, platform, revision, *, web_port=None, images
     # Single quotes preserve literal dollar signs in the path; Compose must not
     # expand a repository directory as an environment-variable expression.
     private_file(workspace / "compose.env", "".join(f"{key}='{value}'\n" for key, value in environment.items()))
+    if root_env:
+        expose_root_environment(root, name)
     receipt = {"version": 1, "revision": revision, "image_tag": image_tag, "workspace": str(workspace), "environment": environment}
     private_file(workspace / "review.json", json.dumps(receipt, indent=2) + "\n")
     return receipt
@@ -113,6 +140,7 @@ def main():
     initialize.add_argument("--name", required=True)
     initialize.add_argument("--api-port", type=int, required=True)
     initialize.add_argument("--web-port", type=int, help="optional distinct loopback Intel Web port")
+    initialize.add_argument("--root-env", action="store_true", help="keep editable settings in repo-root compose.env; refuse an existing file")
     initialize.add_argument("--platform", choices=("linux/amd64", "linux/arm64"), required=True)
     value = subcommands.add_parser("value", help="read one non-secret review setting")
     value.add_argument("--name", required=True)
@@ -121,8 +149,11 @@ def main():
     try:
         if args.command == "init":
             revision = subprocess.check_output(["git", "rev-parse", "--verify", "HEAD"], cwd=ROOT, text=True).strip()
-            receipt = provision(ROOT, args.name, args.api_port, args.platform, revision, web_port=args.web_port)
+            receipt = provision(ROOT, args.name, args.api_port, args.platform, revision,
+                                web_port=args.web_port, root_env=args.root_env)
             print(f"Prepared isolated backend review: {receipt['workspace']}")
+            if args.root_env:
+                print(f"Editable Compose settings: {ROOT / 'compose.env'}")
             print("No images built or services started. Keep compose.env and all credentials for restart.")
         else:
             receipt = json.loads((review_path(ROOT, args.name) / "review.json").read_text(encoding="utf-8"))

@@ -22,7 +22,7 @@ Native local identities live under the protected OS-home container, independentl
 
 ## Launch the Compose stack
 
-Use the [standalone backend recipe](../../../deploy/README.md#isolated-native-backend-review): provision with `deploy/native_review.py init`, build the `backend` Bake group, then start `compose.native-review.yml` directly with its generated env file and unique project. This creates separate deployment data and purpose-scoped credentials without mounting a native child. Reuse that exact Compose selection for status, logs, restart and stop. Stop preserves data; no startup resets configuration or rotates credentials.
+Use the [standalone backend recipe](../../../deploy/README.md#isolated-native-backend-review): provision with `deploy/native_review.py init --root-env`, build the `backend` Bake group, then start `compose.native-review.yml` directly with `--env-file compose.env` and its unique project. The editable env file is private and Git-ignored at the repository root. This creates separate deployment data and purpose-scoped credentials without mounting a native child. Reuse that exact Compose selection for status, logs, restart and stop. Stop preserves data; no startup resets configuration or rotates credentials.
 
 Optional Intel Web and Atlas services require explicit deployment configuration. The browser authenticates its Connect form with an already registered Connect ID; the ID alone grants no authority. Use the native Atlas page to submit collection work when a real worker is advertised. [Deployment](../../../deploy/README.md) · [Atlas](../../../deploy/atlas-dispatch.md)
 

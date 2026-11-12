@@ -36,16 +36,18 @@ Start Docker Desktop or your local Docker engine, then run these commands from t
 
 ```sh
 export PLATFORM="$(python3 scripts/fleetworks_verify.py platform --format docker)"
-python3 deploy/native_review.py init --name native-local --api-port 18091 --platform "$PLATFORM"
+python3 deploy/native_review.py init --name native-local --api-port 18091 --platform "$PLATFORM" --root-env
 export IMAGE_TAG="$(python3 deploy/native_review.py value --name native-local --field image_tag)"
 export VERSION="$(tr -d '[:space:]' < version.txt)"
 docker buildx bake -f deploy/docker-bake.hcl --load backend
 ```
 
+Edit `compose.env` at the repository root to update local Compose settings. It is private and ignored by Git. The deployment's generated env path points to this same file, so both locations use the same settings. Keep its generated access scope, epochs and storage path with the existing credentials and data.
+
 **Start the backend:** use this command after setup and whenever you want to start it again. It also works from a fresh terminal at the repository root.
 
 ```sh
-docker compose --env-file .agent-scratch/native-review/native-local/compose.env \
+docker compose --env-file compose.env \
   -f deploy/compose.native-review.yml --project-name fleetworks-native-review-native-local \
   up --no-build --pull never --detach --wait
 ```
@@ -59,7 +61,7 @@ In the native app's **Workstation** connection editor, use:
 
 Choose **Test**, then **Connect**. This recipe runs the backend independently from the app. Atlas collection uses the [additional overlay below](#collect-articles-with-atlas); Intel Web is an optional separate deployment.
 
-To inspect or stop the backend, use the same Compose command prefix with `ps`, `logs --follow` or `down` in place of `up --no-build --pull never --detach --wait`. Stop preserves backend data. For concurrent deployments, choose a different name and API port during initialization and use that deployment's matching env file and project. [Full deployment guide](deploy/README.md#isolated-native-backend-review)
+Rerun the start command to apply edited Compose settings. To inspect or stop the backend, use the same command prefix with `ps`, `logs --follow` or `down` in place of `up --no-build --pull never --detach --wait`. Stop preserves backend data. For concurrent deployments, omit `--root-env`, choose a different name and API port, and use that deployment's matching env file and project. [Full deployment guide](deploy/README.md#isolated-native-backend-review)
 
 Venture, the six terminal clients and the legacy `argos` executable are retired. Their historical evidence remains available in the [retirement disposition](docs/archive/cli-retirement.md). Backend service executables and administrative support tools remain supported.
 

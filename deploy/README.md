@@ -19,14 +19,16 @@ Use the standalone [native review recipe](compose.native-review.yml) for the Run
 Provision a **new** task-owned deployment directory, separate from every native workspace and existing stack. The helper creates private files and directories only; an existing review name fails without replacing credentials or data. Choose an unused API port. It creates no browser service or published database/search port.
 
 ```sh
-export REVIEW_NAME=rune-search-review
+export REVIEW_NAME=native-local
 export PLATFORM="$(python3 scripts/fleetworks_verify.py platform --format docker)"
-python3 deploy/native_review.py init --name "$REVIEW_NAME" --api-port 18091 --platform "$PLATFORM"
+python3 deploy/native_review.py init --name "$REVIEW_NAME" --api-port 18091 --platform "$PLATFORM" --root-env
 export REVIEW_WORKSPACE="$(python3 deploy/native_review.py value --name "$REVIEW_NAME" --field workspace)"
 export IMAGE_TAG="$(python3 deploy/native_review.py value --name "$REVIEW_NAME" --field image_tag)"
 export REVIEW_PROJECT="$(python3 deploy/native_review.py value --name "$REVIEW_NAME" --field project)"
 export VERSION="$(tr -d '[:space:]' < version.txt)"
 ```
+
+The editable `compose.env` lives at the repository root, is mode 0600 and is ignored by Git. `--root-env` refuses an existing root file. The workspace's generated `compose.env` points to the root file, so older commands read the same settings, including after an editor atomically replaces it. Initialization runs once; use the existing file for subsequent starts. For concurrent reviews or separate platform results, omit `--root-env` and use that review's `$REVIEW_WORKSPACE/compose.env` in every Compose command below.
 
 The workspace lives under `.agent-scratch/native-review/<name>`. Its FORMAT 1 `secrets/gateway-credentials.json` references separate owner-only token files for Native, WebRelay and InternalService purposes. Native may register/maintain; WebRelay may resolve existing browser context and cannot register or maintain; the internal health credential has read permission only. Every private runtime role receives the same persisted `FLEETWORKS_ACCESS_SCOPE_ID` and `FLEETWORKS_ACCESS_EPOCH`. Search read/write tokens differ, and only search plus `native-worker` receive the writer token. Keep these files and the unique search source epoch across restarts. Startup never rotates an epoch or resets a volume. Tokens stay out of command arguments, output and build artifacts; do not print or source `compose.env`.
 
@@ -50,11 +52,11 @@ Run a separate fresh review on `PLATFORM=linux/amd64` and `PLATFORM=linux/arm64`
 Validate and start the exact preloaded tags in a second operator action. Keep the same env file, standalone Compose file and project on every command. No native folder is mounted here.
 
 ```sh
-docker compose --env-file "$REVIEW_WORKSPACE/compose.env" -f deploy/compose.native-review.yml \
+docker compose --env-file compose.env -f deploy/compose.native-review.yml \
   --project-name "$REVIEW_PROJECT" config --quiet
-docker compose --env-file "$REVIEW_WORKSPACE/compose.env" -f deploy/compose.native-review.yml \
+docker compose --env-file compose.env -f deploy/compose.native-review.yml \
   --project-name "$REVIEW_PROJECT" up --no-build --pull never --detach --wait
-docker compose --env-file "$REVIEW_WORKSPACE/compose.env" -f deploy/compose.native-review.yml \
+docker compose --env-file compose.env -f deploy/compose.native-review.yml \
   --project-name "$REVIEW_PROJECT" ps
 ```
 
@@ -69,9 +71,9 @@ Atlas/NLP/Rust-BERT and optional web deployment remain separate operator flows; 
 Rebuilding a tag does not replace a running consumer. Explicitly recreate the selected services after a successful build. Inspect logs and stop this review with the same project; retain credentials, source identity and data:
 
 ```sh
-docker compose --env-file "$REVIEW_WORKSPACE/compose.env" -f deploy/compose.native-review.yml \
+docker compose --env-file compose.env -f deploy/compose.native-review.yml \
   --project-name "$REVIEW_PROJECT" logs --tail 100 api native-worker search-index
-docker compose --env-file "$REVIEW_WORKSPACE/compose.env" -f deploy/compose.native-review.yml \
+docker compose --env-file compose.env -f deploy/compose.native-review.yml \
   --project-name "$REVIEW_PROJECT" down
 ```
 
@@ -97,7 +99,7 @@ For a new browser-enabled deployment, add `--web-port 18092` to the provisioning
 
 ```sh
 docker buildx bake -f deploy/docker-bake.hcl --load backend web
-docker compose --env-file "$REVIEW_WORKSPACE/compose.env" \
+docker compose --env-file compose.env \
   -f deploy/compose.native-review.yml -f deploy/compose.yml \
   --project-name "$REVIEW_PROJECT" up --no-build --pull never --detach --wait
 ```
@@ -105,10 +107,10 @@ docker compose --env-file "$REVIEW_WORKSPACE/compose.env" \
 For Web development, additionally select `-f deploy/compose.dev.yml` and build its development image before starting:
 
 ```sh
-docker compose --env-file "$REVIEW_WORKSPACE/compose.env" \
+docker compose --env-file compose.env \
   -f deploy/compose.native-review.yml -f deploy/compose.yml -f deploy/compose.dev.yml \
   --project-name "$REVIEW_PROJECT" build web
-docker compose --env-file "$REVIEW_WORKSPACE/compose.env" \
+docker compose --env-file compose.env \
   -f deploy/compose.native-review.yml -f deploy/compose.yml -f deploy/compose.dev.yml \
   --project-name "$REVIEW_PROJECT" up --no-build --pull never --detach --wait
 ```

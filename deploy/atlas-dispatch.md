@@ -4,10 +4,10 @@ Add `compose.atlas.yml` to the [standalone native-review base](README.md) to sta
 
 ## Start directly with Compose
 
-Provision a fresh isolated deployment using the [backend recipe](README.md#isolated-native-backend-review). The helper creates private service tokens, including the Atlas internal token; keep its credentials, scope/epoch and numeric owner UID/GID across restarts. Build the backend images, then explicitly select the Atlas overlay with the same env file and project:
+Provision a fresh isolated deployment using the [backend recipe](README.md#isolated-native-backend-review). The local recipe keeps editable settings in repo-root `compose.env`. The helper creates private service tokens, including the Atlas internal token; keep its credentials, scope/epoch and numeric owner UID/GID across restarts. Build the backend images, then explicitly select the Atlas overlay with the same env file and project:
 
 ```sh
-docker compose --env-file "$REVIEW_WORKSPACE/compose.env" \
+docker compose --env-file compose.env \
   -f deploy/compose.native-review.yml -f deploy/compose.atlas.yml \
   --project-name "$REVIEW_PROJECT" up --no-build --pull never --detach --wait
 ```

@@ -12,6 +12,7 @@ findings.md
 progress.md
 .agent-scratch/
 /.fleetworks/
+/compose.env
 .agent_scratch/
 .agents/teamwork/
 .planning/**/tui/

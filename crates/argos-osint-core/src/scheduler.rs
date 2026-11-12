@@ -532,17 +532,7 @@ impl WorkerPool {
                 while !flag.load(Ordering::Acquire) {
                     let (owner, embedder) = (owner.clone(), embedder.clone());
                     let drained = crate::storage::runtime::blocking(move |repo| async move {
-                        let elected = crate::storage::jobs::try_elect(
-                            repo.db(),
-                            &owner,
-                            DEFAULT_LEASE_SECS,
-                            chrono::Utc::now(),
-                        )
-                        .await
-                        .map_err(|e| anyhow::anyhow!("elect: {e}"))?
-                        .value
-                        .elected;
-                        if !elected {
+                        if !surreal_elected(&repo, &owner).await? {
                             return Ok(0);
                         }
                         let d =
@@ -765,17 +755,7 @@ impl WorkerPool {
                         &db_path,
                         "insight-refresh",
                         crate::storage::runtime::blocking(move |repo| async move {
-                            let elected = crate::storage::jobs::try_elect(
-                                repo.db(),
-                                &drain_owner,
-                                DEFAULT_LEASE_SECS,
-                                chrono::Utc::now(),
-                            )
-                            .await
-                            .map_err(|e| anyhow::anyhow!("elect: {e}"))?
-                            .value
-                            .elected;
-                            if !elected {
+                            if !surreal_elected(&repo, &drain_owner).await? {
                                 return Ok(());
                             }
                             // Same fence as the legacy store pools' sweep.
@@ -891,13 +871,9 @@ async fn surreal_elected(
     repo: &crate::storage::repo::Repository,
     owner: &str,
 ) -> anyhow::Result<bool> {
-    Ok(
-        crate::storage::jobs::try_elect(repo.db(), owner, DEFAULT_LEASE_SECS, chrono::Utc::now())
-            .await
-            .map_err(|e| anyhow::anyhow!("elect: {e}"))?
-            .value
-            .elected,
-    )
+    repo.scheduler_elected(owner, DEFAULT_LEASE_SECS, chrono::Utc::now())
+        .await
+        .map_err(|error| anyhow::anyhow!("elect: {error}"))
 }
 
 impl Drop for WorkerPool {

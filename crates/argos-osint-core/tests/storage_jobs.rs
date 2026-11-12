@@ -1240,6 +1240,33 @@ async fn exactly_one_scheduler_wins_and_takes_over_after_expiry() {
     assert!(take.elected && take.epoch == 2);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shared_repository_scheduler_election_avoids_self_contention() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server.repo("argos", "sched_shared_repo").await;
+    let now = Utc::now();
+    let mut handles = Vec::new();
+    for _ in 0..16 {
+        let repo = repo.clone();
+        handles.push(tokio::spawn(async move {
+            repo.scheduler_elected("shared-owner", LEASE, now).await
+        }));
+    }
+    for handle in handles {
+        assert!(handle.await.unwrap().unwrap());
+    }
+    assert_eq!(
+        scalar::<String>(
+            repo.db(),
+            "SELECT VALUE owner FROM ONLY scheduler_lease:singleton",
+        )
+        .await,
+        "shared-owner"
+    );
+}
+
 // --- claim window: approximately FIFO, never across a priority level ---------
 
 #[tokio::test]

@@ -7,6 +7,7 @@
 //! untouched beside it until phase 5.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use surrealdb::engine::any::Any;
@@ -15,6 +16,9 @@ use surrealdb::Surreal;
 use super::bootstrap::{self, Bootstrap};
 use super::home::{self, Hold, Layout, Mode};
 use super::open::{self, Target};
+use super::tx::TxError;
+
+const LEASE_RENEW_INTERVAL: Duration = Duration::from_secs(5);
 
 /// The repository's cached catalog matcher: the served matcher with the
 /// [`crate::actor_catalog::catalog_epoch`] it was built at. Reads clone the
@@ -29,12 +33,18 @@ struct MatcherCache {
     rebuild: tokio::sync::Mutex<()>,
 }
 
+struct SchedulerLeaseRenewal {
+    owner: String,
+    renewed_at: Instant,
+}
+
 struct Inner {
     db: Surreal<Any>,
     bootstrap: Bootstrap,
     mode: Option<Mode>,
     publisher: std::sync::OnceLock<super::publisher::Publisher>,
     matcher: MatcherCache,
+    scheduler_lease: tokio::sync::Mutex<Option<SchedulerLeaseRenewal>>,
     _hold: Option<Hold>,
 }
 
@@ -102,6 +112,7 @@ impl Repository {
                     ready: std::sync::atomic::AtomicBool::new(false),
                     rebuild: tokio::sync::Mutex::new(()),
                 },
+                scheduler_lease: tokio::sync::Mutex::new(None),
                 _hold: hold,
             }),
         }
@@ -110,6 +121,40 @@ impl Repository {
     /// The client, for the `storage::*` repository functions.
     pub fn db(&self) -> &Surreal<Any> {
         &self.inner.db
+    }
+
+    /// Whether `owner` holds this repository's scheduler lease.
+    ///
+    /// Sibling drainers share a repository and owner, so one successful lease
+    /// renewal is reused briefly rather than repeatedly contending on the
+    /// singleton lease record. A conflicting external renewal skips this tick.
+    pub async fn scheduler_elected(
+        &self,
+        owner: &str,
+        lease_secs: i64,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, TxError> {
+        let mut lease = self.inner.scheduler_lease.lock().await;
+        if lease.as_ref().is_some_and(|renewal| {
+            renewal.owner == owner && renewal.renewed_at.elapsed() < LEASE_RENEW_INTERVAL
+        }) {
+            return Ok(true);
+        }
+
+        match super::jobs::try_elect(&self.inner.db, owner, lease_secs, now).await {
+            Ok(election) if election.value.elected => {
+                *lease = Some(SchedulerLeaseRenewal {
+                    owner: owner.to_string(),
+                    renewed_at: Instant::now(),
+                });
+                Ok(true)
+            }
+            Ok(_) | Err(TxError::Contention { .. }) => {
+                *lease = None;
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// The group-commit publisher for memory writes, started on first use

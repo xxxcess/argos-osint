@@ -69,15 +69,19 @@ class CandidateImageTests(unittest.TestCase):
             candidate.read_manifest(*args)
 
     def test_resolved_compose_services_must_all_bind_loaded_image_ids(self):
-        services = {"bootstrap": self.tags["runtime"], "api": self.tags["runtime"], **self.tags}
+        services = {"bootstrap": self.tags["runtime"], "api": self.tags["runtime"], "native-worker":self.tags["runtime"], **self.tags}
         with patch.object(candidate, "compose_images", return_value=services):
             ids = candidate.service_image_ids({}, self.images)
             self.assertEqual(ids["bootstrap"], ids["api"])
             self.assertEqual(ids["api"], self.images["runtime"]["id"])
+            self.assertEqual(ids["native-worker"], self.images["runtime"]["id"])
             self.assertEqual(ids.keys(), services.keys())
         with patch.object(candidate, "compose_images", return_value={**services, "other": "registry.invalid/image"}):
             with self.assertRaisesRegex(ValueError, "exactly the archived image tags"):
                 candidate.service_image_ids({}, self.images)
+        with patch.object(candidate,"compose_images",return_value={key:value for key,value in services.items() if key!="native-worker"}):
+            with self.assertRaisesRegex(ValueError,"Registered native worker"):
+                candidate.service_image_ids({},self.images)
 
     def test_image_inspect_rejects_mismatched_native_architecture(self):
         sample = json.dumps([{"Id": f"sha256:{1:064x}", "Os": "linux", "Architecture": "arm64", "Size": 123}])

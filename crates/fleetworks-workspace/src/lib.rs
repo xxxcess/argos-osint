@@ -2,6 +2,9 @@
 
 mod import;
 
+#[cfg(unix)]
+pub mod native;
+
 use std::collections::BTreeMap;
 use std::env;
 use std::ffi::{OsStr, OsString};

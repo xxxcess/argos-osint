@@ -63,6 +63,7 @@ pub mod config_commit;
 pub mod config_transfer;
 #[cfg(test)]
 mod config_transfer_tests;
+pub mod current_configuration;
 pub mod data_paths;
 pub mod embed;
 pub mod events;

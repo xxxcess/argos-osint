@@ -10,6 +10,8 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
+use fleetworks_contracts::context::ActivityScope;
+use serde::Serialize;
 use surrealdb::engine::any::Any;
 use surrealdb::types::SurrealValue;
 use surrealdb::Surreal;
@@ -373,6 +375,287 @@ pub async fn job_apps(db: &Surreal<Any>) -> Result<Vec<String>> {
         .collect();
     apps.truncate(32);
     Ok(apps)
+}
+
+/// A requester-associated row. Membership grants visibility, never control.
+///
+/// Mixed-origin rows contain lifecycle status only. Child/event/task counts
+/// remain unavailable until their owners offer an attribution-aware projection.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct ActivityJobRow {
+    #[serde(flatten)]
+    pub job: JobRow,
+    pub private_details_available: bool,
+    pub activity_actions_available: bool,
+    pub status_only: bool,
+    pub can_cancel: bool,
+    pub can_retry: bool,
+    pub action_reason_code: String,
+}
+
+// The inner request lookup is indexed by job/scope/node and bounded to one
+// match. A child must have durable causal origin; parent links alone grant no
+// visibility. No pre-pagination ID cap can hide an otherwise eligible job.
+fn activity_membership() -> &'static str {
+    "array::len((SELECT VALUE id FROM job_request WHERE \
+      (job_id = record::id($parent.id) OR \
+       (job_id = type::record('job_origin', record::id($parent.id)).root_id \
+        AND type::record('job_origin', record::id($parent.id)).scope_id = $activity_scope \
+        AND type::record('job_origin', record::id($parent.id)).deployment_id = $activity_deployment)) \
+      AND scope_id = $activity_scope AND deployment_id = $activity_deployment \
+      AND workstation_id = $activity_node \
+      AND ($activity_workspace = NONE OR workspace_id = $activity_workspace) LIMIT 1)) > 0"
+}
+
+fn activity_private() -> &'static str {
+    "type::record('job_origin', record::id(id)).scope_id = $activity_scope \
+     AND type::record('job_origin', record::id(id)).deployment_id = $activity_deployment \
+     AND type::record('job_origin', record::id(id)).workstation_id = $activity_node \
+     AND ($activity_workspace = NONE OR type::record('job_origin', record::id(id)).workspace_id = $activity_workspace) \
+     AND array::len((SELECT VALUE id FROM job_request \
+       WHERE job_id = (type::record('job_origin', record::id($parent.id)).root_id ?? record::id($parent.id)) \
+       AND (scope_id != $activity_scope OR deployment_id != $activity_deployment \
+         OR workstation_id != $activity_node \
+         OR ($activity_workspace != NONE AND workspace_id != $activity_workspace)) LIMIT 1)) = 0"
+}
+
+fn validate_activity_scope(authority_scope: &str, scope: &ActivityScope) -> Result<()> {
+    let valid = |value: &str| {
+        !value.is_empty() && value.len() <= 128 && !value.chars().any(char::is_control)
+    };
+    anyhow::ensure!(
+        valid(authority_scope)
+            && valid(&scope.deployment_id)
+            && valid(&scope.workstation_id)
+            && scope.scope_revision > 0
+            && scope.workspace_id.as_deref().is_none_or(valid),
+        "current activity authority required"
+    );
+    Ok(())
+}
+
+async fn require_activity_schema(db: &Surreal<Any>) -> Result<()> {
+    db.query("INFO FOR TABLE job_request; INFO FOR TABLE job_origin;")
+        .await?
+        .check()?;
+    Ok(())
+}
+
+const ACTIVITY_RELATIONS_UNAVAILABLE: &str = "0 AS events, 0 AS children, 0 AS tasks, \
+    0 AS attempt_rows, '' AS open_attempt_started, '' AS started_at";
+
+#[derive(SurrealValue)]
+struct ActivityPrivacy {
+    key: String,
+    available: bool,
+}
+
+fn activity_row(raw: Raw, private: bool) -> ActivityJobRow {
+    let mut job = row(raw);
+    // A retry/cancel grant and durable action association are independent of
+    // membership. The activity reader cannot assert either one.
+    job.cancellable = false;
+    if !private {
+        job = JobRow {
+            id: job.id,
+            kind: job.kind,
+            app: job.app,
+            operation: job.operation,
+            state: job.state,
+            created_at: job.created_at,
+            queued_at: job.queued_at,
+            finished_at: job.finished_at,
+            ..JobRow::default()
+        };
+    }
+    ActivityJobRow {
+        job,
+        private_details_available: private,
+        activity_actions_available: false,
+        status_only: !private,
+        can_cancel: false,
+        can_retry: false,
+        action_reason_code: "durable_action_not_enabled".into(),
+    }
+}
+
+/// Page eligible workstation jobs after durable requester membership filtering.
+/// Native callers can select all local children; browser callers should narrow
+/// to their resolved selected child before invoking this storage read.
+pub async fn list_activity_jobs(
+    db: &Surreal<Any>,
+    authority_scope: &str,
+    scope: &ActivityScope,
+    filter: &JobFilter,
+    limit: usize,
+) -> Result<Vec<ActivityJobRow>> {
+    validate_activity_scope(authority_scope, scope)?;
+    require_activity_schema(db).await?;
+    let mut sql = format!(
+        "SELECT id, record::id(id) AS key, updated_at, {RANK} AS rank FROM job \
+        WHERE parent = NONE AND kind != 'service' AND {ELIGIBLE} AND ({})",
+        activity_membership()
+    );
+    let states: Vec<_> = filter
+        .status
+        .states()
+        .iter()
+        .map(|value| (*value).to_owned())
+        .collect();
+    if !states.is_empty() {
+        sql.push_str(" AND state IN $states");
+    }
+    if !filter.app.is_empty() {
+        sql.push_str(" AND app = $app");
+    }
+    if !filter.operation.is_empty() {
+        sql.push_str(" AND operation = $op");
+    }
+    let text = filter.text.trim().to_lowercase();
+    if !text.is_empty() {
+        // Private title/error text must not become a cross-origin search oracle.
+        sql.push_str(&format!(
+            " AND (string::contains(string::lowercase(operation), $text) \
+            OR string::contains(string::lowercase(<string>record::id(id)), $text) \
+            OR (({}) AND (string::contains(string::lowercase(title), $text) \
+            OR string::contains(string::lowercase(error_summary), $text))))",
+            activity_private()
+        ));
+    }
+    if !filter.since.is_empty() {
+        sql.push_str(" AND created_at >= <datetime>$since");
+    }
+    sql.push_str(" ORDER BY rank, updated_at DESC, key LIMIT $n");
+    let query = format!("LET $visible = ({sql}); \
+        SELECT {ROW_FIELDS}, {RANK} AS rank, {ACTIVITY_RELATIONS_UNAVAILABLE} FROM job WHERE id IN $visible.id ORDER BY rank, updated_at DESC, key; \
+        SELECT record::id(id) AS key, (({}) ?? false) AS available FROM job WHERE id IN $visible.id;", activity_private());
+    let mut result = db
+        .query(query)
+        .bind(("activity_scope", authority_scope.to_owned()))
+        .bind(("activity_deployment", scope.deployment_id.clone()))
+        .bind(("activity_node", scope.workstation_id.clone()))
+        .bind(("activity_workspace", scope.workspace_id.clone()))
+        .bind(("cutoff", cutoff(Utc::now())))
+        .bind(("states", states))
+        .bind(("app", filter.app.clone()))
+        .bind(("op", filter.operation.clone()))
+        .bind(("text", text))
+        .bind(("since", filter.since.clone()))
+        .bind(("n", limit.clamp(1, 200) as i64))
+        .await?
+        .check()?;
+    let rows: Vec<Raw> = result.take(1)?;
+    let privacy: Vec<ActivityPrivacy> = result.take(2)?;
+    let privacy: std::collections::HashMap<_, _> = privacy
+        .into_iter()
+        .map(|row| (row.key, row.available))
+        .collect();
+    Ok(rows
+        .into_iter()
+        .map(|raw| {
+            let private = privacy.get(&raw.key).copied().unwrap_or(false);
+            activity_row(raw, private)
+        })
+        .collect())
+}
+
+/// Resolve an eligible attributed job before any stage/result/log payload read.
+pub async fn get_activity_job(
+    db: &Surreal<Any>,
+    authority_scope: &str,
+    scope: &ActivityScope,
+    id: &str,
+) -> Result<Option<ActivityJobRow>> {
+    validate_activity_scope(authority_scope, scope)?;
+    anyhow::ensure!(
+        !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control),
+        "bounded job ID required"
+    );
+    require_activity_schema(db).await?;
+    let query = format!("LET $visible = (SELECT VALUE id FROM job WHERE id = $job AND kind != 'service' AND {ELIGIBLE} AND ({})); \
+        SELECT {ROW_FIELDS}, {RANK} AS rank, {ACTIVITY_RELATIONS_UNAVAILABLE} FROM job WHERE id IN $visible; \
+        SELECT record::id(id) AS key, (({}) ?? false) AS available FROM job WHERE id IN $visible;", activity_membership(), activity_private());
+    let mut result = db
+        .query(query)
+        .bind(("job", rid("job", id)))
+        .bind(("activity_scope", authority_scope.to_owned()))
+        .bind(("activity_deployment", scope.deployment_id.clone()))
+        .bind(("activity_node", scope.workstation_id.clone()))
+        .bind(("activity_workspace", scope.workspace_id.clone()))
+        .bind(("cutoff", cutoff(Utc::now())))
+        .await?
+        .check()?;
+    let rows: Vec<Raw> = result.take(1)?;
+    let privacy: Vec<ActivityPrivacy> = result.take(2)?;
+    Ok(rows
+        .into_iter()
+        .next()
+        .map(|raw| activity_row(raw, privacy.first().is_some_and(|row| row.available))))
+}
+
+#[derive(SurrealValue)]
+struct ActivityCount {
+    state: String,
+    recent: bool,
+    n: i64,
+}
+
+/// Counts use the same membership predicate before aggregation, not a page of IDs.
+pub async fn activity_job_counts(
+    db: &Surreal<Any>,
+    authority_scope: &str,
+    scope: &ActivityScope,
+) -> Result<JobCounts> {
+    validate_activity_scope(authority_scope, scope)?;
+    require_activity_schema(db).await?;
+    let query = format!("SELECT state, (finished_at ?? d'1970-01-01T00:00:00Z') >= <datetime>$day AS recent, count() AS n \
+        FROM job WHERE parent = NONE AND kind != 'service' AND {ELIGIBLE} AND ({}) GROUP BY state, recent", activity_membership());
+    let now = Utc::now();
+    let rows: Vec<ActivityCount> = db
+        .query(query)
+        .bind(("activity_scope", authority_scope.to_owned()))
+        .bind(("activity_deployment", scope.deployment_id.clone()))
+        .bind(("activity_node", scope.workstation_id.clone()))
+        .bind(("activity_workspace", scope.workspace_id.clone()))
+        .bind(("cutoff", cutoff(now)))
+        .bind(("day", ts(now - Duration::hours(24))))
+        .await?
+        .check()?
+        .take(0)?;
+    let mut counts = JobCounts::default();
+    for row in rows {
+        match row.state.as_str() {
+            "running" => counts.active += row.n,
+            "queued" => counts.queued += row.n,
+            "retry_scheduled" => counts.retrying += row.n,
+            "failed" | "partial" => counts.failed += row.n,
+            "completed" | "succeeded" if row.recent => counts.completed_recent += row.n,
+            _ => {}
+        }
+    }
+    Ok(counts)
+}
+
+/// Bounded app facets from the authorized workstation cohort only.
+pub async fn activity_job_apps(
+    db: &Surreal<Any>,
+    authority_scope: &str,
+    scope: &ActivityScope,
+) -> Result<Vec<String>> {
+    validate_activity_scope(authority_scope, scope)?;
+    require_activity_schema(db).await?;
+    let query = format!("SELECT VALUE app FROM job WHERE parent = NONE AND kind != 'service' AND app != '' AND {ELIGIBLE} AND ({}) GROUP BY app ORDER BY app LIMIT 32", activity_membership());
+    Ok(db
+        .query(query)
+        .bind(("activity_scope", authority_scope.to_owned()))
+        .bind(("activity_deployment", scope.deployment_id.clone()))
+        .bind(("activity_node", scope.workstation_id.clone()))
+        .bind(("activity_workspace", scope.workspace_id.clone()))
+        .bind(("cutoff", cutoff(Utc::now())))
+        .await?
+        .check()?
+        .take(0)?)
 }
 
 /// Dashboard metadata for a job (`argos_jobs` columns with no executor

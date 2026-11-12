@@ -14,6 +14,10 @@ x-runtime-environment: &runtime-environment
   FLEETWORKS_STORAGE_DATABASE: ${FLEETWORKS_STORAGE_DATABASE:-fleetworks}
   FLEETWORKS_STORAGE_USERNAME: ${FLEETWORKS_STORAGE_USERNAME:-fleetworks}
   FLEETWORKS_STORAGE_PASSWORD_FILE: /run/secrets/storage_password
+  # Empty authority permits old owned-project shutdown/config inspection only;
+  # private Rust startup rejects it. Venture supplies persisted current values.
+  FLEETWORKS_ACCESS_SCOPE_ID: ${FLEETWORKS_ACCESS_SCOPE_ID:-}
+  FLEETWORKS_ACCESS_EPOCH: ${FLEETWORKS_ACCESS_EPOCH:-}
 
 x-runtime: &runtime
   image: ${FLEETWORKS_RUNTIME_IMAGE:-fleetworks-runtime:local}
@@ -72,7 +76,9 @@ services:
       FLEETWORKS_API_BIND: ${FLEETWORKS_API_BIND:-0.0.0.0}
       FLEETWORKS_API_ALLOWED_HOSTS: "${FLEETWORKS_API_ALLOWED_HOSTS:-api:8080,127.0.0.1,localhost,127.0.0.1:${FLEETWORKS_API_PORT:-8080},localhost:${FLEETWORKS_API_PORT:-8080}}"
       FLEETWORKS_API_ALLOWED_ORIGINS: ${FLEETWORKS_API_ALLOWED_ORIGINS:-}
-      FLEETWORKS_API_TOKEN_FILE: /run/secrets/api_token
+      FLEETWORKS_INTEL_WEB_URL: "${FLEETWORKS_INTEL_WEB_URL:-${FLEETWORKS_WEB_ORIGIN:-http://127.0.0.1:${FLEETWORKS_WEB_PORT:-3000}}}"
+      FLEETWORKS_API_CREDENTIALS_FILE: /run/secrets/gateway_credentials
+      FLEETWORKS_API_TOKEN_FILE: /run/secrets/operator_api_token
       FLEETWORKS_API_HEALTH_HOST: "127.0.0.1:${FLEETWORKS_API_PORT:-8080}"
       FLEETWORKS_BRAIN_ORIGIN: http://brain:8080
       FLEETWORKS_INTERNAL_TOKEN_FILE: /run/secrets/brain_token
@@ -84,7 +90,10 @@ services:
       FLEETWORKS_JOBS_TOKEN_FILE: /run/secrets/jobs_token
     secrets:
       - storage_password
-      - api_token
+      - gateway_credentials
+      - native_api_token
+      - web_relay_token
+      - operator_api_token
       - brain_token
       - tools_token
       - control_token
@@ -271,6 +280,24 @@ services:
       execution:
         condition: service_healthy
 
+  native-worker:
+    <<: *runtime
+    command: [--role, native-worker]
+    restart: unless-stopped
+    environment:
+      <<: *runtime-environment
+      FLEETWORKS_JOBS_ORIGIN: http://jobs:8080
+      FLEETWORKS_JOBS_TOKEN_FILE: /run/secrets/jobs_token
+      FLEETWORKS_NATIVE_QUEUE_NAME: fleetworks.native
+    secrets:
+      - storage_password
+      - jobs_token
+    depends_on:
+      jobs:
+        condition: service_healthy
+      bootstrap:
+        condition: service_completed_successfully
+
   execution:
     <<: *runtime
     command: [--role, execution, --port, "8080"]
@@ -314,9 +341,9 @@ services:
       FLEETWORKS_WEB_BIND: 0.0.0.0
       FLEETWORKS_WEB_ORIGIN: "${FLEETWORKS_WEB_ORIGIN:-http://127.0.0.1:${FLEETWORKS_WEB_PORT:-3000}}"
       FLEETWORKS_API_ORIGIN: http://api:8080
-      FLEETWORKS_API_TOKEN_FILE: /run/secrets/api_token
+      FLEETWORKS_API_TOKEN_FILE: /run/secrets/web_relay_token
     secrets:
-      - api_token
+      - web_relay_token
     depends_on:
       api:
         condition: service_healthy
@@ -376,6 +403,16 @@ services:
     stop_grace_period: 30s
 
 secrets:
+  gateway_credentials:
+    file: ${FLEETWORKS_API_CREDENTIALS_FILE:-${FLEETWORKS_HOST_WORKSPACE}/secrets/gateway-credentials.json}
+  native_api_token:
+    file: ${FLEETWORKS_NATIVE_TOKEN_FILE:-${FLEETWORKS_HOST_WORKSPACE}/secrets/native-api-token}
+  web_relay_token:
+    file: ${FLEETWORKS_WEB_RELAY_TOKEN_FILE:-${FLEETWORKS_HOST_WORKSPACE}/secrets/web-relay-token}
+  operator_api_token:
+    file: ${FLEETWORKS_OPERATOR_TOKEN_FILE:-${FLEETWORKS_HOST_WORKSPACE}/secrets/operator-api-token}
+  # Retained only for old overlay/ownership decoding. No current service mounts
+  # this bearer and it is absent from the purpose manifest.
   api_token:
     file: ${FLEETWORKS_API_TOKEN_FILE:-${FLEETWORKS_HOST_WORKSPACE}/secrets/api-token}
   brain_token:

@@ -100,6 +100,13 @@ pub(crate) async fn add_alias_in(
         .bind(("p", prov.to_string())),
     )
     .await?;
+    super::actor_search_outbox::enqueue_actors_in(
+        tx,
+        &[actor.to_owned()],
+        None,
+        chrono::Utc::now(),
+    )
+    .await?;
     Ok(())
 }
 

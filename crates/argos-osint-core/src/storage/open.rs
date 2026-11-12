@@ -216,6 +216,9 @@ async fn open_network(target: &NetworkTarget, ns: &str, database: &str) -> Resul
         NetworkAccess::Bootstrap => {
             let schema = bootstrap::ensure_schema(&db).await?;
             bootstrap::ensure_network_identity(&db).await?;
+            super::connect_registry::initialize_control(&db)
+                .await
+                .map_err(|_| TxError::Abort("registered context bootstrap failed".into()))?;
             schema
         }
         NetworkAccess::Runtime => bootstrap::verify_schema(&db).await?,

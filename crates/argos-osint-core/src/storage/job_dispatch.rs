@@ -187,6 +187,109 @@ pub async fn submit(
     job: &NewJob<'_>,
     task: &NewTask<'_>,
 ) -> Result<bool, TxError> {
+    validate_submission(job, task)?;
+    Ok(run_tx(db, RetryPolicy::default(), |tx| async move {
+        submit_in(&tx, job, task).await
+    })
+    .await?
+    .value)
+}
+
+/// Accept work and its interactive origin/request association in one commit.
+pub async fn submit_interactive(
+    db: &Surreal<Any>,
+    job: &NewJob<'_>,
+    task: &NewTask<'_>,
+    admission: &super::job_context::InteractiveAdmission,
+) -> Result<bool, TxError> {
+    validate_submission(job, task)?;
+    run_tx(db, RetryPolicy::default(), |tx| async move {
+        let created = submit_in(&tx, job, task).await?;
+        admission
+            .record_in(&tx, job.id, job.operation, created)
+            .await?;
+        Ok(created)
+    })
+    .await
+    .map(|committed| committed.value)
+}
+
+/// Join durable job/task/outbox acceptance to a caller-owned transaction.
+///
+/// The caller can persist validated origin, request associations and immutable
+/// dataset pins before committing; no acceptance is returned before that commit.
+pub async fn submit_in(tx: &Tx, job: &NewJob<'_>, task: &NewTask<'_>) -> Result<bool, TxError> {
+    validate_submission(job, task)?;
+    let job_key = jobs::rid("job", job.id);
+    let mut reply = jobs::run(
+        tx,
+        tx.query(
+            "LET $existing = (SELECT * FROM ONLY $job);
+             LET $queued = (SELECT * FROM ONLY $task);
+             RETURN (SELECT VALUE enabled FROM ONLY $pool)=true;
+             RETURN $existing!=NONE OR $queued!=NONE;
+             RETURN $existing.operation=$job_op AND $existing.kind=$kind
+                AND $existing.parent=$parent AND $queued.job=$job
+                AND $queued.pool=$pool_name AND $queued.operation=$task_op
+                AND $queued.input_hash=$input AND $queued.priority=$priority AND $queued.deps=$deps;
+             RETURN record::exists($retired);",
+        )
+        .bind(("job", job_key.clone()))
+        .bind(("task", jobs::rid("task", task.id)))
+        .bind(("pool", jobs::rid("job_dispatch_pool", task.pool)))
+        .bind(("job_op", job.operation.to_owned()))
+        .bind(("kind", job.kind.to_owned()))
+        .bind(("parent", job.parent.map(|id| jobs::rid("job", id))))
+        .bind(("pool_name", task.pool.to_owned()))
+        .bind(("task_op", task.operation.to_owned()))
+        .bind(("input", task.input_hash.to_owned()))
+        .bind(("priority", task.priority))
+        .bind((
+            "deps",
+            task.deps
+                .iter()
+                .map(|id| jobs::rid("task", id))
+                .collect::<Vec<_>>(),
+        ))
+        .bind(("retired", jobs::rid("job_retirement", job.id))),
+    )
+    .await?;
+    if jobs::take::<Option<bool>>(&mut reply, 2)? != Some(true) {
+        return Err(invalid("dispatch_pool_disabled"));
+    }
+    if jobs::take::<Option<bool>>(&mut reply, 3)? == Some(true) {
+        return if jobs::take::<Option<bool>>(&mut reply, 4)? == Some(true) {
+            Ok(false)
+        } else {
+            Err(invalid("dispatch_submission_conflict"))
+        };
+    }
+    if jobs::take::<Option<bool>>(&mut reply, 5)? == Some(true) {
+        return Err(invalid("dispatch_submission_retired"));
+    }
+    jobs::create_job_in(tx, job).await?;
+    jobs::create_task_in(tx, task).await?;
+    jobs::run(
+        tx,
+        tx.query("UPDATE $job SET state='queued', phase='Queued', cancellable=true RETURN NONE")
+            .bind(("job", job_key)),
+    )
+    .await?;
+    // Reuse the original event key from create_job_in to publish the
+    // queued state without retaining a premature started event.
+    jobs::log_transition_in(
+        tx,
+        job.id,
+        &format!("{}:started", job.id),
+        "job.queued",
+        &format!("Queued: {}", jobs::job_title(job.operation)),
+        &jobs::ts(job.created_at),
+    )
+    .await?;
+    Ok(true)
+}
+
+fn validate_submission(job: &NewJob<'_>, task: &NewTask<'_>) -> Result<(), TxError> {
     if task.job != job.id
         || !valid_identity(job.id)
         || !valid_identity(task.id)
@@ -196,71 +299,7 @@ pub async fn submit(
     {
         return Err(invalid("invalid_dispatch_submission"));
     }
-    Ok(run_tx(db, RetryPolicy::default(), |tx| async move {
-        let job_key = jobs::rid("job", job.id);
-        let mut reply = jobs::run(
-            &tx,
-            tx.query(
-                "LET $existing = (SELECT * FROM ONLY $job);
-                 LET $queued = (SELECT * FROM ONLY $task);
-                 RETURN (SELECT VALUE enabled FROM ONLY $pool)=true;
-                 RETURN $existing!=NONE OR $queued!=NONE;
-                 RETURN $existing.operation=$job_op AND $existing.kind=$kind
-                    AND $existing.parent=$parent AND $queued.job=$job
-                    AND $queued.pool=$pool_name AND $queued.operation=$task_op
-                    AND $queued.input_hash=$input AND $queued.priority=$priority AND $queued.deps=$deps;
-                 RETURN record::exists($retired);",
-            )
-            .bind(("job", job_key.clone()))
-            .bind(("task", jobs::rid("task", task.id)))
-            .bind(("pool", jobs::rid("job_dispatch_pool", task.pool)))
-            .bind(("job_op", job.operation.to_owned()))
-            .bind(("kind", job.kind.to_owned()))
-            .bind(("parent", job.parent.map(|id| jobs::rid("job", id))))
-            .bind(("pool_name", task.pool.to_owned()))
-            .bind(("task_op", task.operation.to_owned()))
-            .bind(("input", task.input_hash.to_owned()))
-            .bind(("priority", task.priority))
-            .bind(("deps", task.deps.iter().map(|id| jobs::rid("task", id)).collect::<Vec<_>>()))
-            .bind(("retired", jobs::rid("job_retirement", job.id))),
-        )
-        .await?;
-        if jobs::take::<Option<bool>>(&mut reply, 2)? != Some(true) {
-            return Err(invalid("dispatch_pool_disabled"));
-        }
-        if jobs::take::<Option<bool>>(&mut reply, 3)? == Some(true) {
-            return if jobs::take::<Option<bool>>(&mut reply, 4)? == Some(true) {
-                Ok(false)
-            } else {
-                Err(invalid("dispatch_submission_conflict"))
-            };
-        }
-        if jobs::take::<Option<bool>>(&mut reply, 5)? == Some(true) {
-            return Err(invalid("dispatch_submission_retired"));
-        }
-        jobs::create_job_in(&tx, job).await?;
-        jobs::create_task_in(&tx, task).await?;
-        jobs::run(
-            &tx,
-            tx.query("UPDATE $job SET state='queued', phase='Queued', cancellable=true RETURN NONE")
-                .bind(("job", job_key)),
-        )
-        .await?;
-        // Reuse the original event key from create_job_in to publish the
-        // queued state without retaining a premature started event.
-        jobs::log_transition_in(
-            &tx,
-            job.id,
-            &format!("{}:started", job.id),
-            "job.queued",
-            &format!("Queued: {}", jobs::job_title(job.operation)),
-            &jobs::ts(job.created_at),
-        )
-        .await?;
-        Ok(true)
-    })
-    .await?
-    .value)
+    Ok(())
 }
 
 #[derive(SurrealValue)]
@@ -734,12 +773,29 @@ pub async fn retry_failed_atlas(
         return Err(invalid("invalid_dispatch_retry"));
     }
     Ok(run_tx(db, RetryPolicy::default(), |tx| async move {
-        let job = jobs::rid("job", job_id);
-        let at = jobs::ts(now);
-        let mut reply = jobs::run(
-            &tx,
-            tx.query(
-                "LET $eligible=(SELECT VALUE id FROM ONLY $job
+        retry_failed_atlas_in(&tx, job_id, task_id, now).await
+    })
+    .await?
+    .value)
+}
+
+/// Join the existing Atlas retry to an authorized caller-owned transaction.
+/// Origin/session and action audit are committed by that caller in this TX.
+pub(crate) async fn retry_failed_atlas_in(
+    tx: &Tx,
+    job_id: &str,
+    task_id: &str,
+    now: DateTime<Utc>,
+) -> Result<bool, TxError> {
+    if !valid_identity(job_id) || !valid_identity(task_id) {
+        return Err(invalid("invalid_dispatch_retry"));
+    }
+    let job = jobs::rid("job", job_id);
+    let at = jobs::ts(now);
+    let mut reply = jobs::run(
+        &tx,
+        tx.query(
+            "LET $eligible=(SELECT VALUE id FROM ONLY $job
                     WHERE state='failed' AND operation=$pool_name AND parent=NONE
                     AND !cancel_requested AND !stopped AND created_at>=<datetime>$fresh_after
                     AND !record::exists($retired));
@@ -751,47 +807,44 @@ pub async fn retry_failed_atlas(
                     error_category='', error_message=''
                  WHERE job=$job AND pool=$pool_name AND operation=$pool_name AND state='failed'
                     AND $eligible=$job AND $enabled=true RETURN VALUE lease_epoch;",
-            )
-            .bind(("job", job.clone()))
-            .bind(("task", jobs::rid("task", task_id)))
-            .bind(("pool", jobs::rid("job_dispatch_pool", ATLAS_POOL)))
-            .bind(("pool_name", ATLAS_POOL))
-            .bind((
-                "fresh_after",
-                jobs::ts(now - Duration::hours(jobs::EXECUTION_WINDOW_HOURS)),
-            ))
-            .bind(("retired", jobs::rid("job_retirement", job_id)))
-            .bind(("now", at.clone())),
         )
-        .await?;
-        let revisions: Vec<i64> = jobs::take(&mut reply, 2)?;
-        let Some(revision) = revisions.into_iter().next() else {
-            return Ok(false);
-        };
-        jobs::bump(&tx, "job_guard", job_id).await?;
-        jobs::run(
-            &tx,
-            tx.query(
-                "UPDATE $job SET state='queued', phase='Queued for retry', finished_at=NONE,
+        .bind(("job", job.clone()))
+        .bind(("task", jobs::rid("task", task_id)))
+        .bind(("pool", jobs::rid("job_dispatch_pool", ATLAS_POOL)))
+        .bind(("pool_name", ATLAS_POOL))
+        .bind((
+            "fresh_after",
+            jobs::ts(now - Duration::hours(jobs::EXECUTION_WINDOW_HOURS)),
+        ))
+        .bind(("retired", jobs::rid("job_retirement", job_id)))
+        .bind(("now", at.clone())),
+    )
+    .await?;
+    let revisions: Vec<i64> = jobs::take(&mut reply, 2)?;
+    let Some(revision) = revisions.into_iter().next() else {
+        return Ok(false);
+    };
+    jobs::bump(&tx, "job_guard", job_id).await?;
+    jobs::run(
+        &tx,
+        tx.query(
+            "UPDATE $job SET state='queued', phase='Queued for retry', finished_at=NONE,
                  error_category='', error_summary='', updated_at=<datetime>$now RETURN NONE",
-            )
-            .bind(("job", job))
-            .bind(("now", at.clone())),
         )
-        .await?;
-        jobs::log_transition_in(
-            &tx,
-            job_id,
-            &format!("{task_id}:{revision}:retry"),
-            "job.retry",
-            "Queued for retry",
-            &at,
-        )
-        .await?;
-        Ok(true)
-    })
-    .await?
-    .value)
+        .bind(("job", job))
+        .bind(("now", at.clone())),
+    )
+    .await?;
+    jobs::log_transition_in(
+        &tx,
+        job_id,
+        &format!("{task_id}:{revision}:retry"),
+        "job.retry",
+        "Queued for retry",
+        &at,
+    )
+    .await?;
+    Ok(true)
 }
 
 /// Recover one bounded page of expired task leases for a pool. The task

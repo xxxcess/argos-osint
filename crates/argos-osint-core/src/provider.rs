@@ -1701,12 +1701,14 @@ pub fn route_can_authenticate(secret: &ProviderSecret) -> bool {
         .is_some_and(|key| !key.trim().is_empty())
 }
 
-/// Stored key first, then the vendor environment variable. The environment
-/// value is not written back into `auth.json`. A delegated process returns no
-/// key, including a vendor environment variable.
+/// Network services use saved credentials only. Retained operator clients may
+/// use vendor environment variables. Delegated processes return no API key.
 pub fn resolved_key(secret: &ProviderSecret) -> Option<String> {
     if delegate_to_execution(secret) {
         return None;
+    }
+    if std::env::var_os("FLEETWORKS_WORKSPACE").is_some() {
+        return resolved_key_with(secret, |_| None);
     }
     resolved_key_with(secret, |name| std::env::var(name).ok())
 }
@@ -2754,13 +2756,19 @@ impl SettingsFile {
         }
     }
 
-    /// The key a provider's tools use: a non-empty setting, else its environment variable.
+    /// The saved key in network services; retained operator clients may use environment fallback.
     pub fn provider_key(&self, provider: &str) -> String {
+        if std::env::var_os("FLEETWORKS_WORKSPACE").is_some() {
+            return self.saved_key(provider).trim().to_owned();
+        }
         self.provider_key_with(provider, |name| std::env::var(name).ok())
     }
 
     /// The second account for a provider: a non-empty setting, else its fallback environment variable.
     pub fn provider_fallback_key(&self, provider: &str) -> String {
+        if std::env::var_os("FLEETWORKS_WORKSPACE").is_some() {
+            return self.saved_fallback_key(provider).trim().to_owned();
+        }
         self.provider_fallback_key_with(provider, |name| std::env::var(name).ok())
     }
 
@@ -2811,6 +2819,13 @@ impl SettingsFile {
     /// migration ladder over it and rewriting the file (through the commit
     /// store's secure primitive) only when something actually migrated.
     pub fn load_from(path: &std::path::Path) -> Result<Self> {
+        if let Some(root) = crate::current_configuration::network_root()? {
+            anyhow::ensure!(
+                path == root.join("config.toml"),
+                "network settings path mismatch"
+            );
+            return Ok(crate::current_configuration::read(&root)?.settings);
+        }
         let seeded = || {
             let mut settings = Self::default();
             settings.defaults.seed_tool_picker();

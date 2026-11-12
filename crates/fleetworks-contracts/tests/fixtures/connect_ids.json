@@ -1,0 +1,36 @@
+{
+  "policy": {
+    "version": 1,
+    "normalization": "NFC; retain case and internal spaces",
+    "ipv4_mapped_ipv6": "serialize as canonical IPv4",
+    "ipv6": "brackets required; canonical compressed lowercase",
+    "max_workspace_name_utf8_bytes": 128,
+    "max_connect_id_utf8_bytes": 176,
+    "node_addresses": "non-loopback unicast; no unspecified, multicast, broadcast or zone suffix",
+    "default": "valid for registration; reserved against ordinary child creation"
+  },
+  "valid": [
+    {"input":"192.168.1.42:research","canonical":"192.168.1.42:research","ip":"192.168.1.42","workspace":"research"},
+    {"input":"192.0.2.42:default","canonical":"192.0.2.42:default","ip":"192.0.2.42","workspace":"default"},
+    {"input":"[2001:0DB8:0000:0000:0000:0000:0000:0042]:research","canonical":"[2001:db8::42]:research","ip":"2001:db8::42","workspace":"research"},
+    {"input":"[2001:db8::42]:Case Review","canonical":"[2001:db8::42]:Case Review","ip":"2001:db8::42","workspace":"Case Review"},
+    {"input":"[::ffff:192.0.2.42]:research","canonical":"192.0.2.42:research","ip":"192.0.2.42","workspace":"research"},
+    {"input":"[::ffff:c000:22a]:research","canonical":"192.0.2.42:research","ip":"192.0.2.42","workspace":"research"},
+    {"input":"192.0.2.42:Café research","canonical":"192.0.2.42:Café research","ip":"192.0.2.42","workspace":"Café research"},
+    {"input":"192.0.2.42:研究 班","canonical":"192.0.2.42:研究 班","ip":"192.0.2.42","workspace":"研究 班"},
+    {"input":"192.0.2.42:case-review_2","canonical":"192.0.2.42:case-review_2","ip":"192.0.2.42","workspace":"case-review_2"}
+  ],
+  "invalid": [
+    "", "research", "192.0.2.42", "192.0.2.42:", "192.0.2.42:.",
+    "192.0.2.42:..", "192.0.2.42:.internal", "192.0.2.42: research",
+    "192.0.2.42:research ", "192.0.2.42:research\t", "192.0.2.42:re\u0000search",
+    "192.0.2.42:re\nsearch", "192.0.2.42:research/child", "192.0.2.42:research\\child",
+    "192.0.2.42:research:child", "192.0.2.42:/tmp/research", "192.0.2.42: research",
+    "192.168.001.042:research", "999.0.0.1:research", "localhost:research",
+    "http://192.0.2.42:research", "2001:db8::42:research", "[192.0.2.42]:research",
+    "[2001:db8::42]research", "[fe80::42%en0]:research", "[2001:db8::42]:research/child",
+    "0.0.0.0:research", "127.0.0.1:research", "255.255.255.255:research",
+    "224.0.0.1:research", "[::]:research", "[::1]:research", "[ff02::1]:research",
+    "[::ffff:127.0.0.1]:research"
+  ]
+}

@@ -10,7 +10,7 @@ Open a file under `docs/diagrams/` in a browser for the HTML page. Matching `.sv
 | --- | --- | --- | --- |
 | Local NLP | Data flow | — | [nlp-preprocessing.svg](diagrams/nlp-preprocessing.svg) |
 | Fleetworks service boundaries | Architecture | [fleetworks.html](diagrams/fleetworks.html) | [fleetworks.svg](diagrams/fleetworks.svg) |
-| Workspace and clients | Architecture | [workspace.html](diagrams/workspace.html) | [workspace.svg](diagrams/workspace.svg) |
+| Native identity and shared backend | Architecture | [workspace.html](diagrams/workspace.html) | [workspace.svg](diagrams/workspace.svg) |
 | Intel web request and readiness boundaries | Process | [intel-web.html](diagrams/intel-web.html) | [intel-web.svg](diagrams/intel-web.svg) |
 | Intel Focus Brief reading order | Layout | [intel-focus-layout.html](diagrams/intel-focus-layout.html) | [intel-focus-layout.svg](diagrams/intel-focus-layout.svg) |
 | Venture startup and ownership | Process | [venture-navigation.html](diagrams/venture-navigation.html) | [venture-navigation.svg](diagrams/venture-navigation.svg) |

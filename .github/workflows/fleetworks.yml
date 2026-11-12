@@ -22,9 +22,15 @@ on:
       head:
         description: Expected checked-out commit for an exact dispatch
         type: string
+      components:
+        description: Explicit native selects both Mac apps; auto uses the shared change planner
+        type: choice
+        options: [auto, native, backend, all]
+        default: auto
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: fleetworks-${{ github.event_name }}-${{ github.event_name == 'push' && github.sha || github.event.pull_request.number || github.ref }}
@@ -43,7 +49,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
+      head: ${{ steps.plan.outputs.head }}
       native: ${{ steps.plan.outputs.native }}
+      desktop: ${{ steps.plan.outputs.desktop }}
       server: ${{ steps.plan.outputs.server }}
       compose: ${{ steps.plan.outputs.compose }}
       queue: ${{ steps.plan.outputs.queue }}
@@ -77,12 +85,19 @@ jobs:
           DISPATCH_MODE: ${{ inputs.mode }}
           DISPATCH_BASE: ${{ inputs.base }}
           DISPATCH_HEAD: ${{ inputs.head }}
+          DISPATCH_COMPONENTS: ${{ inputs.components }}
         shell: bash
         run: |
           set -euo pipefail
           if [[ -n "$DISPATCH_HEAD" && "$DISPATCH_HEAD" != "$FLEETWORKS_HEAD" ]]; then
             echo '::error::Dispatch ref moved away from the requested revision'
             exit 1
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "${DISPATCH_COMPONENTS:-auto}" != auto ]]; then
+            if [[ ! "$DISPATCH_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
+              echo '::error::Explicit component dispatch requires an exact expected head SHA'
+              exit 1
+            fi
           fi
           python3 -B -m unittest discover -s scripts -p 'test_fleetworks_*.py'
           mode=pr
@@ -100,7 +115,9 @@ jobs:
           fi
           python3 scripts/fleetworks_verify.py "$mode" \
             --event "$event" --base "$base" \
-            --head "$FLEETWORKS_HEAD" --github-output "$GITHUB_OUTPUT"
+            --head "$FLEETWORKS_HEAD" --components "${DISPATCH_COMPONENTS:-auto}" \
+            --github-output "$GITHUB_OUTPUT"
+          printf 'head=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   native:
     name: Native clients / ${{ matrix.runner }}
@@ -175,6 +192,24 @@ jobs:
             target/agents/cargo-timings/*.html
           if-no-files-found: ignore
           retention-days: 7
+
+  desktop:
+    name: Mac app / ${{ matrix.target }}
+    needs: scope
+    if: needs.scope.outputs.desktop == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: aarch64-apple-darwin
+            runner: macos-15
+    uses: ./.github/workflows/fleetworks-native.yml
+    with:
+      expected-head: ${{ needs.scope.outputs.head }}
+      target: ${{ matrix.target }}
+      runner: ${{ matrix.runner }}
 
   server:
     name: Server build / Linux ARM64
@@ -338,6 +373,28 @@ jobs:
         with:
           ref: ${{ env.FLEETWORKS_HEAD }}
           persist-credentials: false
+      - name: Verify selected private search disk and transport contracts
+        if: contains(needs.scope.outputs.image_targets, 'search-index')
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$FLEETWORKS_HEAD"
+          toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
+          rustup toolchain install "$toolchain" --profile minimal
+          python3 scripts/fleetworks_verify.py timed --phase search-contracts -- \
+            python3 scripts/agent_cargo.py test --locked --no-default-features -p fleetworks-search-index
+      - name: Validate isolated backend review recipe
+        if: contains(needs.scope.outputs.image_targets, 'runtime') || contains(needs.scope.outputs.image_targets, 'search-index')
+        env:
+          REVIEW_ARCH: ${{ matrix.arch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -m unittest discover -s deploy -p test_native_review.py
+          review="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${REVIEW_ARCH}"
+          python3 deploy/native_review.py init --name "$review" --api-port 18091 --platform "linux/${REVIEW_ARCH}"
+          workspace="$(python3 deploy/native_review.py value --name "$review" --field workspace)"
+          docker compose --env-file "$workspace/compose.env" -f deploy/compose.native-review.yml config --quiet
       - name: Build selected server images
         env:
           IMAGE_TARGETS: ${{ needs.scope.outputs.image_targets }}
@@ -353,7 +410,7 @@ jobs:
           read -r -a targets <<< "${IMAGE_TARGETS//,/ }"
           python3 scripts/fleetworks_verify.py timed --phase server-images -- \
             docker buildx bake -f deploy/docker-bake.hcl \
-            --set "*.platforms=linux/${IMAGE_ARCH}" "${targets[@]}"
+            --load --set "*.platforms=linux/${IMAGE_ARCH}" "${targets[@]}"
       - name: Smoke selected server images
         env:
           IMAGE_TARGETS: ${{ needs.scope.outputs.image_targets }}
@@ -363,12 +420,26 @@ jobs:
           VERSION="$(tr -d '[:space:]' < version.txt)"
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
           for target in ${IMAGE_TARGETS//,/ }; do
-            if [[ "$target" == web ]]; then
-              docker run --rm --entrypoint node "web:${VERSION}" -e 'process.exit(0)'
-            else
-              docker run --rm "${target}:${VERSION}" --help >/dev/null
-            fi
-            docker image inspect "${target}:local" >/dev/null
+            case "$target" in
+              web)
+                image=web
+                docker run --rm --entrypoint node "${image}:${VERSION}" -e 'process.exit(0)' ;;
+              runtime)
+                image=fleetworks-runtime
+                docker run --rm "${image}:${VERSION}" --help >/dev/null ;;
+              surrealdb)
+                image=fleetworks-surrealdb
+                docker run --rm --entrypoint /surreal "${image}:${VERSION}" version >/dev/null ;;
+              search-index)
+                image=fleetworks-search-index
+                # Executable packaging evidence only; the tests above exercise
+                # real disk/HTTP behavior without inventing a --help interface.
+                docker run --rm --entrypoint /usr/bin/test "${image}:${VERSION}" -x /usr/local/bin/fleetworks-search-index ;;
+              *)
+                image="$target"
+                docker run --rm "${image}:${VERSION}" --help >/dev/null ;;
+            esac
+            docker image inspect "${image}:local" >/dev/null
           done
 
   compose:
@@ -397,6 +468,17 @@ jobs:
           ref: ${{ env.FLEETWORKS_HEAD }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Validate backend provisioning and standalone Compose
+        env:
+          REVIEW_ARCH: ${{ matrix.arch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -m unittest discover -s deploy -p test_native_review.py
+          review="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${REVIEW_ARCH}"
+          python3 deploy/native_review.py init --name "$review" --api-port 18091 --platform "linux/${REVIEW_ARCH}"
+          workspace="$(python3 deploy/native_review.py value --name "$review" --field workspace)"
+          docker compose --env-file "$workspace/compose.env" -f deploy/compose.native-review.yml config --quiet
       - name: Exercise packaged Compose through native Venture
         env:
           DOCKER_DEFAULT_PLATFORM: linux/${{ matrix.arch }}
@@ -456,7 +538,7 @@ jobs:
 
   required:
     name: Fleetworks required
-    needs: [scope, native, server, compose, bert, web, images]
+    needs: [scope, native, desktop, server, compose, bert, web, images]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -465,6 +547,7 @@ jobs:
         env:
           SCOPE_RESULT: ${{ needs.scope.result }}
           NATIVE_SELECTED: ${{ needs.scope.outputs.native }}
+          DESKTOP_SELECTED: ${{ needs.scope.outputs.desktop }}
           SERVER_SELECTED: ${{ needs.scope.outputs.server }}
           COMPOSE_SELECTED: ${{ needs.scope.outputs.compose }}
           BERT_SELECTED: ${{ needs.scope.outputs.bert }}
@@ -475,6 +558,7 @@ jobs:
           QUEUE_SELECTED: ${{ needs.scope.outputs.queue }}
           STORAGE_SELECTED: ${{ needs.scope.outputs.storage }}
           NATIVE_RESULT: ${{ needs.native.result }}
+          DESKTOP_RESULT: ${{ needs.desktop.result }}
           SERVER_RESULT: ${{ needs.server.result }}
           COMPOSE_RESULT: ${{ needs.compose.result }}
           BERT_RESULT: ${{ needs.bert.result }}
@@ -508,6 +592,7 @@ jobs:
             *) echo '::error::Development browser scope needs the web gate'; failed=1 ;;
           esac
           verify native "$NATIVE_SELECTED" "$NATIVE_RESULT" || failed=1
+          verify desktop "$DESKTOP_SELECTED" "$DESKTOP_RESULT" || failed=1
           verify server "$SERVER_SELECTED" "$SERVER_RESULT" || failed=1
           verify compose "$COMPOSE_SELECTED" "$COMPOSE_RESULT" || failed=1
           verify bert "$BERT_SELECTED" "$BERT_RESULT" || failed=1

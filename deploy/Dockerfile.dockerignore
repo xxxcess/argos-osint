@@ -14,6 +14,8 @@
 !apps/
 !apps/fleetworks-cli/
 !apps/fleetworks-cli/**
+!apps/fleetworks-desktop/
+!apps/fleetworks-desktop/Cargo.toml
 !apps/venture/
 !apps/venture/**
 !apps/web-desktop/
@@ -25,6 +27,8 @@
 !deploy/start-surreal.sh
 !deploy/check-api.sh
 !deploy/check-web.mjs
+!deploy/start-search-index.sh
+!deploy/check-search.sh
 **/.fleetworks
 **/.agent-scratch
 **/.env

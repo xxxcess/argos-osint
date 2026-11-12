@@ -4,15 +4,28 @@ use std::time::Duration;
 use reqwest::header::{self, HeaderValue};
 use reqwest::{Method, RequestBuilder};
 use serde::de::DeserializeOwned;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncSeekExt;
 use url::Url;
 
 use crate::{Ready, API_VERSION, READY_PATH};
+
+mod configuration_transfer;
+pub use configuration_transfer::ConfigurationTransferReceipt;
 
 const MAX_REQUEST_BYTES: usize = 16 * 1024;
 const MAX_QUERY_BYTES: usize = 8 * 1024;
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TOKEN_BYTES: usize = 4 * 1024;
+
+/// A validated backend-owned upload. The reference contains no filesystem path.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[non_exhaustive]
+pub struct DatasetUpload {
+    pub dataset: crate::readiness::DatasetRef,
+    pub expires_in_seconds: u64,
+}
 
 /// Client failures contain neither the API's prose nor request URLs or credentials.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -73,6 +86,7 @@ pub struct Client {
     origin: Url,
     token: Option<HeaderValue>,
     http: reqwest::Client,
+    registration: Option<(HeaderValue, HeaderValue)>,
 }
 
 impl Client {
@@ -114,7 +128,32 @@ impl Client {
             origin,
             token,
             http,
+            registration: None,
         })
+    }
+
+    /// Clone the origin-bound client for one confirmed registered origin.
+    ///
+    /// The base client is unchanged for backend-global reads. The server must
+    /// still validate current ownership, registration and permission; headers
+    /// are context references, never authorization or immutable job origin.
+    pub fn with_registered_context(
+        &self,
+        context: &crate::context::RegisteredContext,
+    ) -> Result<Self, ClientError> {
+        if context.registration_id.is_empty()
+            || context.registration_id.len() > 128
+            || context.registration_revision == 0
+        {
+            return Err(ClientError::InvalidRequest);
+        }
+        let registration = HeaderValue::from_str(&context.registration_id)
+            .map_err(|_| ClientError::InvalidRequest)?;
+        let revision = HeaderValue::from_str(&context.registration_revision.to_string())
+            .map_err(|_| ClientError::InvalidRequest)?;
+        let mut client = self.clone();
+        client.registration = Some((registration, revision));
+        Ok(client)
     }
 
     /// Read readiness and verify the reported API version.
@@ -159,6 +198,76 @@ impl Client {
         .await
     }
 
+    /// Upload an already-open, user-selected CSV with bounded memory.
+    ///
+    /// The server independently verifies the actual byte count, SHA-256 and CSV
+    /// kind before publishing a dataset reference. No local path crosses HTTP.
+    pub async fn upload_dataset(
+        &self,
+        kind: crate::readiness::DatasetKind,
+        sha256: &str,
+        mut file: tokio::fs::File,
+        size: u64,
+    ) -> Result<DatasetUpload, ClientError> {
+        use crate::readiness::DatasetKind;
+        let (wire_kind, limit) = match kind {
+            DatasetKind::ActorCatalog => ("actor_catalog", 256 * 1024 * 1024),
+            DatasetKind::ClassifierTraining => ("classifier_training", 128 * 1024 * 1024),
+        };
+        if size == 0 || size > limit {
+            return Err(ClientError::RequestTooLarge);
+        }
+        if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(ClientError::InvalidRequest);
+        }
+        let metadata = file
+            .metadata()
+            .await
+            .map_err(|_| ClientError::InvalidRequest)?;
+        if !metadata.is_file() || metadata.len() != size {
+            return Err(ClientError::InvalidRequest);
+        }
+        file.rewind()
+            .await
+            .map_err(|_| ClientError::InvalidRequest)?;
+        let stream =
+            futures_util::stream::try_unfold((file, 0u64), move |(mut file, read)| async move {
+                let mut chunk = vec![0u8; 64 * 1024];
+                let length = file.read(&mut chunk).await?;
+                if length == 0 {
+                    if read != size {
+                        return Err(std::io::Error::other("dataset length changed"));
+                    }
+                    return Ok(None);
+                }
+                let read = read + length as u64;
+                if read > size {
+                    return Err(std::io::Error::other("dataset length changed"));
+                }
+                chunk.truncate(length);
+                Ok(Some((chunk, (file, read))))
+            });
+        let request = self
+            .request(Method::POST, "/api/v1/workstation/datasets/upload")?
+            .query(&[("kind", wire_kind), ("sha256", sha256)])
+            .header(header::CONTENT_TYPE, "text/csv")
+            .header(header::CONTENT_LENGTH, size)
+            .timeout(Duration::from_secs(600))
+            .body(reqwest::Body::wrap_stream(stream));
+        let response: DatasetUpload = Self::send(request).await?;
+        response
+            .dataset
+            .validate()
+            .map_err(|_| ClientError::InvalidResponse)?;
+        if response.dataset.kind != kind
+            || response.dataset.size_bytes != size
+            || response.dataset.sha256 != sha256.to_ascii_lowercase()
+        {
+            return Err(ClientError::InvalidResponse);
+        }
+        Ok(response)
+    }
+
     fn request(&self, method: Method, route: &str) -> Result<RequestBuilder, ClientError> {
         let tail = route
             .strip_prefix("/api/v1/")
@@ -177,10 +286,15 @@ impl Client {
         }
         let mut url = self.origin.clone();
         url.set_path(route);
-        let request = self
+        let mut request = self
             .http
             .request(method, url)
             .header(header::ACCEPT, "application/json");
+        if let Some((registration, revision)) = &self.registration {
+            request = request
+                .header("x-fleetworks-registration", registration.clone())
+                .header("x-fleetworks-registration-revision", revision.clone());
+        }
         Ok(match &self.token {
             Some(token) => request.header(header::AUTHORIZATION, token.clone()),
             None => request,

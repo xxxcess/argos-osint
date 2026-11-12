@@ -8,12 +8,19 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from fleetworks_verify import ALL_IMAGES, ALL_SCOPES, CLIENT_IMAGES, path_images, path_scopes, select_scopes
+from fleetworks_verify import ALL_IMAGES, ALL_SCOPES, BACKEND_IMAGES, CLIENT_IMAGES, RUST_IMAGES, component_plan, path_images, path_scopes, select_scopes
 
 PLANNER = Path(__file__).with_name("fleetworks_verify.py").resolve()
 
 
 class PathScopesTests(unittest.TestCase):
+    def test_explicit_native_is_mac_only_and_backend_excludes_web_and_clients(self):
+        self.assertEqual(component_plan("native", ALL_SCOPES, ALL_IMAGES), ({"desktop"}, set()))
+        scopes, images = component_plan("backend", set(), set())
+        self.assertFalse(scopes & {"native", "desktop", "web", "web_dev"})
+        self.assertEqual(images, set(BACKEND_IMAGES))
+        self.assertEqual(component_plan("all", set(), set()), (set(ALL_SCOPES), set(ALL_IMAGES)))
+
     def test_scope_selection_by_path(self):
         cases = {
             "README.md": set(),
@@ -24,6 +31,8 @@ class PathScopesTests(unittest.TestCase):
             "apps/fleetworks-cli/src/jobs.rs": {"native", "images"},
             "apps/fleetworks-cli/src/bin/fleetworks-brain.rs": {"native", "images"},
             "apps/fleetworks-cli/src/brain_ui.rs": {"native", "images"},
+            "apps/fleetworks-desktop/src/views/brain.rs": {"desktop"},
+            "apps/fleetworks-desktop/resources/Info.plist": {"desktop"},
             "apps/venture/src/main.rs": {"native", "server", "compose", "images"},
             "apps/venture/src/classifier.rs": {"native", "server", "compose", "bert", "images"},
             "apps/web-desktop/server.mjs": {"web", "web_dev", "server", "compose", "images"},
@@ -32,22 +41,28 @@ class PathScopesTests(unittest.TestCase):
             "tests/web/intel.spec.ts": {"web", "images"},
             "deploy/Dockerfile": {"server", "compose", "images"},
             "deploy/docker-bake.hcl": {"server", "compose", "images"},
+            "deploy/Dockerfile.dockerignore": {"server", "compose", "images"},
+            "deploy/compose.native-review.yml": {"server", "compose"},
+            "deploy/start-search-index.sh": {"server", "compose", "images"},
             "deploy/compose.atlas.yml": {"server", "compose", "bert"},
-            "crates/argos-osint-core/src/storage/bootstrap.rs": {"server", "storage", "queue"},
-            "services/api-host/src/main.rs": {"server", "storage", "queue"},
-            "services/api-host/src/actor_seed.rs": {"server", "storage", "queue"},
-            "services/api-host/src/atlas_worker.rs": {"server", "storage", "queue"},
-            "crates/argos-osint-api/src/lib.rs": {"server", "queue"},
-            "crates/fleetworks-jobs/src/queue.rs": {"server", "storage", "queue"},
+            "crates/argos-osint-core/src/storage/bootstrap.rs": {"server", "storage", "queue", "images"},
+            "services/api-host/src/main.rs": {"server", "storage", "queue", "images"},
+            "services/api-host/src/actor_seed.rs": {"server", "storage", "queue", "images"},
+            "services/api-host/src/atlas_worker.rs": {"server", "storage", "queue", "images"},
+            "services/search-index/src/schema.rs": {"server", "images"},
+            "services/search-index/src/query.rs": {"server", "images"},
+            "services/search-index/tests/index_contract.rs": {"server", "images"},
+            "crates/argos-osint-api/src/lib.rs": {"server", "queue", "images"},
+            "crates/fleetworks-jobs/src/queue.rs": {"server", "storage", "queue", "images"},
             "scripts/fleetworks_atlas_smoke.py": {"server", "queue"},
-            "services/api-host/src/classifier_service.rs": {"server", "queue", "bert"},
-            "crates/argos-osint-core/src/classifier/model.rs": {"server", "queue", "bert"},
+            "services/api-host/src/classifier_service.rs": {"server", "queue", "bert", "images"},
+            "crates/argos-osint-core/src/classifier/model.rs": {"server", "queue", "bert", "images"},
             "tools/atlas-bert/src/main.rs": {"bert"},
             "scripts/fixtures/atlas_bert": {"bert", "server", "queue", "web", "web_dev"},
             ".github/workflows/atlas-bert.yml": {"bert"},
-            "Cargo.lock": {"native", "server", "storage", "compose", "queue", "images"},
+            "Cargo.lock": {"native", "desktop", "server", "storage", "compose", "queue", "images"},
             "pnpm-lock.yaml": {"web", "web_dev", "server", "compose", "images"},
-            "crates/fleetworks-contracts/src/lib.rs": {"native", "server", "storage", "compose", "queue", "images"},
+            "crates/fleetworks-contracts/src/lib.rs": {"native", "desktop", "server", "storage", "compose", "queue", "images"},
             "packages/api-client/src/index.ts": {"web", "server", "compose", "images"},
             "scripts/surrealdb-release.json": {"server", "storage", "queue"},
             ".github/workflows/fleetworks.yml": set(),
@@ -68,6 +83,20 @@ class PathScopesTests(unittest.TestCase):
         self.assertEqual(path_images("apps/web-desktop/app/page.tsx"), {"web"})
         self.assertEqual(path_images("deploy/Dockerfile"), ALL_IMAGES)
         self.assertEqual(path_images("README.md"), set())
+        self.assertEqual(path_images("apps/fleetworks-desktop/src/views/brain.rs"), set())
+
+    def test_search_and_backend_inputs_select_only_affected_linux_images(self):
+        for path in ("services/search-index/src/engine.rs", "services/search-index/src/schema.rs", "services/search-index/tests/index_contract.rs", "deploy/check-search.sh", "deploy/start-search-index.sh"):
+            with self.subTest(path=path):
+                self.assertEqual(path_images(path), {"search-index"})
+        self.assertEqual(path_images("services/api-host/src/actor_index_worker.rs"), {"runtime"})
+        self.assertEqual(path_images("crates/argos-osint-core/src/storage/actor_search_outbox.rs"), {"runtime"})
+        self.assertEqual(path_images("deploy/check-api.sh"), {"runtime"})
+        self.assertEqual(path_images("deploy/start-surreal.sh"), {"surrealdb"})
+        self.assertEqual(path_images("Cargo.lock"), set(RUST_IMAGES))
+        self.assertEqual(path_images("crates/fleetworks-contracts/src/actor_index.rs"), set(RUST_IMAGES))
+        self.assertEqual(path_images("deploy/Dockerfile.dockerignore"), ALL_IMAGES)
+        self.assertEqual(component_plan("backend", set(), set())[1], {"runtime", "surrealdb", "search-index"})
 
 
 class GitScopeTests(unittest.TestCase):
@@ -164,6 +193,10 @@ class GitScopeTests(unittest.TestCase):
     def test_workflow_edit_does_not_select_unrelated_lanes(self):
         head = self.commit(".github/workflows/fleetworks.yml", ".github/workflows/embedded.yml")
         self.assert_scopes(self.plan(self.start, head=head), set())
+
+    def test_search_schema_selects_its_image_without_native_or_web_actions(self):
+        head = self.commit("services/search-index/src/schema.rs", "services/search-index/tests/index_contract.rs")
+        self.assert_scopes(self.plan(self.start, head=head), {"server", "images"}, images={"search-index"})
 
     def test_local_selection_adds_worktree_changes(self):
         file = self.repo / "apps/fleetworks-cli/src/jobs.rs"

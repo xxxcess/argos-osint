@@ -43,6 +43,8 @@ services:
       FLEETWORKS_INTERNAL_TOKEN_FILE: /run/secrets/internal_token
       FLEETWORKS_API_TOKEN_FILE: /run/secrets/internal_token
       FLEETWORKS_API_HEALTH_HOST: "127.0.0.1:8080"
+      FLEETWORKS_ACCESS_SCOPE_ID: ${FLEETWORKS_ACCESS_SCOPE_ID:-}
+      FLEETWORKS_ACCESS_EPOCH: ${FLEETWORKS_ACCESS_EPOCH:-}
     secrets:
       - internal_token
     healthcheck:
@@ -71,6 +73,8 @@ services:
       FLEETWORKS_INTERNAL_TOKEN_FILE: /run/secrets/internal_token
       FLEETWORKS_API_TOKEN_FILE: /run/secrets/internal_token
       FLEETWORKS_API_HEALTH_HOST: "127.0.0.1:8080"
+      FLEETWORKS_ACCESS_SCOPE_ID: ${FLEETWORKS_ACCESS_SCOPE_ID:-}
+      FLEETWORKS_ACCESS_EPOCH: ${FLEETWORKS_ACCESS_EPOCH:-}
       LD_LIBRARY_PATH: /workspace/models/atlas-bert/lib
     volumes:
       - type: bind

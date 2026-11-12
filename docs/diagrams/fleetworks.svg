@@ -1,64 +1,71 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 484" role="img" aria-labelledby="fleetworks-title fleetworks-desc">
-<title id="fleetworks-title">Fleetworks service boundaries · planned target</title>
-<desc id="fleetworks-desc">Venture manages the local Compose stack. Terminal clients and the Intel web relay call the authenticated API. The API relays retained operations to private Brain, Tools, Control and Jobs. Planned ownership: SurrealDB holds domain records and publication fences; Jobs owns SQLite operational state and an embedded RocksDB queue. The optional Atlas worker uses authenticated Jobs HTTP delivery and calls the private NLP and classifier services.</desc>
-<defs>
-  <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker>
-</defs>
-<style>
-  text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}
-  .label{font-size:17px;font-weight:600}
-  .note{font-size:13px}
-  .zone{font-size:12px;font-weight:600;letter-spacing:1px}
-  .node{fill:white;stroke:#4f5d75}
-  .accent{fill:#fff6ed;stroke:#eb6c36}
-  .edge{fill:none;stroke:#4f5d75;stroke-width:2;marker-end:url(#arrow)}
-</style>
-<rect width="960" height="484" fill="#f5f5f5"/>
-<rect x="308" y="24" width="620" height="432" rx="6" fill="none" stroke="#a0a5b0"/>
-<rect x="320" y="332" width="596" height="108" rx="6" fill="#ebedf1"/>
-<text x="40" y="52" class="zone">HOST</text>
-<text x="340" y="52" class="zone">LOCAL COMPOSE STACK</text>
-<text x="336" y="352" class="zone">EMBEDDED DELIVERY + OPTIONAL ATLAS</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 800" role="img" aria-labelledby="fleetworks-title fleetworks-desc">
+<title id="fleetworks-title">Native clients and independent backend ownership</title>
+<desc id="fleetworks-desc">The native Mac client and registered Intel Web call the purpose-authenticated gateway. The native client owns only protected local folder identity. Private Brain, Tools, Control and Execution services share domain records and fences in SurrealDB. Workers use authenticated Jobs HTTP for SQLite logs and the RocksDB queue, and publish actor projections to the private Tantivy service. The gateway queries Tantivy for discovery and validates candidates against canonical domain records. An external operator provisions the backend; client launch does not start it.</desc>
+<defs><marker id="fleetworks-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker></defs>
+<style>text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}.label{font-size:20px;font-weight:600}.note{font-size:16px}.zone{font-size:13px;font-weight:600;letter-spacing:1px}.node{fill:#fff;stroke:#4f5d75}.accent{fill:#fff6ed;stroke:#eb6c36}.edge{fill:none;stroke:#4f5d75;stroke-width:2;marker-end:url(#fleetworks-arrow)}.minor{fill:#4f5d75;font-size:14px}</style>
+<rect width="1320" height="800" fill="#f5f5f5"/>
+<path d="M320 44H1296V752H320Z" fill="none" stroke="#a0a5b0" stroke-dasharray="6 5"/>
+<text x="24" y="44" class="zone">INDEPENDENT CLIENTS</text>
+<text x="344" y="72" class="zone">LINUX BACKEND · ONE DEPLOYMENT / PURPOSE-SCOPED AUTHORITY</text>
+<path d="M272 156H300V224H352" class="edge"/>
+<path d="M272 336H304V288H352" class="edge"/>
+<path d="M596 224H628V152H660" class="edge"/>
+<path d="M940 152H1000" class="edge"/>
+<path d="M472 172V96H1128V112" class="edge"/>
+<path d="M800 500V460H1280V260H1128V232" class="edge"/>
+<path d="M940 552H972V404H1000" class="edge"/>
+<path d="M904 232V356H1000" class="edge"/>
+<path d="M472 336V704H1128V660" class="edge"/>
+<path d="M940 608H1000" class="edge"/>
+<path d="M720 500V232" class="edge"/>
+<path d="M272 480H320" class="edge"/>
 
-<path d="M240 112H308" class="edge"/>
-<path d="M240 256H340" class="edge"/>
-<path d="M440 148V220" class="edge"/>
-<path d="M540 256H692" class="edge"/>
-<path d="M540 236H620V112H692" class="edge"/>
-<path d="M792 148V220" class="edge"/>
-<path d="M592 368V312H792V292" class="edge"/>
-<path d="M512 398H488" class="edge"/>
-<path d="M672 398H696" class="edge"/>
+<rect x="24" y="100" width="248" height="112" rx="6" class="accent"/>
+<text x="44" y="132" class="label">Fleetworks Desktop</text>
+<text x="44" y="160" class="note">Rune / rune-kit · API only</text>
+<text x="44" y="188" class="note">Protected local folder identity</text>
+<rect x="24" y="280" width="248" height="112" rx="6" class="node"/>
+<text x="44" y="312" class="label">Intel Web</text>
+<text x="44" y="340" class="note">Server Connect session gate</text>
+<text x="44" y="368" class="note">Topology canvas + list twin</text>
+<rect x="24" y="440" width="248" height="88" rx="6" class="node"/>
+<text x="44" y="472" class="label">External operator</text>
+<text x="44" y="500" class="note">Venture / isolated deployment</text>
+<text x="24" y="568" class="note">App launch starts no backend.</text>
+<text x="24" y="596" class="note">Local folders identify requests;</text>
+<text x="24" y="624" class="note">they do not partition resources.</text>
 
-<rect x="40" y="76" width="200" height="72" rx="6" class="accent"/>
-<text x="140" y="106" text-anchor="middle" class="label">Venture</text>
-<text x="140" y="128" text-anchor="middle" class="note">Workspace and lifecycle</text>
-<rect x="40" y="220" width="200" height="72" rx="6" class="node"/>
-<text x="140" y="250" text-anchor="middle" class="label">Terminal clients</text>
-<text x="140" y="272" text-anchor="middle" class="note">Versioned HTTP</text>
+<rect x="352" y="172" width="244" height="164" rx="6" class="accent"/>
+<text x="372" y="208" class="label">Authenticated gateway</text>
+<text x="372" y="244" class="note">Purpose + permission checks</text>
+<text x="372" y="272" class="note">Registry / session revisions</text>
+<text x="372" y="300" class="note">Workstation activity boundary</text>
+<text x="620" y="92" class="minor">Registry and immutable request origin</text>
 
-<rect x="340" y="76" width="200" height="72" rx="6" class="node"/>
-<text x="440" y="106" text-anchor="middle" class="label">Intel web</text>
-<text x="440" y="128" text-anchor="middle" class="note">Same-origin relay</text>
-<rect x="340" y="220" width="200" height="72" rx="6" class="accent"/>
-<text x="440" y="250" text-anchor="middle" class="label">Fleetworks API</text>
-<text x="440" y="272" text-anchor="middle" class="note">Bearer and readiness</text>
-<rect x="692" y="76" width="200" height="72" rx="6" class="node"/>
-<text x="792" y="106" text-anchor="middle" class="label">Private services</text>
-<text x="792" y="122" text-anchor="middle" class="note">Brain · Tools · Control · Jobs</text>
-<text x="792" y="141" text-anchor="middle" class="note">Jobs: SQLite + queue</text>
-<rect x="692" y="220" width="200" height="72" rx="6" class="node"/>
-<text x="792" y="250" text-anchor="middle" class="label">SurrealDB</text>
-<text x="792" y="272" text-anchor="middle" class="note">Domain records + fences</text>
+<rect x="660" y="112" width="280" height="120" rx="6" class="node"/>
+<text x="680" y="144" class="label">Private domain services</text>
+<text x="680" y="172" class="note">Brain · Tools · Control · Execution</text>
+<text x="680" y="204" class="note">NLP / Rust-BERT remain private</text>
+<rect x="1000" y="112" width="260" height="120" rx="6" class="node"/>
+<text x="1020" y="144" class="label">SurrealDB</text>
+<text x="1020" y="176" class="note">Canonical records / publication</text>
+<text x="1020" y="204" class="note">Jobs / leases / origin / outbox</text>
+<rect x="1000" y="320" width="260" height="112" rx="6" class="node"/>
+<text x="1020" y="352" class="label">Jobs process</text>
+<text x="1020" y="384" class="note">SQLite operational logs</text>
+<text x="1020" y="412" class="note">Embedded RocksDB delivery</text>
+<text x="948" y="300" class="minor">Jobs HTTP</text>
+<text x="1016" y="484" class="minor">Domain writes keep durable fences</text>
 
-<rect x="336" y="368" width="152" height="60" rx="6" class="node"/>
-<text x="412" y="393" text-anchor="middle" class="label">Jobs queue</text>
-<text x="412" y="413" text-anchor="middle" class="note">Embedded RocksDB</text>
-<rect x="512" y="368" width="160" height="60" rx="6" class="node"/>
-<text x="592" y="393" text-anchor="middle" class="label">Atlas worker</text>
-<text x="592" y="413" text-anchor="middle" class="note">Publish and consume</text>
-<rect x="696" y="368" width="200" height="60" rx="6" class="node"/>
-<text x="796" y="393" text-anchor="middle" class="label">Private inference</text>
-<text x="796" y="413" text-anchor="middle" class="note">Compromise and Rust-BERT</text>
-<text x="40" y="474" class="note">Planned authority split; production scheduling still uses SurrealDB.</text>
+<rect x="660" y="500" width="280" height="152" rx="6" class="node"/>
+<text x="680" y="536" class="label">Backend workers</text>
+<text x="680" y="568" class="note">Native Tools / seed / train</text>
+<text x="680" y="596" class="note">Brief / Atlas / domain work</text>
+<text x="680" y="628" class="note">Bounded actor-index pump</text>
+<rect x="1000" y="548" width="260" height="112" rx="6" class="node"/>
+<text x="1020" y="580" class="label">Private actor search</text>
+<text x="1020" y="612" class="note">Tantivy projection</text>
+<text x="1020" y="640" class="note">Commit → reload → visible ACK</text>
+<text x="728" y="728" class="minor">Discovery candidates are checked against current canonical records</text>
+<text x="24" y="784" class="minor">Scheduling authority remains in SurrealDB. Jobs state-store cutover and product retirement have separate acceptance gates.</text>
 </svg>

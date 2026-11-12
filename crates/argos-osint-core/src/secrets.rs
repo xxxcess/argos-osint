@@ -68,6 +68,7 @@ struct AuthStamp {
 }
 
 struct CachedAuth {
+    path: std::path::PathBuf,
     stamp: AuthStamp,
     auth: AuthFile,
 }
@@ -199,7 +200,7 @@ impl AuthFile {
             if let Some(hit) = guard.as_ref() {
                 // No mtime means the stamp cannot tell a rewrite apart:
                 // treat it as a miss.
-                if stamp.modified.is_some() && hit.stamp == stamp {
+                if hit.path == path && stamp.modified.is_some() && hit.stamp == stamp {
                     return Ok(hit.auth.clone());
                 }
             }
@@ -208,6 +209,7 @@ impl AuthFile {
         let stamp = auth_stamp(&path);
         let mut guard = AUTH_CACHE.write().unwrap_or_else(|err| err.into_inner());
         *guard = Some(CachedAuth {
+            path,
             stamp,
             auth: auth.clone(),
         });
@@ -218,6 +220,14 @@ impl AuthFile {
     /// legacy `research` / `gmail` slots away; the migration rewrite itself goes
     /// through the commit store's secure primitive.
     pub fn load_from(path: &Path) -> Result<Self> {
+        if let Some(root) = crate::current_configuration::network_root()? {
+            anyhow::ensure!(path == root.join("auth.json"), "network auth path mismatch");
+            let mut auth = crate::current_configuration::read_auth(&root)?;
+            if crate::provider::execution_holds_provider_credentials() {
+                auth.withhold_delegated_keys();
+            }
+            return Ok(auth);
+        }
         if !path.exists() {
             return Ok(Self::default());
         }

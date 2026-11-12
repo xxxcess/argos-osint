@@ -4,29 +4,160 @@ on:
   workflow_dispatch:
     inputs:
       head:
-        description: Optional exact commit expected at the selected ref
+        description: Exact pushed commit expected at the selected ref
         type: string
+        required: true
+      components:
+        description: Native always builds both Mac apps; legacy retains the retiring CLI candidates
+        type: choice
+        options: [native, backend, all, legacy]
+        default: native
+      publish:
+        description: Review artifacts only; trusted release publication is a separate operation
+        type: choice
+        options: [none]
+        default: none
 
 permissions:
   contents: read
+  actions: read
+
+concurrency:
+  group: fleetworks-candidate-${{ github.ref }}-${{ inputs.head }}-${{ inputs.components }}
+  cancel-in-progress: false
 
 jobs:
+  resolve:
+    name: Freeze source and component targets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      head: ${{ steps.resolve.outputs.head }}
+      native-selected: ${{ steps.resolve.outputs.native-selected }}
+      legacy-selected: ${{ steps.resolve.outputs.legacy-selected }}
+      legacy-matrix: ${{ steps.resolve.outputs.legacy-matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          lfs: false
+      - name: Require the exact selected revision and build-only trust scope
+        id: resolve
+        env:
+          EXPECTED_HEAD: ${{ inputs.head }}
+          COMPONENTS: ${{ inputs.components }}
+          PUBLISH: ${{ inputs.publish }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_HEAD" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          test "$EXPECTED_HEAD" = "$GITHUB_SHA"
+          test "$PUBLISH" = none
+          python3 - <<'PY'
+          import json
+          import os
+          components = os.environ["COMPONENTS"]
+          if components not in {"native", "backend", "all", "legacy"}:
+              raise SystemExit("Unknown candidate component selection")
+          linux = [{"target": "x86_64-unknown-linux-gnu", "runner": "ubuntu-24.04"},
+                   {"target": "aarch64-unknown-linux-gnu", "runner": "ubuntu-24.04-arm"}]
+          macs = [{"target": "x86_64-apple-darwin", "runner": "macos-15-intel"},
+                  {"target": "aarch64-apple-darwin", "runner": "macos-15"}]
+          legacy = linux if components == "backend" else linux + macs if components in {"all", "legacy"} else []
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print("head=" + os.environ["EXPECTED_HEAD"], file=output)
+              print("native-selected=" + str(components in {"native", "all"}).lower(), file=output)
+              print("legacy-selected=" + str(bool(legacy)).lower(), file=output)
+              print("legacy-matrix=" + json.dumps({"include": legacy}), file=output)
+          PY
+
   candidate:
-    name: ${{ matrix.target }}
+    name: Retained operator/CLI / ${{ matrix.target }}
+    needs: resolve
+    if: needs.resolve.outputs.legacy-selected == 'true'
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-24.04
-          - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-24.04-arm
-          - target: x86_64-apple-darwin
-            runner: macos-15-intel
-          - target: aarch64-apple-darwin
-            runner: macos-15
+      matrix: ${{ fromJson(needs.resolve.outputs.legacy-matrix) }}
     uses: ./.github/workflows/fleetworks-candidate-target.yml
     with:
       target: ${{ matrix.target }}
       runner: ${{ matrix.runner }}
-      expected-head: ${{ inputs.head || github.sha }}
+      expected-head: ${{ needs.resolve.outputs.head }}
+
+  native_intel:
+    name: Intel Mac app
+    needs: resolve
+    if: needs.resolve.outputs.native-selected == 'true'
+    uses: ./.github/workflows/fleetworks-native.yml
+    with:
+      target: x86_64-apple-darwin
+      runner: macos-15-intel
+      expected-head: ${{ needs.resolve.outputs.head }}
+
+  native_arm:
+    name: Apple Silicon Mac app
+    needs: resolve
+    if: needs.resolve.outputs.native-selected == 'true'
+    uses: ./.github/workflows/fleetworks-native.yml
+    with:
+      target: aarch64-apple-darwin
+      runner: macos-15
+      expected-head: ${{ needs.resolve.outputs.head }}
+
+  required:
+    name: Candidate required
+    needs: [resolve, candidate, native_intel, native_arm]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every selected target and record actual artifact links
+        env:
+          RESOLVE_RESULT: ${{ needs.resolve.result }}
+          EXACT_HEAD: ${{ needs.resolve.outputs.head }}
+          NATIVE_SELECTED: ${{ needs.resolve.outputs.native-selected }}
+          LEGACY_SELECTED: ${{ needs.resolve.outputs.legacy-selected }}
+          LEGACY_RESULT: ${{ needs.candidate.result }}
+          INTEL_RESULT: ${{ needs.native_intel.result }}
+          ARM_RESULT: ${{ needs.native_arm.result }}
+          INTEL_ID: ${{ needs.native_intel.outputs.artifact-id }}
+          INTEL_URL: ${{ needs.native_intel.outputs.artifact-url }}
+          INTEL_SHA256: ${{ needs.native_intel.outputs.sha256 }}
+          INTEL_EVIDENCE: ${{ needs.native_intel.outputs.evidence-url }}
+          ARM_ID: ${{ needs.native_arm.outputs.artifact-id }}
+          ARM_URL: ${{ needs.native_arm.outputs.artifact-url }}
+          ARM_SHA256: ${{ needs.native_arm.outputs.sha256 }}
+          ARM_EVIDENCE: ${{ needs.native_arm.outputs.evidence-url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RESOLVE_RESULT" = success
+          [[ "$EXACT_HEAD" =~ ^[0-9a-f]{40}$ ]]
+          check() {
+            case "$2:$3" in
+              true:success|false:skipped) ;;
+              *) echo "::error::$1 selected=${2:-missing} result=${3:-missing}"; return 1 ;;
+            esac
+          }
+          failed=0
+          check legacy "$LEGACY_SELECTED" "$LEGACY_RESULT" || failed=1
+          check intel "$NATIVE_SELECTED" "$INTEL_RESULT" || failed=1
+          check arm "$NATIVE_SELECTED" "$ARM_RESULT" || failed=1
+          printf 'Fleetworks candidate source `%s`\n\n' "$EXACT_HEAD" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$NATIVE_SELECTED" == true ]]; then
+            for architecture in INTEL ARM; do
+              id_name="${architecture}_ID" url_name="${architecture}_URL"
+              sha_name="${architecture}_SHA256" evidence_name="${architecture}_EVIDENCE"
+              if [[ ! "${!id_name}" =~ ^[1-9][0-9]*$ || ! "${!sha_name}" =~ ^[0-9a-f]{64}$ || -z "${!url_name}" || -z "${!evidence_name}" ]]; then
+                echo "::error::$architecture app/evidence artifact identity is missing"
+                failed=1
+              else
+                printf -- '- %s: [app](%s), [PNG/tree/test evidence](%s), artifact ID `%s`, SHA-256 `%s`.\n' \
+                  "$architecture" "${!url_name}" "${!evidence_name}" "${!id_name}" "${!sha_name}" >> "$GITHUB_STEP_SUMMARY"
+              fi
+            done
+            printf '\nActions retention: 14 days. Unsigned review bytes; human visual inspection, real matching-hardware GUI launch, minimum-OS testing, signing/notarization and publication remain pending.\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$failed"

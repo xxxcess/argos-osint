@@ -5,6 +5,58 @@ use tokio::task::JoinHandle;
 use super::{Client, ClientError, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES};
 use crate::{JOBS_PATH, READY_PATH};
 
+#[tokio::test]
+async fn registered_client_clone_keeps_global_reads_free_of_workspace_context() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let requests = tokio::spawn(async move {
+        let mut received = Vec::new();
+        for _ in 0..2 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            while !bytes.ends_with(b"\r\n\r\n") {
+                let mut byte = [0_u8; 1];
+                assert_eq!(socket.read(&mut byte).await.unwrap(), 1);
+                bytes.push(byte[0]);
+                assert!(bytes.len() <= 16 * 1024);
+            }
+            received.push(String::from_utf8(bytes).unwrap().to_ascii_lowercase());
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnull")
+                .await
+                .unwrap();
+        }
+        received
+    });
+    let receipt = crate::connect::RegistrationReceipt::new(
+        "deployment".into(),
+        "node".into(),
+        "workspace".into(),
+        "registration-a".into(),
+        "192.0.2.42:research".parse().unwrap(),
+        3,
+    );
+    let context = crate::context::RegisteredContext::new(
+        receipt,
+        4,
+        5,
+        "fresh-configuration".into(),
+        "access-epoch".into(),
+    )
+    .unwrap();
+    let base = Client::new(&origin, Some("fixture-token")).unwrap();
+    let scoped = base.with_registered_context(&context).unwrap();
+    scoped.get::<serde_json::Value>(JOBS_PATH).await.unwrap();
+    base.get::<serde_json::Value>(READY_PATH).await.unwrap();
+    let received = requests.await.unwrap();
+    assert!(received[0].contains("\r\nx-fleetworks-registration: registration-a\r\n"));
+    assert!(received[0].contains("\r\nx-fleetworks-registration-revision: 3\r\n"));
+    assert!(!received[1].contains("x-fleetworks-registration"));
+    assert!(received
+        .iter()
+        .all(|request| request.contains("authorization: bearer fixture-token")));
+}
+
 #[test]
 fn requires_a_safe_origin_and_token() {
     for origin in [

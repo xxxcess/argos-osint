@@ -1,5 +1,6 @@
 mod classifier;
 mod compose;
+mod credentials;
 mod host_broker;
 mod host_storage;
 mod splash;
@@ -34,7 +35,7 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Action {
-    /// Create the workspace directories and its local API token.
+    /// Create private purpose credentials and stable deployment authority.
     Init,
     /// Import supported API keys and model defaults from a legacy Argos home.
     Import {
@@ -167,7 +168,7 @@ async fn main() -> Result<()> {
     eprintln!("Workspace {}", workspace.root().display());
     match args.action {
         Action::Init => {
-            workspace.initialize_api_token()?;
+            tokio::task::spawn_blocking(move || credentials::provision(&workspace)).await??;
             println!("Workspace initialized");
             Ok(())
         }

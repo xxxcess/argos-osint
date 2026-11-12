@@ -19,7 +19,12 @@ pub(crate) fn read_and_retry_routes() -> Router<ApiState> {
 }
 
 pub(crate) fn routes() -> Router<ApiState> {
-    read_and_retry_routes().route(JOB_CANCEL_PATH, post(crate::cancel))
+    Router::new()
+        .route(JOBS_PATH, get(crate::activity::jobs))
+        .route(JOB_DETAIL_PATH, get(crate::activity::job))
+        .route(JOB_RETRY_PATH, post(crate::activity_actions::retry))
+        .route(JOB_CANCEL_PATH, post(crate::activity_actions::cancel))
+        .route("/api/v1/logs", get(crate::activity::logs))
 }
 
 pub(crate) async fn ready(State(state): State<ApiState>) -> ApiResult {

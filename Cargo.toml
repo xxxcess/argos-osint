@@ -5,12 +5,14 @@ members = [
     "crates/argos-osint-bin",
     "crates/argos-osint-api",
     "services/api-host",
+    "services/search-index",
     "crates/fleetworks-contracts",
     "crates/fleetworks-workspace",
     "crates/fleetworks-broker",
     "crates/fleetworks-jobs",
     "apps/venture",
     "apps/fleetworks-cli",
+    "apps/fleetworks-desktop",
 ]
 
 default-members = ["apps/venture", "apps/fleetworks-cli"]
@@ -34,6 +36,8 @@ regex = "1"
 rquickjs = { version = "=0.14.0", default-features = false, features = ["std"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "multipart"] }
 rpassword = "7"
+rune = { git = "https://github.com/anomalyco/rune", rev = "205b8d4f7e60fa6248b83bfbbb4c6a06096c59ff", default-features = false, features = ["accessibility", "embedded-fonts", "metal-backend", "native-file-dialog", "svg"] }
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "205b8d4f7e60fa6248b83bfbbb4c6a06096c59ff", default-features = false, features = ["markdown"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -52,11 +56,27 @@ tract-onnx = "0.23"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
+unicode-normalization = "=0.1.25"
 scraper = "0.27"
+
+# Rune's vendor fixes must be selected by the application workspace; patches
+# declared by a Git dependency do not propagate. Keep these at the Rune pin.
+[patch.crates-io]
+wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "205b8d4f7e60fa6248b83bfbbb4c6a06096c59ff" }
+winit = { git = "https://github.com/anomalyco/rune", rev = "205b8d4f7e60fa6248b83bfbbb4c6a06096c59ff" }
 
 # The embedded JS engine must meet local interrupt deadlines in debug builds too.
 [profile.dev.package.rquickjs-sys]
 opt-level = 3
+
+# Rune's full debug information can exceed the native development host's
+# memory budget. Preserve backtrace line tables without rebuilding unrelated
+# backend dependencies with a different global profile.
+[profile.dev.package.rune]
+debug = "line-tables-only"
+
+[profile.dev.package.rune-kit]
+debug = "line-tables-only"
 
 # RocksDB's C++ (built by cc in librocksdb-sys' build script) is the single
 # biggest compile; skip -g for it in dev/test builds (local and CI).

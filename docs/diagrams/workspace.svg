@@ -1,41 +1,66 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 344" role="img" aria-labelledby="workspace-title workspace-desc">
-<title id="workspace-title">Fleetworks workspace and clients</title>
-<desc id="workspace-desc">Venture resolves one workspace, owns the local stack, and launches independent clients. The six terminal clients and the Intel desktop use the same versioned HTTP API.</desc>
-<defs>
-  <marker id="workspace-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker>
-</defs>
-<style>
-  text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}
-  .heading{font-family:'Instrument Serif',Georgia,serif;font-size:24px}
-  .label{font-size:16px;font-weight:600}
-  .note{font-size:13px}
-  .code{font:12px 'Geist Mono',ui-monospace,monospace}
-  .zone{font-size:12px;font-weight:600;letter-spacing:1px}
-  .node{fill:white;stroke:#4f5d75}
-  .accent{fill:#fff6ed;stroke:#eb6c36}
-  .edge,.flow{fill:none;stroke:#4f5d75;stroke-width:1.5}
-  .edge{marker-end:url(#workspace-arrow)}
-</style>
-<rect width="960" height="344" fill="#f5f5f5"/>
-<text x="40" y="36" class="heading" text-anchor="start">Venture selects a workspace and serves two client surfaces</text>
-<path d="M204 192H260V108H316" class="edge"/>
-<path d="M204 192H316" class="edge"/>
-<path d="M204 192H260V276H316" class="edge"/>
-<path d="M640 192H708" class="edge"/>
-<path d="M640 276H680V208H708" class="edge"/>
-<rect x="40" y="156" width="164" height="72" rx="6" class="accent"/>
-<text x="122" y="189" class="label" text-anchor="middle">Venture</text>
-<text x="122" y="207" class="note" text-anchor="middle">Local stack owner</text>
-<rect x="316" y="72" width="324" height="72" rx="6" class="node"/>
-<text x="478" y="105" class="label" text-anchor="middle">Workspace</text>
-<text x="478" y="123" class="note" text-anchor="middle">Datasets, config, secrets, models, logs, storage</text>
-<rect x="316" y="156" width="324" height="72" rx="6" class="node"/>
-<text x="478" y="189" class="label" text-anchor="middle">Terminal clients</text>
-<text x="478" y="207" class="note" text-anchor="middle">Atlas · Brain · Jobs · Tools · Models · Profile</text>
-<rect x="316" y="240" width="324" height="72" rx="6" class="node"/>
-<text x="478" y="273" class="label" text-anchor="middle">Intel desktop</text>
-<text x="478" y="291" class="note" text-anchor="middle">Bulletin · Focus Brief · actor dossiers · topology</text>
-<rect x="708" y="156" width="212" height="72" rx="6" class="accent"/>
-<text x="814" y="189" class="label" text-anchor="middle">Fleetworks API</text>
-<text x="814" y="207" class="note" text-anchor="middle">Authenticated /api/v1</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 860" role="img" aria-labelledby="workspace-title workspace-desc">
+<title id="workspace-title">Native local identity and shared backend resources</title>
+<desc id="workspace-desc">The Mac app selects an owned immediate child in its protected OS-account home container. Default cannot be removed or renamed. Registration records stable node and child identity. Models, keys, actors and search remain shared in the selected backend. Accepted Jobs preserve captured origin and configuration revision. An external operator provisions the backend through a distinct workspace.</desc>
+<defs><marker id="workspace-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker></defs>
+<style>text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}.label{font-size:20px;font-weight:600}.note{font-size:16px}.zone{font-size:13px;font-weight:600;letter-spacing:1px}.node{fill:#fff;stroke:#4f5d75}.accent{fill:#fff6ed;stroke:#eb6c36}.edge{fill:none;stroke:#4f5d75;stroke-width:2;marker-end:url(#workspace-arrow)}.minor{fill:#4f5d75;font-size:14px}</style>
+<rect width="1320" height="860" fill="#f5f5f5"/>
+<path d="M24 40H644V552H24Z M696 40H1296V700H696Z" fill="none" stroke="#a0a5b0" stroke-dasharray="6 5"/>
+<text x="48" y="66" class="zone">MAC · OS-ACCOUNT LOCAL IDENTITY</text>
+<text x="720" y="66" class="zone">SELECTED BACKEND · AUTHENTICATED AUTHORITY</text>
+
+<path d="M180 192V244" class="edge"/>
+<path d="M156 348V374H138V408" class="edge"/>
+<path d="M334 348V408" class="edge"/>
+<path d="M512 348V374H530V408" class="edge"/>
+<path d="M308 132H720" class="edge"/>
+<path d="M308 168H664V380H720" class="edge"/>
+<path d="M1260 146H1280V600H1260" class="edge"/>
+<path d="M620 742H680V424H720" class="edge"/>
+<rect x="48" y="92" width="260" height="100" rx="6" class="accent"/>
+<text x="64" y="122" class="label">Fleetworks Desktop</text>
+<text x="64" y="150" class="note">Selected child + gateway</text>
+<text x="64" y="176" class="note">API-only request controls</text>
+<rect x="48" y="244" width="572" height="104" rx="6" class="node"/>
+<text x="64" y="274" class="label">Protected container · $HOME/.fleetworks</text>
+<text x="64" y="302" class="note">Owned identity markers / catalog; no automatic legacy adoption</text>
+<text x="64" y="328" class="note">Root is never registered as a workspace</text>
+<rect x="48" y="408" width="180" height="104" rx="6" class="node"/>
+<text x="64" y="438" class="label">default</text>
+<text x="64" y="466" class="note">Protected</text>
+<text x="64" y="492" class="note">No delete / rename</text>
+<rect x="244" y="408" width="180" height="104" rx="6" class="node"/>
+<text x="260" y="438" class="label">research</text>
+<text x="260" y="466" class="note">Owned direct child</text>
+<text x="260" y="492" class="note">Stable child ID</text>
+<rect x="440" y="408" width="180" height="104" rx="6" class="node"/>
+<text x="456" y="438" class="label">analysis</text>
+<text x="456" y="466" class="note">Owned direct child</text>
+<text x="456" y="492" class="note">Stable child ID</text>
+<rect x="720" y="92" width="540" height="120" rx="6" class="accent"/>
+<text x="736" y="122" class="label">Registered request context</text>
+<text x="736" y="150" class="note">Stable deployment / workstation / workspace IDs</text>
+<text x="736" y="176" class="note">Native interface and registration revisions</text>
+<text x="736" y="202" class="note">A Connect ID selects context; it is not a credential</text>
+<rect x="720" y="316" width="540" height="132" rx="6" class="node"/>
+<text x="736" y="346" class="label">Backend-global resources</text>
+<text x="736" y="374" class="note">Models / roles / provider accounts / tool credentials</text>
+<text x="736" y="400" class="note">Actor corpus / canonical dossiers / search projection</text>
+<text x="736" y="426" class="note">Switching local children does not partition these resources</text>
+<rect x="720" y="540" width="540" height="120" rx="6" class="node"/>
+<text x="736" y="570" class="label">Durable Jobs and request associations</text>
+<text x="736" y="598" class="note">Origin + configuration revision captured at acceptance</text>
+<text x="736" y="624" class="note">Creator stays immutable; reuse adds a requester association</text>
+<text x="736" y="650" class="note">Later folder / IP changes do not rewrite accepted history</text>
+<rect x="48" y="684" width="572" height="124" rx="6" class="node"/>
+<text x="64" y="714" class="label">External operator workspace</text>
+<text x="64" y="742" class="note">Venture / dedicated deployment files / Docker volumes</text>
+<text x="64" y="768" class="note">Separate from the protected native home container</text>
+<text x="64" y="794" class="note">The Mac app never launches this stack</text>
+<text x="336" y="116" class="minor">Authenticated ensure / current proof</text>
+<text x="338" y="220" class="minor">Shared backend target</text>
+<text x="786" y="516" class="minor">Capture in the actual durable acceptance transaction</text>
+<text x="48" y="590" class="minor">Select / attach only verified immediate children. Unknown paths stay unadopted.</text>
+<text x="48" y="620" class="minor">Delete waits for every backend retirement receipt and guarded OS Trash.</text>
+<text x="48" y="650" class="minor">Pending work keeps files intact. OS cutover evidence remains separate.</text>
+<text x="48" y="838" class="minor">Local paths, registration identity and backend resources have distinct owners. App launch does not start services.</text>
 </svg>

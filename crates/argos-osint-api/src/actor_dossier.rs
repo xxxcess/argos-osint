@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 
 use argos_osint_core::storage::actor_catalog::{self, ActorAliasSearch, ActorNameSearch};
 use axum::extract::{Query, State};
+use axum::Extension;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -41,6 +42,7 @@ enum SearchMode {
     #[default]
     Name,
     Alias,
+    Discovery,
 }
 
 #[derive(Deserialize)]
@@ -65,8 +67,23 @@ impl ActorSearchQuery {
 pub(crate) async fn search(
     State(state): State<ApiState>,
     Query(request): Query<ActorSearchQuery>,
+    search: Option<Extension<crate::actor_search::SearchClient>>,
+    principal: Option<Extension<crate::AuthenticatedPrincipal>>,
 ) -> ApiResult {
     let (query, limit) = request.validate()?;
+    if matches!(request.mode, SearchMode::Discovery) {
+        let response = crate::actor_search::discover(
+            &state,
+            search.as_ref().map(|client| &client.0),
+            principal.as_ref().map(|principal| &principal.0),
+            query,
+            limit,
+        )
+        .await?;
+        return Ok(Json(
+            serde_json::to_value(response).map_err(crate::internal)?,
+        ));
+    }
     // A small display limit must not turn a shared alias into a unique match.
     // Resolve the bounded candidate window before applying the display limit.
     let window = *actor_catalog::ACTOR_SEARCH_LIMIT.end();
@@ -83,6 +100,7 @@ pub(crate) async fn search(
                 .map_err(crate::internal)?;
             project_aliases(result, limit)
         }
+        SearchMode::Discovery => unreachable!("discovery uses the authenticated canonical path"),
     };
     Ok(Json(response))
 }

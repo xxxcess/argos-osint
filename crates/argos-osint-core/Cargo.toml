@@ -8,6 +8,7 @@ description = "Brain recall, hardware, and providers for Argos"
 rust-version.workspace = true
 
 [dependencies]
+fleetworks-contracts = { path = "../fleetworks-contracts" }
 tracing = "0.1"
 anyhow.workspace = true
 aho-corasick = "1.1"

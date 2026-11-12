@@ -13,6 +13,39 @@ variable "PLATFORM" {
 # guide export VERSION from that file. :local remains the development alias.
 variable "VERSION" {}
 
+# Explicit review tags never replace the aliases selected by an existing stack.
+variable "IMAGE_TAG" {
+  default = ""
+}
+
+group "backend" {
+  targets = ["runtime", "surrealdb", "search-index"]
+}
+
+target "search-index" {
+  context    = "cwd://."
+  dockerfile = "deploy/Dockerfile"
+  target     = "search-index"
+  tags       = IMAGE_TAG != "" ? ["fleetworks-search-index:${IMAGE_TAG}"] : ["fleetworks-search-index:local", "fleetworks-search-index:${VERSION}"]
+  platforms  = ["${PLATFORM}"]
+}
+
+target "runtime" {
+  context    = "cwd://."
+  dockerfile = "deploy/Dockerfile"
+  target     = "runtime"
+  tags       = IMAGE_TAG != "" ? ["fleetworks-runtime:${IMAGE_TAG}"] : ["fleetworks-runtime:local", "fleetworks-runtime:${VERSION}"]
+  platforms  = ["${PLATFORM}"]
+}
+
+target "surrealdb" {
+  context    = "cwd://."
+  dockerfile = "deploy/Dockerfile"
+  target     = "surrealdb"
+  tags       = IMAGE_TAG != "" ? ["fleetworks-surrealdb:${IMAGE_TAG}"] : ["fleetworks-surrealdb:local", "fleetworks-surrealdb:${VERSION}"]
+  platforms  = ["${PLATFORM}"]
+}
+
 group "clients" {
   targets = [
     "venture",
@@ -33,7 +66,7 @@ target "web" {
   context    = "cwd://."
   dockerfile = "deploy/Dockerfile"
   target     = "web"
-  tags       = ["web:local", "web:${VERSION}"]
+  tags       = IMAGE_TAG != "" ? ["web:${IMAGE_TAG}"] : ["web:local", "web:${VERSION}"]
   platforms  = ["${PLATFORM}"]
 }
 
@@ -41,7 +74,7 @@ target "venture" {
   context    = "cwd://."
   dockerfile = "deploy/Dockerfile"
   target     = "venture"
-  tags       = ["venture:local", "venture:${VERSION}"]
+  tags       = IMAGE_TAG != "" ? ["venture:${IMAGE_TAG}"] : ["venture:local", "venture:${VERSION}"]
   platforms  = ["${PLATFORM}"]
 }
 
@@ -49,7 +82,7 @@ target "fleetworks-atlas" {
   context    = "cwd://."
   dockerfile = "deploy/Dockerfile"
   target     = "fleetworks-atlas"
-  tags       = ["fleetworks-atlas:local", "fleetworks-atlas:${VERSION}"]
+  tags       = IMAGE_TAG != "" ? ["fleetworks-atlas:${IMAGE_TAG}"] : ["fleetworks-atlas:local", "fleetworks-atlas:${VERSION}"]
   platforms  = ["${PLATFORM}"]
 }
 
@@ -57,7 +90,7 @@ target "fleetworks-brain" {
   context    = "cwd://."
   dockerfile = "deploy/Dockerfile"
   target     = "fleetworks-brain"
-  tags       = ["fleetworks-brain:local", "fleetworks-brain:${VERSION}"]
+  tags       = IMAGE_TAG != "" ? ["fleetworks-brain:${IMAGE_TAG}"] : ["fleetworks-brain:local", "fleetworks-brain:${VERSION}"]
   platforms  = ["${PLATFORM}"]
 }
 
@@ -65,7 +98,7 @@ target "fleetworks-jobs" {
   context    = "cwd://."
   dockerfile = "deploy/Dockerfile"
   target     = "fleetworks-jobs"
-  tags       = ["fleetworks-jobs:local", "fleetworks-jobs:${VERSION}"]
+  tags       = IMAGE_TAG != "" ? ["fleetworks-jobs:${IMAGE_TAG}"] : ["fleetworks-jobs:local", "fleetworks-jobs:${VERSION}"]
   platforms  = ["${PLATFORM}"]
 }
 
@@ -73,7 +106,7 @@ target "fleetworks-tools" {
   context    = "cwd://."
   dockerfile = "deploy/Dockerfile"
   target     = "fleetworks-tools"
-  tags       = ["fleetworks-tools:local", "fleetworks-tools:${VERSION}"]
+  tags       = IMAGE_TAG != "" ? ["fleetworks-tools:${IMAGE_TAG}"] : ["fleetworks-tools:local", "fleetworks-tools:${VERSION}"]
   platforms  = ["${PLATFORM}"]
 }
 
@@ -81,7 +114,7 @@ target "fleetworks-models" {
   context    = "cwd://."
   dockerfile = "deploy/Dockerfile"
   target     = "fleetworks-models"
-  tags       = ["fleetworks-models:local", "fleetworks-models:${VERSION}"]
+  tags       = IMAGE_TAG != "" ? ["fleetworks-models:${IMAGE_TAG}"] : ["fleetworks-models:local", "fleetworks-models:${VERSION}"]
   platforms  = ["${PLATFORM}"]
 }
 
@@ -89,6 +122,6 @@ target "fleetworks-profile" {
   context    = "cwd://."
   dockerfile = "deploy/Dockerfile"
   target     = "fleetworks-profile"
-  tags       = ["fleetworks-profile:local", "fleetworks-profile:${VERSION}"]
+  tags       = IMAGE_TAG != "" ? ["fleetworks-profile:${IMAGE_TAG}"] : ["fleetworks-profile:local", "fleetworks-profile:${VERSION}"]
   platforms  = ["${PLATFORM}"]
 }

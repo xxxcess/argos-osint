@@ -4,7 +4,7 @@ Understand the product, then follow its implementation. This is the maintained e
 
 | Route | Start here | Follow it to |
 | --- | --- | --- |
-| Start Fleetworks | [Venture and workspace guide](wiki/code/fleetworks.md) | Client commands, local Compose, storage modes and rollout status |
+| Start Fleetworks | [Fleetworks guide](wiki/code/fleetworks.md) | Native app, registered context and independently operated backend |
 | Explore concepts | [Concepts](wiki/concepts/index.md) | Apps, evidence, model roles, persistence and their diagrams |
 | Explore code | [Code](wiki/code/index.md) | Crates, module entry points, contracts and verification |
 
@@ -20,7 +20,9 @@ Understand the product, then follow its implementation. This is the maintained e
 | [docs/wiki/](wiki/index.md) | Two routes, searchable tags and wiki maintenance |
 | [docs/diagrams/](diagrams.md) | Diagram catalog; HTML pages and matching SVG figures |
 | [Core crate](../crates/argos-osint-core) | Domain pipelines and storage; [module map](wiki/code/core.md) |
-| [Venture](../apps/venture) and [terminal clients](../apps/fleetworks-cli) | Workspace lifecycle and versioned API clients. [Fleetworks guide](wiki/code/fleetworks.md) |
+| [Native app](../apps/fleetworks-desktop) | API-only macOS control hub; [connections](wiki/code/native-connections.md) and [protected workspaces](wiki/code/native-workspaces.md) |
+| [Venture](../apps/venture) and [retained terminal clients](../apps/fleetworks-cli) | Operator compatibility and versioned API consumers; retirement remains gated by replacement parity. [Fleetworks guide](wiki/code/fleetworks.md) |
+| [Actor search](wiki/code/actor-search.md) | Private Tantivy projection, canonical discovery, visible acknowledgements and verification boundaries |
 | [Jobs persistence](wiki/code/jobs-persistence.md) | Planned SQLite state, embedded RocksDB delivery, migration scopes and acceptance |
 | [Deployment](../deploy/README.md) | Local Compose, database profiles and the [Atlas overlay](../deploy/atlas-dispatch.md) |
 | [API adapter](../crates/argos-osint-api) / [host](../services/api-host) | Versioned HTTP contracts and authenticated service roles. [API contract](wiki/code/intel-web.md) |

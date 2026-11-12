@@ -155,10 +155,20 @@ impl ToolRunner {
     }
 
     pub(super) fn for_repository(&self, repository: Repository, settings: SettingsFile) -> Self {
+        let keys = ProviderKeys::from_settings(&settings);
+        self.for_repository_with_keys(repository, settings, keys)
+    }
+
+    pub(super) fn for_repository_with_keys(
+        &self,
+        repository: Repository,
+        settings: SettingsFile,
+        keys: ProviderKeys,
+    ) -> Self {
         Self {
             repository: Some(repository),
             db_path: PathBuf::new(),
-            keys: ProviderKeys::from_settings(&settings),
+            keys,
             settings,
             concurrency: self.concurrency.clone(),
             inflight: self.inflight.clone(),

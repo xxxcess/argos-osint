@@ -16,6 +16,8 @@ use sha2::{Digest, Sha256};
 use tokio::process::Command;
 use url::Url;
 
+use crate::credentials;
+use crate::credentials::Gateway;
 use crate::host_storage::{self, Broker as HostBroker, Config as HostStorage, Mode as HostMode};
 
 const DISK_URL: &str = "ws://surrealdb:8000";
@@ -39,6 +41,8 @@ const PRIVATE_TOKEN_FILES: &[(&str, &str)] = &[
     ("FLEETWORKS_EXECUTION_TOKEN_FILE", "execution-token"),
 ];
 const SETTINGS: &[(&str, Option<&str>)] = &[
+    ("FLEETWORKS_ACCESS_SCOPE_ID", None),
+    ("FLEETWORKS_ACCESS_EPOCH", None),
     ("FLEETWORKS_STORAGE_NAMESPACE", Some("fleetworks")),
     ("FLEETWORKS_STORAGE_DATABASE", Some("fleetworks")),
     ("FLEETWORKS_STORAGE_USERNAME", Some("fleetworks")),
@@ -46,6 +50,7 @@ const SETTINGS: &[(&str, Option<&str>)] = &[
     ("FLEETWORKS_API_ALLOWED_HOSTS", None),
     ("FLEETWORKS_API_ALLOWED_ORIGINS", None),
     ("FLEETWORKS_WEB_ORIGIN", None),
+    ("FLEETWORKS_INTEL_WEB_URL", None),
     ("FLEETWORKS_QUEUE_NAME", None),
     // Legacy owner decoding only; new launch preparation skips this setting.
     ("FLEETWORKS_BROKER_QUEUE", None),
@@ -117,6 +122,8 @@ pub(crate) struct Owner {
     uid: u32,
     gid: u32,
     token: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    gateway: Option<Gateway>,
     root_password: PathBuf,
     runtime_password: PathBuf,
     settings: BTreeMap<String, String>,
@@ -152,6 +159,12 @@ impl Owner {
                 && owner.file.is_absolute()
                 && owner.dev_file.as_deref().is_none_or(Path::is_absolute)
                 && owner.token.is_absolute()
+                && owner.gateway.as_ref().is_none_or(|gateway| gateway
+                    .validates_workspace(workspace.root())
+                    && gateway.operator_token == owner.token
+                    && owner.settings.get("FLEETWORKS_ACCESS_SCOPE_ID") == Some(&gateway.scope_id)
+                    && owner.settings.get("FLEETWORKS_ACCESS_EPOCH")
+                        == Some(&gateway.access_epoch))
                 && owner.root_password.is_absolute()
                 && owner.runtime_password.is_absolute()
                 && owner.api_port != 0
@@ -315,6 +328,21 @@ impl Owner {
             .env(RUNTIME_PASSWORD_FILE, &self.runtime_password);
         for (variable, name) in PRIVATE_TOKEN_FILES {
             command.env(variable, self.workspace.join("secrets").join(name));
+        }
+        if let Some(gateway) = &self.gateway {
+            command
+                .env("FLEETWORKS_API_CREDENTIALS_FILE", &gateway.manifest)
+                .env("FLEETWORKS_NATIVE_TOKEN_FILE", &gateway.native_token)
+                .env("FLEETWORKS_WEB_RELAY_TOKEN_FILE", &gateway.web_token)
+                .env("FLEETWORKS_OPERATOR_TOKEN_FILE", &gateway.operator_token);
+        } else {
+            // Legacy ownership remains usable for shutdown, never for a new
+            // launch. Empty private authority cannot construct a principal.
+            command
+                .env_remove("FLEETWORKS_API_CREDENTIALS_FILE")
+                .env_remove("FLEETWORKS_NATIVE_TOKEN_FILE")
+                .env_remove("FLEETWORKS_WEB_RELAY_TOKEN_FILE")
+                .env_remove("FLEETWORKS_OPERATOR_TOKEN_FILE");
         }
         for (key, _) in SETTINGS {
             command.env_remove(key);
@@ -675,17 +703,37 @@ fn prepare(
         "Fleetworks API and web ports must differ"
     );
 
-    let token = secret(
+    let authority_value = |key| -> Result<Option<String>> {
+        Ok(value(&environment, key)?.or_else(|| {
+            prior
+                .as_ref()
+                .and_then(|owner| owner.settings.get(key).cloned())
+        }))
+    };
+    let gateway = credentials::provision_with_values(
         workspace,
-        &environment,
-        API_TOKEN_FILE,
-        prior.as_ref().map(|owner| owner.token.as_path()),
-        Some("api-token"),
+        authority_value("FLEETWORKS_ACCESS_SCOPE_ID")?,
+        authority_value("FLEETWORKS_ACCESS_EPOCH")?,
     )?;
-    workspace.read_api_token_file(&token)?;
+    if let Some(configured) = value(&environment, API_TOKEN_FILE)? {
+        ensure!(workspace.resolve_path(Path::new(&configured))==gateway.operator_token,"Venture gateway uses its new operator-api-token; legacy API token overrides gain no authority");
+    }
+    ensure!(
+        environment.get("FLEETWORKS_API_TOKEN").is_none(),
+        "Venture gateway credentials require protected files"
+    );
+    let token = gateway.operator_token.clone();
     for (_, name) in PRIVATE_TOKEN_FILES {
         workspace.initialize_secret_file(name)?;
     }
+    let mut private: Vec<PathBuf> = PRIVATE_TOKEN_FILES
+        .iter()
+        .map(|(_, name)| workspace.root().join("secrets").join(name))
+        .collect();
+    if let Some(atlas) = &atlas {
+        private.push(atlas.internal_token.clone());
+    }
+    gateway.ensure_distinct(workspace, &private)?;
     let root_password = secret(
         workspace,
         &environment,
@@ -731,6 +779,36 @@ fn prepare(
             settings.insert(name.to_owned(), setting);
         }
     }
+    settings.insert(
+        "FLEETWORKS_ACCESS_SCOPE_ID".into(),
+        gateway.scope_id.clone(),
+    );
+    settings.insert(
+        "FLEETWORKS_ACCESS_EPOCH".into(),
+        gateway.access_epoch.clone(),
+    );
+    let web = settings
+        .get("FLEETWORKS_INTEL_WEB_URL")
+        .or_else(|| settings.get("FLEETWORKS_WEB_ORIGIN"))
+        .cloned()
+        .unwrap_or_else(|| format!("http://127.0.0.1:{web_port}"));
+    let url = Url::parse(&web).context("invalid public Intel Web URL")?;
+    let loopback = url.host_str().is_some_and(|host| {
+        host == "localhost"
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    });
+    ensure!(
+        url.host().is_some()
+            && (url.scheme() == "https" || url.scheme() == "http" && loopback)
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none(),
+        "Intel Web URL requires HTTPS or loopback HTTP without credentials/query/fragment"
+    );
+    settings.insert("FLEETWORKS_INTEL_WEB_URL".into(), web);
     let requested = Owner {
         version: OWNER_VERSION,
         project: project_name(workspace.root()),
@@ -748,6 +826,7 @@ fn prepare(
         uid,
         gid,
         token,
+        gateway: Some(gateway),
         root_password,
         runtime_password,
         settings,
@@ -1253,6 +1332,7 @@ mod tests {
             uid: 1000,
             gid: 1000,
             token: first.root().join("secrets/api-token"),
+            gateway: None,
             root_password: first.root().join("secrets/storage-root-password"),
             runtime_password: first.root().join("secrets/storage-password"),
             settings: BTreeMap::new(),
@@ -1296,6 +1376,42 @@ mod tests {
             .as_std()
             .get_envs()
             .any(|(key, value)| key == OsStr::new(super::BROKER_PASSWORD_FILE) && value.is_some()));
+
+        fs::remove_file(owner_path(&first)).unwrap();
+        let gateway = crate::credentials::provision(&first).unwrap();
+        owner.token = gateway.operator_token.clone();
+        owner.settings.insert(
+            "FLEETWORKS_ACCESS_SCOPE_ID".into(),
+            gateway.scope_id.clone(),
+        );
+        owner.settings.insert(
+            "FLEETWORKS_ACCESS_EPOCH".into(),
+            gateway.access_epoch.clone(),
+        );
+        owner.gateway = Some(gateway.clone());
+        owner.save(&first).unwrap();
+        assert_eq!(Owner::read(&first).unwrap().as_ref(), Some(&owner));
+        let command = owner.compose();
+        let expected = [
+            (
+                "FLEETWORKS_API_CREDENTIALS_FILE",
+                gateway.manifest.as_os_str(),
+            ),
+            (
+                "FLEETWORKS_WEB_RELAY_TOKEN_FILE",
+                gateway.web_token.as_os_str(),
+            ),
+            (
+                "FLEETWORKS_NATIVE_TOKEN_FILE",
+                gateway.native_token.as_os_str(),
+            ),
+        ];
+        for (name, path) in expected {
+            assert!(command
+                .as_std()
+                .get_envs()
+                .any(|(key, value)| key == OsStr::new(name) && value == Some(path)));
+        }
 
         fs::copy(owner_path(&first), owner_path(&second)).unwrap();
         assert!(Owner::read(&second).is_err());

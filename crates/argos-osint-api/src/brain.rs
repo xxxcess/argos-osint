@@ -11,14 +11,21 @@ use crate::private_relay::{PrivateClient, Service};
 use crate::{ApiResult, ApiState};
 
 pub(crate) fn routes() -> Router<ApiState> {
-    Router::new()
+    build_routes(true)
+}
+
+pub(crate) fn operator_routes() -> Router<ApiState> {
+    build_routes(false)
+}
+
+fn build_routes(scoped: bool) -> Router<ApiState> {
+    let router = Router::new()
         .route("/api/v1/actors/detail", get(crate::actor_dossier::read))
         .route("/api/v1/actors/search", get(crate::actor_dossier::search))
         .route("/api/v1/articles/detail", get(crate::detail))
         .route("/api/v1/articles/related", get(crate::related))
         .route("/api/v1/brief/ensure", post(crate::ensure))
         .route("/api/v1/brief/reload", post(crate::reload))
-        .route("/api/v1/brief/stages", get(crate::stages))
         .route(
             "/api/v1/topology",
             get(crate::topology_web::read).post(crate::topology),
@@ -34,7 +41,12 @@ pub(crate) fn routes() -> Router<ApiState> {
         .route(
             "/api/v1/topology/summary/generate",
             post(crate::topology_summary::generate),
-        )
+        );
+    if scoped {
+        router.route("/api/v1/brief/stages", get(crate::activity::stages))
+    } else {
+        router.route("/api/v1/brief/stages", get(crate::stages))
+    }
 }
 
 pub(crate) async fn ready(State(state): State<ApiState>) -> ApiResult {
@@ -59,8 +71,18 @@ impl BrainClient {
 pub(crate) async fn forward(
     State(client): State<BrainClient>,
     request: Request,
-    _next: Next,
+    next: Next,
 ) -> Result<Response, Response> {
+    if request.uri().path() == "/api/v1/actors/search"
+        && request.uri().query().is_some_and(|query| {
+            let modes: Vec<_> = url::form_urlencoded::parse(query.as_bytes())
+                .filter(|(key, _)| key == "mode")
+                .collect();
+            modes.len() == 1 && modes[0].1 == "discovery"
+        })
+    {
+        return Ok(next.run(request).await);
+    }
     client.0.forward(request).await
 }
 
@@ -68,7 +90,6 @@ pub(crate) async fn forward(
 mod tests {
     use axum::body::{to_bytes, Body};
     use axum::http::{header, Request, StatusCode};
-    use axum::middleware;
     use tower::ServiceExt;
 
     use super::*;
@@ -94,6 +115,55 @@ mod tests {
         const PATH: &str = "/api/v1/brief/reload";
         const QUERY: &str = "id=alpha%2Fbeta%26gamma";
         const PAYLOAD: &str = r#"{"run":"run-1","id":"story-1","request_id":"test-reload"}"#;
+        const PUBLIC_TOKEN: &str = "public-native-test-credential-0123456789";
+        use argos_osint_core::storage::connect_registry;
+        use argos_osint_core::storage::connect_registry::RegistryAuthority;
+        #[cfg(feature = "embedded")]
+        use argos_osint_core::storage::repo::Repository;
+        use fleetworks_contracts::connect::RegistrationEnsureRequest;
+        use fleetworks_contracts::connect::WorkspaceName;
+        use fleetworks_contracts::context::CredentialPurpose;
+        use fleetworks_contracts::context::Permission;
+
+        #[cfg(not(feature = "embedded"))]
+        let datastore = crate::storage_test_support::Server::start()
+            .expect("server-only API fixture requires the pinned isolated SurrealDB harness");
+        #[cfg(not(feature = "embedded"))]
+        let repo = datastore.repo("argos", "api_brief_relay_context").await;
+        #[cfg(feature = "embedded")]
+        let directory = tempfile::tempdir().expect("isolated embedded fixture");
+        #[cfg(feature = "embedded")]
+        let repo = Repository::connect(
+            &argos_osint_core::storage::open::Target::Embedded {
+                path: directory.path().join("store"),
+            },
+            "argos",
+            "api_brief_relay_context",
+        )
+        .await
+        .expect("actual embedded repository");
+        argos_osint_core::storage::bootstrap::ensure_network_identity(repo.db())
+            .await
+            .expect("actual deployment identity");
+        connect_registry::initialize_control(repo.db())
+            .await
+            .expect("explicit fixture registry");
+        let authority = RegistryAuthority::new("relay-scope", "relay-native", "relay-access")
+            .expect("fixture authority");
+        let receipt = connect_registry::ensure(
+            &repo,
+            &authority,
+            &RegistrationEnsureRequest::new(
+                "relay-ensure".into(),
+                "192.0.2.42".parse().expect("synthetic native IP"),
+                WorkspaceName::new("research").expect("child name"),
+                "synthetic-relay-installation".into(),
+                "synthetic-relay-folder".into(),
+            ),
+        )
+        .await
+        .expect("actual registration")
+        .receipt;
 
         let upstream = Router::new().route(
             PATH,
@@ -106,6 +176,10 @@ mod tests {
                 assert_eq!(request.headers()[header::CONTENT_TYPE], "application/json");
                 assert!(!request.headers().contains_key(header::ORIGIN));
                 assert!(!request.headers().contains_key(header::COOKIE));
+                assert_ne!(
+                    request.headers()[crate::request_context::DELEGATION_HEADER],
+                    "forged"
+                );
                 assert_eq!(
                     to_bytes(request.into_body(), crate::MAX_REQUEST_BYTES)
                         .await
@@ -122,11 +196,41 @@ mod tests {
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let client = BrainClient::new(&origin, TOKEN).unwrap();
         let server = tokio::spawn(async { axum::serve(listener, upstream).await.unwrap() });
-        let gateway = Router::new()
-            .route(PATH, post(|| async { StatusCode::IM_A_TEAPOT }))
-            .route_layer(middleware::from_fn_with_state(client, forward));
+        let policy = crate::NetworkPolicy::with_credentials(
+            &["127.0.0.1:8080".into()],
+            vec![crate::ScopedCredential::new(
+                "relay-native".into(),
+                "relay-scope".into(),
+                "relay-access".into(),
+                CredentialPurpose::Native,
+                [Permission::SubmitInteractive].into_iter().collect(),
+                PUBLIC_TOKEN,
+            )
+            .expect("actual native ingress authority")],
+        )
+        .expect("fixture policy");
+        let gateway = crate::network_router_with_private_services(
+            crate::ApiState {
+                repo,
+                instance_id: "relay-fixture".into(),
+                port: 8080,
+                origins: std::sync::Arc::new(vec!["https://public.example".into()]),
+            },
+            policy,
+            crate::PrivateServices::new(Some(client), None, None, None),
+        );
         let request = Request::post(format!("{PATH}?{QUERY}"))
-            .header(header::AUTHORIZATION, "Bearer public-credential")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header(header::AUTHORIZATION, format!("Bearer {PUBLIC_TOKEN}"))
+            .header(
+                crate::request_context::REGISTRATION_HEADER,
+                &receipt.registration_id,
+            )
+            .header(
+                crate::request_context::REGISTRATION_REVISION_HEADER,
+                receipt.revision.to_string(),
+            )
+            .header(crate::request_context::DELEGATION_HEADER, "forged")
             .header(header::ORIGIN, "https://public.example")
             .header(header::COOKIE, "session=public-credential")
             .header(header::CONTENT_TYPE, "application/json")

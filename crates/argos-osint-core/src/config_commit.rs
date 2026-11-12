@@ -198,15 +198,20 @@ impl ConfigLock {
                 }
             }
         };
+        let guard = Arc::new(ConfigGuard {
+            _file: file,
+            lock_path,
+            pid,
+            holder,
+        });
+        // The journal, under the same cross-process guard, is the durable
+        // revision authority. A process restart must never reuse an old form's
+        // revision merely because its in-memory counter started at zero.
+        let generation = durable_generation_at(root)?;
         Ok(Self {
             root: root.to_path_buf(),
-            guard: Arc::new(ConfigGuard {
-                _file: file,
-                lock_path,
-                pid,
-                holder,
-            }),
-            generation: current_generation(),
+            guard,
+            generation,
         })
     }
 
@@ -339,6 +344,38 @@ pub fn read_journal_at(root: &Path) -> Option<CommitJournal> {
         return None;
     }
     serde_json::from_str(&raw).ok()
+}
+
+fn durable_generation_at(root: &Path) -> Result<u64> {
+    use std::io::Read;
+    let path = root.join(JOURNAL_NAME);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error).context("read configuration revision"),
+    };
+    anyhow::ensure!(
+        metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() <= 1024 * 1024,
+        "invalid configuration revision journal"
+    );
+    let mut raw = Vec::new();
+    fs::File::open(path)?
+        .take(1024 * 1024 + 1)
+        .read_to_end(&mut raw)?;
+    anyhow::ensure!(
+        raw.len() <= 1024 * 1024,
+        "configuration revision journal exceeded its bound"
+    );
+    let journal: CommitJournal =
+        serde_json::from_slice(&raw).context("invalid configuration revision journal")?;
+    anyhow::ensure!(
+        matches!(
+            journal.state.as_str(),
+            STATE_COMMITTED | STATE_RESTORED | STATE_PENDING
+        ),
+        "unknown configuration journal state"
+    );
+    Ok(journal.generation)
 }
 
 /// Atomically writes the journal in `root`.

@@ -166,6 +166,7 @@ pub(crate) async fn bump(tx: &Tx, table: &str, key: &str) -> Result<(), TxError>
 /// Apply the job-system schema (idempotent).
 pub async fn apply_schema(db: &Surreal<Any>) -> Result<(), TxError> {
     db.query(SCHEMA).await?.check()?;
+    db.query(super::job_context::SCHEMA).await?.check()?;
     Ok(())
 }
 
@@ -272,6 +273,9 @@ pub(crate) async fn log_transition_in(
 }
 
 pub(crate) async fn create_job_in(tx: &Tx, job: &NewJob<'_>) -> Result<(), TxError> {
+    if job.kind != "service" {
+        super::configuration_reset::fence_new_work_in(tx).await?;
+    }
     let (root, ancestors) = match job.parent {
         None => (rid("job", job.id), Vec::new()),
         Some(parent) => {
@@ -312,6 +316,9 @@ pub(crate) async fn create_job_in(tx: &Tx, job: &NewJob<'_>) -> Result<(), TxErr
         .bind(("at", ts(job.created_at))),
     )
     .await?;
+    if let Some(parent) = job.parent {
+        super::job_context::record_child_in(tx, parent, job.id).await?;
+    }
     log_transition_in(
         tx,
         job.id,

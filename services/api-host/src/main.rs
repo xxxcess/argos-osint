@@ -1,3 +1,4 @@
+mod actor_index_worker;
 mod actor_seed;
 mod atlas_worker;
 mod classifier_service;
@@ -5,8 +6,11 @@ mod classifier_train;
 mod execution_service;
 mod fleetworks;
 mod jobs_service;
+mod native_worker;
 mod nlp_service;
 mod queue_client;
+mod reset_services;
+mod setup_jobs;
 
 use anyhow::{ensure, Result};
 use argos_osint_core::storage::{self, home::Layout};
@@ -62,6 +66,8 @@ enum Role {
     Execution,
     /// Claim and execute durable Atlas dispatches.
     AtlasWorker,
+    /// Consume registered setup/tools Jobs and pump the private actor index.
+    NativeWorker,
     /// Warm, private Compromise inference without a database session.
     Nlp,
     /// Serve pinned Rust-BERT inference without a database session.
@@ -151,7 +157,7 @@ async fn main() -> Result<()> {
         )
         .await;
     }
-    let (layout, network, access, services) = tokio::task::spawn_blocking(move || {
+    let (layout, network, access, mut services) = tokio::task::spawn_blocking(move || {
         let access = if matches!(
             role,
             Role::Combined | Role::Api | Role::Brain | Role::Tools | Role::Control | Role::Jobs
@@ -215,6 +221,7 @@ async fn main() -> Result<()> {
             atlas_dispatch,
         )
         .await?;
+        fleetworks::export_deployment_identity(&repo).await?;
         println!("Fleetworks storage ready");
         return Ok(());
     }
@@ -241,12 +248,19 @@ async fn main() -> Result<()> {
         .await??;
         let listener = tokio::net::TcpListener::bind(SocketAddr::new(bind, port)).await?;
         let port = listener.local_addr()?.port();
+        let owner_state = argos_osint_api::ApiState {
+            repo: repo.clone(),
+            instance_id: format!("execution-{}-{}", std::process::id(), chrono_id()),
+            port,
+            origins: Arc::new(Vec::new()),
+        };
         let router = argos_osint_api::guard_network(
             execution_service::router(workspace),
-            policy,
+            policy.clone(),
             Arc::new(Vec::new()),
             port,
         );
+        let router = reset_services::attach_http_owner(router, &owner_state, policy, role).await?;
         let result = serve_with_graceful_shutdown_timeout(
             listener,
             router,
@@ -257,10 +271,57 @@ async fn main() -> Result<()> {
         drain_storage().await;
         return result;
     }
-    tokio::task::spawn_blocking(argos_osint_core::provider::SettingsFile::load).await??;
+    if role == Role::NativeWorker {
+        let workspace = fleetworks::workspace_path()?;
+        let result = reset_services::run_headless(
+            repo.clone(),
+            role,
+            move |stop| native_worker::run(repo, workspace, reset_services::stopped(stop)),
+            shutdown_signal(),
+        )
+        .await;
+        drain_storage().await;
+        return result;
+    }
+    if role == Role::Api {
+        services = fleetworks::workstation_services(&repo, services).await?;
+    }
+    // Retained operator/worker readers remain until their explicit retirement.
+    if matches!(
+        role,
+        Role::Combined | Role::Worker | Role::BriefWorker | Role::AtlasWorker
+    ) {
+        tokio::task::spawn_blocking(argos_osint_core::provider::SettingsFile::load).await??;
+    }
     if role == Role::AtlasWorker {
         let _beat = start_process_beat().await?;
-        let result = atlas_worker::run(repo, shutdown_signal()).await;
+        let result = reset_services::run_headless(
+            repo.clone(),
+            role,
+            move |stop| atlas_worker::run(repo, reset_services::stopped(stop)),
+            shutdown_signal(),
+        )
+        .await;
+        drain_storage().await;
+        return result;
+    }
+    if matches!(role, Role::Worker | Role::BriefWorker) {
+        let result = reset_services::run_headless(
+            repo.clone(),
+            role,
+            move |stop| async move {
+                let (beat, workers) = start_workers(role).await?;
+                reset_services::stopped(stop).await;
+                tokio::task::spawn_blocking(move || {
+                    argos_osint_core::scheduler::WorkerPool::shutdown_all(workers);
+                    drop(beat);
+                })
+                .await?;
+                Ok(())
+            },
+            shutdown_signal(),
+        )
+        .await;
         drain_storage().await;
         return result;
     }
@@ -274,7 +335,14 @@ async fn main() -> Result<()> {
             origins: Arc::new(api.origins),
         };
         let router = if let Some(policy) = api.policy {
-            match role {
+            let reset = if role == Role::Api {
+                reset_services::gateway(&state, policy.clone()).await?
+            } else {
+                None
+            };
+            let owner_state = state.clone();
+            let owner_policy = policy.clone();
+            let router = match role {
                 Role::Brain => argos_osint_api::brain_router(state, policy),
                 Role::Tools => argos_osint_api::tools_router(state, policy),
                 Role::Control => argos_osint_api::control_router(state, policy),
@@ -289,6 +357,16 @@ async fn main() -> Result<()> {
                     argos_osint_api::jobs_router(state, policy).merge(internal)
                 }
                 _ => argos_osint_api::network_router_with_private_services(state, policy, services),
+            };
+            let router = if let Some(reset) = reset {
+                router.layer(axum::Extension(reset))
+            } else {
+                router
+            };
+            if matches!(role, Role::Brain | Role::Tools | Role::Control | Role::Jobs) {
+                reset_services::attach_http_owner(router, &owner_state, owner_policy, role).await?
+            } else {
+                router
             }
         } else {
             ensure!(
@@ -309,7 +387,7 @@ async fn main() -> Result<()> {
     } else {
         None
     };
-    let workers = if matches!(role, Role::Combined | Role::Worker | Role::BriefWorker) {
+    let workers = if role == Role::Combined {
         Some(start_workers(role).await?)
     } else {
         None
@@ -388,11 +466,14 @@ where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let server = axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            let _ = shutdown_rx.await;
-        })
-        .into_future();
+    let server = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        let _ = shutdown_rx.await;
+    })
+    .into_future();
     tokio::pin!(server);
 
     tokio::select! {

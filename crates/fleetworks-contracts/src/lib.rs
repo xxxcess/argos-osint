@@ -2,8 +2,18 @@
 
 mod client;
 
+pub mod actor_index;
+pub mod capabilities;
+pub mod classifier_activation;
+pub mod connect;
+pub mod context;
+pub mod readiness;
+pub mod search;
+
 pub use client::Client;
 pub use client::ClientError;
+pub use client::ConfigurationTransferReceipt;
+pub use client::DatasetUpload;
 
 use serde::{Deserialize, Serialize};
 
@@ -43,6 +53,8 @@ pub struct ToolRunRequest {
     pub request_id: String,
     pub tool_id: String,
     pub inputs: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<context::MutationContext>,
 }
 
 impl ToolRunRequest {
@@ -52,7 +64,14 @@ impl ToolRunRequest {
             request_id,
             tool_id,
             inputs,
+            context: None,
         }
+    }
+
+    /// Pin a confirmed registered origin and global configuration revision.
+    pub fn with_context(mut self, context: context::MutationContext) -> Self {
+        self.context = Some(context);
+        self
     }
 }
 
@@ -68,12 +87,23 @@ const ATLAS_JOB_PREFIX: &str = "fleet-atlas-job-";
 #[non_exhaustive]
 pub struct AtlasCycleRequest {
     pub request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<context::MutationContext>,
 }
 
 impl AtlasCycleRequest {
     /// Build a request from 1–64 ASCII letters, digits, dashes or underscores.
     pub fn new(request_id: String) -> Option<Self> {
-        valid_atlas_request_id(&request_id).then_some(Self { request_id })
+        valid_atlas_request_id(&request_id).then_some(Self {
+            request_id,
+            context: None,
+        })
+    }
+
+    /// Pin a confirmed registered origin and global configuration revision.
+    pub fn with_context(mut self, context: context::MutationContext) -> Self {
+        self.context = Some(context);
+        self
     }
 
     /// Compute the durable IDs, including for requests decoded from JSON.

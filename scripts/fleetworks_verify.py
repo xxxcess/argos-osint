@@ -13,10 +13,12 @@ import time
 from pathlib import Path
 
 PRIMARY_SCOPES = frozenset({"native", "server", "storage", "compose", "queue"})
-ALL_SCOPES = PRIMARY_SCOPES | {"bert", "web", "web_dev", "images"}
+ALL_SCOPES = PRIMARY_SCOPES | {"desktop", "bert", "web", "web_dev", "images"}
 CLI_NAMES = ("atlas", "brain", "jobs", "tools", "models", "profile")
 CLIENT_IMAGES = frozenset({"venture", *(f"fleetworks-{name}" for name in CLI_NAMES)})
-ALL_IMAGES = CLIENT_IMAGES | {"web"}
+BACKEND_IMAGES = frozenset({"runtime", "surrealdb", "search-index"})
+RUST_IMAGES = CLIENT_IMAGES | {"runtime", "search-index"}
+ALL_IMAGES = CLIENT_IMAGES | BACKEND_IMAGES | {"web"}
 BERT_ONLY_PATHS = {".github/workflows/atlas-bert.yml"}
 BERT_SHARED_PATHS = {
     "apps/venture/src/classifier.rs",
@@ -59,7 +61,20 @@ SERVER_STORAGE_PATHS = {
 NATIVE_PACKAGES = (
     "-p", "fleetworks-workspace", "-p", "fleetworks-contracts", "-p", "fleetworks-cli", "-p", "fleetworks-venture",
 )
+DESKTOP_PACKAGES = ("-p", "fleetworks-desktop")
 EVENTS = ("push", "pull_request", "workflow_dispatch", "schedule")
+COMPONENTS = ("auto", "native", "backend", "all")
+
+
+def component_plan(components, scopes, images):
+    """Explicit component selection shares this planner with automatic paths."""
+    if components == "native":
+        return {"desktop"}, set()
+    if components == "backend":
+        return set(ALL_SCOPES - {"native", "desktop", "web", "web_dev"}), set(BACKEND_IMAGES)
+    if components == "all":
+        return set(ALL_SCOPES), set(ALL_IMAGES)
+    return set(scopes), set(images)
 
 
 def client_image(name):
@@ -71,7 +86,13 @@ def path_images(path):
     if not path or path.endswith(".md"):
         return set()
     if path in SHARED_PRIMARY_PATHS or path.startswith(SHARED_PRIMARY_PREFIXES):
-        return set(CLIENT_IMAGES)
+        return set(RUST_IMAGES)
+    if path.startswith("services/search-index/") or path in {"deploy/start-search-index.sh", "deploy/check-search.sh"}:
+        return {"search-index"}
+    if path == "deploy/start-surreal.sh":
+        return {"surrealdb"}
+    if path == "deploy/check-api.sh" or path.startswith(("crates/fleetworks-jobs/", *SERVER_PREFIXES)):
+        return {"runtime"}
     if path.startswith("apps/venture/"):
         return {"venture"}
     if path.startswith("apps/fleetworks-cli/"):
@@ -83,7 +104,7 @@ def path_images(path):
         if name.endswith("_ui.rs") and name[: -len("_ui.rs")] in CLI_NAMES:
             return {client_image(name[: -len("_ui.rs")])}
         return {client_image(name) for name in CLI_NAMES}
-    if path in {"deploy/Dockerfile", "deploy/docker-bake.hcl"}:
+    if path in {"deploy/Dockerfile", "deploy/Dockerfile.dockerignore", "deploy/docker-bake.hcl"}:
         return set(ALL_IMAGES)
     if (
         path in WEB_BUILD_PATHS
@@ -103,7 +124,7 @@ def raw_path_scopes(path):
     if path.startswith("tools/atlas-bert/") or path in BERT_ONLY_PATHS:
         return {"bert"}
     if path in SHARED_PRIMARY_PATHS or path.startswith(SHARED_PRIMARY_PREFIXES):
-        return PRIMARY_SCOPES
+        return PRIMARY_SCOPES | {"desktop"}
     if path in {"scripts/test_surreal.py", "scripts/test_surreal_release.py", "scripts/surrealdb-release.json"}:
         return {"server", "storage", "queue"}
     if path == "scripts/fixtures/atlas_bert":
@@ -120,13 +141,17 @@ def raw_path_scopes(path):
         return scopes | {"native", "server", "compose"}
     if path.startswith("apps/fleetworks-cli/"):
         return {"native"}
+    if path.startswith("apps/fleetworks-desktop/"):
+        return {"desktop"}
+    if path.startswith("services/search-index/"):
+        return {"server"}
     if path.startswith("apps/web-desktop/app/api/"):
         return {"web", "web_dev", "server", "compose"}
     if path.startswith(("apps/web-desktop/app/", "packages/")) and not path.endswith(("/package.json", "/tsconfig.json")):
         return {"web", "server", "compose"}
     if path.startswith(("apps/web-desktop/", "packages/")):
         return {"web", "web_dev", "server", "compose"}
-    if path in {"deploy/Dockerfile", "deploy/docker-bake.hcl"}:
+    if path in {"deploy/Dockerfile", "deploy/Dockerfile.dockerignore", "deploy/docker-bake.hcl"}:
         return scopes | {"server", "compose", "images"}
     if path.startswith("deploy/"):
         return scopes | {"server", "compose"}
@@ -257,6 +282,14 @@ def run_local(scopes, comparison=None):
             ["cargo", "fmt", *NATIVE_PACKAGES, "--", "--check"],
             [sys.executable, "scripts/agent_cargo.py", "test", "--locked", *NATIVE_PACKAGES],
         ])
+    if "desktop" in scopes:
+        if platform.system() == "Darwin":
+            checks.extend([
+                ["cargo", "fmt", *DESKTOP_PACKAGES, "--", "--check"],
+                [sys.executable, "scripts/agent_cargo.py", "test", "--locked", *DESKTOP_PACKAGES],
+            ])
+        else:
+            print("Desktop checks are pending on the selected macOS lanes; this host cannot provide Mac evidence.", flush=True)
     if "web" in scopes:
         checks.extend(["pnpm", command] for command in ("typecheck", "lint", "test"))
     if scopes:
@@ -295,6 +328,8 @@ def dispatch(args, head):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
+    host = commands.add_parser("platform", help="report physical host targets without building or starting services")
+    host.add_argument("--format", choices=("rust", "docker", "json"), default="json")
     for name, help_text, default_event in (
         ("plan", "print selected scopes without running their checks", "push"),
         ("local", "run local checks for selected scopes and working changes", "push"),
@@ -305,6 +340,7 @@ def main():
         mode.add_argument("--event", choices=EVENTS, default=default_event)
         mode.add_argument("--base", default="", metavar="SHA", help="comparison commit, or omit to select all")
         mode.add_argument("--head", metavar="SHA", help="expected checkout commit, defaulting to HEAD")
+        mode.add_argument("--components", choices=COMPONENTS, default="auto", help="explicit selection; native always selects both Mac app lanes")
         if name != "local":
             mode.add_argument("--github-output", type=Path, help="append Boolean scope outputs for GitHub Actions")
     remote = commands.add_parser("dispatch", help="explicitly start a GitHub Actions workflow run")
@@ -318,6 +354,11 @@ def main():
     args = parser.parse_args()
 
     try:
+        if args.command == "platform":
+            import fleetworks_platform
+
+            print(fleetworks_platform.format_platform(fleetworks_platform.detect(), args.format))
+            return 0
         if args.command == "timed":
             command = args.argv[1:] if args.argv[:1] == ["--"] else args.argv
             if not command:
@@ -328,9 +369,10 @@ def main():
             return dispatch(args, actual)
         event = "workflow_dispatch" if args.command == "full" else args.event
         scopes, images, reason = select_plan(event, args.base, actual, worktree=args.command == "local")
-        if reason:
+        scopes, images = component_plan(args.components, scopes, images)
+        if reason and args.components == "auto":
             print(f"{reason}. Selecting all scopes.")
-        full = args.command == "full"
+        full = args.components in {"backend", "all"} or (args.command == "full" and args.components == "auto")
         arches = ["amd64", "arm64"] if full else ["amd64"]
         if output_path := getattr(args, "github_output", None):
             with output_path.open("a", encoding="utf-8") as output:

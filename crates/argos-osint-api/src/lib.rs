@@ -1,16 +1,33 @@
 //! Versioned local Intel HTTP adapter. @tag:intel-brief
+mod activity;
+mod activity_actions;
 mod actor_dossier;
+mod actor_search;
+mod admission;
 mod brain;
+pub mod classifier_activation;
+mod configuration;
+pub mod configuration_reset;
+mod connect;
+mod context_boundary;
 mod control;
+pub mod datasets;
 mod host_metrics;
 mod jobs_api;
 mod live;
+mod maintenance;
 mod network;
 mod operations;
 mod private_relay;
+mod request_context;
+mod request_reconciliation;
+#[cfg(all(test, not(feature = "embedded")))]
+#[path = "../../argos-osint-core/tests/support/mod.rs"]
+mod storage_test_support;
 mod tools;
 mod topology_summary;
 mod topology_web;
+pub mod workstation;
 
 use argos_osint_core::{
     intel_service as intel,
@@ -29,9 +46,12 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{sync::Arc, time::Duration};
 
+pub use actor_search::SearchClient;
 pub use brain::BrainClient;
 pub use control::ControlClient;
 pub use jobs_api::JobsClient;
+pub use network::AuthenticatedPrincipal;
+pub use network::ScopedCredential;
 pub use network::{network_origin, NetworkPolicy};
 pub use tools::ToolsClient;
 
@@ -102,6 +122,10 @@ pub struct PrivateServices {
     tools: Option<ToolsClient>,
     control: Option<ControlClient>,
     jobs: Option<JobsClient>,
+    search: Option<SearchClient>,
+    readiness: Option<workstation::ReadinessOwners>,
+    datasets: Option<datasets::DatasetStore>,
+    activation: Option<Arc<classifier_activation::ActivationArtifacts>>,
 }
 
 impl PrivateServices {
@@ -117,7 +141,35 @@ impl PrivateServices {
             tools,
             control,
             jobs,
+            search: None,
+            readiness: None,
+            datasets: None,
+            activation: None,
         }
+    }
+
+    pub fn with_search(mut self, search: SearchClient) -> Self {
+        self.search = Some(search);
+        self
+    }
+
+    /// Bind the actual server-owned Natural artifact store at startup.
+    pub fn with_activation_artifacts(
+        mut self,
+        artifacts: classifier_activation::ActivationArtifacts,
+    ) -> Self {
+        self.activation = Some(Arc::new(artifacts));
+        self
+    }
+
+    pub fn with_workstation(
+        mut self,
+        readiness: workstation::ReadinessOwners,
+        datasets: datasets::DatasetStore,
+    ) -> Self {
+        self.readiness = Some(readiness);
+        self.datasets = Some(datasets);
+        self
     }
 }
 
@@ -169,6 +221,10 @@ pub fn jobs_router(state: ApiState, policy: NetworkPolicy) -> Router {
 fn private_router(state: ApiState, policy: NetworkPolicy, routes: Router<ApiState>) -> Router {
     let port = state.port;
     let router = routes
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            context_boundary::private,
+        ))
         .layer(axum::Extension(AccessMode::Bearer))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
         .layer(middleware::from_fn(request_timeout))
@@ -210,7 +266,11 @@ fn router_with_access(
     };
     let sampler = Arc::new(std::sync::Mutex::new(host_metrics::HostSampler::default()));
     let feed = Arc::new(host_metrics::HostFeed::new(sampler.clone()));
-    let brain_routes = brain::routes();
+    let brain_routes = if mode == AccessMode::Bearer {
+        brain::routes()
+    } else {
+        brain::operator_routes()
+    };
     let brain_routes = if let Some(brain) = services.brain {
         brain_routes.route_layer(middleware::from_fn_with_state(brain, brain::forward))
     } else {
@@ -246,7 +306,56 @@ fn router_with_access(
             jobs_routes
         };
         router
+            .merge(configuration_reset::routes())
+            .merge(classifier_activation::routes())
             .route(ATLAS_CYCLES_PATH, post(operations::submit_atlas_cycle))
+            .route("/api/v1/workstation/readiness", get(workstation::read))
+            .route(
+                "/api/v1/workstation/requests/detail",
+                get(request_reconciliation::read),
+            )
+            .route("/api/v1/workstation/datasets", get(datasets::list))
+            .route(
+                "/api/v1/workstation/datasets/upload",
+                post(datasets::upload).layer(DefaultBodyLimit::disable()),
+            )
+            .route(
+                "/api/v1/workstation/maintenance/seed-actors",
+                post(maintenance::seed),
+            )
+            .route(
+                "/api/v1/workstation/maintenance/train-classifier",
+                post(maintenance::train),
+            )
+            .route(
+                fleetworks_contracts::search::ACTOR_REINDEX_PATH,
+                post(maintenance::reindex),
+            )
+            .route(
+                "/api/v1/connect/registrations/ensure",
+                post(connect::ensure),
+            )
+            .route(
+                "/api/v1/connect/registrations/rebind",
+                post(connect::rebind),
+            )
+            .route(
+                "/api/v1/connect/registrations/retire",
+                post(connect::retire),
+            )
+            .route(
+                "/api/v1/connect/registrations/context",
+                post(connect::registration_context),
+            )
+            .route("/api/v1/connect/sessions", post(connect::create_session))
+            .route(
+                "/api/v1/connect/sessions/resolve",
+                post(connect::resolve_session),
+            )
+            .route(
+                "/api/v1/connect/sessions/logout",
+                post(connect::logout_session),
+            )
             .merge(tools_routes)
             .merge(control_routes)
             .merge(jobs_routes)
@@ -256,12 +365,36 @@ fn router_with_access(
             .merge(control::read_routes())
             .merge(jobs_api::read_and_retry_routes())
     };
+    let router = if let Some(search) = services.search {
+        router.layer(axum::Extension(search))
+    } else {
+        router
+    };
+    let router = if let Some(readiness) = services.readiness {
+        router.layer(axum::Extension(readiness))
+    } else {
+        router
+    };
+    let router = if let Some(activation) = services.activation {
+        router.layer(axum::Extension(activation))
+    } else {
+        router
+    };
+    let router = if let Some(datasets) = services.datasets {
+        router.layer(axum::Extension(datasets))
+    } else {
+        router
+    };
     router
         .layer(axum::Extension(sampler))
         .layer(axum::Extension(feed))
-        .layer(axum::Extension(mode))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
         .layer(middleware::from_fn(request_timeout))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            context_boundary::gateway,
+        ))
+        .layer(axum::Extension(mode))
         .layer(middleware::from_fn_with_state(access, network::protect))
         .with_state(state)
 }
@@ -270,7 +403,12 @@ async fn request_timeout(request: Request, next: Next) -> Response {
     // A read queued behind a running brief still has to return. 45s covers
     // that wait; the web client waits longer so it receives this JSON timeout
     // instead of aborting with "signal timed out".
-    match tokio::time::timeout(Duration::from_secs(45), next.run(request)).await {
+    let timeout = if request.uri().path() == "/api/v1/workstation/datasets/upload" {
+        Duration::from_secs(600)
+    } else {
+        Duration::from_secs(45)
+    };
+    match tokio::time::timeout(timeout, next.run(request)).await {
         Ok(response) => response,
         Err(_) => (
             StatusCode::REQUEST_TIMEOUT,
@@ -334,7 +472,11 @@ async fn storage_ready(repo: &Repository) -> Result<(), ApiError> {
     }
     Ok(())
 }
-async fn capabilities(axum::Extension(mode): axum::Extension<AccessMode>) -> Json<Value> {
+async fn capabilities(
+    State(state): State<ApiState>,
+    axum::Extension(mode): axum::Extension<AccessMode>,
+    principal: Option<axum::Extension<AuthenticatedPrincipal>>,
+) -> ApiResult {
     let mut features = vec![
         "bulletin",
         "brief",
@@ -349,11 +491,94 @@ async fn capabilities(axum::Extension(mode): axum::Extension<AccessMode>) -> Jso
         "profile",
     ];
     if mode == AccessMode::Bearer {
-        features.extend(["atlas-cycles", "job-cancel", "tool-execution"]);
+        use fleetworks_contracts::capabilities;
+        let Some(axum::Extension(principal)) = principal else {
+            return Err(ApiError(
+                StatusCode::UNAUTHORIZED,
+                "Purpose-scoped credential required",
+            ));
+        };
+        let deployment = storage::connect_registry::deployment_state(&state.repo)
+            .await
+            .map_err(internal)?;
+        features.extend([
+            capabilities::CONNECT_REGISTRY_FEATURE,
+            "workstation-readiness",
+            "dataset-upload",
+            "profile-management",
+            "actor-discovery",
+        ]);
+        for (pool, feature) in [
+            (storage::job_dispatch::ATLAS_POOL, "atlas-cycles"),
+            (
+                argos_osint_core::osint::manual::TOOLS_POOL,
+                "tool-execution",
+            ),
+        ] {
+            let mut result = state
+                .repo
+                .db()
+                .query("SELECT VALUE enabled FROM ONLY type::record('job_dispatch_pool',$pool)")
+                .bind(("pool", pool.to_owned()))
+                .await
+                .map_err(internal)?
+                .check()
+                .map_err(internal)?;
+            if result.take::<Option<bool>>(0).map_err(internal)? == Some(true) {
+                features.push(feature);
+            }
+        }
+        let mut response = capabilities::Capabilities::default();
+        response.categories = intel::CATEGORIES
+            .iter()
+            .map(|category| (*category).to_owned())
+            .collect();
+        response.auth = true;
+        response.features = features.into_iter().map(str::to_owned).collect();
+        response.instance_id = Some(state.instance_id);
+        response.deployment_id = Some(deployment.deployment_id);
+        response.configuration_epoch = Some(deployment.configuration_epoch);
+        response.connect = Some(capabilities::ConnectCapabilities::default());
+        response.workspace_control = Some(capabilities::WorkspaceControlCapabilities::default());
+        response.resource_scopes = Some(capabilities::ResourceScopes::default());
+        response.permissions = principal.permissions().collect();
+        response.live = Some(capabilities::LiveCapabilities::new(
+            "/api/v1/live".into(),
+            vec!["metrics".into(), "brief".into()],
+            1,
+        ));
+        let mut search = capabilities::SearchCapabilities::default();
+        search.actors = Some(capabilities::ActorSearchCapabilities::default());
+        response.search = Some(search);
+        if let Ok(raw) = std::env::var("FLEETWORKS_INTEL_WEB_URL") {
+            let mut web =
+                url::Url::parse(&raw).map_err(|_| internal("invalid public Intel Web URL"))?;
+            let loopback = web.host_str().is_some_and(|host| {
+                host == "localhost"
+                    || host
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback())
+            });
+            if web.host().is_none()
+                || !(web.scheme() == "https" || web.scheme() == "http" && loopback)
+                || !web.username().is_empty()
+                || web.password().is_some()
+                || web.query().is_some()
+                || web.fragment().is_some()
+            {
+                return Err(internal("unsafe public Intel Web URL"));
+            }
+            let base = web.to_string();
+            let path = format!("{}/connect", web.path().trim_end_matches('/'));
+            web.set_path(&path);
+            response.links.intel_web =
+                Some(capabilities::IntelWebLinks::new(base, web.to_string()));
+        }
+        return Ok(Json(serde_json::to_value(response).map_err(internal)?));
     }
-    Json(
+    Ok(Json(
         json!({"api_version":1,"categories":intel::CATEGORIES,"auth":mode == AccessMode::Bearer,"features":features,"live":{"path":"/api/v1/live","channels":["metrics","brief"],"version":1}}),
-    )
+    ))
 }
 async fn days(State(s): State<ApiState>) -> ApiResult {
     Ok(Json(
@@ -441,11 +666,50 @@ async fn related(State(s): State<ApiState>, Query(k): Query<RelatedKey>) -> ApiR
             .map_err(internal)?,
     ))
 }
-async fn ensure(State(s): State<ApiState>, Json(k): Json<ArticleKey>) -> ApiResult {
-    let a = load(&s, &k).await?;
-    Ok(Json(
-        json!({"job_id":intel::ensure_brief(&s.repo, &a).await.map_err(internal)?}),
-    ))
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EnsureKey {
+    run: String,
+    id: String,
+    request_id: Option<String>,
+}
+async fn ensure(
+    State(s): State<ApiState>,
+    context: Option<axum::Extension<request_context::ResolvedRequest>>,
+    Json(k): Json<EnsureKey>,
+) -> ApiResult {
+    let a = load(
+        &s,
+        &ArticleKey {
+            run: k.run,
+            id: k.id,
+        },
+    )
+    .await?;
+    let job_id = if let Some(axum::Extension(context)) = context {
+        let request_id = k.request_id.unwrap_or_else(argos_osint_core::store::new_id);
+        let (admission, settings, auth) =
+            admission::capture_with_configuration(&context, &request_id).await?;
+        if let Some(job) = admission
+            .replay_job(&s.repo, "intel_brief")
+            .await
+            .map_err(internal)?
+        {
+            job
+        } else {
+            let inputs =
+                storage::brief_stages::inputs_for_article_with_auth(&s.repo, &a, &settings, &auth)
+                    .await
+                    .map_err(internal)?;
+            storage::brief_stages::ensure_interactive(&s.repo, &inputs, &admission)
+                .await
+                .map_err(internal)?
+                .job_id
+        }
+    } else {
+        intel::ensure_brief(&s.repo, &a).await.map_err(internal)?
+    };
+    Ok(Json(json!({"job_id":job_id})))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -454,7 +718,11 @@ struct ReloadKey {
     id: String,
     request_id: String,
 }
-async fn reload(State(s): State<ApiState>, Json(k): Json<ReloadKey>) -> ApiResult {
+async fn reload(
+    State(s): State<ApiState>,
+    context: Option<axum::Extension<request_context::ResolvedRequest>>,
+    Json(k): Json<ReloadKey>,
+) -> ApiResult {
     if !(8..=128).contains(&k.request_id.len())
         || !k
             .request_id
@@ -471,9 +739,38 @@ async fn reload(State(s): State<ApiState>, Json(k): Json<ReloadKey>) -> ApiResul
         },
     )
     .await?;
-    Ok(Json(
-        json!({"job_id":intel::reload_brief(&s.repo, &a, &k.request_id).await.map_err(internal)?}),
-    ))
+    let job_id = if let Some(axum::Extension(context)) = context {
+        let (admission, settings, auth) =
+            admission::capture_with_configuration(&context, &k.request_id).await?;
+        if let Some(job) = admission
+            .replay_job(&s.repo, "intel_brief")
+            .await
+            .map_err(internal)?
+        {
+            job
+        } else {
+            let mut inputs =
+                storage::brief_stages::inputs_for_article_with_auth(&s.repo, &a, &settings, &auth)
+                    .await
+                    .map_err(internal)?;
+            inputs.input_revision = format!(
+                "{}:reload:{}:{}",
+                inputs.input_revision,
+                admission.context().registration_id,
+                k.request_id
+            );
+            inputs.stage_revisions.clear();
+            storage::brief_stages::ensure_interactive(&s.repo, &inputs, &admission)
+                .await
+                .map_err(internal)?
+                .job_id
+        }
+    } else {
+        intel::reload_brief(&s.repo, &a, &k.request_id)
+            .await
+            .map_err(internal)?
+    };
+    Ok(Json(json!({"job_id":job_id})))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -513,29 +810,19 @@ async fn job(State(s): State<ApiState>, Query(k): Query<JobKey>) -> ApiResult {
         json!({"job":row,"stages":safe_stages(&s.repo, &k.id).await?}),
     ))
 }
-async fn cancel(State(s): State<ApiState>, Json(k): Json<JobKey>) -> ApiResult {
-    use argos_osint_core::job_registry::CancelRequest;
-
-    validate_job(&k)?;
-    match storage::jobs_view::cancel_job(s.repo.db(), &k.id)
-        .await
-        .map_err(internal)?
-    {
-        CancelRequest::Requested => Ok(Json(json!({"done":true}))),
-        CancelRequest::Missing => Err(missing()),
-        CancelRequest::NotCancellable | CancelRequest::NotRunning => Err(ApiError(
-            StatusCode::CONFLICT,
-            "Job is not active and cancellable",
-        )),
-    }
-}
-
 async fn retry(
     State(s): State<ApiState>,
     axum::Extension(mode): axum::Extension<AccessMode>,
+    context: Option<axum::Extension<request_context::ResolvedRequest>>,
     Json(k): Json<JobKey>,
 ) -> ApiResult {
     validate_job(&k)?;
+    if context.is_some() {
+        return Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Durable scoped retry is not enabled",
+        ));
+    }
     let requeued = if let Some(cycle) = AtlasCycleReceipt::from_job_id(&k.id) {
         if mode != AccessMode::Bearer {
             return Err(missing());

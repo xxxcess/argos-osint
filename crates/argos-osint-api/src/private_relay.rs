@@ -3,12 +3,14 @@
 use std::time::Duration;
 
 use anyhow::ensure;
-use axum::body::Bytes;
-use axum::extract::{FromRequest, Request};
+use axum::extract::Request;
 use axum::http::{header, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use url::Url;
 
+use crate::request_context::ContextFailure;
+use crate::request_context::ResolvedRequest;
+use crate::request_context::DELEGATION_HEADER;
 use crate::{network, ApiError};
 
 const MAX_QUERY_BYTES: usize = 8 * 1024;
@@ -51,7 +53,12 @@ impl Service {
                     "/api/v1/profile" | "/api/v1/models/defaults"
                 ) | (
                     &Method::POST,
-                    "/api/v1/profile/export" | "/api/v1/models/defaults/set"
+                    "/api/v1/profile/export"
+                        | "/api/v1/profile/import"
+                        | "/api/v1/models/defaults/set"
+                        | "/api/v1/profile/accounts/upsert"
+                        | "/api/v1/profile/accounts/delete"
+                        | "/api/v1/profile/tools/set"
                 )
             ),
             Self::Jobs => matches!(
@@ -108,6 +115,15 @@ impl PrivateClient {
     }
 
     pub(crate) async fn forward(self, request: Request) -> Result<Response, Response> {
+        // Only gateway middleware can supply this extension. Never copy an
+        // inbound delegation, claimed origin, cookie or authorization header.
+        let context = request
+            .extensions()
+            .get::<ResolvedRequest>()
+            .ok_or_else(|| ContextFailure::registration_required().into_response())?;
+        let delegation = context
+            .delegation_header()
+            .map_err(IntoResponse::into_response)?;
         // The service router selects the operation. Request data cannot
         // change the upstream origin.
         let uri = request.uri();
@@ -126,15 +142,32 @@ impl PrivateClient {
         url.set_path(uri.path());
         url.set_query(uri.query());
         let method = request.method().clone();
+        let transfer = matches!(self.service, Service::Control)
+            && matches!(
+                uri.path(),
+                "/api/v1/profile/import" | "/api/v1/profile/export"
+            );
+        let body_limit = if transfer {
+            2 * 1024 * 1024
+        } else {
+            crate::MAX_REQUEST_BYTES
+        };
         let content_type = request.headers().get(header::CONTENT_TYPE).cloned();
-        let payload = Bytes::from_request(request, &())
+        let payload = axum::body::to_bytes(request.into_body(), body_limit)
             .await
-            .map_err(IntoResponse::into_response)?;
+            .map_err(|_| {
+                ApiError(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "Private request exceeds its size limit",
+                )
+                .into_response()
+            })?;
         // Public Authorization, Host, Origin and cookies never leave the gateway.
         let mut upstream = self
             .http
             .request(method, url)
             .header(header::AUTHORIZATION, self.authorization)
+            .header(DELEGATION_HEADER, delegation)
             .body(payload);
         if let Some(value) = content_type {
             upstream = upstream.header(header::CONTENT_TYPE, value);
@@ -152,13 +185,23 @@ impl PrivateClient {
                 .unavailable("service refused the internal request"));
         }
         let content_type = upstream.headers().get(header::CONTENT_TYPE).cloned();
+        let disposition = if transfer {
+            upstream.headers().get(header::CONTENT_DISPOSITION).cloned()
+        } else {
+            None
+        };
+        let response_limit = if transfer {
+            2 * 1024 * 1024
+        } else {
+            MAX_RESPONSE_BYTES
+        };
         let mut bytes = Vec::new();
         while let Some(chunk) = upstream
             .chunk()
             .await
             .map_err(|_| self.service.unavailable("response interrupted"))?
         {
-            if chunk.len() > MAX_RESPONSE_BYTES - bytes.len() {
+            if chunk.len() > response_limit - bytes.len() {
                 return Err(self.service.unavailable("response exceeds the size limit"));
             }
             bytes.extend_from_slice(&chunk);
@@ -167,6 +210,15 @@ impl PrivateClient {
         if let Some(value) = content_type {
             response.headers_mut().insert(header::CONTENT_TYPE, value);
         }
+        if let Some(value) = disposition {
+            response
+                .headers_mut()
+                .insert(header::CONTENT_DISPOSITION, value);
+        }
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store, private"),
+        );
         Ok(response)
     }
 }

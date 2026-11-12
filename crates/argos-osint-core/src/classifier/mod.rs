@@ -30,6 +30,7 @@ pub mod artifact;
 #[cfg(feature = "classifier")]
 pub(crate) mod bert;
 pub mod calibration;
+pub mod candidate_activation;
 pub mod dataset;
 #[cfg(feature = "classifier")]
 pub(crate) mod engine;

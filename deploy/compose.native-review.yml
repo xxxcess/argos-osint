@@ -1,0 +1,331 @@
+# Standalone backend review stack. Do not combine with compose.yml: that file
+# retains the web/operator workflow. Provision with deploy/native_review.py.
+name: ${COMPOSE_PROJECT_NAME:?Select a dedicated native-review project}
+
+x-workspace: &workspace
+  type: bind
+  source: ${FLEETWORKS_HOST_WORKSPACE:?Select the fresh backend review workspace}
+  target: /workspace
+  bind:
+    create_host_path: false
+
+x-identity: &identity
+  type: bind
+  source: ${FLEETWORKS_HOST_WORKSPACE}/deployment
+  target: /deployment-identity
+  read_only: true
+  bind:
+    create_host_path: false
+
+x-environment: &environment
+  ARGOS_HOME: /workspace
+  FLEETWORKS_WORKSPACE: /workspace
+  HOME: /workspace
+  FLEETWORKS_STORAGE_URL: ws://surrealdb:8000
+  FLEETWORKS_STORAGE_NAMESPACE: fleetworks_review
+  FLEETWORKS_STORAGE_DATABASE: fleetworks_review
+  FLEETWORKS_STORAGE_USERNAME: fleetworks_review
+  FLEETWORKS_STORAGE_PASSWORD_FILE: /run/secrets/storage_password
+  FLEETWORKS_ACCESS_SCOPE_ID: ${FLEETWORKS_ACCESS_SCOPE_ID:?Retain the provisioned review scope}
+  FLEETWORKS_ACCESS_EPOCH: ${FLEETWORKS_ACCESS_EPOCH:?Retain the provisioned review epoch}
+  FLEETWORKS_JOBS_ORIGIN: http://jobs:8080
+  FLEETWORKS_JOBS_TOKEN_FILE: /run/secrets/jobs_token
+
+x-runtime: &runtime
+  image: ${FLEETWORKS_RUNTIME_IMAGE:?Set the exact built review runtime image}
+  pull_policy: never
+  platform: ${PLATFORM:?Select linux/amd64 or linux/arm64 explicitly}
+  user: &owner "${FLEETWORKS_UID:?Set the workspace owner UID}:${FLEETWORKS_GID:?Set the workspace owner GID}"
+  environment: *environment
+  volumes: [*workspace]
+  tmpfs: [/tmp, /workspace/secrets, /workspace/storage]
+  secrets: [storage_password, jobs_token]
+  init: true
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  restart: unless-stopped
+  stop_grace_period: 45s
+  cpus: 1.0
+  mem_limit: 1g
+  pids_limit: 256
+
+x-health: &health
+  test: [CMD, /usr/local/bin/check-fleetworks-api]
+  interval: 5s
+  timeout: 4s
+  start_period: 20s
+  retries: 12
+
+services:
+  surrealdb:
+    image: ${FLEETWORKS_SURREAL_IMAGE:?Set the exact built review database image}
+    pull_policy: never
+    platform: ${PLATFORM}
+    user: *owner
+    environment:
+      FLEETWORKS_STORAGE_ROOT_USERNAME: root
+      FLEETWORKS_STORAGE_ROOT_PASSWORD_FILE: /run/secrets/storage_root_password
+      SURREAL_ROCKSDB_BLOCK_CACHE_SIZE: "67108864"
+      SURREAL_ROCKSDB_WRITE_BUFFER_SIZE: "16777216"
+      SURREAL_ROCKSDB_MAX_WRITE_BUFFER_NUMBER: "2"
+      SURREAL_ROCKSDB_JOBS_COUNT: "2"
+      SURREAL_ROCKSDB_THREAD_COUNT: "2"
+      SURREAL_ROCKSDB_MAX_CONCURRENT_SUBCOMPACTIONS: "1"
+      SURREAL_KVS_THREADPOOL_SIZE: "4"
+      SURREAL_SCAN_BATCH_BYTES: "524288"
+      SURREAL_MEMORY_THRESHOLD: "402653184"
+    volumes:
+      - type: bind
+        source: ${FLEETWORKS_HOST_WORKSPACE}/storage/surrealdb
+        target: /data
+        bind:
+          create_host_path: false
+    secrets: [storage_root_password]
+    tmpfs: [/tmp, /logs]
+    healthcheck:
+      test: [CMD, /surreal, isready, --endpoint, "http://127.0.0.1:8000"]
+      interval: 5s
+      timeout: 4s
+      start_period: 20s
+      retries: 12
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    stop_grace_period: 45s
+    cpus: 1.0
+    mem_limit: 512m
+    pids_limit: 128
+
+  bootstrap:
+    <<: *runtime
+    command: [--role, bootstrap]
+    restart: "no"
+    environment:
+      <<: *environment
+      FLEETWORKS_STORAGE_ROOT_USERNAME: root
+      FLEETWORKS_STORAGE_ROOT_PASSWORD_FILE: /run/secrets/storage_root_password
+      FLEETWORKS_DEPLOYMENT_ID_FILE: /deployment-identity/deployment-id
+    volumes:
+      - <<: *workspace
+        read_only: true
+      - <<: *identity
+        read_only: false
+    secrets: [storage_password, storage_root_password]
+    depends_on:
+      surrealdb:
+        condition: service_healthy
+
+  search-index:
+    image: ${FLEETWORKS_SEARCH_IMAGE:?Set the exact built review search image}
+    pull_policy: never
+    platform: ${PLATFORM}
+    user: *owner
+    environment:
+      FLEETWORKS_SEARCH_BIND: 0.0.0.0:8087
+      FLEETWORKS_SEARCH_ALLOWED_HOSTS: search-index:8087
+      FLEETWORKS_SEARCH_HEALTH_HOST: search-index:8087
+      FLEETWORKS_SEARCH_TOKEN_FILE: /run/secrets/search_read_token
+      FLEETWORKS_SEARCH_WRITE_TOKEN_FILE: /run/secrets/search_write_token
+      FLEETWORKS_DEPLOYMENT_ID_FILE: /deployment-identity/deployment-id
+      FLEETWORKS_SEARCH_SOURCE_EPOCH: ${FLEETWORKS_SEARCH_SOURCE_EPOCH:?Retain the provisioned source epoch}
+      FLEETWORKS_SEARCH_INDEX_DIR: /var/lib/fleetworks-search
+      FLEETWORKS_SEARCH_WRITER_MEMORY_BYTES: "67108864"
+      FLEETWORKS_SEARCH_QUERY_CAPACITY: "4"
+      FLEETWORKS_ACCESS_SCOPE_ID: ${FLEETWORKS_ACCESS_SCOPE_ID}
+      FLEETWORKS_ACCESS_EPOCH: ${FLEETWORKS_ACCESS_EPOCH}
+    volumes:
+      - *identity
+      - type: bind
+        source: ${FLEETWORKS_HOST_WORKSPACE}/storage/search-index
+        target: /var/lib/fleetworks-search
+        bind:
+          create_host_path: false
+    secrets: [search_read_token, search_write_token]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, /usr/local/bin/check-fleetworks-search]
+      interval: 5s
+      timeout: 4s
+      start_period: 20s
+      retries: 12
+    tmpfs: [/tmp]
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    stop_grace_period: 45s
+    cpus: 1.0
+    mem_limit: 512m
+    pids_limit: 128
+
+  jobs:
+    <<: *runtime
+    command: [--role, jobs, --port, "8080"]
+    environment:
+      <<: *environment
+      FLEETWORKS_JOBS_BIND: 0.0.0.0
+      FLEETWORKS_JOBS_ALLOWED_HOSTS: jobs:8080
+      FLEETWORKS_API_TOKEN_FILE: /run/secrets/jobs_token
+      FLEETWORKS_API_HEALTH_HOST: jobs:8080
+      FLEETWORKS_JOBS_SQLITE_PATH: /var/lib/fleetworks-jobs/jobs.sqlite3
+      FLEETWORKS_JOBS_QUEUE_PATH: /var/lib/fleetworks-jobs/queue
+    volumes:
+      - *workspace
+      - type: bind
+        source: ${FLEETWORKS_HOST_WORKSPACE}/storage/jobs
+        target: /var/lib/fleetworks-jobs
+        bind:
+          create_host_path: false
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    healthcheck: *health
+
+  execution:
+    <<: *runtime
+    command: [--role, execution, --port, "8080"]
+    environment:
+      <<: *environment
+      FLEETWORKS_EXECUTION_BIND: 0.0.0.0
+      FLEETWORKS_EXECUTION_ALLOWED_HOSTS: execution:8080
+      FLEETWORKS_EXECUTION_TOKEN_FILE: /run/secrets/execution_token
+      FLEETWORKS_API_TOKEN_FILE: /run/secrets/execution_token
+      FLEETWORKS_API_HEALTH_HOST: execution:8080
+    secrets: [storage_password, jobs_token, execution_token]
+    depends_on:
+      jobs:
+        condition: service_healthy
+    healthcheck: *health
+
+  brain:
+    <<: *runtime
+    command: [--role, brain, --port, "8080"]
+    environment:
+      <<: *environment
+      FLEETWORKS_BRAIN_BIND: 0.0.0.0
+      FLEETWORKS_BRAIN_ALLOWED_HOSTS: brain:8080
+      FLEETWORKS_INTERNAL_TOKEN_FILE: /run/secrets/brain_token
+      FLEETWORKS_API_TOKEN_FILE: /run/secrets/brain_token
+      FLEETWORKS_API_HEALTH_HOST: brain:8080
+      FLEETWORKS_EXECUTION_ORIGIN: http://execution:8080
+      FLEETWORKS_EXECUTION_TOKEN_FILE: /run/secrets/execution_token
+    secrets: [storage_password, jobs_token, brain_token, execution_token]
+    depends_on:
+      execution:
+        condition: service_healthy
+    healthcheck: *health
+
+  tools:
+    <<: *runtime
+    command: [--role, tools, --port, "8080"]
+    environment:
+      <<: *environment
+      FLEETWORKS_TOOLS_BIND: 0.0.0.0
+      FLEETWORKS_TOOLS_ALLOWED_HOSTS: tools:8080
+      FLEETWORKS_TOOLS_TOKEN_FILE: /run/secrets/tools_token
+      FLEETWORKS_API_TOKEN_FILE: /run/secrets/tools_token
+      FLEETWORKS_API_HEALTH_HOST: tools:8080
+    secrets: [storage_password, jobs_token, tools_token]
+    depends_on:
+      jobs:
+        condition: service_healthy
+    healthcheck: *health
+
+  control:
+    <<: *runtime
+    command: [--role, control, --port, "8080"]
+    environment:
+      <<: *environment
+      FLEETWORKS_CONTROL_BIND: 0.0.0.0
+      FLEETWORKS_CONTROL_ALLOWED_HOSTS: control:8080
+      FLEETWORKS_CONTROL_TOKEN_FILE: /run/secrets/control_token
+      FLEETWORKS_API_TOKEN_FILE: /run/secrets/control_token
+      FLEETWORKS_API_HEALTH_HOST: control:8080
+    secrets: [storage_password, jobs_token, control_token]
+    depends_on:
+      jobs:
+        condition: service_healthy
+    healthcheck: *health
+
+  api:
+    <<: *runtime
+    command: [--role, api, --port, "8080"]
+    environment:
+      <<: *environment
+      FLEETWORKS_API_BIND: 0.0.0.0
+      FLEETWORKS_API_ALLOWED_HOSTS: "api:8080,127.0.0.1:${FLEETWORKS_API_PORT:?Select an unused review port},localhost:${FLEETWORKS_API_PORT}"
+      FLEETWORKS_API_ALLOWED_ORIGINS: ""
+      FLEETWORKS_API_CREDENTIALS_FILE: /run/secrets/gateway_credentials
+      FLEETWORKS_API_TOKEN_FILE: /run/secrets/gateway_health_token
+      FLEETWORKS_API_HEALTH_HOST: api:8080
+      FLEETWORKS_BRAIN_ORIGIN: http://brain:8080
+      FLEETWORKS_INTERNAL_TOKEN_FILE: /run/secrets/brain_token
+      FLEETWORKS_TOOLS_ORIGIN: http://tools:8080
+      FLEETWORKS_TOOLS_TOKEN_FILE: /run/secrets/tools_token
+      FLEETWORKS_CONTROL_ORIGIN: http://control:8080
+      FLEETWORKS_CONTROL_TOKEN_FILE: /run/secrets/control_token
+      FLEETWORKS_SEARCH_ORIGIN: http://search-index:8087
+      FLEETWORKS_SEARCH_TOKEN_FILE: /run/secrets/search_read_token
+    secrets: [storage_password, jobs_token, gateway_credentials, gateway_native_token, gateway_web_token, gateway_health_token, brain_token, tools_token, control_token, search_read_token]
+    depends_on:
+      brain:
+        condition: service_healthy
+      tools:
+        condition: service_healthy
+      control:
+        condition: service_healthy
+    ports:
+      - target: 8080
+        published: "${FLEETWORKS_API_PORT}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    healthcheck: *health
+
+  native-worker:
+    <<: *runtime
+    command: [--role, native-worker]
+    environment:
+      <<: *environment
+      FLEETWORKS_NATIVE_QUEUE_NAME: fleetworks.native.review
+      FLEETWORKS_SEARCH_ORIGIN: http://search-index:8087
+      FLEETWORKS_SEARCH_TOKEN_FILE: /run/secrets/search_read_token
+      FLEETWORKS_SEARCH_WRITE_TOKEN_FILE: /run/secrets/search_write_token
+    secrets: [storage_password, jobs_token, search_read_token, search_write_token]
+    depends_on:
+      jobs:
+        condition: service_healthy
+    mem_limit: 2g
+
+secrets:
+  gateway_credentials:
+    file: ${FLEETWORKS_HOST_WORKSPACE}/secrets/gateway-credentials.json
+  gateway_native_token:
+    file: ${FLEETWORKS_HOST_WORKSPACE}/secrets/native-token
+  gateway_web_token:
+    file: ${FLEETWORKS_HOST_WORKSPACE}/secrets/web-relay-token
+  gateway_health_token:
+    file: ${FLEETWORKS_HOST_WORKSPACE}/secrets/gateway-health-token
+  brain_token:
+    file: ${FLEETWORKS_HOST_WORKSPACE}/secrets/brain-token
+  tools_token:
+    file: ${FLEETWORKS_HOST_WORKSPACE}/secrets/tools-token
+  control_token:
+    file: ${FLEETWORKS_HOST_WORKSPACE}/secrets/control-token
+  jobs_token:
+    file: ${FLEETWORKS_HOST_WORKSPACE}/secrets/jobs-token
+  execution_token:
+    file: ${FLEETWORKS_HOST_WORKSPACE}/secrets/execution-token
+  storage_password:
+    file: ${FLEETWORKS_HOST_WORKSPACE}/secrets/storage-password
+  storage_root_password:
+    file: ${FLEETWORKS_HOST_WORKSPACE}/secrets/storage-root-password
+  search_read_token:
+    file: ${FLEETWORKS_HOST_WORKSPACE}/secrets/search-read-token
+  search_write_token:
+    file: ${FLEETWORKS_HOST_WORKSPACE}/secrets/search-write-token

@@ -15,16 +15,34 @@ use crate::{bad, internal, storage_ready, ApiError, ApiResult, ApiState};
 
 pub(crate) async fn submit_atlas_cycle(
     State(state): State<ApiState>,
+    Extension(context): Extension<crate::request_context::ResolvedRequest>,
     Json(request): Json<AtlasCycleRequest>,
 ) -> Result<(StatusCode, Json<AtlasCycleReceipt>), ApiError> {
     use storage::job_dispatch::{self, ATLAS_POOL};
     use storage::jobs::{NewJob, NewTask};
     use storage::tx::TxError;
 
-    let cycle = request.receipt().ok_or_else(bad)?;
+    let admission = crate::admission::capture_checked(
+        &state.repo,
+        &context,
+        &request.request_id,
+        ATLAS_CYCLE_OPERATION,
+        request.context.as_ref(),
+    )
+    .await?;
+    request.receipt().ok_or_else(bad)?;
+    use sha2::Digest;
+    let scoped = serde_json::to_vec(&(
+        &admission.context().deployment_id,
+        &admission.context().registration_id,
+        &request.request_id,
+    ))
+    .map_err(internal)?;
+    let cycle = AtlasCycleReceipt::from_request_id(&format!("{:x}", sha2::Sha256::digest(scoped)))
+        .ok_or_else(bad)?;
     let task_id = cycle.task_id();
     let now = chrono::Utc::now();
-    job_dispatch::submit(
+    job_dispatch::submit_interactive(
         state.repo.db(),
         &NewJob {
             id: &cycle.job_id,
@@ -43,6 +61,7 @@ pub(crate) async fn submit_atlas_cycle(
             input_hash: &cycle.run_id,
             created_at: now,
         },
+        &admission,
     )
     .await
     .map_err(|error| match error {

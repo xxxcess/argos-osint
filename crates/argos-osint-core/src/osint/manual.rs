@@ -1,5 +1,14 @@
 //! Repository-backed manual calls. Admission claims a request once and the
-//! API process completes it independently of the caller's connection.
+//! API process completes it independently of the caller's connection. New
+//! network calls use the durable dispatch adapter; embedded callers retain
+//! their existing process-local entry point until its retirement gate.
+
+mod durable;
+
+pub use durable::status as durable_status;
+pub use durable::DurableToolOutcome;
+pub use durable::TOOLS_OPERATION;
+pub use durable::TOOLS_POOL;
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -28,6 +37,7 @@ pub enum SubmitError {
     Invalid,
     Conflict,
     Busy,
+    ContextChanged,
     Unavailable(anyhow::Error),
 }
 
@@ -36,6 +46,8 @@ pub enum SubmitError {
 #[non_exhaustive]
 pub struct Receipt {
     pub call_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
 }
 
 /// The safe projection of a manual invocation, without provider wire data.
@@ -43,6 +55,8 @@ pub struct Receipt {
 #[non_exhaustive]
 pub struct Status {
     pub call_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
     pub tool_id: String,
     pub status: String,
     pub result: Option<ToolResult>,
@@ -119,7 +133,10 @@ impl Tools {
                 .await
                 .map_err(SubmitError::Unavailable)?
             {
-                Some(saved) if saved.matches(tool, &inputs) => Ok(Receipt { call_id }),
+                Some(saved) if saved.matches(tool, &inputs) => Ok(Receipt {
+                    call_id,
+                    job_id: None,
+                }),
                 Some(_) => Err(SubmitError::Conflict),
                 None => Err(SubmitError::Busy),
             };
@@ -133,6 +150,7 @@ impl Tools {
                 Ok(should_run) => {
                     let _ = reply.send(Ok(Receipt {
                         call_id: call_id.clone(),
+                        job_id: None,
                     }));
                     if should_run {
                         execute(&repo, &runner, &call_id, &tool, inputs).await;
@@ -243,15 +261,31 @@ async fn run_tool(
     inputs: &Value,
     settings: SettingsFile,
 ) -> anyhow::Result<ToolResult> {
+    let cancel = Arc::new(AtomicBool::new(false));
+    run_tool_with_cancel(repo, runner, call_id, tool, inputs, settings, &cancel, None).await
+}
+
+async fn run_tool_with_cancel(
+    repo: &Repository,
+    runner: &ToolRunner,
+    call_id: &str,
+    tool: &str,
+    inputs: &Value,
+    settings: SettingsFile,
+    cancel: &Arc<AtomicBool>,
+    keys: Option<ProviderKeys>,
+) -> anyhow::Result<ToolResult> {
     anyhow::ensure!(
         crate::storage::tool_state::tool_enabled(repo, tool).await?,
         "Tool disabled in catalog"
     );
-    let runner = runner.for_repository(repo.clone(), settings);
+    let runner = match keys {
+        Some(keys) => runner.for_repository_with_keys(repo.clone(), settings, keys),
+        None => runner.for_repository(repo.clone(), settings),
+    };
     let attribution = ToolAttribution::manual().with_call_id(call_id);
-    let cancel = Arc::new(AtomicBool::new(false));
     runner
-        .execute_tool_attributed(tool, inputs.clone(), false, &cancel, &attribution)
+        .execute_tool_attributed(tool, inputs.clone(), false, cancel, &attribution)
         .await
 }
 
@@ -328,6 +362,7 @@ pub async fn status(repo: &Repository, call_id: &str) -> anyhow::Result<Option<S
     }
     Ok(Some(Status {
         call_id: call_id.to_owned(),
+        job_id: None,
         tool_id: call.tool_id,
         status: call.status,
         result: call

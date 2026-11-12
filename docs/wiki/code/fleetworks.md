@@ -2,7 +2,11 @@
 
 [Code route](index.md) · [Architecture](architecture.md) · [Deployment guide](../../../deploy/README.md)
 
-Venture initializes an isolated workspace, imports selected configuration on request, and owns its local Compose stack. Terminal clients and the Intel web relay use the authenticated API. Domain services share the network datastore; Jobs owns a separate disk-backed SQLite log store. Interactive launches show the Fleetworks ASCII emblem. Set `NO_COLOR` for monochrome output.
+Fleetworks Desktop is the API-only macOS control hub. Its eight pages use an independently operated gateway; launching the app does not launch the backend or Intel Web. Atlas, Brain, Tools, Models and Profile target shared backend resources within the caller's permissions. Workstation, Workspaces and Jobs & Logs separate local identity from registered request activity. Start with [native connections](native-connections.md), [protected workspaces](native-workspaces.md) and the [native build/fixture guide](../../../apps/fleetworks-desktop/README.md).
+
+Linux domain services share the network datastore. Jobs exclusively owns its SQLite operational logs and embedded RocksDB queue; [actor discovery](actor-search.md) has a separate private Tantivy service. The [isolated native-review deployment](../../../deploy/README.md) builds backend-only images and leaves web/client launch independent. Backend network readers accept explicit current-format configuration and saved credentials; they do not migrate historical files or revive environment provider keys during ordinary reads.
+
+Venture and terminal commands below are retained operator compatibility surfaces while replacement/installed dual-Mac parity gates remain open. Venture owns only its recorded operator workspace and stack. Those paths are distinct from the native protected OS-home container. Retaining a command does not authorize it to bypass current registration, purpose permissions or configuration revisions; older contextless mutations are rejected by the gateway.
 
 [![Fleetworks service boundaries](../../diagrams/fleetworks.svg)](../../diagrams/fleetworks.html)
 

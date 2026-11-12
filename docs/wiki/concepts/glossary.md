@@ -10,16 +10,19 @@ Service and evidence terms used across Fleetworks. See the [architecture](../cod
 
 | Name | Role |
 | --- | --- |
-| Venture | Initializes the workspace, owns local services and launches terminal clients |
+| Fleetworks Desktop | API-only native macOS hub; protected local folders identify future requests and registered activity |
+| Venture | Retained operator launcher; owns only its recorded operator workspace and stack |
 | Intel | Web workspace for Bulletin, Focus Brief, Actor Dossier and Topology |
 | Atlas | Collects headlines and hands off durable classification and derivative work |
 | Brain | Serves retained actors, brief details, Related articles and topology through a private service |
-| Jobs and Logs | Reads durable work and events, with retry and cancellation for eligible jobs |
-| Tools, Models and Profile | Reads the tool catalog, role defaults, workspace and service health |
+| Native Jobs and Logs | Reads server-enforced workstation activity; eligible actions require separate permissions and current proof |
+| Tools, Models and Profile | Backend-wide tools, canonical model roles and provider accounts within the caller's permissions |
+
+A native **container** is the protected `~/.fleetworks` directory under the operating system account home. A native **workspace** is one owned immediate child, including the protected `default`. An **operator workspace** holds backend deployment data and is a separate concept. A **Connect ID** locates an existing registration; it is not a credential. A **deployment** owns shared backend resources, while immutable job origin identifies the registered workstation/workspace that requested work. See [connections](../code/native-connections.md) and [local ownership](../code/native-workspaces.md).
 
 ## Model roles
 
-A role selects a provider and model with ordered fallbacks in `config.toml`. Provider accounts live in `auth.json`. The shared provider executor owns route resolution and pacing. Live Atlas category admission uses the separate pinned Rust-BERT service. [Providers](providers.md)
+A role selects a provider and model with ordered fallbacks in the backend's `config.toml`. Provider accounts live in its private `auth.json`; native child folders do not copy them. Current network readers use explicit current-format configuration and saved keys. The shared provider executor owns route resolution and pacing. Live Atlas category admission uses the separate pinned Rust-BERT service. Optional Natural training produces a separate candidate and does not retrain Rust-BERT. [Providers](providers.md)
 
 [![Model roles](../../diagrams/model-roles.svg)](../../diagrams/model-roles.html)
 
@@ -49,7 +52,7 @@ history. Retained-source entries remain truthful when canonical indexing is abse
 
 ## Persistence
 
-- Fleetworks uses a [workspace-scoped network SurrealDB endpoint](../code/fleetworks.md#launch-the-compose-stack).
+- A Fleetworks backend uses an [operator-selected network SurrealDB endpoint](../code/fleetworks.md#launch-the-compose-stack); native folders do not create separate backend databases.
 - Memory, provenance, graph edges and vector indexes live behind the [storage boundary](../code/storage.md).
 - Current storage modules define schema bootstrap and recall behavior.
 

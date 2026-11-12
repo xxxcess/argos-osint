@@ -7,10 +7,13 @@ use axum::middleware::Next;
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
+use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::{ToolRunRequest, TOOL_RESULT_PATH, TOOL_RUN_PATH};
 use serde::Deserialize;
 
 use crate::private_relay::{PrivateClient, Service};
+use crate::request_context::ContextFailure;
+use crate::request_context::ResolvedRequest;
 use crate::{bad, internal, missing, ApiError, ApiResult, ApiState};
 
 pub(crate) fn routes() -> Router<ApiState> {
@@ -47,14 +50,30 @@ pub(crate) async fn forward(
 async fn submit(
     State(state): State<ApiState>,
     Extension(tools): Extension<Tools>,
+    context: Option<Extension<ResolvedRequest>>,
     Json(request): Json<ToolRunRequest>,
 ) -> Result<(StatusCode, Json<Receipt>), ApiError> {
+    let Some(Extension(context)) = context else {
+        return Err(ContextFailure::registration_required().into());
+    };
+    if !context.permits(Permission::SubmitInteractive) {
+        return Err(ContextFailure::forbidden().into());
+    }
+    let admission = crate::admission::capture_checked(
+        &state.repo,
+        &context,
+        &request.request_id,
+        manual::TOOLS_OPERATION,
+        request.context.as_ref(),
+    )
+    .await?;
     let receipt = tools
-        .submit(
-            state.repo,
+        .submit_interactive(
+            &state.repo,
             &request.request_id,
             &request.tool_id,
             request.inputs,
+            &admission,
         )
         .await
         .map_err(|error| match error {
@@ -65,7 +84,11 @@ async fn submit(
             SubmitError::Busy => {
                 ApiError(StatusCode::TOO_MANY_REQUESTS, "Too many pending tool calls")
             }
-            SubmitError::Unavailable(error) => internal(error),
+            SubmitError::ContextChanged => ContextFailure::changed().into(),
+            SubmitError::Unavailable(error) => {
+                tracing::warn!(error=%argos_osint_core::provider_diag::sanitize(&error.to_string()),"Durable Tools admission unavailable");
+                ApiError(StatusCode::SERVICE_UNAVAILABLE, "Durable Tools admission unavailable")
+            }
             _ => internal("Unknown tool submission failure"),
         })?;
     Ok((StatusCode::ACCEPTED, Json(receipt)))
@@ -79,14 +102,29 @@ struct ResultQuery {
 
 async fn result(
     State(state): State<ApiState>,
+    context: Option<Extension<ResolvedRequest>>,
     Query(query): Query<ResultQuery>,
 ) -> Result<Json<manual::Status>, ApiError> {
     if !manual::valid_call_id(&query.id) {
         return Err(bad());
     }
-    let result = manual::status(&state.repo, &query.id)
+    let Some(Extension(context)) = context else {
+        return Err(ContextFailure::registration_required().into());
+    };
+    let scope = crate::activity::scope_for_request(&state.repo, &context, None).await?;
+    let job = crate::activity::authorized_job(&state.repo, &context, &scope, &query.id).await?;
+    if !job.private_details_available || job.job.operation != manual::TOOLS_OPERATION {
+        return Err(missing());
+    }
+    let result = manual::durable_status(&state.repo, &query.id)
         .await
         .map_err(internal)?
         .ok_or_else(missing)?;
+    if !crate::activity::authorized_job(&state.repo, &context, &scope, &query.id)
+        .await?
+        .private_details_available
+    {
+        return Err(ContextFailure::changed().into());
+    }
     Ok(Json(result))
 }

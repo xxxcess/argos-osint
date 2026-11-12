@@ -92,6 +92,88 @@ async fn latest_run(repo: &Repository, article_id: &str) -> Result<Option<jobs::
 /// article's chain for unchanged inputs, otherwise supersede it and admit
 /// the next generation with its captured stage inputs.
 pub async fn ensure(repo: &Repository, inputs: &BriefInputs) -> Result<jobs::Chain> {
+    ensure_inner(repo, inputs, None).await
+}
+
+/// Admit a native or web request using its proof inside the chain transaction.
+pub async fn ensure_interactive(
+    repo: &Repository,
+    inputs: &BriefInputs,
+    admission: &super::job_context::InteractiveAdmission,
+) -> Result<jobs::Chain> {
+    ensure_inner(
+        repo,
+        inputs,
+        Some(Attribution {
+            authority: admission.authority(),
+            context: admission.context(),
+            origin: admission.origin(),
+            web_proof: admission.web_proof(),
+        }),
+    )
+    .await
+}
+
+struct Attribution<'a> {
+    authority: &'a super::connect_registry::RegistryAuthority,
+    context: &'a fleetworks_contracts::context::RegisteredContext,
+    origin: &'a fleetworks_contracts::context::JobOrigin,
+    web_proof: Option<(&'a str, u64)>,
+}
+
+/// Admit or reuse a brief and its genuine requester in the same transaction.
+///
+/// The gateway supplies authenticated registry authority and a server-captured
+/// origin. A reused chain retains its creator and gets a separate association.
+pub async fn ensure_attributed(
+    repo: &Repository,
+    inputs: &BriefInputs,
+    authority: &super::connect_registry::RegistryAuthority,
+    context: &fleetworks_contracts::context::RegisteredContext,
+    origin: &fleetworks_contracts::context::JobOrigin,
+) -> Result<jobs::Chain> {
+    ensure_inner(
+        repo,
+        inputs,
+        Some(Attribution {
+            authority,
+            context,
+            origin,
+            web_proof: None,
+        }),
+    )
+    .await
+}
+
+/// Retain browser proof through durable admission rather than trusting only
+/// an earlier gateway preflight that could race logout or revocation.
+pub async fn ensure_web_attributed(
+    repo: &Repository,
+    inputs: &BriefInputs,
+    authority: &super::connect_registry::RegistryAuthority,
+    context: &fleetworks_contracts::context::RegisteredContext,
+    origin: &fleetworks_contracts::context::JobOrigin,
+    session_token: &str,
+    expected_context_revision: u64,
+) -> Result<jobs::Chain> {
+    ensure_inner(
+        repo,
+        inputs,
+        Some(Attribution {
+            authority,
+            context,
+            origin,
+            web_proof: Some((session_token, expected_context_revision)),
+        }),
+    )
+    .await
+}
+
+async fn ensure_inner(
+    repo: &Repository,
+    inputs: &BriefInputs,
+    attribution: Option<Attribution<'_>>,
+) -> Result<jobs::Chain> {
     let specs: Vec<StageSpec<'_>> = brief_pipeline::STAGES
         .iter()
         .map(|(op, _)| StageSpec {
@@ -106,6 +188,7 @@ pub async fn ensure(repo: &Repository, inputs: &BriefInputs) -> Result<jobs::Cha
     let now = Utc::now();
     let committed = run_tx(repo.db(), RetryPolicy::default(), |tx| {
         let specs = &specs;
+        let attribution = attribution.as_ref();
         async move {
             let admission = jobs::ensure_chain_in(
                 &tx,
@@ -139,6 +222,33 @@ pub async fn ensure(repo: &Repository, inputs: &BriefInputs) -> Result<jobs::Cha
                 )
                 .await?;
                 capture_stage_inputs(&tx, &chain.job_id, inputs, force_body).await?;
+            }
+            if let Some(attribution) = attribution {
+                if let Some((token, revision)) = attribution.web_proof {
+                    super::job_context::record_web_admission_in(
+                        &tx,
+                        attribution.authority,
+                        attribution.context,
+                        attribution.origin,
+                        token,
+                        revision,
+                        &chain.job_id,
+                        "intel_brief",
+                        chain.created,
+                    )
+                    .await?;
+                } else {
+                    super::job_context::record_admission_in(
+                        &tx,
+                        attribution.authority,
+                        attribution.context,
+                        attribution.origin,
+                        &chain.job_id,
+                        "intel_brief",
+                        chain.created,
+                    )
+                    .await?;
+                }
             }
             Ok(chain)
         }

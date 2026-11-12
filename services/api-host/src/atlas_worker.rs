@@ -12,7 +12,6 @@ use argos_osint_core::atlas::{self, LiveRun, Stop};
 use argos_osint_core::classifier::readiness::CyclePreflightError;
 use argos_osint_core::classifier::ClassifierError;
 use argos_osint_core::osint::{effective_user_agent, ProviderKeys};
-use argos_osint_core::provider::SettingsFile;
 use argos_osint_core::storage::classifier_admission::AdmissionError;
 use argos_osint_core::storage::job_dispatch::{
     self, DeliveryClaim, DeliveryFinish, DeliveryLease, DeliveryOutcome, Envelope, ATLAS_POOL,
@@ -190,11 +189,30 @@ async fn run_cycle(
         lease.task.operation == "atlas_cycle",
         "unexpected Atlas dispatch operation"
     );
-    let settings = tokio::task::spawn_blocking(SettingsFile::load).await??;
+    let origin =
+        argos_osint_core::storage::job_context::origin_for_job(repo, &lease.task.job_id).await?;
+    let configuration = tokio::task::spawn_blocking(|| {
+        argos_osint_core::current_configuration::read(&argos_osint_core::paths::home_dir())
+    })
+    .await?;
+    let configuration = match configuration {
+        Ok(configuration) => configuration,
+        Err(_) => {
+            return Ok(CycleResult::Failed(
+                "atlas_current_configuration_unavailable",
+            ))
+        }
+    };
+    if origin.is_some_and(|origin| origin.configuration_revision != configuration.revision) {
+        return Ok(CycleResult::Failed(
+            "atlas_configuration_changed_after_admission",
+        ));
+    }
+    let settings = configuration.settings;
     let stop = atlas::run_live(
         &argos_osint_core::paths::db_path(),
         pause,
-        &ProviderKeys::from_settings(&settings),
+        &ProviderKeys::from_saved_settings(&settings),
         effective_user_agent(Some(&settings.osint_user_agent)),
         LiveRun::Dispatch(lease.task.input_hash.clone()),
         &[],

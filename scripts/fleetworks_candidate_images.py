@@ -149,6 +149,8 @@ def service_image_ids(overrides, images):
     services = compose_images(overrides)
     if set(services.values()) != by_tag.keys():
         raise ValueError("Compose services do not use exactly the archived image tags")
+    if services.get("native-worker") != images["runtime"]["tag"]:
+        raise ValueError("Registered native worker must use the archived runtime image")
     return {service: by_tag[tag] for service, tag in services.items()}
 
 

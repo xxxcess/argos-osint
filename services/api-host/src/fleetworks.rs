@@ -131,8 +131,15 @@ impl ApiAccess {
             .iter()
             .map(|raw| argos_osint_api::network_origin(raw))
             .collect::<Result<Vec<_>>>()?;
-        let token = read_secret("FLEETWORKS_API_TOKEN")?;
-        let policy = NetworkPolicy::new(&hosts, &token)?;
+        let policy = match env::var_os("FLEETWORKS_API_CREDENTIALS_FILE") {
+            Some(path) => {
+                NetworkPolicy::from_credentials_file(&hosts, std::path::Path::new(&path))?
+            }
+            None => {
+                let token = read_secret("FLEETWORKS_API_TOKEN")?;
+                NetworkPolicy::new(&hosts, &token)?
+            }
+        };
         Ok(Self {
             bind,
             origins,
@@ -142,7 +149,7 @@ impl ApiAccess {
 }
 
 pub(crate) fn private_services() -> Result<PrivateServices> {
-    Ok(PrivateServices::new(
+    let services = PrivateServices::new(
         private_client(
             "FLEETWORKS_BRAIN_ORIGIN",
             "FLEETWORKS_INTERNAL_TOKEN",
@@ -163,7 +170,115 @@ pub(crate) fn private_services() -> Result<PrivateServices> {
             "FLEETWORKS_JOBS_TOKEN",
             JobsClient::new,
         )?,
-    ))
+    );
+    match env::var("FLEETWORKS_SEARCH_ORIGIN") {
+        Ok(origin) => Ok(services.with_search(argos_osint_api::SearchClient::new(
+            &origin,
+            &read_secret("FLEETWORKS_SEARCH_TOKEN")?,
+        )?)),
+        Err(env::VarError::NotPresent) => Ok(services),
+        Err(_) => Err(anyhow!("invalid search origin encoding")),
+    }
+}
+
+pub(crate) async fn workstation_services(
+    repo: &Repository,
+    services: PrivateServices,
+) -> Result<PrivateServices> {
+    let deployment = argos_osint_core::storage::connect_registry::deployment_state(repo).await?;
+    tokio::task::spawn_blocking(move || {
+        use argos_osint_api::workstation::ReadinessOwners;
+        use argos_osint_api::workstation::ReadinessProbe;
+        use fleetworks_contracts::readiness::ReadinessCheckId;
+        let mut probes = Vec::new();
+        for (id, origin_key, token_key) in [
+            (
+                ReadinessCheckId::Brain,
+                "FLEETWORKS_BRAIN_ORIGIN",
+                "FLEETWORKS_INTERNAL_TOKEN",
+            ),
+            (
+                ReadinessCheckId::Control,
+                "FLEETWORKS_CONTROL_ORIGIN",
+                "FLEETWORKS_CONTROL_TOKEN",
+            ),
+            (
+                ReadinessCheckId::Jobs,
+                "FLEETWORKS_JOBS_ORIGIN",
+                "FLEETWORKS_JOBS_TOKEN",
+            ),
+            (
+                ReadinessCheckId::Nlp,
+                "FLEETWORKS_NLP_ORIGIN",
+                "FLEETWORKS_NLP_TOKEN",
+            ),
+            (
+                ReadinessCheckId::Classifier,
+                "FLEETWORKS_CLASSIFIER_ORIGIN",
+                "FLEETWORKS_CLASSIFIER_TOKEN",
+            ),
+        ] {
+            match env::var(origin_key) {
+                Ok(origin) => {
+                    probes.push(ReadinessProbe::new(id, &origin, &read_secret(token_key)?)?)
+                }
+                Err(env::VarError::NotPresent) => {}
+                Err(_) => return Err(anyhow!("invalid readiness owner encoding")),
+            }
+        }
+        let workspace = workspace_path()?;
+        let artifacts =
+            argos_osint_api::classifier_activation::ActivationArtifacts::new(workspace.clone())?;
+        Ok(services
+            .with_workstation(
+                ReadinessOwners::new(deployment.deployment_id, probes)?,
+                argos_osint_api::datasets::DatasetStore::open(workspace.join("staged-datasets"))?,
+            )
+            .with_activation_artifacts(artifacts))
+    })
+    .await?
+}
+
+pub(crate) async fn export_deployment_identity(repo: &Repository) -> Result<()> {
+    let Some(path) = env::var_os("FLEETWORKS_DEPLOYMENT_ID_FILE").map(PathBuf::from) else {
+        return Ok(());
+    };
+    let id = argos_osint_core::storage::connect_registry::deployment_state(repo)
+        .await?
+        .deployment_id;
+    tokio::task::spawn_blocking(move || {
+        ensure!(
+            path.is_absolute(),
+            "deployment receipt must be an absolute path"
+        );
+        let parent = path
+            .parent()
+            .context("deployment receipt requires parent")?;
+        ensure!(
+            parent.canonicalize()? == parent,
+            "deployment receipt parent must be provisioned and canonical"
+        );
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                ensure!(
+                    metadata.is_file() && !metadata.file_type().is_symlink(),
+                    "deployment receipt is not a regular file"
+                );
+                let mut existing = String::new();
+                File::open(&path)?.take(513).read_to_string(&mut existing)?;
+                ensure!(
+                    existing.len() <= 512 && existing.trim() == id,
+                    "deployment receipt belongs to a different database"
+                );
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                argos_osint_core::config_commit::write_secure(&path, &format!("{id}\n"))?
+            }
+            Err(error) => return Err(error.into()),
+        }
+        Ok(())
+    })
+    .await?
 }
 
 fn private_client<T>(
@@ -193,7 +308,37 @@ pub(crate) fn internal_access_with_token(
         .with_context(|| format!("invalid {bind_key}"))?;
     let hosts = split_csv(&env::var(&host_key).with_context(|| format!("{host_key} is required"))?);
     let token = read_secret(token_key)?;
-    Ok((bind, NetworkPolicy::new(&hosts, &token)?))
+    let scope = env::var("FLEETWORKS_ACCESS_SCOPE_ID")
+        .context("FLEETWORKS_ACCESS_SCOPE_ID is required for private service authority")?;
+    let epoch = env::var("FLEETWORKS_ACCESS_EPOCH")
+        .context("FLEETWORKS_ACCESS_EPOCH is required for private service authority")?;
+    use fleetworks_contracts::context::CredentialPurpose;
+    use fleetworks_contracts::context::Permission;
+    let credential = argos_osint_api::ScopedCredential::new(
+        format!("internal-{}", service.to_ascii_lowercase()),
+        scope,
+        epoch,
+        CredentialPurpose::InternalService,
+        [
+            Permission::ReadBackend,
+            Permission::RegisterWorkstation,
+            Permission::RebindWorkstation,
+            Permission::ResolveWebSession,
+            Permission::ManageConfiguration,
+            Permission::MaintainBackend,
+            Permission::SubmitInteractive,
+            Permission::ReadWorkstationActivity,
+            Permission::RetryJob,
+            Permission::CancelJob,
+        ]
+        .into_iter()
+        .collect(),
+        &token,
+    )?;
+    Ok((
+        bind,
+        NetworkPolicy::with_credentials(&hosts, vec![credential])?,
+    ))
 }
 
 fn split_csv(raw: &str) -> Vec<String> {

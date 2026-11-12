@@ -2301,6 +2301,29 @@ pub struct ProviderKeys {
 }
 
 impl ProviderKeys {
+    /// Current backend configuration only, with no inherited environment keys.
+    pub fn from_saved_settings(settings: &crate::provider::SettingsFile) -> Self {
+        Self {
+            firecrawl: settings.saved_key("firecrawl").to_owned(),
+            firecrawl_fallback: settings.saved_fallback_key("firecrawl").to_owned(),
+            hunter: settings.saved_key("hunter").to_owned(),
+            hunter_fallback: settings.saved_fallback_key("hunter").to_owned(),
+            sociavault: settings.saved_key("sociavault").to_owned(),
+            sociavault_fallback: settings.saved_fallback_key("sociavault").to_owned(),
+            newsapi: settings.saved_key("newsapi").to_owned(),
+            newsapi_fallback: settings.saved_fallback_key("newsapi").to_owned(),
+            courtlistener: settings.saved_key("courtlistener").to_owned(),
+            courtlistener_fallback: settings.saved_fallback_key("courtlistener").to_owned(),
+            gnews: settings.saved_key("gnews").to_owned(),
+            gnews_fallback: settings.saved_fallback_key("gnews").to_owned(),
+            newsdata: settings.saved_key("newsdata").to_owned(),
+            newsdata_fallback: settings.saved_fallback_key("newsdata").to_owned(),
+            currents: settings.saved_key("currents").to_owned(),
+            currents_fallback: settings.saved_fallback_key("currents").to_owned(),
+            whoxy: settings.saved_key("whoxy").to_owned(),
+            whoxy_fallback: settings.saved_fallback_key("whoxy").to_owned(),
+        }
+    }
     /// Keys from the configured provider settings (primary + fallback).
     pub fn from_settings(settings: &crate::provider::SettingsFile) -> Self {
         Self {

@@ -8,15 +8,9 @@ Conventions for Fleetworks contributors. Product behavior lives in [architecture
 
 Use [contributor workflow](contributing.md) for builds, isolated artifacts, worktrees, retries and commits; [versioning](versioning.md) defines release policy. Tests remain offline.
 
-## TUI
+## Historical terminal reference
 
-All agents follow [tui-verification.md](tui-verification.md) and the repo [argos-tui-verify skill](../../../.opencode/skills/argos-tui-verify/SKILL.md). Use `scripts/tui_review.py` for fresh fixture galleries. Inspect PNGs, action tests and metric tests separately; capture is not visual approval. [Session evidence](../../archive/tui-verification-session-2026-10-10.md) records the defects behind this convention. Keep the viewport/state matrix proportional to affected presets; Profile uses 160×50, 120×40, 100×32, 100×24, 80×24, 60×18 and 40×20. Artifacts are fixture cells/PNG/manifest/review ledger under a named plan; avoid live secrets.
-
-- Layout, hit-test, and Tab order share rectangles. `LayoutRegistry` fills during `draw`. Focus order uses registered targets from the active layout scope.
-- Internal IDs stay `Osint` / `Providers` / `System` even when the labels are Tools / Models / Profile.
-- Empty focused fields keep their placeholder until the user types. Placeholders are never saved. Keys stay masked.
-- Long panes own an offset, a wrapped extent, and a `see more` footer. Offsets are not `u16`-truncated page math.
-- Investigation panel width is `floor(0.30 × terminal viewport)` when the screen is at least 110 columns. Full-report cards are `floor(0.70 × viewport)` wide.
+The terminal executables and their capture helpers are retired. Their [design](tui-design-spec.md), [components](tui-components.md), [Profile metrics](profile-analytics-dashboard.md) and [verification records](tui-verification.md) remain historical references. Use [native verification](native-verification.md) and React guidance for supported clients. [Retirement disposition](../../archive/cli-retirement.md)
 
 ## Schema
 
@@ -26,7 +20,7 @@ Domain storage is SurrealDB; the Jobs service owns SQLite operational logs. Read
 
 - Offline by default. HTTP fixtures and fake executors; no live keys in the suite.
 - Coverage tests in core: every tool input has a binding kind, extractors, and producers.
-- TUI: `ratatui::backend::TestBackend` at 160×50, 120×40, 100×36, 80×24 as needed. `click` draws first.
+- Native: use actual Rune production views and Runtime handlers, with selected PNG/tree inspection; the retired terminal TestBackend records are historical.
 
 ## Planning and scratch
 
@@ -50,7 +44,7 @@ TUI and React changes follow their linked design/component/theme guidance; prese
 
 ## Rust style
 
-Rust edits and reviews load the [argos-rust-style skill](../../../.opencode/skills/argos-rust-style/SKILL.md): Google's Rust Style Guide for imports, errors, types, traits, naming, docs, and implementation. `cargo fmt` formats. Library rules apply to `argos-osint-core` and `argos-osint-api`; application rules apply to `argos-osint-bin` and `argos-api-host`. The async rules below and the current crate layout override that guide's Chromium and Fuchsia notes.
+Rust edits and reviews load the [argos-rust-style skill](../../../.opencode/skills/argos-rust-style/SKILL.md): Google's Rust Style Guide for imports, errors, types, traits, naming, docs, and implementation. `cargo fmt` formats. Library rules apply to `argos-osint-core` and `argos-osint-api`; application rules apply to `fleetworks-desktop`, `fleetworks-search-index` and `argos-api-host`. The async rules below and the current crate layout override that guide's Chromium and Fuchsia notes.
 
 ## Async runtime and process safety
 
@@ -63,8 +57,7 @@ Rules for asynchronous execution and process management:
 - **Subprocess ownership**: Always set `.kill_on_drop(true)` on `tokio::process::Command` when spawning external processes, guaranteeing that children are terminated if the supervising future or task is cancelled or dropped.
 - **Dual-signal shutdown**: Supervisors and long-running daemons must handle both `SIGINT` and `SIGTERM` gracefully on Unix, forwarding signals to child processes and completing orderly teardown before exit.
 - **Process table hygiene**: Detached external command invocations (e.g. system browser openers) must explicitly wait on child process handles in dedicated background threads to harvest exit status codes and prevent zombie (`<defunct>`) processes.
-- **spawn_blocking offload**: Blocking or synchronous work must stay off Tokio worker threads. `cli.rs::dispatch` runs the interactive welcome wizard through `tokio::task::spawn_blocking`, and `App::boot` is spawned through `spawn_blocking` before the TUI enters the process runtime; `tui/app.rs` starts the process heartbeat outside the Tokio-entered context so `storage::runtime::blocking` can be used on plain threads.
-- **TUI thread + store calls**: The TUI event loop runs inside an entered Tokio context (`app.rs:11012-11041`). Any `storage::runtime::blocking` call (including `storage::brain_store` dispatch) from a UI handler will bail. Controls that mutate lists (Brain create/pin/delete, Jobs clear, Logs clear, Profile clear-filters) must follow the **recon write pattern**: spawn a plain `std::thread::spawn` worker, perform the store operation via `Store::memory()` or the repository, send a completion event (`InsightSaved`, `MemoryPinned`, `MemoryDeleted`, `JobsCleared`, `LogsCleared`, `ProfileLoaded`), and let the event handler reload the list directly. No dirty-flag tick intermediary.
+- **spawn_blocking offload**: Blocking or synchronous work must stay off Tokio worker threads. Use bounded `tokio::task::spawn_blocking` or dedicated owned workers at actual service boundaries; native clients keep engine execution on the backend.
 - **Concurrent child pipe I/O**: `crates/argos-osint-core/src/subscription.rs::complete` writes the prompt to the child's stdin and reads stdout JSONL lines concurrently in a `tokio::select!` loop. A broken pipe on the stdin write (`ErrorKind::BrokenPipe`, child closed stdin early) is tolerated: stdin is dropped and the stdout reader continues to drain the child's output instead of failing the whole completion.
 - **Non-blocking process liveness probing**: `crates/argos-osint-core/src/storage/server.rs::pid_alive` probes a process with non-blocking `libc::kill(pid, 0)` (signal 0, no signal delivered). `EPERM` means the process exists but is owned by another user (treated as alive); `ESRCH` means it does not exist. Non-positive or overflowing PIDs are strictly rejected.
-- **Bounded SIGTERM→SIGKILL escalation**: `storage/server.rs::stop_server_process` sends SIGTERM, waits an 8-second grace, then escalates to SIGKILL with a further 5-second kill grace, bailing if the server still does not stop. `cli.rs::dispatch` applies the same bounded escalation to a foreground child: SIGTERM on a shutdown signal, a 5-second graceful wait, then SIGKILL plus a 2-second reap timeout.
+- **Bounded SIGTERM→SIGKILL escalation**: `storage/server.rs::stop_server_process` sends SIGTERM, waits an 8-second grace, then escalates to SIGKILL with a further 5-second kill grace, bailing if the server still does not stop.

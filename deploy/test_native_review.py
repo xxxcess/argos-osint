@@ -50,5 +50,30 @@ class NativeReviewTests(unittest.TestCase):
                 provision(root, "fixture", 18091, "linux/amd64", "a" * 40)
 
 
+    def test_optional_web_is_explicit_and_keeps_image_overrides_in_restart_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            images = {"FLEETWORKS_RUNTIME_IMAGE": "fleetworks-candidate-runtime:" + "a" * 40 + "-amd64"}
+            receipt = provision(Path(directory), "web", 18091, "linux/amd64", "a" * 40,
+                                web_port=18092, images=images)
+            environment = receipt["environment"]
+            self.assertEqual(environment["FLEETWORKS_WEB_ORIGIN"], "http://127.0.0.1:18092")
+            self.assertEqual(environment["FLEETWORKS_WEB_PORT"], "18092")
+            self.assertEqual(environment["FLEETWORKS_RUNTIME_IMAGE"], images["FLEETWORKS_RUNTIME_IMAGE"])
+            self.assertIn("native-review-web-", environment["FLEETWORKS_WEB_IMAGE"])
+            stored = json.loads((Path(receipt["workspace"]) / "review.json").read_text())
+            self.assertEqual(stored, receipt)
+            self.assertTrue((Path(receipt["workspace"]) / "secrets/internal-token").is_file())
+
+    def test_invalid_web_or_image_settings_cannot_create_a_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for options in ({"web_port": 18091}, {"web_port": 80},
+                            {"images": {"FLEETWORKS_ACCESS_EPOCH": "forged"}},
+                            {"images": {"FLEETWORKS_RUNTIME_IMAGE": "unversioned"}}):
+                with self.subTest(options=options), self.assertRaises(ValueError):
+                    provision(root, "fixture", 18091, "linux/amd64", "a" * 40, **options)
+                self.assertFalse(review_path(root, "fixture").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

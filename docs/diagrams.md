@@ -20,7 +20,6 @@ Open a file under `docs/diagrams/` in a browser for the HTML page. Matching `.sv
 | Durable request origin and scoped activity | Data flow | [brief-job-context.html](diagrams/brief-job-context.html) | [brief-job-context.svg](diagrams/brief-job-context.svg) |
 | Intel web request and readiness boundaries | Process | [intel-web.html](diagrams/intel-web.html) | [intel-web.svg](diagrams/intel-web.svg) |
 | Intel Focus Brief reading order | Layout | [intel-focus-layout.html](diagrams/intel-focus-layout.html) | [intel-focus-layout.svg](diagrams/intel-focus-layout.svg) |
-| Venture startup and ownership | Process | [venture-navigation.html](diagrams/venture-navigation.html) | [venture-navigation.svg](diagrams/venture-navigation.svg) |
 | OSINT catalog | Nested | [osint-providers.html](diagrams/osint-providers.html) | [osint-providers.svg](diagrams/osint-providers.svg) |
 | Atlas collection, admission, and derivatives | Process | [atlas-pipeline.html](diagrams/atlas-pipeline.html) | [atlas-pipeline.svg](diagrams/atlas-pipeline.svg) |
 | Pinned Rust-BERT classification | Data flow | [classifier-runtime.html](diagrams/classifier-runtime.html) | [classifier-runtime.svg](diagrams/classifier-runtime.svg) |
@@ -42,7 +41,6 @@ Open a file under `docs/diagrams/` in a browser for the HTML page. Matching `.sv
 | Fleetworks documentation routes | Hierarchy | [wiki-navigation.html](diagrams/wiki-navigation.html) | [wiki-navigation.svg](diagrams/wiki-navigation.svg) |
 | Development iteration loops | Process | [dev-loops.html](diagrams/dev-loops.html) | [dev-loops.svg](diagrams/dev-loops.svg) |
 | Native app development loop | Process | [dev-loop-native.html](diagrams/dev-loop-native.html) | [dev-loop-native.svg](diagrams/dev-loop-native.svg) |
-| Retained operator and CLI compatibility loop | Process | [dev-loop-cli.html](diagrams/dev-loop-cli.html) | [dev-loop-cli.svg](diagrams/dev-loop-cli.svg) |
 | Runtime service image development loop | Process | [dev-loop-runtime.html](diagrams/dev-loop-runtime.html) | [dev-loop-runtime.svg](diagrams/dev-loop-runtime.svg) |
 | Web development container and browser loop | Data flow | [dev-loop-web.html](diagrams/dev-loop-web.html) | [dev-loop-web.svg](diagrams/dev-loop-web.svg) |
 | Dockerfile targets and packaged image loop | Architecture | [dev-loop-images.html](diagrams/dev-loop-images.html) | [dev-loop-images.svg](diagrams/dev-loop-images.svg) |
@@ -52,6 +50,15 @@ Open a file under `docs/diagrams/` in a browser for the HTML page. Matching `.sv
 | Agent handoffs | Process | [agent-team.html](diagrams/agent-team.html) | [agent-team.svg](diagrams/agent-team.svg) |
 
 The catalog covers current Fleetworks contracts and explicitly labeled target architectures. The [Jobs persistence plan](wiki/code/jobs-persistence.md) distinguishes implemented foundations from the pending authority cutover. Earlier design figures and dated verification evidence are collected in [the archive](archive/index.md).
+
+## Historical figures
+
+These CLI-only workflows were retired on 2026-11-12. Their diagrams preserve the former architecture; current replacements are linked below and the [retirement record](archive/cli-retirement.md) records disposition.
+
+| Historical figure | HTML | SVG | Current replacement |
+| --- | --- | --- | --- |
+| Retired Venture lifecycle | [venture-navigation.html](diagrams/venture-navigation.html) | [venture-navigation.svg](diagrams/venture-navigation.svg) | [Native connections](diagrams/native-connections.html) and [Docker image loop](diagrams/dev-loop-images.html) |
+| Retired CLI development loop | [dev-loop-cli.html](diagrams/dev-loop-cli.html) | [dev-loop-cli.svg](diagrams/dev-loop-cli.svg) | [Native app development loop](diagrams/dev-loop-native.html) |
 
 ## When to draw
 

@@ -4,8 +4,7 @@
 
 Fleetworks uses [Semantic Versioning 2.0.0](https://semver.org/) and
 [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/).
-One version covers the main Rust workspace, including the legacy CLI/TUI, the
-Fleetworks host, Venture, the native clients and the shared crates. Each member
+One version covers the main Rust workspace, including the native macOS app, Linux service host, private search and shared crates. Each member
 inherits `workspace.package.version` from `Cargo.toml` with
 `version.workspace = true`.
 Database schema numbers and provider/API/model versions are separate contracts.
@@ -21,8 +20,8 @@ Do not move that boundary to hide unreleased work.
 Use `<type>(optional-scope)!: description`, omitting `!` for compatible changes.
 Types and scopes are lowercase. Prefer a short behavior-focused subject; use a
 body to explain the problem, resulting behavior, validation and material limits.
-Suggested scopes include `tui`, `recon`, `intel`, `atlas`, `brain`, `osint`,
-`models`, `profile`, `store`, `providers`, `cli`, `opencode`, `release`, `deps`
+Suggested scopes include `native`, `recon`, `intel`, `atlas`, `brain`, `osint`,
+`models`, `profile`, `store`, `providers`, `api`, `opencode`, `release`, `deps`
 and `graph`. Comma-separated scopes are supported when one coherent change
 crosses surfaces. Scopes describe the change; they do not select a crate version.
 
@@ -43,11 +42,11 @@ impact across unreleased changes wins. Maintenance commits join the next release
 without causing one themselves; release notes emphasize features, fixes,
 performance and compatibility changes.
 
-Public compatibility includes CLI commands/flags and machine-readable output,
+Public compatibility includes supported backend/admin commands and machine-readable output,
 core library APIs, persisted configuration/portable import formats, user data
 readability and documented workflows. An additive database migration that
 preserves existing data is normally compatible; a schema counter increment is
-not automatically a breaking change. TUI layout refinements are normally fixes
+not automatically a breaking change. Native/browser layout refinements are normally fixes
 or features; removal of a documented workflow needs compatibility assessment.
 Never use `chore` to conceal user-facing fixes or breaking changes.
 
@@ -59,7 +58,7 @@ Validated with the transcript follow/history regression tests.
 ```
 
 ```text
-feat(cli)!: replace the legacy export payload
+feat(api)!: replace the legacy export payload
 
 BREAKING CHANGE: Export now emits the portable configuration schema.
 Consumers must migrate their parser to the documented fields before upgrading.
@@ -98,7 +97,7 @@ git commit --file .agent-scratch/<task>/commit.txt
 Node 20+ is required; the checker has no npm dependencies. It checks commit
 syntax, breaking footers and synchronized versions, and reports release impact.
 It does not decide whether a change really breaks compatibility or replace the
-Rust fmt → Clippy → test gate, scoped TUI review or other relevant checks. Agents
+Rust fmt → Clippy → test gate, scoped native/browser review or other relevant checks. Agents
 record actual validation in the commit body and report the SHA. Existing task
 authorization governs commits, pushes, merges and releases. The read-only
 OpenCode `architect` agent prepares messages/impact only; it does not stage or commit.
@@ -117,7 +116,7 @@ since the last release and maintains a release PR. Merging a reviewed, green
 release PR authorizes its `vX.Y.Z` tag and GitHub Release on the next run.
 Release Please publishes the tag and release notes. The
 [Fleetworks workflow](ci.md#fleetworksyml--scoped-branch-checks) separately
-verifies native builds and Venture-managed Compose startup from an exact
+verifies native app builds and direct isolated Compose startup from an exact
 source revision. The separate [candidate workflow](../../../.github/workflows/fleetworks-candidate.yml)
 produces downloadable native bundles and Linux image archives for release review. Development server images are tagged with the same workspace SemVer, read from `version.txt` with no leading `v`, and also keep a `:local` alias. Git tags keep the `v` prefix. [Deployment guide](../../../deploy/README.md)
 
@@ -154,30 +153,14 @@ Dispatch the candidate workflow against a published ref and its exact local comm
 
 ```sh
 branch=$(git branch --show-current)
-gh workflow run fleetworks-candidate.yml --ref "$branch" -f head="$(git rev-parse HEAD)"
+gh workflow run fleetworks-candidate.yml --ref "$branch" -f head="$(git rev-parse HEAD)" -f components=all
 ```
 
-The workflow packages Venture and the six CLI binaries on native Linux AMD64,
-Linux ARM64, macOS Intel, and macOS ARM64. Each Actions artifact contains a
-tarball and its SHA-256 sidecar. The archive carries the source revision,
-version, target, license, and per-file checksums. A separate job on each target
-downloads the exact artifact ID, verifies the archive against the packaging
-job's digest, and executes the extracted binaries. Review all four jobs for the
-requested commit before using their candidates.
+Select `components=native` (the default), `backend` or `all`. Native packages the complete Rune app on Intel and Apple silicon Macs. Each app archive carries source revision, version, target, bundle inventory and per-file hashes; the reusable native workflow downloads the exact artifact ID and verifies its bytes. No CLI archive or terminal executable is produced.
 
-On both native Linux targets, a separate archive carries the runtime, web,
-and SurrealDB images. The image manifest records the archive
-checksum and exact Docker image IDs. A fresh job loads the archive and uses the
-downloaded Venture binary to start the stack without building or pulling. The
-smoke checks each Compose container against the expected loaded image ID.
+Backend selection packages runtime, SurrealDB and private search images on native Linux AMD64 and ARM64; `components=all` additionally includes Web. An identity manifest binds archive checksum and exact image IDs. A fresh job loads the downloaded archive and uses the direct standalone Compose smoke without building or pulling; every created service must match the expected image ID. [Deployment](../../../deploy/README.md)
 
-Candidate artifacts expire after 14 days. The workflow creates Actions
-artifacts only. Public tag and release automation remain under Release Please.
-During cutover, pushes that change candidate packaging on `feat/atlas-zero-shot`
-also run this workflow so the feature branch can verify its first bundles.
-Docker archive identity covers the downloaded bytes and the images that run
-from them. Registry publication and OCI manifest digest verification are
-separate release requirements.
+Review the actual selected jobs for the requested commit. Candidate artifacts expire after 14 days and remain review artifacts, with no trusted publication implied. Release Please owns public tags and release notes. Signing, notarization, installed native GUI/input/accessibility, minimum OS, both-platform runtime integration and registry manifest digest verification remain separate evidence. Retirement of terminal entry points does not close those gaps.
 
 ## GitHub setup and first release
 

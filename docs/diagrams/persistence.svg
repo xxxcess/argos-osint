@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 572" role="img" aria-labelledby="persistence-title persistence-desc">
 <title id="persistence-title">Fleetworks network storage selections · planned target</title>
-<desc id="persistence-desc">Bootstrap applies the schema and provisions the scoped runtime account. Domain services use one workspace SurrealDB endpoint; in the planned target, Jobs alone opens SQLite operational state and an embedded RocksDB queue. Venture can manage the database in Compose or on the host, or use an operator-managed external server.</desc>
+<desc id="persistence-desc">Bootstrap applies the schema and provisions the scoped runtime account. Domain services use one workspace SurrealDB endpoint; in the planned target, Jobs alone opens SQLite operational state and an embedded RocksDB queue. Independent Docker operators provision owned persistent database storage or configure a private external endpoint. The native app connects only to the gateway.</desc>
 <defs>
   <marker id="persistence-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker>
 </defs>
@@ -20,12 +20,10 @@
 <text x="40" y="36" class="heading" text-anchor="start">Planned split: domain endpoint + Jobs-owned local stores</text>
 <path d="M264 112H364" class="edge"/>
 <path d="M696 112H596" class="edge"/>
-<path d="M480 148V216H144" class="flow"/>
-<path d="M480 216H808" class="flow"/>
-<path d="M144 216V248" class="edge"/>
-<path d="M368 216V248" class="edge"/>
-<path d="M592 216V248" class="edge"/>
-<path d="M808 216V248" class="edge"/>
+<path d="M480 148V216H256" class="flow"/>
+<path d="M480 216H704" class="flow"/>
+<path d="M256 216V248" class="edge"/>
+<path d="M704 216V248" class="edge"/>
 <rect x="40" y="76" width="224" height="72" rx="6" class="node"/>
 <text x="152" y="109" class="label" text-anchor="middle">Schema bootstrap</text>
 <text x="152" y="127" class="note" text-anchor="middle">Root credential · one-shot</text>
@@ -35,23 +33,15 @@
 <rect x="696" y="76" width="224" height="72" rx="6" class="node"/>
 <text x="808" y="109" class="label" text-anchor="middle">Domain services</text>
 <text x="808" y="127" class="note" text-anchor="middle">Scoped database account</text>
-<rect x="40" y="248" width="208" height="88" rx="6" class="node"/>
-<text x="144" y="280" class="label" text-anchor="middle">Compose disk</text>
-<text x="144" y="298" class="note" text-anchor="middle">Owned container</text>
-<text x="144" y="316" class="note" text-anchor="middle">Persistent workspace disk</text>
-<rect x="264" y="248" width="208" height="88" rx="6" class="node"/>
-<text x="368" y="280" class="label" text-anchor="middle">Local Process / host disk</text>
-<text x="368" y="298" class="note" text-anchor="middle">Owned server process</text>
-<text x="368" y="316" class="note" text-anchor="middle">Persistent workspace disk</text>
-<rect x="488" y="248" width="208" height="88" rx="6" class="node"/>
-<text x="592" y="280" class="label" text-anchor="middle">Host memory</text>
-<text x="592" y="298" class="note" text-anchor="middle">Owned server process</text>
-<text x="592" y="316" class="note" text-anchor="middle">New identity on restart</text>
-<rect x="712" y="248" width="208" height="88" rx="6" class="node"/>
-<text x="816" y="280" class="label" text-anchor="middle">Local Net / external</text>
-<text x="816" y="298" class="note" text-anchor="middle">Operator-managed server</text>
-<text x="816" y="316" class="note" text-anchor="middle">Use wss:// off-host</text>
-<text x="40" y="364" class="note" text-anchor="start">Domain modes above. Jobs storage stays local and disk-backed in every mode.</text>
+<rect x="40" y="248" width="432" height="88" rx="6" class="node"/>
+<text x="256" y="280" class="label" text-anchor="middle">Managed Compose database</text>
+<text x="256" y="298" class="note" text-anchor="middle">Independent Docker lifecycle</text>
+<text x="256" y="316" class="note" text-anchor="middle">Owned persistent /data directory</text>
+<rect x="488" y="248" width="432" height="88" rx="6" class="node"/>
+<text x="704" y="280" class="label" text-anchor="middle">Configured external endpoint</text>
+<text x="704" y="298" class="note" text-anchor="middle">Private ws:// or protected wss:// server</text>
+<text x="704" y="316" class="note" text-anchor="middle">Operator owns its identity and lifecycle</text>
+<text x="40" y="364" class="note">Network domain storage above. Embedded compatibility fixtures are a separate test path.</text>
 <path d="M808 148V184H940V404H164V420" class="edge"/>
 <path d="M288 460H400" class="edge"/>
 <rect x="40" y="420" width="248" height="80" rx="6" class="accent"/>

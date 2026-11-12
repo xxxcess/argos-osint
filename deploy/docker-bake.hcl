@@ -1,5 +1,4 @@
-# Linux server images for the web app, Venture, and each Fleetworks CLI.
-# The client targets share clients_build, so one compile feeds every selected image.
+# Linux backend images plus the optional Intel Web service.
 #
 # Bake resolves local contexts from the working directory. The documented
 # command runs at the repository root, so cwd://. is that checkout. A parent
@@ -46,82 +45,14 @@ target "surrealdb" {
   platforms  = ["${PLATFORM}"]
 }
 
-group "clients" {
-  targets = [
-    "venture",
-    "fleetworks-atlas",
-    "fleetworks-brain",
-    "fleetworks-jobs",
-    "fleetworks-tools",
-    "fleetworks-models",
-    "fleetworks-profile",
-  ]
-}
-
 group "server" {
-  targets = ["web", "venture", "fleetworks-atlas", "fleetworks-brain", "fleetworks-jobs", "fleetworks-tools", "fleetworks-models", "fleetworks-profile"]
+  targets = ["runtime", "surrealdb", "search-index", "web"]
 }
 
 target "web" {
   context    = "cwd://."
   dockerfile = "deploy/Dockerfile"
   target     = "web"
-  tags       = IMAGE_TAG != "" ? ["web:${IMAGE_TAG}"] : ["web:local", "web:${VERSION}"]
-  platforms  = ["${PLATFORM}"]
-}
-
-target "venture" {
-  context    = "cwd://."
-  dockerfile = "deploy/Dockerfile"
-  target     = "venture"
-  tags       = IMAGE_TAG != "" ? ["venture:${IMAGE_TAG}"] : ["venture:local", "venture:${VERSION}"]
-  platforms  = ["${PLATFORM}"]
-}
-
-target "fleetworks-atlas" {
-  context    = "cwd://."
-  dockerfile = "deploy/Dockerfile"
-  target     = "fleetworks-atlas"
-  tags       = IMAGE_TAG != "" ? ["fleetworks-atlas:${IMAGE_TAG}"] : ["fleetworks-atlas:local", "fleetworks-atlas:${VERSION}"]
-  platforms  = ["${PLATFORM}"]
-}
-
-target "fleetworks-brain" {
-  context    = "cwd://."
-  dockerfile = "deploy/Dockerfile"
-  target     = "fleetworks-brain"
-  tags       = IMAGE_TAG != "" ? ["fleetworks-brain:${IMAGE_TAG}"] : ["fleetworks-brain:local", "fleetworks-brain:${VERSION}"]
-  platforms  = ["${PLATFORM}"]
-}
-
-target "fleetworks-jobs" {
-  context    = "cwd://."
-  dockerfile = "deploy/Dockerfile"
-  target     = "fleetworks-jobs"
-  tags       = IMAGE_TAG != "" ? ["fleetworks-jobs:${IMAGE_TAG}"] : ["fleetworks-jobs:local", "fleetworks-jobs:${VERSION}"]
-  platforms  = ["${PLATFORM}"]
-}
-
-target "fleetworks-tools" {
-  context    = "cwd://."
-  dockerfile = "deploy/Dockerfile"
-  target     = "fleetworks-tools"
-  tags       = IMAGE_TAG != "" ? ["fleetworks-tools:${IMAGE_TAG}"] : ["fleetworks-tools:local", "fleetworks-tools:${VERSION}"]
-  platforms  = ["${PLATFORM}"]
-}
-
-target "fleetworks-models" {
-  context    = "cwd://."
-  dockerfile = "deploy/Dockerfile"
-  target     = "fleetworks-models"
-  tags       = IMAGE_TAG != "" ? ["fleetworks-models:${IMAGE_TAG}"] : ["fleetworks-models:local", "fleetworks-models:${VERSION}"]
-  platforms  = ["${PLATFORM}"]
-}
-
-target "fleetworks-profile" {
-  context    = "cwd://."
-  dockerfile = "deploy/Dockerfile"
-  target     = "fleetworks-profile"
-  tags       = IMAGE_TAG != "" ? ["fleetworks-profile:${IMAGE_TAG}"] : ["fleetworks-profile:local", "fleetworks-profile:${VERSION}"]
+  tags       = IMAGE_TAG != "" ? ["fleetworks-web:${IMAGE_TAG}"] : ["fleetworks-web:local", "fleetworks-web:${VERSION}"]
   platforms  = ["${PLATFORM}"]
 }

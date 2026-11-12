@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 840" role="img" aria-labelledby="dev-loop-images-title dev-loop-images-desc">
 <title id="dev-loop-images-title">Docker targets: backend group, identity and explicit recreation</title>
-<desc id="dev-loop-images-desc">The external path planner selects affected Dockerfile inputs and target images. Native view-only changes do not select Linux image builds. Verify Docker context, daemon and builder architecture and choose linux/amd64 or linux/arm64 plus a unique IMAGE_TAG that preserves aliases used by existing stacks. The Bake backend group builds exactly runtime, surrealdb and search-index. Runtime contains the shared service host; search-index uses only contracts and search source in a separate compile graph; the digest-pinned database wrapper has its own target. Retain exact loaded image IDs, platform, tags and Buildx metadata. Hash-verified matching Linux model and native-library assets are separate staged dependencies for explicitly selected inference roles. Explicitly recreate only selected owned services under isolated workspace, project and ports while preserving data, credentials, identities, caches and unrelated images. Native app packaging, web images and retained Venture or CLI targets remain independent.</desc>
+<desc id="dev-loop-images-desc">The external path planner selects affected Dockerfile inputs and target images. Native view-only changes do not select Linux image builds. Verify Docker context, daemon and builder architecture and choose linux/amd64 or linux/arm64 plus a unique IMAGE_TAG that preserves aliases used by existing stacks. The Bake backend group builds exactly runtime, surrealdb and search-index. Runtime contains the shared service host; search-index uses only contracts and search source in a separate compile graph; the digest-pinned database wrapper has its own target. Retain exact loaded image IDs, platform, tags and Buildx metadata. Hash-verified matching Linux model and native-library assets are separate staged dependencies for explicitly selected inference roles. Explicitly recreate only selected owned services under isolated workspace, project and ports while preserving data, credentials, identities, caches and unrelated images. Native app packaging and optional web images remain independent.</desc>
 <defs><marker id="dev-loop-images-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker></defs>
 <style>text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}.label{font-size:20px;font-weight:600}.note{font-size:16px}.zone{font-size:13px;font-weight:600;letter-spacing:1px}.node{fill:#fff;stroke:#4f5d75}.accent{fill:#fff6ed;stroke:#eb6c36}.edge{fill:none;stroke:#4f5d75;stroke-width:2;marker-end:url(#dev-loop-images-arrow)}.minor{fill:#4f5d75;font-size:14px}.code{font-family:'Geist Mono',ui-monospace,monospace;font-size:14px}</style>
 <rect width="1320" height="840" fill="#f5f5f5"/>
@@ -34,7 +34,7 @@
 <rect x="468" y="360" width="360" height="112" rx="6" class="accent"/>
 <text x="484" y="392" class="label">search-index</text>
 <text x="484" y="422" class="note">Contracts + private Tantivy service only</text>
-<text x="484" y="450" class="note">No core inference / CLI / native / Next build</text>
+<text x="484" y="450" class="note">No core inference / native views / Next build</text>
 <rect x="888" y="360" width="384" height="112" rx="6" class="node"/>
 <text x="904" y="392" class="label">surrealdb</text>
 <text x="904" y="422" class="note">Digest-pinned database + secret wrapper</text>
@@ -54,6 +54,6 @@
 <text x="904" y="646" class="note">Exact tags / IDs; dedicated project and ports</text>
 <text x="904" y="674" class="note">Recreate only the selected consumers</text>
 <text x="904" y="702" class="note">Retain data / identity / secrets / caches</text>
-<text x="48" y="796" class="minor">Web and Venture / CLI compatibility targets stay separate. Native app builds do not provision Docker or mutate the user's stack.</text>
+<text x="48" y="796" class="minor">Web stays a separate optional target. Native app builds do not provision Docker or mutate the user's stack.</text>
 <text x="48" y="824" class="minor">Keep unrelated images and aliases. Loading differs from recreation, health, integration and real model inference.</text>
 </svg>

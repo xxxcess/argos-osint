@@ -1,3 +1,0 @@
-# Compatibility placeholder for owner records created before embedded dispatch.
-# Venture uses this path only while stopping an old project with --remove-orphans.
-services: {}

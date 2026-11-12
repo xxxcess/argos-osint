@@ -6,15 +6,15 @@ Follow these routes from setup to implementation.
 
 ## What this repository is
 
-Fleetworks collects public-source intelligence and prepares cited Focus Briefs. Venture starts the services behind the Intel web desktop and six terminal clients. They share an authenticated API and SurrealDB.
+Fleetworks collects public-source intelligence and prepares cited Focus Briefs. The native macOS app and Intel Web connect to an independently deployed authenticated Linux backend with SurrealDB, private services and workers.
 
 Start with the [README](../../README.md), [concepts](concepts/index.md), and [glossary](concepts/glossary.md). Follow the [code map](code/index.md) and [diagrams](../diagrams.md) for implementation.
 
 ## Run a workspace
 
-Install Rust 1.95.0, Docker, and Compose v2.20+. The [quick start](../../README.md#quick-start) runs a Compose disk stack. Local development typically uses `venture up --dev --storage local-net` with existing SurrealDB. [Workspace setup](code/fleetworks.md) · [Deployment settings](../../deploy/README.md)
+Install the pinned Rust 1.95.0 toolchain and Xcode tools for native app packaging. Docker and Compose v2.20+ operate the separate backend. Start at the [quick start](../../README.md#quick-start), then follow [native connections](code/native-connections.md) and [direct deployment](../../deploy/README.md). The app never launches services.
 
-`venture web` starts services and opens Jobs and Logs. `venture client <app>` launches a client. `venture stop` stops owned services and preserves workspace data.
+Use the same deployment env file, Compose files and project for startup, status, logs and stop. Keep backend data separate from the protected native container. Retired terminal instructions are preserved only as [historical evidence](../archive/cli-retirement.md).
 
 ## How a request moves
 
@@ -30,11 +30,11 @@ Clients call the gateway API, which routes retained operations to private servic
 | Jobs and Logs | Durable work and operational events | [Usage](concepts/usage.md#jobs-and-logs) · [Lifecycle](../diagrams/jobs-lifecycle.html) |
 | Tools, Models, and Profile | Catalog calls, role defaults, workspace health, and portable configuration | [Usage](concepts/usage.md#profile) · [Providers](concepts/providers.md) · [Model roles](../diagrams/model-roles.html) |
 
-The [CLI reference](../../apps/fleetworks-cli/README.md) is the command list. [Interfaces](code/interfaces.md) ties the clients to their verification.
+[Interfaces](code/interfaces.md) ties supported native, browser and service entry points to their verification.
 
 ## Persistence
 
-Services share the selected SurrealDB endpoint. Venture can manage the database or connect to an existing server. Compatibility tests retain direct embedded-engine access.
+Services share the explicitly configured SurrealDB endpoint. Direct Compose provisions the review database; deployment operators configure independent endpoints explicitly. Embedded storage contracts retain direct engine access.
 
 [Storage map](code/storage.md) · [Schema authority](code/storage.md#schema-and-runtime-authority) · [Persistence diagram](../diagrams/persistence.html) · [Recall](code/storage.md#recall-and-source-lifecycle)
 
@@ -50,9 +50,9 @@ The browser app is React Native Web, served by Next from [apps/web-desktop](../.
 
 Start with the [web contract](code/intel-web.md), then the [UI rules](code/react-ui.md) and [browser checks](code/react-ui-testing.md). The [request figure](../diagrams/intel-web.html) shows the relay and readiness boundaries.
 
-## Terminal clients and the retained desk
+## Native client and historical terminals
 
-Venture launches Atlas, Brain, Jobs, Tools, Models, and Profile as HTTP clients. The older Ratatui desk remains for compatibility. [CLI reference](../../apps/fleetworks-cli/README.md) · [Compatibility TUI design](code/tui-design-spec.md) · [TUI verification](code/tui-verification.md)
+The Rune app supplies Atlas, Brain, Tools, Models, Profile, Workstation, Workspaces and scoped Jobs & Logs. Intel Web supplies topology and its list twin. Venture, the six terminal clients and the older Ratatui executable are retired. [Native verification](code/native-verification.md) · [Historical disposition](../archive/cli-retirement.md)
 
 ## Where the code lives
 
@@ -60,8 +60,8 @@ Use the [repository map](../index.md#directory-map) for the directory index.
 
 | Path | Role |
 | --- | --- |
-| [apps/venture](../../apps/venture) | Workspace launcher |
-| [apps/fleetworks-cli](../../apps/fleetworks-cli) | Six network clients |
+| [apps/fleetworks-desktop](../../apps/fleetworks-desktop) | Native Rune macOS control hub |
+| [crates/fleetworks-contracts](../../crates/fleetworks-contracts) | Client-safe contracts and origin-pinned SDK |
 | [apps/web-desktop](../../apps/web-desktop) | Intel web server and relay |
 | [packages](../../packages) | Shared React Native UI, Intel screens, and API client |
 | [crates/argos-osint-core](../../crates/argos-osint-core) | Domain workflows and storage |

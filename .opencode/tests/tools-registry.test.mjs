@@ -85,7 +85,12 @@ test("utility agent performs quick non-code edits only", () => {
 
 test("commands map to catalog specialists and verify uses the embedded integration gate", () => {
   const command = readFileSync(join(root, "commands/tui-verify.md"), "utf8");
-  assert.match(command, /argos-tui-verify/);
+  assert.match(command, /terminal executables.*retired/i);
+  assert.match(command, /Do not run historical TUI helpers/);
+  assert.match(command, /fleetworks-rune-verify/);
+  assert.match(command, /docs\/wiki\/code\/native-verification\.md/);
+  assert.match(command, /docs\/archive\/cli-retirement\.md/);
+  assert.doesNotMatch(command, /`argos-tui-verify`/);
   const verify = readFileSync(join(root, "commands/ecc-verify.md"), "utf8");
   const review = readFileSync(join(root, "commands/ecc-review.md"), "utf8");
   assert.match(command, /agent: tester/);

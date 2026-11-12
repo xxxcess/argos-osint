@@ -48,7 +48,7 @@ surreal = ["dep:surrealdb"]
 embedded = ["surreal", "surrealdb/kv-rocksdb"]
 # WebSocket client for per-home loopback and authenticated Fleetworks storage.
 server = ["surreal", "surrealdb/protocol-ws", "surrealdb/rustls", "dep:rustls", "dep:webpki-roots"]
-# Test/screenshot fixtures used by the binary's tests. Never enabled in release builds.
+# Shared backend test fixtures. Never enabled in release builds.
 fixtures = []
 # Paused-time Tokio tests (`tokio::time::pause`).
 test-util = ["tokio/test-util"]

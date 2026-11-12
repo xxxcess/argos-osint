@@ -11,13 +11,18 @@ import sys
 import tempfile
 from pathlib import Path
 
-from fleetworks_candidate import ROOT, archive_name, checksum_line, extract, native_pattern, sha256
+from fleetworks_candidate import ROOT, checksum_line, sha256
+from fleetworks_platform import detect
+
+sys.path.insert(0, str(ROOT / "deploy"))
+import native_review
+import verify as deploy_verify
 
 ARCHITECTURES = {"x86_64-unknown-linux-gnu": "amd64", "aarch64-unknown-linux-gnu": "arm64"}
 IMAGE_ENV = {
     "runtime": "FLEETWORKS_RUNTIME_IMAGE",
-    "web": "FLEETWORKS_WEB_IMAGE",
     "surrealdb": "FLEETWORKS_SURREAL_IMAGE",
+    "search-index": "FLEETWORKS_SEARCH_IMAGE",
 }
 MAX_ARCHIVE_BYTES = 1024 ** 3
 MAX_IMAGE_BYTES = 3 * MAX_ARCHIVE_BYTES
@@ -30,31 +35,33 @@ def docker(*args, env=None, output=False):
 
 
 def verify_daemon(target):
-    native_pattern(target)
+    host = detect()
     platform = f"linux/{ARCHITECTURES[target]}"
+    if host.system != "Linux" or host.docker_platform != platform or host.rosetta:
+        raise ValueError("Image candidates require the matching physical Linux host")
     if docker("version", "--format", "{{.Server.Os}}/{{.Server.Arch}}", output=True).strip() != platform:
         raise ValueError(f"Docker daemon is not native for {platform}")
     return platform
 
 
-def image_tags(revision, platform):
+def image_environment(web=False):
+    return {**IMAGE_ENV, **({"web": "FLEETWORKS_WEB_IMAGE"} if web else {})}
+
+
+def image_tags(revision, platform, *, web=False):
     arch = platform.split("/", 1)[1]
-    return {role: f"fleetworks-candidate-{role}:{revision}-{arch}" for role in IMAGE_ENV}
+    return {role: f"fleetworks-candidate-{role}:{revision}-{arch}" for role in image_environment(web)}
 
 
-def compose_images(overrides):
-    environment = {key: value for key, value in os.environ.items() if not key.startswith(("FLEETWORKS_", "COMPOSE_"))}
+def compose_images(overrides, platform="linux/amd64", *, web=False):
     with tempfile.TemporaryDirectory(prefix="fleetworks-image-config-") as temporary:
-        workspace = Path(temporary).resolve()
-        environment.update({
-            "FLEETWORKS_HOST_WORKSPACE": str(workspace),
-            "FLEETWORKS_UID": str(os.getuid()),
-            "FLEETWORKS_GID": str(os.getgid()),
-            **overrides,
-        })
+        receipt = native_review.provision(Path(temporary), "image-config", 18091, platform,
+                                          "0" * 40, web_port=18092 if web else None, images=overrides)
+        workspace = Path(receipt["workspace"])
+        environment = {**deploy_verify.isolated_environment(os.environ), **receipt["environment"]}
         model = json.loads(docker(
-            "compose", "--env-file", "/dev/null", "-f", ROOT / "deploy/compose.yml", "-f", ROOT / "deploy/compose.atlas.yml",
-            "--profile", "disk", "config", "--format", "json", env=environment, output=True,
+            *deploy_verify.compose_command(workspace, web=web, atlas=True)[1:],
+            "config", "--format", "json", env=environment, output=True,
         ))
     return {service: item["image"] for service, item in model["services"].items()}
 
@@ -106,10 +113,10 @@ def save_images(archive, tags):
         raise ValueError("Docker archive exceeds the compressed size limit")
 
 
-def package(directory, revision, target):
+def package(directory, revision, target, *, web=False):
     platform = verify_daemon(target)
-    tags = image_tags(revision, platform)
-    for role in IMAGE_ENV:
+    tags = image_tags(revision, platform, web=web)
+    for role in image_environment(web):
         docker("build", "--platform", platform, "--file", ROOT / "deploy/Dockerfile", "--target", role, "--tag", tags[role], ROOT)
     images = inspect_images(tags, platform)
     directory.mkdir(parents=True, exist_ok=True)
@@ -144,9 +151,9 @@ def read_manifest(directory, expected_digest, revision, target, platform):
     return manifest, archive
 
 
-def service_image_ids(overrides, images):
+def service_image_ids(overrides, images, platform="linux/amd64", *, web=False):
     by_tag = {item["tag"]: item["id"] for item in images.values()}
-    services = compose_images(overrides)
+    services = compose_images(overrides, platform, web=web)
     if set(services.values()) != by_tag.keys():
         raise ValueError("Compose services do not use exactly the archived image tags")
     if services.get("native-worker") != images["runtime"]["tag"]:
@@ -154,10 +161,10 @@ def service_image_ids(overrides, images):
     return {service: by_tag[tag] for service, tag in services.items()}
 
 
-def verify(directory, manifest_digest, cli_directory, cli_digest, revision, target, *, surreal=None):
+def verify(directory, manifest_digest, revision, target, *, web=False):
     platform = verify_daemon(target)
     manifest, archive = read_manifest(directory, manifest_digest, revision, target, platform)
-    tags = image_tags(revision, platform)
+    tags = image_tags(revision, platform, web=web)
     expected = manifest["images"]
     if expected.keys() != tags.keys() or any(expected[role]["tag"] != tag for role, tag in tags.items()):
         raise ValueError("Manifest contains unexpected candidate image tags")
@@ -165,31 +172,16 @@ def verify(directory, manifest_digest, cli_directory, cli_digest, revision, targ
     loaded = inspect_images(tags, platform)
     if any(loaded[role]["id"] != expected[role]["id"] for role in tags):
         raise ValueError("Loaded image IDs differ from the packaging job's image IDs")
-    overrides = {name: tags[role] for role, name in IMAGE_ENV.items()}
-    expected_ids = service_image_ids(overrides, loaded)
-    version = (ROOT / "version.txt").read_text(encoding="utf-8").strip()
-    cli_archive = cli_directory / archive_name(version, target, revision)
+    overrides = {name: tags[role] for role, name in image_environment(web).items()}
+    expected_ids = service_image_ids(overrides, loaded, platform, web=web)
     with tempfile.TemporaryDirectory(prefix="fleetworks-image-smoke-") as temporary:
-        install = Path(temporary).resolve()
-        extract(cli_archive, install, cli_digest, version, target, revision)
-        id_file = install / "service-image-ids.json"
+        id_file = Path(temporary) / "service-image-ids.json"
         id_file.write_text(json.dumps(expected_ids), encoding="utf-8")
-        smoke = [
-            sys.executable, str(ROOT / "deploy/verify.py"), "--venture", str(install / "bin/venture"),
-            "--no-build", "--image-ids", str(id_file),
-        ]
-        environment = {**os.environ, **overrides}
-        disk_smoke = smoke
-        if target == "x86_64-unknown-linux-gnu":
-            dataset = ROOT / "datasets/argos_atlas_strategic_domains_v2.csv"
-            disk_smoke = [*smoke, "--train-legacy-dataset", str(dataset)]
-        subprocess.run(disk_smoke, cwd=ROOT, env=environment, check=True)
-        if surreal is not None:
-            for storage in ("host-memory", "host-disk", "external"):
-                subprocess.run(
-                    [*smoke, "--storage", storage, "--surreal", str(surreal)],
-                    cwd=ROOT, env=environment, check=True,
-                )
+        name = "candidate-" + revision[:12] + "-" + os.urandom(4).hex()
+        subprocess.run([
+            sys.executable, str(ROOT / "deploy/verify.py"), "--name", name, "--platform", platform,
+            *(["--web"] if web else []), "--atlas", "--source-journey", "--no-build", "--image-ids", str(id_file),
+        ], cwd=ROOT, env={**deploy_verify.isolated_environment(os.environ), **overrides}, check=True)
     print(f"Verified downloaded Docker image IDs for {revision} on {platform}")
 
 
@@ -202,25 +194,19 @@ def main():
         command.add_argument("--directory", type=Path, required=True)
         command.add_argument("--revision", required=True)
         command.add_argument("--target", choices=ARCHITECTURES, required=True)
+        command.add_argument("--web", action="store_true", help="also package/verify optional Intel Web")
     pack.add_argument("--github-output", type=Path, required=True)
     check.add_argument("--manifest-sha256", required=True)
-    check.add_argument("--cli-directory", type=Path, required=True)
-    check.add_argument("--cli-sha256", required=True)
-    check.add_argument("--surreal", type=Path, help="pinned SurrealDB for optional host and external storage smokes")
     args = parser.parse_args()
     try:
         if not re.fullmatch(r"[0-9a-f]{40}", args.revision):
             raise ValueError("An exact Git revision is required")
         if args.command == "pack":
-            manifest = package(args.directory.resolve(), args.revision, args.target)
+            manifest = package(args.directory.resolve(), args.revision, args.target, web=args.web)
             with args.github_output.open("a", encoding="utf-8") as output:
                 print(f"manifest-sha256={sha256(manifest)}", file=output)
         else:
-            verify(
-                args.directory.resolve(), args.manifest_sha256, args.cli_directory.resolve(),
-                args.cli_sha256, args.revision, args.target,
-                surreal=args.surreal.resolve(strict=True) if args.surreal else None,
-            )
+            verify(args.directory.resolve(), args.manifest_sha256, args.revision, args.target, web=args.web)
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
         print(f"fleetworks-candidate-images: {error}", file=sys.stderr)
         return 1

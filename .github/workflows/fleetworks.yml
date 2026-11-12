@@ -50,7 +50,6 @@ jobs:
     timeout-minutes: 5
     outputs:
       head: ${{ steps.plan.outputs.head }}
-      native: ${{ steps.plan.outputs.native }}
       desktop: ${{ steps.plan.outputs.desktop }}
       server: ${{ steps.plan.outputs.server }}
       compose: ${{ steps.plan.outputs.compose }}
@@ -119,80 +118,6 @@ jobs:
             --github-output "$GITHUB_OUTPUT"
           printf 'head=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-  native:
-    name: Native clients / ${{ matrix.runner }}
-    needs: scope
-    if: needs.scope.outputs.native == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            host: x86_64-unknown-linux-gnu
-            machine: x86_64
-            executable: 'ELF 64-bit.*x86-64'
-          - runner: macos-15-intel
-            host: x86_64-apple-darwin
-            machine: x86_64
-            executable: 'Mach-O 64-bit.*x86_64'
-          - runner: macos-15
-            host: aarch64-apple-darwin
-            machine: arm64
-            executable: 'Mach-O 64-bit.*arm64'
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ env.FLEETWORKS_HEAD }}
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@1.95.0
-        with:
-          components: rustfmt
-      - name: Check native host and run scoped tests
-        env:
-          EXPECTED_HOST: ${{ matrix.host }}
-          EXPECTED_MACHINE: ${{ matrix.machine }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$FLEETWORKS_HEAD"
-          test "$(uname -m)" = "$EXPECTED_MACHINE"
-          test "$(rustc -vV | sed -n 's/^host: //p')" = "$EXPECTED_HOST"
-          rustc --version | grep -q '^rustc 1\.95\.0 '
-          packages=(-p fleetworks-workspace -p fleetworks-contracts -p fleetworks-cli -p fleetworks-venture)
-          cargo fmt "${packages[@]}" -- --check
-          python3 scripts/fleetworks_verify.py timed --phase native-test -- \
-            python3 scripts/agent_cargo.py test --timings --locked "${packages[@]}"
-          python3 scripts/fleetworks_verify.py timed --phase native-build -- \
-            python3 scripts/agent_cargo.py build --timings --locked --bins -p fleetworks-cli -p fleetworks-venture
-      - name: Smoke the actual native executables
-        env:
-          EXECUTABLE_PATTERN: ${{ matrix.executable }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          bins=target/agents/debug
-          scratch="$(mktemp -d "$RUNNER_TEMP/fleetworks-native.XXXXXX")"
-          workspace="$(cd "$scratch" && pwd -P)/review workspace"
-          for binary in venture fleetworks-{atlas,brain,jobs,tools,models,profile}; do
-            file "$bins/$binary" | grep -E "$EXECUTABLE_PATTERN"
-            "$bins/$binary" --help >/dev/null
-          done
-          "$bins/venture" --workspace "$workspace" init
-          "$bins/venture" --workspace "$workspace" client profile workspace --json |
-            python3 -c 'import json, sys; assert json.load(sys.stdin) == {"workspace": sys.argv[1]}' "$workspace"
-      - name: Retain native phase timings
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: fleetworks-native-timings-${{ matrix.runner }}
-          path: |
-            ${{ runner.temp }}/fleetworks-timings.jsonl
-            target/agents/cargo-timings/*.html
-          if-no-files-found: ignore
-          retention-days: 7
-
   desktop:
     name: Mac app / ${{ matrix.target }}
     needs: scope
@@ -250,7 +175,7 @@ jobs:
             log="$RUNNER_TEMP/fleetworks-$phase.log"
             python3 scripts/fleetworks_verify.py timed --phase "$phase" -- \
               python3 scripts/agent_cargo.py test --timings --locked -p argos-osint-core \
-                "${features[@]}" --lib "$filter" | tee "$log"
+                "${features[@]}" --features fixtures --lib "$filter" | tee "$log"
             if ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored' "$log"; then
               echo "::error::The required $filter tests did not pass"
               exit 1
@@ -289,7 +214,7 @@ jobs:
           test -x "$ARGOS_SURREAL_BIN"
           python3 scripts/fleetworks_verify.py timed --phase storage-affected -- \
             python3 scripts/agent_cargo.py test --timings --locked -p argos-osint-core \
-              --no-default-features --features server,nlp,classifier \
+              --no-default-features --features server,nlp,classifier,fixtures \
               --test storage_contracts --test storage_jobs --test storage_brief --test storage_brief_publish \
               --test storage_provider_pacer --test storage_provider_account --test storage_credits \
               --test storage_actor_catalog --test storage_atlas_delete
@@ -306,7 +231,7 @@ jobs:
           test -x "$ARGOS_SURREAL_BIN"
           log="$RUNNER_TEMP/fleetworks-atlas-quota-test.log"
           python3 scripts/agent_cargo.py test --locked -p argos-osint-core \
-            --no-default-features --features server,nlp,classifier --test storage_atlas \
+            --no-default-features --features server,nlp,classifier,fixtures --test storage_atlas \
             quota_reservations_share_daily_account_caps -- --exact --nocapture | tee "$log"
           if ! grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored' "$log"; then
             echo '::error::The required Atlas quota reservation test did not pass'
@@ -326,27 +251,18 @@ jobs:
           python3 scripts/fleetworks_verify.py timed --phase queue-smoke -- \
             python3 scripts/fleetworks_atlas_smoke.py \
               --host target/agents/debug/argos-api-host --surreal "$SURREAL_BIN"
-      - name: Validate disk and external Compose configurations
-        if: hashFiles('deploy/compose.yml') != ''
+      - name: Validate scoped standalone Compose and optional overlays
         shell: bash
         run: |
           set -euo pipefail
-          export FLEETWORKS_HOST_WORKSPACE="$(mktemp -d "$RUNNER_TEMP/fleetworks-compose.XXXXXX")"
-          export FLEETWORKS_UID="$(id -u)" FLEETWORKS_GID="$(id -g)"
-          umask 077
-          mkdir -p "$FLEETWORKS_HOST_WORKSPACE"/{secrets,storage/surrealdb,storage/jobs}
-          for secret in api-token brain-token control-token execution-token jobs-token tools-token storage-password storage-root-password; do
-            printf '%064d\n' 0 > "$FLEETWORKS_HOST_WORKSPACE/secrets/$secret"
-          done
-          docker compose -f deploy/compose.yml --profile disk config --quiet
-          FLEETWORKS_STORAGE_URL=ws://host.docker.internal:8000 docker compose -f deploy/compose.yml config --quiet
-          if [[ -f deploy/compose.dev.yml ]]; then
-            docker compose -f deploy/compose.yml -f deploy/compose.dev.yml --profile disk config --quiet
-          fi
-          if [[ -f deploy/compose.atlas.yml ]]; then
-            printf '%064d\n' 0 > "$FLEETWORKS_HOST_WORKSPACE/secrets/internal-token"
-            docker compose -f deploy/compose.yml -f deploy/compose.atlas.yml --profile disk config --quiet
-          fi
+          review="config-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          python3 deploy/native_review.py init --name "$review" --api-port 18091 --web-port 18092 --platform linux/arm64
+          workspace="$(python3 deploy/native_review.py value --name "$review" --field workspace)"
+          base=(docker compose --env-file "$workspace/compose.env" -f deploy/compose.native-review.yml)
+          "${base[@]}" config --quiet
+          "${base[@]}" -f deploy/compose.yml config --quiet
+          "${base[@]}" -f deploy/compose.yml -f deploy/compose.dev.yml config --quiet
+          "${base[@]}" -f deploy/compose.atlas.yml config --quiet
       - name: Retain server phase timings
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -422,7 +338,7 @@ jobs:
           for target in ${IMAGE_TARGETS//,/ }; do
             case "$target" in
               web)
-                image=web
+                image=fleetworks-web
                 docker run --rm --entrypoint node "${image}:${VERSION}" -e 'process.exit(0)' ;;
               runtime)
                 image=fleetworks-runtime
@@ -467,45 +383,28 @@ jobs:
         with:
           ref: ${{ env.FLEETWORKS_HEAD }}
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@1.95.0
-      - name: Validate backend provisioning and standalone Compose
+      - name: Exercise standalone packaged backend and selected Web
         env:
           REVIEW_ARCH: ${{ matrix.arch }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 -B -m unittest discover -s deploy -p test_native_review.py
-          review="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${REVIEW_ARCH}"
-          python3 deploy/native_review.py init --name "$review" --api-port 18091 --platform "linux/${REVIEW_ARCH}"
-          workspace="$(python3 deploy/native_review.py value --name "$review" --field workspace)"
-          docker compose --env-file "$workspace/compose.env" -f deploy/compose.native-review.yml config --quiet
-      - name: Exercise packaged Compose through native Venture
-        env:
-          DOCKER_DEFAULT_PLATFORM: linux/${{ matrix.arch }}
+          INCLUDE_WEB: ${{ needs.scope.outputs.web }}
           EXPECTED_MACHINE: ${{ matrix.machine }}
-          EXECUTABLE_PATTERN: ${{ matrix.executable }}
         shell: bash
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$FLEETWORKS_HEAD"
           test "$(uname -m)" = "$EXPECTED_MACHINE"
-          test "$(rustc -vV | sed -n 's/^host: //p')" = "$EXPECTED_MACHINE-unknown-linux-gnu"
-          rustc --version | grep -q '^rustc 1\.95\.0 '
-          test "$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')" = "$DOCKER_DEFAULT_PLATFORM"
-          if [[ ! -f deploy/verify.py ]]; then
-            echo "::error file=deploy/verify.py::Missing selected Compose smoke script"
-            exit 1
-          fi
-          python3 scripts/fleetworks_verify.py timed --phase compose-launcher-build -- \
-            python3 scripts/agent_cargo.py build --timings --locked -p fleetworks-venture --bin venture
-          file target/agents/debug/venture | grep -Ei "$EXECUTABLE_PATTERN"
+          test "$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')" = "linux/$REVIEW_ARCH"
+          python3 -B -m unittest discover -s deploy -p 'test_*.py'
+          web=()
+          if [[ "$INCLUDE_WEB" == true ]]; then web=(--web); fi
           python3 scripts/fleetworks_verify.py timed --phase compose-build-and-smoke -- \
-            python3 deploy/verify.py --venture target/agents/debug/venture
-      - name: Exercise packaged development readiness
-        if: needs.scope.outputs.full == 'true' && matrix.arch == 'amd64'
+            python3 deploy/verify.py --name "ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$REVIEW_ARCH" \
+              --platform "linux/$REVIEW_ARCH" "${web[@]}" --atlas --source-journey
+      - name: Exercise packaged development Web readiness
+        if: needs.scope.outputs.full == 'true' && needs.scope.outputs.web_dev == 'true' && matrix.arch == 'amd64'
         run: |
           python3 scripts/fleetworks_verify.py timed --phase compose-dev-smoke -- \
-            python3 deploy/verify.py --venture target/agents/debug/venture --dev
+            python3 deploy/verify.py --name "dev-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --platform linux/amd64 --web --dev
       - name: Retain Compose phase timings
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -513,7 +412,7 @@ jobs:
           name: fleetworks-compose-timings-${{ matrix.arch }}
           path: |
             ${{ runner.temp }}/fleetworks-timings.jsonl
-            target/agents/cargo-timings/*.html
+            .agent-scratch/native-review/ci-*/public-smoke-*.json
           if-no-files-found: ignore
           retention-days: 7
 
@@ -536,7 +435,7 @@ jobs:
 
   required:
     name: Fleetworks required
-    needs: [scope, native, desktop, server, compose, bert, web, images]
+    needs: [scope, desktop, server, compose, bert, web, images]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -544,7 +443,6 @@ jobs:
       - name: Require success for every selected scope
         env:
           SCOPE_RESULT: ${{ needs.scope.result }}
-          NATIVE_SELECTED: ${{ needs.scope.outputs.native }}
           DESKTOP_SELECTED: ${{ needs.scope.outputs.desktop }}
           SERVER_SELECTED: ${{ needs.scope.outputs.server }}
           COMPOSE_SELECTED: ${{ needs.scope.outputs.compose }}
@@ -555,7 +453,6 @@ jobs:
           IMAGE_TARGETS: ${{ needs.scope.outputs.image_targets }}
           QUEUE_SELECTED: ${{ needs.scope.outputs.queue }}
           STORAGE_SELECTED: ${{ needs.scope.outputs.storage }}
-          NATIVE_RESULT: ${{ needs.native.result }}
           DESKTOP_RESULT: ${{ needs.desktop.result }}
           SERVER_RESULT: ${{ needs.server.result }}
           COMPOSE_RESULT: ${{ needs.compose.result }}
@@ -589,7 +486,6 @@ jobs:
             true:true|false:true|false:false) ;;
             *) echo '::error::Development browser scope needs the web gate'; failed=1 ;;
           esac
-          verify native "$NATIVE_SELECTED" "$NATIVE_RESULT" || failed=1
           verify desktop "$DESKTOP_SELECTED" "$DESKTOP_RESULT" || failed=1
           verify server "$SERVER_SELECTED" "$SERVER_RESULT" || failed=1
           verify compose "$COMPOSE_SELECTED" "$COMPOSE_RESULT" || failed=1

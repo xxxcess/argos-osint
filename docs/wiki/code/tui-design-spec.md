@@ -1,5 +1,7 @@
 # TUI design contract
 
+> Historical reference: Venture, the six terminal clients and the legacy `argos` executable were retired on 2026-11-12. Source paths, commands and verification below describe the earlier implementation and are not current instructions. Use [native verification](native-verification.md) and the [retirement disposition](../../archive/cli-retirement.md).
+
 [Code route](index.md) · [Wiki](../../index.md)
 
 Read this contract and the relevant [component catalog](tui-components.md) entries before changing `crates/argos-osint-bin/src/tui/`. Keep the terminal UI simple: no new chrome, motion, or density modes. React Native presentation follows the [Fleetworks look and feel](react-ui.md#fleetworks-look-and-feel), where component design may vary inside the theme. That latitude does not transfer here. Profile's current presentation, 20-view inventory and acceptance matrix are specified in [profile-analytics-dashboard.md](profile-analytics-dashboard.md). That document supersedes the older 35-widget and focused-only accordion presentation; telemetry/history and [metric semantics](profile-dashboard-and-search.md#metric-dictionary) remain authoritative.

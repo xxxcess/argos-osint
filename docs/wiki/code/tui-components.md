@@ -1,5 +1,7 @@
 # TUI components
 
+> Historical reference: Venture, the six terminal clients and the legacy `argos` executable were retired on 2026-11-12. Source paths, commands and verification below describe the earlier implementation and are not current instructions. Use [native verification](native-verification.md) and the [retirement disposition](../../archive/cli-retirement.md).
+
 [Code route](index.md) · [Wiki](../../index.md)
 
 The [design contract](tui-design-spec.md) preserves the palette in `theme.rs`. Profile follows the [20-view dashboard contract](profile-analytics-dashboard.md) and retains metric semantics/history in [profile-dashboard-and-search.md](profile-dashboard-and-search.md). Components render immutable data; storage reads belong to background refresh/detail delivery.

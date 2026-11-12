@@ -21,18 +21,19 @@ Without that setting, both retain the normal launcher `.next` behavior. The isol
 
 Rust 1.95.0 is pinned. Agents build through `python3 scripts/agent_cargo.py … --locked`, which writes to `target/agents`. Leave `ARGOS_EMBED` unset. The wrapper also removes inherited values. Use `cargo fmt` directly. Keep `target/debug` for the user's builds. Local checks use the host's native architecture.
 
-For Fleetworks client, service, deployment or web work, start with the [scope planner](ci.md#fleetworksyml--scoped-branch-checks). `local` runs the selected host-native iteration checks and includes working-tree paths. Venture and client unit tests need no datastore. Run the selected hosted checks for platform, server and packaged evidence. Use the embedded gate for affected compatibility and embedded-storage behavior.
+For Fleetworks client, service, deployment or web work, start with the [scope planner](ci.md#fleetworksyml--scoped-branch-checks). `local` runs the selected host-native iteration checks and includes working-tree paths. Native client contract and workspace unit tests need no datastore. Run the selected hosted checks for platform, server and packaged evidence. Use the embedded gate for affected compatibility and embedded-storage behavior.
 
-### Development loops: local CLI and Docker
+<a id="development-loops-local-cli-and-docker"></a>
 
-Fleetworks has a Rune macOS client, an independently operated Linux backend and Intel Web. The app connects to the gateway; Venture retains external deployment and compatibility CLI operations. Pick the shortest loop that exercises the changed contract, then widen. The commands below are the fast paths; deployment details stay in the [deployment guide](../../../deploy/README.md).
+### Development loops: native app and Docker
+
+Fleetworks has a Rune macOS client, an independently operated Linux backend and Intel Web. The app connects to the gateway; direct Docker Compose operates services. Pick the shortest loop that exercises the changed contract, then widen. The commands below are the fast paths; deployment details stay in the [deployment guide](../../../deploy/README.md).
 
 [![Fleetworks development loops](../../diagrams/dev-loops.svg)](../../diagrams/dev-loops.html)
 
 | Changed code | Loop | Rebuild needed |
 | --- | --- | --- |
 | Rune app and its client/workspace contracts | **1. Native app** | Scoped host debug tests, selected real-view captures and complete app bundle |
-| Retained Venture / CLI compatibility | **1b. Operator CLI** | Scoped host `cargo` build only |
 | `argos-api-host` roles, core, storage, jobs (service side) | **2. Runtime image** | `runtime` image |
 | `apps/web-desktop/app`, `packages/{ui,intel,api-client}/src` | **3. Web dev container** | None; files reload |
 | Web dependencies, relay, Next config, Dockerfile, Compose, SurrealDB wrapper, private search | **4. Image build** | Affected `web`, `runtime`, `surrealdb` or `search-index` image |
@@ -50,22 +51,11 @@ python3 scripts/fleetworks_candidate.py build-native --agent --target host --pro
 
 Use [selected native verification](native-verification.md) for affected Runtime/PNG/tree/script evidence. The helper prints the `.app` and manifest paths; add `--open` only when an actual GUI launch is intended. Native build/fixture commands do not provision a backend. Installed-app, minimum-OS and platform validation stay separate from fixture generation.
 
-**1b. Retained operator CLI loop.** Build the affected Venture/client binary and use a disposable operator workspace. This compatibility surface has its own callers and retirement gates; the native app never launches it.
-
-```sh
-python3 scripts/agent_cargo.py build --locked -p fleetworks-venture -p fleetworks-cli --bins
-python3 scripts/agent_cargo.py test --locked -p fleetworks-venture -p fleetworks-cli
-./target/agents/debug/venture --workspace ./.fleetworks status
-./target/agents/debug/venture --workspace ./.fleetworks client jobs --help
-```
-
-Users build into `target/debug` with plain `cargo build --locked` as in the README. Agents never write there. Running `venture client <app>` against an already running stack exercises a CLI change against real services without rebuilding any image.
-
-**2. Runtime image loop (service changes).** Service roles run from the `runtime` image, so a host build alone does not change them. `venture up` and `docker compose -f deploy/compose.yml up --build` rebuild the image from source. Compose sets core optimization level 1 for faster local builds; the Dockerfile default is 3. BuildKit cache mounts retain Cargo dependencies, so repeat builds recompile only changed crates. Use `local-net` (existing SurrealDB) or `compose-disk` for storage, then confirm with `venture status`, `venture logs --follow` and `venture client <app>`. For a server-feature check without containers, use the `server,nlp,classifier` graph in [Targeted local Rust builds](#targeted-local-rust-builds-and-tests-fast-iteration).
+**2. Runtime image loop (service changes).** Service roles run from the `runtime` image, so a host build alone does not change them. Provision the independent review directory with `deploy/native_review.py init`, build the `backend` Bake group, then explicitly start its preloaded images with `compose.native-review.yml`. Reuse the exact env file/project for `ps`, `logs` and `down`. BuildKit retains dependencies; rebuilding an image does not recreate a running consumer. For a server-feature check without containers, use the `server,nlp,classifier` graph in [Targeted local Rust builds](#targeted-local-rust-builds-and-tests-fast-iteration).
 
 [![Runtime service image development loop](../../diagrams/dev-loop-runtime.svg)](../../diagrams/dev-loop-runtime.html)
 
-**3. Web dev container loop.** `venture up --dev --storage local-net` runs the `web_dev` stage with `compose.dev.yml`. It mounts `apps/web-desktop/app/` and `packages/*/src/` read-only and Next reloads on save. Rebuild only after dependency, relay or Next configuration changes. Stop the stack before switching between dev and production profiles. Browser checks use isolated output as described under [Build and test](#build-and-test).
+**3. Web development loop.** The independently configured Next server uses a fixed internal gateway origin and separate WebRelay credential. For Docker development, layer `compose.yml` and `compose.dev.yml` over the same native-review base. Source mounts reload on save; dependency, relay or Next configuration changes require the affected image. Start/stop the exact selected Compose files and project explicitly. Browser checks use isolated output as described under [Build and test](#build-and-test).
 
 [![Web development container and browser loop](../../diagrams/dev-loop-web.svg)](../../diagrams/dev-loop-web.html)
 
@@ -76,13 +66,13 @@ Users build into `target/debug` with plain `cargo build --locked` as in the READ
 ```sh
 export VERSION="$(tr -d '[:space:]' < version.txt)"
 docker buildx bake -f deploy/docker-bake.hcl web                # one image
-docker buildx bake -f deploy/docker-bake.hcl venture fleetworks-brain
+docker buildx bake -f deploy/docker-bake.hcl backend
 docker build -f deploy/Dockerfile --target runtime -t fleetworks-runtime:local .
 docker build -f deploy/Dockerfile --target surrealdb -t fleetworks-surrealdb:3.3.4 .
-python3 deploy/verify.py --venture path/to/venture [--dev] [--no-build --image-ids ids.json]
+python3 deploy/verify.py --name isolated-review [--web] [--dev] [--atlas]
 ```
 
-`venture up --no-build` starts with preloaded images (`FLEETWORKS_RUNTIME_IMAGE`, `FLEETWORKS_WEB_IMAGE`, `FLEETWORKS_SURREAL_IMAGE`). All client images share one compile, so build only the targets you changed.
+The standalone Compose command uses `up --no-build --pull never` with the exact preloaded review tags. The [deployment guide](../../../deploy/README.md) supplies provisioning, env-file and project selection; no terminal-client images remain.
 
 **5. Hosted CI.** Preview the selected lanes with `python3 scripts/fleetworks_verify.py plan`, push, and inspect results for the exact revision as described in [CI](ci.md#fleetworksyml--scoped-branch-checks). Compose and packaged smokes on AMD64 and ARM64 run here.
 
@@ -94,7 +84,7 @@ Stable iteration order: static checks and unit tests (loop 1), then the affected
 
 ### Verification ownership and host resources
 
-One integration/build owner uses a stable feature graph and resource-based concurrency; see [execution policy](agent-workflow.md#coordinate-work-that-can-actually-run-in-parallel). Freeze edits before builds and reuse unaffected evidence. Workspace bin tests activate core fixtures; switching to core-only commands may rebuild dependencies.
+One integration/build owner uses a stable feature graph and resource-based concurrency; see [execution policy](agent-workflow.md#coordinate-work-that-can-actually-run-in-parallel). Freeze edits before builds and reuse unaffected evidence. The service-host development dependency activates core fixtures for workspace tests; changing activating targets may rebuild dependencies.
 
 ### Build cache hygiene
 
@@ -121,7 +111,7 @@ ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1 \
   --test storage_jobs <filter> -- --nocapture
 ```
 
-Use `--lib`, `--bin <bin>` or `--test <name>` for the relevant target. Preserve activating targets when matching workspace features. Confirm that tests ran. `python3 scripts/test_surreal.py --mode embedded --no-fail-fast` runs required embedded contracts. CLI, API and PTY checks follow the affected contract in [CI](ci.md).
+Use `--lib`, `--bin <bin>` or `--test <name>` for the relevant target. Preserve activating targets when matching workspace features. Confirm that tests ran. `python3 scripts/test_surreal.py --mode embedded --no-fail-fast` runs required embedded contracts. Native, API and administrative process checks follow the affected contract in [CI](ci.md).
 
 For an authorized focused Fleetworks storage contract, use an isolated pinned server and the network service feature graph. Resolve the checksum-verified executable with `python3 scripts/test_surreal.py --mode server --fetch-only`.
 
@@ -144,13 +134,13 @@ env -u ARGOS_SURREAL_MODE -u ARGOS_SURREAL_BIN -u ARGOS_SURREAL_REQUIRED \
   scripts/local_matrix.sh --storage embedded
 ```
 
-The gate runs format, Clippy, workspace tests, CLI smoke and required embedded storage. Parent mode variables stay unset so mode-selected storage runs once. Targeted storage tests set mode and required execution explicitly. Some native-only fixtures execute in both phases.
+The gate runs format, Clippy, workspace tests and required embedded storage. Parent mode variables stay unset so mode-selected storage runs once. Targeted storage tests set mode and required execution explicitly. Some native-only fixtures execute in both phases.
 
 A pull request into any branch other than `main` runs the selected Fleetworks checks and commit policy. It does not run the four-platform embedded builds. Those run on the push to `main` and by `gh workflow run embedded.yml --ref <branch>`. Dispatch `mutation.yml` for hosted mutation evidence. Once changes are published, inspect the checks for the exact revision with `gh pr checks`, `gh run list` or `gh run view --log-failed`. `.github` remains Code Architect-owned. MiniLM requires explicit opt-in.
 
 ## Storage facts
 
-- Fleetworks uses a workspace-specific network datastore. See [Venture storage selections](fleetworks.md#launch-the-compose-stack).
+- Fleetworks uses a workspace-specific network datastore. See [direct backend deployment](../../../deploy/README.md).
 - Network service builds use `--no-default-features --features server,nlp,classifier`.
 - The compatibility build and embedded storage contracts use `embedded,nlp,classifier`.
 - Domain storage uses SurrealDB. Only `fleetworks-jobs` may directly depend on SQLite (`rusqlite`); CI enforces that boundary and rejects LanceDB.
@@ -174,7 +164,7 @@ The seed corpus resolution order for the classifier is:
 
 ## Classifier bundle build workflow
 
-**Status:** bundle build/parity scripts, Venture setup, local admission and the background monitoring consumer are implemented. Verification results are recorded separately; these commands do not establish a quality or performance result. Synthetic-only installations retain the explicitly activated baseline until independently reviewed promotion evidence exists.
+**Status:** bundle build/parity scripts, explicit native maintenance, local admission and the background monitoring consumer are implemented. Verification results are recorded separately; these commands do not establish a quality or performance result. Synthetic-only installations retain the explicitly activated baseline until independently reviewed promotion evidence exists.
 
 - **Rebuild:** run `node scripts/build_classifier_bundle.mjs` to generate the committed bundle at `crates/argos-osint-core/assets/classifier/natural-classifier.js` from the verified vendored upstream files (`natural@8.2.6`, `apparatus@0.0.10`) via the deterministic adaptation patch. The script performs **no network access** at build time; the pinned packages must already be present locally.
 - **Verify:** run `node scripts/build_classifier_bundle.mjs --check` to compute the SHA-256 of the current bundle and compare it against the committed `source-manifest.json` entry; this verifies byte-for-byte fidelity and fails closed on upstream drift. Output includes `crates/argos-osint-core/assets/classifier/source-manifest.json` with upstream versions/commits/tarball+per-file hashes/adaptation list/bundle hash.

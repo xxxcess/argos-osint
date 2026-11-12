@@ -62,7 +62,7 @@ test("drift in each release-managed version is rejected", t => {
 
 test("crate version overrides and broad dependency updaters are rejected", t => {
   const root = fixture(t);
-  const member = join(root, "crates/argos-osint-bin/Cargo.toml");
+  const member = join(root, "crates/argos-osint-core/Cargo.toml");
   const original = readFileSync(member, "utf8");
   writeFileSync(member, original.replace("version.workspace = true", 'version = "0.1.0"'));
   assert.throws(() => checkVersions(root), /must inherit/);

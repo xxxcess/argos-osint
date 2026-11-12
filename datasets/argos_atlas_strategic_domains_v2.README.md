@@ -1,6 +1,6 @@
 # Fleetworks classifier v2 distinct-scenario dataset
 
-`argos_atlas_strategic_domains_v2.csv` is the labeled synthetic dataset for the optional Natural classifier. Copy it into the Venture workspace and select it with `venture train-legacy --file datasets/argos_atlas_strategic_domains_v2.csv`. The original CSV remains a frozen v1 baseline. The dataset version is `strategic-domains-v2-distinct-1`. [Training setup](../deploy/README.md#train-the-optional-natural-classifier)
+`argos_atlas_strategic_domains_v2.csv` is the labeled synthetic dataset for the optional Natural classifier. Select it through native Workstation readiness and explicitly confirm durable candidate-only Natural training; activation is a separate consented operation. The original CSV remains a frozen v1 baseline. The dataset version is `strategic-domains-v2-distinct-1`. [Training setup](../deploy/README.md#optional-maintenance-and-inference)
 
 ## What changed
 

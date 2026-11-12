@@ -1,82 +1,20 @@
-"""Offline contracts for the immutable native CLI candidate archive."""
+"""Offline contracts for the native Mac candidate package."""
 
-import io
 import json
 import os
 import plistlib
 import struct
 import subprocess
-import tarfile
+import sys
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
 from unittest import mock
 
-from fleetworks_candidate import BINARIES, NATIVE_APP, NATIVE_BINARY, NATIVE_MANIFEST
-from fleetworks_candidate import apple_versions, cargo_executable, cargo_native_command
-from fleetworks_candidate import checksum_line, extract, extract_native, native_output, package, package_native, sha256, tar_member
-
-
-class CandidateArchiveTests(unittest.TestCase):
-    def setUp(self):
-        scratch = tempfile.TemporaryDirectory()
-        self.addCleanup(scratch.cleanup)
-        self.root = Path(scratch.name)
-        self.version = "0.2.1"
-        self.target = "x86_64-unknown-linux-gnu"
-        self.revision = "1" * 40
-        self.binaries = self.root / "binaries"
-        self.binaries.mkdir()
-        for name in BINARIES:
-            path = self.binaries / name
-            path.write_bytes(f"fixture payload {name}\n".encode())
-            path.chmod(0o755)
-        self.license = self.root / "LICENSE"
-        self.license.write_bytes(b"fixture license\n")
-
-    def pack(self, name="archive"):
-        return package(self.root / name, self.binaries, self.license, self.version, self.target, self.revision)
-
-    def extract(self, archive, digest, revision=None):
-        destination = self.root / "install"
-        extract(archive, destination, digest, self.version, self.target, revision or self.revision)
-        return destination
-
-    def test_reproducible_archive_preserves_every_binary_and_its_mode(self):
-        archive, digest = self.pack()
-        duplicate, duplicate_digest = self.pack("duplicate")
-        self.assertEqual(archive.read_bytes(), duplicate.read_bytes())
-        self.assertEqual(digest, duplicate_digest)
-        self.assertEqual(archive.with_suffix(".gz.sha256").read_text(), checksum_line(archive, digest))
-        install = self.extract(archive, digest)
-        self.assertEqual((install / "LICENSE").read_bytes(), self.license.read_bytes())
-        for name in BINARIES:
-            path = install / "bin" / name
-            self.assertEqual(path.read_bytes(), (self.binaries / name).read_bytes())
-            self.assertTrue(os.access(path, os.X_OK))
-
-    def test_rejects_digest_sidecar_and_manifest_mismatches(self):
-        archive, digest = self.pack()
-        with self.assertRaisesRegex(ValueError, "packaging job's SHA-256"):
-            self.extract(archive, "0" * 64)
-        with self.assertRaisesRegex(ValueError, "manifest does not match"):
-            self.extract(archive, digest, "2" * 40)
-        archive.with_suffix(".gz.sha256").write_text("wrong\n")
-        with self.assertRaisesRegex(ValueError, "sidecar"):
-            self.extract(archive, digest)
-        self.assertFalse((self.root / "install").exists())
-
-    def test_rejects_unexpected_paths_before_extraction(self):
-        archive, _ = self.pack()
-        with tarfile.open(archive, "w:gz") as tar:
-            tar.addfile(tar_member("../escape", 1, 0o644), io.BytesIO(b"x"))
-        digest = sha256(archive)
-        archive.with_suffix(".gz.sha256").write_text(checksum_line(archive, digest))
-        with self.assertRaisesRegex(ValueError, "unexpected"):
-            self.extract(archive, digest)
-        self.assertFalse((self.root / "escape").exists())
-        self.assertFalse((self.root / "install").exists())
+from fleetworks_candidate import NATIVE_APP, NATIVE_BINARY, NATIVE_MANIFEST
+from fleetworks_candidate import main, apple_versions, cargo_executable, cargo_native_command
+from fleetworks_candidate import checksum_line, extract_native, native_output, package_native, sha256
 
 
 class NativeAppTests(unittest.TestCase):
@@ -109,6 +47,13 @@ class NativeAppTests(unittest.TestCase):
                          run_id="123", attempt="2", workflow="fixture", runner=self.command_runner)
         arguments.update(overrides)
         return package_native(self.destination, self.binary, self.resources, **arguments)
+
+    def test_retired_terminal_archive_commands_are_not_supported(self):
+        for command in ("pack", "verify"):
+            with self.subTest(command=command), mock.patch.object(sys, "argv", ["fleetworks_candidate.py", command]), \
+                 mock.patch("sys.stderr"), self.assertRaises(SystemExit) as exited:
+                main()
+            self.assertEqual(exited.exception.code, 2)
 
     def test_packages_complete_app_with_numeric_versions_and_honest_manifest(self):
         result = self.pack(archive=True)

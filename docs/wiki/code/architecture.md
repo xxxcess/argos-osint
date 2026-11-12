@@ -14,7 +14,7 @@
 
 External operator tooling owns deployment origins, service processes, images and volumes. The Compose recipes publish their selected gateway/web ports on loopback; the isolated backend-only review recipe omits the web app. The gateway reaches private Brain, Tools, Control, Jobs and execution roles, plus configured Linux NLP, classifier and search services. Actor discovery uses private Tantivy behind the gateway's current canonical eligibility checks; selected dossiers come from authoritative SurrealDB. The Mac app receives bounded gateway projections and keeps engine, index and deployment ownership on Linux. [Actor discovery ownership](actor-search.md)
 
-[Venture](../../../apps/venture) retains operator workspace/Compose and owned host-service lifecycle. [Terminal clients](../../../apps/fleetworks-cli) remain compatibility surfaces while replacement and installed-app acceptance gates are open. Their launch/import paths are external operator work; the Rune app does not start a backend, web server or container. [Service startup and roles](fleetworks.md)
+Direct [Docker Compose](../../../deploy/README.md) operates backend services and optional Intel Web. Venture, the six terminal clients and legacy `argos` are retired. The Rune app connects to the gateway and never starts a backend, web server or container. [Service startup and roles](fleetworks.md)
 
 The brief worker runs stages and publication. Atlas uses a Jobs-owned embedded delivery queue with a collection worker and private NLP and classifier services. SurrealDB owns job execution state and domain records. Jobs exclusively owns disk-backed SQLite operational logs; scheduler cutover is pending the domain handoff and fencing migration.
 
@@ -22,7 +22,7 @@ The brief worker runs stages and publication. Atlas uses a Jobs-owned embedded d
 
 `@tag:surreal-storage`
 
-Service processes share Venture's selected SurrealDB endpoint. `local-net` uses existing services. `local-process` manages disk-backed SurrealDB on the host. Compose disk, host disk/memory, and remote database modes are also available. [Storage map](storage.md) · [Planned Jobs ownership and rollout scopes](jobs-persistence.md)
+Service processes share the explicitly configured private SurrealDB endpoint. The standalone Compose recipe provisions a persistent authenticated database; independently managed deployments supply their own endpoint and credentials. [Storage map](storage.md) · [Planned Jobs ownership and rollout scopes](jobs-persistence.md)
 
 [![Persistence stack](../../diagrams/persistence.svg)](../../diagrams/persistence.html)
 
@@ -37,7 +37,7 @@ The native Models page reads and saves the selected backend's configured role de
 
 Profile manages the selected backend's shared provider accounts and tool credentials; Models manages its shared roles and defaults. Authorized changes and portable import/export use explicit gateway operations and confirmed configuration revisions. Workstation observes readiness. Selecting a different local child changes future request origin and its activity filter while preserving the same backend-global configuration, actors and models. Accepted work retains its captured workstation/child origin and configuration revision; later selection or configuration changes preserve that history. [Native connections and context](native-connections.md) · [Protected local workspaces](native-workspaces.md)
 
-Saved gateway connections are separate local metadata: a name, canonical origin and protected credential-file reference under the verified native container. Token bytes remain in the explicitly selected private file. Destination changes invalidate the old client/context and require review of unsaved backend drafts. The user independently selects a managed child; a connection profile does not partition the backend corpus or launch services. Retained Venture can explicitly import reviewed provider configuration/model defaults into an operator workspace; the native client performs no automatic legacy import.
+Saved gateway connections are separate local metadata: a name, canonical origin and protected credential-file reference under the verified native container. Token bytes remain in the explicitly selected private file. Destination changes invalidate the old client/context and require review of unsaved backend drafts. The user independently selects a managed child; a connection profile does not partition the backend corpus or launch services. Portable configuration import/export is an explicit confirmed backend operation; the native client performs no automatic legacy import.
 
 ## Brain browsing and direct associations
 
@@ -202,7 +202,7 @@ Summary flush and local index worker rows describe long-lived elected services, 
 
 The native app and [Intel Web](intel-web.md) use the versioned gateway. Server-loaded credentials distinguish Native, WebRelay, Operator and InternalService purposes, with independent permissions and current deployment/access scope. Loopback requests obey the same purpose, permission and context gates. Native work submissions require authenticated current registration and confirmed configuration authority; workstation Jobs/Logs enforce their scoped associations. Private Linux services use separate internal credentials and remain behind the gateway.
 
-The browser enters through the same-origin web relay, whose purpose credential stays server-side. Connect exchanges a registered context for a server-issued session; subsequent requests and streams enforce current session, Host/Origin, permission and registration checks. A displayed Connect ID selects context and grants no authentication authority. Native Open Intel Web uses that real gate. Topology remains in the browser; native Brain provides discovery and authoritative dossier controls. The retained operator stack supervisor waits for storage-backed readiness before starting its selected web process. [Web lifecycle](../../diagrams/intel-web.html)
+The browser enters through the same-origin web relay, whose purpose credential stays server-side. Connect exchanges a registered context for a server-issued session; subsequent requests and streams enforce current session, Host/Origin, permission and registration checks. A displayed Connect ID selects context and grants no authentication authority. Native Open Intel Web uses that real gate. Topology remains in the browser; native Brain provides discovery and authoritative dossier controls. Direct Compose readiness checks and separately configured web startup are operator actions. [Web lifecycle](../../diagrams/intel-web.html)
 
 The existing [native verifier](../../../scripts/fleetworks_verify.py) selects and renders shared-view PNG/tree fixtures; scoped Cargo tests separately exercise Runtime/state/input assertions. The [candidate helper](../../../scripts/fleetworks_candidate.py) builds/packages a staged macOS `.app`, manifest, ZIP and checksums. The [native CI lane](../../../.github/workflows/fleetworks.yml) selects both architectures through the [shared Mac workflow](../../../.github/workflows/fleetworks-native.yml), with exact source/toolchain/Rune identity and verification of downloaded artifact bytes. These source paths are implemented; complete dual-architecture hosted execution, installed-app GUI/OS integration, tested minimum macOS, signing/notarization and trusted publication retain separate acceptance gates. Generated frames and bundle checks carry their own evidence and cannot establish those later outcomes. [Native verification limits](native-verification.md)
 
@@ -216,7 +216,7 @@ Service hosts run network and storage operations asynchronously. CPU-intensive h
 
 `@tag:process-lifecycle`
 
-Venture owns the selected workspace's Compose project and supervises the native SurrealDB process it starts; legacy Rabbit ownership remains readable for shutdown. Explicit stop tears down owned resources, preserves workspace data, and leaves independently managed endpoints running. The HTTP host handles SIGINT and SIGTERM and bounds graceful connection draining. See the [Venture guide](fleetworks.md#launch-the-compose-stack).
+The operator selects the deployment directory, env file and Compose project explicitly. Compose stop/down acts on that project and preserves persistent backend data; native application close leaves services and accepted work running. The HTTP host handles SIGINT and SIGTERM and bounds graceful connection draining. Retired host-process ownership records remain historical recovery material, not a current launcher contract. See the [deployment guide](../../../deploy/README.md).
 
 ## Atlas background ownership
 

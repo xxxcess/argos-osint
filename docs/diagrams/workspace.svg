@@ -53,7 +53,7 @@
 <text x="736" y="650" class="note">Later folder / IP changes do not rewrite accepted history</text>
 <rect x="48" y="684" width="572" height="124" rx="6" class="node"/>
 <text x="64" y="714" class="label">External operator workspace</text>
-<text x="64" y="742" class="note">Venture / dedicated deployment files / Docker volumes</text>
+<text x="64" y="742" class="note">Direct Compose / backend files / Docker volumes</text>
 <text x="64" y="768" class="note">Separate from the protected native home container</text>
 <text x="64" y="794" class="note">The Mac app never launches this stack</text>
 <text x="336" y="116" class="minor">Authenticated ensure / current proof</text>

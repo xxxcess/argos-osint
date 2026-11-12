@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
     "crates/argos-osint-core",
-    "crates/argos-osint-bin",
     "crates/argos-osint-api",
     "services/api-host",
     "services/search-index",
@@ -10,12 +9,10 @@ members = [
     "crates/fleetworks-workspace",
     "crates/fleetworks-broker",
     "crates/fleetworks-jobs",
-    "apps/venture",
-    "apps/fleetworks-cli",
     "apps/fleetworks-desktop",
 ]
 
-default-members = ["apps/venture", "apps/fleetworks-cli"]
+default-members = ["apps/fleetworks-desktop"]
 
 [workspace.package]
 edition = "2021"
@@ -28,14 +25,11 @@ rust-version = "1.95"
 anyhow = "1"
 chrono = { version = "0.4", features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
-crossterm = { version = "0.28", features = ["event-stream"] }
 dirs = "5"
 futures-util = "0.3"
-ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_28", "all-widgets", "layout-cache", "macros", "underline-color"] }
 regex = "1"
 rquickjs = { version = "=0.14.0", default-features = false, features = ["std"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "multipart"] }
-rpassword = "7"
 rune = { git = "https://github.com/anomalyco/rune", rev = "205b8d4f7e60fa6248b83bfbbb4c6a06096c59ff", default-features = false, features = ["accessibility", "embedded-fonts", "metal-backend", "native-file-dialog", "svg"] }
 rune-kit = { git = "https://github.com/anomalyco/rune", rev = "205b8d4f7e60fa6248b83bfbbb4c6a06096c59ff", default-features = false, features = ["markdown"] }
 serde = { version = "1", features = ["derive"] }

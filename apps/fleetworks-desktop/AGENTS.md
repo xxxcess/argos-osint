@@ -1,6 +1,6 @@
 # Fleetworks native client
 
-Read the root instructions and the active native cutover handoff first. Use the repository Rust style skill. This app is a macOS Rune/rune-kit API client; the gateway and Linux workers own domain operations. Never import Venture, terminal UI, storage/search/inference engines, Docker APIs, a webview, embedded HTTP server or process runner.
+Read the root instructions and the active native cutover handoff first. Use the repository Rust style skill. This app is a macOS Rune/rune-kit API client; the gateway and Linux workers own domain operations. Never restore retired launcher/terminal entry points or import terminal UI, storage/search/inference engines, Docker APIs, a webview, embedded HTTP server or process runner.
 
 Production and verification share `app::view`, `State`, theme and handlers. The `native_fixture` example supplies only synthetic state/effects and must not read real homes, credentials or gateways, create/reset real folders, or launch a browser. Use Rune Runtime state/input assertions before PNG/tree inspection; generated or unviewed images are not visual approval. A missing renderer/adapter is blocked evidence, not success.
 

@@ -12,12 +12,8 @@
 !services/
 !services/**
 !apps/
-!apps/fleetworks-cli/
-!apps/fleetworks-cli/**
 !apps/fleetworks-desktop/
 !apps/fleetworks-desktop/Cargo.toml
-!apps/venture/
-!apps/venture/**
 !apps/web-desktop/
 !apps/web-desktop/**
 !packages/

@@ -5,7 +5,7 @@ services:
 
   atlas:
     extends:
-      file: compose.yml
+      file: compose.native-review.yml
       service: worker
     command: [--role, atlas-worker]
     environment:
@@ -28,13 +28,9 @@ services:
         condition: service_healthy
 
   nlp: &private-engine
-    image: ${FLEETWORKS_RUNTIME_IMAGE:-fleetworks-runtime:local}
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile
-      target: runtime
-      args:
-        FLEETWORKS_CORE_OPT_LEVEL: ${FLEETWORKS_CORE_OPT_LEVEL:-1}
+    image: ${FLEETWORKS_RUNTIME_IMAGE:?Provision the isolated runtime image}
+    pull_policy: never
+    platform: ${PLATFORM}
     user: "${FLEETWORKS_UID:?Set FLEETWORKS_UID}:${FLEETWORKS_GID:?Set FLEETWORKS_GID}"
     command: [--role, nlp, --port, "8080"]
     environment:
@@ -43,8 +39,8 @@ services:
       FLEETWORKS_INTERNAL_TOKEN_FILE: /run/secrets/internal_token
       FLEETWORKS_API_TOKEN_FILE: /run/secrets/internal_token
       FLEETWORKS_API_HEALTH_HOST: "127.0.0.1:8080"
-      FLEETWORKS_ACCESS_SCOPE_ID: ${FLEETWORKS_ACCESS_SCOPE_ID:-}
-      FLEETWORKS_ACCESS_EPOCH: ${FLEETWORKS_ACCESS_EPOCH:-}
+      FLEETWORKS_ACCESS_SCOPE_ID: ${FLEETWORKS_ACCESS_SCOPE_ID:?Retain the provisioned scope}
+      FLEETWORKS_ACCESS_EPOCH: ${FLEETWORKS_ACCESS_EPOCH:?Retain the provisioned epoch}
     secrets:
       - internal_token
     healthcheck:
@@ -58,7 +54,7 @@ services:
     init: true
     read_only: true
     cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
+    security_opt: ["no-new-privileges:true"]
     restart: unless-stopped
     stop_grace_period: 20s
 
@@ -73,8 +69,8 @@ services:
       FLEETWORKS_INTERNAL_TOKEN_FILE: /run/secrets/internal_token
       FLEETWORKS_API_TOKEN_FILE: /run/secrets/internal_token
       FLEETWORKS_API_HEALTH_HOST: "127.0.0.1:8080"
-      FLEETWORKS_ACCESS_SCOPE_ID: ${FLEETWORKS_ACCESS_SCOPE_ID:-}
-      FLEETWORKS_ACCESS_EPOCH: ${FLEETWORKS_ACCESS_EPOCH:-}
+      FLEETWORKS_ACCESS_SCOPE_ID: ${FLEETWORKS_ACCESS_SCOPE_ID:?Retain the provisioned scope}
+      FLEETWORKS_ACCESS_EPOCH: ${FLEETWORKS_ACCESS_EPOCH:?Retain the provisioned epoch}
       LD_LIBRARY_PATH: /workspace/models/atlas-bert/lib
     volumes:
       - type: bind
@@ -90,4 +86,4 @@ services:
 
 secrets:
   internal_token:
-    file: ${FLEETWORKS_INTERNAL_TOKEN_FILE:-${FLEETWORKS_HOST_WORKSPACE}/secrets/internal-token}
+    file: ${FLEETWORKS_HOST_WORKSPACE}/secrets/internal-token

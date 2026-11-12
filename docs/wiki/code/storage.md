@@ -4,7 +4,7 @@
 
 `@tag:surreal-storage`
 
-SurrealDB owns domain data. Jobs is moving operational state to SQLite and delivery to embedded RocksDB; see the [planned ownership and rollout scopes](jobs-persistence.md). Services open the [Venture-selected network endpoint](fleetworks.md#launch-the-compose-stack). The browser and terminal clients use the authenticated API.
+SurrealDB owns domain data. Jobs is moving operational state to SQLite and delivery to embedded RocksDB; see the [planned ownership and rollout scopes](jobs-persistence.md). Services open the [explicitly configured network endpoint](fleetworks.md#launch-the-compose-stack). The native app and browser use the authenticated API.
 
 | Responsibility | Source entry |
 | --- | --- |
@@ -89,7 +89,7 @@ NLP-off body matching: word-boundary exact pass always runs on cleaned bodies; N
 
 ## Intel web read service
 
-The [UI-independent Intel service](../../../crates/argos-osint-core/src/intel_service.rs) supplies keyset article occurrence pages and brief projections to the [local HTTP API](intel-web.md). Bootstrap adds the `atlas_article_bulletin` category/time/ID index idempotently; record formats and schema version remain unchanged. The API host owns the repository and the CLI supervisor does not open it. Existing embedded locks/server leases therefore remain authoritative.
+The [UI-independent Intel service](../../../crates/argos-osint-core/src/intel_service.rs) supplies keyset article occurrence pages and brief projections to the [local HTTP API](intel-web.md). Bootstrap adds the `atlas_article_bulletin` category/time/ID index idempotently; record formats and schema version remain unchanged. The API host owns the repository and the native app does not open it. Existing embedded locks/server leases therefore remain authoritative.
 
 ## Actor catalog
 

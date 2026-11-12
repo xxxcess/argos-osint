@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 360" role="img" aria-labelledby="dev-loop-cli-title dev-loop-cli-desc">
-<title id="dev-loop-cli-title">Local CLI and TUI development loop</title>
-<desc id="dev-loop-cli-desc">Venture and the six fleetworks-* terminal clients build and test directly on the host. Running a client against an active stack exercises real HTTP routes without rebuilding any Docker image.</desc>
+<title id="dev-loop-cli-title">Historical CLI development loop · retired 2026-11-12</title>
+<desc id="dev-loop-cli-desc">Historical diagram of the retired Venture and six terminal-client development loop. These executables were removed on 2026-11-12. The current supported client loop is the Rune native app; independently operated Docker services supply the backend. Old arrows below record the former workflow, not runnable current commands.</desc>
 <defs>
   <marker id="dev-loop-cli-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker>
 </defs>
@@ -17,7 +17,7 @@
   .edge{marker-end:url(#dev-loop-cli-arrow)}
 </style>
 <rect width="960" height="360" fill="#f5f5f5"/>
-<text x="40" y="36" class="heading" text-anchor="start">Avenue 1 · Host Cargo build, TestBackend fixtures, and live API calls</text>
+<text x="40" y="36" class="heading" text-anchor="start">Historical CLI loop · retired 2026-11-12</text>
 <path d="M240 120H284" class="edge"/>
 <path d="M500 120H544" class="edge"/>
 <path d="M640 160V236" class="edge"/>
@@ -26,27 +26,27 @@
 <path d="M736 120H768V236" class="edge"/>
 <rect x="40" y="80" width="200" height="80" rx="6" class="node"/>
 <text x="140" y="108" class="label" text-anchor="middle">Edit CLI or Venture</text>
-<text x="140" y="128" class="note" text-anchor="middle">Client & workspace crates</text>
-<text x="140" y="146" class="code" text-anchor="middle">apps/{fleetworks-cli,venture}</text>
+<text x="140" y="128" class="note" text-anchor="middle">Client + workspace crates</text>
+<text x="140" y="146" class="code" text-anchor="middle">Former client crates</text>
 <rect x="284" y="80" width="216" height="80" rx="6" class="accent"/>
-<text x="392" y="108" class="label" text-anchor="middle">Host Cargo build & test</text>
+<text x="392" y="108" class="label" text-anchor="middle">Host Cargo build + test</text>
 <text x="392" y="128" class="note" text-anchor="middle">Unit + TestBackend views</text>
-<text x="392" y="146" class="code" text-anchor="middle">agent_cargo.py → target/agents</text>
+<text x="392" y="146" class="code" text-anchor="middle">Agent shared cache</text>
 <rect x="544" y="80" width="192" height="80" rx="6" class="node"/>
 <text x="640" y="108" class="label" text-anchor="middle">Interactive TTY</text>
 <text x="640" y="128" class="note" text-anchor="middle">Full-screen Ratatui shell</text>
-<text x="640" y="146" class="code" text-anchor="middle"><app> tui (stdin+stdout TTY)</text>
+<text x="640" y="146" class="code" text-anchor="middle">TTY → Ratatui</text>
 <rect x="284" y="236" width="216" height="80" rx="6" class="node"/>
-<text x="392" y="264" class="label" text-anchor="middle">Non-TTY & one-shot</text>
+<text x="392" y="264" class="label" text-anchor="middle">Non-TTY + one-shot</text>
 <text x="392" y="284" class="note" text-anchor="middle">Line prompt or JSON stdout</text>
 <text x="392" y="302" class="code" text-anchor="middle">piped tui · --json commands</text>
 <rect x="544" y="236" width="192" height="80" rx="6" class="node"/>
 <text x="640" y="264" class="label" text-anchor="middle">Workspace credentials</text>
 <text x="640" y="284" class="note" text-anchor="middle">Origin + bearer token</text>
-<text x="640" y="302" class="code" text-anchor="middle">.fleetworks/secrets/api-token</text>
+<text x="640" y="302" class="code" text-anchor="middle">Private token file</text>
 <rect x="768" y="236" width="152" height="80" rx="6" class="accent"/>
 <text x="844" y="264" class="label" text-anchor="middle">Running API</text>
 <text x="844" y="284" class="note" text-anchor="middle">Zero image rebuild</text>
 <text x="844" y="302" class="code" text-anchor="middle">127.0.0.1:8080</text>
-<text x="40" y="340" class="note" text-anchor="start">Users build into target/debug; agents use agent_cargo.py (target/agents). Cell dumps render to PNG via scripts/render_tui_cells.py.</text>
+<a href="dev-loop-native.html"><text x="40" y="340" class="note">Historical only. Current workflow: native app development and independent Docker services.</text></a>
 </svg>

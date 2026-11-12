@@ -2,7 +2,7 @@
 
 [Wiki](../index.md)
 
-These are dated implementation records, audits and checklists. They may describe retired backends, UI layouts or agent tooling. Current behavior and instructions belong to the [concept](../wiki/concepts/index.md) and [code](../wiki/code/index.md) routes. Keep historical results intact; promote enduring contracts into their canonical wiki page.
+These are dated implementation records, audits and checklists. They may describe retired backends, UI layouts or agent tooling. Current behavior and instructions belong to the [concept](../wiki/concepts/index.md) and [code](../wiki/code/index.md) routes. Keep historical results intact; promote enduring contracts into their canonical wiki page. Venture, terminal-client and legacy `argos` records have a [2026-11-12 retirement disposition](cli-retirement.md); their commands are historical.
 
 ## Records
 

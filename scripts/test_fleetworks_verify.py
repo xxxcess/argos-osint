@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from fleetworks_verify import ALL_IMAGES, ALL_SCOPES, BACKEND_IMAGES, CLIENT_IMAGES, RUST_IMAGES, component_plan, path_images, path_scopes, select_scopes
+from fleetworks_verify import ALL_IMAGES, ALL_SCOPES, BACKEND_IMAGES, RUST_IMAGES, component_plan, path_images, path_scopes, select_scopes
 
 PLANNER = Path(__file__).with_name("fleetworks_verify.py").resolve()
 
@@ -17,7 +17,7 @@ class PathScopesTests(unittest.TestCase):
     def test_explicit_native_is_mac_only_and_backend_excludes_web_and_clients(self):
         self.assertEqual(component_plan("native", ALL_SCOPES, ALL_IMAGES), ({"desktop"}, set()))
         scopes, images = component_plan("backend", set(), set())
-        self.assertFalse(scopes & {"native", "desktop", "web", "web_dev"})
+        self.assertFalse(scopes & {"desktop", "web", "web_dev"})
         self.assertEqual(images, set(BACKEND_IMAGES))
         self.assertEqual(component_plan("all", set(), set()), (set(ALL_SCOPES), set(ALL_IMAGES)))
 
@@ -28,16 +28,11 @@ class PathScopesTests(unittest.TestCase):
             "docs/wiki/code/ci.md": set(),
             "docs/diagrams/stack.svg": set(),
             ".planning/example/task_plan.md": set(),
-            "apps/fleetworks-cli/src/jobs.rs": {"native", "images"},
-            "apps/fleetworks-cli/src/bin/fleetworks-brain.rs": {"native", "images"},
-            "apps/fleetworks-cli/src/brain_ui.rs": {"native", "images"},
             "apps/fleetworks-desktop/src/views/brain.rs": {"desktop"},
             "apps/fleetworks-desktop/resources/Info.plist": {"desktop"},
             "scripts/fleetworks_native_verify.py": {"desktop"},
             "scripts/test_fleetworks_native_verify.py": {"desktop"},
             ".github/workflows/fleetworks-native.yml": {"desktop"},
-            "apps/venture/src/main.rs": {"native", "server", "compose", "images"},
-            "apps/venture/src/classifier.rs": {"native", "server", "compose", "bert", "images"},
             "apps/web-desktop/server.mjs": {"web", "web_dev", "server", "compose", "images"},
             "apps/web-desktop/app/page.tsx": {"web", "server", "compose", "images"},
             "apps/web-desktop/app/api/v1/route.ts": {"web", "web_dev", "server", "compose", "images"},
@@ -45,6 +40,8 @@ class PathScopesTests(unittest.TestCase):
             "deploy/Dockerfile": {"server", "compose", "images"},
             "deploy/docker-bake.hcl": {"server", "compose", "images"},
             "deploy/Dockerfile.dockerignore": {"server", "compose", "images"},
+            "deploy/compose.yml": {"web", "web_dev", "server", "compose"},
+            "deploy/compose.dev.yml": {"web", "web_dev", "server", "compose"},
             "deploy/compose.native-review.yml": {"server", "compose"},
             "deploy/start-search-index.sh": {"server", "compose", "images"},
             "deploy/compose.atlas.yml": {"server", "compose", "bert"},
@@ -63,15 +60,14 @@ class PathScopesTests(unittest.TestCase):
             "tools/atlas-bert/src/main.rs": {"bert"},
             "scripts/fixtures/atlas_bert": {"bert", "server", "queue", "web", "web_dev"},
             ".github/workflows/atlas-bert.yml": {"bert"},
-            "Cargo.lock": {"native", "desktop", "server", "storage", "compose", "queue", "images"},
+            "Cargo.lock": {"desktop", "server", "storage", "compose", "queue", "images"},
             "pnpm-lock.yaml": {"web", "web_dev", "server", "compose", "images"},
-            "crates/fleetworks-contracts/src/lib.rs": {"native", "desktop", "server", "storage", "compose", "queue", "images"},
+            "crates/fleetworks-contracts/src/lib.rs": {"desktop", "server", "storage", "compose", "queue", "images"},
             "packages/api-client/src/index.ts": {"web", "server", "compose", "images"},
             "scripts/surrealdb-release.json": {"server", "storage", "queue"},
             ".github/workflows/fleetworks.yml": set(),
             ".github/workflows/embedded.yml": set(),
             "scripts/fleetworks_verify.py": set(),
-            "crates/argos-osint-bin/src/cli.rs": set(),
             "scripts/fleetworks_config_reset.py": set(),
             "scripts/test_fleetworks_config_reset.py": set(),
             "new/unknown/build input": set(ALL_SCOPES),
@@ -80,11 +76,9 @@ class PathScopesTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(path_scopes(path), expected)
 
-    def test_server_image_targets_follow_one_binary(self):
-        self.assertEqual(path_images("apps/fleetworks-cli/src/bin/fleetworks-brain.rs"), {"fleetworks-brain"})
-        self.assertEqual(path_images("apps/fleetworks-cli/src/brain_ui.rs"), {"fleetworks-brain"})
-        self.assertEqual(path_images("apps/fleetworks-cli/src/lib.rs"), set(CLIENT_IMAGES) - {"venture"})
-        self.assertEqual(path_images("apps/venture/src/main.rs"), {"venture"})
+    def test_images_are_backend_and_optional_web_only(self):
+        self.assertEqual(ALL_IMAGES, {"runtime", "surrealdb", "search-index", "web"})
+        self.assertNotIn("native", ALL_SCOPES)
         self.assertEqual(path_images("apps/web-desktop/app/page.tsx"), {"web"})
         self.assertEqual(path_images("deploy/Dockerfile"), ALL_IMAGES)
         self.assertEqual(path_images("README.md"), set())
@@ -156,32 +150,29 @@ class GitScopeTests(unittest.TestCase):
         self.assertEqual(actual_outputs, expected_outputs)
 
     def test_union_includes_each_changed_path_with_spaces(self):
-        head = self.commit("apps/fleetworks-cli/src/job list.rs", "deploy/start.sh")
+        head = self.commit("services/api-host/src/job list.rs", "deploy/start.sh")
         uncommitted = self.repo / "unknown.txt"
         uncommitted.write_text("Ignore working tree changes\n", encoding="utf-8")
         self.git("add", str(uncommitted))
-        clients = {f"fleetworks-{name}" for name in ("atlas", "brain", "jobs", "tools", "models", "profile")}
         self.assert_scopes(
             self.plan(self.start, head=head),
-            {"native", "server", "compose", "images"},
-            images=clients,
+            {"server", "queue", "compose", "images"},
+            images={"runtime"},
         )
 
     def test_pr_uses_merge_base_and_push_compares_both_revisions(self):
-        base = self.commit("apps/fleetworks-cli/src/old.rs")
+        base = self.commit("services/api-host/src/old.rs")
         self.git("checkout", "-qb", "review", self.start)
         head = self.commit("docs/review.md")
         self.assert_scopes(self.plan(base, event="pull_request", head=head), set())
-        clients = set(CLIENT_IMAGES) - {"venture"}
-        self.assert_scopes(self.plan(base, event="push", head=head), {"native", "images"}, images=clients)
+        self.assert_scopes(self.plan(base, event="push", head=head), {"server", "queue", "images"}, images={"runtime"})
 
     def test_rename_selects_both_paths(self):
-        base = self.commit("apps/fleetworks-cli/jobs.rs")
+        base = self.commit("services/api-host/jobs.rs")
         (self.repo / "deploy").mkdir()
-        self.git("mv", "apps/fleetworks-cli/jobs.rs", "deploy/jobs.rs")
+        self.git("mv", "services/api-host/jobs.rs", "deploy/jobs.rs")
         self.git("commit", "-qm", "rename fixture")
-        clients = set(CLIENT_IMAGES) - {"venture"}
-        self.assert_scopes(self.plan(base), {"native", "server", "compose", "images"}, images=clients)
+        self.assert_scopes(self.plan(base), {"server", "queue", "compose", "images"}, images={"runtime"})
 
     def test_unavailable_comparison_selects_all_scopes(self):
         for base in ("", "0" * 40, "1" * 40, "HEAD^"):
@@ -208,14 +199,14 @@ class GitScopeTests(unittest.TestCase):
         self.assert_scopes(self.plan(self.start, head=head), {"server", "images"}, images={"search-index"})
 
     def test_local_selection_adds_worktree_changes(self):
-        file = self.repo / "apps/fleetworks-cli/src/jobs.rs"
+        file = self.repo / "apps/fleetworks-desktop/src/jobs.rs"
         file.parent.mkdir(parents=True)
         file.write_text("local changes\n", encoding="utf-8")
         current = Path.cwd()
         try:
             os.chdir(self.repo)
             self.assertEqual(select_scopes("push", self.start, self.start), (set(), None))
-            self.assertEqual(select_scopes("push", self.start, self.start, worktree=True), ({"native", "images"}, None))
+            self.assertEqual(select_scopes("push", self.start, self.start, worktree=True), ({"desktop"}, None))
         finally:
             os.chdir(current)
 

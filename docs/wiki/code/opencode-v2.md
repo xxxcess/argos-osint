@@ -14,7 +14,7 @@ This page describes the explicitly selected OpenCode team profile. Its role/mode
 | `rust-coder` | none | `agents.<role>.model` | Investigate and implement assigned changes directly; return consultation, documentation and verification needs to the owning role; consult architect only for material unresolved contracts or architecture decisions; existing grounded scope is sufficient to proceed. |
 | `react-coder` | none | `agents.<role>.model` | Investigate and implement assigned changes directly; return consultation, documentation and verification needs to the owning role; consult architect only for material unresolved contracts or architecture decisions; existing grounded scope is sufficient to proceed. |
 | `reviewer` | `architect` | `agents.<role>.model` | Audit integrated diffs for correctness, concurrency/performance, `argos-rust-style`, and React UI compliance (`APPROVE \| REJECT`) |
-| `tester` | `architect` | `agents.<role>.model` | Execute empirical host-native checks, TUI/UI screenshot verification, and adversarial stress tests in `INTEGRATION_ROOT` (`PASS \| FAIL \| BLOCKED \| PENDING`) |
+| `tester` | `architect` | `agents.<role>.model` | Execute empirical host-native checks, native/browser screenshot verification, and adversarial stress tests in `INTEGRATION_ROOT` (`PASS \| FAIL \| BLOCKED \| PENDING`) |
 | `auditor` | none | `agents.<role>.model` | Forensic integrity and anti-cheating leaf audit (`CLEAN \| INTEGRITY_VIOLATION` binary veto) |
 | `utility` | none | `agents.<role>.model` | Quick general non-code edits (documentation, configuration, instructions); leaf role with no source/test/CI edit rights |
 | `scribe` | none | `agents.<role>.model` | Review code deltas and maintain canonical documentation, tags, and diagrams |
@@ -57,11 +57,11 @@ References: [official V2 agents](https://opencode.ai/v2/docs/agents), [config](h
 
 ## Rust style
 
-Any Rust edit or review under `crates/` loads `argos-rust-style` (Google's Rust Style Guide, with repository overrides). `argos-osint-core` and `argos-osint-api` follow the library rules; `argos-osint-bin` and `argos-api-host` follow the application rules. Tokio async and the existing crate layout stay in force. `orchestrator` passes the skill into Rust phases; `architect` identifies it in the spec, `rust-coder` applies it directly, and `reviewer`/`tester` review diffs against it. The canonical file is `.opencode/skills/argos-rust-style/SKILL.md`; `.agents/skills/argos-rust-style` is the same skill. `cargo fmt` remains the formatter.
+Any Rust edit or review under `crates/` loads `argos-rust-style` (Google's Rust Style Guide, with repository overrides). `argos-osint-core` and `argos-osint-api` follow the library rules; `fleetworks-desktop`, `fleetworks-search-index` and `argos-api-host` follow the application rules. Tokio async and the existing crate layout stay in force. `orchestrator` passes the skill into Rust phases; `architect` identifies it in the spec, `rust-coder` applies it directly, and `reviewer`/`tester` review diffs against it. The canonical file is `.opencode/skills/argos-rust-style/SKILL.md`; `.agents/skills/argos-rust-style` is the same skill. `cargo fmt` remains the formatter.
 
-## UI/TUI visual verification
+## Native and browser visual verification
 
-Follow the [canonical evidence workflow](agent-workflow.md) and [TUI verification](tui-verification.md): inspect actual previews and retain matching provenance; missing visual, accessibility, functionality or integration evidence remains open.
+Follow the [canonical evidence workflow](agent-workflow.md) and [native verification](native-verification.md): inspect actual previews and retain matching provenance; missing visual, accessibility, functionality or integration evidence remains open.
 
 ## React UI skills
 

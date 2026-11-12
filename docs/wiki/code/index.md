@@ -2,14 +2,13 @@
 
 [Wiki](../../index.md) · [Explore concepts](../concepts/index.md)
 
-Start with the [workspace manifest](../../../Cargo.toml). The native macOS app connects to an independently operated gateway; Venture retains operator stack management. The core crate owns domain workflows and the repository. SurrealDB retains domain persistence; [Jobs persistence](jobs-persistence.md) describes the SQLite/RocksDB target and remaining cutover.
+Start with the [workspace manifest](../../../Cargo.toml). The native macOS app connects to an independently operated gateway; direct Docker Compose operates the backend. The core crate owns domain workflows and the repository. SurrealDB retains domain persistence; [Jobs persistence](jobs-persistence.md) describes the SQLite/RocksDB target and remaining cutover.
 
 | Branch | What to inspect | Next page |
 | --- | --- | --- |
 | [Native app](../../../apps/fleetworks-desktop) · [Client contracts](../../../crates/fleetworks-contracts) | Eight native pages, origin-pinned SDK and protected local identity | [Connections](native-connections.md) · [Workspaces](native-workspaces.md) |
 | [Core](../../../crates/argos-osint-core/src) | Atlas, Intel, Brain, providers and NLP | [Core map](core.md) |
 | [HTTP adapter](../../../crates/argos-osint-api) · [Service host](../../../services/api-host) | Versioned API, authenticated gateway, private Brain, readiness and worker roles | [Intel web](intel-web.md) |
-| [Venture](../../../apps/venture) · [Retained terminal clients](../../../apps/fleetworks-cli) | Operator workspace setup/lifecycle and compatibility consumers pending parity-gated retirement | [Interfaces](interfaces.md) |
 | [Compose](../../../deploy) · [Jobs stores](../../../crates/fleetworks-jobs) | Local service graph and embedded durable delivery | [Deployment](../../../deploy/README.md) |
 | [Private actor index](../../../services/search-index) · [Source outbox](../../../crates/argos-osint-core/src/storage/actor_search_outbox.rs) | Canonical discovery, transactional intent and reader-visible generations | [Actor search](actor-search.md) |
 | [Storage](../../../crates/argos-osint-core/src/storage) | Open/bootstrap, repositories, publication, jobs and recall | [Storage map](storage.md) |
@@ -33,7 +32,7 @@ Start with the [workspace manifest](../../../Cargo.toml). The native macOS app c
 | Rust style | [Repository Rust style](../../../.opencode/skills/argos-rust-style/SKILL.md) · [Conventions](conventions.md#rust-style) |
 | React UI and fixture review | [Design rules](react-ui.md) · [Browser checks](react-ui-testing.md) |
 | Native Runtime captures and inspection | [Selected native UI verification](native-verification.md) |
-| Retained Ratatui source | [Contributor verification](tui-verification.md) |
+| Historical terminal evidence | [Retirement disposition](../../archive/cli-retirement.md) |
 | Agent coordination | [Execution policy](agent-workflow.md) · [OpenCode](opencode-v2.md) |
 | Docs and figures | [Wiki maintenance](../maintenance.md) · [Diagram catalog](../../diagrams.md) |
 | Release and CI | [Versioning](versioning.md) · [CI](ci.md) |

@@ -2,7 +2,7 @@
 
 [Code route](index.md) · [Intel web contract](intel-web.md) · [OpenCode](opencode-v2.md)
 
-Apply to React UI work in `apps/web-desktop`, `packages/ui`, `packages/intel` and UI-facing changes in `packages/api-client`. The web theme is the **Dark Digitized HUD + Glassmorphism** system below; the TUI keeps its own `theme.rs`, and web work preserves layout semantics and product contracts. This is the shared design baseline for creation, updates and reviews; task-specific design direction can change it deliberately. Rust terminal UI follows its own [design contract](tui-design-spec.md).
+Apply to React UI work in `apps/web-desktop`, `packages/ui`, `packages/intel` and UI-facing changes in `packages/api-client`. The web theme uses the Fleetworks charcoal, gold and ivory tokens with the existing HUD/glass treatment below. Web work preserves layout semantics and product contracts. This is the shared design baseline for creation, updates and reviews; task-specific design direction can change it deliberately. Retired terminal design is [historical](../../archive/cli-retirement.md).
 
 <a id="argos-look--feel-reference"></a>
 
@@ -17,17 +17,18 @@ Fleetworks uses a restrained, evidence-first workspace with the HUD and glass tr
 5. **Components.** Accent titles and thin frames are the theme signature. Compose or add components freely inside that signature: new groupings, frames, meters, and stripes are fine when they carry information. Extend a shared primitive first; add one when the screen needs a form the set does not have. Bold key values at normal size.
 6. **States.** Hover, focus, active, selected, disabled, loading, empty, and error are designed with the layout. Contrast and focus order come first. Motion stays light; `prefers-reduced-motion` must still show state. Use real labels and data, not placeholder copy.
 
-Scroll long content; do not squeeze charts, tables, or critical rows. Ellipsize labels. React Native topology graphs use [ForceCanvas.tsx](../../../packages/intel/src/topology/ForceCanvas.tsx) (`react-force-graph-3d`) plus the accessible list twin. Do not add another graph library. The TUI keeps its existing topology view and does not gain new chrome, motion, or density modes.
+Scroll long content; do not squeeze charts, tables, or critical rows. Ellipsize labels. React Native topology graphs use [ForceCanvas.tsx](../../../packages/intel/src/topology/ForceCanvas.tsx) (`react-force-graph-3d`) plus the accessible list twin. Do not add another graph library. Native Rune has no topology renderer.
 
-| Principle                   | React Native                                                                | TUI (keep simple)                                 |
-| --------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------- |
-| Accent hierarchy            | Titles, primary buttons, focus rings                                        | ACCENT titles + focus border + `• focused`        |
-| Thin separation             | Subtle border or light elevation, one padding unit                          | Thin borders, 1-cell padding                      |
-| Controlled density          | Spaced by default; compact only for launchers/palettes/headlines            | Same rule; no new modes                           |
-| Focus vs selection          | Distinct states; focus never hides other content                            | ACCENT/bold = activation; SELECT = keyboard focus |
-| Scroll over squeeze         | Min sizes + scroll; ellipsize labels                                        | Charts ≥11 rows, tables ≥9; scroll                |
-| Theme, with room to compose | Tokens for color, type, space, and radius; component layout may be original | `theme.rs` remains authoritative                  |
-| Topology graphs             | `react-force-graph-3d` via `ForceCanvas`                                    | Existing canvas; no force-graph port              |
+| Principle                   | React Native                                                                |
+| --------------------------- | --------------------------------------------------------------------------- |
+| Accent hierarchy            | Titles, primary buttons, focus rings                                        |
+| Thin separation             | Subtle border or light elevation, one padding unit                          |
+| Controlled density          | Spaced by default; compact only for launchers/palettes/headlines            |
+| Focus vs selection          | Distinct states; focus never hides other content                            |
+| Scroll over squeeze         | Min sizes + scroll; ellipsize labels                                        |
+| Theme, with room to compose | Tokens for color, type, space, and radius; component layout may be original |
+| Topology graphs             | `react-force-graph-3d` via `ForceCanvas`                                    |
+
 
 ## Ownership and stack
 
@@ -40,7 +41,7 @@ Scroll long content; do not squeeze charts, tables, or critical rows. Ellipsize 
 | Browser shell and CSS              | [app](../../../apps/web-desktop/app), especially [style.css](../../../apps/web-desktop/app/style.css)                                                        |
 | Behavior and offline fixtures      | [Intel web contract](intel-web.md), [browser tests](../../../tests/web/intel.spec.ts), [Playwright config](../../../playwright.config.ts)                    |
 
-Use installed manifests and the app's [Next guidance](../../../apps/web-desktop/AGENTS.md) for version-specific APIs. Next runs a server: the React Native UI calls its same-origin API routes, which forward to Rust. Only server configuration knows the Rust origin; Next does not implement storage/domain behavior. React Compiler is enabled for the web app and its shared transpiled packages; keep it enabled. Expo/Tauri/native builds are later milestones, not verified targets. Keep the pinned dependency set; add libraries only when the task needs them and validate compatibility.
+Use installed manifests and the app's [Next guidance](../../../apps/web-desktop/AGENTS.md) for version-specific APIs. Next runs a server: the React Native UI calls its same-origin API routes, which forward to Rust. Only server configuration knows the Rust origin; Next does not implement storage/domain behavior. React Compiler is enabled for the web app and its shared transpiled packages; keep it enabled. The Rune macOS client is a separate Rust app; a web build is not native app verification. Keep the pinned dependency set; add libraries only when the task needs them and validate compatibility.
 
 ## React Native and Compiler baseline
 
@@ -53,27 +54,27 @@ Compiler optimization is not a correctness proof. Typecheck, Hooks/compiler diag
 
 ## Visual language
 
-**TUI palette + HUD/glass treatment** (Dark Digitized HUD + Glassmorphism) for shared `packages/ui` tokens. That palette is the core TUI palette in [theme.rs](../../../crates/argos-osint-bin/src/tui/theme.rs) ([TUI design](tui-design-spec.md#theme-data-and-interaction)). Intel screens add an Intel-scoped matte graphite/mint namespace (`bg #0B0B0C`, `accent #5FD39A`, separate `select #7FE0B4`, and per-kind hues) in [intel-theme.ts](../../../packages/intel/src/shell/intel-theme.ts). Those values do not replace `packages/ui` tokens or the TUI theme. Do not copy terminal cell measurements.
+**Fleetworks charcoal, gold and ivory paint with the existing HUD/glass treatment.** The canonical shared web tokens live in [packages/ui](../../../packages/ui/src/index.tsx); Intel semantic colors live in [intel-theme.ts](../../../packages/intel/src/shell/intel-theme.ts). The retired terminal theme is historical and does not own current web values. Preserve existing layout, typography, geometry and motion when changing paint.
 
 Authority: tokens, `glass`, `glow()`, `Tone`/`toneColor`, `StatusTag`, `Frame` and `Panel` in [packages/ui](../../../packages/ui/src/index.tsx); grid backdrop, glow focus ring and thin scrollbars in [style.css](../../../apps/web-desktop/app/style.css). Add or change values there, never as scattered hex in feature components.
 
 | Token                                               | Value                             | Use                                                |
 | --------------------------------------------------- | --------------------------------- | -------------------------------------------------- |
-| bg / panel / raised                                 | `#141414` / `#1e1e1e` / `#303030` | Page, panels, selected/raised rows                 |
-| border                                              | `#535353`                         | Thin rules and borders                             |
-| text / dim / muted                                  | `#e8e8e8` / `#b5b5b5` / `#919191` | Primary, secondary, quiet metadata                 |
-| accent (sky) / accent2 (violet)                     | `#87bfff` / `#c678dd`             | Active/focus/links / secondary emphasis            |
+| bg / panel / raised                                 | `#111111` / `#141414` / `#232321` | Page, panels, selected/raised rows                 |
+| border                                              | `#898274`                         | Thin rules and borders                             |
+| text / dim / muted                                  | `#F3EEE4` / `#C6C0B5` / `#A09A8F` | Primary, secondary, quiet metadata                 |
+| accent (gold) / accent2 (violet)                     | `#C6A56E` / `#c678dd`             | Active/focus/links / secondary emphasis            |
 | success / warning / danger                          | `#98c379` / `#e5c07b` / `#f08a8a` | Severity tones via `Tone`/`toneColor`              |
-| `glass`, `glassStrong`, `glassBorder`, `accentSoft` | derived from TUI surface grays    | Translucent fills, muted borders, soft accent wash |
+| `glass`, `glassStrong`, `glassBorder`, `accentSoft` | derived from shared web surfaces    | Translucent fills, muted borders, soft accent wash |
 | `fonts.mono` / `fonts.body`                         |                                   | Telemetry labels, nav, metadata / prose            |
 
-Values mirror `theme.rs`; recheck it when changing the palette.
+Verify direct colors and alpha composites against their actual surfaces; use the current web token authority.
 
 ### Intel matte desk
 
 @tag:look-and-feel @tag:react-ui @tag:intel-brief
 
-[Intel tokens](../../../packages/intel/src/shell/intel-theme.ts) use matte surfaces (`bg #0B0B0C`, `panel #141416`, `panelRaised #1B1B1E`, `inset #0F0F11`) and neutral text (`text #ECECEE`, `dim #B4B4BA`, `muted #85858E`, `faint #84848D`). Keep mint accent and selection separate; kind colors still identify evidence types. Intel uses a 4px spacing unit, 20px card padding, 12px gutters, body 15/22, 22px titles and 32px display text. Mono remains for metadata and telemetry; body type carries prose. These Intel values do not change the shared or TUI palette above.
+[Intel tokens](../../../packages/intel/src/shell/intel-theme.ts) use matte charcoal surfaces (`bg #111111`, `panel #141414`, `panelRaised #232321`, `inset #0D0D0D`), ivory text and gold accent. Selection uses its own surface (`#322C22`) and highlight (`#D8BD8C`); kind colors continue to identify evidence types. Preserve the existing spacing, typography and component geometry, with mono for metadata and telemetry and body type for prose. These values are independent of retired terminal cell measurements.
 
 [Motion helpers](../../../packages/intel/src/shell/motion.ts) and [ScreenTransition](../../../packages/intel/src/shell/ScreenTransition.tsx) use RN `Animated`, with app CSS for web hover, stagger and shimmer treatments. Motion tokens are 120ms fast, 200ms base, 260ms pages, 220ms inspector, 600ms topology focus and 450ms fit. Page transitions use an 8px directional translation and crossfade; Bulletin → Brief → Topology is forward. Reduced motion makes page/camera movement immediate and removes CSS animation. Do not introduce an animation library.
 
@@ -141,7 +142,7 @@ REST supplies snapshots, pagination and actions. Volatile host metrics and pendi
 
 ## Focus Brief column order
 
-The React Native reading column contains summary, identified actors, retained claims, then analytical inferences. The context rail contains lifecycle/actions, source and related reports, and stacks after the reading column below 900px. Origin, extracted entities and the topology action follow within the same scrolling shell. Inferences stay last among evidence sections on wide and narrow layouts. Preserve their heading and pending, empty and unavailable states. Core TUI still places Inferences after Related in its center column. See [column order](../../diagrams/intel-focus-layout.html).
+The React Native reading column contains summary, identified actors, retained claims, then analytical inferences. The context rail contains lifecycle/actions, source and related reports, and stacks after the reading column below 900px. Origin, extracted entities and the topology action follow within the same scrolling shell. Inferences stay last among evidence sections on wide and narrow layouts. Preserve their heading and pending, empty and unavailable states. The retired terminal layout is historical. See [column order](../../diagrams/intel-focus-layout.html).
 
 ## Product meaning
 

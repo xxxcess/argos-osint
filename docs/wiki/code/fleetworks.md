@@ -6,50 +6,25 @@ Fleetworks Desktop is the API-only macOS control hub. Its eight pages use an ind
 
 Linux domain services share the network datastore. Jobs exclusively owns its SQLite operational logs and embedded RocksDB queue; [actor discovery](actor-search.md) has a separate private Tantivy service. The [isolated native-review deployment](../../../deploy/README.md) builds backend-only images and leaves web/client launch independent. Backend network readers accept explicit current-format configuration and saved credentials; they do not migrate historical files or revive environment provider keys during ordinary reads.
 
-Venture and terminal commands below are retained operator compatibility surfaces while replacement/installed dual-Mac parity gates remain open. Venture owns only its recorded operator workspace and stack. Those paths are distinct from the native protected OS-home container. Retaining a command does not authorize it to bypass current registration, purpose permissions or configuration revisions; older contextless mutations are rejected by the gateway.
+Venture, the six Fleetworks terminal clients and the legacy `argos` executable are retired. Use the native app, Intel Web and direct Docker deployment. Historical terminal evidence is retained under the [retirement disposition](../../archive/cli-retirement.md); it is not a current startup recipe.
 
 [![Fleetworks service boundaries](../../diagrams/fleetworks.svg)](../../diagrams/fleetworks.html)
 
-## Try the workspace and clients
-
-From a checkout, build the launcher and six sibling executables.
+## Build and connect the native app
 
 ```sh
-cargo build --locked -p fleetworks-venture -p fleetworks-cli --bins
-target/debug/venture --workspace ./review-workspace init
-target/debug/venture --workspace ./review-workspace client profile workspace
+python3 scripts/fleetworks_candidate.py build-native --target host --profile debug
 ```
 
-Workspace selection uses `--workspace`, `FLEETWORKS_WORKSPACE`, then `.fleetworks` under the current directory. Venture displays the absolute workspace path. The initial directories are `datasets/`, `exports/`, `config/`, `secrets/`, `models/`, `logs/`, and `storage/`.
+The helper prints the complete `.app` and manifest paths. Add `--open` only for an intended GUI launch. In Workstation, save a gateway origin and protected Native-purpose token-file reference, test compatibility, then connect explicitly. Select an owned native child and current LAN/VPN address to ensure or reuse its registered context. The app does not launch services. [Connection flow](native-connections.md)
 
-Use `config/workspace.toml` for `[datasets]` bindings and `[environment]` defaults. Dataset paths are relative to the workspace. Use `secrets/environment.toml` for private environment defaults. An explicitly set process variable takes precedence over either file.
-
-Run `venture --workspace ./review-workspace import --from "$HOME/.argos"` to copy selected provider API-key configuration and model defaults. Venture reports counts and rejects destination conflicts. Import preserves the source files.
-
-## Connect to the API
-
-The clients default to `http://127.0.0.1:8080`. Pass `--api-origin` or set `FLEETWORKS_API_ORIGIN` to select the API listener. The API bearer can come from `--api-token-file`, `FLEETWORKS_API_TOKEN`, `FLEETWORKS_API_TOKEN_FILE`, or the workspace's `secrets/api-token`. Use the same token as the API when it requires one. Unauthenticated HTTP is restricted to loopback. Remote connections require HTTPS and a bearer token.
-
-See the [CLI command reference](../../../apps/fleetworks-cli/README.md) for route-specific commands and their API requirements. Use `venture status` for storage-backed readiness and `venture client <app> --help` for an individual CLI.
+Native local identities live under the protected OS-home container, independently of the current working directory. Selecting a child changes origin and activity scope while preserving backend-global actors, provider accounts and model defaults. [Workspace ownership](native-workspaces.md)
 
 ## Launch the Compose stack
 
-Run `venture --workspace ./review-workspace up` from the repository root with a local Docker engine and Docker Compose installed. A new interactive setup defaults to `local-net`; a new non-interactive setup uses `compose-disk`. Pass `--storage` to select a target explicitly. Venture prepares credentials and records project ownership before starting managed host processes and the Compose API, private services, workers, and web relay.
+Use the [standalone backend recipe](../../../deploy/README.md#isolated-native-backend-review): provision with `deploy/native_review.py init`, build the `backend` Bake group, then start `compose.native-review.yml` directly with its generated env file and unique project. This creates separate deployment data and purpose-scoped credentials without mounting a native child. Reuse that exact Compose selection for status, logs, restart and stop. Stop preserves data; no startup resets configuration or rotates credentials.
 
-- `local-net` connects to running SurrealDB. Set `FLEETWORKS_STORAGE_URL` and `FLEETWORKS_STORAGE_ROOT_PASSWORD_FILE`. Jobs owns its local embedded stores. Use `host.docker.internal` for ports published on the Docker host.
-- `local-process` starts and supervises a disk-backed SurrealDB 3.3.4 process on the host. Venture supplies their connection settings to the stack and preserves their workspace data on stop.
-- `remote` is the interactive choice for `--storage external`. Venture checks the configured SurrealDB URL at `/health` before recording the stack.
-- `compose-disk`, `host-disk`, and `host-memory` select the Compose disk database, a Venture-managed host disk database, or a disposable host database.
-
-Later launches reuse the recorded configuration. Open the printed web address, `http://127.0.0.1:3000` by default. Set `FLEETWORKS_WEB_PORT` or `FLEETWORKS_API_PORT` to remap the loopback ports. Use `venture status`, `venture logs --follow`, and `venture stop` with the same workspace. Stop retains persistent data. See the deployment guide for [local-network credentials](../../../deploy/README.md#local-network-services) and [native process prerequisites](../../../deploy/README.md#venture-managed-host-processes).
-
-Use `venture web` to start the stack and open Jobs and Logs, or `venture web --terminal logs` to follow Compose output. Both accept the `up` options. Attach to an existing stack with `venture client jobs tui` to inspect jobs and logs or confirm retry and cancellation. Exiting the terminal session leaves the stack running.
-
-The six `tui` client commands render a full-screen ratatui view on a terminal and keep their line session for pipes ([details](../../../apps/fleetworks-cli/README.md#full-screen-tui-sessions)). Native clients and Venture are built on the host, while service roles run from the `runtime` image that `up` rebuilds. See the [development loops](contributing.md#development-loops-local-cli-and-docker) for choosing between CLI, web-dev and image iteration.
-
-Use `up --dev --storage local-net` or `web --dev --storage local-net` for Next development mode. Venture remembers the profile for status, logs and stop. Use `up --no-build` for preloaded images. [Development setup](../../../deploy/README.md#web-development)
-
-Add `--atlas` to start the Atlas worker, Compromise NLP, and Rust-BERT classifier services with delivery through Jobs. Submit a durable cycle with `venture client atlas start --request-id <id>`. Use a new request ID for each new collection. The [Atlas deployment guide](../../../deploy/atlas-dispatch.md) explains the provider and model files required for a live cycle.
+Optional Intel Web and Atlas services require explicit deployment configuration. The browser authenticates its Connect form with an already registered Connect ID; the ID alone grants no authority. Use the native Atlas page to submit collection work when a real worker is advertised. [Deployment](../../../deploy/README.md) · [Atlas](../../../deploy/atlas-dispatch.md)
 
 ## Run the network API and workers
 
@@ -65,9 +40,9 @@ Set `FLEETWORKS_WORKSPACE` and `ARGOS_HOME` to the same absolute workspace path.
 
 Run `argos-api-host --role bootstrap` before serving against the authenticated datastore. It applies the schema and creates the database-scoped Editor account. Set `FLEETWORKS_STORAGE_ROOT_PASSWORD_FILE` and `FLEETWORKS_STORAGE_PASSWORD_FILE` to files containing the bootstrap and runtime passwords. The root username defaults to `root` and can be set with `FLEETWORKS_STORAGE_ROOT_USERNAME`. Use a randomly generated 32–256 character runtime password with letters, digits, or `-._~`. Keep the runtime password file across restarts. A new in-memory server starts with a new database identity.
 
-Then run the host with `--role api`, `--role worker` and `--role brief-worker` using the runtime credentials. The API additionally needs `FLEETWORKS_API_TOKEN_FILE` and `FLEETWORKS_API_ALLOWED_HOSTS`. The latter is a comma-separated list of exact Host authorities, such as `127.0.0.1:8080,localhost:8080`. Set `FLEETWORKS_API_ALLOWED_ORIGINS` to the allowed browser origins. The API binds to loopback unless `FLEETWORKS_API_BIND` is set explicitly. Both worker roles run without an HTTP listener.
+Then run the host with `--role api`, `--role worker` and `--role brief-worker` using the runtime credentials. The API additionally needs a purpose-scoped `FLEETWORKS_API_CREDENTIALS_FILE` manifest, matching access scope/epoch and `FLEETWORKS_API_ALLOWED_HOSTS`. The latter is a comma-separated list of exact Host authorities, such as `127.0.0.1:8080,localhost:8080`. Set `FLEETWORKS_API_ALLOWED_ORIGINS` to the allowed browser origins. The API binds to loopback unless `FLEETWORKS_API_BIND` is set explicitly. Both worker roles run without an HTTP listener.
 
-Standalone private services use the same workspace and network storage settings. Start each with `argos-api-host --role <role>` and set `FLEETWORKS_<SERVICE>_BIND` and `FLEETWORKS_<SERVICE>_ALLOWED_HOSTS`, where `<SERVICE>` is the uppercase role name. Share each bearer file between the service and its callers. Venture provisions these connections automatically.
+Standalone private services use the same workspace and network storage settings. Start each with `argos-api-host --role <role>` and set `FLEETWORKS_<SERVICE>_BIND` and `FLEETWORKS_<SERVICE>_ALLOWED_HOSTS`, where `<SERVICE>` is the uppercase role name. Share each bearer file between the service and its callers. The direct Compose recipe provisions these connections explicitly.
 
 | Role | Responsibility | Shared bearer variable |
 | --- | --- | --- |
@@ -81,20 +56,20 @@ Set `FLEETWORKS_BRAIN_ORIGIN`, `FLEETWORKS_TOOLS_ORIGIN`, `FLEETWORKS_CONTROL_OR
 
 Execution resolves captured provider accounts from workspace configuration and streams progress and results. Its callers load route metadata without provider API keys and cannot write `auth.json`; local endpoints and the ChatGPT subscription execute in the caller. Role-default edits apply to new work, and endpoint changes invalidate captured routes. Callers own retries and validation.
 
-With `--atlas`, `atlas-worker` consumes Jobs-owned embedded queue deliveries after SurrealDB records the transitional job and outbox transaction. Stored job revisions and database identity govern cancellation, retries and completed-run replay. The `nlp` and `classifier` roles accept authenticated requests. Use `venture train-legacy` to train the Natural classifier against a snapshot of the selected CSV.
+With the Atlas overlay, `atlas-worker` consumes Jobs-owned embedded queue deliveries after SurrealDB records the transitional job and outbox transaction. Stored job revisions and database identity govern cancellation, retries and completed-run replay. The `nlp` and `classifier` roles accept authenticated requests. Use explicit native readiness maintenance to train a Natural candidate from a staged immutable dataset. Activation is a separate confirmed operation; neither operation supplies Rust-BERT inference.
 
 ## Rollout status
 
 | Area | Implemented behavior |
 | --- | --- |
-| Venture and workspace | Configuration import, local-network and managed process modes, owned lifecycle, client launch |
+| Native app and local workspaces | Complete app packaging, saved connections, protected child identities and registered request context |
+| Direct Docker backend | Independently provisioned purpose credentials, private services, workers and persistent stores |
 | Atlas | Durable dispatch and replay, separate NLP/Rust-BERT services, shared daily NewsAPI quota in SurrealDB |
-| Brain and Intel | Retained briefs and publication recovery, actor search by exact name or indexed alias. Seed with `venture seed-actors --file <workspace CSV>`. [Actor catalog guide](actor-catalog.md) |
-| Tools, Models and Profile | Durable manual tool results, saved model defaults, workspace health and server-side configuration exports |
-| Interactive terminal | Six line-oriented clients via `venture client <app>`; explicit subcommands provide one-shot output |
-| Model execution | Shared provider pacing, per-account admission and private execution for retained API-key attempts |
+| Brain and Intel | Canonical actor discovery, dossiers, retained briefs and publication recovery; explicit seed maintenance |
+| Tools, Models and Profile | Durable manual tool results, shared defaults and confirmed configuration revisions |
+| Jobs & Logs | Workstation membership before rows/counts/pagination, private-safe logs and explicitly authorized actions |
 
-Check the selected revision's workflow results for verification evidence. The [CI guide](ci.md#fleetworksyml--scoped-branch-checks) describes native, server, image, Compose, queue, web and classifier checks.
+Installed-app, matching-hardware accessibility, both Mac architectures and real backend integration require their own recorded evidence. Retirement was explicitly authorized; it does not close those verification gaps or the separate production scheduler migration. [Native verification](native-verification.md) · [CI](ci.md#fleetworksyml--scoped-branch-checks)
 
 ## Verification
 
@@ -102,7 +77,7 @@ Use [the network smoke](../../../scripts/fleetworks_network_smoke.py) with the b
 
 ## Operational persistence migration
 
-The Jobs process exclusively opens `FLEETWORKS_JOBS_SQLITE_PATH` (default: `<workspace>/storage/jobs/jobs.sqlite3`). Venture mounts `storage/jobs/` only into Jobs at `/var/lib/fleetworks-jobs`; other processes use its authenticated HTTP endpoint. WAL mode and FULL synchronization persist acknowledged writes. Stop retains the database.
+The Jobs process exclusively opens `FLEETWORKS_JOBS_SQLITE_PATH` (default: `<workspace>/storage/jobs/jobs.sqlite3`). Compose mounts `storage/jobs/` only into Jobs at `/var/lib/fleetworks-jobs`; other processes use its authenticated HTTP endpoint. WAL mode and FULL synchronization persist acknowledged writes. Stop retains the database.
 
 Standalone operational logs use SQLite. Existing SurrealDB log history remains in the domain database; investigation traces and transactional job lifecycle events retain their existing storage. Job scheduling, leases, attempts, recovery and Profile telemetry still use SurrealDB. The SQLite crate supplies scheduling primitives, but production scheduler cutover is pending the domain handoff/fencing port. Drain existing jobs before switching new submissions; do not copy active leases across stores.
 

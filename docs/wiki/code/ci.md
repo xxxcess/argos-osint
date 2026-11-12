@@ -21,7 +21,7 @@ A pull request into `nightly`, `feat/atlas-zero-shot`, or any base other than `m
 
 | Check | Non-main pull request |
 | --- | --- |
-| Fleetworks scopes selected for the changed paths | Yes. Native clients, the Linux ARM64 server, selected server images, Compose, web, and Rust-BERT run only when the planner selects them. |
+| Fleetworks scopes selected for the changed paths | Yes. The native app, the Linux ARM64 server, selected server images, Compose, web, and Rust-BERT run only when the planner selects them. |
 | Commit policy | Yes. |
 | Dataset integrity | Only when the diff touches `datasets/`, `.gitattributes`, or `datasets.yml`. |
 | Embedded compatibility | No. |
@@ -45,12 +45,11 @@ The [Fleetworks workflow](../../../.github/workflows/fleetworks.yml) is the buil
 
 | Scope | Hosted evidence |
 | --- | --- |
-| Native clients | Linux x86-64, Apple silicon macOS, and Intel macOS tests and executable smoke for Venture and its sibling clients |
 | Native app | Both physical Mac architectures: scoped desktop tests, selected shared-view Runtime/PNG/tree captures, complete app ZIP packaging and verification of exact downloaded artifact bytes |
 | Server | Linux ARM64 service check, build, unit tests, and network bootstrap and readiness smoke |
-| Server images | Linux AMD64 images for the selected client binaries and the web app. Full and nightly runs also build Linux ARM64. Venture and the CLIs share one compile, then each image copies one binary. Each image is tagged `name:<version.txt>` and `name:local`. The version tag is the workspace SemVer with no leading `v`. |
+| Server images | Selected runtime, private search, SurrealDB and web images on native Linux AMD64; full and nightly selection also includes Linux ARM64. No terminal-client images remain. Version tags use the workspace SemVer without a leading `v`; isolated reviews use unique tags. |
 | Storage and queue | Affected disk storage and brief recovery contracts, plus Jobs-owned embedded queue Atlas dispatch when selected |
-| Packaged Compose | Venture-owned image startup, authenticated readiness, relay, and Atlas smoke on Linux ARM64 and AMD64 |
+| Packaged Compose | Direct isolated Compose startup, authenticated readiness, source journey and Atlas transport smoke on Linux ARM64 and AMD64; browser gate checks run when the Web scope is selected |
 | Linux Rust-BERT | Native Linux AMD64 and ARM64 build, link, units, pinned checkpoint inference and extracted runtime bundle verification |
 | Web | Locked install, static and unit checks, production build, relay lifecycle, and production Chromium contracts. The development browser profile also runs for selected runtime changes. |
 
@@ -104,9 +103,9 @@ Each leg uses Rust 1.95.0, skips debuginfo, and has a 90-minute timeout. Linux i
 
 `Swatinem/rust-cache` keeps one embedded cache per runner OS and covers `target/agents`, where `scripts/agent_cargo.py` builds. A newer dispatch on the same branch cancels the older dispatch. Main pushes complete.
 
-Server storage, service startup, and client images belong to the Fleetworks server and image scopes. They are not a second platform matrix.
+Server storage, service startup, and backend images belong to the Fleetworks server and image scopes. They are not a second platform matrix.
 
-The native embedded command remains the [local compatibility gate](contributing.md#full-local-embedded-gate--github-ci-monitoring) for affected embedded or legacy runtime changes. Use the [focused recipes](contributing.md#targeted-local-rust-builds-and-tests-fast-iteration) for an authorized isolated network fixture.
+The native embedded command remains the [local compatibility gate](contributing.md#full-local-embedded-gate--github-ci-monitoring) for affected embedded-storage changes. Use the [focused recipes](contributing.md#targeted-local-rust-builds-and-tests-fast-iteration) for an authorized isolated network fixture.
 
 ## `intel-web.yml` — local web client checks
 
@@ -137,7 +136,7 @@ Worker lifecycle and ordered-queue fixtures own isolated test processes, private
 
 ## `atlas-bert.yml` — classifier worker checks
 
-Fleetworks calls this workflow for selected classifier changes and full dispatches. Both native runners (`ubuntu-24.04` and `ubuntu-24.04-arm`) build inside `python:3.11-bookworm`, matching the deployment image's Debian 12/glibc 2.36 ABI. The repository supplies the exact Rust toolchain. There is no macOS engine install, emulation or doc-only substitute for a runtime leg. The separate legacy macOS embedded engine matrix remains intentionally retained until its retirement acceptance gates pass.
+Fleetworks calls this workflow for selected classifier changes and full dispatches. Both native runners (`ubuntu-24.04` and `ubuntu-24.04-arm`) build inside `python:3.11-bookworm`, matching the deployment image's Debian 12/glibc 2.36 ABI. The repository supplies the exact Rust toolchain. There is no macOS engine install, emulation or doc-only substitute for a runtime leg. The separate embedded-storage contract matrix is not a native client build requirement; executable retirement does not establish its results.
 
 The [Linux worker helper](../../../tools/atlas-bert/scripts/verify_linux.py) selects official SHA256-pinned Python 3.11 CPU wheels: PyTorch 2.1.0+cpu on AMD64 and 2.1.0 on ARM64. Both are listed in the [official CPU index](https://download.pytorch.org/whl/cpu/torch/). `torch-sys` 0.14.0's [version check](https://docs.rs/crate/torch-sys/0.14.0/source/build.rs) requires 2.1.0; the helper refuses version-check bypasses. Native build/link and nonzero unit tests precede the unchanged pinned Typeform DistilBERT MNLI checkpoint preparation. Real inference checks its protocol, six-domain ordering, finite bounded scores, singleton/batch consistency and repeat consistency.
 
@@ -155,15 +154,15 @@ The supplied SHA must be checked out exactly. No workflow is dispatched by editi
 
 ### `fleetworks-candidate.yml` — release candidates
 
-The [candidate workflow](../../../.github/workflows/fleetworks-candidate.yml) builds release binaries for Linux AMD64 and ARM64 and Intel and Apple silicon macOS. It does not run on pull requests or branch pushes. Start a run on a published ref:
+The [candidate workflow](../../../.github/workflows/fleetworks-candidate.yml) accepts `components=native`, `backend` or `all` on a published ref. Native selects both physical Mac architectures; backend selects native Linux AMD64 and ARM64 image archives. The default is native. It does not run on pull requests or branch pushes. For all review artifacts:
 
 ```sh
-gh workflow run fleetworks-candidate.yml --ref <branch> -f head=<sha>
+gh workflow run fleetworks-candidate.yml --ref <branch> -f head=<sha> -f components=all
 ```
 
-The workflow uploads a CLI archive and its SHA-256 for each target and retains them for 14 days. A separate native job downloads the exact CLI artifact by ID, verifies its archive and file hashes, checks the revision, version, and executable architecture, and runs the installed Venture and client binaries.
+Native app ZIPs retain complete bundle hashes, architecture and source identity, and are downloaded by exact artifact ID for verification. Linux archives contain runtime, SurrealDB and private search images plus an identity manifest; `components=all` also includes Web. They contain no launcher or terminal-client binaries. The image helper verifies downloaded archive digests and exact loaded Docker image IDs, then uses the direct standalone Compose smoke with no build or pull. Every created service must match its expected image ID.
 
-Each Linux target also exports the runtime, web and SurrealDB images. Verification downloads the exact image artifact and CLI artifact by ID, checks archive digests and native image IDs, then starts the downloaded Venture and images with `--no-build`. The smoke checks the image ID of every created service. The image archive is limited to 1 GiB compressed and 3 GiB uncompressed. The AMD64 job checks restart behavior for both Venture-managed host modes and an independently started external disk database with the pinned SurrealDB executable. These Actions artifacts verify release candidates. Public release distribution and registry manifest digest verification are separate. [Release policy](versioning.md#release-candidates)
+These configured Actions checks produce review artifacts with 14-day retention. Their existence does not establish that a particular revision passed. Public distribution, registry manifest verification, signing/notarization, installed GUI behavior and matching-hardware accessibility remain separate. [Release policy](versioning.md#release-candidates)
 
 ### `commit-policy.yml`
 
@@ -197,10 +196,12 @@ Until further notice, agents must not run Rust mutation tests or mutation baseli
 
 Follow the [scope and freeze policy](agent-workflow.md#scope-and-finish-line) and [contributor commands](contributing.md). Use one shared-cache build owner and stable features. For Fleetworks, use the scoped local and hosted checks. For affected compatibility code, run the native embedded gate with parent storage-mode variables unset, then dispatch `embedded.yml` when the branch needs hosted platform evidence before it merges. Record local, hosted, and skipped evidence separately.
 
-For the Fleetworks packaged stack, use [Venture's Compose smoke](../../../deploy/verify.py). Its `--dev` option checks development readiness and shutdown. Browser reload is covered separately by the web fixtures.
+For an explicitly authorized isolated packaged run, use the [direct Compose smoke](../../../deploy/verify.py):
 
-For changes to the compatibility launcher, run `python3 scripts/test_web_stack.py --terminal-captures .agent-scratch/stack-review` after building `argos` and `argos-api-host` through the isolated Cargo wrapper and building the Next server. `--tui-only --tui-web-profile installed` narrows this to Venture back/value restoration, TUI return, same-parent storage reuse, shared API/Web TUI, and terminal cleanup. These PTY and process checks are local supplemental evidence; the workflows above do not execute this script. Keep actual hosted results separate.
+```sh
+python3 deploy/verify.py --name fresh-review --platform linux/amd64 --web --atlas --source-journey
+```
 
-The composer-launch regression `python3 scripts/test_web_stack.py --composer-smoke` runs the same PTY harness in its own temp `ARGOS_HOME`: `storage init --mode embedded`, then `stack up --tui`, submit a recon prompt from the Home composer, assert the investigation surface replaces the Home launcher, and then hold a bounded 45 s window in which no `stack overflow` or `fatal runtime error` may appear and the child must stay alive. It finishes with clean `ARGOS_EXIT=0` and termios restored. It needs only `argos` built and is POSIX-only. Like the stack lifecycle checks, it is local supplemental evidence that the workflows do not execute.
+The helper provisions a new task-owned directory, builds isolated tags, starts only its own project and stops that project while preserving files. `--web --dev` selects the separate development readiness smoke. `--no-build --image-ids <file>` validates exact preloaded images; it does not invoke a retired launcher. The app and Docker runtime are never started merely by editing documentation. Historical CLI/PTY checks are retained only in the [retirement disposition](../../archive/cli-retirement.md), not the current gate.
 
 Live-transport changes also run `pnpm test:live` after the Next build. Its offline Node fixtures verify origin checks, raw relay framing, dropped upstream connections, and the real Next runtime across a stateless restart. Browser fixtures intercept WebSockets as well as REST; request-count assertions cover quiet pages, push metrics, pending work, and reconnect. The web workflow runs these contracts in its live relay and runtime lifecycle step after building Next and installing Chromium. Local executions and hosted results remain separate evidence.

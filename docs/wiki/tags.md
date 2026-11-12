@@ -13,9 +13,9 @@ Tags connect a documented concern to its implementation across directory boundar
 | `@tag:osint-providers` | [Providers](code/core.md#providers-and-tool-adapters) | [providers.rs](../../crates/argos-osint-core/src/osint/providers.rs) |
 | `@tag:jobs-persistence` | [Jobs persistence](code/jobs-persistence.md) · [Scoped operational logs](code/native-connections.md#bounded-operational-logs) | [jobs_client.rs](../../crates/argos-osint-core/src/storage/jobs_client.rs), [scoped owner](../../crates/fleetworks-jobs/src/scoped_logs.rs), [Jobs store](../../crates/fleetworks-jobs) |
 | `@tag:surreal-storage` | [Storage](code/storage.md) | [storage/mod.rs](../../crates/argos-osint-core/src/storage/mod.rs) |
-| `@tag:tui-components` | [Terminal fixtures](code/tui-verification.md) | [components.rs](../../crates/argos-osint-bin/src/tui/components.rs) |
+| `@tag:tui-components` | [Historical terminal fixtures](code/tui-verification.md) | Retired source; [disposition](../archive/cli-retirement.md) |
 | `@tag:async-runtime` | [Architecture](code/architecture.md#async-runtime-safety) | [hardware.rs](../../crates/argos-osint-core/src/hardware.rs) |
-| `@tag:process-lifecycle` | [Venture lifecycle](code/architecture.md#process-lifecycle-and-signal-handling) | [compose.rs](../../apps/venture/src/compose.rs), [host_storage.rs](../../apps/venture/src/host_storage.rs) |
+| `@tag:process-lifecycle` | [Service lifecycle](code/architecture.md#process-lifecycle-and-signal-handling) | [Service host](../../services/api-host/src/main.rs) · [Standalone Compose](../../deploy/compose.native-review.yml) |
 | `@tag:api-timeouts` | [Intel web](code/intel-web.md#api-contract) | [lib.rs](../../crates/argos-osint-api/src/lib.rs) |
 | `@tag:abort-signal` | [Intel web](code/intel-web.md#async-presentation) | [index.tsx](../../packages/api-client/src/index.tsx) |
 | `@tag:testing` | [Testing](code/react-ui.md#react-component-testing-real-component-pattern) | [UI tests](../../packages/ui/__tests__/) / [Intel tests](../../packages/intel/__tests__/) |

@@ -4,19 +4,19 @@
 
 [![Models and roles](../../diagrams/model-roles.svg)](../../diagrams/model-roles.html)
 
-Venture loads workspace settings and can import selected API-key configuration and model defaults from an existing home. Process environment variables override workspace defaults. The Models client reads configured routes with `venture client models defaults`. [Workspace configuration](../code/fleetworks.md#try-the-workspace-and-clients)
+Native Profile and Models manage the selected backend's shared provider accounts and role defaults through explicit versioned gateway operations. Ordinary network readers use current-format backend configuration and do not reload old files or environment provider keys. Local child selection changes request origin, not account ownership. [Configuration boundary](../code/fleetworks.md)
 
 | Concern | Where |
 | --- | --- |
-| Private workspace environment defaults | `secrets/environment.toml` |
-| Imported provider credentials and roles | Workspace `auth.json` and `config.toml` |
-| Public workspace defaults | `config/workspace.toml` |
+| Provider credentials | Protected backend `auth.json`; browser and native never receive saved key bytes |
+| Roles and defaults | Current-format backend `config.toml` with confirmed configuration revision |
+| Local saved connections | Protected native origin/token-file references, separate from backend accounts |
 
-| Model provider | Key environment variable | Endpoint |
+| Model provider | Saved account kind | Endpoint |
 | --- | --- | --- |
-| OpenRouter | `OPENROUTER_API_KEY` | Optional HTTPS base |
-| Google | `GEMINI_API_KEY`, then `GOOGLE_API_KEY` | `https://generativelanguage.googleapis.com/v1beta/openai` |
-| Nvidia | `NVIDIA_API_KEY` | `https://integrate.api.nvidia.com/v1` |
+| OpenRouter | `openrouter` | Optional HTTPS base |
+| Google | `google` | `https://generativelanguage.googleapis.com/v1beta/openai` |
+| Nvidia | `nvidia` | `https://integrate.api.nvidia.com/v1` |
 
 The current Models roles are independent pipeline assignments:
 
@@ -29,7 +29,7 @@ The current Models roles are independent pipeline assignments:
 | `atlas_analyst` | Atlas claims, inferences, related leads and prose |
 | `brain_summary` | Shared readable knowledge summaries |
 
-The defaults API advertises this catalog in `roles`; the Models CLI displays these roles and their routes. Older role fields remain readable for one-time migration and inspection. Migration freezes each new assignment independently; an explicitly empty pipeline role stays unconfigured rather than inheriting from another role. Legacy names are not active Models CLI settings.
+The defaults API advertises this catalog in `roles`; the native Models page displays these roles and their routes. Older role fields remain readable for one-time migration and inspection. Migration freezes each new assignment independently; an explicitly empty pipeline role stays unconfigured rather than inheriting from another role. Legacy names are not active native role settings.
 
 Each configured role can carry an ordered `fallbacks` list of provider/account/model routes. Route selection preserves account identity, resolves operation capabilities and keeps credentials on the service side. Atlas category admission uses the private Rust-BERT service. Shared decision routes remain available for bounded tasks such as article cleanup and evidence selection.
 
@@ -37,7 +37,7 @@ Each configured role can carry an ordered `fallbacks` list of provider/account/m
 
 [![OSINT catalog](../../diagrams/osint-providers.svg)](../../diagrams/osint-providers.html)
 
-Primary: Firecrawl, SociaVault, Hunter. Saved key overrides env.
+Primary: Firecrawl, SociaVault, Hunter. Network execution resolves the captured saved backend account; it does not revive environment keys.
 
 - Fallback field on the same row (`*_API_KEY_FALLBACK`) retries once after rate/quota, then is used first for later calls
 - Atlas keeps a separate daily counter for the fallback account

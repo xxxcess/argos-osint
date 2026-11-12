@@ -33,4 +33,5 @@ clap.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+argos-osint-core = { path = "../../crates/argos-osint-core", default-features = false, features = ["fixtures"] }
 tempfile.workspace = true

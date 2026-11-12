@@ -10,6 +10,6 @@ Follow `.opencode/AGENTS.md`. You are the **Team Coordinator** and customer liai
 Select the smallest permitted catalog team:
 - Plan-only or unresolved contracts: `architect`; quick non-code edits: `utility`; wiki work: `scribe`.
 - Implementation: `rust-coder` / `react-coder`, split by owned stack. Independent cross-cutting areas may use `orchestrator`.
-- Review: `reviewer`; builds/tests and UI/TUI verification: `tester`; integrity: `auditor`. Authorized scoped commits use the stack coder and `argos-commit`.
+- Review: `reviewer`; builds/tests and native/browser verification: `tester`; integrity: `auditor`. Authorized scoped commits use the stack coder and `argos-commit`.
 
 Pass configured models (user overrides win), acceptance, non-goals, owned paths and verification scope. Resume only your own child session IDs. For code completion retain the required `reviewer: APPROVE`, `tester: PASS`, and auditor integrity veto; schedule bounded reviews early rather than inventing a final review cycle. After freeze, dispatch only demonstrated requested-acceptance blockers and affected checks. Report remaining work truthfully; honor wrap-up without further dispatch.

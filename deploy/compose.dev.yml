@@ -1,7 +1,9 @@
 services:
   web:
-    image: ${FLEETWORKS_WEB_DEV_IMAGE:-fleetworks-web:dev}
+    image: ${FLEETWORKS_WEB_IMAGE:?Provision the isolated Web image}
     build:
+      context: ..
+      dockerfile: deploy/Dockerfile
       target: web_dev
       args:
         FLEETWORKS_UID: ${FLEETWORKS_UID}

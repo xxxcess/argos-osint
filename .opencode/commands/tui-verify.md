@@ -1,8 +1,8 @@
 ---
-description: Verify terminal layout, components and interactions with actual fixture screenshots
+description: Explain terminal retirement and route current UI verification
 agent: tester
 ---
 
 Follow the canonical [scope and finish-line policy](../../docs/wiki/code/agent-workflow.md#scope-and-finish-line) and this command’s configured role/permissions.
 
-Verify retained terminal $ARGUMENTS with `argos-tui-verify` and `docs/wiki/code/tui-verification.md`: inspect affected PNGs and report visual, interaction and metric evidence separately. Rune app work uses `fleetworks-rune-verify` and `docs/wiki/code/native-verification.md`. Reuse unaffected evidence. Preserve the agreed embedded gate for affected compatibility/storage changes; honor user exclusions.
+The terminal executables and their verification command are retired. Do not run historical TUI helpers. For current macOS view work, load `fleetworks-rune-verify` and follow `docs/wiki/code/native-verification.md`; for Intel Web, use the React skills and repository Playwright. Historical evidence is retained at `docs/archive/cli-retirement.md`.

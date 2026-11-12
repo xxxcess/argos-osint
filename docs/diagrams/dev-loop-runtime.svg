@@ -51,5 +51,5 @@
 <text x="484" y="600" class="label">Retained backend state and separate dependencies</text>
 <text x="484" y="630" class="note">SurrealDB identity + domain, Jobs SQLite, staged datasets and search data stay owned.</text>
 <text x="484" y="658" class="note">Search-index images and matching Linux model / native-library assets have separate lifecycles.</text>
-<text x="48" y="720" class="minor">Preserve the user's running stack and useful images. Native Mac startup and retained operator / CLI loops remain independent.</text>
+<text x="48" y="720" class="minor">Preserve the user's running stack and useful images. Native Mac startup is independent of direct Docker operation.</text>
 </svg>

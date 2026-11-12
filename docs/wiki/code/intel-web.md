@@ -6,7 +6,7 @@
 
 The [Fleetworks deployment](fleetworks.md#launch-the-compose-stack) runs Intel Web independently of the native app, with a same-origin HTTP and WebSocket relay. Its server pins `FLEETWORKS_API_ORIGIN` and a separately provisioned WebRelay credential. A browser supplies an existing canonical Connect ID; the backend resolves its current registration and issues opaque session proof. The central server gate protects pages, RSC/prefetch, REST/actions/exports and live access. Host/Origin/CSRF and expected-context revisions fence forged or stale calls. [Connections and authority](native-connections.md#browser-handoff)
 
-The gateway forwards retained actor, brief, Related and topology operations to private Brain. Durable workers retain background execution. Venture remains an external operator deployment tool; opening Intel Web from native only opens the validated advertised Connect URL. Native may close while the independently authenticated browser and accepted jobs continue.
+The gateway forwards retained actor, brief, Related and topology operations to private Brain. Durable workers retain background execution. Direct Docker Compose operates the backend and optional web frontend; opening Intel Web from native only opens the validated advertised Connect URL. Native may close while the independently authenticated browser and accepted jobs continue.
 
 Brief admission commits the job, tasks, captured inputs and run visibility together before a worker can claim a task. To recover a brief left incomplete during admission by an older build, use the Focus Brief reload action to create a fresh generation. Retrying an existing reload request ID attaches to the generation it already created.
 
@@ -132,18 +132,17 @@ Brief generations and canonical publication are separate states. The DTO include
 
 ## Running locally
 
-Start the local production web stack through Venture.
+Provision the independent backend with an explicit web port, build its images and add the Web overlay to the same base Compose selection:
 
 ```sh
-cargo build --locked -p fleetworks-venture -p fleetworks-cli --bins
-target/debug/venture --workspace ./review-workspace web --storage compose-disk
+python3 deploy/native_review.py init --name web-review --api-port 18091 --web-port 18092 --platform linux/amd64
 ```
 
-Open the printed URL after readiness. Use the same workspace for `status`, `logs` and `stop`. [Venture lifecycle and storage selection](fleetworks.md#launch-the-compose-stack)
+Use the [deployment recipe](../../../deploy/README.md#web-and-development) to resolve its workspace/image tags, build `backend web` and start `compose.native-review.yml` plus `compose.yml`. Open the provisioned `/connect` URL and enter an existing registered Connect ID. Use the same env file, Compose files and unique project for status, logs and stop; the native app owns none of these processes.
 
 For frontend work, use the workspace's pinned Node and pnpm versions, install with `pnpm install --frozen-lockfile`, and follow the [React testing guide](react-ui-testing.md) for isolated production and development fixtures.
 
-The browser requests relative `/api/v1/…` paths. Venture's Compose stack sets `FLEETWORKS_API_ORIGIN` and `FLEETWORKS_API_TOKEN_FILE` in the Next server environment. Readiness gates the working UI and actions. Recovery namespaces queries under the API instance.
+The browser requests relative `/api/v1/…` paths. The explicit Web overlay sets `FLEETWORKS_API_ORIGIN` and `FLEETWORKS_API_TOKEN_FILE` in the Next server environment. Readiness gates the working UI and actions. Recovery namespaces queries under the API instance.
 
 `@tag:web-routing` — the shared `IntelNavigation` screen contract has an in-memory adapter for native hosts/tests and an app-owned browser History adapter. `/home` is the launcher (`/` is an alias), `/bulletin` is the retained feed, `/brief?run=...&id=...` loads an occurrence directly, `/actor?id=<canonical-id>` reads an Actor Dossier, and `/topology?seed=<memory-id>` contains only a durable Brain memory ID. Its type and neighborhood are inferred server-side; no JSON object or originating article IDs appear in the URL. Return-to-brief context is retained in browser history state. Reload, browser back/forward and direct entry work; the root workspace stays mounted to retain feed filters during navigation. Missing occurrence IDs show an explicit empty state. Invalid graph seeds show the normal unselected state.
 
@@ -152,7 +151,7 @@ The browser requests relative `/api/v1/…` paths. Venture's Compose stack sets 
 ## Verification
 
 - [Fleetworks network smoke](../../../scripts/fleetworks_network_smoke.py) exercises authenticated gateway and private Brain behavior against isolated storage.
-- [Packaged smoke](../../../deploy/verify.py) checks Venture startup, readiness through the web relay, Atlas dispatch and owned shutdown. [CI scopes](ci.md#fleetworksyml--scoped-branch-checks)
+- [Packaged smoke](../../../deploy/verify.py) checks direct isolated Compose startup, the web gate, Atlas transport and owned shutdown. [CI scopes](ci.md#fleetworksyml--scoped-branch-checks)
 - [API contracts](../../../crates/argos-osint-api/tests/api_contract.rs) cover pagination, revisions, admission/reload idempotency, missing IDs and ingress rules.
 - [Browser fixtures](../../../tests/web/intel.spec.ts) cover production and development navigation, responsive presentation, mutations and reconnect. Follow [React UI verification](react-ui-testing.md).
 

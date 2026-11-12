@@ -12,16 +12,13 @@ import sys
 import time
 from pathlib import Path
 
-PRIMARY_SCOPES = frozenset({"native", "server", "storage", "compose", "queue"})
+PRIMARY_SCOPES = frozenset({"server", "storage", "compose", "queue"})
 ALL_SCOPES = PRIMARY_SCOPES | {"desktop", "bert", "web", "web_dev", "images"}
-CLI_NAMES = ("atlas", "brain", "jobs", "tools", "models", "profile")
-CLIENT_IMAGES = frozenset({"venture", *(f"fleetworks-{name}" for name in CLI_NAMES)})
 BACKEND_IMAGES = frozenset({"runtime", "surrealdb", "search-index"})
-RUST_IMAGES = CLIENT_IMAGES | {"runtime", "search-index"}
-ALL_IMAGES = CLIENT_IMAGES | BACKEND_IMAGES | {"web"}
+RUST_IMAGES = frozenset({"runtime", "search-index"})
+ALL_IMAGES = BACKEND_IMAGES | {"web"}
 BERT_ONLY_PATHS = {".github/workflows/atlas-bert.yml"}
 BERT_SHARED_PATHS = {
-    "apps/venture/src/classifier.rs",
     "services/api-host/src/classifier_service.rs",
     "services/api-host/src/classifier_train.rs",
     "crates/argos-api-host/src/classifier_service.rs",
@@ -42,7 +39,7 @@ SHARED_PRIMARY_PREFIXES = (".cargo/", "crates/fleetworks-contracts/", "crates/fl
 WEB_BUILD_PATHS = {
     ".github/workflows/intel-web.yml", ".node-version", ".nvmrc", "package.json", "pnpm-lock.yaml",
     "pnpm-workspace.yaml", "tsconfig.json", "playwright.config.ts", "scripts/check_web_build.mjs",
-    "scripts/serve_web.mjs", "scripts/test_web_stack.py",
+    "scripts/serve_web.mjs",
 }
 SERVER_PREFIXES = (
     "services/api-host/",
@@ -58,10 +55,7 @@ SERVER_STORAGE_PATHS = {
     "services/api-host/src/actor_seed.rs",
     "services/api-host/src/atlas_worker.rs",
 }
-NATIVE_PACKAGES = (
-    "-p", "fleetworks-workspace", "-p", "fleetworks-contracts", "-p", "fleetworks-cli", "-p", "fleetworks-venture",
-)
-DESKTOP_PACKAGES = ("-p", "fleetworks-desktop")
+DESKTOP_PACKAGES = ("-p", "fleetworks-desktop", "-p", "fleetworks-workspace", "-p", "fleetworks-contracts")
 EVENTS = ("push", "pull_request", "workflow_dispatch", "schedule")
 COMPONENTS = ("auto", "native", "backend", "all")
 
@@ -71,14 +65,10 @@ def component_plan(components, scopes, images):
     if components == "native":
         return {"desktop"}, set()
     if components == "backend":
-        return set(ALL_SCOPES - {"native", "desktop", "web", "web_dev"}), set(BACKEND_IMAGES)
+        return set(ALL_SCOPES - {"desktop", "web", "web_dev"}), set(BACKEND_IMAGES)
     if components == "all":
         return set(ALL_SCOPES), set(ALL_IMAGES)
     return set(scopes), set(images)
-
-
-def client_image(name):
-    return f"fleetworks-{name}"
 
 
 def path_images(path):
@@ -93,17 +83,6 @@ def path_images(path):
         return {"surrealdb"}
     if path == "deploy/check-api.sh" or path.startswith(("crates/fleetworks-jobs/", *SERVER_PREFIXES)):
         return {"runtime"}
-    if path.startswith("apps/venture/"):
-        return {"venture"}
-    if path.startswith("apps/fleetworks-cli/"):
-        name = Path(path).name
-        if name.startswith("fleetworks-") and name.endswith(".rs"):
-            image = name[:-3]
-            if image in CLIENT_IMAGES:
-                return {image}
-        if name.endswith("_ui.rs") and name[: -len("_ui.rs")] in CLI_NAMES:
-            return {client_image(name[: -len("_ui.rs")])}
-        return {client_image(name) for name in CLI_NAMES}
     if path in {"deploy/Dockerfile", "deploy/Dockerfile.dockerignore", "deploy/docker-bake.hcl"}:
         return set(ALL_IMAGES)
     if (
@@ -131,16 +110,14 @@ def raw_path_scopes(path):
         return {"bert", "server", "queue", "web", "web_dev"}
     if path == "scripts/fleetworks_network_smoke.py":
         return {"server"}
+    if path in {"deploy/compose.yml", "deploy/compose.dev.yml", "deploy/check-web.mjs"}:
+        return {"web", "web_dev", "server", "compose"}
     if path in WEB_BUILD_PATHS or path.startswith("patches/"):
         return {"web", "web_dev", "server", "compose"}
     if path.startswith(("tests/web/", "vitest")) or path == "eslint.config.mjs":
         return {"web"}
 
     scopes = {"bert"} if path in BERT_SHARED_PATHS or path.startswith(BERT_SHARED_PREFIXES) else set()
-    if path.startswith("apps/venture/"):
-        return scopes | {"native", "server", "compose"}
-    if path.startswith("apps/fleetworks-cli/"):
-        return {"native"}
     if path.startswith("apps/fleetworks-desktop/"):
         return {"desktop"}
     if path in {"scripts/fleetworks_native_verify.py", "scripts/test_fleetworks_native_verify.py", ".github/workflows/fleetworks-native.yml"}:
@@ -169,7 +146,6 @@ def raw_path_scopes(path):
     # A pull request runs only lanes named by its changed paths. These files are
     # checked by the scope job, the main-merge embedded workflow, or a dispatch.
     if path.startswith((
-        "crates/argos-osint-bin/",
         ".opencode/",
         ".agents/",
         "scripts/fleetworks_candidate",
@@ -283,16 +259,11 @@ def run_local(scopes, comparison=None):
     ]
     if comparison:
         checks.insert(0, ["git", "diff", "--check", comparison])
-    if "native" in scopes:
-        checks.extend([
-            ["cargo", "fmt", *NATIVE_PACKAGES, "--", "--check"],
-            [sys.executable, "scripts/agent_cargo.py", "test", "--locked", *NATIVE_PACKAGES],
-        ])
     if "desktop" in scopes:
         if platform.system() == "Darwin":
             checks.extend([
                 ["cargo", "fmt", *DESKTOP_PACKAGES, "--", "--check"],
-                [sys.executable, "scripts/agent_cargo.py", "test", "--locked", *DESKTOP_PACKAGES],
+                [sys.executable, "scripts/agent_cargo.py", "test", "--locked", *DESKTOP_PACKAGES, "--", "--test-threads=1"],
             ])
         else:
             print("Desktop checks are pending on the selected macOS lanes; this host cannot provide Mac evidence.", flush=True)

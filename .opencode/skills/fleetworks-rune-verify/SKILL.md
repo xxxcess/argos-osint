@@ -1,6 +1,6 @@
 ---
 name: fleetworks-rune-verify
-description: Implement and verify Fleetworks Rune macOS views, state, input and accessibility with same-view Runtime fixtures and inspected PNG/tree evidence. Use for apps/fleetworks-desktop; retained terminal and React views use their own workflows.
+description: Implement and verify Fleetworks Rune macOS views, state, input and accessibility with same-view Runtime fixtures and inspected PNG/tree evidence. Use for apps/fleetworks-desktop; React views use their own workflow; terminal evidence is historical.
 ---
 
 # Fleetworks Rune verification

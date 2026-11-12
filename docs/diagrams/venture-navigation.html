@@ -1,12 +1,12 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>External Venture operator lifecycle</title>
+<title>Historical Venture lifecycle · retired 2026-11-12</title>
 <style>body{margin:32px;background:#f5f5f5;color:#2d3142;font-family:Geist,system-ui,sans-serif}main{max-width:1060px;margin:auto}h1{font-family:'Instrument Serif',Georgia,serif;font-size:38px;font-weight:400}svg{width:100%;height:auto}p{max-width:105ch;line-height:1.6}a{color:#394b65}code{font-family:'Geist Mono',ui-monospace,monospace}</style></head><body><main>
-<h1>External Venture operator lifecycle</h1>
-<p>Venture remains a supported external operator tool. Explicit operator commands select a deployment workspace and storage target, start or reconcile owned services, check readiness and optionally attach the retained operator CLI. This is separate from native application startup, gateway profiles and local origin children.</p>
+<h1>Historical Venture lifecycle · retired 2026-11-12</h1>
+<p>Historical record, retired 2026-11-12. These arrows document the former CLI workflow. Use the current native app and independently operated Docker backend.</p>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 432" role="img" aria-labelledby="venture-navigation-title venture-navigation-desc">
-<title id="venture-navigation-title">External Venture operator startup and ownership</title>
-<desc id="venture-navigation-desc">An external operator selects Venture's deployment workspace and configured storage target, explicitly starts or reconciles owned services and checks actual owner readiness before printing addresses. The retained web command may attach an operator terminal to Jobs or service logs. Exiting that session leaves the deployment running. Status, logs and stop operate only on the owned deployment and retain persistent data. Native application startup is a separate gateway connection and registration flow and never invokes Venture or starts this stack.</desc>
+<title id="venture-navigation-title">Historical Venture lifecycle · retired 2026-11-12</title>
+<desc id="venture-navigation-desc">Historical diagram of the removed Venture deployment launcher. It previously selected an operator workspace, started owned services, checked readiness and attached terminal sessions. Venture was retired on 2026-11-12. Current application startup uses native gateway connections; backend lifecycle uses direct Docker commands.</desc>
 <defs>
   <marker id="venture-navigation-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker>
 </defs>
@@ -23,7 +23,7 @@
   .edge{marker-end:url(#venture-navigation-arrow)}
 </style>
 <rect width="960" height="432" fill="#f5f5f5"/>
-<text x="40" y="36" class="heading" text-anchor="start">External operator startup and owned-stack lifecycle</text>
+<text x="40" y="36" class="heading" text-anchor="start">Historical Venture lifecycle · retired 2026-11-12</text>
 <path d="M228 116H272" class="edge"/>
 <path d="M460 116H504" class="edge"/>
 <path d="M692 116H736" class="edge"/>
@@ -51,9 +51,9 @@
 <rect x="728" y="236" width="192" height="72" rx="6" class="node"/>
 <text x="824" y="269" class="label" text-anchor="middle">Operator management</text>
 <text x="824" y="287" class="note" text-anchor="middle">status · logs · stop</text>
-<text x="40" y="336" class="note" text-anchor="start">Exiting the operator terminal leaves the stack running; venture stop stops owned services and retains data.</text>
-<text x="40" y="364" class="note">This deployment workspace is not a native origin child. Venture remains an external operator tool.</text>
-<text x="40" y="404" class="note">Native startup follows native-connections: choose a gateway, authenticate and register; it starts no services.</text>
+<text x="40" y="336" class="note" text-anchor="start">Historically, exiting the terminal kept the stack running; Stop retained persistent data.</text>
+<text x="40" y="364" class="note">Venture is retired. Direct Docker commands now manage the independent backend.</text>
+<a href="native-connections.html"><text x="40" y="404" class="note">Current startup: choose a native gateway and register; direct Docker owns backend lifecycle.</text></a>
 </svg>
-<p>Source: <a href="../../apps/venture/src/main.rs">Venture command routing</a> and <a href="../../apps/venture/src/compose.rs">owned deployment lifecycle</a>. Native startup belongs in <a href="native-connections.html">Native connections</a>; no native view starts Venture, Docker, a server or the web stack. Exiting an operator session preserves the deployment. Stopping it remains an explicit operator action and retains persistent data.</p>
+<p><a href="native-connections.html">Native connection flow</a> · <a href="dev-loop-images.html">Independent Docker image loop</a> · <a href="../archive/cli-retirement.md">CLI retirement record</a> · <a href="../diagrams.md">Diagram catalog</a></p>
 </main></body></html>

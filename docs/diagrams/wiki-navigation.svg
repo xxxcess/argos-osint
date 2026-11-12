@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 336" role="img" aria-labelledby="wiki-navigation-title wiki-navigation-desc">
 <title id="wiki-navigation-title">Fleetworks documentation routes</title>
-<desc id="wiki-navigation-desc">Start at the documentation index. The Venture guide covers setup and daily operations. Concepts explain product behavior, and the code route maps implementation and verification.</desc>
+<desc id="wiki-navigation-desc">Start at the documentation index. The Fleetworks guide covers the native app and independent Docker services. Concepts explain product behavior, and the code route maps implementation and verification.</desc>
 <defs>
   <marker id="wiki-navigation-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker>
 </defs>
@@ -26,7 +26,7 @@
 <text x="480" y="111" class="note" text-anchor="middle">docs/index.md</text>
 <rect x="40" y="192" width="260" height="88" rx="6" class="node"/>
 <text x="170" y="224" class="label" text-anchor="middle">Start Fleetworks</text>
-<text x="170" y="242" class="note" text-anchor="middle">Workspace · Venture · services</text>
+<text x="170" y="242" class="note" text-anchor="middle">Native app · Docker services</text>
 <text x="170" y="260" class="note" text-anchor="middle">wiki/code/fleetworks.md</text>
 <rect x="350" y="192" width="260" height="88" rx="6" class="node"/>
 <text x="480" y="224" class="label" text-anchor="middle">Explore concepts</text>

@@ -4,7 +4,7 @@
   <img src="assets/brand/fleetworks-logo.jpg" alt="Fleetworks emblem with five gold rays, an ivory disc, and a gold crescent" width="960">
 </p>
 
-Fleetworks collects public-source intelligence, connects evidence to actors and articles, and prepares cited Focus Briefs. Fleetworks Desktop is a native Rune macOS control hub connected to an independently operated Linux backend. Intel Web provides the browser desktop; Venture retains deployment and terminal-client compatibility operations.
+Fleetworks collects public-source intelligence, connects evidence to actors and articles, and prepares cited Focus Briefs. Fleetworks Desktop is a native Rune macOS control hub connected to an independently operated Linux backend. Intel Web provides the browser desktop. Backend services are deployed directly with Docker Compose.
 
 [Native app](apps/fleetworks-desktop/README.md) · [Connections](docs/wiki/code/native-connections.md) · [Setup and usage](docs/wiki/code/fleetworks.md) · [Deployment](deploy/README.md) · [Wiki](docs/index.md) · [Releases](docs/wiki/code/versioning.md)
 
@@ -20,7 +20,7 @@ python3 scripts/fleetworks_candidate.py build-native --target host --profile deb
 
 The helper prints the app and manifest paths. Add `--open` to launch it. The app opens offline setup and connects to an existing gateway; backend and Intel Web startup are separate operator actions.
 
-1. Provision a backend using the [isolated native-review recipe](deploy/README.md#isolated-native-backend-review), or use the operator stack below. Backend deployment requires Docker and Docker Compose **v2.20 or newer**.
+1. Provision a backend using the [isolated native-review recipe](deploy/README.md#isolated-native-backend-review), using the direct Docker commands below. Backend deployment requires Docker and Docker Compose **v2.20 or newer**.
 2. In **Workstation**, add a named connection with the gateway origin and its private Native-purpose token file. **Test** checks compatibility; **Connect** establishes the connection. Saved profiles keep protected file references, and reconnect is explicit.
 3. Select a current LAN/VPN interface and an owned workspace to register request context. Activity and mutations use that registration and the credential's permissions.
 
@@ -28,23 +28,30 @@ Native workspaces are protected children of `~/.fleetworks`, with a `default` ch
 
 When the gateway advertises an Intel Web URL, **Open Intel Web** opens its Connect form and copies the registered Connect ID. The browser uses its own server credential and session; the Connect ID alone is not a credential. See [connection and browser handoff](docs/wiki/code/native-connections.md#browser-handoff).
 
-### Operator and Intel Web stack
+### Independent Docker backend
 
-Venture remains available for deployment and retained CLI workflows. Use a separate operator workspace from the native container:
+Docker and Docker Compose **v2.20 or newer** run the Linux backend separately from the native app. Provision a new isolated deployment directory and build its backend images from the repository root:
 
 ```sh
-cargo build --locked -p fleetworks-venture -p fleetworks-cli --bins
-./target/debug/venture --workspace ./.fleetworks-backend up --storage compose-disk
-./target/debug/venture --workspace ./.fleetworks-backend status
+export REVIEW_NAME=native-local
+export PLATFORM="$(python3 scripts/fleetworks_verify.py platform --format docker)"
+python3 deploy/native_review.py init --name "$REVIEW_NAME" --api-port 18091 --platform "$PLATFORM"
+export REVIEW_WORKSPACE="$(python3 deploy/native_review.py value --name "$REVIEW_NAME" --field workspace)"
+export REVIEW_PROJECT="$(python3 deploy/native_review.py value --name "$REVIEW_NAME" --field project)"
+export IMAGE_TAG="$(python3 deploy/native_review.py value --name "$REVIEW_NAME" --field image_tag)"
+export VERSION="$(tr -d '[:space:]' < version.txt)"
+docker buildx bake -f deploy/docker-bake.hcl --load backend
+docker compose --env-file "$REVIEW_WORKSPACE/compose.env" -f deploy/compose.native-review.yml \
+  --project-name "$REVIEW_PROJECT" up --no-build --pull never --detach --wait
 ```
 
-Venture initializes credentials and starts the stack. The gateway defaults to `http://127.0.0.1:8080`; Intel Web defaults to `http://127.0.0.1:3000` and requires a registered Connect ID. Select `.fleetworks-backend/secrets/native-api-token` in the native connection editor. The separate operator credential supports diagnostics; it does not grant native registration or mutation permissions.
+Use `http://127.0.0.1:18091` and the deployment's protected `secrets/native-token` file in the native connection editor. This backend-only recipe starts no browser frontend. Keep the same env file, Compose file and project for `ps`, `logs` and `down`; stopping preserves backend data. Concurrent deployments need distinct directories, project names and ports. The native protected container is separate from the deployment directory. [Deployment, credentials and optional Web](deploy/README.md)
 
-Use the same operator workspace for status, logs and stop. Concurrent stacks need distinct workspaces, project names and ports. [Storage and operator setup](docs/wiki/code/fleetworks.md) · [Credential roles](deploy/README.md#credentials) · [CLI reference](apps/fleetworks-cli/README.md)
+Venture, the six terminal clients and the legacy `argos` executable are retired. Their historical evidence remains available in the [retirement disposition](docs/archive/cli-retirement.md). Backend service executables and administrative support tools remain supported.
 
 ### Collect articles with Atlas
 
-Provision provider credentials, the Atlas worker, private NLP and a Rust-BERT model for the container architecture. The operator stack enables its Atlas overlay with `up --atlas`. Submit through the native Atlas page after connecting and registering; submission requires an advertised durable worker and permission. A job receipt confirms acceptance, while Jobs reports progress and completion. The [Atlas deployment guide](deploy/atlas-dispatch.md) lists the files and settings.
+Provision provider credentials, the Atlas worker, private NLP and a Rust-BERT model for the container architecture. Enable the separately configured [Atlas Compose overlay](deploy/atlas-dispatch.md). Submit through the native Atlas page after connecting and registering; submission requires an advertised durable worker and permission. A job receipt confirms acceptance, while Jobs reports progress and completion. The [Atlas deployment guide](deploy/atlas-dispatch.md) lists the files and settings.
 
 ## Applications and services
 
@@ -61,7 +68,7 @@ Provision provider credentials, the Atlas worker, private NLP and a Rust-BERT mo
 
 The native app uses shared Rust contracts and an origin-pinned API client. Axum serves the gateway; Next.js runs the React Native Web desktop through a same-origin relay with a separate credential. Linux services own inference, indexing and storage: SurrealDB holds domain records and current scheduling state, Jobs owns SQLite operational logs and its embedded RocksDB delivery queue, and private Tantivy serves actor discovery. The Atlas overlay runs Compromise NLP and Rust-BERT behind private endpoints. [Architecture](docs/wiki/code/architecture.md) · [Persistence rollout](docs/wiki/code/jobs-persistence.md)
 
-Source implementation, fixture checks and packaged builds are separate from installed-app, physical-Mac accessibility, real backend integration and both-architecture verification. Terminal retirement and production scheduler migration retain their own acceptance gates. See [rollout status](docs/wiki/code/fleetworks.md#rollout-status), [native verification](docs/wiki/code/native-verification.md) and [CI](docs/wiki/code/ci.md) for the applicable checks.
+Source implementation, fixture checks and packaged builds are separate from installed-app, physical-Mac accessibility, real backend integration and both-architecture verification. Production scheduler migration retains its own acceptance gates. Executable retirement does not establish installed-app or dual-Mac parity. See [rollout status](docs/wiki/code/fleetworks.md#rollout-status), [native verification](docs/wiki/code/native-verification.md) and [CI](docs/wiki/code/ci.md) for the applicable checks.
 
 ## Development
 
@@ -80,9 +87,8 @@ Choose the shortest loop for the changed surface. Native app builds connect to t
 | Change | Loop |
 | --- | --- |
 | Rune app, client contracts or workspace manager | Scoped host debug tests, selected same-view Runtime/PNG/tree fixtures, then `python3 scripts/fleetworks_candidate.py build-native --target host --profile debug`. |
-| Venture or a `fleetworks-*` CLI | `cargo build --locked -p fleetworks-venture -p fleetworks-cli --bins`, unit tests, then `venture client <app>` against a running stack. No image rebuild. |
 | Service roles (`argos-api-host`) | Rebuild the `runtime` image; the native-review `backend` Bake group builds backend-only images. BuildKit caches dependencies. |
-| Web app and `packages/*/src` | `venture up --dev --storage local-net`. Source is mounted and reloads on save. |
+| Web app and `packages/*/src` | Run the separately configured Next development server; use isolated repository Playwright output for browser checks. |
 | Dependencies, Dockerfile, Compose or private search | Build the affected image with `docker buildx bake -f deploy/docker-bake.hcl <target>`, then use its isolated deployment checks. |
 | Packaging or release | Push and read the hosted CI results for that revision. |
 

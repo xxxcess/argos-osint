@@ -1,5 +1,7 @@
 # TUI implementation and verification
 
+> Historical reference: Venture, the six terminal clients and the legacy `argos` executable were retired on 2026-11-12. Source paths, commands and verification below describe the earlier implementation and are not current instructions. Use [native verification](native-verification.md) and the [retirement disposition](../../archive/cli-retirement.md).
+
 [Code route](index.md) · [Wiki](../../index.md) · [Canonical agent workflow](agent-workflow.md)
 
 This is the repo standard for agents changing terminal presentation or interaction. Read the [design contract](tui-design-spec.md) and affected [component APIs](tui-components.md) before editing. Keep the TUI simple. React Native component creativity belongs in the [Fleetworks look and feel](react-ui.md#fleetworks-look-and-feel) and does not add terminal chrome. The [Profile implementation session](../../archive/tui-verification-session-2026-10-10.md) records how this procedure was established, including actual screenshots and defects found. The reusable skill is [argos-tui-verify](../../../.opencode/skills/argos-tui-verify/SKILL.md).

@@ -21,7 +21,7 @@ Understand the product, then follow its implementation. This is the maintained e
 | [docs/diagrams/](diagrams.md) | Diagram catalog; HTML pages and matching SVG figures |
 | [Core crate](../crates/argos-osint-core) | Domain pipelines and storage; [module map](wiki/code/core.md) |
 | [Native app](../apps/fleetworks-desktop) | API-only macOS control hub; [connections](wiki/code/native-connections.md) and [protected workspaces](wiki/code/native-workspaces.md) |
-| [Venture](../apps/venture) and [retained terminal clients](../apps/fleetworks-cli) | Operator compatibility and versioned API consumers; retirement remains gated by replacement parity. [Fleetworks guide](wiki/code/fleetworks.md) |
+| [Direct Docker backend](../deploy/README.md) | Independent Linux services, purpose credentials and persistent backend data; [retired terminal disposition](archive/cli-retirement.md) |
 | [Actor search](wiki/code/actor-search.md) | Private Tantivy projection, canonical discovery, visible acknowledgements and verification boundaries |
 | [Jobs persistence](wiki/code/jobs-persistence.md) | Planned SQLite state, embedded RocksDB delivery, migration scopes and acceptance |
 | [Deployment](../deploy/README.md) | Local Compose, database profiles and the [Atlas overlay](../deploy/atlas-dispatch.md) |

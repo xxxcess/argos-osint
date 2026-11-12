@@ -57,7 +57,7 @@
 <text x="484" y="600" class="label">Retained backend state and separate dependencies</text>
 <text x="484" y="630" class="note">SurrealDB identity + domain, Jobs SQLite, staged datasets and search data stay owned.</text>
 <text x="484" y="658" class="note">Search-index images and matching Linux model / native-library assets have separate lifecycles.</text>
-<text x="48" y="720" class="minor">Preserve the user's running stack and useful images. Native Mac startup and retained operator / CLI loops remain independent.</text>
+<text x="48" y="720" class="minor">Preserve the user's running stack and useful images. Native Mac startup is independent of direct Docker operation.</text>
 </svg>
 <p>The runtime Dockerfile stage compiles the locked server,nlp,classifier graph with architecture-scoped BuildKit caches. A complete image, observed startup and successful source-to-visible behavior are distinct evidence. Matching Linux inference assets are staged separately when their roles are selected.</p>
 <p><a href="../../deploy/Dockerfile">Dockerfile targets</a> · <a href="../../deploy/README.md">Backend review recipe</a> · <a href="dev-loop-images.html">Image loop</a> · <a href="../diagrams.md">Diagram catalog</a></p>

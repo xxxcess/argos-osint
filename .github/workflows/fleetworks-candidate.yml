@@ -8,9 +8,9 @@ on:
         type: string
         required: true
       components:
-        description: Native always builds both Mac apps; legacy retains the retiring CLI candidates
+        description: Native builds both Mac apps; backend builds both Linux image candidates
         type: choice
-        options: [native, backend, all, legacy]
+        options: [native, backend, all]
         default: native
       publish:
         description: Review artifacts only; trusted release publication is a separate operation
@@ -34,8 +34,8 @@ jobs:
     outputs:
       head: ${{ steps.resolve.outputs.head }}
       native-selected: ${{ steps.resolve.outputs.native-selected }}
-      legacy-selected: ${{ steps.resolve.outputs.legacy-selected }}
-      legacy-matrix: ${{ steps.resolve.outputs.legacy-matrix }}
+      backend-selected: ${{ steps.resolve.outputs.backend-selected }}
+      backend-matrix: ${{ steps.resolve.outputs.backend-matrix }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -59,29 +59,28 @@ jobs:
           import json
           import os
           components = os.environ["COMPONENTS"]
-          if components not in {"native", "backend", "all", "legacy"}:
+          if components not in {"native", "backend", "all"}:
               raise SystemExit("Unknown candidate component selection")
           linux = [{"target": "x86_64-unknown-linux-gnu", "runner": "ubuntu-24.04"},
                    {"target": "aarch64-unknown-linux-gnu", "runner": "ubuntu-24.04-arm"}]
-          macs = [{"target": "x86_64-apple-darwin", "runner": "macos-15-intel"},
-                  {"target": "aarch64-apple-darwin", "runner": "macos-15"}]
-          legacy = linux if components == "backend" else linux + macs if components in {"all", "legacy"} else []
+          backend = linux if components in {"backend", "all"} else []
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
               print("head=" + os.environ["EXPECTED_HEAD"], file=output)
               print("native-selected=" + str(components in {"native", "all"}).lower(), file=output)
-              print("legacy-selected=" + str(bool(legacy)).lower(), file=output)
-              print("legacy-matrix=" + json.dumps({"include": legacy}), file=output)
+              print("backend-selected=" + str(bool(backend)).lower(), file=output)
+              print("backend-matrix=" + json.dumps({"include": backend}), file=output)
           PY
 
   candidate:
-    name: Retained operator/CLI / ${{ matrix.target }}
+    name: Linux backend images / ${{ matrix.target }}
     needs: resolve
-    if: needs.resolve.outputs.legacy-selected == 'true'
+    if: needs.resolve.outputs.backend-selected == 'true'
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.resolve.outputs.legacy-matrix) }}
+      matrix: ${{ fromJson(needs.resolve.outputs.backend-matrix) }}
     uses: ./.github/workflows/fleetworks-candidate-target.yml
     with:
+      include-web: ${{ inputs.components == 'all' }}
       target: ${{ matrix.target }}
       runner: ${{ matrix.runner }}
       expected-head: ${{ needs.resolve.outputs.head }}
@@ -118,8 +117,8 @@ jobs:
           RESOLVE_RESULT: ${{ needs.resolve.result }}
           EXACT_HEAD: ${{ needs.resolve.outputs.head }}
           NATIVE_SELECTED: ${{ needs.resolve.outputs.native-selected }}
-          LEGACY_SELECTED: ${{ needs.resolve.outputs.legacy-selected }}
-          LEGACY_RESULT: ${{ needs.candidate.result }}
+          BACKEND_SELECTED: ${{ needs.resolve.outputs.backend-selected }}
+          BACKEND_RESULT: ${{ needs.candidate.result }}
           INTEL_RESULT: ${{ needs.native_intel.result }}
           ARM_RESULT: ${{ needs.native_arm.result }}
           INTEL_ID: ${{ needs.native_intel.outputs.artifact-id }}
@@ -142,7 +141,7 @@ jobs:
             esac
           }
           failed=0
-          check legacy "$LEGACY_SELECTED" "$LEGACY_RESULT" || failed=1
+          check backend "$BACKEND_SELECTED" "$BACKEND_RESULT" || failed=1
           check intel "$NATIVE_SELECTED" "$INTEL_RESULT" || failed=1
           check arm "$NATIVE_SELECTED" "$ARM_RESULT" || failed=1
           printf 'Fleetworks candidate source `%s`\n\n' "$EXACT_HEAD" >> "$GITHUB_STEP_SUMMARY"

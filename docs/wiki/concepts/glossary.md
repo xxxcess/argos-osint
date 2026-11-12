@@ -11,7 +11,7 @@ Service and evidence terms used across Fleetworks. See the [architecture](../cod
 | Name | Role |
 | --- | --- |
 | Fleetworks Desktop | API-only native macOS hub; protected local folders identify future requests and registered activity |
-| Venture | Retained operator launcher; owns only its recorded operator workspace and stack |
+| Venture | Retired operator launcher; [historical disposition](../../archive/cli-retirement.md). Current deployment uses direct Docker Compose |
 | Intel | Web workspace for Bulletin, Focus Brief, Actor Dossier and Topology |
 | Atlas | Collects headlines and hands off durable classification and derivative work |
 | Brain | Serves retained actors, brief details, Related articles and topology through a private service |

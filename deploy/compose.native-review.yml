@@ -1,5 +1,5 @@
-# Standalone backend review stack. Do not combine with compose.yml: that file
-# retains the web/operator workflow. Provision with deploy/native_review.py.
+# Standalone backend stack. Provision with deploy/native_review.py.
+# Optional overlays: compose.yml (Web), compose.dev.yml, compose.atlas.yml.
 name: ${COMPOSE_PROJECT_NAME:?Select a dedicated native-review project}
 
 x-workspace: &workspace
@@ -261,6 +261,7 @@ services:
       FLEETWORKS_API_BIND: 0.0.0.0
       FLEETWORKS_API_ALLOWED_HOSTS: "api:8080,127.0.0.1:${FLEETWORKS_API_PORT:?Select an unused review port},localhost:${FLEETWORKS_API_PORT}"
       FLEETWORKS_API_ALLOWED_ORIGINS: ""
+      FLEETWORKS_INTEL_WEB_URL: ${FLEETWORKS_INTEL_WEB_URL:-}
       FLEETWORKS_API_CREDENTIALS_FILE: /run/secrets/gateway_credentials
       FLEETWORKS_API_TOKEN_FILE: /run/secrets/gateway_health_token
       FLEETWORKS_API_HEALTH_HOST: api:8080
@@ -286,6 +287,30 @@ services:
         host_ip: 127.0.0.1
         protocol: tcp
     healthcheck: *health
+
+  worker:
+    <<: *runtime
+    command: [--role, worker]
+    environment:
+      <<: *environment
+      FLEETWORKS_EXECUTION_ORIGIN: http://execution:8080
+      FLEETWORKS_EXECUTION_TOKEN_FILE: /run/secrets/execution_token
+    secrets: [storage_password, jobs_token, execution_token]
+    depends_on:
+      execution:
+        condition: service_healthy
+
+  brief-worker:
+    <<: *runtime
+    command: [--role, brief-worker]
+    environment:
+      <<: *environment
+      FLEETWORKS_EXECUTION_ORIGIN: http://execution:8080
+      FLEETWORKS_EXECUTION_TOKEN_FILE: /run/secrets/execution_token
+    secrets: [storage_password, jobs_token, execution_token]
+    depends_on:
+      execution:
+        condition: service_healthy
 
   native-worker:
     <<: *runtime

@@ -1,5 +1,7 @@
 # Profile dashboard and search
 
+> Historical reference: Venture, the six terminal clients and the legacy `argos` executable were retired on 2026-11-12. Source paths, commands and verification below describe the earlier implementation and are not current instructions. Use [native verification](native-verification.md) and the [retirement disposition](../../archive/cli-retirement.md).
+
 [Code route](index.md) · [Wiki](../../index.md)
 
 This contributor reference covers metric and configuration contracts in the retained Ratatui Profile dashboard (`ModuleId::System`). The network Profile client exposes workspace and health reads through the authenticated API. [Fleetworks Profile usage](../concepts/usage.md#profile)

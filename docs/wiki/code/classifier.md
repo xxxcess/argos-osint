@@ -23,7 +23,7 @@ The feature-independent [taxonomy](../../../crates/argos-osint-core/src/atlas_ta
 | [atlas_admission_maintenance.rs](../../../crates/argos-osint-core/src/atlas_admission_maintenance.rs) | Durable retained-occurrence reclassification with 64-row activations and original provenance |
 | [storage/classifier_calibration.rs](../../../crates/argos-osint-core/src/storage/classifier_calibration.rs) | Observation origins, terminal-cycle outbox and independent bounded monitoring |
 | [atlas_calibration.rs](../../../crates/argos-osint-core/src/atlas_calibration.rs) | Bounded story-family discovery and permanent partitions |
-| [data_paths.rs](../../../crates/argos-osint-core/src/data_paths.rs) | Saved dataset/artifact locations for backend owners and retained operator clients |
+| [data_paths.rs](../../../crates/argos-osint-core/src/data_paths.rs) | Saved dataset/artifact locations for backend owners |
 | [dataset.rs](../../../crates/argos-osint-core/src/classifier/dataset.rs) | Read-only runtime resolution and bounded synthetic CSV validation |
 | [readiness.rs](../../../crates/argos-osint-core/src/classifier/readiness.rs) | Shared home probe/cache, manual jobs, pin/evaluate/rollback and cycle-preflight permit |
 
@@ -33,7 +33,7 @@ The neutral [runtime budget](../../../crates/argos-osint-core/src/js_runtime_bud
 
 The [Atlas Compose overlay](../../../deploy/atlas-dispatch.md) runs an authenticated private classifier role. The service keeps the pinned Rust-BERT worker warm and checks exact inference receipts. Supply the Linux worker and checkpoint files under the workspace using paths visible inside the container. The service can report transport readiness before model assets are available. Atlas reports a pin failure on the durable cycle job.
 
-The retained operator command `venture train-legacy` snapshots the selected dataset for one-shot Natural training. Its explicit `--activate` option selects that Natural artifact under the existing compatibility contract. The native maintenance flow below separates those operations. Fresh Atlas cycles use Rust-BERT.
+Native registered maintenance snapshots a staged dataset for durable candidate-only Natural training. Activation is a separate explicit operation bound to immutable candidate hashes and the expected prior revision. The retired launcher training command is not a supported entry point. Fresh Atlas cycles use Rust-BERT.
 
 ## Native maintenance and optional Natural activation
 
@@ -87,7 +87,7 @@ Prepare the CPU worker and pinned English NLI checkpoint for the container's Lin
      /absolute/path/to/argos-atlas-bert serve /absolute/path/atlas-distilbert-mnli
    ```
 
-   Start Venture with `up --atlas`, submit a cycle through the Atlas client and inspect the returned job through Jobs. The classifier service can report transport readiness before its model assets are available. Atlas verifies the pin before a new collection and records configuration or inference errors on the job.
+   Start the explicit Atlas Compose overlay, submit a cycle through native Atlas and inspect its authorized job in Jobs. The classifier service can report transport readiness before its model assets are available. Atlas verifies the pin before a new collection and records configuration or inference errors on the job.
 
 A run pins the executable, model bytes and admission threshold. Resume of acquisition or admission requires those exact assets. Proven derivative-only work can resume after the classifier is no longer loaded.
 
@@ -127,19 +127,13 @@ The resolver recognizes a workspace through bounded Cargo markers while walking 
 
 The parser accepts RFC quoted commas/quotes/newlines, LF/CRLF and one leading UTF-8 BOM. The header is the exact unique 18-field set in the [dataset contract](../concepts/strategic-domains-taxonomy.md), in any column order. Limits include 128 MiB input, 128 KiB raw records, 16 KiB metadata fields, 32 KiB title/description per row, 64 MiB total feature text and 50,000 rows. No truncation, lossy decoding or label/notes-as-feature behavior is permitted.
 
-The default v2 release has 1,020 distinct synthetic scenarios and four disjoint partitions: Train 440, Calibration 230, Development 165, Test 185. Complete labels contain zero to six domains; editorial primary/secondary annotations are subsets. Unknown dataset versions fail explicitly. The original unversioned filename remains the frozen v1 fixture, selectable explicitly; it retains exact-two validation. Every CLI CSV row is complete synthetic English annotation. The frozen v1 seed version (`strategic-domains-v1-seed-1`) additionally requires 1,700 rows, 220 families, 1,130/285/285 split rows, 142/39/39 split families, focused/pair/negative family cardinalities and the prescribed domain/pair counts. The explicitly supported development versions (`synthetic-development-v1` and `synthetic-development-v2`) retain strict schema, uniqueness and family-leakage checks but do not claim delivered-release validation. Reviewed-real evidence uses the typed reviewed pipeline; a CSV string cannot assert review approval. Canonical hashes bind all four splits plus permanent family assignments. Calibration fits isotonic and regularized monotone sigmoid alternatives, including discriminative-support gates; Development compares calibration error and admission quality. Reports distinguish Calibration fit diagnostics from independent Development evaluation. A failed sigmoid fit retains isotonic with an explicit reason. Test is read only by explicit final evaluation.
+The default v2 release has 1,020 distinct synthetic scenarios and four disjoint partitions: Train 440, Calibration 230, Development 165, Test 185. Complete labels contain zero to six domains; editorial primary/secondary annotations are subsets. Unknown dataset versions fail explicitly. The original unversioned filename remains the frozen v1 fixture, selectable explicitly; it retains exact-two validation. Every synthetic training CSV row is complete synthetic English annotation. The frozen v1 seed version (`strategic-domains-v1-seed-1`) additionally requires 1,700 rows, 220 families, 1,130/285/285 split rows, 142/39/39 split families, focused/pair/negative family cardinalities and the prescribed domain/pair counts. The explicitly supported development versions (`synthetic-development-v1` and `synthetic-development-v2`) retain strict schema, uniqueness and family-leakage checks but do not claim delivered-release validation. Reviewed-real evidence uses the typed reviewed pipeline; a CSV string cannot assert review approval. Canonical hashes bind all four splits plus permanent family assignments. Calibration fits isotonic and regularized monotone sigmoid alternatives, including discriminative-support gates; Development compares calibration error and admission quality. Reports distinguish Calibration fit diagnostics from independent Development evaluation. A failed sigmoid fit retains isotonic with an explicit reason. Test is read only by explicit final evaluation.
 
 The frozen v1 seed's 55 positive calibration rows per domain represent eight independent positive families, not 55 independent stories. This does not meet the 20-accepted-family production gate.
 
 ## Workspace training
 
-This retained operator/CLI path runs the optional Natural trainer against a selected deployment-workspace dataset. Native Workstation uses the separate registered maintenance and candidate-activation flow above.
-
-```sh
-venture --workspace ./review-workspace train-legacy --file datasets/argos_atlas_strategic_domains_v2.csv
-```
-
-Venture snapshots the selected bytes for the training worker. Use `--activate` for explicit activation. [Training and dataset setup](../../../deploy/README.md#train-the-optional-natural-classifier)
+Select and stage the dataset in native Workstation readiness, then explicitly confirm candidate-only Natural training. Use the separate candidate preview and activation action for the exact immutable hashes, expected prior model revision and required synthetic-baseline consent. Training does not activate a model or establish Rust-BERT readiness. [Training and inference setup](../../../deploy/README.md#optional-maintenance-and-inference)
 
 Manual training persists a bounded request before returning acceptance. Replaying the same ID/body returns the original operation, even if the CSV later changes or disappears; changed consent/file identity conflicts. Candidate-only completion is successful and distinct from activation, including when an existing pointer is invalid or incompatible. Explicit synthetic repair requires a strictly verified prior activation identity and preserves its history/generation; unreadable or malformed lineage is never treated as an absent prior. A durable terminal result precedes final owner/writer teardown. Readiness reports retryable `writer_busy` and disables new training until the existing writer is free; status observes that transition without creating a lock. Starting the next operation reaps its exact terminal monitor through a bounded retained join. Cancellation and shutdown retain owned worker handles, release only owned leases and preserve the prior model before commit. Evaluation pins once, scores deterministic Test-family representatives with frozen gates and does not fit, calibrate or activate.
 
@@ -151,7 +145,7 @@ The `preflight_cycle` API supplies a private permit retaining a real model pin. 
 
 The [classifier quality v2 acceptance record](../../../.planning/2026-11-06-classifier-quality-v2/acceptance.md) distinguishes actual checks, immutable identities, quality limitations and pending gates. The [earlier admission acceptance record](../../../.planning/2026-11-05-atlas-performance-completion/acceptance.md) retains the prior implementation evidence.
 
-Bundle commands are `node scripts/build_classifier_bundle.mjs --check` and `node scripts/test_classifier_bundle.mjs`; the parity tool can emit a reviewable golden oracle. Rust public contracts are in `tests/classifier_{contract,artifact,training_calibration,dataset,readiness}.rs` plus adversarial artifact/runtime targets. Follow the [contributor workflow](contributing.md) for authorized host-native embedded checks and required gate. Installed-build/no-Node, interruption/memory, atomic history, CLI/PTY and React browser evidence are separate acceptance checks.
+Bundle commands are `node scripts/build_classifier_bundle.mjs --check` and `node scripts/test_classifier_bundle.mjs`; the parity tool can emit a reviewable golden oracle. Rust public contracts are in `tests/classifier_{contract,artifact,training_calibration,dataset,readiness}.rs` plus adversarial artifact/runtime targets. Follow the [contributor workflow](contributing.md) for authorized host-native embedded checks and required gate. Installed-build/no-Node, interruption/memory, atomic history, native installed-app and React browser evidence are separate acceptance checks.
 
 ## Historical admission and provider monitoring
 

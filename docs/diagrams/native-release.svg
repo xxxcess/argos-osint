@@ -60,12 +60,12 @@
 <text x="56" y="472" class="note">Pending · review exact artifacts</text>
 <text x="56" y="496" class="note">Explicit trusted authorization</text>
 <text x="56" y="520" class="note">Sign / notarize / verify trust</text>
-<text x="56" y="544" class="note">Separate from candidate workflow</text>
+<text x="56" y="544" class="note">Separate trusted workflow</text>
 <rect x="40" y="632" width="272" height="140" rx="6" class="pending"/>
 <text x="56" y="664" class="label">Durable release assets</text>
 <text x="56" y="692" class="note">Only after trusted promotion</text>
 <text x="56" y="716" class="note">Versioned app archives + hashes</text>
 <text x="56" y="740" class="note">Stable links outlive Actions URLs</text>
 <text x="40" y="820" class="minor">Diagram arrows describe the source workflow and required later gates, not a completed release or GUI/minimum-OS pass.</text>
-<text x="40" y="848" class="minor">Both selected Mac jobs must succeed. Retained legacy candidates remain selectable until their retirement gates pass.</text>
+<text x="40" y="848" class="minor">Both selected Mac jobs must succeed. Linux backend image candidates use separate build and verification lanes.</text>
 </svg>

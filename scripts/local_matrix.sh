@@ -7,7 +7,7 @@
 #   workspace test suite (unit + storage contract tests on the embedded
 #   engine), then `test_surreal.py --mode embedded`.
 # server (opt-in): `--no-default-features --features server,nlp,classifier`
-#   clippy for core and bin, then the storage contract tests against a local
+#   clippy for core and service host, then the storage contract tests against a local
 #   SurrealDB 3.3.4 server (`test_surreal.py --mode server`, using --surreal-bin or
 #   `surreal` on PATH). Non-storage tests run only in the embedded leg.
 #
@@ -41,8 +41,8 @@ case "$storage" in
     step cargo fmt --all -- --check
     step "${cargo[@]}" clippy --workspace --all-targets --locked -- -D warnings
     step "${cargo[@]}" test --workspace --locked
-    # Smoke: the built bin must carry the storage CLI (catches feature wiring gaps).
-    step "${cargo[@]}" run -q -p argos-osint-bin --locked -- storage init --help
+    # The retained service host must expose its actual role/bootstrap interface.
+    step "${cargo[@]}" run -q -p argos-api-host --locked -- --help
     step python3 scripts/test_surreal.py --mode embedded --no-fail-fast
     ;;
   server)
@@ -50,10 +50,10 @@ case "$storage" in
       surreal_bin="$(command -v surreal || true)"
     fi
     [ -n "$surreal_bin" ] || { echo "local_matrix: no surreal binary (pass --surreal-bin or put surreal on PATH)" >&2; exit 2; }
-    step "${cargo[@]}" clippy -p argos-osint-core -p argos-osint-bin --all-targets --locked \
+    step "${cargo[@]}" clippy -p argos-osint-core -p argos-api-host --all-targets --locked \
       --no-default-features --features server,nlp,classifier -- -D warnings
-    step "${cargo[@]}" run -q -p argos-osint-bin --locked --no-default-features --features server,nlp,classifier \
-      -- storage init --help
+    step "${cargo[@]}" run -q -p argos-api-host --locked --no-default-features --features server,nlp,classifier \
+      -- --help
     step python3 scripts/test_surreal.py --mode server --bin "$surreal_bin" --no-fail-fast
     ;;
   *)

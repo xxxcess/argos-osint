@@ -1,6 +1,6 @@
 # Jobs persistence and embedded delivery
 
-[Architecture](architecture.md) · [Storage map](storage.md) · [Venture](fleetworks.md) · [Deployment](../../../deploy/README.md)
+[Architecture](architecture.md) · [Storage map](storage.md) · [Native and services](fleetworks.md) · [Deployment](../../../deploy/README.md)
 
 `@tag:jobs-persistence`
 
@@ -13,7 +13,7 @@ Fleetworks is moving operational job traffic out of the domain datastore and rep
 | Jobs / SQLite | Jobs, tasks, attempts, execution leases, retries, cancellation, progress, logs, operational telemetry and enqueue intents | Authenticated Jobs HTTP; SQL never exposed to clients |
 | Jobs / RocksDB | Delivery messages, visibility leases, acknowledgments, delayed requeues and dead letters | Embedded in the same Jobs process; workers use queue HTTP operations |
 | Domain services / SurrealDB | Articles, actors, evidence, briefs, results, business admission/accounting, domain publication fences and applied-operation receipts | Existing domain repositories and service APIs |
-| Venture | Workspace paths, credentials, service lifecycle and storage selection | No RabbitMQ server or external broker configuration in the target startup |
+| Direct Docker deployment | Explicit backend paths, purpose credentials, service lifecycle and storage endpoint | No native app deployment ownership, RabbitMQ server or external broker configuration |
 
 Only Jobs opens either operational database. Other containers must not mount its data directory. Both stores persist beneath workspace `storage/jobs/`; stop and container replacement retain them. `local-net` selects the existing **domain** SurrealDB endpoint; local job storage remains owned by Jobs. `local-process` manages domain SurrealDB; it does not need a native broker in the target architecture.
 

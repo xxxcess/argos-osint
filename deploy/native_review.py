@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TOKEN_NAMES = (
     "native-token", "web-relay-token", "gateway-health-token", "brain-token",
     "tools-token", "control-token", "jobs-token", "execution-token",
-    "storage-password", "storage-root-password", "search-read-token", "search-write-token",
+    "internal-token", "storage-password", "storage-root-password", "search-read-token", "search-write-token",
 )
 NATIVE_PERMISSIONS = (
     "read_backend", "register_workstation", "rebind_workstation", "manage_configuration",
@@ -43,13 +43,19 @@ def private_file(path, value):
         os.fsync(output.fileno())
 
 
-def provision(root, name, api_port, platform, revision):
+def provision(root, name, api_port, platform, revision, *, web_port=None, images=None):
     if not 1024 <= api_port <= 65535:
         raise ValueError("Choose an unused unprivileged API port")
+    if web_port is not None and (not 1024 <= web_port <= 65535 or web_port == api_port):
+        raise ValueError("Choose a distinct unused unprivileged Web port")
     if platform not in {"linux/amd64", "linux/arm64"}:
         raise ValueError("Review platform must be linux/amd64 or linux/arm64")
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise ValueError("Review revision must be a full Git SHA")
+    if images:
+        allowed = {"FLEETWORKS_RUNTIME_IMAGE", "FLEETWORKS_SURREAL_IMAGE", "FLEETWORKS_SEARCH_IMAGE", "FLEETWORKS_WEB_IMAGE"}
+        if set(images) - allowed or any(not re.fullmatch(r"[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9._-]+", value) for value in images.values()):
+            raise ValueError("Review image overrides must be explicit tagged images")
     workspace = review_path(root, name)
     if any(character in str(workspace) for character in "'\\\r\n"):
         raise ValueError("Review repository path cannot contain quotes, backslashes or line breaks")
@@ -85,6 +91,12 @@ def provision(root, name, api_port, platform, revision):
         "FLEETWORKS_SURREAL_IMAGE": "fleetworks-surrealdb:" + image_tag,
         "FLEETWORKS_SEARCH_IMAGE": "fleetworks-search-index:" + image_tag,
     }
+    if web_port is not None:
+        environment.update(FLEETWORKS_WEB_PORT=str(web_port),
+                           FLEETWORKS_WEB_ORIGIN=f"http://127.0.0.1:{web_port}",
+                           FLEETWORKS_WEB_IMAGE="fleetworks-web:" + image_tag)
+    if images:
+        environment.update(images)
     # Compose reads this directly; documentation never sources/evals file text.
     # Single quotes preserve literal dollar signs in the path; Compose must not
     # expand a repository directory as an environment-variable expression.
@@ -100,6 +112,7 @@ def main():
     initialize = subcommands.add_parser("init", help="create new private files under .agent-scratch/native-review")
     initialize.add_argument("--name", required=True)
     initialize.add_argument("--api-port", type=int, required=True)
+    initialize.add_argument("--web-port", type=int, help="optional distinct loopback Intel Web port")
     initialize.add_argument("--platform", choices=("linux/amd64", "linux/arm64"), required=True)
     value = subcommands.add_parser("value", help="read one non-secret review setting")
     value.add_argument("--name", required=True)
@@ -108,7 +121,7 @@ def main():
     try:
         if args.command == "init":
             revision = subprocess.check_output(["git", "rev-parse", "--verify", "HEAD"], cwd=ROOT, text=True).strip()
-            receipt = provision(ROOT, args.name, args.api_port, args.platform, revision)
+            receipt = provision(ROOT, args.name, args.api_port, args.platform, revision, web_port=args.web_port)
             print(f"Prepared isolated backend review: {receipt['workspace']}")
             print("No images built or services started. Keep compose.env and all credentials for restart.")
         else:

@@ -2,7 +2,7 @@
 
 [Wiki](../../index.md) · [Explore code](../code/index.md)
 
-Start with [usage](usage.md) for Venture, the Intel web app and the terminal clients. The [glossary](glossary.md) explains service and evidence terms.
+Start with [usage](usage.md) for the native macOS app and Intel Web with independently operated backend services. The [glossary](glossary.md) explains service and evidence terms.
 
 ## Follow the work
 

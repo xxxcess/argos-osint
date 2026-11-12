@@ -1,5 +1,7 @@
 # Profile analytics dashboard
 
+> Historical reference: the Ratatui executable and terminal clients were retired on 2026-11-12. These layouts, source paths and fixture instructions describe the earlier implementation; metric meanings remain historical evidence rather than native UI parity. Use [native verification](native-verification.md) and the [retirement disposition](../../archive/cli-retirement.md).
+
 [Code route](index.md) · [Wiki](../../index.md)
 
 This contributor contract covers the retained Ratatui Profile dashboard. It keeps the internal `ModuleId::System` and exactly three upper tabs: **Overview / System / Configs**. Configs contains Dataset paths and portable Export / import views. Dataset paths stores actor CSV, article training CSV and classifier save directory in `[data_paths]`; see the [stored dataset paths](../../../crates/argos-osint-core/src/data_paths.rs). Overview starts on **Summary**, followed by Intel, Recon, Atlas, Models and Tools. Its simultaneous dashboard panels replace the earlier focused-only accordion and 35-primary-widget presentation. Telemetry, cohorts, retained DTOs/history, retention, privacy and provider scheduler contracts remain authoritative in [profile-dashboard-and-search.md](profile-dashboard-and-search.md).

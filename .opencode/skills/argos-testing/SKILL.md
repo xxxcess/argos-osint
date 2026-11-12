@@ -25,7 +25,7 @@ Exercise opt-in fixtures before using them as evidence. Preserve meaningful asse
 
 ## Rust and storage
 
-- Unit tests live beside meaningful logic; public/cross-module integration tests live under `crates/<crate>/tests/`. Reuse `tests/support` rather than creating an accidentally discovered empty test crate. CLI process tests prove CLI contracts; executable examples follow public APIs.
+- Unit tests live beside meaningful logic; public/cross-module integration tests live under `crates/<crate>/tests/`. Reuse `tests/support` rather than creating an accidentally discovered empty test crate. Backend and administrative process tests prove supported command contracts; executable examples follow public APIs.
 - Test state machines and persistence: idempotence, owner/epoch fencing, timeout/backoff, cancellation, rollback/partial commits, restart/reopen and stale-generation exclusion. Use explicit barriers/channels or supported controlled time, never sleeps to hide races.
 - Jobs SQLite/RocksDB tests use temporary local directories and the Jobs HTTP fixtures; never share their files between process owners. Test crash/reopen, idempotent outbox handoff, visibility expiry and stale delivery epochs. See [planned persistence scopes](../../../docs/wiki/code/jobs-persistence.md).
 - For domain contracts, use current SurrealDB schemas, `storage::repo::Repository` and the existing isolated harness. Assert schema/bootstrap/version guards and records through public contracts; raw query tests are appropriate when query semantics are the contract. Disk reopen tests must use persisted storage.
@@ -33,18 +33,18 @@ Exercise opt-in fixtures before using them as evidence. Preserve meaningful asse
 - Use table-driven finite cases; add property-based tooling only when existing dependencies and the affected input space justify it. Include useful assertion diagnostics and reproduction data.
 - Load `argos-rust-style` for Rust edits/review. No local Rust mutation tests or baselines (`cargo mutants` included); use hosted `mutation.yml` and report local mutation execution as deliberately skipped.
 
-## React, browser and terminal
+## React and browser
 
 - Discover the existing package manager, lockfile, scripts and CI; do not scaffold or migrate a test stack. Keep type/lint/build/behavior evidence distinct and preserve React Compiler/Hooks checks.
 - Test user-visible loading/success/empty/error/retry, validation, accessible roles/names, focus/keyboard and relevant responsive states. Test hooks through consumers and asynchronous API/cache behavior through realistic boundary fixtures. Reset caches, timers, handlers and storage between tests.
 - Cover cancellation, pagination and stale-response races where relevant. Use accessible locators and Playwright auto-waiting; isolate accounts/backend data and preserve the real app path while stubbing external providers.
 - Browser verification uses the repository Playwright runner. Set `ARGOS_WEB_TEST_DEV=1`; Next output/locks belong under `.agent-scratch/next-web-tests`. Never stop the user's frontend or remove its lock. Retain bounded traces/screenshots/errors for failed affected cases.
-- Load applicable React/TUI skills. Use deterministic terminal state/cell fixtures, terminal restoration checks and actual PNG inspection. Generated images alone are not visual evidence; snapshots alone do not prove interactions. Missing visual evidence remains pending.
+- Load applicable React and Rune skills. Use actual production view/state/input fixtures and inspected PNG/tree evidence. Generated images alone are not visual evidence; snapshots alone do not prove interactions. Missing visual evidence remains pending.
 
 ## Rune client and Linux backend
 
 - Rune changes follow [fleetworks-rune-verify](../fleetworks-rune-verify/SKILL.md) and [native verification](../../../docs/wiki/code/native-verification.md). Test actual `State`/handlers with Rune Runtime, then select real-view PNG/tree/script captures through `fleetworks_verify.py native-ui --agent`. Use the shared debug graph, actual scene inventory and synthetic effects. Preserve two-node/child/deployment privacy, stale-reply, credential and protected-path cases when affected.
-- Native UI, transport, package validation, inspected captures and matching-hardware GUI/input/accessibility are separate evidence. Native view-only work needs neither terminal captures nor a backend engine installation. Retained compatibility or embedded-storage changes still require their applicable gate below.
+- Native UI, transport, package validation, inspected captures and matching-hardware GUI/input/accessibility are separate evidence. Native view-only work needs neither terminal captures nor a backend engine installation. Embedded-storage changes still require their applicable gate below.
 - Linux backend/search changes require real isolated domain/outbox/index/gateway/dossier and restart/lease/pressure checks when affected. Native PNGs, optional Natural training and doc-only Rust-BERT compilation cannot establish real Linux model inference. Both Linux architectures and both physical Mac architectures remain explicit platform evidence.
 
 ## Execution restrictions

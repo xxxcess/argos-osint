@@ -69,8 +69,6 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY services ./services
-COPY apps/fleetworks-cli ./apps/fleetworks-cli
-COPY apps/venture ./apps/venture
 # Resolve the Mac workspace member without copying view sources into this
 # Linux compile graph or invalidating it for native-only source edits.
 COPY apps/fleetworks-desktop/Cargo.toml ./apps/fleetworks-desktop/Cargo.toml
@@ -95,7 +93,7 @@ USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/argos-api-host"]
 
 # Independent Linux search graph: load every workspace manifest but only the
-# contracts/search source. Native views, CLI code and inference/core source do
+# contracts/search source. Native views and inference/core source do
 # not invalidate this compile or enter its selected dependency graph.
 FROM rust:1.95.0-bookworm AS search_build
 ARG TARGETARCH
@@ -104,18 +102,15 @@ ENV CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates/argos-osint-core/Cargo.toml ./crates/argos-osint-core/Cargo.toml
-COPY crates/argos-osint-bin/Cargo.toml ./crates/argos-osint-bin/Cargo.toml
 COPY crates/argos-osint-api/Cargo.toml ./crates/argos-osint-api/Cargo.toml
 COPY crates/fleetworks-workspace/Cargo.toml ./crates/fleetworks-workspace/Cargo.toml
 COPY crates/fleetworks-broker/Cargo.toml ./crates/fleetworks-broker/Cargo.toml
 COPY crates/fleetworks-jobs/Cargo.toml ./crates/fleetworks-jobs/Cargo.toml
-COPY apps/venture/Cargo.toml ./apps/venture/Cargo.toml
-COPY apps/fleetworks-cli/Cargo.toml ./apps/fleetworks-cli/Cargo.toml
 COPY apps/fleetworks-desktop/Cargo.toml ./apps/fleetworks-desktop/Cargo.toml
 COPY services/api-host/Cargo.toml ./services/api-host/Cargo.toml
-RUN for member in crates/argos-osint-core crates/argos-osint-bin crates/argos-osint-api \
+RUN for member in crates/argos-osint-core crates/argos-osint-api \
         crates/fleetworks-workspace crates/fleetworks-broker crates/fleetworks-jobs \
-        apps/venture apps/fleetworks-cli apps/fleetworks-desktop services/api-host; do \
+        apps/fleetworks-desktop services/api-host; do \
       mkdir -p "${member}/src"; \
       printf '\n' > "${member}/src/lib.rs"; \
       printf 'fn main() {}\n' > "${member}/src/main.rs"; \
@@ -138,62 +133,3 @@ COPY --chmod=0555 deploy/check-search.sh /usr/local/bin/check-fleetworks-search
 WORKDIR /var/lib/fleetworks-search
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/start-fleetworks-search-index"]
-
-# One server compile for Venture and the six CLIs. Each final target is a
-# separate image so a development cycle can build only the binaries it changed.
-FROM rust:1.95.0-bookworm AS clients_build
-ARG TARGETARCH
-ARG CARGO_BUILD_JOBS=1
-ENV CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
-WORKDIR /src
-COPY Cargo.toml Cargo.lock ./
-COPY crates ./crates
-COPY services ./services
-COPY apps/fleetworks-cli ./apps/fleetworks-cli
-COPY apps/venture ./apps/venture
-COPY apps/fleetworks-desktop/Cargo.toml ./apps/fleetworks-desktop/Cargo.toml
-RUN mkdir -p apps/fleetworks-desktop/src \
-    && printf 'fn main() {}\n' > apps/fleetworks-desktop/src/main.rs
-RUN --mount=type=cache,id=fleetworks-clients-${TARGETARCH},target=/usr/local/cargo/registry \
-    --mount=type=cache,id=fleetworks-git-${TARGETARCH},target=/usr/local/cargo/git \
-    --mount=type=cache,id=fleetworks-clients-target-${TARGETARCH},target=/src/target,sharing=locked \
-    cargo build --release --locked --bins -p fleetworks-cli -p fleetworks-venture \
-    && mkdir -p /out \
-    && for binary in venture fleetworks-atlas fleetworks-brain fleetworks-jobs fleetworks-tools fleetworks-models fleetworks-profile; do \
-         install -D "target/release/${binary}" "/out/${binary}"; \
-       done
-
-FROM debian:bookworm-slim AS client_base
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-WORKDIR /workspace
-USER 65532:65532
-
-FROM client_base AS venture
-COPY --from=clients_build --chmod=0555 /out/venture /usr/local/bin/venture
-ENTRYPOINT ["/usr/local/bin/venture"]
-
-FROM client_base AS fleetworks-atlas
-COPY --from=clients_build --chmod=0555 /out/fleetworks-atlas /usr/local/bin/fleetworks-atlas
-ENTRYPOINT ["/usr/local/bin/fleetworks-atlas"]
-
-FROM client_base AS fleetworks-brain
-COPY --from=clients_build --chmod=0555 /out/fleetworks-brain /usr/local/bin/fleetworks-brain
-ENTRYPOINT ["/usr/local/bin/fleetworks-brain"]
-
-FROM client_base AS fleetworks-jobs
-COPY --from=clients_build --chmod=0555 /out/fleetworks-jobs /usr/local/bin/fleetworks-jobs
-ENTRYPOINT ["/usr/local/bin/fleetworks-jobs"]
-
-FROM client_base AS fleetworks-tools
-COPY --from=clients_build --chmod=0555 /out/fleetworks-tools /usr/local/bin/fleetworks-tools
-ENTRYPOINT ["/usr/local/bin/fleetworks-tools"]
-
-FROM client_base AS fleetworks-models
-COPY --from=clients_build --chmod=0555 /out/fleetworks-models /usr/local/bin/fleetworks-models
-ENTRYPOINT ["/usr/local/bin/fleetworks-models"]
-
-FROM client_base AS fleetworks-profile
-COPY --from=clients_build --chmod=0555 /out/fleetworks-profile /usr/local/bin/fleetworks-profile
-ENTRYPOINT ["/usr/local/bin/fleetworks-profile"]

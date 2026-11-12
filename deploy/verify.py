@@ -1,4 +1,4 @@
-"""Build and smoke-test the local Fleetworks Compose stack through Venture."""
+"""Build and smoke-test a fresh isolated standalone backend, optionally with Web."""
 
 import argparse
 import contextlib
@@ -12,15 +12,17 @@ import secrets
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
+
+import native_review
 
 
 IMAGE_OVERRIDES = (
     "FLEETWORKS_RUNTIME_IMAGE",
     "FLEETWORKS_WEB_IMAGE",
     "FLEETWORKS_SURREAL_IMAGE",
+    "FLEETWORKS_SEARCH_IMAGE",
 )
 
 
@@ -137,65 +139,6 @@ def web_logout(port, headers):
     assert request(port, "/api/v1/health/ready", headers=headers)[0] == 401, "logged-out cookie remained valid"
 
 
-def external_ready(database, port):
-    if database.poll() is not None:
-        return False
-    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
-    try:
-        connection.request("GET", "/health")
-        return connection.getresponse().status == 200
-    except (OSError, http.client.HTTPException):
-        return False
-    finally:
-        connection.close()
-
-
-@contextlib.contextmanager
-def external_database(directory, environment, surreal, port):
-    server_env = {name: value for name, value in environment.items() if not name.startswith("SURREAL_")}
-    version = subprocess.check_output([surreal, "version"], env=server_env, text=True, timeout=5).split()
-    if version[:1] != ["3.3.4"]:
-        raise RuntimeError("The external fixture requires the repository-pinned SurrealDB 3.3.4")
-    password = secrets.token_hex(32)
-    server_env.update(SURREAL_USER="root", SURREAL_PASS=password)
-    backend = f'rocksdb://{directory / "external-surrealdb"}?versioned=false&sync=every'
-    with tempfile.NamedTemporaryFile(mode="w", dir=directory, encoding="utf-8") as credential, (
-        directory / "external-surreal.log"
-    ).open("w+b") as log:
-        credential.write(password + "\n")
-        credential.flush()
-        environment.update(
-            FLEETWORKS_STORAGE_URL=f"ws://host.docker.internal:{port}",
-            FLEETWORKS_STORAGE_ROOT_USERNAME="root",
-            FLEETWORKS_STORAGE_ROOT_PASSWORD_FILE=credential.name,
-        )
-        with subprocess.Popen(
-            [surreal, "start", "--no-banner", "--log", "warn", "--bind", f"0.0.0.0:{port}", backend],
-            env=server_env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-        ) as database:
-            try:
-                deadline = time.monotonic() + 35
-                while not external_ready(database, port):
-                    if database.poll() is not None or time.monotonic() >= deadline:
-                        raise RuntimeError("External SurrealDB did not become ready")
-                    time.sleep(0.15)
-                yield database
-            except Exception:
-                log.seek(max(0, log.tell() - 4096))
-                details = log.read(4096).decode(errors="replace").replace(password, "[redacted]")
-                if details:
-                    print(details, file=sys.stderr)
-                raise
-            finally:
-                if database.poll() is None:
-                    database.terminate()
-                    try:
-                        database.wait(timeout=22)
-                    except subprocess.TimeoutExpired:
-                        database.kill()
-                        database.wait()
-
-
 def exercise_training(port, token, context, workspace, source):
     """Actual staged Natural maintenance, retaining prior activation explicitly."""
     original = source.read_bytes()
@@ -280,203 +223,167 @@ def exercise_activity(api_port, web_port, token, context, browser, job_id):
     assert request(web_port, "/api/v1/jobs?workspace_id=not-a-child", headers=browser)[0] == 404, "browser selected another child"
 
 
-def check_container_images(workspace, environment, expected):
-    owner = json.loads((workspace / "storage/venture-owner.json").read_text())
-    docker_env = {
-        name: value for name, value in environment.items()
-        if name not in ("DOCKER_CONTEXT", "DOCKER_HOST", "DOCKER_TLS", "DOCKER_TLS_VERIFY")
-    }
+def isolated_environment(environment):
+    return {name: value for name, value in environment.items()
+            if not name.startswith(("ARGOS_", "FLEETWORKS_", "COMPOSE_", "SURREAL_"))
+            and not name.endswith(("_API_KEY", "_API_KEY_FALLBACK", "_API_TOKEN", "_API_TOKEN_FALLBACK"))}
 
-    def docker(*args):
-        return subprocess.check_output(
-            ["docker", "--host", owner["docker_host"], *args],
-            env=docker_env, text=True, timeout=30,
-        ).splitlines()
 
-    project = owner["project"]
-    containers = docker("ps", "--all", "--filter", f"label=com.docker.compose.project={project}", "--quiet")
+def compose_command(workspace, *, web=False, dev=False, atlas=False):
+    if dev and not web:
+        raise ValueError("Development Web requires --web")
+    command = ["docker", "compose", "--env-file", str(workspace / "compose.env"),
+               "-f", str(native_review.ROOT / "deploy/compose.native-review.yml")]
+    for enabled, name in ((web, "compose.yml"), (dev, "compose.dev.yml"), (atlas, "compose.atlas.yml")):
+        if enabled:
+            command.extend(("-f", str(native_review.ROOT / "deploy" / name)))
+    return command
+
+
+def check_container_images(command, environment, expected):
+    containers = subprocess.check_output([*command, "ps", "--all", "--quiet"],
+                                         env=environment, text=True, timeout=30).splitlines()
     if not containers:
-        raise RuntimeError("Venture's owned project has no containers to verify")
-    rows = docker(
-        "inspect", "--type", "container", "--format",
-        '{{ index .Config.Labels "com.docker.compose.service" }} {{ .Image }}',
-        *containers,
-    )
+        raise RuntimeError("The dedicated Compose project has no containers to verify")
+    rows = subprocess.check_output([
+        "docker", "inspect", "--type", "container", "--format",
+        '{{ index .Config.Labels "com.docker.compose.service" }} {{ .Image }}', *containers,
+    ], env=environment, text=True, timeout=30).splitlines()
     actual = dict(row.split() for row in rows)
     if len(actual) != len(containers) or actual != expected:
-        raise RuntimeError(f"Compose container images differ from the expected IDs: {actual}")
+        raise RuntimeError("Compose container images differ from the downloaded image IDs")
     print(f"Verified exact image IDs for {len(actual)} Compose services")
 
 
-def verify(
-    venture, compose, dev=False, *, no_build=False, image_ids=None, storage="compose-disk",
-    surreal=None, train_legacy_dataset=None,
-):
-    atlas = compose.with_name("compose.atlas.yml").is_file()
-    separate_database = storage != "compose-disk"
-    api_port, web_port, *db_ports = fixture_ports(separate_database)
-    environment = {
-        name: value for name, value in os.environ.items()
-        if not name.startswith(("ARGOS_", "FLEETWORKS_", "COMPOSE_"))
-        and not name.endswith(("_API_KEY", "_API_KEY_FALLBACK", "_API_TOKEN", "_API_TOKEN_FALLBACK"))
-    }
-    environment.update(
-        FLEETWORKS_API_PORT=str(api_port),
-        FLEETWORKS_WEB_PORT=str(web_port),
-    )
-    if no_build:
-        environment.update({name: os.environ[name] for name in IMAGE_OVERRIDES if name in os.environ})
-    if storage in ("host-memory", "host-disk"):
-        environment.update(
-            FLEETWORKS_HOST_DB_BIND=f"0.0.0.0:{db_ports[0]}",
-            FLEETWORKS_SURREAL_BIN=str(surreal),
-        )
-    if separate_database and image_ids is not None:
-        image_ids = {service: image for service, image in image_ids.items() if service != "surrealdb"}
-    with tempfile.TemporaryDirectory(prefix="fleetworks-compose-") as directory, contextlib.ExitStack() as resources:
-        directory = Path(directory)
-        workspace = directory / "workspace"
-        registration = native_fixture(directory)
-        other_directory = directory / "other-node-fixture"
-        other_directory.mkdir(mode=0o700)
-        other_registration = {**native_fixture(other_directory), "request_id":"compose-other-node", "workstation_ip":"192.0.2.62"}
-        # Preserve and prove that the pre-cutover credential gains no rights.
-        (workspace / "secrets").mkdir(mode=0o700, parents=True)
-        legacy = secrets.token_hex(32)
-        descriptor = os.open(workspace / "secrets/api-token", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(descriptor, "w") as output:
-            output.write(legacy + "\n")
-        database = None
-        if storage == "external":
-            database = resources.enter_context(external_database(directory, environment, surreal, db_ports[0]))
+def require_unused_project(environment, platform):
+    """Reject a foreign project before this verifier can build, start or stop it."""
+    daemon = subprocess.check_output(
+        ["docker", "version", "--format", "{{.Server.Os}}/{{.Server.Arch}}"],
+        cwd=native_review.ROOT, env=environment, text=True, timeout=30,
+    ).strip()
+    if daemon != platform:
+        raise ValueError("The selected Docker daemon does not match the requested platform")
+    project = environment["COMPOSE_PROJECT_NAME"]
+    containers = subprocess.check_output(
+        ["docker", "ps", "--all", "--filter", f"label=com.docker.compose.project={project}", "--quiet"],
+        cwd=native_review.ROOT, env=environment, text=True, timeout=30,
+    ).strip()
+    if containers:
+        raise ValueError("The selected Docker project already has containers; choose a fresh review name")
 
-        def check_external_survived():
-            if database is not None and not external_ready(database, db_ports[0]):
-                raise RuntimeError("External SurrealDB did not stay ready after Venture stop")
 
-        def run(*args, check=True, timeout=60, stdout=None):
-            return subprocess.run(
-                [venture, "--workspace", workspace, *args],
-                env=environment, check=check, timeout=timeout, stdout=stdout,
-            )
+def verify(name, platform, *, web=False, dev=False, atlas=False, no_build=False,
+           image_ids=None, source_journey=False):
+    api_port, web_port = fixture_ports()
+    revision = subprocess.check_output(["git", "rev-parse", "--verify", "HEAD"],
+                                       cwd=native_review.ROOT, text=True).strip()
+    overrides = {key: os.environ[key] for key in IMAGE_OVERRIDES if key in os.environ} if no_build else None
+    receipt = native_review.provision(native_review.ROOT, name, api_port, platform, revision,
+                                      web_port=web_port if web else None, images=overrides)
+    workspace = Path(receipt["workspace"])
+    environment = {**isolated_environment(os.environ), **receipt["environment"]}
+    # No cleanup is entered until both daemon and preexisting-project checks pass.
+    require_unused_project(environment, platform)
+    command = compose_command(workspace, web=web, dev=dev, atlas=atlas)
+    # Keep this journey distinct from native_cutover_smoke nodes 61/62.
+    registration = {**native_fixture(workspace), "workstation_ip": "192.0.2.71"}
+    other_directory = workspace / "other-node-fixture"
+    other_directory.mkdir(mode=0o700)
+    other_registration = {**native_fixture(other_directory), "request_id": "compose-other-node", "workstation_ip": "192.0.2.72"}
 
-        options = []
-        if atlas:
-            options.append("--atlas")
+    def run(*arguments, check=True, timeout=60):
+        return subprocess.run([*command, *arguments], cwd=native_review.ROOT, env=environment,
+                              check=check, timeout=timeout)
+
+    if not no_build:
+        environment.update(VERSION=(native_review.ROOT / "version.txt").read_text().strip(),
+                           IMAGE_TAG=receipt["image_tag"])
+        subprocess.run(["docker", "buildx", "bake", "--load", "-f", "deploy/docker-bake.hcl",
+                        "backend", *(["web"] if web and not dev else [])],
+                       cwd=native_review.ROOT, env=environment, check=True, timeout=3600)
         if dev:
-            options.append("--dev")
-        if no_build:
-            options.append("--no-build")
+            run("build", "web", timeout=2400)
 
-        def start():
-            run("up", "--storage", storage, "--compose-file", compose, *options, timeout=2400)
-            run("status", "--json")
-            ready = "/api/v1/health/ready"
-            assert request(api_port, ready)[0] == 401, "direct API accepted a request without a bearer"
-            assert (workspace / "secrets/api-token").read_text().strip() == legacy, "legacy credential bytes changed"
-            assert request(api_port, ready, legacy)[0] == 401, "old public token acquired gateway authority"
-            token = (workspace / "secrets/native-api-token").read_text().strip()
-            operator = (workspace / "secrets/operator-api-token").read_text().strip()
-            web_token = (workspace / "secrets/web-relay-token").read_text().strip()
-            assert len({token, operator, web_token, legacy}) == 4, "purpose credentials were reused"
-            assert request(api_port, "/api/v1/connect/registrations/ensure", web_token, registration)[0] == 403, "WebRelay acquired registration authority"
-            assert request(api_port, "/api/v1/tools/run", operator, {"request_id":"denied-operator","tool_id":"dork_generate","inputs":{"objective":"Synthetic fixture"}})[0] == 403, "read-only operator acquired mutation authority"
-            assert request(api_port, "/api/v1/jobs", token)[0] == 401, "contextless activity was accepted"
-            context = register_native(api_port, token, registration)
-            browser = web_connect(web_port, context)
-            direct_status, direct = request(api_port, ready, operator)
-            relay_status, relay = request(web_port, ready, headers=browser)
-            assert direct_status == relay_status == 200, "API or relay readiness failed"
-            assert direct.get("ready") and direct.get("storage") and direct.get("storage") == relay.get("storage"), (
-                "web readiness did not reach the same ready API"
-            )
-            if storage == "compose-disk":
-                assert (workspace / "storage/surrealdb").is_dir(), "Compose disk store is missing"
-            if storage == "host-disk":
-                assert (workspace / "storage/host-surrealdb").is_dir(), "host disk store is missing"
-            if image_ids is not None:
-                check_container_images(workspace, environment, image_ids)
-            return token, context, browser
+    def start():
+        run("up", "--detach", "--no-build", "--pull", "never", "--wait", "--wait-timeout", "240", timeout=300)
+        run("ps", "--all")
+        ready = "/api/v1/health/ready"
+        token = (workspace / "secrets/native-token").read_text().strip()
+        relay = (workspace / "secrets/web-relay-token").read_text().strip()
+        health = (workspace / "secrets/gateway-health-token").read_text().strip()
+        assert len({token, relay, health}) == 3, "purpose credentials were reused"
+        assert request(api_port, ready)[0] == 401, "API accepted a request without a bearer"
+        assert request(api_port, "/api/v1/connect/registrations/ensure", relay, registration)[0] == 403
+        assert request(api_port, "/api/v1/tools/run", health, {"request_id": "denied-health"})[0] == 403
+        assert request(api_port, "/api/v1/jobs", token)[0] == 401, "contextless activity was accepted"
+        context = register_native(api_port, token, registration)
+        status, direct = request(api_port, ready, health)
+        assert status == 200 and direct.get("ready") and direct.get("storage")
+        browser = web_connect(web_port, context) if web else None
+        if web:
+            relay_status, relayed = request(web_port, ready, headers=browser)
+            assert relay_status == 200 and relayed.get("storage") == direct["storage"]
+        if image_ids is not None:
+            check_container_images(command, environment, image_ids)
+        return token, context, browser
 
-        try:
-            token, context, browser = start()
-            result_path, completed = exercise_tools(api_port, token, native_headers(context), "compose-native-dork")
+    try:
+        token, context, browser = start()
+        proof = native_headers(context)
+        result_path, completed = exercise_tools(api_port, token, proof, "compose-native-dork")
+        if web:
             web_result, _ = exercise_tools(web_port, None, browser, "compose-web-dork")
             exercise_activity(api_port, web_port, token, context, browser, completed["job_id"])
-            other = register_native(api_port, token, other_registration)
-            assert request(api_port, "/api/v1/jobs/detail?id=" + completed["job_id"], token, headers=native_headers(other))[0] == 404, "another workstation read private job data"
-            assert request(api_port, web_result, token, headers=native_headers(other))[0] == 404, "another workstation read private tool output"
-            if train_legacy_dataset is not None:
-                exercise_training(api_port, token, context, workspace, train_legacy_dataset)
-            if atlas:
-                assert (workspace / "storage/jobs/queue").is_dir(), "embedded queue store is missing"
-                exercise_atlas(api_port, token, native_headers(context))
-                print("Packaged Atlas dispatch reached the private classifier service")
+        else:
+            status, page = request(api_port, "/api/v1/jobs?limit=25", token, headers=proof)
+            assert status == 200 and any(row["id"] == completed["job_id"] for row in page["rows"])
+            assert request(api_port, "/api/v1/logs?job_id=" + completed["job_id"], token, headers=proof)[0] == 200
+        other = register_native(api_port, token, other_registration)
+        assert request(api_port, "/api/v1/jobs/detail?id=" + completed["job_id"], token,
+                       headers=native_headers(other))[0] == 404
+        if web:
+            assert request(api_port, web_result, token, headers=native_headers(other))[0] == 404
             web_logout(web_port, browser)
-            if separate_database:
-                run("stop", timeout=150)
-                check_external_survived()
-                token, context, browser = start()
-                status, value = request(api_port, result_path, token, headers=native_headers(context))
-                if storage == "host-memory":
-                    assert status == 404, "host memory retained a tool result after restart"
-                    exercise_tools(api_port, token, native_headers(context), "compose-after-restart")
-                    print("Host memory reset its tool result and accepted new work after restart")
-                else:
-                    assert (status, value) == (200, completed), f"{storage} lost its tool result after restart"
-                    print(f"{storage} retained its completed tool result after restart")
-                web_logout(web_port, browser)
+        if atlas:
+            exercise_atlas(api_port, token, proof)
+        if source_journey:
+            subprocess.run([sys.executable, str(native_review.ROOT / "deploy/native_cutover_smoke.py"), "--name", name],
+                           cwd=native_review.ROOT, env=environment, check=True, timeout=1200)
+        # Reopen the actual persistent deployment and prove completed output survives.
+        run("stop", timeout=150)
+        token, context, browser = start()
+        assert request(api_port, result_path, token, headers=native_headers(context)) == (200, completed)
+        if web:
+            web_logout(web_port, browser)
+    finally:
+        failed = sys.exc_info()[0] is not None
+        try:
+            if failed:
+                run("logs", "--no-color", "--tail", "100", check=False, timeout=30)
         finally:
-            failed = sys.exc_info()[0] is not None
-            try:
-                if failed:
-                    run("logs", check=False, timeout=30)
-            except (OSError, subprocess.TimeoutExpired) as error:
-                print(f"Could not collect Compose logs: {error}", file=sys.stderr)
-            finally:
-                run("stop", check=not failed, timeout=150)
-            if not failed:
-                check_external_survived()
-        mode = "development" if dev else "production"
-        print(f"Venture {mode} Compose startup, purpose isolation, real registration, attributed Tools/activity, browser session/logout and owned shutdown passed ({storage})")
-        print("Backend integration only: installed-native filesystem/GUI and retired terminal presentation remain separate evidence gates")
+            run("down", check=not failed, timeout=150)
+    print("Standalone backend registration, purpose isolation, attributed Tools/activity and disk restart passed")
+    print("Backend integration only; installed-native GUI and real Rust-BERT inference are separate gates")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--venture", type=Path, required=True)
-    parser.add_argument("--compose", type=Path, default=Path(__file__).with_name("compose.yml"))
-    parser.add_argument("--dev", action="store_true", help="verify the development web override")
-    parser.add_argument("--no-build", action="store_true", help="use preloaded images without building or pulling")
-    parser.add_argument("--image-ids", type=Path, help="expected Docker image ID for each Compose service as JSON")
-    parser.add_argument("--storage", choices=("compose-disk", "host-memory", "host-disk", "external"), default="compose-disk")
-    parser.add_argument("--surreal", type=Path, help="pinned SurrealDB executable for host or external storage")
-    parser.add_argument("--train-legacy-dataset", type=Path, help="retained flag spelling: stage CSV and run registered Natural maintenance twice, retaining prior activation")
+    parser.add_argument("--name", required=True, help="fresh dedicated native-review name; never reuse an existing project")
+    parser.add_argument("--platform", choices=("linux/amd64", "linux/arm64"), required=True)
+    parser.add_argument("--web", action="store_true", help="also exercise actual Web Connect/session/relay/logout")
+    parser.add_argument("--dev", action="store_true", help="build the development Web overlay (requires --web)")
+    parser.add_argument("--atlas", action="store_true", help="also exercise private Atlas dispatch")
+    parser.add_argument("--source-journey", action="store_true", help="run real synthetic seed/search/rebuild/train/activation/privacy journey")
+    parser.add_argument("--no-build", action="store_true", help="use explicit preloaded images without building or pulling")
+    parser.add_argument("--image-ids", type=Path, help="expected image ID for every Compose service")
     args = parser.parse_args()
-    if args.storage == "compose-disk" and args.surreal is not None:
-        parser.error("--surreal requires host or external storage")
-    if args.storage != "compose-disk" and args.surreal is None:
-        parser.error("host and external storage modes require --surreal")
-    image_ids = None
-    if args.image_ids:
-        if not args.no_build:
-            parser.error("--image-ids requires --no-build")
-        try:
-            image_ids = json.loads(args.image_ids.read_text())
-        except (OSError, ValueError) as error:
-            parser.error(f"could not read --image-ids: {error}")
-        if not isinstance(image_ids, dict) or not image_ids or not all(
-            isinstance(image_id, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", image_id)
-            for image_id in image_ids.values()
-        ):
-            parser.error("--image-ids must map service names to SHA-256 image IDs")
-    verify(
-        args.venture.resolve(strict=True), args.compose.resolve(strict=True), args.dev,
-        no_build=args.no_build, image_ids=image_ids, storage=args.storage,
-        surreal=args.surreal.resolve(strict=True) if args.surreal else None,
-        train_legacy_dataset=args.train_legacy_dataset.resolve(strict=True) if args.train_legacy_dataset else None,
-    )
+    if args.dev and (not args.web or args.no_build):
+        parser.error("--dev requires --web and a development image build")
+    expected = json.loads(args.image_ids.read_text()) if args.image_ids else None
+    verify(args.name, args.platform, web=args.web, dev=args.dev, atlas=args.atlas,
+           no_build=args.no_build, image_ids=expected, source_journey=args.source_journey)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

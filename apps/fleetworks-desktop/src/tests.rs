@@ -4,8 +4,6 @@ use rune::Env;
 use rune::Runtime;
 use rune::TextEdit;
 
-use crate::Page;
-use crate::State;
 use crate::app;
 use crate::app::Intent;
 use crate::app::Load;
@@ -13,6 +11,8 @@ use crate::backend::ReadKind;
 use crate::brain::Brain;
 use crate::connection::ConnectionStatus;
 use crate::workspaces::WorkspaceRow;
+use crate::Page;
+use crate::State;
 use fleetworks_contracts::capabilities::Capabilities;
 use fleetworks_contracts::connect::RegistrationReceipt;
 use fleetworks_contracts::context::Permission;
@@ -239,12 +239,10 @@ fn provider_key_is_masked_in_real_accessibility_tree_and_confirmation() {
         .confirmation
         .as_ref()
         .expect("real provider form confirmation");
-    assert!(
-        !confirmation
-            .change
-            .summary()
-            .contains("synthetic-secret-that-must-stay-masked")
-    );
+    assert!(!confirmation
+        .change
+        .summary()
+        .contains("synthetic-secret-that-must-stay-masked"));
     let mut runtime = Runtime::new(
         state,
         app::view,

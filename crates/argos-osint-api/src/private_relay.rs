@@ -65,7 +65,11 @@ impl Service {
                 (method, path),
                 (
                     &Method::GET | &Method::HEAD,
-                    JOBS_PATH | JOB_DETAIL_PATH | "/api/v1/logs"
+                    JOBS_PATH
+                        | JOB_DETAIL_PATH
+                        | "/api/v1/logs"
+                        | "/api/v1/logs/export"
+                        | "/api/v1/logs/follow"
                 ) | (&Method::POST, JOB_RETRY_PATH | JOB_CANCEL_PATH)
             ),
         }
@@ -147,6 +151,8 @@ impl PrivateClient {
                 uri.path(),
                 "/api/v1/profile/import" | "/api/v1/profile/export"
             );
+        let log_export =
+            matches!(self.service, Service::Jobs) && uri.path() == "/api/v1/logs/export";
         let body_limit = if transfer {
             2 * 1024 * 1024
         } else {
@@ -185,8 +191,24 @@ impl PrivateClient {
                 .unavailable("service refused the internal request"));
         }
         let content_type = upstream.headers().get(header::CONTENT_TYPE).cloned();
-        let disposition = if transfer {
+        let disposition = if transfer || log_export {
             upstream.headers().get(header::CONTENT_DISPOSITION).cloned()
+        } else {
+            None
+        };
+        let log_cursor = if log_export {
+            upstream
+                .headers()
+                .get("x-fleetworks-next-log-cursor")
+                .cloned()
+        } else {
+            None
+        };
+        let apps_complete = if log_export {
+            upstream
+                .headers()
+                .get("x-fleetworks-log-apps-complete")
+                .cloned()
         } else {
             None
         };
@@ -214,6 +236,16 @@ impl PrivateClient {
             response
                 .headers_mut()
                 .insert(header::CONTENT_DISPOSITION, value);
+        }
+        if let Some(value) = log_cursor {
+            response
+                .headers_mut()
+                .insert("x-fleetworks-next-log-cursor", value);
+        }
+        if let Some(value) = apps_complete {
+            response
+                .headers_mut()
+                .insert("x-fleetworks-log-apps-complete", value);
         }
         response.headers_mut().insert(
             header::CACHE_CONTROL,

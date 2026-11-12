@@ -64,7 +64,10 @@ impl<T> Routed<T> {
     }
 }
 
-pub fn bounded<T>(reindex: bool) -> (Routes<T>, Vec<(Lane, mpsc::Receiver<Routed<T>>)>) {
+/// A resource lane paired with its bounded delivery receiver.
+pub type LaneReceiver<T> = (Lane, mpsc::Receiver<Routed<T>>);
+
+pub fn bounded<T>(reindex: bool) -> (Routes<T>, Vec<LaneReceiver<T>>) {
     let mut senders = Vec::new();
     let mut receivers = Vec::new();
     for lane in Lane::ALL {

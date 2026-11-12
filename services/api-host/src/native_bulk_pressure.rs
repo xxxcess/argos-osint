@@ -267,7 +267,10 @@ fn free_bytes(workspace: &Path) -> Option<u64> {
         }
         // SAFETY: successful statvfs initialized the complete output.
         let output = unsafe { output.assume_init() };
-        return (output.f_bavail as u64).checked_mul(output.f_frsize as u64);
+        // Field widths vary across Unix; retain the u64 overflow boundary.
+        let available = u128::from(output.f_bavail);
+        let fragment_size = u128::from(output.f_frsize);
+        u64::try_from(available * fragment_size).ok()
     }
     #[cfg(not(unix))]
     {

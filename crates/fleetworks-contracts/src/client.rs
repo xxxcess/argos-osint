@@ -11,6 +11,9 @@ use url::Url;
 
 use crate::{Ready, API_VERSION, READY_PATH};
 
+mod log_transfer;
+pub use log_transfer::LogExportPage;
+
 mod configuration_transfer;
 pub use configuration_transfer::ConfigurationTransferReceipt;
 
@@ -89,29 +92,43 @@ pub struct Client {
     registration: Option<(HeaderValue, HeaderValue)>,
 }
 
+/// Parse the shared origin policy without transport or credential side effects.
+fn validated_origin(origin: &str) -> Result<(Url, bool), ClientError> {
+    let origin = Url::parse(origin).map_err(|_| ClientError::InvalidOrigin)?;
+    let loopback = match origin.host() {
+        Some(url::Host::Domain(name)) => name == "localhost",
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    };
+    if origin.host().is_none()
+        || !matches!(origin.scheme(), "http" | "https")
+        || (origin.scheme() == "http" && !loopback)
+        || !origin.username().is_empty()
+        || origin.password().is_some()
+        || origin.path() != "/"
+        || origin.query().is_some()
+        || origin.fragment().is_some()
+    {
+        return Err(ClientError::InvalidOrigin);
+    }
+    Ok((origin, loopback))
+}
+
 impl Client {
+    /// Validate and normalize an origin for a local connection profile.
+    ///
+    /// This uses the same origin policy as `new` without creating an HTTP
+    /// client, reading a credential reference or making any network request.
+    pub fn canonical_origin(origin: &str) -> Result<String, ClientError> {
+        validated_origin(origin).map(|(origin, _)| origin.to_string())
+    }
+
     /// Connect to an HTTP loopback origin or an HTTPS origin.
     ///
     /// Unauthenticated access is restricted to loopback for legacy Argos compatibility.
     pub fn new(origin: &str, token: Option<&str>) -> Result<Self, ClientError> {
-        let origin = Url::parse(origin).map_err(|_| ClientError::InvalidOrigin)?;
-        let loopback = match origin.host() {
-            Some(url::Host::Domain(name)) => name == "localhost",
-            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-            None => false,
-        };
-        if origin.host().is_none()
-            || !matches!(origin.scheme(), "http" | "https")
-            || (origin.scheme() == "http" && !loopback)
-            || !origin.username().is_empty()
-            || origin.password().is_some()
-            || origin.path() != "/"
-            || origin.query().is_some()
-            || origin.fragment().is_some()
-        {
-            return Err(ClientError::InvalidOrigin);
-        }
+        let (origin, loopback) = validated_origin(origin)?;
         if !loopback && token.is_none() {
             return Err(ClientError::MissingToken);
         }

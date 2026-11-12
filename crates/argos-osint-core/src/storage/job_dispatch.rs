@@ -793,7 +793,7 @@ pub(crate) async fn retry_failed_atlas_in(
     let job = jobs::rid("job", job_id);
     let at = jobs::ts(now);
     let mut reply = jobs::run(
-        &tx,
+        tx,
         tx.query(
             "LET $eligible=(SELECT VALUE id FROM ONLY $job
                     WHERE state='failed' AND operation=$pool_name AND parent=NONE
@@ -824,9 +824,9 @@ pub(crate) async fn retry_failed_atlas_in(
     let Some(revision) = revisions.into_iter().next() else {
         return Ok(false);
     };
-    jobs::bump(&tx, "job_guard", job_id).await?;
+    jobs::bump(tx, "job_guard", job_id).await?;
     jobs::run(
-        &tx,
+        tx,
         tx.query(
             "UPDATE $job SET state='queued', phase='Queued for retry', finished_at=NONE,
                  error_category='', error_summary='', updated_at=<datetime>$now RETURN NONE",
@@ -836,7 +836,7 @@ pub(crate) async fn retry_failed_atlas_in(
     )
     .await?;
     jobs::log_transition_in(
-        &tx,
+        tx,
         job_id,
         &format!("{task_id}:{revision}:retry"),
         "job.retry",

@@ -5,6 +5,8 @@
 //! Network failures never fall back to writing the domain database. Legacy
 //! embedded clients retain the Surreal sink until a Jobs connection is installed.
 
+pub mod scoped_logs;
+
 use std::io::Read;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -54,6 +56,10 @@ pub enum LogCommand {
         since: String,
         before_seq: Option<i64>,
         limit: usize,
+    },
+    /// Requires a complete, nonempty authority-selected cohort.
+    ScopedPage {
+        read: fleetworks_jobs::scoped_logs::ScopedLogRead,
     },
     Get {
         id: String,
@@ -225,6 +231,9 @@ pub async fn execute_local(store: &Store, command: LogCommand) -> Result<Value> 
             Ok(serde_json::to_value(store.log_list(filter).await?)?)
         }
         LogCommand::Get { id } => Ok(serde_json::to_value(store.log_get(id).await?)?),
+        LogCommand::ScopedPage { read } => {
+            Ok(serde_json::to_value(store.scoped_log_page(read).await?)?)
+        }
         LogCommand::Counts { since } => store.log_counts(since).await,
         LogCommand::Apps => Ok(serde_json::to_value(store.log_apps().await?)?),
         LogCommand::Prune { before } => {

@@ -11,6 +11,7 @@ mod operations;
 pub mod queue;
 mod queue_types;
 mod read;
+pub mod scoped_logs;
 mod types;
 
 pub use types::{

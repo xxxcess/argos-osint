@@ -230,6 +230,11 @@ async fn consume_lane(
         lane.pool(),
         argos_osint_core::store::new_id()
     );
+    let pools = [lane.pool()];
+    let dispatch = DeliveryLane {
+        owner: &owner,
+        pools: &pools,
+    };
     loop {
         let routed =
             tokio::select! {biased;_=stop.changed()=>return Ok(()),value=receiver.recv()=>value};
@@ -240,14 +245,7 @@ async fn consume_lane(
         // Box at the task boundary: seed/train futures retain bounded heap
         // state rather than increasing the executor's normal thread stack.
         if Box::pin(handle(
-            &repo,
-            &workspace,
-            &store,
-            &tools,
-            &owner,
-            received,
-            &[lane.pool()],
-            &mut stop,
+            &repo, &workspace, &store, &tools, &dispatch, received, &mut stop,
         ))
         .await
         .is_err()
@@ -264,18 +262,22 @@ async fn consume_lane(
     }
 }
 
+struct DeliveryLane<'a> {
+    owner: &'a str,
+    pools: &'a [&'a str],
+}
+
 async fn handle(
     repo: &Repository,
     workspace: &std::path::Path,
     store: &DatasetStore,
     tools: &manual::Tools,
-    owner: &str,
+    lane: &DeliveryLane<'_>,
     received: Received,
-    pools: &[&str],
     stop: &mut watch::Receiver<bool>,
 ) -> Result<()> {
     let envelope = match Envelope::decode(received.payload()) {
-        Ok(envelope) if pools.contains(&envelope.pool.as_str()) => envelope,
+        Ok(envelope) if lane.pools.contains(&envelope.pool.as_str()) => envelope,
         _ => {
             received.settle(Disposition::DeadLetter).await?;
             return Ok(());
@@ -284,7 +286,7 @@ async fn handle(
     let claim = job_dispatch::claim_delivery(
         repo.db(),
         &envelope,
-        owner,
+        lane.owner,
         LEASE_SECONDS,
         Utc::now(),
         &argos_osint_core::store::new_id(),

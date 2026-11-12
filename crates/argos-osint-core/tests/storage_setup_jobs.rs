@@ -261,7 +261,7 @@ async fn different_nodes_share_one_resource_job_with_request_associations_and_bu
     let mut rows=repo.db().query("SELECT VALUE workstation_id FROM job_origin; SELECT VALUE workstation_id FROM job_request").await.expect("durable origin read").check().expect("origin read statements");
     assert_eq!(
         rows.take::<Vec<String>>(0).expect("creator"),
-        [first.workstation_id.clone()]
+        std::slice::from_ref(&first.workstation_id)
     );
     let associations = rows.take::<Vec<String>>(1).expect("request associations");
     assert_eq!(associations.len(), 2);

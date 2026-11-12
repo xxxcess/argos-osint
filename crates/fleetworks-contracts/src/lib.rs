@@ -7,6 +7,7 @@ pub mod capabilities;
 pub mod classifier_activation;
 pub mod connect;
 pub mod context;
+pub mod operational_logs;
 pub mod readiness;
 pub mod search;
 
@@ -14,6 +15,7 @@ pub use client::Client;
 pub use client::ClientError;
 pub use client::ConfigurationTransferReceipt;
 pub use client::DatasetUpload;
+pub use client::LogExportPage;
 
 use serde::{Deserialize, Serialize};
 

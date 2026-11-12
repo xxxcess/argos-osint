@@ -4,9 +4,12 @@ use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::readiness::DatasetKind;
 use fleetworks_contracts::readiness::MaintenanceOperation;
 use rune::El;
+use rune_kit::shell::TabItem;
+use rune_kit::shell::TabOrientation;
 use rune_kit::Button;
 use rune_kit::ButtonVariant;
 use rune_kit::Kit;
+use rune_kit::TabStrip;
 use rune_kit::TextArea;
 use rune_kit::TextInput;
 
@@ -354,16 +357,62 @@ fn profile(state: &State, kit: &Kit) -> El {
 }
 
 fn jobs(state: &State, kit: &Kit) -> El {
+    let tabs = rune::col().w_full().padding(12.0).child(
+        TabStrip::new("activity-tabs", TabOrientation::Horizontal)
+            .label("Workstation activity")
+            .tabs([
+                TabItem::new("jobs", "Jobs").closable(false),
+                TabItem::new("logs", "Logs").closable(false),
+            ])
+            .active(Some(
+                if state.activity_tab == crate::logs::ActivityTab::Jobs {
+                    "jobs"
+                } else {
+                    "logs"
+                },
+            ))
+            .on_select(|state: &mut State, id, _| {
+                state.select_activity_tab(if id == "logs" {
+                    crate::logs::ActivityTab::Logs
+                } else {
+                    crate::logs::ActivityTab::Jobs
+                })
+            })
+            .build(kit)
+            .grow(0.0)
+            .h(32.0)
+            .w_full(),
+    );
+    if state.activity_tab == crate::logs::ActivityTab::Logs {
+        return rune::col()
+            .w_full()
+            .grow(1.0)
+            .min_h(0.0)
+            .child(tabs)
+            .child(scroll(
+                rune::col()
+                    .gap(8.0)
+                    .child(crate::log_views::panel(
+                        &state.scoped_logs,
+                        state.backend.selected_job.as_deref(),
+                        kit,
+                        |state| &mut state.scoped_logs,
+                        State::log_event,
+                    ))
+                    .child(crate::log_views::loaded_rows(state, kit)),
+                "logs-body",
+            ));
+    }
     let registered = state.registration.context.is_some();
-    let mut body = rune::col().child(heading("Workstation jobs and selected-job logs", kit))
+    let mut body = rune::col().child(heading("Workstation jobs and operational logs", kit))
         .child(quiet("Only jobs attributed or associated with this registered workstation are requested. Shared jobs may expose status while private details and logs remain unavailable.", kit))
         .child(rune::row().gap(8.0)
             .child(Button::new("This workstation").variant(if !state.backend.selected_workspace_only { ButtonVariant::Submit } else { ButtonVariant::Outline }).disabled(!registered)
                 .on_press(|state: &mut State| state.set_activity_workspace_filter(false)).build(kit).key("jobs-node-scope"))
             .child(Button::new("Selected workspace").variant(if state.backend.selected_workspace_only { ButtonVariant::Submit } else { ButtonVariant::Outline }).disabled(!registered)
                 .on_press(|state: &mut State| state.set_activity_workspace_filter(true)).build(kit).key("jobs-workspace-scope")))
-        .child(Button::new("Refresh activity").disabled(!registered || !state.permission(Permission::ReadWorkstationActivity))
-            .on_press(|state: &mut State| state.refresh_page()).build(kit).key("jobs-refresh"));
+        .child(Button::new("Show operational logs").variant(ButtonVariant::Ghost)
+            .on_press(|state:&mut State|state.reveal_operational_logs()).build(kit).key("jobs-open-operational-logs"));
     if let Some(context) = &state.registration.context {
         body = body.child(line(
             format!(
@@ -383,9 +432,12 @@ fn jobs(state: &State, kit: &Kit) -> El {
             kit,
         ));
     }
-    if let Some(message) = load_message(&state.backend.jobs, "Activity has not been loaded.", kit) {
-        body = body.child(message);
-    }
+    body = body.child(crate::jobs_query_views::controls(
+        &state.scoped_jobs,
+        kit,
+        |state| &mut state.scoped_jobs,
+        State::jobs_event,
+    ));
     if let Load::Ready(jobs) = &state.backend.jobs {
         if jobs.rows.is_empty() {
             body = body.child(quiet(
@@ -399,7 +451,11 @@ fn jobs(state: &State, kit: &Kit) -> El {
                 Button::new(format!(
                     "{} · {} · {}{}",
                     job.app,
-                    job.title,
+                    if job.title.is_empty() {
+                        &job.operation
+                    } else {
+                        &job.title
+                    },
                     job.state,
                     if job.status_only {
                         " · status only"
@@ -418,6 +474,11 @@ fn jobs(state: &State, kit: &Kit) -> El {
             );
         }
     }
+    body = body.child(crate::jobs_query_views::pager(
+        &state.scoped_jobs,
+        kit,
+        State::jobs_event,
+    ));
     if let Some(message) = load_message(
         &state.backend.detail,
         "Select an attributed job to inspect its current lifecycle.",
@@ -427,7 +488,14 @@ fn jobs(state: &State, kit: &Kit) -> El {
     }
     if let Load::Ready(detail) = &state.backend.detail {
         body = body
-            .child(heading(detail.job.title.clone(), kit))
+            .child(heading(
+                if detail.job.title.is_empty() {
+                    "Job status".into()
+                } else {
+                    detail.job.title.clone()
+                },
+                kit,
+            ))
             .child(line(
                 format!(
                     "{} · {} · {}",
@@ -478,43 +546,14 @@ fn jobs(state: &State, kit: &Kit) -> El {
                 kit,
             ));
         }
-        body = body
-            .child(
-                Button::new("Refresh selected-job logs")
-                    .disabled(!detail.private_details_available || detail.job.status_only)
-                    .on_press(|state: &mut State| state.refresh_job_logs())
-                    .build(kit)
-                    .key("job-logs-refresh"),
-            )
-            .child(crate::job_action_views::actions(state, kit));
+        body = body.child(crate::job_action_views::actions(state, kit));
     }
-    if let Some(message) = load_message(
-        &state.backend.logs,
-        "Selected-job logs have not been loaded.",
-        kit,
-    ) {
-        body = body.child(message);
-    }
-    if let Load::Ready(logs) = &state.backend.logs {
-        if !logs.available {
-            body = body.child(quiet(
-                logs.reason
-                    .clone()
-                    .unwrap_or_else(|| "Private logs are unavailable".into()),
-                kit,
-            ));
-        } else if logs.rows.is_empty() {
-            body = body.child(quiet("No logs were returned for this authorized job.", kit));
-        } else {
-            for row in &logs.rows {
-                body = body.child(line(
-                    format!("{} · {} · {}", row.ts, row.severity, row.message),
-                    kit,
-                ));
-            }
-        }
-    }
-    scroll(body, "jobs-body")
+    rune::col()
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .child(tabs)
+        .child(scroll(body, "jobs-body"))
 }
 
 pub(crate) fn maintenance(state: &State, kit: &Kit) -> El {

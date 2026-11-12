@@ -114,7 +114,7 @@ async fn batch(
         .await
         .expect("prepare")
     {
-        Preparation::Batch { lease, prepared } => (lease, prepared),
+        Preparation::Batch { lease, prepared } => (lease, *prepared),
         Preparation::Waiting => panic!("fixture expected eligible delivery"),
     }
 }

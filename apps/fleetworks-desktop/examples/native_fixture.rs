@@ -4,14 +4,16 @@
 mod native {
     mod activation_scenes;
     mod appearance_scenes;
+    mod connection_profile_scenes;
     mod job_action_scenes;
+    mod jobs_scenes;
     mod lifecycle_scenes;
+    mod log_scenes;
     mod readiness_scenes;
     mod submission_scenes;
 
     use fleetworks_contracts::capabilities::Capabilities;
     use fleetworks_contracts::connect::RegistrationReceipt;
-    use fleetworks_contracts::context::ActivityScope;
     use fleetworks_contracts::context::JobOrigin;
     use fleetworks_contracts::context::OriginSource;
     use fleetworks_contracts::context::Permission;
@@ -35,7 +37,6 @@ mod native {
     use fleetworks_desktop::app::Load;
     use fleetworks_desktop::backend::AccountMetadata;
     use fleetworks_desktop::backend::ActivityJob;
-    use fleetworks_desktop::backend::ActivityJobs;
     use fleetworks_desktop::backend::Article;
     use fleetworks_desktop::backend::ArticlePage;
     use fleetworks_desktop::backend::JobDetail;
@@ -259,11 +260,6 @@ mod native {
 
     fn jobs_ready(state: &mut State) {
         registered(state);
-        let context = state
-            .registration
-            .context
-            .as_ref()
-            .expect("synthetic context");
         let job = ActivityJob {
             id: "synthetic-job".into(),
             app: "Workstation".into(),
@@ -281,12 +277,7 @@ mod native {
             can_retry: false,
             action_reason_code: "not_observed".into(),
         };
-        state.backend.jobs = Load::Ready(ActivityJobs {
-            rows: vec![job.clone()],
-            activity_scope: ActivityScope::for_workstation(context),
-            relation_counts_available: false,
-            activity_actions_available: false,
-        });
+        jobs_scenes::install(state, vec![job.clone()]);
         state.backend.selected_job = Some(job.id.clone());
         state.backend.detail = Load::Ready(JobDetail {
             job,
@@ -394,6 +385,12 @@ mod native {
     }
 
     fn reply(state: &mut State, intent: &Intent) {
+        if log_scenes::reply(state, intent) {
+            return;
+        }
+        if connection_profile_scenes::reply(state, intent) {
+            return;
+        }
         if activation_scenes::reply(state, intent) {
             return;
         }
@@ -401,6 +398,9 @@ mod native {
             return;
         }
         if job_action_scenes::reply(state, intent) {
+            return;
+        }
+        if jobs_scenes::reply(state, intent) {
             return;
         }
         if submission_scenes::reply(state, intent) {
@@ -571,6 +571,37 @@ mod native {
         rune::run(AppSpec {
             init,
             scenes: &[
+                ("logs-workstation-loaded", log_scenes::loaded),
+                ("logs-export-partial", log_scenes::partial_export),
+                ("logs-display-cap", log_scenes::display_cap),
+                ("logs-cursor-changed", log_scenes::cursor_changed),
+                ("logs-cohort-unavailable", log_scenes::cohort_unavailable),
+                (
+                    "connection-profiles-empty",
+                    connection_profile_scenes::empty,
+                ),
+                (
+                    "connection-profiles-saved",
+                    connection_profile_scenes::saved,
+                ),
+                ("connection-profile-add", connection_profile_scenes::add),
+                ("connection-profile-edit", connection_profile_scenes::edit),
+                (
+                    "connection-profile-tested",
+                    connection_profile_scenes::tested,
+                ),
+                (
+                    "connection-profile-auth-error",
+                    connection_profile_scenes::auth_error,
+                ),
+                (
+                    "connection-profile-save-conflict",
+                    connection_profile_scenes::conflict,
+                ),
+                (
+                    "connection-profile-switch-confirm",
+                    connection_profile_scenes::dirty_switch,
+                ),
                 ("activation-candidate-preview", activation_scenes::preview),
                 ("activation-confirmation", activation_scenes::confirmation),
                 ("activation-accepted", activation_scenes::accepted),
@@ -664,6 +695,14 @@ mod native {
                 ("maintenance-preview", maintenance_preview),
                 ("jobs-offline", |state| state.page = Page::Jobs),
                 ("jobs-ready", jobs_ready),
+                ("jobs-filters-ready", jobs_scenes::filters_ready),
+                ("jobs-page-two", jobs_scenes::page_two),
+                ("jobs-no-matches", jobs_scenes::no_matches),
+                ("jobs-page-expired", jobs_scenes::expired),
+                ("jobs-permission-required", jobs_scenes::permission_required),
+                ("jobs-query-loading", jobs_scenes::loading),
+                ("jobs-query-error", jobs_scenes::error),
+                ("jobs-status-only", jobs_scenes::status_only),
                 ("job-cancel-preview", job_action_scenes::cancel_preview),
                 ("job-retry-preview", job_action_scenes::retry_preview),
                 ("job-cancel-receipt", job_action_scenes::cancel_receipt),

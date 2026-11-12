@@ -20,8 +20,8 @@ use crate::State;
     about = "Connect to an independently running Fleetworks gateway"
 )]
 struct Options {
-    #[arg(long, default_value = fleetworks_contracts::DEFAULT_API_ORIGIN)]
-    api_origin: String,
+    #[arg(long)]
+    api_origin: Option<String>,
     #[arg(long)]
     api_token_file: Option<PathBuf>,
     #[arg(long)]
@@ -69,7 +69,11 @@ pub fn run() -> anyhow::Result<()> {
     let app = App::new(app::spec())
         .init(move || {
             let mut state = State::with_services(init_services.clone());
-            state.connection.origin = TextEdit::new(&options.api_origin);
+            state.connection_profiles.launch_override =
+                options.api_origin.is_some() || options.api_token_file.is_some();
+            if let Some(origin) = &options.api_origin {
+                state.connection.origin = TextEdit::new(origin);
+            }
             if let Some(path) = &options.api_token_file {
                 state.connection.token_file = TextEdit::new(path.to_string_lossy());
             }

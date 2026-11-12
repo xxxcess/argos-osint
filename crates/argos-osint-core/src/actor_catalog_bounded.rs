@@ -197,72 +197,6 @@ impl<R: Read> Read for BoundedInput<'_, R> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const CSV:&[u8]=b"actor_id,actor_name,actor_type,aliases,name_normalized,description\r\nsynthetic-1,Harbor Union,organization,\"[\"\"HU Catalog\"\"]\",harbor union,\"multi\nline\"\r\n";
-
-    #[test]
-    fn bounded_parser_preserves_existing_csv_semantics_and_checks_resources_before_return() {
-        let cancel = AtomicBool::new(false);
-        let mut probes = 0;
-        let actual = read_bounded(CSV, &ActorReadLimits::default(), &cancel, |_| {
-            probes += 1;
-            Ok(())
-        })
-        .expect("bounded quoted CSV");
-        assert_eq!(
-            actual,
-            super::super::read(CSV).expect("existing semantic parser")
-        );
-        assert!(probes >= 2);
-        assert!(
-            read_bounded(CSV, &ActorReadLimits::default(), &cancel, |retained| {
-                ensure!(retained == 0, "post-parse pressure");
-                Ok(())
-            })
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn record_row_retained_memory_and_shutdown_are_bounded_before_source_publication() {
-        let cancel = AtomicBool::new(false);
-        let header = b"actor_id,actor_name,actor_type,aliases,name_normalized\n";
-        let mut oversized = header.to_vec();
-        oversized.extend_from_slice(b"id,\"");
-        oversized.extend(vec![b'x'; 64 * 1024]);
-        assert!(read_bounded(
-            oversized.as_slice(),
-            &ActorReadLimits::default(),
-            &cancel,
-            |_| Ok(())
-        )
-        .is_err());
-        let mut rows = header.to_vec();
-        rows.extend_from_slice(b"one,Harbor One,organization,[],harbor one\ntwo,Harbor Two,organization,[],harbor two\n");
-        let limits = ActorReadLimits {
-            max_rows: 1,
-            ..Default::default()
-        };
-        assert!(read_bounded(rows.as_slice(), &limits, &cancel, |_| Ok(())).is_err());
-        let limits = ActorReadLimits {
-            max_retained_bytes: 1024 * 1024,
-            ..Default::default()
-        };
-        let mut many = header.to_vec();
-        for index in 0..1500 {
-            many.extend_from_slice(
-                format!("id-{index},Harbor {index},organization,[],harbor {index}\n").as_bytes(),
-            );
-        }
-        assert!(read_bounded(many.as_slice(), &limits, &cancel, |_| Ok(())).is_err());
-        cancel.store(true, Ordering::Release);
-        assert!(read_bounded(CSV, &ActorReadLimits::default(), &cancel, |_| Ok(())).is_err());
-    }
-}
-
 pub fn read_bounded(
     reader: impl Read,
     limits: &ActorReadLimits,
@@ -396,4 +330,70 @@ pub fn read_bounded(
     ensure!(!cancel.load(Ordering::Acquire), "actor_parse_cancelled");
     resource_probe(retained_bytes)?;
     Ok(actors)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CSV:&[u8]=b"actor_id,actor_name,actor_type,aliases,name_normalized,description\r\nsynthetic-1,Harbor Union,organization,\"[\"\"HU Catalog\"\"]\",harbor union,\"multi\nline\"\r\n";
+
+    #[test]
+    fn bounded_parser_preserves_existing_csv_semantics_and_checks_resources_before_return() {
+        let cancel = AtomicBool::new(false);
+        let mut probes = 0;
+        let actual = read_bounded(CSV, &ActorReadLimits::default(), &cancel, |_| {
+            probes += 1;
+            Ok(())
+        })
+        .expect("bounded quoted CSV");
+        assert_eq!(
+            actual,
+            super::super::read(CSV).expect("existing semantic parser")
+        );
+        assert!(probes >= 2);
+        assert!(
+            read_bounded(CSV, &ActorReadLimits::default(), &cancel, |retained| {
+                ensure!(retained == 0, "post-parse pressure");
+                Ok(())
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn record_row_retained_memory_and_shutdown_are_bounded_before_source_publication() {
+        let cancel = AtomicBool::new(false);
+        let header = b"actor_id,actor_name,actor_type,aliases,name_normalized\n";
+        let mut oversized = header.to_vec();
+        oversized.extend_from_slice(b"id,\"");
+        oversized.extend(vec![b'x'; 64 * 1024]);
+        assert!(read_bounded(
+            oversized.as_slice(),
+            &ActorReadLimits::default(),
+            &cancel,
+            |_| Ok(())
+        )
+        .is_err());
+        let mut rows = header.to_vec();
+        rows.extend_from_slice(b"one,Harbor One,organization,[],harbor one\ntwo,Harbor Two,organization,[],harbor two\n");
+        let limits = ActorReadLimits {
+            max_rows: 1,
+            ..Default::default()
+        };
+        assert!(read_bounded(rows.as_slice(), &limits, &cancel, |_| Ok(())).is_err());
+        let limits = ActorReadLimits {
+            max_retained_bytes: 1024 * 1024,
+            ..Default::default()
+        };
+        let mut many = header.to_vec();
+        for index in 0..1500 {
+            many.extend_from_slice(
+                format!("id-{index},Harbor {index},organization,[],harbor {index}\n").as_bytes(),
+            );
+        }
+        assert!(read_bounded(many.as_slice(), &limits, &cancel, |_| Ok(())).is_err());
+        cancel.store(true, Ordering::Release);
+        assert!(read_bounded(CSV, &ActorReadLimits::default(), &cancel, |_| Ok(())).is_err());
+    }
 }

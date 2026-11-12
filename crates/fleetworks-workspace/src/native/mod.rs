@@ -9,6 +9,7 @@
 //! Trash effect, verifies the actual destination, and retains uncertain recovery
 //! state. It performs no recursive deletion or unverified path fallback.
 
+mod connections;
 mod fs;
 mod lifecycle_catalog;
 #[cfg(test)]
@@ -19,6 +20,11 @@ mod state;
 mod tests;
 mod trash;
 
+pub use connections::ConnectionProfilesSnapshot;
+pub use connections::CredentialReference;
+pub use connections::GatewayProfile;
+pub use connections::GatewayProfileInput;
+pub use connections::CONNECTIONS_FILE;
 pub use rebind::RebindAttempt;
 pub use state::BackendBinding;
 pub use state::OperationPhase;

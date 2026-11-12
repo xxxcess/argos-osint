@@ -399,9 +399,7 @@ impl NetworkPolicy {
     fn credential(&self, headers: &HeaderMap) -> Option<&ScopedCredential> {
         let values = headers.get_all(header::AUTHORIZATION);
         let mut values = values.iter();
-        let Some(value) = values.next() else {
-            return None;
-        };
+        let value = values.next()?;
         let bytes = value.as_bytes();
         if values.next().is_some()
             || bytes.len() < 7
@@ -543,7 +541,10 @@ pub(crate) async fn protect(
         next.run(request).await
     };
     let headers = response.headers_mut();
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, private"),
+    );
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),

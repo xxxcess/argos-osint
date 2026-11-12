@@ -9,6 +9,8 @@ Read root/scoped AGENTS, the existing [testing guidance](../argos-testing/SKILL.
 
 Production and fixtures share `app::view`, `State`, theme and handlers. Use [native_fixture](../../../apps/fleetworks-desktop/examples/native_fixture.rs) synthetic effects for credentials, folders, network, dialogs, browser and clipboard; never point a scene at real user data. Assert observable state/input behavior with Rune Runtime before images. Add only affected finite regressions: stale completions, permissions, bounded pagination/follow, scope changes, unavailable/error states, keyboard/focus and protected filesystem behavior.
 
+`Runtime::find` reports a drawn centre without checking clipping. For offscreen controls, use `Tx::scroll_into_view`, advance a frame and assert the centre is inside the actual scroll viewport before pointer input. `Runtime::window_focus` queues the element focus event; advance a frame before asserting its handler effects. Keep assertions on the real production controls.
+
 For agent builds, inspect and reuse the matching `target/agents/debug` graph through `python3 scripts/agent_cargo.py … --locked`. Run scoped app/contracts/workspace tests as affected. Native view-only changes do not compile Linux engines, install Node/Docker or run the embedded compatibility matrix. Select backend/embedded checks when those contracts change.
 
 Generate selected real-view evidence with the existing build-once helper:

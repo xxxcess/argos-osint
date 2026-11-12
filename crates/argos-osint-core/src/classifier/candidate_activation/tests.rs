@@ -28,11 +28,13 @@ fn trained(root: &std::path::Path) -> ArtifactStore {
     }
     let file = root.join("training.csv");
     fs::write(&file, csv).expect("bounded genuine training input");
-    let mut selection = DatasetRequest::default();
-    selection.explicit_file = Some(file);
-    selection.cwd = root.into();
-    selection.home = root.into();
-    selection.executable = root.join("fixture-program");
+    let selection = DatasetRequest {
+        explicit_file: Some(file),
+        cwd: root.into(),
+        home: root.into(),
+        executable: root.join("fixture-program"),
+        ..Default::default()
+    };
     let parsed =
         dataset::parse_csv(&dataset::resolve_dataset(&selection).expect("selected synthetic CSV"))
             .expect("actual CSV validation");

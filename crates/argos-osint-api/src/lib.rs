@@ -1,6 +1,7 @@
 //! Versioned local Intel HTTP adapter. @tag:intel-brief
 mod activity;
 mod activity_actions;
+mod activity_paging;
 mod actor_dossier;
 mod actor_search;
 mod admission;
@@ -17,6 +18,7 @@ mod jobs_api;
 mod live;
 mod maintenance;
 mod network;
+mod operational_logs;
 mod operations;
 mod private_relay;
 mod request_context;

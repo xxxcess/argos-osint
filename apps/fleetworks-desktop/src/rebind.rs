@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use anyhow::Result;
-use fleetworks_contracts::Client;
 use fleetworks_contracts::connect::RegistrationEnsureRequest;
 use fleetworks_contracts::connect::RegistrationReceipt;
 use fleetworks_contracts::context::Permission;
+use fleetworks_contracts::Client;
 use fleetworks_workspace::native::NativeContainer;
 use fleetworks_workspace::native::RebindAttempt;
 use serde::Serialize;

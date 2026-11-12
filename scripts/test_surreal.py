@@ -49,6 +49,20 @@ HOST_ASSETS = {
     ("Darwin", "x86_64"): "darwin-amd64",
     ("Darwin", "arm64"): "darwin-arm64",
 }
+# These required-mode fixtures otherwise skip in the ordinary workspace run.
+CUTOVER_CONTRACTS = (
+    "storage_connect_registry",
+    "storage_workstation_activity",
+    "storage_workstation_paging",
+    "storage_job_actions",
+    "storage_setup_jobs",
+    "storage_configuration_reset_barrier",
+    "storage_actor_search_outbox",
+    "storage_actor_search_rebuild",
+    "storage_actor_seed_execution",
+    "storage_classifier_activation",
+    "storage_operational_logs",
+)
 # Disk profile from the storage audit appendix (section 4).
 PROFILE = {
     "SURREAL_ROCKSDB_BLOCK_CACHE_SIZE": "67108864",
@@ -190,8 +204,9 @@ def main():
         # its clippy/test build: embedded is the default build, server is
         # `--no-default-features --features server,nlp,classifier`.
         features = [] if mode == "embedded" else ["--no-default-features", "--features", "server,nlp,classifier"]
+        cutover_targets = [argument for name in CUTOVER_CONTRACTS for argument in ("--test", name)]
         command = [*cargo, "test", "--workspace", "--locked", *features, "--test", "storage_contracts", "--test", "storage_jobs", "--test", "storage_memory", "--test", "storage_insights", "--test", "storage_atlas", "--test", "storage_article_discovery", "--test", "storage_classifier_admission",
-            "--test", "storage_atlas_derivatives", "--test", "storage_classifier_single_domain", "--test", "storage_admission_maintenance", "--test", "storage_classifier_calibration", "--test", "storage_intel", "--test", "storage_lifecycle", "--test", "storage_atlas_delete", "--test", "storage_atlas_metadata", "--test", "storage_provenance", "--test", "storage_refresh", "--test", "storage_bootstrap", "--test", "storage_open", "--test", "storage_home", "--test", "storage_server", "--test", "storage_commands", "--test", "storage_install", "--test", "storage_runtime", "--test", "storage_memories", "--test", "storage_insight_views", "--test", "storage_vectors", "--test", "storage_browse", "--test", "storage_recon", "--test", "storage_browse_assoc", "--test", "storage_derivations", "--test", "storage_pipeline_inputs", "--test", "storage_refresh_exec", "--test", "storage_topology", "--test", "storage_topology_gaps", "--test", "storage_entities", "--test", "storage_live_evidence", "--test", "storage_credits", "--test", "storage_provider_pacer", "--test", "storage_provider_account", "--test", "storage_jobs_view", "--test", "storage_recon_runs", "--test", "storage_profile_view", "--test", "storage_recon_exec", "--test", "storage_recon_delete", "--test", "storage_recon_extract", "--test", "storage_insight_owner", "--test", "storage_recon_dispatch", "--test", "storage_telemetry", "--test", "storage_recon_jobs", "--test", "storage_summaries", "--test", "storage_brief", "--test", "storage_recall_turn", "--test", "storage_recon_delete_insights", "--test", "storage_pipeline_exec", "--test", "storage_investigation", "--test", "storage_atlas_store", "--test", "storage_logs", "--test", "storage_atlas_memory", "--test", "storage_actor_index", "--test", "storage_actor_catalog", "--test", "storage_intel_articles", "--test", "storage_app_jobs", "--test", "storage_insight_retry", "--test", "storage_index_drain", "--test", "storage_actor_dedup", "--test", "storage_brain_backfill", "--test", "storage_summary_flush", "--test", "storage_brain_scope", "--test", "storage_store_bridge", "--test", "storage_processes", "--test", "storage_brief_publish", "--test", "storage_curated_links", "--test", "storage_intelligence_contracts", "--test", "storage_indexed_links", *extra, "--", "--nocapture"]
+            "--test", "storage_atlas_derivatives", "--test", "storage_classifier_single_domain", "--test", "storage_admission_maintenance", "--test", "storage_classifier_calibration", "--test", "storage_intel", "--test", "storage_lifecycle", "--test", "storage_atlas_delete", "--test", "storage_atlas_metadata", "--test", "storage_provenance", "--test", "storage_refresh", "--test", "storage_bootstrap", "--test", "storage_open", "--test", "storage_home", "--test", "storage_server", "--test", "storage_commands", "--test", "storage_install", "--test", "storage_runtime", "--test", "storage_memories", "--test", "storage_insight_views", "--test", "storage_vectors", "--test", "storage_browse", "--test", "storage_recon", "--test", "storage_browse_assoc", "--test", "storage_derivations", "--test", "storage_pipeline_inputs", "--test", "storage_refresh_exec", "--test", "storage_topology", "--test", "storage_topology_gaps", "--test", "storage_entities", "--test", "storage_live_evidence", "--test", "storage_credits", "--test", "storage_provider_pacer", "--test", "storage_provider_account", "--test", "storage_jobs_view", "--test", "storage_recon_runs", "--test", "storage_profile_view", "--test", "storage_recon_exec", "--test", "storage_recon_delete", "--test", "storage_recon_extract", "--test", "storage_insight_owner", "--test", "storage_recon_dispatch", "--test", "storage_telemetry", "--test", "storage_recon_jobs", "--test", "storage_summaries", "--test", "storage_brief", "--test", "storage_recall_turn", "--test", "storage_recon_delete_insights", "--test", "storage_pipeline_exec", "--test", "storage_investigation", "--test", "storage_atlas_store", "--test", "storage_logs", "--test", "storage_atlas_memory", "--test", "storage_actor_index", "--test", "storage_actor_catalog", "--test", "storage_intel_articles", "--test", "storage_app_jobs", "--test", "storage_insight_retry", "--test", "storage_index_drain", "--test", "storage_actor_dedup", "--test", "storage_brain_backfill", "--test", "storage_summary_flush", "--test", "storage_brain_scope", "--test", "storage_store_bridge", "--test", "storage_processes", "--test", "storage_brief_publish", "--test", "storage_curated_links", "--test", "storage_intelligence_contracts", "--test", "storage_indexed_links", *cutover_targets, *extra, "--", "--nocapture"]
         env = {**os.environ, "ARGOS_SURREAL_MODE": mode, "ARGOS_SURREAL_REQUIRED": "1"}
         if binary:
             env["ARGOS_SURREAL_BIN"] = str(binary)

@@ -104,6 +104,8 @@ impl State {
         self.submissions.invalidate_origin();
         self.job_actions.invalidate_origin();
         self.classifier_activation.invalidate_origin();
+        self.scoped_logs.invalidate_origin();
+        self.scoped_jobs.invalidate_origin();
         self.backend.invalidate_activity();
         self.maintenance.invalidate_origin();
         self.readiness_revision = self.readiness_revision.wrapping_add(1);

@@ -405,7 +405,7 @@ fn read_import(path: PathBuf) -> Result<(String, Vec<u8>), String> {
     Ok((file_name, bytes))
 }
 
-fn write_private_export(path: PathBuf, bytes: Vec<u8>) -> Result<(), String> {
+pub(crate) fn write_private_export(path: PathBuf, bytes: Vec<u8>) -> Result<(), String> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     if !path.is_absolute() || bytes.is_empty() || bytes.len() as u64 > LIMIT {

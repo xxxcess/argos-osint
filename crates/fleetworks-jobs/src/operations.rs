@@ -181,7 +181,7 @@ pub(crate) fn execute(
                 "progress cannot be negative"
             );
             ensure!(
-                !done.zip(*total).is_some_and(|(done, total)| done > total),
+                done.zip(*total).is_none_or(|(done, total)| done <= total),
                 "progress exceeds total"
             );
             let job = read::get_job(connection, job_id)?;

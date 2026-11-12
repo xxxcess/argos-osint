@@ -164,7 +164,7 @@ impl Tools {
                     .bind(("call", jobs::rid("osint_call", call_id)))).await?;
                 let existing: Option<CallRow> = jobs::take(&mut response, 0)?;
                 if let Some(existing) = existing {
-                    if !existing.matches(tool, &inputs) { return Err(aborted("manual_tool_conflict")); }
+                    if !existing.matches(tool, inputs) { return Err(aborted("manual_tool_conflict")); }
                 } else {
                     let mut response = jobs::run(&tx, tx.query("SELECT VALUE count() FROM osint_call WHERE origin=$origin AND status IN ['queued','running'] AND type::record('job',record::id(id)).operation=$operation AND type::record('job',record::id(id)).state IN ['queued','running','reconciling'] GROUP ALL")
                         .bind(("origin", ORIGIN)).bind(("operation", TOOLS_OPERATION))).await?;
@@ -178,7 +178,7 @@ impl Tools {
                 admission.record_in(&tx, call_id, TOOLS_OPERATION, created).await?;
                 if created {
                     jobs::run(&tx, tx.query("UPDATE $job SET app='tools',title=$title,tool=$tool,cancellable=false RETURN NONE; UPDATE $task SET max_attempts=1 RETURN NONE;")
-                        .bind(("job", jobs::rid("job", call_id))).bind(("task", jobs::rid("task", &task_id)))
+                        .bind(("job", jobs::rid("job", call_id))).bind(("task", jobs::rid("task", task_id)))
                         .bind(("title", format!("Tool: {tool}"))).bind(("tool", tool.to_owned()))).await?;
                 }
                 Ok(())

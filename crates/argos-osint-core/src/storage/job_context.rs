@@ -126,7 +126,7 @@ impl InteractiveAdmission {
                 let mut response = jobs::run(
                     &tx,
                     tx.query("SELECT job_id FROM ONLY $record")
-                        .bind(("record", jobs::rid("job_request", &key))),
+                        .bind(("record", jobs::rid("job_request", key))),
                 )
                 .await?;
                 let saved: Option<SavedRequest> = jobs::take(&mut response, 0)?;

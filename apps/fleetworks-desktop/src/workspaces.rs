@@ -281,6 +281,11 @@ impl State {
                 self.workspaces.message = Some(error);
             }
         }
+        if matches!(self.connection_profiles.catalog, Load::Idle)
+            && self.workspaces.container.is_some()
+        {
+            self.initialize_connection_profiles();
+        }
     }
 }
 

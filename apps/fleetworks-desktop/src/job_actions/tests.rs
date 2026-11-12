@@ -48,6 +48,8 @@ fn fixture() -> State {
         "synthetic-access".into(),
     )
     .expect("synthetic registered proof");
+    state.registration.context = Some(context.clone());
+    state.sync_jobs_binding();
     let job = ActivityJob {
         id: "synthetic-job".into(),
         app: "atlas".into(),

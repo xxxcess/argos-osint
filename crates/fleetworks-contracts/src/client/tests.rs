@@ -190,3 +190,147 @@ async fn serve_once(status: &str, headers: &str, body: &[u8]) -> (String, JoinHa
     });
     (format!("http://{address}"), handle)
 }
+
+#[test]
+fn canonical_profile_origin_reuses_transport_policy_without_requiring_credentials() {
+    assert_eq!(
+        Client::canonical_origin("https://EXAMPLE.invalid:443")
+            .expect("offline origin normalization"),
+        "https://example.invalid/"
+    );
+    assert_eq!(
+        Client::canonical_origin("http://127.0.0.1:80").expect("loopback normalization"),
+        "http://127.0.0.1/"
+    );
+    assert!(matches!(
+        Client::new("https://example.invalid", None),
+        Err(ClientError::MissingToken)
+    ));
+    for origin in [
+        "http://192.0.2.1",
+        "https://user:secret@example.invalid",
+        "https://example.invalid/api",
+        "https://example.invalid?secret=value",
+        "https://example.invalid/#fragment",
+        "file:///tmp/profile",
+    ] {
+        assert_eq!(
+            Client::canonical_origin(origin),
+            Err(ClientError::InvalidOrigin)
+        );
+        assert!(matches!(
+            Client::new(origin, Some("synthetic-token")),
+            Err(ClientError::InvalidOrigin)
+        ));
+    }
+}
+
+fn log_client(origin: &str) -> Client {
+    let receipt = crate::connect::RegistrationReceipt::new(
+        "deployment".into(),
+        "node".into(),
+        "workspace".into(),
+        "logs-registration".into(),
+        "192.0.2.42:research".parse().unwrap(),
+        3,
+    );
+    let context = crate::context::RegisteredContext::new(
+        receipt,
+        4,
+        5,
+        "current-configuration".into(),
+        "current-access".into(),
+    )
+    .unwrap();
+    Client::new(origin, Some("fixture-token"))
+        .unwrap()
+        .with_registered_context(&context)
+        .unwrap()
+}
+
+#[tokio::test]
+async fn log_export_is_registered_bounded_and_reports_incomplete_snapshot() {
+    let body = br#"{"id":"event","ts":"2026-11-12T12:00:00Z","severity":"info","app":"tools","event_type":"phase","message":"synthetic private summary","job_id":"job","task_id":"","attempt_id":"","run_id":""}
+"#;
+    let cursor = "ab".repeat(32);
+    let headers = format!("Content-Type: application/x-ndjson\r\nContent-Disposition: attachment; filename=workstation-logs.ndjson\r\nx-fleetworks-log-apps-complete: false\r\nx-fleetworks-next-log-cursor: {cursor}\r\n");
+    let (origin, request) = serve_once("200 OK", &headers, body).await;
+    let query = crate::operational_logs::LogQuery {
+        text: Some("first /&=second".into()),
+        limit: Some(1),
+        ..Default::default()
+    };
+    let export = log_client(&origin).export_logs(&query).await.unwrap();
+    assert_eq!(export.bytes, body);
+    assert_eq!(export.next_cursor.as_deref(), Some(cursor.as_str()));
+    assert!(!export.apps_complete);
+    assert!(!format!("{export:?}").contains("synthetic private summary"));
+    let request = request.await.unwrap().to_ascii_lowercase();
+    assert!(request
+        .starts_with("get /api/v1/logs/export?text=first+%2f%26%3dsecond&limit=1 http/1.1\r\n"));
+    assert!(request.contains("\r\nx-fleetworks-registration: logs-registration\r\n"));
+    assert!(request.contains("\r\nauthorization: bearer fixture-token\r\n"));
+}
+
+#[tokio::test]
+async fn log_export_rejects_raw_payloads_bad_metadata_and_oversize() {
+    let headers = "Content-Type: application/x-ndjson\r\nContent-Disposition: attachment; filename=workstation-logs.ndjson\r\nx-fleetworks-log-apps-complete: true\r\n";
+    let body = br#"{"id":"event","ts":"2026-11-12T12:00:00Z","severity":"info","app":"tools","event_type":"phase","message":"safe","job_id":"job","task_id":"","attempt_id":"","run_id":"","details":{"secret":"synthetic-never-exported"}}"#;
+    for (response_headers, bytes, expected) in [
+        (
+            headers.to_owned(),
+            body.as_slice(),
+            ClientError::InvalidResponse,
+        ),
+        (
+            headers.replace("x-fleetworks-log-apps-complete: true\r\n", ""),
+            b"".as_slice(),
+            ClientError::InvalidResponse,
+        ),
+        (
+            format!("{headers}x-fleetworks-next-log-cursor: raw-sequence-42\r\n"),
+            b"".as_slice(),
+            ClientError::InvalidResponse,
+        ),
+        (
+            format!("{headers}Content-Length: {}\r\n", MAX_RESPONSE_BYTES + 1),
+            b"".as_slice(),
+            ClientError::ResponseTooLarge,
+        ),
+    ] {
+        let (origin, request) = serve_once("200 OK", &response_headers, bytes).await;
+        assert_eq!(
+            log_client(&origin)
+                .export_logs(&Default::default())
+                .await
+                .unwrap_err(),
+            expected
+        );
+        request.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn log_export_refuses_missing_context_and_untrusted_error_prose() {
+    let unregistered = Client::new("http://127.0.0.1:1", None).unwrap();
+    assert_eq!(
+        unregistered
+            .export_logs(&Default::default())
+            .await
+            .unwrap_err(),
+        ClientError::InvalidRequest
+    );
+    let (origin, request) = serve_once(
+        "409 Conflict",
+        "",
+        b"untrusted synthetic private diagnostic",
+    )
+    .await;
+    let error = log_client(&origin)
+        .export_logs(&Default::default())
+        .await
+        .unwrap_err();
+    assert_eq!(error, ClientError::Status(409));
+    assert!(!error.to_string().contains("synthetic"));
+    request.await.unwrap();
+}

@@ -237,10 +237,10 @@ fn checked_route(auth: &AuthFile, route: &Route) -> Result<ModelRoute, ApiError>
     } else {
         &route.account
     };
-    if !auth
+    if auth
         .accounts
         .get(account)
-        .is_some_and(|saved| provider::effective_kind(saved) == kind)
+        .is_none_or(|saved| provider::effective_kind(saved) != kind)
     {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
@@ -303,7 +303,7 @@ fn set_role(root: &Path, request: SetRole) -> Result<u64, ApiError> {
 }
 
 fn set_role_locked(root: &Path, lock: &ConfigLock, request: SetRole) -> Result<u64, ApiError> {
-    let mut snapshot = read_locked(root, &lock)?;
+    let mut snapshot = read_locked(root, lock)?;
     expected(&snapshot, request.expected_revision)?;
     let assignment = assignment(
         &snapshot.auth,
@@ -316,7 +316,7 @@ fn set_role_locked(root: &Path, lock: &ConfigLock, request: SetRole) -> Result<u
         .defaults
         .role_mut(&request.role)
         .ok_or_else(bad)? = assignment;
-    commit(root, &lock, &snapshot)
+    commit(root, lock, &snapshot)
 }
 
 pub(crate) async fn save_role(

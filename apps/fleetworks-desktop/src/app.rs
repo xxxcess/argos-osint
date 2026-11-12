@@ -35,8 +35,14 @@ use crate::connection::Connection;
 use crate::connection::ConnectionStatus;
 use crate::connection::GatewayEffects;
 use crate::connection::RequestTask;
+use crate::connection_profiles::ConnectionProfiles;
+use crate::connection_profiles::ProfileAction;
 use crate::job_actions::JobAction;
 use crate::job_actions::JobActions;
+use crate::jobs_query::JobsQueryState;
+use crate::logs::ActivityTab;
+use crate::logs::LogAction;
+use crate::logs::LogState;
 use crate::maintenance::Maintenance;
 use crate::rebind::Rebind;
 use crate::registration::Registration;
@@ -152,6 +158,12 @@ pub enum Intent {
     PrepareJobAction { action: JobAction },
     PostJobAction { action: JobAction },
     ClassifierActivation { action: ActivationAction },
+    ConnectionProfile { action: ProfileAction },
+    ConnectionCredentialSelected,
+    ChooseConnectionCredential,
+    OperationalLogs { action: LogAction },
+    CopyLogSummaries,
+    SaveLogExport { partial: bool },
 }
 
 /// One state owns navigation, context, client and asynchronous request guards.
@@ -160,6 +172,7 @@ pub struct State {
     pub page: Page,
     pub sidebar: PaneState,
     pub connection: Connection,
+    pub connection_profiles: ConnectionProfiles,
     pub brain: Brain,
     pub backend: Backend,
     pub maintenance: Maintenance,
@@ -168,6 +181,9 @@ pub struct State {
     pub submissions: Submissions,
     pub job_actions: JobActions,
     pub classifier_activation: ClassifierActivation,
+    pub scoped_logs: LogState,
+    pub scoped_jobs: JobsQueryState,
+    pub activity_tab: ActivityTab,
     pub readiness: Load<WorkstationReadiness>,
     pub readiness_received_at: Option<f64>,
     pub(crate) clock: f64,
@@ -197,6 +213,7 @@ impl Default for State {
             page: Page::Workstation,
             sidebar: PaneState::new(220.0).range(180.0, 340.0),
             connection: Connection::default(),
+            connection_profiles: ConnectionProfiles::initial(),
             brain: Brain::default(),
             backend: Backend::default(),
             maintenance: Maintenance::default(),
@@ -205,6 +222,9 @@ impl Default for State {
             submissions: Submissions::default(),
             job_actions: JobActions::default(),
             classifier_activation: ClassifierActivation::default(),
+            scoped_logs: LogState::default(),
+            scoped_jobs: JobsQueryState::default(),
+            activity_tab: ActivityTab::Jobs,
             readiness: Load::Idle,
             readiness_received_at: None,
             clock: 0.0,
@@ -257,11 +277,14 @@ impl State {
 
     pub fn navigate(&mut self, page: Page) {
         self.page = page;
+        self.sync_jobs_binding();
+        self.sync_log_visibility();
     }
 
     /// Drop ephemeral reads only. Accepted backend work has an independent lifetime.
     pub fn cancel_requests(&mut self) {
         self.connection_request = None;
+        self.connection_profiles.cancel_tests();
         self.readiness_request = None;
         self.search_request = None;
         self.dossier_request = None;
@@ -278,12 +301,15 @@ impl State {
         self.submissions.cancel_requests();
         self.job_actions.request = None;
         self.classifier_activation.cancel_requests();
+        self.scoped_logs.cancel_requests();
+        self.scoped_jobs.cancel_reads();
         self.brain.in_flight = false;
     }
 
     /// Isolate data immediately on destination/auth changes and reject old callbacks.
     pub fn disconnect(&mut self) {
         self.cancel_requests();
+        self.activity_tab = ActivityTab::Jobs;
         self.invalidate_origin();
         self.registration.interfaces = Load::Idle;
         self.registration.selected_interface = None;
@@ -308,15 +334,14 @@ impl State {
     }
 
     pub fn connect(&mut self) {
+        self.connection_profiles.initial_selection_applied = true;
         self.disconnect();
         self.connection.status = ConnectionStatus::Connecting;
         self.record(Intent::Connect);
         if let Some(services) = &self.services {
-            let file = (!self.connection.token_file.text.is_empty())
-                .then(|| PathBuf::from(&self.connection.token_file.text));
             self.connection_request = services.connect(
                 self.connection.origin.text.clone(),
-                file,
+                self.editor_credential(),
                 self.connection.epoch,
             );
         }
@@ -329,6 +354,8 @@ impl State {
         self.connection_request = None;
         match result {
             Ok(connected) => {
+                self.connection_profiles.credential = connected.credential;
+                self.connection_profiles.editing = false;
                 self.client = Some(connected.client);
                 self.connection.ready = Some(connected.ready);
                 self.connection.capabilities = Some(connected.capabilities);
@@ -492,6 +519,8 @@ impl State {
 fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
     state.clock = now;
     let mut changed = false;
+    changed |= state.poll_scoped_logs();
+    changed |= state.sync_jobs_binding();
     if let Some(key) = state.reveal.take() {
         tx.scroll_into_view(key);
         changed = true;
@@ -648,5 +677,5 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     } else {
         base
     };
-    rune_kit::root(base, std::iter::empty())
+    rune_kit::root(base, std::iter::empty()).on_window_focus(State::log_window_focus)
 }

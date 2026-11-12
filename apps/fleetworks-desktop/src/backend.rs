@@ -2,9 +2,9 @@
 
 use std::collections::BTreeMap;
 
-use fleetworks_contracts::Client;
 use fleetworks_contracts::context::ActivityScope;
 use fleetworks_contracts::context::Permission;
+use fleetworks_contracts::Client;
 use rune::TextEdit;
 use serde::Deserialize;
 use serde::Serialize;
@@ -258,7 +258,6 @@ enum ReadResult {
     Tools(ToolCatalog),
     Models(ModelDefaults),
     Profile(ProfileSnapshot),
-    Jobs(ActivityJobs),
     JobDetail(Box<JobDetail>),
     Logs(JobLogs),
 }
@@ -383,9 +382,15 @@ impl State {
             Page::Tools => ReadRequest::Tools,
             Page::Models => ReadRequest::Models,
             Page::Profile => ReadRequest::Profile,
-            Page::Jobs => ReadRequest::Jobs {
-                workspace_id: self.activity_workspace_filter(),
-            },
+            Page::Jobs => {
+                if self.activity_tab == crate::logs::ActivityTab::Logs {
+                    self.refresh_operational_logs();
+                    return;
+                }
+                ReadRequest::Jobs {
+                    workspace_id: self.activity_workspace_filter(),
+                }
+            }
             Page::Workstation => {
                 self.refresh_readiness();
                 self.backend_read(ReadRequest::Profile);
@@ -414,6 +419,7 @@ impl State {
     }
 
     pub fn select_job(&mut self, id: &str) {
+        self.select_activity_tab(crate::logs::ActivityTab::Jobs);
         if self.backend.selected_job.as_deref() != Some(id) {
             self.job_actions.confirmation = None;
         }
@@ -424,6 +430,7 @@ impl State {
             return;
         }
         self.backend.selected_job = Some(id.to_owned());
+        self.selected_log_job_changed(id);
         self.backend.logs = Load::Idle;
         self.backend_read(ReadRequest::JobDetail {
             id: id.to_owned(),
@@ -441,11 +448,13 @@ impl State {
             return;
         }
         self.page = Page::Jobs;
-        self.backend.selected_job = Some(id.to_owned());
-        self.backend.logs = Load::Idle;
+        self.select_activity_tab(crate::logs::ActivityTab::Jobs);
         self.backend_read(ReadRequest::Jobs {
             workspace_id: self.activity_workspace_filter(),
         });
+        self.backend.selected_job = Some(id.to_owned());
+        self.selected_log_job_changed(id);
+        self.backend.logs = Load::Idle;
         self.backend_read(ReadRequest::JobDetail {
             id: id.to_owned(),
             workspace_id: self.activity_workspace_filter(),
@@ -464,6 +473,11 @@ impl State {
 
     pub fn set_activity_workspace_filter(&mut self, narrow: bool) {
         self.backend.selected_workspace_only = narrow;
+        self.scoped_logs.select_target(if narrow {
+            crate::logs::LogTarget::SelectedWorkspace
+        } else {
+            crate::logs::LogTarget::Workstation
+        });
         self.backend.invalidate_activity();
         self.refresh_page();
     }
@@ -481,6 +495,10 @@ impl State {
     }
 
     pub fn backend_read(&mut self, request: ReadRequest) {
+        if matches!(request, ReadRequest::Jobs { .. }) {
+            self.refresh_scoped_jobs();
+            return;
+        }
         let kind = request.kind();
         let permission = if kind.is_activity() {
             Permission::ReadWorkstationActivity
@@ -560,22 +578,6 @@ impl State {
                     Load::Failed(
                         "Gateway profile requires the current explicit configuration format".into(),
                     )
-                }
-            }
-            Ok(ReadResult::Jobs(jobs)) => {
-                let valid = self.registration.context.as_ref().is_some_and(|context| {
-                    jobs.activity_scope.deployment_id == context.deployment_id
-                        && jobs.activity_scope.workstation_id == context.workstation_id
-                        && jobs.activity_scope.scope_revision == context.scope_revision
-                        && jobs.activity_scope.workspace_id == self.activity_workspace_filter()
-                });
-                if valid {
-                    self.backend.jobs = Load::Ready(jobs);
-                } else {
-                    self.backend.failed(
-                        kind,
-                        "Gateway returned activity for a different registered scope".into(),
-                    );
                 }
             }
             Ok(ReadResult::JobDetail(detail)) => {
@@ -660,17 +662,9 @@ async fn read(
             .await
             .map(ReadResult::Models),
         ReadRequest::Profile => client.get("/api/v1/profile").await.map(ReadResult::Profile),
-        ReadRequest::Jobs { workspace_id } => client
-            .get_with_query(
-                "/api/v1/jobs",
-                &ActivityQuery {
-                    id: None,
-                    workspace_id: workspace_id.as_deref(),
-                    limit: 100,
-                },
-            )
-            .await
-            .map(ReadResult::Jobs),
+        // Lists use the registered Jobs controller's explicit newest/cursor
+        // contract; this generic detail adapter cannot issue a legacy list.
+        ReadRequest::Jobs { .. } => Err(fleetworks_contracts::ClientError::InvalidRequest),
         ReadRequest::JobDetail { id, workspace_id } => client
             .get_with_query(
                 "/api/v1/jobs/detail",

@@ -545,7 +545,7 @@ impl Coordinator {
         let lock = self.lock().await?;
         let row=run_tx(repo.db(),RetryPolicy::default(),|tx|{let request=&request;async move{
             registry_guard(&tx).await?;let mut row=row_in(&tx,&key(&authority.scope_id,&request.reset_id)).await?.ok_or_else(||abort("missing"))?;
-            matches_request(&row,authority,&request)?;if !drained(&tx).await?{return Err(abort("draining"));}
+            matches_request(&row,authority,request)?;if !drained(&tx).await?{return Err(abort("draining"));}
             if !matches!(row.phase.as_str(),"prepared"|"clearing"){return Err(abort("conflict"));}
             jobs::run(&tx,tx.query("UPDATE $record SET phase='clearing',local_receipts_json=$receipts RETURN NONE")
                 .bind(("record",jobs::rid("configuration_reset",&key(&authority.scope_id,&request.reset_id))))
@@ -646,7 +646,7 @@ impl Coordinator {
             return Err(ResetError::ReprovisioningRequired);
         }
         let row=run_tx(repo.db(),RetryPolicy::default(),|tx|{let request=&request;let row=&row;async move{
-            registry_guard(&tx).await?;let current=row_in(&tx,&key(&authority.scope_id,&request.reset_id)).await?.ok_or_else(||abort("missing"))?;matches_request(&current,authority,&request)?;
+            registry_guard(&tx).await?;let current=row_in(&tx,&key(&authority.scope_id,&request.reset_id)).await?.ok_or_else(||abort("missing"))?;matches_request(&current,authority,request)?;
             if current.phase=="complete"{return Ok(current);}
             if current.phase!="backend_complete"||!drained(&tx).await?{return Err(abort("conflict"));}
             jobs::run(&tx,tx.query("UPDATE $record SET phase='complete' RETURN NONE;

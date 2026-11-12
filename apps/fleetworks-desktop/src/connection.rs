@@ -1,7 +1,7 @@
 //! Gateway-only effects. No application operation starts a process or service.
 
-use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::OnceLock;
 
 use fleetworks_contracts::capabilities::Capabilities;
@@ -9,7 +9,10 @@ use fleetworks_contracts::readiness::WorkstationReadiness;
 use fleetworks_contracts::search::ActorSearchQuery;
 use fleetworks_contracts::search::ActorSearchResponse;
 use fleetworks_contracts::Client;
+use fleetworks_contracts::ClientError;
 use fleetworks_contracts::Ready;
+use fleetworks_workspace::native::CredentialReference;
+use fleetworks_workspace::native::NativeContainer;
 use rune::AppHandle;
 use rune::TextEdit;
 use tokio::runtime::Handle;
@@ -73,6 +76,83 @@ pub(crate) struct Connected {
     pub client: Client,
     pub ready: Ready,
     pub capabilities: Capabilities,
+    pub credential: Option<CredentialReference>,
+}
+
+#[derive(Clone)]
+pub(crate) enum ConnectionCredential {
+    None,
+    File(PathBuf),
+    Reference(CredentialReference),
+    Saved {
+        reference: CredentialReference,
+        container: Arc<NativeContainer>,
+        catalog_revision: u64,
+        profile_id: String,
+        profile_revision: u64,
+    },
+    Unavailable,
+}
+impl ConnectionCredential {
+    pub(crate) fn reference(&self, origin: &str) -> anyhow::Result<Option<CredentialReference>> {
+        match self {
+            Self::None => Ok(None),
+            Self::File(path) => CredentialReference::capture(path, origin).map(Some),
+            Self::Reference(reference) => {
+                drop(reference.open_verified(origin)?);
+                Ok(Some(reference.clone()))
+            }
+            Self::Saved {
+                reference,
+                container,
+                catalog_revision,
+                profile_id,
+                profile_revision,
+            } => {
+                let catalog = container.connection_profiles()?;
+                anyhow::ensure!(
+                    catalog.revision == *catalog_revision
+                        && catalog
+                            .profiles
+                            .iter()
+                            .any(|profile| &profile.id == profile_id
+                                && profile.revision == *profile_revision
+                                && &profile.credential == reference
+                                && profile.origin == origin),
+                    "saved connection changed; refresh before using its credential reference"
+                );
+                drop(reference.open_verified(origin)?);
+                Ok(Some(reference.clone()))
+            }
+            Self::Unavailable => anyhow::bail!(
+                "refresh saved connection metadata before using its credential reference"
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConnectionTestPhase {
+    Origin,
+    CredentialReference,
+    Reachability,
+    Authentication,
+    Compatibility,
+    Readiness,
+}
+#[derive(Clone, Debug)]
+pub struct ConnectionTestFailure {
+    pub phase: ConnectionTestPhase,
+    pub message: String,
+}
+#[derive(Clone, Debug)]
+pub struct ConnectionTestSummary {
+    pub origin: String,
+    pub deployment_id: String,
+    pub api_version: u16,
+    pub ready: bool,
+    pub storage: bool,
+    pub credential: Option<CredentialReference>,
 }
 
 /// One app-owned Tokio executor sends results back through Rune's UI-thread handle.
@@ -98,13 +178,53 @@ impl GatewayEffects {
     pub(crate) fn connect(
         &self,
         origin: String,
-        token_file: Option<PathBuf>,
+        credential: ConnectionCredential,
         epoch: u64,
     ) -> Option<RequestTask> {
         let ui = self.ui.get()?.clone();
         let task = self.runtime.spawn(async move {
-            let result = connect(&origin, token_file.as_deref()).await;
+            let result = handshake(&origin, credential)
+                .await
+                .map_err(|error| error.message);
             ui.update(move |state, _| state.complete_connection(epoch, result));
+        });
+        Some(RequestTask(task.abort_handle()))
+    }
+
+    pub(crate) fn test_profile(
+        &self,
+        origin: String,
+        credential: ConnectionCredential,
+        epoch: u64,
+        draft: u64,
+        revision: u64,
+    ) -> Option<RequestTask> {
+        let ui = self.ui.get()?.clone();
+        let task = self.runtime.spawn(async move {
+            let result =
+                handshake(&origin, credential)
+                    .await
+                    .map(|connected| ConnectionTestSummary {
+                        origin: Client::canonical_origin(&origin)
+                            .expect("handshake validated the origin"),
+                        deployment_id: connected
+                            .capabilities
+                            .deployment_id
+                            .unwrap_or(connected.ready.instance_id),
+                        api_version: connected.ready.api_version,
+                        ready: connected.ready.ready,
+                        storage: connected.ready.storage,
+                        credential: connected.credential,
+                    });
+            // The test's client is dropped here. Only Connect may install an
+            // authenticated client or change the active connection status.
+            ui.update(move |state, _| {
+                if state.connection.epoch == epoch
+                    && state.connection_profiles.draft_revision == draft
+                {
+                    state.complete_profile_test(revision, result);
+                }
+            });
         });
         Some(RequestTask(task.abort_handle()))
     }
@@ -183,64 +303,73 @@ impl GatewayEffects {
     }
 }
 
-async fn connect(origin: &str, token_file: Option<&Path>) -> Result<Connected, String> {
-    let token = match token_file {
-        Some(path) => Some(read_private_token(path).await?),
-        None => None,
-    };
-    let client = Client::new(origin, token.as_deref()).map_err(|error| error.to_string())?;
-    let ready = client.ready().await.map_err(|error| error.to_string())?;
+async fn handshake(
+    origin: &str,
+    credential: ConnectionCredential,
+) -> Result<Connected, ConnectionTestFailure> {
+    let origin = Client::canonical_origin(origin).map_err(|error| ConnectionTestFailure {
+        phase: ConnectionTestPhase::Origin,
+        message: error.to_string(),
+    })?;
+    if origin.len() > 2048 {
+        return Err(ConnectionTestFailure {
+            phase: ConnectionTestPhase::Origin,
+            message: "Gateway origin exceeds the saved-connection size limit".into(),
+        });
+    }
+    let (token, credential) = read_private_token(origin.clone(), credential).await?;
+    let client = Client::new(&origin, token.as_deref())
+        .map_err(|error| client_failure(error, ConnectionTestPhase::Authentication))?;
+    let ready = client
+        .ready()
+        .await
+        .map_err(|error| client_failure(error, ConnectionTestPhase::Readiness))?;
     let capabilities: Capabilities = client
         .get(fleetworks_contracts::CAPABILITIES_PATH)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| client_failure(error, ConnectionTestPhase::Compatibility))?;
     capabilities
         .require_native_contract()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| ConnectionTestFailure {
+            phase: ConnectionTestPhase::Compatibility,
+            message: error.to_string(),
+        })?;
     Ok(Connected {
         client,
         ready,
         capabilities,
+        credential,
     })
 }
 
-async fn read_private_token(path: &Path) -> Result<String, String> {
-    let metadata = tokio::fs::symlink_metadata(path)
-        .await
-        .map_err(|_| "Cannot read the selected protected credential file".to_owned())?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > TOKEN_LIMIT {
-        return Err("Credential file must be a bounded regular file, not a symbolic link".into());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o077 != 0 {
-            return Err("Credential file must be readable only by its owner (mode 0600)".into());
+async fn read_private_token(
+    origin: String,
+    source: ConnectionCredential,
+) -> Result<(Option<String>, Option<CredentialReference>), ConnectionTestFailure> {
+    tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        use std::io::Read;
+        let Some(reference) = source.reference(&origin)? else { return Ok((None,None)); };
+        let file = reference.open_verified(&origin)?; let mut bytes = Vec::new(); file.take(TOKEN_LIMIT + 1).read_to_end(&mut bytes)?;
+        anyhow::ensure!(bytes.len() as u64 <= TOKEN_LIMIT,"credential file exceeds bound");
+        let value = String::from_utf8(bytes)?;
+        Ok((Some(value.trim_end_matches(['\r','\n']).to_owned()),Some(reference)))
+    }).await.map_err(|_| ConnectionTestFailure { phase:ConnectionTestPhase::CredentialReference,message:"Credential reference worker stopped".into() })?
+        .map_err(|_| ConnectionTestFailure { phase:ConnectionTestPhase::CredentialReference,message:"Protected credential reference is missing, changed or unsafe; select its private file again".into() })
+}
+
+fn client_failure(error: ClientError, phase: ConnectionTestPhase) -> ConnectionTestFailure {
+    let phase = match error {
+        ClientError::Transport | ClientError::Timeout => ConnectionTestPhase::Reachability,
+        ClientError::Status(401 | 403) | ClientError::MissingToken | ClientError::InvalidToken => {
+            ConnectionTestPhase::Authentication
         }
-    }
-    let file = tokio::fs::File::open(path)
-        .await
-        .map_err(|_| "Cannot open the selected protected credential file".to_owned())?;
-    let opened = file
-        .metadata()
-        .await
-        .map_err(|_| "Cannot inspect the selected protected credential file".to_owned())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if metadata.dev() != opened.dev() || metadata.ino() != opened.ino() {
-            return Err("Credential file changed while it was being opened".into());
+        ClientError::UnsupportedVersion(_) | ClientError::Status(404) => {
+            ConnectionTestPhase::Compatibility
         }
+        _ => phase,
+    };
+    ConnectionTestFailure {
+        phase,
+        message: error.to_string(),
     }
-    use tokio::io::AsyncReadExt;
-    let mut bytes = Vec::new();
-    file.take(TOKEN_LIMIT + 1)
-        .read_to_end(&mut bytes)
-        .await
-        .map_err(|_| "Cannot read the selected protected credential file".to_owned())?;
-    if bytes.len() as u64 > TOKEN_LIMIT {
-        return Err("Credential file exceeds its size limit".into());
-    }
-    let value = String::from_utf8(bytes).map_err(|_| "Invalid credential file".to_owned())?;
-    Ok(value.trim_end_matches(['\r', '\n']).to_owned())
 }

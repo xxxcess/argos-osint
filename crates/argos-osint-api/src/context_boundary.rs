@@ -44,6 +44,8 @@ fn requirement(request: &Request) -> Option<(Permission, ContextRequirement)> {
             "/api/v1/jobs"
                 | "/api/v1/jobs/detail"
                 | "/api/v1/logs"
+                | "/api/v1/logs/export"
+                | "/api/v1/logs/follow"
                 | "/api/v1/brief/stages"
                 | "/api/v1/tools/result"
         )

@@ -128,12 +128,24 @@ pub(super) fn read_json<T: DeserializeOwned>(
     fd: impl AsFd,
     name: &str,
 ) -> Result<(T, ObjectIdentity)> {
+    read_json_limited(fd, name, MAX_METADATA_BYTES)
+}
+
+pub(super) fn read_json_limited<T: DeserializeOwned>(
+    fd: impl AsFd,
+    name: &str,
+    limit: u64,
+) -> Result<(T, ObjectIdentity)> {
+    anyhow::ensure!(
+        limit > 0 && limit <= MAX_METADATA_BYTES,
+        "invalid native metadata limit"
+    );
     let file = open_private_file(fd, name, false)?;
     let identity = require_private_file(&file)?;
     let mut body = Vec::new();
-    file.take(MAX_METADATA_BYTES + 1).read_to_end(&mut body)?;
+    file.take(limit + 1).read_to_end(&mut body)?;
     anyhow::ensure!(
-        body.len() as u64 <= MAX_METADATA_BYTES,
+        body.len() as u64 <= limit,
         "native metadata exceeds its bounded size"
     );
     let value = serde_json::from_slice(&body).context("native metadata needs explicit repair")?;

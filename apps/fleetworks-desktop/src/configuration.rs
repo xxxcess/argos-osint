@@ -158,6 +158,7 @@ pub struct Configuration {
     pub(crate) request: Option<RequestTask>,
     pub(crate) revision: u64,
     pub(crate) draft_revision: u64,
+    pub(crate) saved_draft_revision: u64,
 }
 
 fn secret() -> TextEdit {
@@ -189,6 +190,7 @@ impl Default for Configuration {
             request: None,
             revision: 0,
             draft_revision: 0,
+            saved_draft_revision: 0,
         }
     }
 }
@@ -453,6 +455,7 @@ impl GatewayEffects {
                 state.configuration.result = match result {
                     Ok(saved) if saved.saved && saved.configuration_revision > expected_revision => {
                         if state.configuration.draft_revision == draft_revision {
+                            state.configuration.saved_draft_revision = draft_revision;
                             match action {
                                 ConfigurationAction::ProviderAccount => state.configuration.account_api_key.replace_text(""),
                                 ConfigurationAction::ToolCredentials => { state.configuration.tool_primary.replace_text(""); state.configuration.tool_fallback.replace_text(""); },

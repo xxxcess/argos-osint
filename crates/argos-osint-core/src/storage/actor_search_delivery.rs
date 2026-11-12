@@ -138,6 +138,6 @@ pub(super) async fn prepare(
             jobs::run(&tx,tx.query("UPDATE $job SET state='running',worker_owner=$owner,heartbeat_at=<datetime>$now WHERE state='queued' RETURN NONE")
                 .bind(("job",jobs::rid("job",cause))).bind(("owner",owner.clone())).bind(("now",now.to_rfc3339()))).await?;
         }
-        Ok(Preparation::Batch {lease,prepared})
+        Ok(Preparation::Batch {lease,prepared:Box::new(prepared)})
     }}).await?.value)
 }

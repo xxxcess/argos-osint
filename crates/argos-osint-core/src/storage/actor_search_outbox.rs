@@ -454,7 +454,7 @@ pub enum Preparation {
     Waiting,
     Batch {
         lease: Lease,
-        prepared: PreparedBatch,
+        prepared: Box<PreparedBatch>,
     },
 }
 

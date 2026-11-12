@@ -396,16 +396,26 @@ fn workstation(state: &State, kit: &Kit) -> El {
         .label("Gateway API origin")
         .placeholder("https://gateway.example.test")
         .width(None)
+        .disabled(
+            state.connection_profiles.busy
+                || !state.connection_profiles.editing
+                || state.connected(),
+        )
         .on_edit(|state: &mut State| &mut state.connection.origin)
-        .on_change(|state: &mut State, _| state.disconnect())
+        .on_change(|state: &mut State, _| state.profile_editor_changed(true))
         .build(kit)
         .key("gateway-origin");
     let credential = TextInput::new(&state.connection.token_file)
         .label("Protected gateway credential file")
-        .placeholder("Select a private token file through launch configuration")
+        .placeholder("Select an existing private token file")
         .width(None)
+        .disabled(
+            state.connection_profiles.busy
+                || !state.connection_profiles.editing
+                || state.connected(),
+        )
         .on_edit(|state: &mut State| &mut state.connection.token_file)
-        .on_change(|state: &mut State, _| state.disconnect())
+        .on_change(|state: &mut State, _| state.profile_credential_edited())
         .build(kit)
         .key("gateway-token-file");
     let actions = rune::row()
@@ -413,8 +423,10 @@ fn workstation(state: &State, kit: &Kit) -> El {
         .child(
             Button::new("Connect")
                 .variant(ButtonVariant::Submit)
-                .disabled(connecting)
-                .on_press(|state: &mut State| state.connect())
+                .disabled(connecting || state.connection_profiles.busy)
+                .on_press(|state: &mut State| {
+                    state.profile_action(crate::connection_profiles::ProfileAction::Connect)
+                })
                 .build(kit)
                 .key("connect"),
         )
@@ -429,10 +441,12 @@ fn workstation(state: &State, kit: &Kit) -> El {
     let mut body = rune::col()
         .child(heading("Connection and local workstation", kit))
         .child(quiet("Local and remote profiles connect to independently running gateways. Accepted jobs continue after this app closes.", kit))
+        .child(crate::connection_profile_views::profiles(state,kit))
         .child(quiet("Gateway API origin", kit))
         .child(origin)
         .child(quiet("Protected gateway credential file", kit))
         .child(credential)
+        .child(crate::connection_profile_views::actions(state,kit))
         .child(actions)
         .child(line(status, kit).key("connection-status").role("status"))
         .child(heading("Registration", kit))

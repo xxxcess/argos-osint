@@ -175,7 +175,7 @@ pub(crate) async fn authorized_job(
         .ok_or_else(ContextFailure::missing)
 }
 
-async fn action_availability(
+pub(crate) async fn action_availability(
     repo: &Repository,
     request: &ResolvedRequest,
     rows: &mut [ActivityJobRow],
@@ -358,71 +358,6 @@ pub(crate) async fn stages(
     }
     Ok(Json(
         json!({"stages":stages,"outputs":outputs,"private_details_available":true}),
-    ))
-}
-
-/// Selected-job logs use an exact authorized ID, never the legacy unscoped
-/// parent walk. Whole-node log pagination awaits owner-side attribution joins.
-pub(crate) async fn logs(
-    State(state): State<ApiState>,
-    extension: Option<Extension<ResolvedRequest>>,
-    Query(query): Query<ActivityQuery>,
-) -> ApiResult {
-    let request = request(&extension)?;
-    let scope = scope_for_request(&state.repo, request, query.workspace_id.as_deref()).await?;
-    let limit = query.limit.unwrap_or(100);
-    if !(1..=100).contains(&limit) {
-        return Err(ContextFailure::invalid().into());
-    }
-    if query.id.is_none() && query.job_id.is_none() {
-        return Ok(Json(
-            json!({"rows":[],"available":false,"reason":"Select an attributed job to view its logs"}),
-        ));
-    }
-    let id = job_id(&query)?;
-    if !authorized_job(&state.repo, request, &scope, id)
-        .await?
-        .private_details_available
-    {
-        return Ok(Json(
-            json!({"rows":[],"available":false,"reason":"Shared private logs unavailable"}),
-        ));
-    }
-    let rows: Vec<Value> = if storage::jobs_client::configured() {
-        let value = storage::jobs_client::execute(storage::jobs_client::LogCommand::List {
-            min_rank: None,
-            app: String::new(),
-            job_ids: vec![id.to_owned()],
-            text: String::new(),
-            since: String::new(),
-            before_seq: None,
-            limit,
-        })
-        .await
-        .map_err(crate::internal)?;
-        serde_json::from_value(value).map_err(crate::internal)?
-    } else {
-        state.repo.db().query("SELECT record::id(id) AS id, seq, ts, severity, app, event_type, message, job_id FROM argos_event WHERE job_id = $job ORDER BY seq DESC LIMIT $limit")
-            .bind(("job", id.to_owned())).bind(("limit", limit as i64)).await.map_err(crate::internal)?.check().map_err(crate::internal)?.take(0).map_err(crate::internal)?
-    };
-    if !authorized_job(&state.repo, request, &scope, id)
-        .await?
-        .private_details_available
-    {
-        return Err(ContextFailure::changed().into());
-    }
-    let rows: Vec<_> = rows
-        .into_iter()
-        .filter(|row| row.get("job_id").and_then(Value::as_str) == Some(id))
-        .take(limit)
-        .map(|row| {
-            json!({"id":row["id"],"seq":row["seq"],"ts":row["ts"],"severity":row["severity"],
-            "app":row["app"],"event_type":row["event_type"],"job_id":id,
-            "message":provider_diag::sanitize(row["message"].as_str().unwrap_or_default())})
-        })
-        .collect();
-    Ok(Json(
-        json!({"rows":rows,"available":true,"descendant_logs_available":false}),
     ))
 }
 

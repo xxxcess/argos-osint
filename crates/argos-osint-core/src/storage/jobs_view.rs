@@ -21,7 +21,7 @@ use super::tx::{run_tx, RetryPolicy, TxError};
 use crate::jobs_view::{task_label, AttemptRow, JobCounts, JobDetail, JobFilter, JobRow, TaskRow};
 
 /// Visible jobs (alias-free; `$cutoff` bound by the caller).
-const ELIGIBLE: &str = "created_at >= <datetime>$cutoff \
+pub(crate) const ELIGIBLE: &str = "created_at >= <datetime>$cutoff \
     AND !record::exists(type::record('job_retirement', record::id(id)))";
 
 // Keep the running stack reachable even when active work/history fills the page.
@@ -29,7 +29,7 @@ const RANK: &str = "IF kind = 'service' AND state = 'running' AND operation IN [
     ELSE IF state IN ['running', 'queued', 'retry_scheduled'] AND kind != 'service' { 0 } \
     ELSE IF kind = 'service' { 2 } ELSE { 1 }";
 
-const ROW_FIELDS: &str = "record::id(id) AS key,
+pub(crate) const ROW_FIELDS: &str = "record::id(id) AS key,
     IF parent != NONE { record::id(parent) } ELSE { '' } AS parent_id,
     kind, operation, state, phase, cancel_requested, cancellable AS cancellable_flag,
     app, title, provider, model, tool, run_ref, resource_ref, result_ref, error_category,
@@ -64,8 +64,8 @@ fn row_select() -> String {
 }
 
 #[derive(SurrealValue)]
-struct Raw {
-    key: String,
+pub(crate) struct Raw {
+    pub(crate) key: String,
     parent_id: String,
     kind: String,
     operation: String,
@@ -148,7 +148,7 @@ fn row(r: Raw) -> JobRow {
     }
 }
 
-fn cutoff(now: DateTime<Utc>) -> String {
+pub(crate) fn cutoff(now: DateTime<Utc>) -> String {
     ts(now - Duration::hours(EXECUTION_WINDOW_HOURS))
 }
 
@@ -397,7 +397,7 @@ pub struct ActivityJobRow {
 // The inner request lookup is indexed by job/scope/node and bounded to one
 // match. A child must have durable causal origin; parent links alone grant no
 // visibility. No pre-pagination ID cap can hide an otherwise eligible job.
-fn activity_membership() -> &'static str {
+pub(crate) fn activity_membership() -> &'static str {
     "array::len((SELECT VALUE id FROM job_request WHERE \
       (job_id = record::id($parent.id) OR \
        (job_id = type::record('job_origin', record::id($parent.id)).root_id \
@@ -408,7 +408,7 @@ fn activity_membership() -> &'static str {
       AND ($activity_workspace = NONE OR workspace_id = $activity_workspace) LIMIT 1)) > 0"
 }
 
-fn activity_private() -> &'static str {
+pub(crate) fn activity_private() -> &'static str {
     "type::record('job_origin', record::id(id)).scope_id = $activity_scope \
      AND type::record('job_origin', record::id(id)).deployment_id = $activity_deployment \
      AND type::record('job_origin', record::id(id)).workstation_id = $activity_node \
@@ -420,7 +420,7 @@ fn activity_private() -> &'static str {
          OR ($activity_workspace != NONE AND workspace_id != $activity_workspace)) LIMIT 1)) = 0"
 }
 
-fn validate_activity_scope(authority_scope: &str, scope: &ActivityScope) -> Result<()> {
+pub(crate) fn validate_activity_scope(authority_scope: &str, scope: &ActivityScope) -> Result<()> {
     let valid = |value: &str| {
         !value.is_empty() && value.len() <= 128 && !value.chars().any(char::is_control)
     };
@@ -435,14 +435,14 @@ fn validate_activity_scope(authority_scope: &str, scope: &ActivityScope) -> Resu
     Ok(())
 }
 
-async fn require_activity_schema(db: &Surreal<Any>) -> Result<()> {
+pub(crate) async fn require_activity_schema(db: &Surreal<Any>) -> Result<()> {
     db.query("INFO FOR TABLE job_request; INFO FOR TABLE job_origin;")
         .await?
         .check()?;
     Ok(())
 }
 
-const ACTIVITY_RELATIONS_UNAVAILABLE: &str = "0 AS events, 0 AS children, 0 AS tasks, \
+pub(crate) const ACTIVITY_RELATIONS_UNAVAILABLE: &str = "0 AS events, 0 AS children, 0 AS tasks, \
     0 AS attempt_rows, '' AS open_attempt_started, '' AS started_at";
 
 #[derive(SurrealValue)]
@@ -451,7 +451,7 @@ struct ActivityPrivacy {
     available: bool,
 }
 
-fn activity_row(raw: Raw, private: bool) -> ActivityJobRow {
+pub(crate) fn activity_row(raw: Raw, private: bool) -> ActivityJobRow {
     let mut job = row(raw);
     // A retry/cancel grant and durable action association are independent of
     // membership. The activity reader cannot assert either one.

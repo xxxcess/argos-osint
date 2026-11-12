@@ -6,24 +6,30 @@ import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { WebSocket, WebSocketServer } from "ws";
+import { CONNECT_COOKIE } from "../connect-session.mjs";
+import { startConnectGateway } from "./connect-gateway-fixture.mjs";
 
 test(
   "the real Next runtime relays live frames after REST routing and across a stateless restart",
   { timeout: 60_000 },
   async (t) => {
     const app = resolve(import.meta.dirname, "..");
-    const backend = createServer((_request, response) => {
-      response.setHeader("content-type", "application/json");
-      response.end(
-        JSON.stringify({
-          ready: true,
-          storage: true,
-          service: "argos-intel",
-          api_version: 1,
-          instance_id: "offline-live-fixture",
-        }),
-      );
+    const gateway = await startConnectGateway({
+      dataHandler: (_request, response) => {
+        response.setHeader("content-type", "application/json");
+        response.end(
+          JSON.stringify({
+            ready: true,
+            storage: true,
+            service: "argos-intel",
+            api_version: 1,
+            instance_id: "offline-live-fixture",
+          }),
+        );
+        return true;
+      },
     });
+    const backend = gateway.server;
     const rustSockets = new WebSocketServer({ noServer: true });
     const commands = [];
     backend.on("upgrade", (request, socket, head) =>
@@ -44,9 +50,7 @@ test(
         });
       }),
     );
-    backend.listen(0, "127.0.0.1");
-    await once(backend, "listening");
-    const rustOrigin = `http://127.0.0.1:${backend.address().port}`;
+    const rustOrigin = gateway.origin;
     const reservation = createServer();
     reservation.listen(0, "127.0.0.1");
     await once(reservation, "listening");
@@ -75,7 +79,7 @@ test(
       } finally {
         for (const client of rustSockets.clients) client.terminate();
         rustSockets.close();
-        await new Promise((done) => backend.close(done));
+        await gateway.close();
       }
     });
     async function start() {
@@ -87,7 +91,10 @@ test(
           env: {
             ...process.env,
             NODE_ENV: "production",
-            ARGOS_RUST_API_ORIGIN: rustOrigin,
+            FLEETWORKS_API_ORIGIN: rustOrigin,
+            FLEETWORKS_API_TOKEN: gateway.apiToken,
+            FLEETWORKS_WEB_ORIGIN: origin,
+            FLEETWORKS_WEB_BASE_PATH: "",
           },
           stdio: ["ignore", "pipe", "pipe"],
         },
@@ -102,6 +109,7 @@ test(
         try {
           const response = await fetch(`${origin}/api/v1/health/ready`, {
             signal: AbortSignal.timeout(1000),
+            headers: { cookie: `${CONNECT_COOKIE}=${gateway.sessionToken}` },
           });
           if (
             response.ok &&
@@ -122,8 +130,11 @@ test(
     });
     async function connect() {
       const client = new WebSocket(
-        `${origin.replace("http:", "ws:")}/api/v1/live`,
-        { origin },
+        `${origin.replace("http:", "ws:")}/api/v1/live?context_revision=1`,
+        {
+          origin,
+          headers: { cookie: `${CONNECT_COOKIE}=${gateway.sessionToken}` },
+        },
       );
       await once(client, "open");
       const frame = once(client, "message");
@@ -132,6 +143,22 @@ test(
       return { client, data };
     }
     await start();
+    const denied = await fetch(`${origin}/brief?run=fixture&id=article`, {
+      redirect: "manual",
+    });
+    assert.equal(
+      denied.status,
+      307,
+      "deep links are gated before protected Next rendering",
+    );
+    assert.match(denied.headers.get("location"), /^\/connect/u);
+    const apiDenied = await fetch(`${origin}/api/v1/articles`);
+    assert.equal(apiDenied.status, 401);
+    const rscDenied = await fetch(`${origin}/bulletin?_rsc=fixture`, {
+      headers: { rsc: "1", "next-router-prefetch": "1" },
+      redirect: "manual",
+    });
+    assert.equal(rscDenied.status, 307);
     const first = await connect();
     assert.equal(first.data.data.cpu_percent, 1);
     const closed = once(first.client, "close");

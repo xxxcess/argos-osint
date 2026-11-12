@@ -23,7 +23,7 @@ describe("Frame (real @argos/ui component)", () => {
     const frame = container.firstElementChild as HTMLElement;
     expect(paint(frame, "backgroundColor")).toBe(colors.glass);
     expect(sheetProp(frame, "borderTopWidth")).toBe("2px"); // accent top rule
-    expect(paint(frame, "borderTopColor")).toBe(toneColor.accent);
+    expect(paint(frame, "borderTopColor")).toBe(toneColor.accent.toLowerCase());
     expect(paint(frame, "borderLeftColor")).toBe(colors.glassBorder);
     expect(sheetProp(frame, "padding")).toBe("16px");
     expect(sheetProp(frame, "gap")).toBe("12px");

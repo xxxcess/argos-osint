@@ -183,7 +183,7 @@ export function IntelStatusBar({
             style={[
               s.api,
               { fontSize: navSize },
-              { color: connected ? c.accent : c.danger },
+              { color: connected ? c.success : c.danger },
             ]}
           >
             ● {connected ? "API_OK" : "OFFLINE"}

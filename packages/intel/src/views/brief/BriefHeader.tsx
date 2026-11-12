@@ -26,7 +26,9 @@ export function BriefHeader({
     ...new Set(
       (brief?.claims ?? [])
         .map((claim) => claim.admiralty.trim())
-        .filter((grade) => grade.length > 0 && grade.toLowerCase() !== "unassessed"),
+        .filter(
+          (grade) => grade.length > 0 && grade.toLowerCase() !== "unassessed",
+        ),
     ),
   ];
   const date = article.published_at.slice(0, 10) || "Date unavailable";
@@ -34,7 +36,7 @@ export function BriefHeader({
     score == null
       ? c.muted
       : score >= 70
-        ? c.accent
+        ? c.success
         : score >= 40
           ? c.warning
           : c.danger;

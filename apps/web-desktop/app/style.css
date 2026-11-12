@@ -19,23 +19,23 @@ html {
   zoom: calc(1 / var(--intel-ui-scale, 0.75));
   overflow: hidden;
 }
-/* Intel-only browser canvas; shared Argos/TUI tokens remain unchanged. */
+/* Fleetworks web paint; geometry and the Rust terminal palette are separate. */
 * {
   box-sizing: border-box;
   scrollbar-width: thin;
-  scrollbar-color: #34343a transparent;
+  scrollbar-color: #898274 transparent;
 }
 html,
 body {
   margin: 0;
   height: 100%;
   min-height: 100%;
-  background-color: #0b0b0c;
+  background-color: #111111;
   background-image:
-    radial-gradient(ellipse at 15% 10%, #171719 0%, transparent 45%),
-    radial-gradient(ellipse at 85% 90%, #101012 0%, transparent 50%);
+    radial-gradient(ellipse at 15% 10%, #171716 0%, transparent 45%),
+    radial-gradient(ellipse at 85% 90%, #151514 0%, transparent 50%);
   background-attachment: fixed;
-  color: #ececee;
+  color: #f3eee4;
   font-family:
     var(--intel-body, Inter),
     system-ui,
@@ -66,7 +66,7 @@ body {
 #intel-topology-node-scroll,
 #intel-topology-connection-scroll {
   scrollbar-width: thin;
-  scrollbar-color: #34343a transparent;
+  scrollbar-color: #898274 transparent;
 }
 #intel-topology-node-scroll::-webkit-scrollbar,
 #intel-topology-connection-scroll::-webkit-scrollbar {
@@ -76,7 +76,7 @@ body {
 }
 #intel-topology-node-scroll::-webkit-scrollbar-thumb,
 #intel-topology-connection-scroll::-webkit-scrollbar-thumb {
-  background: #34343a;
+  background: #898274;
 }
 /* Keep list wheel/trackpad scrolling inside its panel at either boundary. */
 #intel-topology-node-scroll,
@@ -157,25 +157,25 @@ select {
   font: inherit;
 }
 a {
-  color: #5fd39a;
+  color: #c6a56e;
   text-decoration: underline;
 }
 input,
 select {
-  background: #111726;
-  border: 1px solid #2e3850;
+  background: #0d0d0d;
+  border: 1px solid #898274;
   border-radius: 8px;
-  color: #ececee;
+  color: #f3eee4;
   min-width: 0;
 }
 :focus-visible {
-  outline: 2px solid #7fe0b4;
+  outline: 2px solid #d8bd8c;
   outline-offset: -2px;
-  box-shadow: 0 0 0 1px #7fe0b4;
+  box-shadow: 0 0 0 1px #d8bd8c;
 }
 ::selection {
-  background: #2e3850;
-  color: #ececee;
+  background: #322c22;
+  color: #f3eee4;
 }
 /* Intel views only: browser motion/glow stays outside shared RN primitives. */
 #intel-home {
@@ -202,27 +202,27 @@ select {
     box-shadow 120ms;
 }
 #intel-home [data-testid="intel-globe"] {
-  filter: drop-shadow(0 0 18px rgba(95, 211, 154, 0.35));
+  filter: drop-shadow(0 0 18px rgba(198, 165, 110, 0.35));
   transition: filter 120ms;
 }
 #intel-home-launcher:is(:hover, :focus-visible)
   [data-testid="intel-launcher-tile"] {
-  box-shadow: 0 0 18px rgba(95, 211, 154, 0.35);
+  box-shadow: 0 0 18px rgba(198, 165, 110, 0.35);
 }
 #intel-home-launcher:is(:hover, :focus-visible) [data-testid="intel-globe"] {
-  filter: drop-shadow(0 0 24px rgba(95, 211, 154, 0.55));
+  filter: drop-shadow(0 0 24px rgba(198, 165, 110, 0.55));
 }
 [data-testid^="article-card-"] {
   transition: border-color 120ms;
 }
 #intel-bulletin input:focus-visible {
-  border-color: rgba(95, 211, 154, 0.35);
+  border-color: #d8bd8c;
 }
 [data-testid="bulletin-skeleton"] {
   background-image: linear-gradient(
     100deg,
     transparent 25%,
-    rgba(95, 211, 154, 0.06) 50%,
+    rgba(198, 165, 110, 0.06) 50%,
     transparent 75%
   );
   background-size: 200% 100%;
@@ -257,9 +257,9 @@ select {
 /* Topology remains a force-graph canvas; DOM tiles share its camera projection. */
 #intel-topology-grid {
   background-image:
-    linear-gradient(rgba(63, 83, 119, 0.09) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(63, 83, 119, 0.09) 1px, transparent 1px),
-    radial-gradient(ellipse at 50% 45%, rgba(18, 29, 60, 0.35), transparent 70%);
+    linear-gradient(rgba(137, 130, 116, 0.09) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(137, 130, 116, 0.09) 1px, transparent 1px),
+    radial-gradient(ellipse at 50% 45%, rgba(50, 44, 34, 0.35), transparent 70%);
   background-size:
     36px 36px,
     36px 36px,
@@ -423,7 +423,7 @@ select {
   background-image: linear-gradient(
     100deg,
     transparent 20%,
-    rgba(255, 255, 255, 0.06) 50%,
+    rgba(243, 238, 228, 0.06) 50%,
     transparent 80%
   );
   background-size: 200% 100%;

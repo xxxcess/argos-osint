@@ -1,10 +1,11 @@
 import { open } from "node:fs/promises";
+import { constants } from "node:fs";
 import { Agent as HttpAgent } from "node:http";
 import { Agent as HttpsAgent } from "node:https";
 
 const httpAgent = new HttpAgent({ keepAlive: true });
 const httpsAgent = new HttpsAgent({ keepAlive: true });
-const loopback = new Set(["127.0.0.1", "localhost"]);
+const loopback = new Set(["127.0.0.1", "localhost", "[::1]"]);
 const maxTokenBytes = 256;
 
 function originUrl(raw) {
@@ -39,12 +40,22 @@ export function rustOrigin() {
   return url.origin;
 }
 
-async function readTokenFile(path) {
+export async function readProtectedTokenFile(path) {
   if (!path) throw new Error("Missing Fleetworks API credential");
   try {
-    const file = await open(path, "r");
+    const file = await open(
+      path,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
     try {
-      if (!(await file.stat()).isFile()) throw new Error("Invalid token file");
+      const stat = await file.stat();
+      if (
+        !stat.isFile() ||
+        stat.nlink !== 1 ||
+        (stat.mode & 0o077) !== 0 ||
+        (typeof process.getuid === "function" && stat.uid !== process.getuid())
+      )
+        throw new Error("Invalid token file");
       const buffer = Buffer.alloc(maxTokenBytes + 3);
       let length = 0;
       while (length < buffer.length) {
@@ -58,7 +69,10 @@ async function readTokenFile(path) {
         length += bytesRead;
       }
       if (length === buffer.length) throw new Error("Invalid token file");
-      return buffer.subarray(0, length).toString("utf8").replace(/\r?\n$/u, "");
+      return buffer
+        .subarray(0, length)
+        .toString("utf8")
+        .replace(/\r?\n$/u, "");
     } finally {
       await file.close();
     }
@@ -72,7 +86,7 @@ export async function rustUpstream() {
   if (process.env.FLEETWORKS_API_ORIGIN === undefined) return { origin };
   const token =
     process.env.FLEETWORKS_API_TOKEN ??
-    (await readTokenFile(process.env.FLEETWORKS_API_TOKEN_FILE));
+    (await readProtectedTokenFile(process.env.FLEETWORKS_API_TOKEN_FILE));
   if (
     token.length < 32 ||
     token.length > maxTokenBytes ||
@@ -93,23 +107,40 @@ export function configuredWebOrigin() {
   const url = originUrl(raw);
   if (
     process.env.FLEETWORKS_API_ORIGIN === undefined ||
-    url.protocol !== "http:" ||
-    !loopback.has(url.hostname)
+    (loopback.has(url.hostname)
+      ? !["http:", "https:"].includes(url.protocol)
+      : url.protocol !== "https:" ||
+        process.env.FLEETWORKS_WEB_AUTHENTICATED_INGRESS !== "1" ||
+        !process.env.FLEETWORKS_WEB_INGRESS_TOKEN_FILE)
   )
     throw new Error("Invalid Fleetworks web origin");
   return url.origin;
 }
 
+/** Explicit external path prefix, shared by Next, relay and browser adapters. */
+export function configuredWebBasePath() {
+  const value = process.env.FLEETWORKS_WEB_BASE_PATH || "";
+  if (
+    value &&
+    (value.length > 128 ||
+      !/^\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/u.test(value))
+  )
+    throw new Error("Invalid Fleetworks web base path");
+  return value;
+}
+
 export function incomingWebOrigin(host, protocol, legacyPort) {
   if (!host || /[/\\@?#\s,]/u.test(host)) throw new Error("Host refused");
-  const url = originUrl(`${protocol}//${host}`);
   const configured = configuredWebOrigin();
+  const url = originUrl(
+    `${configured ? new URL(configured).protocol : protocol}//${host}`,
+  );
   const port = Number(url.port || (url.protocol === "https:" ? 443 : 80));
   if (
-    !loopback.has(url.hostname) ||
-    (configured !== undefined
+    configured !== undefined
       ? url.origin !== configured
-      : legacyPort !== undefined && port !== legacyPort)
+      : !loopback.has(url.hostname) ||
+        (legacyPort !== undefined && port !== legacyPort)
   )
     throw new Error("Host refused");
   return url.origin;

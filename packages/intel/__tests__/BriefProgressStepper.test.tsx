@@ -3,6 +3,8 @@ import { it, expect } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import type { BriefStage } from "@argos/api-client";
 import { BriefProgressStepper } from "../src/views/brief/BriefProgressStepper";
+import { intelColors } from "../src/shell/intel-theme";
+import { paint } from "../../../vitest.test-support";
 const stage = (label: string, state: string, active = false): BriefStage => ({
   operation: label,
   label,
@@ -34,6 +36,12 @@ it("shows completed, active and queued steps without inventing completion for pa
     within(list).getByRole("listitem", { name: "Inferences: In progress" }),
   ).toBeVisible();
   expect(screen.getByText("Brief in progress")).toBeVisible();
+  expect(paint(screen.getByText("Article"), "color")).toBe(
+    intelColors.success.toLowerCase(),
+  );
+  expect(paint(screen.getByText("Inferences"), "color")).toBe(
+    intelColors.cool.toLowerCase(),
+  );
 });
 it("retains failure details and indicates interrupted updates independently of completed stages", () => {
   render(

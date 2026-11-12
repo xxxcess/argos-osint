@@ -16,6 +16,16 @@ import {
   keepPreviousData,
 } from "@tanstack/react-query";
 import type { LiveTransport, BriefProgress } from "./live";
+import { connectionNamespace } from "./connection-scope";
+import type {
+  ConnectionRequestScope,
+  RegisteredWebContext,
+} from "./connection-scope";
+export { connectionNamespace } from "./connection-scope";
+export type {
+  ConnectionRequestScope,
+  RegisteredWebContext,
+} from "./connection-scope";
 export { decodeLiveEvent } from "./live";
 export type {
   LiveTransport,
@@ -212,6 +222,7 @@ interface Backend {
   instance: string;
   connected: boolean;
   live?: LiveTransport;
+  scope?: ConnectionRequestScope;
   connecting: boolean;
   health?: Health;
   connectionError?: string;
@@ -303,20 +314,32 @@ async function request<T>(
   body?: unknown,
   signal?: AbortSignal,
   timeoutMs = REQUEST_TIMEOUT_MS,
+  scope?: ConnectionRequestScope,
 ): Promise<T> {
   const combined = combineSignals(signal, timeoutMs);
   let response: Response;
   try {
     response = await fetch(`${base}/api/v1/${path}`, {
       method: body === undefined ? "GET" : "POST",
-      headers: body === undefined ? {} : { "content-type": "application/json" },
+      headers: {
+        ...(body === undefined ? {} : { "content-type": "application/json" }),
+        ...(scope
+          ? {
+              "x-fleetworks-expected-context-revision": String(
+                scope.context.context_revision,
+              ),
+            }
+          : {}),
+      },
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: combined.signal,
-      credentials: "omit",
+      credentials: base === "" || base.startsWith("/") ? "same-origin" : "omit",
       cache: "no-store",
     });
 
     if (!response.ok) {
+      if (scope && [401, 403, 409].includes(response.status))
+        scope.onInvalidated?.();
       let payload: unknown = undefined;
       let message = `HTTP ${response.status}`;
       try {
@@ -370,10 +393,14 @@ export function BackendProvider({
   children,
   settings,
   live,
+  connection,
+  onConnectionInvalidated,
 }: {
   children: React.ReactNode;
   settings: BackendSettings;
   live?: LiveTransport;
+  connection?: RegisteredWebContext;
+  onConnectionInvalidated?: () => void;
 }) {
   const [client] = useState(
     () =>
@@ -386,7 +413,12 @@ export function BackendProvider({
   );
   return (
     <QueryClientProvider client={client}>
-      <Connection settings={settings} live={live}>
+      <Connection
+        settings={settings}
+        live={live}
+        connection={connection}
+        onConnectionInvalidated={onConnectionInvalidated}
+      >
         {children}
       </Connection>
     </QueryClientProvider>
@@ -398,10 +430,14 @@ function Connection({
   children,
   settings,
   live,
+  connection,
+  onConnectionInvalidated,
 }: {
   children: React.ReactNode;
   settings: BackendSettings;
   live?: LiveTransport;
+  connection?: RegisteredWebContext;
+  onConnectionInvalidated?: () => void;
 }) {
   const base = useSyncExternalStore(
     settings.subscribe,
@@ -410,10 +446,21 @@ function Connection({
   );
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const client = useQueryClient();
+  const namespace = connectionNamespace(connection);
+  const scope: ConnectionRequestScope | undefined = connection
+    ? { context: connection, onInvalidated: onConnectionInvalidated }
+    : undefined;
   const health = useQuery({
-    queryKey: ["health", base],
+    queryKey: ["health", base, namespace],
     queryFn: ({ signal }) =>
-      request<Health>(base, "health/ready", undefined, signal),
+      request<Health>(
+        base,
+        "health/ready",
+        undefined,
+        signal,
+        REQUEST_TIMEOUT_MS,
+        scope,
+      ),
     refetchInterval: READY_POLL_MS,
     retry: false,
   });
@@ -423,7 +470,9 @@ function Connection({
     health.data.storage &&
     health.data.service === "argos-intel" &&
     health.data.api_version === 1;
-  const instance = connected ? health.data.instance_id : "";
+  const instance = connected
+    ? `${health.data.instance_id}${namespace ? `:${namespace}` : ""}`
+    : "";
   const setBase = (raw: string) => {
     const next = safeBackend(raw);
     client.clear();
@@ -435,6 +484,7 @@ function Connection({
     instance,
     connected,
     live,
+    scope,
     connecting: health.isFetching,
     health: health.isSuccess ? health.data : undefined,
     connectionError: health.error?.message,
@@ -463,7 +513,7 @@ export function useRead<T>(
   return useQuery({
     queryKey: [b.base, b.instance, path],
     queryFn: ({ signal }) =>
-      request<T>(b.base, path, undefined, signal, timeoutMs),
+      request<T>(b.base, path, undefined, signal, timeoutMs, b.scope),
     enabled: b.connected && enabled,
     staleTime: 30_000,
     refetchOnWindowFocus: false,
@@ -476,7 +526,14 @@ export function useHostMetrics() {
   const query = useQuery({
     queryKey: [b.base, b.instance, "host/metrics"],
     queryFn: ({ signal }) =>
-      request<HostMetrics>(b.base, "host/metrics", undefined, signal),
+      request<HostMetrics>(
+        b.base,
+        "host/metrics",
+        undefined,
+        signal,
+        REQUEST_TIMEOUT_MS,
+        b.scope,
+      ),
     enabled: b.connected && !b.live,
     staleTime: Infinity,
     refetchOnWindowFocus: false,
@@ -563,7 +620,14 @@ export function useAction<T>(path: string, signal?: AbortSignal) {
   return useMutation({
     mutationFn: (body: unknown) => {
       if (!b.connected) throw new Error("API offline");
-      return request<T>(b.base, path, body, signal);
+      return request<T>(
+        b.base,
+        path,
+        body,
+        signal,
+        REQUEST_TIMEOUT_MS,
+        b.scope,
+      );
     },
     onSuccess: (_data, variables) => {
       // Resolving an existing identity is read-only; it changes no cached data.
@@ -641,6 +705,8 @@ export function useArticles(
           }),
         undefined,
         signal,
+        REQUEST_TIMEOUT_MS,
+        b.scope,
       ),
     getNextPageParam: (last) => last.next_cursor || undefined,
   });
@@ -663,6 +729,8 @@ export function useTopology(seed: string | null) {
         `topology?seed=${encodeURIComponent(seed || "")}`,
         undefined,
         signal,
+        REQUEST_TIMEOUT_MS,
+        b.scope,
       ),
   });
 }
@@ -679,6 +747,8 @@ export function useTopologySummary(seed: string | null, basis: string | null) {
         `topology/summary?${new URLSearchParams({ seed: seed || "", basis: basis || "" })}`,
         undefined,
         signal,
+        REQUEST_TIMEOUT_MS,
+        b.scope,
       ),
     staleTime: 30_000,
     retry: false,
@@ -697,7 +767,14 @@ export function useGenerateTopologySummary() {
   const client = useQueryClient();
   return useMutation({
     mutationFn: (key: TopologySummaryKey) =>
-      request<TopologySummaryView>(b.base, "topology/summary/generate", key),
+      request<TopologySummaryView>(
+        b.base,
+        "topology/summary/generate",
+        key,
+        undefined,
+        REQUEST_TIMEOUT_MS,
+        b.scope,
+      ),
     retry: false,
     onSuccess: (view, key) =>
       client.setQueryData(
@@ -724,6 +801,8 @@ export function useRelated(article: Article) {
           (pageParam ? "&" + new URLSearchParams({ cursor: pageParam }) : ""),
         undefined,
         signal,
+        REQUEST_TIMEOUT_MS,
+        b.scope,
       ),
     getNextPageParam: (last) => last.next_cursor || undefined,
     staleTime: 30_000,
@@ -820,6 +899,8 @@ export function useActorDossier(id: string | null) {
         `actors/detail?id=${encodeURIComponent(id || "")}`,
         undefined,
         signal,
+        REQUEST_TIMEOUT_MS,
+        b.scope,
       ),
   });
 }

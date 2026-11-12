@@ -17,7 +17,7 @@ describe("Label (real @argos/ui component)", () => {
 
   it("uses the muted neutral token, not accent or body colors", () => {
     render(<Label>API endpoint</Label>);
-    expect(paint(screen.getByText("API endpoint"), "color")).toBe("#919191");
+    expect(paint(screen.getByText("API endpoint"), "color")).toBe("#a09a8f");
   });
 
   it("stays mono: no body-font leak in the applied family", () => {

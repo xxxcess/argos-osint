@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { incomingWebOrigin } from "./server-origin.mjs";
+import { configuredWebBasePath } from "./server-origin.mjs";
 
 /** Per-request script nonces protect the server-rendered workspace. */
 export function proxy(request: NextRequest) {
@@ -15,6 +16,26 @@ export function proxy(request: NextRequest) {
   const wsProtocol = origin.protocol === "https:" ? "wss:" : "ws:";
   const csp = `default-src 'none'; script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${isDev ? " 'unsafe-eval'" : ""}; style-src 'self' 'unsafe-inline'; img-src 'self' http: https: data: blob:; font-src 'self'; connect-src 'self' ${wsProtocol}//${origin.host}${isDev ? " ws://127.0.0.1:* ws://localhost:*" : ""}; base-uri 'none'; frame-ancestors 'none'; form-action 'none'`;
   const headers = new Headers(request.headers);
+  for (const name of [...headers.keys()]) {
+    if (
+      name === "x-fleetworks-session" ||
+      name.startsWith("x-fleetworks-context-") ||
+      name.startsWith("x-fleetworks-origin-") ||
+      name.startsWith("x-fleetworks-request-")
+    )
+      headers.delete(name);
+  }
+  const basePath = configuredWebBasePath();
+  const pathname = request.nextUrl.pathname;
+  const fullPath =
+    basePath && !(pathname === basePath || pathname.startsWith(`${basePath}/`))
+      ? `${basePath}${pathname}`
+      : pathname;
+  headers.set(
+    "x-fleetworks-request-path",
+    `${fullPath}${request.nextUrl.search}`,
+  );
+  headers.set("x-fleetworks-request-method", request.method);
   headers.set("x-nonce", nonce);
   headers.set("Content-Security-Policy", csp);
   const response = NextResponse.next({ request: { headers } });

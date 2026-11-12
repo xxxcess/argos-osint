@@ -24,7 +24,7 @@ describe("LoadingState (real @argos/ui component)", () => {
     const strokes = svg?.querySelectorAll("circle");
     expect(strokes?.length).toBe(2);
     const stop = strokes?.[strokes!.length - 1];
-    expect(stop?.getAttribute("style")).toContain("#87bfff");
+    expect(stop?.getAttribute("style")?.toLowerCase()).toContain("#c6a56e");
   });
 
   it("uses default (spaced) density with 20px vertical padding", () => {

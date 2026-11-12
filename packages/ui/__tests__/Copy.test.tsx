@@ -18,10 +18,10 @@ describe("Copy (real @argos/ui component)", () => {
     const copy = screen.getByText(
       "Connections preserve their recorded meaning.",
     );
-    expect(paint(copy, "color")).toBe("#b5b5b5"); // dim
+    expect(paint(copy, "color")).toBe("#c6c0b5"); // dim
     // Copy is never accent or muted in this role.
-    expect(paint(copy, "color")).not.toBe("#87bfff");
-    expect(paint(copy, "color")).not.toBe("#919191");
+    expect(paint(copy, "color")).not.toBe("#c6a56e");
+    expect(paint(copy, "color")).not.toBe("#a09a8f");
   });
 
   it("keeps long prose visible without clipping", () => {

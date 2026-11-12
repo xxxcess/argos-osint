@@ -13,7 +13,7 @@ describe("Panel (real @argos/ui component)", () => {
     );
     const title = screen.getByText("Neighborhood");
     expect(sheetProp(title, "textTransform")).toBe("uppercase");
-    expect(paint(title, "color")).toBe(colors.accent);
+    expect(paint(title, "color")).toBe(colors.accent.toLowerCase());
     expect(sheetProp(title, "fontFamily")).toContain("ui-monospace");
 
     // The children stay visible under the title.

@@ -7,6 +7,8 @@ export function rustUpstream(): Promise<{
 }>;
 export function directAgent(target: URL): Agent;
 export function configuredWebOrigin(): string | undefined;
+export function configuredWebBasePath(): string;
+export function readProtectedTokenFile(path?: string): Promise<string>;
 export function incomingWebOrigin(
   host: string,
   protocol: string,

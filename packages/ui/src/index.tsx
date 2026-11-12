@@ -8,25 +8,31 @@ import {
   ActivityIndicator,
 } from "react-native";
 
-// Dark HUD + glass tokens. Colors are the core TUI palette from
-// crates/argos-osint-bin/src/tui/theme.rs; glass/glow is the web treatment (see docs/wiki/code/react-ui.md).
+// Fleetworks web colors. HUD/glass geometry and the Rust terminal palette
+// remain separate; these tokens change only the existing web paint.
 export const colors = {
-  bg: "#141414",
-  panel: "#1e1e1e",
-  raised: "#303030",
-  border: "#535353",
-  text: "#e8e8e8",
-  dim: "#b5b5b5",
-  muted: "#919191",
-  accent: "#87bfff",
+  bg: "#111111",
+  panel: "#141414",
+  raised: "#232321",
+  inset: "#0D0D0D",
+  border: "#898274",
+  borderSubtle: "#3A3833",
+  text: "#F3EEE4",
+  dim: "#C6C0B5",
+  muted: "#A09A8F",
+  accent: "#C6A56E",
+  accentPressed: "#C4A265",
+  accentHover: "#D8BD8C",
+  onAccent: "#111111",
+  selectionSurface: "#322C22",
   accent2: "#c678dd",
   success: "#98c379",
   warning: "#e5c07b",
   danger: "#f08a8a",
-  glass: "rgba(30, 30, 30, 0.55)",
-  glassStrong: "rgba(48, 48, 48, 0.72)",
-  glassBorder: "rgba(83, 83, 83, 0.6)",
-  accentSoft: "rgba(135, 191, 255, 0.14)",
+  glass: "rgba(20, 20, 20, 0.55)",
+  glassStrong: "rgba(35, 35, 33, 0.72)",
+  glassBorder: "rgba(137, 130, 116, 0.85)",
+  accentSoft: "rgba(198, 165, 110, 0.1)",
 };
 export const fonts = {
   mono: 'ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace',
@@ -165,7 +171,11 @@ export function Button({
         s.button,
         variant === "quiet" && s.quiet,
         variant === "primary" && s.primary,
-        !disabled && hovered && !pressed && variant === "primary" && s.primaryHover,
+        !disabled &&
+          hovered &&
+          !pressed &&
+          variant === "primary" &&
+          s.primaryHover,
         !disabled && hovered && !pressed && variant !== "primary" && s.hovered,
         !disabled && pressed && variant === "primary" && s.primaryPressed,
         !disabled && pressed && variant !== "primary" && s.pressed,
@@ -276,7 +286,7 @@ const s = StyleSheet.create({
   },
   primaryHover: {
     backgroundColor: colors.accentSoft,
-    borderColor: colors.accent,
+    borderColor: colors.accentHover,
     ...(glow(colors.accent) as object),
   },
   pressed: {
@@ -284,16 +294,16 @@ const s = StyleSheet.create({
     backgroundColor: colors.glassStrong,
   },
   primaryPressed: {
-    borderColor: colors.accent,
+    borderColor: colors.accentPressed,
     backgroundColor: colors.glassStrong,
-    color: colors.accent,
+    color: colors.accentPressed,
   },
   active: {
     borderColor: colors.accent,
     backgroundColor: colors.accent,
     ...(glow(colors.accent) as object),
   },
-  activeText: { color: colors.bg, fontWeight: "700" },
+  activeText: { color: colors.onAccent, fontWeight: "700" },
   disabled: {
     backgroundColor: "transparent",
     borderColor: colors.glassBorder,

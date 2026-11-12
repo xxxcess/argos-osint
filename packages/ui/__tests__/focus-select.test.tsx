@@ -22,7 +22,7 @@ describe("Focus vs selection states (real components)", () => {
     );
     const button = buttonEl(container)!;
     await user.hover(button);
-    expect(paint(button, "borderTopColor")).toBe(colors.accent);
+    expect(paint(button, "borderTopColor")).toBe(colors.accent.toLowerCase());
     expect(applied(button).backgroundColor).toBe(colors.accentSoft);
     expect(applied(button).boxShadow).toBe(""); // no glow in the hover lane
   });
@@ -52,7 +52,7 @@ describe("Focus vs selection states (real components)", () => {
     );
     const selected = document.querySelector('[aria-pressed="true"]') as HTMLElement;
     const plain = buttonEl(document.body, 1);
-    expect(applied(selected).backgroundColor).toBe("rgb(135, 191, 255)"); // accent fill
+    expect(applied(selected).backgroundColor).toBe("rgb(198, 165, 110)"); // accent fill
     expect(applied(selected).boxShadow).toContain("12px"); // glow reserved for select
     expect(applied(plain).backgroundColor).toBe(colors.glass);
   });
@@ -124,6 +124,6 @@ describe("Focus vs selection states (real components)", () => {
       </div>,
     );
     await user.hover(buttonEl(container)!);
-    expect(paint(screen.getByText("[ALERT]"), "color")).toBe(colors.accent);
+    expect(paint(screen.getByText("[ALERT]"), "color")).toBe(colors.accent.toLowerCase());
   });
 });

@@ -1,36 +1,28 @@
 import React from "react";
 import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
-import {
-  colors,
-  fonts,
-  glass,
-  glow,
-  toneColor,
-  Panel,
-  Copy,
-} from "@argos/ui";
+import { colors, fonts, glass, glow, toneColor, Panel, Copy } from "@argos/ui";
 import { paint, sheetProp, sheetStyle } from "../../../vitest.test-support";
 
 /**
  * Token contract tests. Tokens are imported from `@argos/ui` (single source of
- * truth, mirroring the TUI palette in crates/argos-osint-bin/src/tui/theme.rs);
- * these assertions pin the terminal-desk values so token drift fails fast, and
+ * truth, with logo anchors shared with native and a separate Rust TUI palette);
+ * these assertions pin the Fleetworks web paint so token drift fails fast, and
  * prove real components consume them rather than redeclaring values.
  */
 describe("Theme tokens (imported from @argos/ui source)", () => {
-  it("defines the terminal-desk neutrals", () => {
-    expect(colors.bg).toBe("#141414");
-    expect(colors.panel).toBe("#1e1e1e");
-    expect(colors.raised).toBe("#303030");
-    expect(colors.border).toBe("#535353");
-    expect(colors.text).toBe("#e8e8e8");
-    expect(colors.dim).toBe("#b5b5b5");
-    expect(colors.muted).toBe("#919191");
+  it("defines the logo charcoal/ivory and warm neutral surfaces", () => {
+    expect(colors.bg).toBe("#111111");
+    expect(colors.panel).toBe("#141414");
+    expect(colors.raised).toBe("#232321");
+    expect(colors.border).toBe("#898274");
+    expect(colors.text).toBe("#F3EEE4");
+    expect(colors.dim).toBe("#C6C0B5");
+    expect(colors.muted).toBe("#A09A8F");
   });
 
   it("defines accent/accent2 plus the four status hues", () => {
-    expect(colors.accent).toBe("#87bfff");
+    expect(colors.accent).toBe("#C6A56E");
     expect(colors.accent2).toBe("#c678dd");
     expect(colors.success).toBe("#98c379");
     expect(colors.warning).toBe("#e5c07b");
@@ -38,10 +30,10 @@ describe("Theme tokens (imported from @argos/ui source)", () => {
   });
 
   it("defines glass translucency values for the HUD treatment", () => {
-    expect(colors.glass).toBe("rgba(30, 30, 30, 0.55)");
-    expect(colors.glassStrong).toBe("rgba(48, 48, 48, 0.72)");
-    expect(colors.glassBorder).toBe("rgba(83, 83, 83, 0.6)");
-    expect(colors.accentSoft).toBe("rgba(135, 191, 255, 0.14)");
+    expect(colors.glass).toBe("rgba(20, 20, 20, 0.55)");
+    expect(colors.glassStrong).toBe("rgba(35, 35, 33, 0.72)");
+    expect(colors.glassBorder).toBe("rgba(137, 130, 116, 0.85)");
+    expect(colors.accentSoft).toBe("rgba(198, 165, 110, 0.1)");
   });
 
   it("keeps mono for telemetry and body for prose", () => {
@@ -95,7 +87,9 @@ describe("Theme tokens (imported from @argos/ui source)", () => {
         <Copy>body</Copy>
       </Panel>,
     );
-    expect(paint(screen.getByText("Bone"), "color")).toBe(colors.accent);
+    expect(paint(screen.getByText("Bone"), "color")).toBe(
+      colors.accent.toLowerCase(),
+    );
     expect(sheetProp(screen.getByText("Bone"), "fontFamily")).toContain(
       "ui-monospace",
     );

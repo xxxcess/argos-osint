@@ -1,0 +1,98 @@
+# Phase 5 design — reset inventory and administrative seam
+
+**Implementation status:** the external utility and disposable fixtures exist. The backend coordinator/schema and administrative handlers are referenced, and normal request, registry/admission and configuration-writer hooks are integrated. Actual loaded-policy observer/private owner RPC implementations and synthetic Rust fixtures are prepared; the initial unified Rust check and two API permission cases passed; newer barrier/process-cache source, positive embedded fixtures and startup injection remain pending. No real installation, credential, Keychain, backend, or provider account has been scanned or reset. Production apply remains blocked by verified owner provisioning and unfinished legacy-reader retirement. This is an outstanding deployment action, not completed cutover evidence.
+
+## Frozen scope and exclusions
+
+The utility is `scripts/fleetworks_config_reset.py`, compatible with the host Python 3.9.6 standard library. It has explicit `inventory` and `apply` subcommands; neither builds, launches, application startup, nor CI invoke it automatically. No current home is inferred. The operator names every absolute root and payload file in a private manifest, reviews the resulting private frozen plan, and repeats every target name for apply. The tool records root/parent device, inode, owner/mode and file identity, size, times and SHA-256; it never prints payload bytes.
+
+Application ownership remains an operator-reviewed installation assertion, supplemented by exact application filename/document checks and owned directory/object guards. A basename alone is not permission to select an unrelated application's directory. An unknown/corrupt store is an explicit review blocker. Do not expand the allowlist to make a blocked installation pass without a source-backed inventory update.
+
+No target directory is removed, renamed, traversed recursively, adopted, or moved to Trash. Both `.fleetworks` and `default`, siblings, installation/child markers, catalog, native retirement/recovery/reset ledgers and configuration recovery records remain. Dataset/model/checkpoint bytes, actors/articles/associations, SurrealDB volumes, Jobs RocksDB/SQLite data and logs, LanceDB/Tantivy generations, repository source, signing/Git/SSH material and other applications are outside the reset.
+
+## Source-backed payload inventory
+
+| Source / category | Exact selected relative payloads | Action and limitations |
+| --- | --- | --- |
+| `core/paths.rs`, `provider.rs`, `secrets.rs`, `config_transfer.rs` | `config.toml`, `auth.json`, `quota.json` | Rewrite owned inode to current empty format: marker `configuration_format=1`, six canonical empty role assignments/fallbacks, empty auth accounts, empty quota settings. All old user/tool/account/role fields disappear. Current gateway readers reject nonempty unmarked documents with 409 before reset; they preserve original bytes. |
+| `core/config_commit.rs` | Individually named `config.toml.<generation>.bak/.staged`, `auth.json.<generation>.bak/.staged`, `quota.json.<generation>.bak/.staged` | Empty payload bytes in place. Never create a secret-bearing backup. A bounded single-directory name inventory reports unlisted matching backups/staging or `.argos-tmp-*` as blockers; temporary files with unknown slots require operator sanitation. No wildcard deletion. |
+| `core/config_commit.rs` | `.argos-config-journal.json` | Protected, never cleared. Pending/unknown recovery state blocks inventory. Frozen journal identity/hash is rechecked under the shared `.argos-config.guard` lock before payload changes; old recovery cannot silently restore a staged key. |
+| `fleetworks-workspace/src/lib.rs` | `secrets/api-token` | Only an explicitly inventoried user-facing gateway token, emptied in place. It cannot also be the independent administrative token file. No `secrets/jobs-token`, internal/Brain/Tools/Control/search/NLP/classifier/database tokens or mixed credential manifests are admitted as payloads. |
+| Same workspace loader | `secrets/environment.toml`, `config/workspace.toml` | Nonempty files block apply for explicit operator sanitation. These may mix user keys with independent infrastructure credentials or dataset bindings. The tool does not rewrite them using a lossy parser or erase infrastructure. After coordinated sanitation, record a new frozen inventory. |
+| `core/config_transfer.rs`, native `transfer.rs` | Individually named `exports/<reviewed-safe-name>.json` | Require recognized portable profile fields (`schema_version` 1–4, providers, tool credentials, model roles and rate limits); empty bytes in place. A bounded one-level name inventory in this explicitly selected app export directory reports unlisted JSON candidates as blockers, without reading them. The native save picker supports arbitrary destinations: exports/backups outside the reviewed installation are separately outstanding until explicitly inventoried through a reviewed adapter. No whole-home or recursive export search, or blanket `.env` deletion. |
+| Native `connection.rs` / `launch.rs` | Explicit CLI-selected token path, process memory | Current native code reads an operator-selected token file; it has no discovered automatic persistent connection profile or Keychain item identifier. Arbitrary external token paths need a separate exact allowlist review. Stop/restart old clients to discard in-memory clients and pending secret transfer buffers. |
+| Secure store | **No exact app-owned Keychain identifiers found in inspected current sources** | Manifest `secure_store` must be `[]`; nonempty entries fail closed. No global Keychain scan, generic `security delete-*`, invented service identifier or upstream-account revocation claim. |
+| Backend configuration / records / caches | Server-owned global configuration scope; configuration and access epochs; Connect sessions/user-facing access; captured credential consumers and auth caches | The authenticated administrative seam below owns these changes. A Mac file operation cannot attest backend cleanup. Preserve registry identities, immutable historical origins and domain/Jobs/index data while invalidating access. |
+
+The source-specific environment inventory includes `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `NVIDIA_API_KEY`; `FIRECRAWL_API_KEY`, `HUNTER_API_KEY`, `SOCIAVAULT_API_KEY`, `NEWSAPI_API_KEY`, `COURTLISTENER_API_TOKEN`, `GNEWS_API_KEY`, `NEWSDATA_API_KEY`, `CURRENTS_API_KEY`, `WHOXY_API_KEY` and their `_FALLBACK` variants; user-facing `FLEETWORKS_API_TOKEN[_FILE]` and retired user API aliases. The parent operator environment cannot be erased by this process. Remove/reprovision only reviewed app service user entries and restart their consumers; preserve independent infrastructure/admin entries. Current provider/secrets staged loaders, workspace legacy imports, environment aliases and historical configuration writers still exist until the parity gate. The tool cannot honestly set `legacy_reload_disabled=true` on their behalf.
+
+## Explicit invocation contract
+
+Create a private ledger directory outside the cleared payloads and a private JSON manifest. Use absolute, non-symlink roots and explicitly reviewed filenames. Example placeholders are not real installation targets:
+
+```json
+{
+  "version": 1,
+  "reset_id": "reviewed-cutover-epoch-1",
+  "ledger": "/absolute/private/reset-ledger",
+  "backend": {
+    "origin": "https://configured-gateway.example",
+    "deployment_id": "reviewed-deployment",
+    "scope_id": "reviewed-scope",
+    "expected_configuration_epoch": "reviewed-old-configuration",
+    "expected_access_epoch": "reviewed-old-access"
+  },
+  "targets": [{
+    "name": "explicitly-selected-legacy-installation",
+    "root": "/absolute/app-owned/installation",
+    "files": ["config.toml", "auth.json", "quota.json"]
+  }],
+  "secure_store": []
+}
+```
+
+```sh
+python3 scripts/fleetworks_config_reset.py inventory --manifest /absolute/private/manifest.json --out /absolute/private/reset-ledger/frozen-plan.json
+python3 scripts/fleetworks_config_reset.py apply --plan /absolute/private/reset-ledger/frozen-plan.json --target explicitly-selected-legacy-installation --admin-token-file /absolute/private/independent-operator-token
+```
+
+Inventory creates only the explicitly requested private plan file. Apply first persists a non-secret planned journal, obtains the actual backend fence, then acquires shared configuration guard locks. All unfinished frozen files are verified before the first mutation. Symlink/hardlink/parent/root/inode/hash substitutions block. Payloads are truncated/rewritten through checked open file descriptors, not deleted by pathname or copied to resumable secret backups. An interrupted canonical empty write can resume only on the original inode and an exact canonical-output prefix; unexpected/new bytes are preserved for review. Completed steps are never repeated. Atomic private journal replacement and fsync retain progress.
+
+A completed reset ID is a no-op even after the user enters new keys. A different inventory cannot reuse that ID. A partially completed backend/local reset remains fenced and visibly pending. Loss of the final HTTP response resumes the same finalization, without repeating any file operation. No secure physical media erasure or upstream provider-key revocation is claimed.
+
+## Required backend administrative interface — drafted, integration pending
+
+Use an independently provisioned **Operator** credential with explicit configuration-reset authority (at minimum both configuration-management and backend-maintenance permission), independent of revoked user access. Remote origins require HTTPS; loopback HTTP fixtures are allowed. The Python transport bypasses environment proxies, validates the exact origin, bounds responses to 64 KiB, and follows no redirect. There is no caller proof JSON file or `--force` option.
+
+Each POST binds `{version:1,reset_id,plan_sha256,deployment_id,expected_configuration_epoch,expected_access_epoch}`. Completion/finalization also carry `local_receipts:[{target_name,inventory_sha256,state:"files_reset"}]`. These are reported local phase receipts, **not authority** to skip server work. Server scope comes from authenticated provisioning and must match the response.
+
+1. `POST /api/v1/admin/configuration-reset/prepare`: transactionally bind the unique reset ID/plan and advance configuration/access epochs **once**. Actually fence interactive admission and configuration/first-use writes; drain or explicitly stop all secret-consuming work, including resumable captured copies; revoke old user access and Connect/browser/native sessions. Preserve independent admin and deployment service/database credentials. Return only after these facts are durable. A replay returns the same epochs; conflicting plan/identity fails.
+2. `GET /api/v1/admin/configuration-reset/status?...`: bounded authoritative phase reconciliation for the same ID/plan. Do not enumerate other scopes or trust body-supplied booleans. The utility's recovery can repeat idempotent prepare; this GET is the operator diagnostic seam.
+3. `POST /api/v1/admin/configuration-reset/complete`: independently clear the actual backend-owned user configuration/account/role material and credential-bearing caches, complete controlled environment/service reprovisioning and prove obsolete readers/aliases cannot reload old values. Keep writes/admission fenced. Repeating this phase must never wipe new first-use credentials after finalization.
+4. `POST /api/v1/admin/configuration-reset/finalize`: only after the local file receipt is durable and backend cleanup/legacy retirement succeeded, release first-use and admission for the new epochs. Idempotently reconcile lost responses. Retain the completed server receipt separately from user config.
+
+All responses bind `version`, `reset_id`, `plan_sha256`, `deployment_id`, authenticated `scope_id`, new `configuration_epoch`, `access_epoch`, and typed boolean `admission_fenced`, `work_drained`, `user_access_revoked`, `sessions_revoked`, `first_use_blocked`. Prepare/complete require fences true; finalize requires fences false and `state:"complete"`. Complete/finalize additionally require `backend_configuration_cleared:true` and `legacy_reload_disabled:true`. Epochs must equal the original prepare receipt, never the old expected epochs. Outage, missing endpoint, false/malformed flags or incomplete retirement leave the local receipt pending. The tool never fabricates these facts.
+
+### Backend coordinator checkpoint
+
+The new `core/storage/configuration_reset.rs`, `configuration_reset/{files,tests}.rs`, schema and `api/configuration_reset.rs` implement the candidate seam. The integration owner has added exports/schema/bootstrap/routes; the unified Rust check is pending. `Coordinator::new` accepts only a server-provisioned `BackendFiles` owner, a trusted `PolicyObserver`, and the exact required private owner services. The API requires an authenticated independent Operator principal with both `ManageConfiguration` and `MaintainBackend`; Native, WebRelay, InternalService and unscoped legacy bearers cannot invoke reset. Caller JSON cannot provide paths, policy, drain/legacy booleans or cache acknowledgements.
+
+Prepare uses the shared registry guard and configuration lock, commits one stable reset ID/plan/new epoch pair, revokes matching Connect sessions, records loaded user-token fingerprints in a retained revocation ledger, and fences admission/first use. The drain queries actual unfinished nonservice Jobs **and** unfinished tasks; a terminal Job with a running task remains pending. Complete rewrites only frozen owned allowlisted backend configuration inodes and known generation backups/staging, without secret backups, then requires actual cache owner observations. The committed configuration journal advances once; interrupted canonical-output prefixes can resume, while changed objects/new keys are preserved. Finalize requires fresh loaded user-token fingerprints and the exact new access/configuration/cache epochs observed from every owner. Relabeling an old bearer with a new epoch or scope cannot revive its fingerprint. Mounted read-only purpose manifests are never claimed to have rotated; external reprovisioning and actual in-memory reload remain prerequisites.
+
+Integrated hooks are `authorize_user_access(repo,scope,epoch,fingerprint)` for all Native/Web boundaries including global reads, `check_user_epoch_in(tx,scope,epoch,fingerprint)` inside actual registry/admission transactions, and `configuration_write_allowed(repo,scope,ConfigLock)` held through every real configuration/first-use write. Global configuration fences also cover another scope attempting a write. Every matched credential also checks retained global user-token revocations, preventing an old user token relabeled as Operator/InternalService from regaining authority while leaving the original independent admin token usable. Administrative routes use their own Operator boundary rather than a workstation registration requirement.
+
+`api/configuration_reset/owners.rs` supplies `ResetPolicyObserver` over the exact loaded `NetworkPolicy` clone and fixed no-proxy authenticated private `ResetOwnerClient` connections. It enumerates all loaded user credentials and rejects mixed scopes/legacy policy. Private owner observe/clear handlers require InternalService plus both management/maintenance permissions at the actual loaded scope/epoch. Each `ResetOwner` checks the real durable fence/drain and actual empty current-format files under `ConfigLock`, invalidates the process AuthFile cache, then records a process-local epoch ACK. Reader contract remains zero while unsupported consumers/caches remain. Exact configured owner services and their startup extensions still need integration-owner provisioning; a mounted-file reread cannot masquerade as actual policy reload.
+
+`configuration_reset/new_work_barrier.rs` is now called by every nonservice Job creation and attributed causal-child fence. It shares the registry guard with prepare/complete, so a late root or child cannot appear after a drained receipt. Existing task progress/finish and infrastructure service creation can still drain. A jobs-only schema without either configuration authority is an explicit compatibility adapter; partial network authority or malformed bounded scope metadata fails closed. `process_cache.rs` provides the shared actual empty-file/cache clear used by private owners and the API's local owner.
+
+The prepared `services/api-host/src/reset_services.rs` startup helper uses the real `ApiState` instance and exact loaded policy. The API process is a required local cache owner because job-event redaction loads AuthFile. Remote owners derive from configured user-credential HTTP services, explicit `FLEETWORKS_RESET_CONSUMERS` headless topology, and actual enabled dispatch pools rechecked during each observation/clear. An absent disabled Atlas worker is optional; an enabled consumer without a provisioned owner blocks reset. NLP, classifier and search engines are not invented credential owners. Headless private listeners require explicit enable/bind/port/Host/infrastructure token-file provisioning, share the real worker stop signal, and wait for its actual completion. Startup provisioning is opt-in and never performs the reset.
+
+The sealed production `running_build_support()` intentionally returns unsupported before lock creation or fencing. Strict current-network readers alone do not prove installation-wide legacy import/environment/no-context consumer retirement. No environment flag, request field or public constructor enables this gate. The synthetic positive fixture can construct the private support marker only inside its inline test module. Production enablement remains a separate reviewed source change after full retirement and actual policy/owner hooks; no real reset is performed by drafting or checking this module.
+
+## Synthetic verification and remaining gates
+
+Run `python3 -m unittest discover -s scripts -p test_fleetworks_config_reset.py -v`. Fixtures create disposable directories and a finite loopback HTTP server with synthetic credentials only. Coverage includes inventory nonmutation/redaction; no backend seam; empty current configuration; exact payload/reset protection; completed-ID repeat/new-key preservation; interrupted/partial write recovery; changed roots/files and symlink/hardlink denial; forged entry/unknown secure-store denial; infrastructure/environment/export review; immutable epochs; missing legacy/finalization receipts; and actual HTTP 404 failure before any local wipe.
+
+The initial unified backend/search check passed without warnings, and the two API reset purpose/JSON-boundary fixtures passed within the API unit checkpoint. The latest new-work/startup integration still requires its affected checks. Core filesystem/positive reset and actual owner restart/clear fixtures are not yet run; the positive fixtures require the embedded feature. A separate server-compatible barrier fixture covers jobs-only compatibility and malformed/partial network authority.
+
+Pending: finish startup injection and check the latest barrier/owner integration, actual coordinated process/environment/cache observations and policy reload, exact additional installations/external exports/secure-store adapters if discovered, legacy-reader retirement and Rust first-use parse/no-reload checks. Then review the concrete real target inventory and execute the separately recorded authorized deployment cutover. Neither these synthetic tests nor CI establish a reset of the user's Mac/backend.

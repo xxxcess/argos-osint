@@ -26,7 +26,7 @@ Wake completed workers explicitly, integrate results promptly, and reuse their v
 
 ## Keep one reusable build graph
 
-Record and reuse host, storage mode, features, target/profile and concurrency through the [build recipes](contributing.md#targeted-local-rust-builds-and-tests-fast-iteration). Dependency feature unification matters: workspace bin tests enable core fixtures; an isolated package can trigger another large build. Zero-match companion targets are not test passes.
+Before compiling, inspect the existing cache and select the matching shared debug graph. Record and reuse host, storage mode, features, target/profile and concurrency through the [build recipes](contributing.md#targeted-local-rust-builds-and-tests-fast-iteration). Prefer scoped debug checks/tests for iteration; release and cross-target builds serve specifically required evidence. Dependency feature unification matters: workspace bin tests enable core fixtures; an isolated package can trigger another large build. Zero-match companion targets are not test passes.
 
 Choose build/test concurrency from memory and observed pressure; two build jobs are a starting point on this 16 GiB host. Serialize shared-state or timing-sensitive fixtures. For slow active builds, inspect CPU time, memory and host throttling once before changing course; do not repeatedly poll diagnostics or restart useful compilation. Follow [cache hygiene](contributing.md#build-cache-hygiene); preserve `target/debug` and the reusable agent cache.
 

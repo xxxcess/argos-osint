@@ -89,7 +89,10 @@ One integration/build owner uses a stable feature graph and resource-based concu
 
 Check `df -h .` and scoped `du -sh` before builds, between large phases and at handoff.
 
+- Before compiling, inspect the existing target directories and the cached host/target, profile, feature set and storage mode. Reuse the matching shared debug graph: `target/agents/debug`, or `target/agents/<triple>/debug` for an explicit target. Keep the same toolchain, activating targets and build flags when they still satisfy the check. Reuse an unchanged phase's cache preflight instead of repeatedly scanning the whole cache.
+- Default local iteration to scoped debug `check`/`test`; use debug `build`/`run` when an executable is needed. Choose release or another target/profile only when the requested packaging, performance or platform evidence requires it. Required verification still determines the features and mode. Let Cargo validate artifact freshness; an existing binary alone is not evidence for changed source.
 - Retain the selected native `target/agents` profile, useful binary and reusable dependencies, fingerprints and incremental cache. Protect the user's `target/debug` by default.
+- Share the agent target directory across workers under one build owner. Preserve active useful compilation; do not create fresh per-agent caches, copy fingerprints between targets or restart a build simply to switch caches.
 - Remove only proven obsolete repo-local agent artifacts. Check exact ownership, path and active processes/locks first; age or an unused lock alone is insufficient proof.
 - Never clean active builds, remove locks to bypass contention, run blanket `cargo clean`, or erase global caches, source, user data or unresolved evidence.
 - Budget growth plus a reserve from a comparable build. If space is insufficient, report the shortfall instead of starting a likely failed build or silently reducing required checks.

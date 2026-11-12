@@ -1,0 +1,24 @@
+# Phase 4 design — documentation and retirement coverage
+
+Source: [design.md](design.md) §§7,11. One affected-surface inventory; implementation/evidence remains in [acceptance.md](acceptance.md). This inventory records required disposition, not completed parity. Root owns coherence and diagrams; component workers update only their assigned guides.
+
+| Surface | Disposition / source | Current evidence and remaining work |
+| --- | --- | --- |
+| Root AGENTS, contributor cache rules, agent workflow | Updated cache-first/default-debug/one-owner guidance at explicit user request | Scoped whitespace pass; architecture entry still needs final supported-product wording |
+| docs/index, code index, Fleetworks/architecture/interfaces | Update native → gateway, private Linux ownership, independent web and external operator boundary | docs/index/code index and Fleetworks lead now route to native/global versus local scopes; interfaces and glossary updated; Fleetworks HTML/SVG pair updated and inspected; remaining architecture/figure work pending final source freeze |
+| Native README/scoped AGENTS | Created actual build/fixture/scope instructions and exact disabled gaps | Current contracts/native/workspace63tests pass and3newPNG/tree captures inspected; later job/lifecycle edits pending |
+| Native connections / workspaces / connect context guides | Created native-connections.md and native-workspaces.md for actual protected root/default/child, canonical ID, proofs, scopes and recovery | Manager and registry persistence evidence passes; physical Trash/rebind integration and full installed-app checks pending |
+| Actor catalog / classifier / actor search guides | Update seed versus visible index versus optional Natural candidate and separate Rust-BERT inference | Host search disk tests passed; DB/source/rebuild/pressure and Linux evidence pending |
+| Deployment README / isolated native-review recipe | Updated standalone backend-only three-image build, unique project/workspace/ports, purpose files and restart | Python fixtures/static Compose/Bake resolution pass; actual build/start/inference pending |
+| Retained Venture operator guide | Migrate scoped provisioning/normal Connect proof; preserve justified deployment controls | Source and Python smokes frozen; real Cargo/Docker/operator smoke pending |
+| CI guide / planner / candidate helpers | Update selected native dual-Mac and Linux images, actual Runtime/PNG/tree and artifact identity | Platform/candidate/planner Python pass; no workflow dispatched or artifact publication |
+| React UI / Intel web / React testing | Update gold/charcoal/ivory authorities, central server gate, cache/session invalidation | Both authorities plus direct semantic colors, static geometry invariant, scoped tests/lint/type/build and8browser journeys pass;6captures inspected |
+| Workspace, workspace-scope, workspace-lifecycle diagram pairs | Rewrite root/default/children, global target versus immutable origin, guarded multi-backend retirement | Pending tested final lifecycle; do not illustrate physical deletion as implemented yet |
+| Fleetworks, native connections, native release, CI scopes pairs | Update runtime/build boundaries and exact-SHA dual-Mac delivery, external promotion | Pending actual packaging/review results; signing/publication remain separate |
+| Actor catalog/search and job lifecycle pairs | Add canonical tx → durable intent → bounded private commit/reload → visible ack, causal/request membership | Current registry/setup/actions/activity15persistence cases pass; rebuild/pressure integration and diagram pairs pending |
+| Intel web / topology diagrams | Preserve ForceCanvas/list geometry and clarify registration/session server gate | Selected real browser graph/list interactions and palette inspected; prose/pairs pending |
+| TUI/CLI/import manuals and terminal capture scripts | Retire only after each replacement/consumer and dual-Mac parity gate | Retained pending those gates; no premature code/history/cache deletion |
+| Agent skill aliases / OpenCode / Antigravity routing | Repoint relevant live product/testing instructions after verified consumer disposition | Cache guidance done; native/search architecture and terminal retirement routing pending |
+| Reset tool/inventory | Created utility and02-reset-inventory with exact ownership, freeze/journal and authenticated backend prerequisites |17synthetic Python fixtures pass; real apply blocks without authoritative backend+legacy-retirement gate |
+
+Preserve Jobs persistence history and unrelated docs. Each modified HTML diagram keeps its SVG pair and embeds registered in docs/diagrams.md/tags/indexes. Render and inspect changed pairs before visual approval. Archive historical terminal guidance with replacement links only after its supported callers migrate; do not remove files merely because names look old.

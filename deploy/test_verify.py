@@ -9,6 +9,16 @@ import verify
 
 
 class RegisteredSmokeTests(unittest.TestCase):
+    def test_fresh_explicit_zero_revision_is_valid_and_missing_or_forged_revision_is_not(self):
+        proof = verify.ProofHeaders({}, {"registration_id": "registration", "registration_revision": 2, "context_revision": 3})
+        with patch.object(verify, "request", return_value=(200, {"configuration_revision": 0})):
+            context = verify.submission_context(18091, None, proof)
+        self.assertEqual(context["expected_configuration_revision"], 0)
+        for value in ({}, {"configuration_revision": None}, {"configuration_revision": False}, {"configuration_revision": -1}, {"configuration_revision": "0"}):
+            with self.subTest(value=value), patch.object(verify, "request", return_value=(200, value)):
+                with self.assertRaisesRegex(AssertionError, "revision unavailable"):
+                    verify.submission_context(18091, None, proof)
+
     def test_fixture_is_a_real_contained_child_with_independent_markers(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

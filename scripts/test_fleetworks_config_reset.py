@@ -3,12 +3,14 @@
 import copy
 import contextlib
 import io
+import fcntl
 import json
 import os
 from pathlib import Path
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import fleetworks_config_reset as reset
@@ -71,6 +73,267 @@ class ResetFixtures(unittest.TestCase):
 
     def journal(self):
         return json.loads((self.ledger / "reset-synthetic-cutover-1.json").read_text())
+
+    def native_profiles(self, *, present=True):
+        """Source-shaped private native fixture; never opens a real token path."""
+        original = self.root
+        self.root = self.base / ".fleetworks"
+        original.rename(self.root)
+        self.protected = self.root / "default"
+        self.selected["targets"][0]["root"] = str(self.root)
+        self.selected["targets"][0]["files"].append(reset.CONNECTIONS)
+        def obj(path):
+            value = path.stat()
+            return {"device": value.st_dev, "inode": value.st_ino, "owner": value.st_uid}
+        installation, workspace = "a" * 64, "b" * 64
+        state = {"version": 1, "installation_marker": installation, "root_object": obj(self.root),
+                 "workspaces": [{"name": "default", "marker": workspace, "object": obj(self.protected),
+                                 "protected_default": True, "state": "local", "bindings": [], "binding_history": []}],
+                 "operations": [], "registration_attempts": [], "rebind_attempts": []}
+        self.write(".native-state.json", json.dumps(state))
+        self.write(".native.lock", "")
+        self.write("default/.fleetworks-workspace.json", json.dumps({
+            "version": 1, "installation_marker": installation, "name": "default", "marker": workspace,
+            "object": obj(self.protected), "protected_default": True}))
+        self.write(".native-retirement-journal.json", '{"synthetic_retained_receipt":"do-not-clear"}')
+        # A reference is metadata only, even if its target does not exist. The
+        # adapter may not treat it as an application-owned credential payload.
+        self.token = self.base / "explicit-external-token"
+        self.token.write_text("synthetic-external-token-do-not-read-or-erase")
+        self.token.chmod(0o600)
+        profile = {"id": "c" * 64, "revision": 7, "name": "Synthetic remote", "origin": "https://gateway.example.test/",
+                   "credential": {"path": str(self.token), "origin": "https://gateway.example.test/", "object": obj(self.token)}}
+        catalog = {"format_version": 1, "installation_marker": installation, "root_object": obj(self.root),
+                   "snapshot": {"revision": 7, "selected_profile_id": profile["id"], "profiles": [profile]}}
+        if present:
+            self.write(reset.CONNECTIONS, json.dumps(catalog))
+        return catalog
+
+    def update_native(self, catalog):
+        self.write(reset.CONNECTIONS, json.dumps(catalog))
+
+    def test_saved_profile_inventory_and_reset_preserve_protected_state_and_external_token(self):
+        catalog = self.native_profiles()
+        protected = {name: (self.root / name).read_bytes() for name in
+                     (*reset.NATIVE_GUARDS, ".native-retirement-journal.json", "default/notes.txt")}
+        before = (self.root / reset.CONNECTIONS).read_bytes()
+        # Prove inventory/apply never open a referenced credential, not merely
+        # that they leave its contents unchanged after reading it.
+        actual_open = os.open
+        def no_token(path, *args, **kwargs):
+            if str(path) in (str(self.token), self.token.name):
+                raise AssertionError("A referenced token must never be opened")
+            return actual_open(path, *args, **kwargs)
+        actual_replace = os.replace
+        def held_native_barrier(source, destination, *args, **kwargs):
+            if destination == reset.CONNECTIONS:
+                probe = actual_open(".native.lock", os.O_RDWR | os.O_NOFOLLOW, dir_fd=kwargs["dst_dir_fd"])
+                try:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    os.close(probe)
+                self.assertEqual((self.root / reset.CONNECTIONS).read_bytes(), before)
+            return actual_replace(source, destination, *args, **kwargs)
+        with mock.patch.object(reset.os, "open", side_effect=no_token), mock.patch.object(reset.os, "replace", side_effect=held_native_barrier):
+            plan = self.plan()
+            self.assertEqual(before, (self.root / reset.CONNECTIONS).read_bytes())
+            self.assertEqual(plan["blockers"], [])
+            self.assertNotIn(str(self.token), json.dumps(plan))
+            self.assertEqual(plan["entries"][-1]["external_references"][0]["state"], "external_reference_not_read_or_erased")
+            self.apply(plan)
+        result = json.loads((self.root / reset.CONNECTIONS).read_text())
+        self.assertEqual(result, {**catalog, "snapshot": {"revision": 8, "selected_profile_id": None, "profiles": []}})
+        self.assertEqual(protected, {name: (self.root / name).read_bytes() for name in protected})
+        self.assertEqual(self.token.read_text(), "synthetic-external-token-do-not-read-or-erase")
+        self.assertEqual((self.root / reset.CONNECTIONS).stat().st_mode & 0o777, 0o600)
+        self.assertIn("native_live_client_cache_owner_ack_unsupported", plan["limitations"])
+
+    def test_saved_profile_finalized_rerun_preserves_new_profiles_and_token_references(self):
+        catalog = self.native_profiles()
+        plan = self.plan()
+        self.apply(plan)
+        catalog["snapshot"]["revision"] = 9
+        catalog["snapshot"]["profiles"][0]["revision"] = 9
+        catalog["snapshot"]["profiles"][0]["credential"]["path"] = str(self.base / "new-unread-token")
+        self.update_native(catalog)
+        before = (self.root / reset.CONNECTIONS).read_bytes()
+        unavailable = FakeBackend(available=False)
+        self.assertTrue(self.apply(plan, unavailable)["repeated"])
+        self.assertEqual(unavailable.requests, [])
+        self.assertEqual(before, (self.root / reset.CONNECTIONS).read_bytes())
+
+    def test_saved_profile_busy_lock_blocks_inventory_and_all_local_payload_changes(self):
+        self.native_profiles()
+        plan = self.plan()
+        with (self.root / ".native.lock").open("r+b") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaisesRegex(reset.ResetError, "busy"):
+                self.plan()
+            with self.assertRaisesRegex(reset.ResetError, "busy"):
+                self.apply(plan)
+        self.assertEqual((self.root / "auth.json").read_text(), self.old["auth.json"])
+        self.assertEqual(self.journal()["done"], [])
+
+    def test_saved_profile_unknown_versions_fields_and_conflicts_fail_closed(self):
+        catalog = self.native_profiles()
+        variants = []
+        for change in (lambda value: value.update(format_version=2),
+                       lambda value: value.update(installation_marker="d" * 64),
+                       lambda value: value["root_object"].update(inode=value["root_object"]["inode"] + 1),
+                       lambda value: value.update(unknown_payload="must-not-drop"),
+                       lambda value: value["snapshot"].update(revision=True),
+                       lambda value: value["snapshot"].update(revision=(1 << 64) - 1),
+                       lambda value: value["snapshot"].update(selected_profile_id="d" * 64),
+                       lambda value: value["snapshot"]["profiles"][0].update(api_token="must-not-appear"),
+                       lambda value: value["snapshot"]["profiles"][0]["credential"]["object"].update(owner=os.getuid() + 1),
+                       lambda value: value["snapshot"]["profiles"][0]["credential"].update(origin="https://other.example.test/"),
+                       lambda value: value["snapshot"]["profiles"][0].update(origin="https://GATEWAY.example.test/"),
+                       lambda value: value["snapshot"]["profiles"][0].update(name=" leading"),
+                       lambda value: value["snapshot"]["profiles"][0].update(name="bad\x00name")):
+            value = copy.deepcopy(catalog)
+            change(value)
+            variants.append(value)
+        for value in variants:
+            with self.subTest(value=list(value)):
+                self.update_native(value)
+                body = (self.root / reset.CONNECTIONS).read_bytes()
+                plan = self.plan()
+                self.assertEqual(len(plan["blockers"]), 1)
+                self.assertNotIn("must-not-appear", json.dumps(plan))
+                with self.assertRaises(reset.Pending):
+                    self.apply(plan)
+                self.assertEqual(body, (self.root / reset.CONNECTIONS).read_bytes())
+
+    def test_saved_profile_bounds_duplicates_and_duplicate_json_fields_require_review(self):
+        catalog = self.native_profiles()
+        variants = []
+        too_many = copy.deepcopy(catalog)
+        too_many["snapshot"]["profiles"] *= 33
+        variants.append(json.dumps(too_many))
+        duplicates = copy.deepcopy(catalog)
+        duplicate = copy.deepcopy(duplicates["snapshot"]["profiles"][0])
+        duplicate.update(id="d" * 64, name=duplicate["name"].upper())
+        duplicates["snapshot"]["profiles"].append(duplicate)
+        variants.append(json.dumps(duplicates))
+        variants.append(json.dumps(catalog).replace('"format_version": 1', '"format_version": 1, "format_version": 1', 1))
+        variants.append(json.dumps(catalog) + " " * reset.NATIVE_LIMIT)
+        for raw in variants:
+            self.write(reset.CONNECTIONS, raw)
+            plan = self.plan()
+            self.assertEqual(len(plan["blockers"]), 1)
+            with self.assertRaises(reset.Pending):
+                self.apply(plan)
+            self.assertEqual((self.root / reset.CONNECTIONS).read_text(), raw)
+
+    def test_saved_profile_symlink_hardlink_and_nonprivate_file_are_never_adopted(self):
+        self.native_profiles()
+        path = self.root / reset.CONNECTIONS
+        raw = path.read_text()
+        for kind in ("symlink", "hardlink", "permissions"):
+            with self.subTest(kind=kind):
+                path.unlink()
+                if kind == "symlink":
+                    path.symlink_to(self.token)
+                elif kind == "hardlink":
+                    os.link(self.token, path)
+                else:
+                    self.write(reset.CONNECTIONS, raw).chmod(0o644)
+                with self.assertRaises((reset.ResetError, OSError)):
+                    self.plan()
+        self.assertEqual(self.token.read_text(), "synthetic-external-token-do-not-read-or-erase")
+
+    def test_saved_profile_stale_revision_or_atomic_substitution_preserves_all_payloads(self):
+        catalog = self.native_profiles()
+        plan = self.plan()
+        catalog["snapshot"]["revision"] += 1
+        self.update_native(catalog)
+        with self.assertRaises(reset.ResetError):
+            self.apply(plan)
+        self.assertEqual(self.journal()["done"], [])
+        self.assertEqual((self.root / "config.toml").read_text(), self.old["config.toml"])
+        (self.ledger / "reset-synthetic-cutover-1.json").unlink()
+        plan = self.plan()
+        replacement = self.write("replacement-catalog", (self.root / reset.CONNECTIONS).read_text())
+        replacement.replace(self.root / reset.CONNECTIONS)
+        with self.assertRaises(reset.ResetError):
+            self.apply(plan)
+        self.assertEqual(self.journal()["done"], [])
+
+    def test_saved_profile_changed_protected_catalog_default_or_lock_requires_review(self):
+        self.native_profiles()
+        for name in reset.NATIVE_GUARDS:
+            with self.subTest(name=name):
+                plan = self.plan()
+                previous = (self.root / name).read_bytes()
+                if name == ".native.lock":
+                    other = self.write("new-lock", "")
+                    other.replace(self.root / name)
+                else:
+                    self.write(name, previous.decode() + "\n")
+                with self.assertRaises(reset.ResetError):
+                    self.apply(plan)
+                self.assertEqual(self.journal()["done"], [])
+                self.write(name, previous.decode())
+                (self.ledger / "reset-synthetic-cutover-1.json").unlink()
+
+    def test_saved_profile_absent_stays_absent_and_empty_zero_revision_advances(self):
+        catalog = self.native_profiles(present=False)
+        self.apply(self.plan())
+        self.assertFalse((self.root / reset.CONNECTIONS).exists())
+        self.selected["reset_id"] = "empty-profile-reset"
+        catalog["snapshot"] = {"revision": 0, "selected_profile_id": None, "profiles": []}
+        self.update_native(catalog)
+        self.apply(self.plan())
+        self.assertEqual(json.loads((self.root / reset.CONNECTIONS).read_text())["snapshot"]["revision"], 1)
+
+    def test_saved_profile_atomic_rename_response_loss_resumes_without_second_clear(self):
+        self.native_profiles()
+        plan = self.plan()
+        actual_replace = os.replace
+        def response_lost(source, destination, *args, **kwargs):
+            actual_replace(source, destination, *args, **kwargs)
+            if destination == reset.CONNECTIONS:
+                raise RuntimeError("synthetic interruption after atomic profile replacement")
+        with mock.patch.object(reset.os, "replace", side_effect=response_lost):
+            with self.assertRaises(RuntimeError):
+                self.apply(plan)
+        self.assertEqual(self.journal()["intent"], 3)
+        self.assertEqual(json.loads((self.root / reset.CONNECTIONS).read_text())["snapshot"]["revision"], 8)
+        self.apply(plan)
+        self.assertEqual(json.loads((self.root / reset.CONNECTIONS).read_text())["snapshot"]["revision"], 8)
+        self.assertFalse(list(self.root.glob(".native-reset-*")))
+
+    def test_saved_profile_pending_finalize_preserves_new_profile_payload(self):
+        catalog = self.native_profiles()
+        plan = self.plan()
+        with self.assertRaises(reset.Pending):
+            self.apply(plan, FakeBackend(finalize=False))
+        self.assertEqual(self.journal()["state"], "local_committed")
+        catalog["snapshot"]["revision"] = 9
+        self.update_native(catalog)
+        before = (self.root / reset.CONNECTIONS).read_bytes()
+        backend = FakeBackend()
+        self.apply(plan, backend)
+        self.assertEqual([phase for phase, _ in backend.requests], ["finalize"])
+        self.assertEqual(before, (self.root / reset.CONNECTIONS).read_bytes())
+
+    def test_saved_profile_root_default_and_unlisted_payload_fail_closed(self):
+        self.native_profiles()
+        self.selected["targets"][0]["files"].remove(reset.CONNECTIONS)
+        plan = self.plan()
+        self.assertTrue(any(item["file"] == reset.CONNECTIONS for item in plan["blockers"]))
+        self.selected["targets"][0]["files"].append(reset.CONNECTIONS)
+        state = json.loads((self.root / ".native-state.json").read_text())
+        for change in (lambda value: value.update(version=2),
+                       lambda value: value.update(unknown_catalog="must-preserve"),
+                       lambda value: value["root_object"].update(inode=value["root_object"]["inode"] + 1),
+                       lambda value: value["workspaces"][0].update(state="creation_pending")):
+            broken = copy.deepcopy(state)
+            change(broken)
+            self.write(".native-state.json", json.dumps(broken))
+            with self.assertRaises(reset.ResetError):
+                self.plan()
 
     def test_inventory_is_read_only_nonsecret_and_records_frozen_objects(self):
         before = {name: (self.root / name).read_bytes() for name in self.old}

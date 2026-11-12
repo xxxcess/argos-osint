@@ -108,10 +108,11 @@ def native_headers(context):
 
 def submission_context(port, token, proof):
     status, current = request(port, "/api/v1/models/defaults", token, headers=proof)
-    assert status == 200 and isinstance(current["configuration_revision"], int) and current["configuration_revision"] > 0, "current configuration revision unavailable"
+    revision = current.get("configuration_revision") if isinstance(current, dict) else None
+    assert status == 200 and type(revision) is int and revision >= 0, "current configuration revision unavailable"
     context = proof.context
     return {"registration_id": context["registration_id"], "expected_registration_revision": context["registration_revision"],
-        "expected_context_revision": context["context_revision"], "expected_configuration_revision": current["configuration_revision"]}
+        "expected_context_revision": context["context_revision"], "expected_configuration_revision": revision}
 
 
 def web_connect(port, context):

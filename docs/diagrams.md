@@ -8,9 +8,16 @@ Open a file under `docs/diagrams/` in a browser for the HTML page. Matching `.sv
 
 | Aspect | Type | HTML | SVG |
 | --- | --- | --- | --- |
-| Local NLP | Data flow | — | [nlp-preprocessing.svg](diagrams/nlp-preprocessing.svg) |
+| Backend NLP preprocessing | Data flow | [nlp-preprocessing.html](diagrams/nlp-preprocessing.html) | [nlp-preprocessing.svg](diagrams/nlp-preprocessing.svg) |
 | Fleetworks service boundaries | Architecture | [fleetworks.html](diagrams/fleetworks.html) | [fleetworks.svg](diagrams/fleetworks.svg) |
 | Native identity and shared backend | Architecture | [workspace.html](diagrams/workspace.html) | [workspace.svg](diagrams/workspace.svg) |
+| Backend resources and registered local origin | Architecture | [workspace-scope.html](diagrams/workspace-scope.html) | [workspace-scope.svg](diagrams/workspace-scope.svg) |
+| Protected child lifecycle and retirement recovery | Process | [workspace-lifecycle.html](diagrams/workspace-lifecycle.html) | [workspace-lifecycle.svg](diagrams/workspace-lifecycle.svg) |
+| Native connection and registered browser handoff | Process | [native-connections.html](diagrams/native-connections.html) | [native-connections.svg](diagrams/native-connections.svg) |
+| Partial readiness and explicit maintenance | Data flow | [workstation-readiness.html](diagrams/workstation-readiness.html) | [workstation-readiness.svg](diagrams/workstation-readiness.svg) |
+| Workstation registry and active bindings | Architecture | [connect-registry.html](diagrams/connect-registry.html) | [connect-registry.svg](diagrams/connect-registry.svg) |
+| Intel Connect authority and central gate | Process | [intel-connect-gate.html](diagrams/intel-connect-gate.html) | [intel-connect-gate.svg](diagrams/intel-connect-gate.svg) |
+| Durable request origin and scoped activity | Data flow | [brief-job-context.html](diagrams/brief-job-context.html) | [brief-job-context.svg](diagrams/brief-job-context.svg) |
 | Intel web request and readiness boundaries | Process | [intel-web.html](diagrams/intel-web.html) | [intel-web.svg](diagrams/intel-web.svg) |
 | Intel Focus Brief reading order | Layout | [intel-focus-layout.html](diagrams/intel-focus-layout.html) | [intel-focus-layout.svg](diagrams/intel-focus-layout.svg) |
 | Venture startup and ownership | Process | [venture-navigation.html](diagrams/venture-navigation.html) | [venture-navigation.svg](diagrams/venture-navigation.svg) |
@@ -20,6 +27,7 @@ Open a file under `docs/diagrams/` in a browser for the HTML page. Matching `.sv
 | Private Brain read boundaries | Data flow | [brain-browse.html](diagrams/brain-browse.html) | [brain-browse.svg](diagrams/brain-browse.svg) |
 | Brain source lifecycle | Data flow | [brain-source-lifecycle.html](diagrams/brain-source-lifecycle.html) | [brain-source-lifecycle.svg](diagrams/brain-source-lifecycle.svg) |
 | Actor catalog | Process | [actor-catalog.html](diagrams/actor-catalog.html) | [actor-catalog.svg](diagrams/actor-catalog.svg) |
+| Private actor projection and canonical discovery | Data flow | [actor-search.html](diagrams/actor-search.html) | [actor-search.svg](diagrams/actor-search.svg) |
 | Actor identity maintenance | Process | [actor-identity.html](diagrams/actor-identity.html) | [actor-identity.svg](diagrams/actor-identity.svg) |
 | Brain topology and neighborhood summaries | Architecture | [brain-topology.html](diagrams/brain-topology.html) | [brain-topology.svg](diagrams/brain-topology.svg) |
 | Topology neighborhood summary states | State machine | [topology-summary-states.html](diagrams/topology-summary-states.html) | [topology-summary-states.svg](diagrams/topology-summary-states.svg) |
@@ -33,11 +41,14 @@ Open a file under `docs/diagrams/` in a browser for the HTML page. Matching `.sv
 | Durable jobs and terminal operations | State machine | [jobs-lifecycle.html](diagrams/jobs-lifecycle.html) | [jobs-lifecycle.svg](diagrams/jobs-lifecycle.svg) |
 | Fleetworks documentation routes | Hierarchy | [wiki-navigation.html](diagrams/wiki-navigation.html) | [wiki-navigation.svg](diagrams/wiki-navigation.svg) |
 | Development iteration loops | Process | [dev-loops.html](diagrams/dev-loops.html) | [dev-loops.svg](diagrams/dev-loops.svg) |
-| Local CLI and TUI development loop | Process | [dev-loop-cli.html](diagrams/dev-loop-cli.html) | [dev-loop-cli.svg](diagrams/dev-loop-cli.svg) |
+| Native app development loop | Process | [dev-loop-native.html](diagrams/dev-loop-native.html) | [dev-loop-native.svg](diagrams/dev-loop-native.svg) |
+| Retained operator and CLI compatibility loop | Process | [dev-loop-cli.html](diagrams/dev-loop-cli.html) | [dev-loop-cli.svg](diagrams/dev-loop-cli.svg) |
 | Runtime service image development loop | Process | [dev-loop-runtime.html](diagrams/dev-loop-runtime.html) | [dev-loop-runtime.svg](diagrams/dev-loop-runtime.svg) |
 | Web development container and browser loop | Data flow | [dev-loop-web.html](diagrams/dev-loop-web.html) | [dev-loop-web.svg](diagrams/dev-loop-web.svg) |
 | Dockerfile targets and packaged image loop | Architecture | [dev-loop-images.html](diagrams/dev-loop-images.html) | [dev-loop-images.svg](diagrams/dev-loop-images.svg) |
 | Fleetworks development scopes | Data flow | [ci-scopes.html](diagrams/ci-scopes.html) | [ci-scopes.svg](diagrams/ci-scopes.svg) |
+| Native review artifacts and trusted promotion gates | Process | [native-release.html](diagrams/native-release.html) | [native-release.svg](diagrams/native-release.svg) |
+| Native Runtime, capture and separate acceptance | Data flow | [native-verification.html](diagrams/native-verification.html) | [native-verification.svg](diagrams/native-verification.svg) |
 | Agent handoffs | Process | [agent-team.html](diagrams/agent-team.html) | [agent-team.svg](diagrams/agent-team.svg) |
 
 The catalog covers current Fleetworks contracts and explicitly labeled target architectures. The [Jobs persistence plan](wiki/code/jobs-persistence.md) distinguishes implemented foundations from the pending authority cutover. Earlier design figures and dated verification evidence are collected in [the archive](archive/index.md).

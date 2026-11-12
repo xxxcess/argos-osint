@@ -10,6 +10,8 @@ The shared backend corpus is independent of the selected native workspace. The
 desktop receives canonical actor IDs and bounded gateway projections; it receives
 no index origin, write token, filesystem path or engine document address.
 
+[![Source intent, private projection and canonical discovery](../../diagrams/actor-search.svg)](../../diagrams/actor-search.html)
+
 ## Ownership and entry points
 
 | Source | Responsibility |

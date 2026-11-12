@@ -1,70 +1,64 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Runtime service image development loop</title>
-<style>
-  body{margin:32px;background:#f5f5f5;color:#2d3142;font-family:Geist,system-ui,sans-serif}
-  main{max-width:1060px;margin:auto}h1{font-family:'Instrument Serif',Georgia,serif}
-  svg{width:100%;height:auto}p{line-height:1.6}a{color:#394b65}
-</style>
-</head><body><main>
-<h1>Runtime service image development loop</h1>
-<p>Backend service roles run inside the shared runtime image. Iterate with focused host server-feature checks first, then rebuild the runtime stage with BuildKit Cargo caches and restart the Compose roles.</p>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 360" role="img" aria-labelledby="dev-loop-runtime-title dev-loop-runtime-desc">
+<style>body{margin:32px;background:#f5f5f5;color:#2d3142;font-family:Geist,system-ui,sans-serif}main{max-width:1320px;margin:auto}h1{font-family:'Instrument Serif',Georgia,serif;font-size:38px;font-weight:400}svg{width:100%;height:auto}p{max-width:100ch;line-height:1.6}a{color:#394b65}</style></head><body><main>
+<h1>One runtime image, explicit consumer recreation</h1>
+<p>API and worker changes use a focused host server graph before rebuilding the shared runtime image. Inspect the exact loaded image, explicitly recreate only its isolated consumers, then observe health and affected behavior. A tag rebuild alone leaves running services unchanged.</p>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 744" role="img" aria-labelledby="dev-loop-runtime-title dev-loop-runtime-desc">
 <title id="dev-loop-runtime-title">Runtime service image development loop</title>
-<desc id="dev-loop-runtime-desc">Backend service roles run inside the shared runtime image. Iterate with focused host server-feature checks first, then rebuild the runtime stage with BuildKit Cargo caches and restart the Compose roles.</desc>
-<defs>
-  <marker id="dev-loop-runtime-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker>
-</defs>
-<style>
-  text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}
-  .heading{font-family:'Instrument Serif',Georgia,serif;font-size:24px}
-  .label{font-size:16px;font-weight:600}
-  .note{font-size:13px}
-  .code{font:12px 'Geist Mono',ui-monospace,monospace}
-  .zone{font-size:12px;font-weight:600;letter-spacing:1px}
-  .node{fill:white;stroke:#4f5d75}
-  .accent{fill:#fff6ed;stroke:#eb6c36}
-  .edge,.flow{fill:none;stroke:#4f5d75;stroke-width:1.5}
-  .edge{marker-end:url(#dev-loop-runtime-arrow)}
-</style>
-<rect width="960" height="360" fill="#f5f5f5"/>
-<text x="40" y="36" class="heading" text-anchor="start">Avenue 2 · Server-feature check → cached runtime image → Compose roles</text>
-<path d="M240 120H284" class="edge"/>
-<path d="M500 120H544" class="edge"/>
-<path d="M744 120H780V236" class="edge"/>
-<path d="M644 160V236" class="edge"/>
-<path d="M544 276H500" class="edge"/>
-<path d="M284 276H240" class="edge"/>
-<rect x="40" y="80" width="200" height="80" rx="6" class="node"/>
-<text x="140" y="108" class="label" text-anchor="middle">Edit service crates</text>
-<text x="140" y="128" class="note" text-anchor="middle">API, core, storage, jobs</text>
-<text x="140" y="146" class="code" text-anchor="middle">services/api-host · crates/*</text>
-<rect x="284" y="80" width="216" height="80" rx="6" class="node"/>
-<text x="392" y="108" class="label" text-anchor="middle">Focused host check</text>
-<text x="392" y="128" class="note" text-anchor="middle">Network feature graph</text>
-<text x="392" y="146" class="code" text-anchor="middle">--features server,nlp,classifier</text>
-<rect x="544" y="80" width="200" height="80" rx="6" class="accent"/>
-<text x="644" y="108" class="label" text-anchor="middle">Build runtime stage</text>
-<text x="644" y="128" class="note" text-anchor="middle">BuildKit Cargo cache mounts</text>
-<text x="644" y="146" class="code" text-anchor="middle">FLEETWORKS_CORE_OPT_LEVEL=1</text>
-<rect x="544" y="236" width="200" height="80" rx="6" class="accent"/>
-<text x="644" y="264" class="label" text-anchor="middle">Service & worker roles</text>
-<text x="644" y="284" class="note" text-anchor="middle">One argos-api-host binary</text>
-<text x="644" y="302" class="code" text-anchor="middle">bootstrap · api · brain · jobs · worker</text>
-<rect x="748" y="236" width="172" height="80" rx="6" class="node"/>
-<text x="834" y="264" class="label" text-anchor="middle">Datastores</text>
-<text x="834" y="284" class="note" text-anchor="middle">Domain + operational</text>
-<text x="834" y="302" class="code" text-anchor="middle">SurrealDB + Jobs SQLite</text>
-<rect x="284" y="236" width="216" height="80" rx="6" class="node"/>
-<text x="392" y="264" class="label" text-anchor="middle">Health & readiness</text>
-<text x="392" y="284" class="note" text-anchor="middle">Container probes + status</text>
-<text x="392" y="302" class="code" text-anchor="middle">check-fleetworks-api · status</text>
-<rect x="40" y="236" width="200" height="80" rx="6" class="node"/>
-<text x="140" y="264" class="label" text-anchor="middle">Exercise via CLI</text>
-<text x="140" y="284" class="note" text-anchor="middle">Logs & live client checks</text>
-<text x="140" y="302" class="code" text-anchor="middle">venture logs · client <app></text>
-<text x="40" y="340" class="note" text-anchor="start">Compose builds argos-api-host at opt-level 1 with 256 core codegen units so incremental service rebuilds stay fast and bounded in memory.</text>
+<desc id="dev-loop-runtime-desc">Affected API, core, storage and durable job code first uses focused network server checks. BuildKit registry, Git and architecture-scoped target caches feed the shared runtime target containing argos-api-host. Native view source is excluded from this Linux image build input. Inspect the matching Linux architecture, unique review tag, exact image ID and build metadata. Explicitly recreate only the consumers of the changed image under a dedicated workspace, Compose project and ports. Retained credentials, deployment identity, SurrealDB domain data, Jobs SQLite, staged datasets and search data are preserved. Observe actual role health and readiness before affected API and attributed job fixtures. The separate search-index image and hash-verified architecture-matching Linux model assets have independent lifecycles. Native app startup does not provision this stack.</desc>
+<defs><marker id="dev-loop-runtime-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker></defs>
+<style>text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}.label{font-size:20px;font-weight:600}.note{font-size:16px}.zone{font-size:13px;font-weight:600;letter-spacing:1px}.node{fill:#fff;stroke:#4f5d75}.accent{fill:#fff6ed;stroke:#eb6c36}.edge{fill:none;stroke:#4f5d75;stroke-width:2;marker-end:url(#dev-loop-runtime-arrow)}.minor{fill:#4f5d75;font-size:14px}.code{font-family:'Geist Mono',ui-monospace,monospace;font-size:14px}</style>
+<rect width="1320" height="744" fill="#f5f5f5"/>
+<text x="48" y="68" class="zone">BACKEND SERVICE ITERATION · HOST CHECKS BEFORE THE AFFECTED IMAGE</text>
+<path d="M408 172H468" class="edge"/>
+<path d="M828 172H888" class="edge"/>
+<path d="M1080 240V336" class="edge"/>
+<path d="M888 404H828" class="edge"/>
+<path d="M468 404H408" class="edge"/>
+<path d="M228 472V568" class="edge"/>
+<path d="M872 568V512H648V472" class="edge"/>
+
+<rect x="48" y="104" width="360" height="136" rx="6" class="node"/>
+<text x="64" y="136" class="label">Edit affected service code</text>
+<text x="64" y="166" class="note">API / core / storage / durable jobs</text>
+<text x="64" y="194" class="note">Select the smallest network feature graph</text>
+<text x="64" y="222" class="note">Native view edits leave this image alone</text>
+<rect x="468" y="104" width="360" height="136" rx="6" class="node"/>
+<text x="484" y="136" class="label">Focused host verification</text>
+<text x="484" y="166" class="note">Actual network server feature graph</text>
+<text x="484" y="194" class="note">Scoped offline tests, then image evidence</text>
+<text x="484" y="222" class="note">Reuse the agent debug graph for checks</text>
+<rect x="888" y="104" width="384" height="136" rx="6" class="accent"/>
+<text x="904" y="136" class="label">Build shared runtime target</text>
+<text x="904" y="166" class="note">One argos-api-host binary; selected roles</text>
+<text x="904" y="194" class="note">Reuse BuildKit registry / Git / target cache</text>
+<text x="904" y="222" class="note">Search has its own target and compile graph</text>
+<rect x="888" y="336" width="384" height="136" rx="6" class="node"/>
+<text x="904" y="368" class="label">Inspect loaded runtime image</text>
+<text x="904" y="398" class="note">Matching Linux platform + unique review tag</text>
+<text x="904" y="426" class="note">Record image ID and build metadata</text>
+<text x="904" y="454" class="note">A rebuilt tag does not replace its consumer</text>
+<rect x="468" y="336" width="360" height="136" rx="6" class="accent"/>
+<text x="484" y="368" class="label">Explicit isolated recreation</text>
+<text x="484" y="398" class="note">Dedicated workspace / project / ports</text>
+<text x="484" y="426" class="note">Recreate only changed-image consumers</text>
+<text x="484" y="454" class="note">Retain credentials, volume data and caches</text>
+<rect x="48" y="336" width="360" height="136" rx="6" class="node"/>
+<text x="64" y="368" class="label">Observe health and readiness</text>
+<text x="64" y="398" class="note">Actual role probes and bounded status</text>
+<text x="64" y="426" class="note">Process health differs from job success</text>
+<text x="64" y="454" class="note">Confirm the selected exact image identity</text>
+<rect x="48" y="568" width="360" height="112" rx="6" class="node"/>
+<text x="64" y="600" class="label">Exercise affected behavior</text>
+<text x="64" y="630" class="note">Scoped APIs / attributed Jobs / safe logs</text>
+<text x="64" y="658" class="note">Record actual results and retained failures</text>
+<rect x="468" y="568" width="804" height="112" rx="6" class="node"/>
+<text x="484" y="600" class="label">Retained backend state and separate dependencies</text>
+<text x="484" y="630" class="note">SurrealDB identity + domain, Jobs SQLite, staged datasets and search data stay owned.</text>
+<text x="484" y="658" class="note">Search-index images and matching Linux model / native-library assets have separate lifecycles.</text>
+<text x="48" y="720" class="minor">Preserve the user's running stack and useful images. Native Mac startup and retained operator / CLI loops remain independent.</text>
 </svg>
-<p>Every backend container role runs the same runtime image with a role-specific --role flag, read-only root filesystem, and scoped /run/secrets credentials.</p>
-<p><a href="../wiki/code/contributing.md#development-loops-local-cli-and-docker">Contributor workflow</a> · <a href="../../deploy/README.md">Deployment guide</a> · <a href="../wiki/code/fleetworks.md#run-the-network-api-and-workers">Fleetworks guide</a> · <a href="../diagrams.md">Diagram catalog</a></p>
+<p>The runtime Dockerfile stage compiles the locked server,nlp,classifier graph with architecture-scoped BuildKit caches. A complete image, observed startup and successful source-to-visible behavior are distinct evidence. Matching Linux inference assets are staged separately when their roles are selected.</p>
+<p><a href="../../deploy/Dockerfile">Dockerfile targets</a> · <a href="../../deploy/README.md">Backend review recipe</a> · <a href="dev-loop-images.html">Image loop</a> · <a href="../diagrams.md">Diagram catalog</a></p>
 </main></body></html>

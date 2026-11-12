@@ -1,62 +1,70 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Intel web request and readiness boundaries</title>
-<style>
-  body{margin:32px;background:#f5f5f5;color:#2d3142;font-family:Geist,system-ui,sans-serif}
-  main{max-width:1060px;margin:auto}h1{font-family:'Instrument Serif',Georgia,serif}
-  svg{width:100%;height:auto}p{line-height:1.6}a{color:#394b65}
-</style>
-</head><body><main>
-<h1>Intel web request and readiness boundaries</h1>
-<p>The browser reaches the Next.js relay on the web origin. The relay adds the API bearer server-side. Retained actor, brief, Related, and topology operations use private Brain. The gateway retains live streams.</p>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 360" role="img" aria-labelledby="intel-web-title intel-web-desc">
-<title id="intel-web-title">Intel web request and readiness boundaries</title>
-<desc id="intel-web-desc">The browser reaches the Next.js relay on the web origin. The relay adds the API bearer server-side. Retained actor, brief, Related, and topology operations use private Brain. The gateway retains live streams.</desc>
-<defs>
-  <marker id="intel-web-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker>
-</defs>
-<style>
-  text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}
-  .heading{font-family:'Instrument Serif',Georgia,serif;font-size:24px}
-  .label{font-size:16px;font-weight:600}
-  .note{font-size:13px}
-  .code{font:12px 'Geist Mono',ui-monospace,monospace}
-  .zone{font-size:12px;font-weight:600;letter-spacing:1px}
-  .node{fill:white;stroke:#4f5d75}
-  .accent{fill:#fff6ed;stroke:#eb6c36}
-  .edge,.flow{fill:none;stroke:#4f5d75;stroke-width:1.5}
-  .edge{marker-end:url(#intel-web-arrow)}
-</style>
-<rect width="960" height="360" fill="#f5f5f5"/>
-<text x="40" y="36" class="heading" text-anchor="start">Browser traffic stays on the web origin</text>
-<path d="M220 124H280" class="edge"/>
-<path d="M460 124H520" class="edge"/>
-<path d="M700 124H760" class="edge"/>
-<path d="M610 160V200H728V252H760" class="edge"/>
-<path d="M840 160V232" class="edge"/>
-<path d="M700 268H760" class="edge"/>
-<rect x="40" y="88" width="180" height="72" rx="6" class="node"/>
-<text x="130" y="121" class="label" text-anchor="middle">Intel browser</text>
-<text x="130" y="139" class="note" text-anchor="middle">Loopback web origin</text>
-<rect x="280" y="88" width="180" height="72" rx="6" class="accent"/>
-<text x="370" y="121" class="label" text-anchor="middle">Next.js relay</text>
-<text x="370" y="139" class="note" text-anchor="middle">Same-origin HTTP and WS</text>
-<rect x="520" y="88" width="180" height="72" rx="6" class="accent"/>
-<text x="610" y="121" class="label" text-anchor="middle">API gateway</text>
-<text x="610" y="139" class="note" text-anchor="middle">Bearer · Host · Origin</text>
-<rect x="760" y="88" width="160" height="72" rx="6" class="node"/>
-<text x="840" y="121" class="label" text-anchor="middle">Private Brain</text>
-<text x="840" y="139" class="note" text-anchor="middle">Retained operations</text>
-<rect x="520" y="232" width="180" height="72" rx="6" class="node"/>
-<text x="610" y="265" class="label" text-anchor="middle">Brief worker</text>
-<text x="610" y="283" class="note" text-anchor="middle">Executes brief stages</text>
-<rect x="760" y="232" width="160" height="72" rx="6" class="node"/>
-<text x="840" y="265" class="label" text-anchor="middle">SurrealDB</text>
-<text x="840" y="283" class="note" text-anchor="middle">Network datastore</text>
-<text x="40" y="220" class="note" text-anchor="start">Venture waits for the owned stack</text>
-<text x="40" y="242" class="note" text-anchor="start">and storage-backed API readiness.</text>
-<text x="40" y="310" class="note" text-anchor="start">The API and web ports publish on host loopback.</text>
+<title>Intel Web request and session boundaries</title>
+<style>body{margin:32px;background:#f5f5f5;color:#2d3142;font-family:Geist,system-ui,sans-serif}main{max-width:1440px;margin:auto}h1{font-family:'Instrument Serif',Georgia,serif;font-size:38px;font-weight:400}svg{width:100%;height:auto}p{max-width:110ch;line-height:1.6}a{color:#394b65}code{font-family:'Geist Mono',ui-monospace,monospace}</style></head><body><main>
+<h1>Intel Web request and session boundaries</h1>
+<p>The existing retained-operation path now includes the authoritative Connect gate. The browser stays on its advertised origin; the server alone adds the scoped relay credential and validated session proof. Accepted Linux work is independent of the native client.</p>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 616" role="img" aria-labelledby="intel-web-title intel-web-desc">
+<title id="intel-web-title">Intel Web guarded relay and retained-operation ownership</title>
+<desc id="intel-web-desc">The browser uses the advertised public web origin, protected by explicit authentication ingress for remote HTTPS. The Next.js Connect gate validates an existing registered context before protected rendering, HTTP exports or live access. Only the server attaches its WebRelay credential and opaque current-session proof to the configured API gateway. The gateway validates that context, owns live streams and delegates retained actor, brief, Related and topology operations to private Brain. Durable brief work and SurrealDB remain independently running Linux resources. Topology ForceCanvas and its accessible list belong to Intel Web. The native client may close without stopping accepted work or the independently managed deployment.</desc>
+<defs><marker id="intel-web-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker></defs>
+<style>text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}.figure-title{font-family:'Instrument Serif',Georgia,serif;font-size:30px}.label{font-size:20px;font-weight:600}.note{font-size:16px}.mono{font-family:'Geist Mono',ui-monospace,monospace;font-size:14px}.zone{font-size:13px;font-weight:600;letter-spacing:1px}.minor{font-size:14px;fill:#4f5d75}.node{fill:#fff;stroke:#4f5d75}.accent{fill:#fff6ed;stroke:#eb6c36}.edge{fill:none;stroke:#4f5d75;stroke-width:2;marker-end:url(#intel-web-arrow)}</style>
+<rect width="1280" height="616" fill="#f5f5f5"/>
+<text x="48" y="44" class="figure-title">Browser traffic stays on the guarded web origin</text>
+<text x="48" y="76" class="zone">PUBLIC ORIGIN AND SERVER-ONLY PRIVATE UPSTREAM ARE SEPARATE</text>
+<path d="M272 172H336" class="edge"/>
+<path d="M624 172H688" class="edge"/>
+<path d="M912 172H976" class="edge"/>
+<path d="M800 240V368" class="edge"/>
+<path d="M1104 240V368" class="edge"/>
+<path d="M912 428H976" class="edge"/>
+<g id="intel-web-browser">
+<rect x="48" y="104" width="224" height="136" rx="6" class="node"/>
+<text x="64" y="136" class="label">Intel browser</text>
+<text x="64" y="168" class="note">Advertised web origin</text>
+<text x="64" y="196" class="note">ForceCanvas + list</text>
+<text x="64" y="224" class="minor">No backend bearer in JS</text>
+</g>
+<g id="intel-web-relay">
+<rect x="336" y="104" width="288" height="136" rx="6" class="node accent"/>
+<text x="352" y="136" class="label">Next.js Connect gate + relay</text>
+<text x="352" y="168" class="note">Existing-ID session / HttpOnly</text>
+<text x="352" y="196" class="note">RSC / REST / export / live guarded</text>
+<text x="352" y="224" class="minor">Central server authority check</text>
+</g>
+<g id="intel-web-gateway">
+<rect x="688" y="104" width="224" height="136" rx="6" class="node accent"/>
+<text x="704" y="136" class="label">API gateway</text>
+<text x="704" y="168" class="note">Scoped WebRelay proof</text>
+<text x="704" y="196" class="note">Private delegation</text>
+<text x="704" y="224" class="minor">Owns live streams</text>
+</g>
+<g id="intel-web-brain">
+<rect x="976" y="104" width="256" height="136" rx="6" class="node"/>
+<text x="992" y="136" class="label">Private Brain</text>
+<text x="992" y="168" class="note">Retained actor / brief / Related</text>
+<text x="992" y="196" class="note">Topology data operations</text>
+<text x="992" y="224" class="minor">Rendering stays in Intel Web</text>
+</g>
+<text x="816" y="304" class="minor">Durably admitted work</text>
+<g id="intel-web-worker">
+<rect x="688" y="368" width="224" height="120" rx="6" class="node"/>
+<text x="704" y="400" class="label">Brief worker</text>
+<text x="704" y="432" class="note">Executes accepted stages</text>
+<text x="704" y="464" class="minor">Independent of client lifetime</text>
+</g>
+<g id="intel-web-storage">
+<rect x="976" y="368" width="256" height="120" rx="6" class="node"/>
+<text x="992" y="400" class="label">SurrealDB</text>
+<text x="992" y="432" class="note">Shared backend domain data</text>
+<text x="992" y="464" class="minor">Private Linux datastore</text>
+</g>
+<text x="48" y="292" class="note">Missing, revoked or unavailable context denies protected data.</text>
+<text x="48" y="328" class="note">Loopback or configured authenticated remote HTTPS ingress.</text>
+<text x="48" y="368" class="note">No native-to-Docker, index or database connection.</text>
+<text x="48" y="404" class="note">Deployment runs independently; native need not remain open.</text>
+<text x="48" y="544" class="minor">Retained-operation view only; actor search has its own index/source path. See the detailed Intel Connect gate for revisions and logout.</text>
+<text x="48" y="580" class="minor">Source ownership diagram, not a passing real browser, native GUI or installed deployment verification claim.</text>
 </svg>
-<p>The browser never receives a workspace bearer. The API uses a separate Brain bearer for retained routes. Live streams stay on the gateway. The shared network store connects admission, background execution, and reads.</p>
-<p><a href="../wiki/code/intel-web.md">Intel web contract</a> · <a href="../wiki/code/fleetworks.md">Fleetworks guide</a> · <a href="../diagrams.md">Diagram catalog</a></p>
+<p>Source: <a href="intel-connect-gate.html">detailed Connect gate</a>, <a href="../../apps/web-desktop/app/server-api.ts">server-only HTTP relay</a>, <a href="../../crates/argos-osint-api/src/private_relay.rs">authenticated private delegation</a> and <a href="../../apps/web-desktop/live-relay.mjs">live gateway relay</a>. External operators manage deployment startup; this diagram does not authorize or imply native service startup.</p>
 </main></body></html>

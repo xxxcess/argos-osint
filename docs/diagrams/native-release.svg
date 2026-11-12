@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 876" role="img" aria-labelledby="native-release-title native-release-desc">
+<title id="native-release-title">Native review artifacts and trusted release</title>
+<desc id="native-release-desc">An exact pushed SHA and native component dispatch select Intel and Apple Silicon Mac builds. Each builds tests and real-view fixtures, packages an unsigned app, uploads immutable fourteen-day Actions artifacts and verifies downloaded bytes by artifact ID and checksum. Review URLs expire. Separate matching-hardware GUI and minimum-macOS acceptance precede explicitly authorized signing, notarization and trusted promotion to durable release assets. Dashed steps are separate pending gates, not candidate publication automation or completed evidence.</desc>
+<defs><marker id="native-release-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker></defs>
+<style>text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}.heading{font-family:'Instrument Serif',Georgia,serif;font-size:28px}.label{font-size:20px;font-weight:600}.note{font-size:16px}.code{font:14px 'Geist Mono',ui-monospace,monospace}.zone{font-size:13px;font-weight:600;letter-spacing:1px}.minor{font-size:14px;fill:#4f5d75}.node,.pending{fill:#fff;stroke:#4f5d75;stroke-width:1.5}.accent{fill:#fff6ed;stroke:#eb6c36;stroke-width:1.5}.pending{stroke-dasharray:6 4}.edge,.later,.flow{fill:none;stroke:#4f5d75;stroke-width:1.5}.later{stroke-dasharray:6 4}.edge,.later{marker-end:url(#native-release-arrow)}</style>
+<rect width="1280" height="876" fill="#f5f5f5"/>
+<text x="32" y="36" class="heading">Two Mac artifacts; trust and installed use have separate gates</text>
+<text x="32" y="64" class="zone">SOLID: CONFIGURED CANDIDATE FLOW · DASHED: SEPARATE ACCEPTANCE / TRUSTED PROMOTION</text>
+<path d="M312 146H376" class="edge"/>
+<path d="M312 172H344V294H376" class="edge"/>
+<path d="M736 146H808" class="edge"/>
+<path d="M736 294H808" class="edge"/>
+<path d="M1024 352V412" class="edge"/>
+<path d="M1024 560V632" class="edge"/>
+<path d="M808 702H736" class="later"/>
+<path d="M376 702H344V486H312" class="later"/>
+<path d="M176 560V632" class="later"/>
+<rect x="40" y="88" width="272" height="116" rx="6" class="node"/>
+<text x="56" y="120" class="label">Freeze exact source</text>
+<text x="56" y="148" class="code">components=native</text>
+<text x="56" y="172" class="note">Both Macs; publish=none</text>
+<text x="56" y="196" class="note">Require the exact pushed SHA</text>
+<rect x="376" y="88" width="360" height="116" rx="6" class="node"/>
+<text x="392" y="120" class="label">Intel Mac build + package</text>
+<text x="392" y="148" class="code">macos-15-intel</text>
+<text x="392" y="172" class="note">Units / fixtures / release .app ZIP</text>
+<text x="392" y="196" class="note">Repository toolchain + Rune pin</text>
+<rect x="376" y="236" width="360" height="116" rx="6" class="node"/>
+<text x="392" y="268" class="label">Apple Silicon build + package</text>
+<text x="392" y="296" class="code">macos-15</text>
+<text x="392" y="320" class="note">Units / fixtures / release .app ZIP</text>
+<text x="392" y="344" class="note">Same exact source SHA</text>
+<rect x="808" y="88" width="432" height="264" rx="6" class="accent"/>
+<text x="824" y="120" class="label">Immutable Actions artifacts</text>
+<text x="824" y="148" class="note">Per-architecture artifact IDs</text>
+<text x="824" y="172" class="note">Versioned .app ZIP + manifest + SHA256</text>
+<text x="824" y="196" class="note">Source / target / Rune / toolchain identity</text>
+<text x="824" y="220" class="note">Unsigned review candidate</text>
+<text x="824" y="244" class="note">Declared minOS is not tested minOS</text>
+<text x="824" y="268" class="note">Actions retention: 14 days</text>
+<text x="824" y="292" class="note">No publication or signing secrets</text>
+<rect x="808" y="412" width="432" height="148" rx="6" class="accent"/>
+<text x="824" y="444" class="label">Verify downloaded bytes</text>
+<text x="824" y="472" class="note">Download by artifact ID; require digest</text>
+<text x="824" y="496" class="note">Check ZIP hash / source / architecture</text>
+<text x="824" y="520" class="note">Check bundle identity / libraries / manifest</text>
+<text x="824" y="544" class="note">No automatic installation or GUI launch</text>
+<rect x="808" y="632" width="432" height="140" rx="6" class="node"/>
+<text x="824" y="664" class="label">Review links + receipts</text>
+<text x="824" y="692" class="note">Actual app and PNG/tree evidence URLs</text>
+<text x="824" y="716" class="note">Record only after download checks succeed</text>
+<text x="824" y="740" class="note">Expiring Actions URLs; not durable assets</text>
+<rect x="376" y="632" width="360" height="140" rx="6" class="pending"/>
+<text x="392" y="664" class="label">Matching Mac acceptance</text>
+<text x="392" y="692" class="note">Finder / Launch Services / OS input</text>
+<text x="392" y="716" class="note">Authenticated read + registered mutation</text>
+<text x="392" y="740" class="note">Local / remote; accessibility + minOS</text>
+<rect x="40" y="412" width="272" height="148" rx="6" class="pending"/>
+<text x="56" y="444" class="label">Trusted promotion</text>
+<text x="56" y="472" class="note">Pending · review exact artifacts</text>
+<text x="56" y="496" class="note">Explicit trusted authorization</text>
+<text x="56" y="520" class="note">Sign / notarize / verify trust</text>
+<text x="56" y="544" class="note">Separate from candidate workflow</text>
+<rect x="40" y="632" width="272" height="140" rx="6" class="pending"/>
+<text x="56" y="664" class="label">Durable release assets</text>
+<text x="56" y="692" class="note">Only after trusted promotion</text>
+<text x="56" y="716" class="note">Versioned app archives + hashes</text>
+<text x="56" y="740" class="note">Stable links outlive Actions URLs</text>
+<text x="40" y="820" class="minor">Diagram arrows describe the source workflow and required later gates, not a completed release or GUI/minimum-OS pass.</text>
+<text x="40" y="848" class="minor">Both selected Mac jobs must succeed. Retained legacy candidates remain selectable until their retirement gates pass.</text>
+</svg>

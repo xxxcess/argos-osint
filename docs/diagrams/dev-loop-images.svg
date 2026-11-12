@@ -1,50 +1,59 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 420" role="img" aria-labelledby="dev-loop-images-title dev-loop-images-desc">
-<title id="dev-loop-images-title">Dockerfile targets and packaged image loop</title>
-<desc id="dev-loop-images-desc">One multi-stage deploy/Dockerfile builds every container image in the repository: surrealdb, web, runtime, and the shared clients_build stages for Venture and the six CLIs.</desc>
-<defs>
-  <marker id="dev-loop-images-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker>
-</defs>
-<style>
-  text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}
-  .heading{font-family:'Instrument Serif',Georgia,serif;font-size:24px}
-  .label{font-size:16px;font-weight:600}
-  .note{font-size:13px}
-  .code{font:12px 'Geist Mono',ui-monospace,monospace}
-  .zone{font-size:12px;font-weight:600;letter-spacing:1px}
-  .node{fill:white;stroke:#4f5d75}
-  .accent{fill:#fff6ed;stroke:#eb6c36}
-  .edge,.flow{fill:none;stroke:#4f5d75;stroke-width:1.5}
-  .edge{marker-end:url(#dev-loop-images-arrow)}
-</style>
-<rect width="960" height="420" fill="#f5f5f5"/>
-<text x="40" y="36" class="heading" text-anchor="start">Avenue 4 · Multi-stage Dockerfile targets → preloaded stack → verify.py smoke</text>
-<path d="M232 212H276V92H320" class="edge"/>
-<path d="M276 212V172H320" class="edge"/>
-<path d="M276 212V252H320" class="edge"/>
-<path d="M276 252V332H320" class="edge"/>
-<path d="M648 92H688V212H728" class="edge"/>
-<path d="M648 172H688" class="flow"/>
-<path d="M648 252H688V212" class="flow"/>
-<path d="M648 332H688V252" class="flow"/>
-<rect x="40" y="172" width="192" height="80" rx="6" class="accent"/>
-<text x="136" y="200" class="label" text-anchor="middle">deploy/Dockerfile</text>
-<text x="136" y="220" class="note" text-anchor="middle">Single multi-stage build</text>
-<text x="136" y="238" class="code" text-anchor="middle">docker-bake.hcl + Compose</text>
-<rect x="320" y="60" width="328" height="64" rx="6" class="node"/>
-<text x="484" y="92" class="label" text-anchor="middle">surrealdb target (Compose disk)</text>
-<text x="484" y="112" class="note" text-anchor="middle">surrealdb:v3.3.4 + static busybox start-surreal</text>
-<rect x="320" y="140" width="328" height="64" rx="6" class="node"/>
-<text x="484" y="172" class="label" text-anchor="middle">web target (Bake & Compose)</text>
-<text x="484" y="192" class="note" text-anchor="middle">node:24-bookworm-slim · prod deps + .next</text>
-<rect x="320" y="220" width="328" height="64" rx="6" class="node"/>
-<text x="484" y="252" class="label" text-anchor="middle">runtime target (Compose services)</text>
-<text x="484" y="272" class="note" text-anchor="middle">debian:bookworm-slim · argos-api-host roles</text>
-<rect x="320" y="300" width="328" height="64" rx="6" class="node"/>
-<text x="484" y="332" class="label" text-anchor="middle">clients_build targets (Bake group)</text>
-<text x="484" y="352" class="note" text-anchor="middle">One compile → venture + 6 fleetworks-* CLIs</text>
-<rect x="728" y="172" width="192" height="80" rx="6" class="accent"/>
-<text x="824" y="200" class="label" text-anchor="middle">Packaged smoke</text>
-<text x="824" y="220" class="note" text-anchor="middle">Preloaded image check</text>
-<text x="824" y="238" class="code" text-anchor="middle">up --no-build · verify.py</text>
-<text x="40" y="396" class="note" text-anchor="start">Bake tags web, venture, and fleetworks-* with :local and :VERSION. Compose builds runtime and surrealdb or starts preloaded tags with --no-build.</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 840" role="img" aria-labelledby="dev-loop-images-title dev-loop-images-desc">
+<title id="dev-loop-images-title">Docker targets: backend group, identity and explicit recreation</title>
+<desc id="dev-loop-images-desc">The external path planner selects affected Dockerfile inputs and target images. Native view-only changes do not select Linux image builds. Verify Docker context, daemon and builder architecture and choose linux/amd64 or linux/arm64 plus a unique IMAGE_TAG that preserves aliases used by existing stacks. The Bake backend group builds exactly runtime, surrealdb and search-index. Runtime contains the shared service host; search-index uses only contracts and search source in a separate compile graph; the digest-pinned database wrapper has its own target. Retain exact loaded image IDs, platform, tags and Buildx metadata. Hash-verified matching Linux model and native-library assets are separate staged dependencies for explicitly selected inference roles. Explicitly recreate only selected owned services under isolated workspace, project and ports while preserving data, credentials, identities, caches and unrelated images. Native app packaging, web images and retained Venture or CLI targets remain independent.</desc>
+<defs><marker id="dev-loop-images-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker></defs>
+<style>text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}.label{font-size:20px;font-weight:600}.note{font-size:16px}.zone{font-size:13px;font-weight:600;letter-spacing:1px}.node{fill:#fff;stroke:#4f5d75}.accent{fill:#fff6ed;stroke:#eb6c36}.edge{fill:none;stroke:#4f5d75;stroke-width:2;marker-end:url(#dev-loop-images-arrow)}.minor{fill:#4f5d75;font-size:14px}.code{font-family:'Geist Mono',ui-monospace,monospace;font-size:14px}</style>
+<rect width="1320" height="840" fill="#f5f5f5"/>
+<text x="48" y="68" class="zone">NARROW INPUTS · MATCHING LINUX PLATFORM · REVIEW TAGS THAT PRESERVE EXISTING ALIASES</text>
+<path d="M408 172H468" class="edge"/>
+<path d="M648 240V280H228V360" class="edge"/>
+<path d="M648 240V360" class="edge"/>
+<path d="M1080 240V360" class="edge"/>
+<path d="M228 472V584" class="edge"/>
+<path d="M648 472V536H228V584" class="edge"/>
+<path d="M1080 472V536H228V584" class="edge"/>
+<path d="M408 652H436V752H1080V720" class="edge"/>
+<path d="M828 652H888" class="edge"/>
+
+<rect x="48" y="104" width="360" height="136" rx="6" class="node"/>
+<text x="64" y="136" class="label">Select affected build inputs</text>
+<text x="64" y="166" class="note">Source / manifests / lock / Docker inputs</text>
+<text x="64" y="194" class="note">Choose only the affected image targets</text>
+<text x="64" y="222" class="note">Native view-only changes stay excluded</text>
+<rect x="468" y="104" width="804" height="136" rx="6" class="accent"/>
+<text x="484" y="136" class="label">Verify builder / daemon platform and unique review tag</text>
+<text x="484" y="166" class="note">Choose linux/amd64 or linux/arm64 deliberately; record the actual Docker context and builder.</text>
+<text x="484" y="194" class="note">IMAGE_TAG keeps existing :local / version aliases intact. Reuse architecture-scoped BuildKit caches.</text>
+<text x="484" y="222" class="note">Build from the repository root; print the selected Bake plan before loading its targets.</text>
+<rect x="24" y="308" width="1272" height="196" fill="none" stroke="#a0a5b0" stroke-dasharray="6 5"/>
+<text x="48" y="336" class="zone">BACKEND · 3 TARGETS</text>
+<rect x="48" y="360" width="360" height="112" rx="6" class="node"/>
+<text x="64" y="392" class="label">runtime</text>
+<text x="64" y="422" class="note">One shared argos-api-host role binary</text>
+<text x="64" y="450" class="note">Native view sources are not copied</text>
+<rect x="468" y="360" width="360" height="112" rx="6" class="accent"/>
+<text x="484" y="392" class="label">search-index</text>
+<text x="484" y="422" class="note">Contracts + private Tantivy service only</text>
+<text x="484" y="450" class="note">No core inference / CLI / native / Next build</text>
+<rect x="888" y="360" width="384" height="112" rx="6" class="node"/>
+<text x="904" y="392" class="label">surrealdb</text>
+<text x="904" y="422" class="note">Digest-pinned database + secret wrapper</text>
+<text x="904" y="450" class="note">Owned data directory remains external</text>
+<rect x="48" y="584" width="360" height="136" rx="6" class="node"/>
+<text x="64" y="616" class="label">Inspect exact loaded images</text>
+<text x="64" y="646" class="note">Retain image IDs / platform / review tags</text>
+<text x="64" y="674" class="note">Retain Buildx metadata + source revision</text>
+<text x="64" y="702" class="note">Build completion starts no services</text>
+<rect x="468" y="584" width="360" height="136" rx="6" class="node"/>
+<text x="484" y="616" class="label">Separate Linux model assets</text>
+<text x="484" y="646" class="note">Hash-verified model + native-library bundle</text>
+<text x="484" y="674" class="note">Match the selected Linux architecture</text>
+<text x="484" y="702" class="note">Stage only for selected inference roles</text>
+<rect x="888" y="584" width="384" height="136" rx="6" class="node"/>
+<text x="904" y="616" class="label">Explicit owned recreation</text>
+<text x="904" y="646" class="note">Exact tags / IDs; dedicated project and ports</text>
+<text x="904" y="674" class="note">Recreate only the selected consumers</text>
+<text x="904" y="702" class="note">Retain data / identity / secrets / caches</text>
+<text x="48" y="796" class="minor">Web and Venture / CLI compatibility targets stay separate. Native app builds do not provision Docker or mutate the user's stack.</text>
+<text x="48" y="824" class="minor">Keep unrelated images and aliases. Loading differs from recreation, health, integration and real model inference.</text>
 </svg>

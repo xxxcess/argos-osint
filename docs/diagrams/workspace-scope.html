@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Workspace scope: backend resources and immutable origin</title>
+<style>body{margin:32px;background:#f5f5f5;color:#2d3142;font-family:Geist,system-ui,sans-serif}main{max-width:1320px;margin:auto}h1{font-family:'Instrument Serif',Georgia,serif;font-size:38px;font-weight:400}svg{width:100%;height:auto}p{max-width:100ch;line-height:1.6}a{color:#394b65}</style></head><body><main>
+<h1>Global resources, local request origin</h1>
+<p>The selected backend owns the shared Atlas, Brain, Tools, Models and Profile resources. A protected local child identifies the origin captured with an accepted request; it does not create a private corpus or copy backend settings. Jobs and Logs remain within the current workstation activity boundary.</p>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 850" role="img" aria-labelledby="workspace-scope-title workspace-scope-desc">
+<title id="workspace-scope-title">Workspace scope: shared backend target and immutable local origin</title>
+<desc id="workspace-scope-desc">The Mac owns a protected home container with default and named immediate children. Root is not registered, and default cannot be removed or renamed. Atlas, Brain, Tools, Models and Profile use shared resources within the selected authorized backend. An interactive request captures a registered child and workstation as immutable provenance, not resource ownership. Jobs and Logs include only the current workstation's attributed or associated work, with optional child or job narrowing. A folder switch preserves global drafts and does not copy keys, model roles or a private corpus.</desc>
+<defs><marker id="workspace-scope-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker></defs>
+<style>text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}.label{font-size:20px;font-weight:600}.note{font-size:16px}.zone{font-size:13px;font-weight:600;letter-spacing:1px}.node{fill:#fff;stroke:#4f5d75}.accent{fill:#fff6ed;stroke:#eb6c36}.edge{fill:none;stroke:#4f5d75;stroke-width:2;marker-end:url(#workspace-scope-arrow)}.minor{fill:#4f5d75;font-size:14px}</style>
+<rect width="1320" height="850" fill="#f5f5f5"/>
+<rect x="24" y="40" width="496" height="646" fill="none" stroke="#a0a5b0" stroke-dasharray="6 5"/>
+<rect x="568" y="40" width="728" height="646" fill="none" stroke="#a0a5b0" stroke-dasharray="6 5"/>
+<text x="48" y="68" class="zone">WORKSTATION · LOCAL IDENTITY</text>
+<text x="592" y="68" class="zone">BACKEND · SELECTED AUTHORIZED DEPLOYMENT</text>
+
+<path d="M272 210V240H120V270" class="edge"/>
+<path d="M272 240V270" class="edge"/>
+<path d="M272 240H424V270" class="edge"/>
+<path d="M272 370V400H592" class="edge"/>
+<path d="M932 324V254" class="edge"/>
+<path d="M932 454V526" class="edge"/>
+
+<rect x="48" y="104" width="448" height="106" rx="6" class="node"/>
+<text x="64" y="134" class="label">OS home / .fleetworks</text>
+<text x="64" y="162" class="note">Protected root, markers and recovery catalog</text>
+<text x="64" y="190" class="note">The root is never a registered workspace</text>
+
+<rect x="48" y="270" width="144" height="100" rx="6" class="node"/>
+<text x="64" y="300" class="label">default</text>
+<text x="64" y="328" class="note">Protected child</text>
+<text x="64" y="354" class="minor">No rename/delete</text>
+<rect x="200" y="270" width="144" height="100" rx="6" class="accent"/>
+<text x="216" y="300" class="label">research</text>
+<text x="216" y="328" class="note">Selected child</text>
+<text x="216" y="354" class="minor">Owned identity</text>
+<rect x="352" y="270" width="144" height="100" rx="6" class="node"/>
+<text x="368" y="300" class="label">analysis</text>
+<text x="368" y="328" class="note">Named child</text>
+<text x="368" y="354" class="minor">Owned identity</text>
+<text x="288" y="392" class="minor">Future request origin</text>
+
+<rect x="48" y="448" width="448" height="116" rx="6" class="node"/>
+<text x="64" y="478" class="label">Local connection profiles</text>
+<text x="64" y="506" class="note">Gateway name / origin / protected file reference</text>
+<text x="64" y="532" class="note">Profile selection does not choose a child</text>
+<text x="64" y="552" class="minor">No provider keys or role copies in child folders</text>
+<text x="48" y="612" class="note">Select only a verified immediate child.</text>
+<text x="48" y="640" class="note">A local path is never a remote server path.</text>
+
+<rect x="592" y="104" width="680" height="150" rx="6" class="node"/>
+<text x="608" y="134" class="label">Backend group · shared resource target</text>
+<text x="608" y="164" class="note">Atlas · Brain · Tools · Models · Profile</text>
+<text x="608" y="192" class="note">Shared records, corpus, search, accounts, keys and model roles</text>
+<text x="608" y="220" class="note">Global reads / configuration use backend permissions, without a folder</text>
+<text x="608" y="242" class="minor">Changing local children does not create a private copy of these resources</text>
+
+<rect x="592" y="324" width="680" height="130" rx="6" class="accent"/>
+<text x="608" y="354" class="label">Registered origin · captured at durable acceptance</text>
+<text x="608" y="382" class="note">Deployment + workstation + child IDs, Connect ID and configuration revision</text>
+<text x="608" y="410" class="note">Creator remains immutable; reuse records a requester association</text>
+<text x="608" y="436" class="note">Later folder / IP changes do not rewrite accepted history</text>
+<text x="948" y="290" class="minor">Global target ≠ local origin</text>
+<text x="948" y="492" class="minor">Server filters before rows / counts / facets</text>
+
+<rect x="592" y="526" width="680" height="130" rx="6" class="node"/>
+<text x="608" y="556" class="label">Workstation group · Jobs &amp; Logs</text>
+<text x="608" y="584" class="note">Only this workstation's attributed / associated work</text>
+<text x="608" y="612" class="note">May narrow to a child, job or eligible descendants; no global service feed</text>
+<text x="608" y="638" class="note">Incompatible shared work exposes status, not private details or controls</text>
+
+<rect x="24" y="716" width="1272" height="106" rx="6" class="node"/>
+<text x="48" y="746" class="label">Switching changes future context, not resource ownership</text>
+<text x="48" y="774" class="note">Workspace-only switches keep authorized global data and drafts; pending origin-dependent confirmations are invalidated.</text>
+<text x="48" y="802" class="note">Gateway / credential changes isolate caches and private state. Closing the app does not cancel accepted backend work.</text>
+</svg>
+<p>This figure describes the implemented manager, registered-context and activity contracts. It does not establish a real installed Mac launch, credential reset, user-folder deletion or both-architecture verification.</p>
+<p><a href="../wiki/code/native-workspaces.md">Protected native workspaces</a> · <a href="../wiki/code/native-connections.md">Connections and activity</a> · <a href="../diagrams.md">Diagram catalog</a></p>
+</main></body></html>

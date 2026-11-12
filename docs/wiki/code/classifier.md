@@ -1,10 +1,10 @@
-# Local classifier
+# Classifier runtime
 
 [Code route](index.md) · [Taxonomy](../concepts/strategic-domains-taxonomy.md) · [Wiki](../../index.md)
 
 @tag:classifier
 
-New Atlas cycles use a local Rust-BERT zero-shot worker. The worker evaluates each article against the six canonical domain definitions and returns independent relevance scores. Atlas admits up to two qualifying domains. Historical admission and provider monitoring have separate durable jobs. The retained Natural engine supports explicit Natural training and exact-pin replay of Natural runs.
+New Atlas cycles use a private Linux Rust-BERT zero-shot worker. The worker evaluates each article against the six canonical domain definitions and returns independent relevance scores. Atlas admits up to two qualifying domains. Historical admission and provider monitoring have separate durable jobs. The retained Natural engine supports optional explicit training and exact-pin replay of Natural runs. Native macOS pages send gateway requests; the desktop owns neither classifier nor NLP engines.
 
 ## Ownership and public entry points
 
@@ -12,7 +12,7 @@ The feature-independent [taxonomy](../../../crates/argos-osint-core/src/atlas_ta
 
 | Source | Responsibility |
 | --- | --- |
-| [tools/atlas-bert](../../../tools/atlas-bert) | Native CPU worker for zero-shot inference with local DistilBERT MNLI assets |
+| [tools/atlas-bert](../../../tools/atlas-bert) | Linux CPU worker for zero-shot inference with deployment-owned DistilBERT MNLI assets |
 | [classifier/mod.rs](../../../crates/argos-osint-core/src/classifier/mod.rs) | Typed errors, receipts, snapshots, inference facade, worker controls and compiled identity |
 | [engine.rs](../../../crates/argos-osint-core/src/classifier/engine.rs) | Worker-owned QuickJS runtime, fixed-code integrity checks, bounded queues, cancellation and restore |
 | [artifact.rs](../../../crates/argos-osint-core/src/classifier/artifact.rs) | Immutable model files, active pointer, writer lease, checksum validation and activation history |
@@ -23,7 +23,7 @@ The feature-independent [taxonomy](../../../crates/argos-osint-core/src/atlas_ta
 | [atlas_admission_maintenance.rs](../../../crates/argos-osint-core/src/atlas_admission_maintenance.rs) | Durable retained-occurrence reclassification with 64-row activations and original provenance |
 | [storage/classifier_calibration.rs](../../../crates/argos-osint-core/src/storage/classifier_calibration.rs) | Observation origins, terminal-cycle outbox and independent bounded monitoring |
 | [atlas_calibration.rs](../../../crates/argos-osint-core/src/atlas_calibration.rs) | Bounded story-family discovery and permanent partitions |
-| [data_paths.rs](../../../crates/argos-osint-core/src/data_paths.rs) | Saved local dataset/artifact locations shared by Profile and Venture |
+| [data_paths.rs](../../../crates/argos-osint-core/src/data_paths.rs) | Saved dataset/artifact locations for backend owners and retained operator clients |
 | [dataset.rs](../../../crates/argos-osint-core/src/classifier/dataset.rs) | Read-only runtime resolution and bounded synthetic CSV validation |
 | [readiness.rs](../../../crates/argos-osint-core/src/classifier/readiness.rs) | Shared home probe/cache, manual jobs, pin/evaluate/rollback and cycle-preflight permit |
 
@@ -33,11 +33,19 @@ The neutral [runtime budget](../../../crates/argos-osint-core/src/js_runtime_bud
 
 The [Atlas Compose overlay](../../../deploy/atlas-dispatch.md) runs an authenticated private classifier role. The service keeps the pinned Rust-BERT worker warm and checks exact inference receipts. Supply the Linux worker and checkpoint files under the workspace using paths visible inside the container. The service can report transport readiness before model assets are available. Atlas reports a pin failure on the durable cycle job.
 
-`venture train-legacy` snapshots the selected dataset for one-shot Natural training. Pass `--activate` to select that Natural artifact explicitly. Fresh Atlas cycles use Rust-BERT.
+The retained operator command `venture train-legacy` snapshots the selected dataset for one-shot Natural training. Its explicit `--activate` option selects that Natural artifact under the existing compatibility contract. The native maintenance flow below separates those operations. Fresh Atlas cycles use Rust-BERT.
 
-## Set up the live Rust-BERT classifier
+## Native maintenance and optional Natural activation
 
-Prepare the CPU worker and pinned English NLI checkpoint. The Compose classifier requires a Linux executable built for the container architecture. Native Intel macOS setup is useful for direct worker verification. The worker runs offline once its assets are installed.
+Workstation offers training only when the gateway reports an actual permitted durable consumer. The user selects a configured dataset or uploads bounded CSV bytes; the server verifies their hash and purpose and returns an opaque dataset reference. The [maintenance contract](../../../crates/fleetworks-contracts/src/readiness.rs) binds that reference, registered origin, request ID and confirmed configuration revision. A local Mac path grants no server filesystem access. The [gateway admission](../../../crates/argos-osint-api/src/maintenance.rs) returns a durable Job receipt; acceptance and completion remain separate. Status and authorized results come from registered Jobs.
+
+This operation trains only optional Natural. The [Linux setup executor](../../../services/api-host/src/setup_jobs.rs) explicitly retains the prior active model and records the candidate/dataset identity with `activation_requested=false`. Successful training neither activates its candidate nor retrains Rust-BERT. To activate, the native user separately inspects the authorized training job's exact candidate hashes and expected prior active revision, then confirms the [activation request](../../../crates/fleetworks-contracts/src/classifier_activation.rs). Synthetic baselines need their own explicit consent. The [activation gateway](../../../crates/argos-osint-api/src/classifier_activation.rs) enforces current Native maintenance/activity permissions, registration and private job eligibility; its backend worker owns artifact validation, writer fences and effect reconciliation. A lost or uncertain effect remains unresolved until operation-owned readback proves the outcome. Fresh Atlas collection continues to pin Rust-BERT independently of the Natural active pointer.
+
+The new [Linux verification/bundle helper](../../../tools/atlas-bert/scripts/verify_linux.py) and [classifier CI lane](ci.md#atlas-bertyml--classifier-worker-checks) configure native AMD64 and ARM64 build/link, real pinned-checkpoint inference and extracted-bundle checks inside Debian bookworm. Both-architecture Linux inference execution remains **pending** cutover evidence. Native fixture/unit results and installed Mac GUI evidence are separate; this maintenance path claims no completed installed-app journey or model-performance result.
+
+## Linux deployment and retained standalone worker setup
+
+Prepare the CPU worker and pinned English NLI checkpoint for the container's Linux architecture. The Linux helper above packages the worker, matching native libraries and verified assets with ABI/hash checks; the external operator supplies container-visible configuration. The worker runs offline once its assets are installed. The following standalone build instructions retain the earlier operator/direct-worker compatibility path, including its Intel macOS example; they are not setup steps for the Rune desktop and do not establish Linux deployment or installed-app acceptance.
 
 1. Set up CPU LibTorch 2.1.0 and Python 3.11. The pinned PyTorch wheel supplies both the worker's LibTorch and the one-time model converter. On Intel macOS, install the Xcode Command Line Tools (`xcode-select --install`) and use an x86_64 Python and Rust toolchain. PyTorch 2.1.0 publishes an Intel macOS wheel. [PyTorch release files](https://pypi.org/project/torch/2.1.0/#files) · [tch 0.14.0 setup](https://docs.rs/crate/tch/0.14.0/source/README.md)
 
@@ -125,7 +133,7 @@ The frozen v1 seed's 55 positive calibration rows per domain represent eight ind
 
 ## Workspace training
 
-Run the optional Natural trainer against a selected workspace dataset.
+This retained operator/CLI path runs the optional Natural trainer against a selected deployment-workspace dataset. Native Workstation uses the separate registered maintenance and candidate-activation flow above.
 
 ```sh
 venture --workspace ./review-workspace train-legacy --file datasets/argos_atlas_strategic_domains_v2.csv

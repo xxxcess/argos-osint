@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 736" role="img" aria-labelledby="dev-loop-native-title dev-loop-native-desc">
+<title id="dev-loop-native-title">Native Mac development: shared debug build and explicit review</title>
+<desc id="dev-loop-native-desc">Native source changes first resolve a supported physical Mac architecture, process architecture, Rosetta state and Rust host. The scoped agent Cargo wrapper uses the locked dependency graph and shared target/agents debug cache while protecting the user target/debug directory. The native candidate helper resolves the executable from successful Cargo artifact output and packages a complete Fleetworks.app with resources, Info.plist, architecture checks, hashes, manifest and printed output path. Launch occurs only with an explicit open request on matching physical hardware. Selected Runtime fixtures use the same production views with synthetic effects and require inspection of generated PNG and accessibility output. Fixture evidence and packaging are separate from observed GUI behavior. These helpers start no backend, initialize no user workspace and perform no configuration reset. External backend and web provisioning, Venture and retained terminal compatibility tools remain separate operations.</desc>
+<defs><marker id="dev-loop-native-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker></defs>
+<style>text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}.label{font-size:20px;font-weight:600}.note{font-size:16px}.zone{font-size:13px;font-weight:600;letter-spacing:1px}.node{fill:#fff;stroke:#4f5d75}.accent{fill:#fff6ed;stroke:#eb6c36}.edge{fill:none;stroke:#4f5d75;stroke-width:2;marker-end:url(#dev-loop-native-arrow)}.minor{fill:#4f5d75;font-size:14px}.code{font-family:'Geist Mono',ui-monospace,monospace;font-size:14px}</style>
+<rect width="1320" height="736" fill="#f5f5f5"/>
+<text x="48" y="68" class="zone">NATIVE CLIENT · ONE HOST DEBUG GRAPH AND ONE BUILD OWNER</text>
+
+<path d="M408 172H468" class="edge"/>
+<path d="M828 172H888" class="edge"/>
+<path d="M1080 240V336" class="edge"/>
+<path d="M888 208H852V404H828" class="edge"/>
+<path d="M888 404H864V512H436V404H408" class="edge"/>
+
+<rect x="48" y="104" width="360" height="136" rx="6" class="node"/>
+<text x="64" y="136" class="label">Edit native client sources</text>
+<text x="64" y="166" class="note">App / safe contracts / workspace manager</text>
+<text x="64" y="194" class="note">Select affected checks and fixture scenes</text>
+<text x="64" y="222" class="note">Freeze sources before final evidence</text>
+
+<rect x="468" y="104" width="360" height="136" rx="6" class="node"/>
+<text x="484" y="136" class="label">Detect and validate the host</text>
+<text x="484" y="166" class="note">Physical CPU / process CPU / Rust host</text>
+<text x="484" y="194" class="note">Resolve Rosetta or host mismatch first</text>
+<text x="484" y="222" class="note">Use the repository-pinned toolchain</text>
+
+<rect x="888" y="104" width="384" height="136" rx="6" class="accent"/>
+<text x="904" y="136" class="label">Scoped shared debug Cargo</text>
+<text x="904" y="166" class="code">agent_cargo.py … --locked</text>
+<text x="904" y="194" class="note">Reuse target/agents and the same graph</text>
+<text x="904" y="222" class="note">Keep the user's target/debug intact</text>
+<text x="1096" y="292" class="minor">Build artifact output</text>
+
+<rect x="888" y="336" width="384" height="136" rx="6" class="accent"/>
+<text x="904" y="368" class="label">Complete Fleetworks.app</text>
+<text x="904" y="398" class="note">Resolve executable; verify architecture</text>
+<text x="904" y="426" class="note">Resources + Info.plist + manifest + hashes</text>
+<text x="904" y="454" class="note">Print the exact app and artifact paths</text>
+
+<rect x="468" y="336" width="360" height="136" rx="6" class="node"/>
+<text x="484" y="368" class="label">Same-view Runtime evidence</text>
+<text x="484" y="398" class="note">Selected synthetic scenes and input</text>
+<text x="484" y="426" class="note">Inspect PNG and accessibility tree</text>
+<text x="484" y="454" class="note">Record GUI / backend evidence separately</text>
+
+<rect x="48" y="336" width="360" height="136" rx="6" class="node"/>
+<text x="64" y="368" class="label">Explicit app launch</text>
+<text x="64" y="398" class="note">Only --open, on the matching physical Mac</text>
+<text x="64" y="426" class="note">Observe actual window / input / lifecycle</text>
+<text x="64" y="454" class="note">Keep package and GUI results distinct</text>
+<text x="484" y="500" class="minor">Explicit --open after packaging</text>
+
+<rect x="48" y="568" width="1224" height="112" rx="6" class="node"/>
+<text x="64" y="600" class="label">Backend and web provisioning are independent operator work</text>
+<text x="64" y="630" class="note">The app connects to an authorized configured gateway. This host loop starts no Docker, database, index, inference or web relay.</text>
+<text x="64" y="658" class="note">Venture and terminal clients remain compatibility tools. Preserve existing stacks, data, images and user configuration.</text>
+<text x="48" y="716" class="minor">Repeat only the affected work. Neither a complete package nor an offline fixture proves installed GUI or live backend behavior.</text>
+</svg>

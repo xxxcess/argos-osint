@@ -25,21 +25,32 @@ For Fleetworks client, service, deployment or web work, start with the [scope pl
 
 ### Development loops: local CLI and Docker
 
-Fleetworks has two execution surfaces. The terminal clients and Venture run natively on the host. The API, private services, workers, web relay and managed SurrealDB run in Docker through `deploy/compose.yml`. Pick the shortest loop that exercises the code you changed, then widen. The commands below are the fast paths; deployment details stay in the [deployment guide](../../../deploy/README.md).
+Fleetworks has a Rune macOS client, an independently operated Linux backend and Intel Web. The app connects to the gateway; Venture retains external deployment and compatibility CLI operations. Pick the shortest loop that exercises the changed contract, then widen. The commands below are the fast paths; deployment details stay in the [deployment guide](../../../deploy/README.md).
 
 [![Fleetworks development loops](../../diagrams/dev-loops.svg)](../../diagrams/dev-loops.html)
 
 | Changed code | Loop | Rebuild needed |
 | --- | --- | --- |
-| Venture, `fleetworks-*` CLIs, shared client crates | **1. Local CLI** | Host `cargo` build only |
+| Rune app and its client/workspace contracts | **1. Native app** | Scoped host debug tests, selected real-view captures and complete app bundle |
+| Retained Venture / CLI compatibility | **1b. Operator CLI** | Scoped host `cargo` build only |
 | `argos-api-host` roles, core, storage, jobs (service side) | **2. Runtime image** | `runtime` image |
 | `apps/web-desktop/app`, `packages/{ui,intel,api-client}/src` | **3. Web dev container** | None; files reload |
-| Web dependencies, relay, Next config, Dockerfile, Compose, SurrealDB wrapper | **4. Image build** | `web`, `runtime` or `surrealdb` image |
+| Web dependencies, relay, Next config, Dockerfile, Compose, SurrealDB wrapper, private search | **4. Image build** | Affected `web`, `runtime`, `surrealdb` or `search-index` image |
 | Platform, packaging or release behavior | **5. Hosted CI** | Pushed revision |
 
-**1. Local CLI loop (no container rebuild).** Build the host binaries and run them against a disposable workspace. Client and Venture unit tests need no datastore.
+**1. Native app loop.** Detect the physical host, run affected app/contracts/workspace tests and build the complete review app through the shared helper. Default host builds reuse the implicit debug graph; an explicit target intentionally selects its separate target directory. Opening the app remains explicit.
 
-[![Local CLI and TUI development loop](../../diagrams/dev-loop-cli.svg)](../../diagrams/dev-loop-cli.html)
+[![Native app development loop](../../diagrams/dev-loop-native.svg)](../../diagrams/dev-loop-native.html)
+
+```sh
+python3 scripts/fleetworks_verify.py platform --format json
+python3 scripts/agent_cargo.py test --locked -p fleetworks-desktop -p fleetworks-workspace -p fleetworks-contracts
+python3 scripts/fleetworks_candidate.py build-native --agent --target host --profile debug
+```
+
+Use [selected native verification](native-verification.md) for affected Runtime/PNG/tree/script evidence. The helper prints the `.app` and manifest paths; add `--open` only when an actual GUI launch is intended. Native build/fixture commands do not provision a backend. Installed-app, minimum-OS and platform validation stay separate from fixture generation.
+
+**1b. Retained operator CLI loop.** Build the affected Venture/client binary and use a disposable operator workspace. This compatibility surface has its own callers and retirement gates; the native app never launches it.
 
 ```sh
 python3 scripts/agent_cargo.py build --locked -p fleetworks-venture -p fleetworks-cli --bins

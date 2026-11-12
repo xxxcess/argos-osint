@@ -14,6 +14,8 @@ Create is private and create-new. Attach accepts an existing owned child with ma
 
 The manager serializes catalog changes with its private lock and journals pending operations. Unknown registration outcomes persist across process restart and block removal. Selecting another child changes future origin, not backend-wide settings or already accepted work.
 
+The [scope figure](../../diagrams/workspace-scope.html) contrasts backend-global resources with captured child origin and workstation-only activity.
+
 ## Backend lifecycle before removal
 
 A child can have known bindings to more than one backend. Removal snapshots the exact child identity and known bindings. Every relevant backend must provide its actual retirement outcome; an unavailable gateway, pending response or incomplete receipt preserves local bytes and the pending journal. A local folder marker cannot manufacture server retirement authority.
@@ -21,6 +23,8 @@ A child can have known bindings to more than one backend. Removal snapshots the 
 The backend fences new admission, revokes sessions and waits for associated jobs and tasks, including genuine causal descendants, before returning deletion-ready evidence. It preserves Jobs/domain history and keeps old identities distinct from a newly created same-name child. A cancelled HTTP request does not prove that work drained.
 
 Only a completed, identity-checked local lifecycle may proceed to a separately guarded macOS Trash adapter. A cleanup-pending state means bytes remain. Inspect the selected revision's native action/fixture evidence before treating that platform operation as verified; tests use isolated adapters and do not trash the user's workspaces.
+
+[![Protected workspace lifecycle and retirement recovery](../../diagrams/workspace-lifecycle.svg)](../../diagrams/workspace-lifecycle.html)
 
 ## Verification
 

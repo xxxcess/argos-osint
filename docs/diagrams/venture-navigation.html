@@ -1,17 +1,12 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Venture startup and ownership · planned target</title>
-<style>
-  body{margin:32px;background:#f5f5f5;color:#2d3142;font-family:Geist,system-ui,sans-serif}
-  main{max-width:1060px;margin:auto}h1{font-family:'Instrument Serif',Georgia,serif}
-  svg{width:100%;height:auto}p{line-height:1.6}a{color:#394b65}
-</style>
-</head><body><main>
-<h1>Venture startup and ownership · planned target</h1>
-<p>Planned startup: choose the domain SurrealDB mode, then start Jobs with its own persistent SQLite and RocksDB paths. Venture checks readiness and service ownership before returning or attaching a terminal.</p>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 384" role="img" aria-labelledby="venture-navigation-title venture-navigation-desc">
-<title id="venture-navigation-title">Venture startup and ownership · planned target</title>
-<desc id="venture-navigation-desc">Venture initializes the workspace, selects a storage mode, reconciles its owned services, and checks domain, SQLite and embedded queue readiness in the planned target before returning or attaching a terminal.</desc>
+<title>External Venture operator lifecycle</title>
+<style>body{margin:32px;background:#f5f5f5;color:#2d3142;font-family:Geist,system-ui,sans-serif}main{max-width:1060px;margin:auto}h1{font-family:'Instrument Serif',Georgia,serif;font-size:38px;font-weight:400}svg{width:100%;height:auto}p{max-width:105ch;line-height:1.6}a{color:#394b65}code{font-family:'Geist Mono',ui-monospace,monospace}</style></head><body><main>
+<h1>External Venture operator lifecycle</h1>
+<p>Venture remains a supported external operator tool. Explicit operator commands select a deployment workspace and storage target, start or reconcile owned services, check readiness and optionally attach the retained operator CLI. This is separate from native application startup, gateway profiles and local origin children.</p>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 432" role="img" aria-labelledby="venture-navigation-title venture-navigation-desc">
+<title id="venture-navigation-title">External Venture operator startup and ownership</title>
+<desc id="venture-navigation-desc">An external operator selects Venture's deployment workspace and configured storage target, explicitly starts or reconciles owned services and checks actual owner readiness before printing addresses. The retained web command may attach an operator terminal to Jobs or service logs. Exiting that session leaves the deployment running. Status, logs and stop operate only on the owned deployment and retain persistent data. Native application startup is a separate gateway connection and registration flow and never invokes Venture or starts this stack.</desc>
 <defs>
   <marker id="venture-navigation-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker>
 </defs>
@@ -27,8 +22,8 @@
   .edge,.flow{fill:none;stroke:#4f5d75;stroke-width:1.5}
   .edge{marker-end:url(#venture-navigation-arrow)}
 </style>
-<rect width="960" height="384" fill="#f5f5f5"/>
-<text x="40" y="36" class="heading" text-anchor="start">Planned startup · domain endpoint + local Jobs stores</text>
+<rect width="960" height="432" fill="#f5f5f5"/>
+<text x="40" y="36" class="heading" text-anchor="start">External operator startup and owned-stack lifecycle</text>
 <path d="M228 116H272" class="edge"/>
 <path d="M460 116H504" class="edge"/>
 <path d="M692 116H736" class="edge"/>
@@ -36,29 +31,29 @@
 <path d="M828 152V212H596V236" class="edge"/>
 <path d="M828 152V236" class="edge"/>
 <rect x="40" y="80" width="188" height="72" rx="6" class="node"/>
-<text x="134" y="113" class="label" text-anchor="middle">Select workspace</text>
-<text x="134" y="131" class="note" text-anchor="middle">--workspace or default</text>
-<rect x="272" y="80" width="188" height="72" rx="6" class="accent"/>
-<text x="366" y="113" class="label" text-anchor="middle">Start services</text>
-<text x="366" y="131" class="note" text-anchor="middle">Domain + Jobs storage</text>
+<text x="134" y="113" class="label" text-anchor="middle">Operator workspace</text>
+<text x="134" y="131" class="note" text-anchor="middle">Deployment configuration</text>
+<rect x="272" y="80" width="188" height="72" rx="6" class="node accent"/>
+<text x="366" y="113" class="label" text-anchor="middle">Start owned services</text>
+<text x="366" y="131" class="note" text-anchor="middle">Explicit operator command</text>
 <rect x="504" y="80" width="188" height="72" rx="6" class="node"/>
-<text x="598" y="113" class="label" text-anchor="middle">Confirm readiness</text>
-<text x="598" y="131" class="note" text-anchor="middle">Domain + SQLite + queue</text>
-<rect x="736" y="80" width="184" height="72" rx="6" class="accent"/>
-<text x="828" y="113" class="label" text-anchor="middle">Stack is ready</text>
-<text x="828" y="131" class="note" text-anchor="middle">Print service addresses</text>
+<text x="598" y="113" class="label" text-anchor="middle">Probe readiness</text>
+<text x="598" y="131" class="note" text-anchor="middle">Configured owner checks</text>
+<rect x="736" y="80" width="184" height="72" rx="6" class="node accent"/>
+<text x="828" y="113" class="label" text-anchor="middle">Owned stack is ready</text>
+<text x="828" y="131" class="note" text-anchor="middle">Print configured addresses</text>
 <rect x="264" y="236" width="200" height="72" rx="6" class="node"/>
 <text x="364" y="269" class="label" text-anchor="middle">Startup failure</text>
-<text x="364" y="287" class="note" text-anchor="middle">Returns a diagnostic</text>
+<text x="364" y="287" class="note" text-anchor="middle">Retain diagnostics and data</text>
 <rect x="496" y="236" width="200" height="72" rx="6" class="node"/>
-<text x="596" y="269" class="label" text-anchor="middle">Terminal session</text>
-<text x="596" y="287" class="note" text-anchor="middle">web attaches Jobs or logs</text>
+<text x="596" y="269" class="label" text-anchor="middle">Optional CLI session</text>
+<text x="596" y="287" class="note" text-anchor="middle">web: attach Jobs or logs</text>
 <rect x="728" y="236" width="192" height="72" rx="6" class="node"/>
-<text x="824" y="269" class="label" text-anchor="middle">Manage stack</text>
+<text x="824" y="269" class="label" text-anchor="middle">Operator management</text>
 <text x="824" y="287" class="note" text-anchor="middle">status · logs · stop</text>
-<text x="40" y="336" class="note" text-anchor="start">Exiting the terminal leaves the stack running. venture stop stops its owned services and retains workspace data.</text>
-<text x="40" y="364" class="note">Planned ownership: Jobs owns local stores; current production scheduling still uses SurrealDB.</text>
+<text x="40" y="336" class="note" text-anchor="start">Exiting the operator terminal leaves the stack running; venture stop stops owned services and retains data.</text>
+<text x="40" y="364" class="note">This deployment workspace is not a native origin child. Venture remains an external operator tool.</text>
+<text x="40" y="404" class="note">Native startup follows native-connections: choose a gateway, authenticate and register; it starts no services.</text>
 </svg>
-<p>Local Net selects the running domain SurrealDB endpoint. Local Process manages domain SurrealDB. Jobs owns its embedded stores in both modes; target startup needs no RabbitMQ server. Drain old work before changing transport; preserve legacy ownership so old stacks can still be stopped. <a href="../wiki/code/jobs-persistence.md">Rollout scopes</a>.</p>
-<p><a href="../wiki/code/fleetworks.md">Fleetworks guide</a> · <a href="../../deploy/README.md">Deployment guide</a> · <a href="../diagrams.md">Diagram catalog</a></p>
+<p>Source: <a href="../../apps/venture/src/main.rs">Venture command routing</a> and <a href="../../apps/venture/src/compose.rs">owned deployment lifecycle</a>. Native startup belongs in <a href="native-connections.html">Native connections</a>; no native view starts Venture, Docker, a server or the web stack. Exiting an operator session preserves the deployment. Stopping it remains an explicit operator action and retains persistent data.</p>
 </main></body></html>

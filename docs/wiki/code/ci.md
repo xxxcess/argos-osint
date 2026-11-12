@@ -83,6 +83,8 @@ The selected desktop scope invokes the same reusable workflow on `macos-15-intel
 
 App ZIPs and fixture evidence have separate artifact URLs and 14-day retention. Missing or failed selected legs fail the required aggregate. The workflow has read-only credentials and creates unsigned review artifacts; signing, notarization and publication remain separate. Generated PNGs and verified downloaded bytes do not establish visual approval, Launch Services/input/accessibility behavior or minimum-OS support. Record those checks on matching hardware independently.
 
+[![Native review artifacts and trusted promotion gates](../../diagrams/native-release.svg)](../../diagrams/native-release.html)
+
 ## `embedded.yml` — main merge compatibility
 
 [embedded.yml](../../../.github/workflows/embedded.yml) builds the compatibility suite on four platforms. It runs when commits land on `main`. A pull request does not run it. Dispatch it for a branch:

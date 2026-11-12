@@ -10,6 +10,8 @@ The existing [Fleetworks verifier](../../../scripts/fleetworks_verify.py) expose
 size is not a release contract; new scenes do not require changing a universal
 test count.
 
+[![Native Runtime, capture inspection and separate acceptance](../../diagrams/native-verification.svg)](../../diagrams/native-verification.html)
+
 This command requires a supported physical Mac and the repository-pinned Rust
 toolchain. It does not install prerequisites, invoke Node/Docker, contact a
 backend, package/install the app or launch a GUI. An explicit execution target

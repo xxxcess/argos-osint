@@ -291,6 +291,11 @@ pub fn pairing_expired(state: &mut State) {
     state.pairing.stage = PairingStage::Failed(PairingFailure::Expired);
 }
 
+pub fn pairing_gateway_unavailable(state: &mut State) {
+    pairing_idle(state);
+    state.pairing.stage = PairingStage::Failed(PairingFailure::GatewayUnavailable);
+}
+
 pub fn pairing_connected(state: &mut State) {
     base(state);
     state.setup_gateway = true;

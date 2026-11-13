@@ -721,6 +721,7 @@ mod tests {
             PairingFailure::KeychainUnavailable,
             PairingFailure::CatalogUnavailable,
             PairingFailure::Network,
+            PairingFailure::GatewayUnavailable,
             PairingFailure::Authentication,
             PairingFailure::Unsupported,
             PairingFailure::Denied,

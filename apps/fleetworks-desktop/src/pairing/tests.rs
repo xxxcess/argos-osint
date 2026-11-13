@@ -96,6 +96,13 @@ struct Gateway {
 
 impl Gateway {
     async fn start(lose_first_start: bool) -> Self {
+        Self::start_with_failure(lose_first_start, None).await
+    }
+
+    async fn start_with_failure(
+        lose_first_start: bool,
+        failure: Option<(&'static str, &'static str)>,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}/", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -144,13 +151,16 @@ impl Gateway {
                 };
                 let lost =
                     request.path == PAIRING_START_PATH && drop_start.swap(false, Ordering::SeqCst);
+                let status = failure
+                    .filter(|(path, _)| *path == request.path)
+                    .map_or("200 OK", |(_, status)| status);
                 recorded.lock().expect("fixture requests").push(request);
                 if lost {
                     continue;
                 }
                 let body = serde_json::to_vec(&response).unwrap();
                 let header = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 );
                 socket.write_all(header.as_bytes()).await.unwrap();
@@ -246,6 +256,64 @@ fn assert_wire_privacy(requests: &[Request]) {
                 .contains(&format!("authorization: bearer {ACCESS}\r\n")));
             assert!(request.body.is_null());
         }
+    }
+}
+
+#[tokio::test]
+async fn gateway_failures_after_challenge_preserve_pending_pairing_and_truthful_recovery() {
+    for (path, status, expected) in [
+        (
+            PAIRING_POLL_PATH,
+            "503 Service Unavailable",
+            PairingFailure::GatewayUnavailable,
+        ),
+        (
+            PAIRING_POLL_PATH,
+            "429 Too Many Requests",
+            PairingFailure::GatewayUnavailable,
+        ),
+        (PAIRING_POLL_PATH, "410 Gone", PairingFailure::Expired),
+        (
+            PAIRING_POLL_PATH,
+            "404 Not Found",
+            PairingFailure::Unsupported,
+        ),
+        (
+            READY_PATH,
+            "503 Service Unavailable",
+            PairingFailure::GatewayUnavailable,
+        ),
+        (
+            CAPABILITIES_PATH,
+            "503 Service Unavailable",
+            PairingFailure::GatewayUnavailable,
+        ),
+    ] {
+        let (_temporary, container, store) = installation();
+        let gateway = Gateway::start_with_failure(false, Some((path, status))).await;
+        let mut progress = Vec::new();
+        let result = connect_or_pair(
+            container.clone(),
+            gateway.origin.clone(),
+            store.clone(),
+            false,
+            |stage| progress.push(stage),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(failure) if failure == expected),
+            "{path}: {status}"
+        );
+        assert!(progress
+            .iter()
+            .any(|stage| matches!(stage, PairingStage::Waiting(_))));
+        let catalog = container.pairing_catalog().unwrap();
+        assert_eq!(catalog.pending_pairings.len(), 1);
+        assert!(catalog.paired_gateways.is_empty());
+        assert!(catalog.selected_origin.is_none());
+        assert_eq!(store.0.lock().unwrap().access_reads, 0);
+        assert_wire_privacy(&gateway.requests.lock().unwrap());
+        gateway.finish().await;
     }
 }
 

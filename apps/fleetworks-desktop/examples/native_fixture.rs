@@ -589,6 +589,10 @@ mod native {
                 ),
                 ("pairing-denied", redesign_scenes::pairing_denied),
                 ("pairing-expired", redesign_scenes::pairing_expired),
+                (
+                    "pairing-gateway-unavailable",
+                    redesign_scenes::pairing_gateway_unavailable,
+                ),
                 ("pairing-connected", redesign_scenes::pairing_connected),
                 ("logs-workstation-loaded", log_scenes::loaded),
                 ("logs-export-partial", log_scenes::partial_export),

@@ -572,36 +572,92 @@ async fn capabilities(
         let mut search = capabilities::SearchCapabilities::default();
         search.actors = Some(capabilities::ActorSearchCapabilities::default());
         response.search = Some(search);
-        if let Ok(raw) = std::env::var("FLEETWORKS_INTEL_WEB_URL") {
-            let mut web =
-                url::Url::parse(&raw).map_err(|_| internal("invalid public Intel Web URL"))?;
-            let loopback = web.host_str().is_some_and(|host| {
-                host == "localhost"
-                    || host
-                        .parse::<std::net::IpAddr>()
-                        .is_ok_and(|ip| ip.is_loopback())
-            });
-            if web.host().is_none()
-                || !(web.scheme() == "https" || web.scheme() == "http" && loopback)
-                || !web.username().is_empty()
-                || web.password().is_some()
-                || web.query().is_some()
-                || web.fragment().is_some()
-            {
-                return Err(internal("unsafe public Intel Web URL"));
-            }
-            let base = web.to_string();
-            let path = format!("{}/connect", web.path().trim_end_matches('/'));
-            web.set_path(&path);
-            response.links.intel_web =
-                Some(capabilities::IntelWebLinks::new(base, web.to_string()));
-        }
+        let web_url = std::env::var("FLEETWORKS_INTEL_WEB_URL").ok();
+        response.links.intel_web = public_intel_web_links(web_url.as_deref()).map_err(internal)?;
         return Ok(Json(serde_json::to_value(response).map_err(internal)?));
     }
     Ok(Json(
         json!({"api_version":1,"categories":intel::CATEGORIES,"auth":mode == AccessMode::Bearer,"features":features,"live":{"path":"/api/v1/live","channels":["metrics","brief"],"version":1}}),
     ))
 }
+
+fn public_intel_web_links(
+    raw: Option<&str>,
+) -> Result<Option<fleetworks_contracts::capabilities::IntelWebLinks>, &'static str> {
+    let Some(raw) = raw.filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let mut web = url::Url::parse(raw).map_err(|_| "invalid public Intel Web URL")?;
+    let loopback = web.host_str().is_some_and(|host| {
+        host == "localhost"
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    });
+    if web.host().is_none()
+        || !(web.scheme() == "https" || web.scheme() == "http" && loopback)
+        || !web.username().is_empty()
+        || web.password().is_some()
+        || web.query().is_some()
+        || web.fragment().is_some()
+    {
+        return Err("unsafe public Intel Web URL");
+    }
+    let base = web.to_string();
+    let path = format!("{}/connect", web.path().trim_end_matches('/'));
+    web.set_path(&path);
+    Ok(Some(
+        fleetworks_contracts::capabilities::IntelWebLinks::new(base, web.to_string()),
+    ))
+}
+
+#[cfg(test)]
+mod capability_link_tests {
+    use super::public_intel_web_links;
+
+    #[test]
+    fn absent_or_empty_optional_web_url_omits_the_link() {
+        for raw in [None, Some("")] {
+            assert_eq!(public_intel_web_links(raw), Ok(None));
+        }
+    }
+
+    #[test]
+    fn configured_web_url_preserves_base_and_connect_destinations() {
+        for (raw, base, connect) in [
+            (
+                "http://127.0.0.1:3000",
+                "http://127.0.0.1:3000/",
+                "http://127.0.0.1:3000/connect",
+            ),
+            (
+                "https://intel.example.test/app/",
+                "https://intel.example.test/app/",
+                "https://intel.example.test/app/connect",
+            ),
+        ] {
+            let links = public_intel_web_links(Some(raw)).unwrap().unwrap();
+            assert_eq!(links.url, base);
+            assert_eq!(links.connect_url, connect);
+        }
+    }
+
+    #[test]
+    fn nonempty_malformed_or_unsafe_web_url_is_rejected() {
+        for raw in [
+            " ",
+            "not a URL",
+            "http://intel.example.test",
+            "https://user:secret@intel.example.test",
+            "https://intel.example.test?token=secret",
+            "https://intel.example.test#fragment",
+            "file:///tmp/intel",
+        ] {
+            assert!(public_intel_web_links(Some(raw)).is_err(), "accepted {raw}");
+        }
+    }
+}
+
 async fn days(State(s): State<ApiState>) -> ApiResult {
     Ok(Json(
         json!({"days":storage::atlas::run_days(s.repo.db()).await.map_err(internal)?,"categories":intel::CATEGORIES}),

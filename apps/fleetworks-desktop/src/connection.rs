@@ -115,6 +115,7 @@ pub enum ConnectionTestPhase {
     Authentication,
     Compatibility,
     Readiness,
+    GatewayAvailability,
 }
 #[derive(Clone, Debug)]
 pub struct ConnectionTestFailure {
@@ -379,8 +380,11 @@ fn client_failure(error: ClientError, phase: ConnectionTestPhase) -> ConnectionT
         ClientError::Status(401 | 403) | ClientError::MissingToken | ClientError::InvalidToken => {
             ConnectionTestPhase::Authentication
         }
-        ClientError::UnsupportedVersion(_) | ClientError::Status(404) => {
+        ClientError::UnsupportedVersion(_) | ClientError::Status(404 | 405 | 426) => {
             ConnectionTestPhase::Compatibility
+        }
+        ClientError::Status(_) | ClientError::InvalidResponse | ClientError::ResponseTooLarge => {
+            ConnectionTestPhase::GatewayAvailability
         }
         _ => phase,
     };

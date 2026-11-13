@@ -261,7 +261,6 @@ services:
       FLEETWORKS_API_BIND: 0.0.0.0
       FLEETWORKS_API_ALLOWED_HOSTS: "api:8080,127.0.0.1:${FLEETWORKS_API_PORT:?Select an unused review port},localhost:${FLEETWORKS_API_PORT}"
       FLEETWORKS_API_ALLOWED_ORIGINS: ""
-      FLEETWORKS_INTEL_WEB_URL: ${FLEETWORKS_INTEL_WEB_URL:-}
       FLEETWORKS_API_CREDENTIALS_FILE: /run/secrets/gateway_credentials
       FLEETWORKS_API_TOKEN_FILE: /run/secrets/gateway_health_token
       FLEETWORKS_API_HEALTH_HOST: api:8080

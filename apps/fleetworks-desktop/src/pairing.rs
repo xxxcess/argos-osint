@@ -21,6 +21,7 @@ pub enum PairingFailure {
     KeychainUnavailable,
     CatalogUnavailable,
     Network,
+    GatewayUnavailable,
     Authentication,
     Unsupported,
     Denied,
@@ -35,6 +36,7 @@ impl PairingFailure {
             Self::KeychainUnavailable => "Keychain is unavailable. Your access has not been saved; try again.",
             Self::CatalogUnavailable => "Protected pairing settings are unavailable. Restore access to this installation, then retry.",
             Self::Network => "Could not reach the gateway. Check its URL and connection, then retry.",
+            Self::GatewayUnavailable => "The gateway could not complete setup. Retry; if this continues, ask your gateway operator to check service configuration and health.",
             Self::Authentication => "This workstation's gateway access was rejected. Pair again after approval.",
             Self::Unsupported => "This gateway does not support pairing yet. Update the gateway before continuing.",
             Self::Denied => "Pairing was declined. Ask your gateway operator before starting again.",
@@ -105,11 +107,12 @@ fn transport_failure(error: ClientError) -> PairingFailure {
     match error {
         ClientError::InvalidOrigin => PairingFailure::InvalidOrigin,
         ClientError::Status(401 | 403) => PairingFailure::Authentication,
+        ClientError::Status(410) => PairingFailure::Expired,
         ClientError::Status(404 | 405 | 426) | ClientError::UnsupportedVersion(_) => {
             PairingFailure::Unsupported
         }
         ClientError::Transport | ClientError::Timeout => PairingFailure::Network,
-        _ => PairingFailure::Unsupported,
+        _ => PairingFailure::GatewayUnavailable,
     }
 }
 
@@ -315,6 +318,9 @@ async fn authenticated(origin: &str, secret: &SecretToken) -> Result<Connected, 
                 PairingFailure::Authentication
             }
             crate::connection::ConnectionTestPhase::Reachability => PairingFailure::Network,
+            crate::connection::ConnectionTestPhase::GatewayAvailability => {
+                PairingFailure::GatewayUnavailable
+            }
             _ => PairingFailure::Unsupported,
         })
 }

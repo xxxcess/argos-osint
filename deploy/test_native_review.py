@@ -172,6 +172,11 @@ class NativeReviewTests(unittest.TestCase):
 
 
 class PrepareReviewTests(unittest.TestCase):
+    def test_native_only_recipe_omits_optional_web_url(self):
+        root = Path(__file__).parent
+        self.assertNotIn("FLEETWORKS_INTEL_WEB_URL:", (root / "compose.native-review.yml").read_text())
+        self.assertIn("FLEETWORKS_INTEL_WEB_URL:", (root / "compose.yml").read_text())
+
     def fixture(self, root, *, legacy=False, root_env=True):
         receipt = provision(root, "local", 18091, "linux/amd64", "a" * 40, root_env=root_env)
         (root / "version.txt").write_text("0.2.1\n")

@@ -39,22 +39,19 @@ fn authority() -> RegistryAuthority {
     RegistryAuthority::new("activation-scope", "fixture-native", "activation-access")
         .expect("explicit fixture authority")
 }
-async fn context(repo: &Repository, node: &str, name: &str) -> RegisteredContext {
+async fn context(
+    repo: &Repository,
+    installation: &str,
+    ip: &str,
+    request: &str,
+) -> RegisteredContext {
     let registration = connect_registry::ensure(
         repo,
         &authority(),
         &RegistrationEnsureRequest::new(
-            format!("ensure-{node}-{name}"),
-            Some(
-                if node == "a" {
-                    "192.0.2.42"
-                } else {
-                    "198.51.100.42"
-                }
-                .parse()
-                .expect("synthetic IP"),
-            ),
-            format!("fixture-installation-{node}"),
+            format!("ensure-{installation}-{request}"),
+            Some(ip.parse().expect("synthetic IP")),
+            format!("fixture-installation-{installation}"),
         ),
     )
     .await
@@ -127,9 +124,12 @@ async fn actual_training_candidate_requires_scoped_private_source_and_explicit_g
         .expect("activation schema")
         .check()
         .expect("schema statements");
-    let creator = context(&repo, "a", "research").await;
-    let other_child = context(&repo, "a", "analysis").await;
-    let other_node = context(&repo, "b", "research").await;
+    let creator = context(&repo, "creator", "192.0.2.42", "initial").await;
+    let other_installation = context(&repo, "independent", "192.0.2.42", "initial").await;
+    let other_node = context(&repo, "foreign", "198.51.100.42", "initial").await;
+    assert_ne!(creator.workstation_id, other_installation.workstation_id);
+    assert_ne!(creator.registration_id, other_installation.registration_id);
+    assert_eq!(creator.workstation_ip, other_installation.workstation_ip);
     let temporary = tempfile::tempdir().expect("disposable training home");
     let (parsed, dataset) = training::prepare(temporary.path());
     setup_jobs::register_dataset(&repo, &authority(), &dataset, setup_jobs::DATASET_TTL)
@@ -189,7 +189,7 @@ async fn actual_training_candidate_requires_scoped_private_source_and_explicit_g
     assert!(classifier_activation::training_source(
         &repo,
         "activation-scope",
-        &other_child,
+        &other_installation,
         &accepted.job_id
     )
     .await
@@ -299,7 +299,7 @@ async fn actual_training_candidate_requires_scoped_private_source_and_explicit_g
     );
     // Controlled durable-state fault after a genuine admitted/claimed effect:
     // generic job/task are terminal, but unresolved operation state still pins
-    // exactly its associated workspace until a proven terminal state returns.
+    // exactly its associated workstation until a proven terminal state returns.
     let pending = connect_registry::begin_retirement(
         &repo,
         &authority(),
@@ -341,24 +341,24 @@ async fn actual_training_candidate_requires_scoped_private_source_and_explicit_g
     let unrelated = connect_registry::begin_retirement(
         &repo,
         &authority(),
-        &other_child.registration_id,
-        other_child.registration_revision,
+        &other_installation.registration_id,
+        other_installation.registration_revision,
     )
     .await
-    .expect("unrelated child retirement");
+    .expect("unrelated installation retirement");
     assert!(
         matches!(
             connect_registry::finish_retirement(
                 &repo,
                 &authority(),
-                &other_child.registration_id,
+                &other_installation.registration_id,
                 unrelated.revision
             )
             .await
-            .expect("unrelated child drain"),
+            .expect("unrelated installation drain"),
             connect_registry::RetirementResult::Complete(_)
         ),
-        "another workspace's activation cannot pin this unrelated child"
+        "another workstation's activation cannot pin this unrelated installation"
     );
     repo.db()
         .query("UPDATE $record SET state='activated' RETURN NONE")

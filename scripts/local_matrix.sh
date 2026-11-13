@@ -43,7 +43,7 @@ case "$storage" in
     # Collect independent runtime failures after the compile/lint preflight.
     step "${cargo[@]}" test --workspace --locked --no-fail-fast
     # The retained service host must expose its actual role/bootstrap interface.
-    step "${cargo[@]}" run -q -p argos-api-host --locked -- --help
+    step "${cargo[@]}" run -p argos-api-host --locked -- --help
     step python3 scripts/test_surreal.py --mode embedded --no-fail-fast
     ;;
   server)
@@ -53,7 +53,7 @@ case "$storage" in
     [ -n "$surreal_bin" ] || { echo "local_matrix: no surreal binary (pass --surreal-bin or put surreal on PATH)" >&2; exit 2; }
     step "${cargo[@]}" clippy -p argos-osint-core -p argos-api-host --all-targets --locked \
       --no-default-features --features server,nlp,classifier -- -D warnings
-    step "${cargo[@]}" run -q -p argos-api-host --locked --no-default-features --features server,nlp,classifier \
+    step "${cargo[@]}" run -p argos-api-host --locked --no-default-features --features server,nlp,classifier \
       -- --help
     step python3 scripts/test_surreal.py --mode server --bin "$surreal_bin" --no-fail-fast
     ;;

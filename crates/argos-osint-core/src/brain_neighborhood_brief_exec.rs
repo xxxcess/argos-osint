@@ -389,11 +389,17 @@ pub async fn generate(
 ) -> Result<Generated, GenerationFailure> {
     let measured_at = std::time::Instant::now();
     let clock = crate::intel_recon::brief_timing::StageClock::default();
-    let result = crate::intel_recon::brief_timing::with_clock(
-        clock.clone(),
-        generate_measured(runtime, db_path, operation_id, task, req, cancel),
-    )
-    .await;
+    // Allocate the large role-chain operation before wrapping it in the
+    // task-local clock, so callers and scope polling keep small frames.
+    let operation = Box::pin(generate_measured(
+        runtime,
+        db_path,
+        operation_id,
+        task,
+        req,
+        cancel,
+    ));
+    let result = crate::intel_recon::brief_timing::with_clock(clock.clone(), operation).await;
     let (outcome, requests) = match &result {
         Ok(value) => ("generated", Some(value.requests)),
         Err(_) => ("failed_or_cancelled", None),

@@ -128,6 +128,8 @@ async fn operational_rows_counts_and_descendants_are_filtered_before_limits_and_
         .expect("explicit fixture consumer");
     let a = context(&repo, "a", "research").await;
     let sibling = context(&repo, "a", "analysis").await;
+    assert_eq!(a.workstation_id, sibling.workstation_id);
+    assert_eq!(a.registration_id, sibling.registration_id);
     let b = context(&repo, "b", "research").await;
     enqueue(&repo, &a, "a-root", "a-root-request").await;
     enqueue(&repo, &sibling, "a-sibling", "a-sibling-request").await;
@@ -328,15 +330,31 @@ async fn operational_rows_counts_and_descendants_are_filtered_before_limits_and_
         ),
         "above cap never issues an incomplete global cursor"
     );
+    let sibling_scope = ActivityScope::for_workstation(&sibling);
+    assert!(
+        matches!(
+            operational_logs::plan(
+                &repo,
+                "logs-scope",
+                &sibling_scope,
+                &LogSelection::workstation(),
+            )
+            .await
+            .expect("same installation retains its whole-workstation cohort"),
+            CohortPlan::TooLarge
+        ),
+        "another request label cannot bypass the workstation cohort cap"
+    );
     let narrow = complete(
         operational_logs::plan(
             &repo,
             "logs-scope",
-            &ActivityScope::for_workstation(&sibling),
-            &LogSelection::workstation(),
+            &sibling_scope,
+            &LogSelection::job("a-sibling".into(), false)
+                .expect("explicit authorized job selector"),
         )
         .await
-        .expect("narrowing retains complete semantics"),
+        .expect("job narrowing retains complete semantics"),
     );
     assert_eq!(narrow.len(), 1);
 }

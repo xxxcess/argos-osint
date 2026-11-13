@@ -1731,7 +1731,12 @@ mod tests {
             MAX_QUEUED_BYTES + 1024 - large.len(),
         ));
         let model = completed._model_id.clone();
-        match completed.restore_completed_candidate(&model, &large, &WorkControl::new()) {
+        // Match train_candidate's existing artifact budget, rather than the
+        // inference execution budget; this case checks runtime/lease lifecycle.
+        let control = WorkControl::new();
+        let mut artifact_control = control.clone();
+        artifact_control.execution_timeout = control.artifact_execution_timeout;
+        match completed.restore_completed_candidate(&model, &large, &artifact_control) {
             Ok(())
             | Err(
                 ClassifierError::RuntimeLimitExceeded { .. } | ClassifierError::InvalidArtifact(_),
@@ -1755,19 +1760,28 @@ mod tests {
         drop(second);
         assert_eq!(classifier_process_budget().reserved_bytes(), baseline);
 
-        for cancelled in [false, true] {
+        for (cancelled, execution_expired) in [(false, false), (true, false), (false, true)] {
             let (mut completed, home) = candidate();
             let payload = finalized_payload(&mut completed);
-            let control = WorkControl::new();
+            let mut control = WorkControl::new();
             control.cancel.store(cancelled, Ordering::Release);
+            if execution_expired {
+                control.execution_timeout = Duration::ZERO;
+            }
             let model = completed._model_id.clone();
             let result = completed.restore_completed_candidate(
                 &model,
-                if cancelled { &payload } else { "{}" },
+                if cancelled || execution_expired {
+                    &payload
+                } else {
+                    "{}"
+                },
                 &control,
             );
             if cancelled {
                 assert!(matches!(result, Err(ClassifierError::Cancelled)));
+            } else if execution_expired {
+                assert!(matches!(result, Err(ClassifierError::Timeout)));
             } else {
                 assert!(matches!(result, Err(ClassifierError::InvalidArtifact(_))));
             }

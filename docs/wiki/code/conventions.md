@@ -14,7 +14,7 @@ The terminal executables and their capture helpers are retired. Their [design](t
 
 ## Schema
 
-Domain storage is SurrealDB; the Jobs service owns SQLite operational logs. Read [bootstrap.rs](../../../crates/argos-osint-core/src/storage/bootstrap.rs), the affected module schemas and [storage contracts](storage.md) before changing persistence. Bootstrap applies schemas in dependency order and guards the stored version; do not copy legacy SQLite `user_version` migration instructions. Document compatibility/migration decisions and verify them through the storage harness. Never delete legacy secrets when saving a new provider account.
+Domain storage is SurrealDB; the Jobs service owns SQLite operational logs. Read [bootstrap.rs](../../../crates/argos-osint-core/src/storage/bootstrap.rs), the affected module schemas and [storage contracts](storage.md) before changing persistence. Bootstrap applies schemas in dependency order and guards the stored version; do not copy legacy SQLite `user_version` migration instructions. Document compatibility/migration decisions and verify them through the storage harness. Update explicit bootstrap module, table and index expectations with schema changes. Never delete legacy secrets when saving a new provider account.
 
 ## Tests
 
@@ -24,10 +24,11 @@ Domain storage is SurrealDB; the Jobs service owns SQLite operational logs. Read
 
 | Test boundary | Fixture practice |
 | --- | --- |
-| Registered authorization | Exercise real registration/admission in integration tests; use forged claims to verify rejection. |
+| Registered authorization | Exercise real registration/admission and assert distinct owner IDs for isolation; request labels do not establish identity. Use explicit selections for narrowing and forged claims to verify rejection. |
 | Process environment | Share one guard across consumers and restore previous values. |
 | Runtime budgets | Reuse the existing shared test gate; a module-local mutex cannot coordinate other consumers. |
 | Revisions | Compare durable values within the same root/context; keep process counters separate. |
+| Operation budgets | Use the production control for the operation; test expiry explicitly with controlled bounds. |
 
 ## Planning and scratch
 

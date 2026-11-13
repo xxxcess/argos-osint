@@ -147,7 +147,10 @@ async fn node_child_deployment_and_causal_membership_filter_before_limits_and_fa
     let db = repo.db();
     let first = register(&repo, "node-a", "research").await;
     let second = register(&repo, "node-a", "analysis").await;
+    assert_eq!(first.workstation_id, second.workstation_id);
+    assert_eq!(first.registration_id, second.registration_id);
     let foreign = register(&repo, "node-b", "research").await;
+    let ordering_epoch = Utc::now();
     for (id, context) in [
         ("owned-a", &first),
         ("owned-b", &second),
@@ -176,20 +179,30 @@ async fn node_child_deployment_and_causal_membership_filter_before_limits_and_fa
         .expect("adversarial parent-only fixture")
         .check()
         .expect("parent fixture statement");
-    db.query("FOR $i IN 0..205 { LET $job = type::record('job', string::concat('foreign-', <string>$i)); CREATE $job SET root=$job, kind='task', operation='summaries', state='running', app='foreign-only', created_at=time::now(), updated_at=time::now(); };")
+    db.query("FOR $i IN 0..205 { LET $job = type::record('job', string::concat('foreign-', <string>$i)); CREATE $job SET root=$job, kind='task', operation='summaries', state='running', app='foreign-only', created_at=time::now(), updated_at=<datetime>$foreign_updated; };")
+        .bind(("foreign_updated", (ordering_epoch + chrono::Duration::seconds(1)).to_rfc3339()))
         .await.expect("crowded foreign jobs").check().expect("crowded foreign statements");
+    // Preserve genuine admission/origins; pin only mutable ordering metadata.
+    // Tied owned rows use ascending key, while the newer foreign crowd must be
+    // excluded before either the large or one-row LIMIT is applied.
+    db.query("UPDATE job SET updated_at=<datetime>$owned_updated WHERE id IN [$first,$second] RETURN NONE")
+        .bind(("owned_updated", ordering_epoch.to_rfc3339()))
+        .bind(("first", surrealdb::types::RecordId::new("job", "owned-a")))
+        .bind(("second", surrealdb::types::RecordId::new("job", "owned-b")))
+        .await.expect("controlled tied ordering after real admission").check().expect("ordering statement");
     let node = scope(&first, false);
     let rows = view::list_activity_jobs(db, "scope-a", &node, &JobFilter::default(), 200)
         .await
         .expect("node activity");
     let ids: std::collections::BTreeSet<_> = rows.iter().map(|row| row.job.id.as_str()).collect();
     assert_eq!(ids, ["owned-a", "owned-b"].into_iter().collect());
+    let small_page = view::list_activity_jobs(db, "scope-a", &node, &JobFilter::default(), 1)
+        .await
+        .expect("small page");
+    assert_eq!(small_page.len(), 1);
     assert_eq!(
-        view::list_activity_jobs(db, "scope-a", &node, &JobFilter::default(), 1)
-            .await
-            .expect("small page")
-            .len(),
-        1
+        small_page[0].job.id, "owned-a",
+        "ascending key breaks equal rank/update ties after membership filtering"
     );
     let child = scope(&first, true);
     assert_eq!(

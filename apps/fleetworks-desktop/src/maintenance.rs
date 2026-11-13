@@ -100,6 +100,11 @@ impl Default for Maintenance {
 }
 
 impl Maintenance {
+    pub(crate) fn busy(&self) -> bool {
+        self.upload_request.is_some()
+            || self.datasets_request.is_some()
+            || self.operation_request.is_some()
+    }
     pub(crate) fn invalidate_origin(&mut self) {
         self.pending_preview = None;
         self.seed_accepted_at = None;

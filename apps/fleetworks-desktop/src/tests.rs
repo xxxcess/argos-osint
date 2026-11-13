@@ -21,7 +21,11 @@ use fleetworks_workstation::native::WorkspaceState;
 
 #[test]
 fn real_shell_navigation_works_offline_without_boundary_effects() {
-    let mut runtime = Runtime::new(
+    let default_state = State::default();
+    assert_eq!(default_state.page, Page::Workstation);
+    assert!(!default_state.setup_gateway);
+
+    let mut disconnected = Runtime::new(
         State::fixture(),
         app::view,
         (1180.0, 780.0),
@@ -30,23 +34,82 @@ fn real_shell_navigation_works_offline_without_boundary_effects() {
             scale: 1.0,
         },
     );
-    runtime.frame(0.0);
+    disconnected.frame(0.0);
+    assert_eq!(disconnected.state.page, Page::Workstation);
+    assert!(!disconnected.state.setup_gateway);
+    assert!(disconnected.find("sidebar-context-footer").is_none());
+    assert!(disconnected.find("nav-workstation").is_some());
+    assert!(disconnected.find("nav-setup").is_some());
+    assert!(disconnected.find("workstation-setup-gateway").is_some());
+    assert!(disconnected.find("host-resources-card").is_none());
+    assert!(disconnected.find("local-client-scope").is_some());
+    assert!(disconnected.find("resource-scope").is_none());
+    assert!(disconnected.find("deployment").is_none());
+    let disconnected_tree = disconnected.accessibility_json().to_string();
+    assert!(!disconnected_tree.contains("Host Resources"));
+    assert!(!disconnected_tree.contains("Workstation activity: registration required"));
+    assert!(!disconnected_tree.contains("6 checks"));
     for page in Page::ALL {
-        let key = format!("nav-{}", page.key());
-        let (x, y) = runtime
-            .find(&key)
-            .expect("each maintained page has a real sidebar control");
-        runtime.pointer_down(x, y);
-        runtime.pointer_up(x, y);
-        runtime.frame(1.0 / 60.0);
-        assert_eq!(runtime.state.page, page);
+        assert!(
+            disconnected.find(&format!("nav-{}", page.key())).is_none(),
+            "deployment destination {page:?} stays hidden until gateway is connected"
+        );
     }
+
+    let (x, y) = disconnected
+        .find("workstation-setup-gateway")
+        .expect("Workstation Status Setup Gateway CTA");
+    disconnected.pointer_down(x, y);
+    disconnected.pointer_up(x, y);
+    disconnected.frame(1.0 / 60.0);
+    assert!(disconnected.state.setup_gateway);
+
+    let (x, y) = disconnected
+        .find("nav-workstation")
+        .expect("Workstation Status sidebar item");
+    disconnected.pointer_down(x, y);
+    disconnected.pointer_up(x, y);
+    disconnected.frame(2.0 / 60.0);
+    assert!(!disconnected.state.setup_gateway);
+    assert_eq!(disconnected.state.page, Page::Workstation);
+
+    disconnected.update(|state, _| state.navigate(Page::Brain));
+    disconnected.frame(3.0 / 60.0);
     assert_eq!(
-        runtime.state.connection.status,
+        disconnected.state.page,
+        Page::Workstation,
+        "disconnected navigation cannot enter hidden deployment pages"
+    );
+    assert_eq!(
+        disconnected.state.connection.status,
         ConnectionStatus::Disconnected
     );
-    assert!(runtime.state.intents.is_empty());
-    assert!(runtime.find("fixture-marker").is_some());
+    assert!(disconnected.state.intents.is_empty());
+    assert!(disconnected.find("fixture-marker").is_some());
+
+    let mut connected = Runtime::new(
+        registered_fixture(),
+        app::view,
+        (1180.0, 780.0),
+        Env {
+            system_dark: true,
+            scale: 1.0,
+        },
+    );
+    connected.frame(0.0);
+    assert!(connected.find("sidebar-context-footer").is_none());
+    assert!(connected.find("nav-workstation").is_some());
+    assert!(connected.find("nav-setup").is_none());
+    for page in Page::ALL {
+        let key = format!("nav-{}", page.key());
+        let (x, y) = connected
+            .find(&key)
+            .expect("each connected page has a real sidebar control");
+        connected.pointer_down(x, y);
+        connected.pointer_up(x, y);
+        connected.frame(1.0 / 60.0);
+        assert_eq!(connected.state.page, page);
+    }
 }
 
 #[test]
@@ -112,7 +175,7 @@ fn workspace(name: &str) -> WorkspaceRow {
     }
 }
 
-fn registered_fixture() -> State {
+pub(crate) fn registered_fixture() -> State {
     let mut state = State::fixture();
     state.connection.status = ConnectionStatus::Connected;
     let mut capabilities = Capabilities::default();
@@ -381,4 +444,207 @@ fn changing_model_after_variant_edit_prunes_only_inactive_pending_updates() {
             action: crate::configuration::ConfigurationAction::ModelRole
         }
     )));
+}
+
+#[test]
+fn setup_advanced_toggle_switch_reveals_and_hides_readiness_checks() {
+    use fleetworks_contracts::readiness::ReadinessCheck;
+    use fleetworks_contracts::readiness::ReadinessCheckId;
+    use fleetworks_contracts::readiness::ReadinessState;
+    use fleetworks_contracts::readiness::WorkstationReadiness;
+
+    let mut state = registered_fixture();
+    state.setup_gateway = true;
+    state.readiness = Load::Ready(WorkstationReadiness::new(
+        "synthetic-deployment".into(),
+        "2026-01-01T00:00:00Z".into(),
+        vec![ReadinessCheck::new(
+            ReadinessCheckId::Gateway,
+            ReadinessState::Ready,
+            "ok".into(),
+            "Synthetic gateway probe".into(),
+            "2026-01-01T00:00:00Z".into(),
+        )],
+    ));
+    state.readiness_received_at = Some(0.0);
+    let mut runtime = Runtime::new(
+        state,
+        app::view,
+        (1180.0, 780.0),
+        Env {
+            system_dark: true,
+            scale: 1.0,
+        },
+    );
+    runtime.frame(0.0);
+    assert!(!runtime.state.setup_advanced_open);
+    assert!(
+        !runtime
+            .accessibility_json()
+            .to_string()
+            .contains("Gateway: Ready"),
+        "readiness checks stay collapsed behind the Switch until toggled"
+    );
+
+    runtime.update(|_, tx| tx.scroll_into_view("setup-advanced-toggle"));
+    runtime.frame(1.0 / 60.0);
+    let (x, y) = runtime
+        .find("setup-advanced-toggle")
+        .expect("setup advanced readiness Switch");
+    runtime.pointer_down(x, y);
+    runtime.pointer_up(x, y);
+    runtime.frame(2.0 / 60.0);
+    assert!(runtime.state.setup_advanced_open);
+    assert!(runtime
+        .accessibility_json()
+        .to_string()
+        .contains("Gateway: Ready"));
+
+    let (x, y) = runtime
+        .find("setup-advanced-toggle")
+        .expect("setup advanced readiness Switch remains reachable");
+    runtime.pointer_down(x, y);
+    runtime.pointer_up(x, y);
+    runtime.frame(3.0 / 60.0);
+    assert!(!runtime.state.setup_advanced_open);
+    assert!(!runtime
+        .accessibility_json()
+        .to_string()
+        .contains("Gateway: Ready"));
+}
+
+#[test]
+fn workstation_metric_tile_opens_and_closes_telemetry_modal() {
+    use crate::app::WorkstationInspector;
+    use crate::workstation_dashboard::HostMetrics;
+
+    let mut state = registered_fixture();
+    state.page = Page::Workstation;
+    state.host_metrics = Load::Ready(HostMetrics {
+        cpu_percent: Some(42.5),
+        memory_percent: Some(61.0),
+        disk_percent: Some(73.2),
+        network_kbps: Some(128.0),
+        platform: Some("linux/x86_64".into()),
+        chipset: Some("synthetic-x64".into()),
+    });
+    let mut runtime = Runtime::new(
+        state,
+        app::view,
+        (1180.0, 780.0),
+        Env {
+            system_dark: true,
+            scale: 1.0,
+        },
+    );
+    runtime.frame(0.0);
+    assert!(!runtime
+        .accessibility_json()
+        .to_string()
+        .contains("CPU Telemetry"));
+
+    runtime.update(|_, tx| tx.scroll_into_view("workstation-tile-cpu"));
+    runtime.frame(1.0 / 60.0);
+    let (x, y) = runtime
+        .find("workstation-tile-cpu")
+        .expect("clickable CPU metric ring tile");
+    runtime.pointer_down(x, y);
+    runtime.pointer_up(x, y);
+    runtime.frame(2.0 / 60.0);
+    assert_eq!(
+        runtime.state.workstation_inspector,
+        Some(WorkstationInspector::Cpu)
+    );
+    let tree = runtime.accessibility_json().to_string();
+    assert!(tree.contains("CPU Telemetry"));
+    assert!(tree.contains("Observed reading: 42.5%"));
+    assert!(tree.contains("Measurements describe the API host"));
+
+    runtime.update(|state, _| state.workstation_inspector = None);
+    runtime.frame(3.0 / 60.0);
+    assert!(!runtime
+        .accessibility_json()
+        .to_string()
+        .contains("CPU Telemetry"));
+}
+
+#[test]
+fn seed_preflight_checklist_and_progressive_disclosure_reflect_state() {
+    use crate::app::ModelsTab;
+    use crate::app::SeedStage;
+    use fleetworks_contracts::readiness::ReadinessCheck;
+    use fleetworks_contracts::readiness::ReadinessCheckId;
+    use fleetworks_contracts::readiness::ReadinessState;
+    use fleetworks_contracts::readiness::WorkstationReadiness;
+
+    let mut state = registered_fixture();
+    state.page = Page::Seed;
+    state.readiness = Load::Ready(WorkstationReadiness::new(
+        "synthetic-deployment".into(),
+        "2026-01-01T00:00:00Z".into(),
+        vec![
+            ReadinessCheck::new(
+                ReadinessCheckId::Gateway,
+                ReadinessState::Ready,
+                "ok".into(),
+                "Gateway ok".into(),
+                "2026-01-01T00:00:00Z".into(),
+            ),
+            ReadinessCheck::new(
+                ReadinessCheckId::Datastore,
+                ReadinessState::Unknown,
+                "pending".into(),
+                "Datastore check pending".into(),
+                "2026-01-01T00:00:00Z".into(),
+            ),
+        ],
+    ));
+    let mut runtime = Runtime::new(
+        state,
+        app::view,
+        (1180.0, 780.0),
+        Env {
+            system_dark: true,
+            scale: 1.0,
+        },
+    );
+    runtime.frame(0.0);
+    assert!(runtime.find("preflight-gateway").is_some());
+    assert!(runtime.find("preflight-datastore").is_some());
+    assert!(runtime.find("preflight-dataset").is_some());
+    assert!(runtime.find("maintenance-seed").is_some());
+    assert!(runtime.find("maintenance-train").is_some());
+    assert!(runtime.find("maintenance-reindex").is_some());
+    let seed_tree = runtime.accessibility_json().to_string();
+    assert!(seed_tree.contains("Choose a CSV to add or update actors."));
+    assert!(!seed_tree.contains("Choose a training CSV for a Natural candidate."));
+
+    runtime.update(|state, _| state.seed_stage = SeedStage::Classifier);
+    runtime.frame(1.0 / 60.0);
+    let classifier_tree = runtime.accessibility_json().to_string();
+    assert!(classifier_tree.contains("Choose a training CSV for a Natural candidate."));
+    assert!(!classifier_tree.contains("Choose a CSV to add or update actors."));
+
+    runtime.update(|state, _| state.seed_stage = SeedStage::Maintenance);
+    runtime.frame(2.0 / 60.0);
+    let reindex_tree = runtime.accessibility_json().to_string();
+    assert!(reindex_tree.contains("Build the actor-search projection from the backend catalog."));
+    assert!(!reindex_tree.contains("Choose a training CSV for a Natural candidate."));
+
+    runtime.update(|state, _| {
+        state.page = Page::Models;
+        state.backend.models = Load::Idle;
+        state.backend.profile = Load::Idle;
+    });
+    runtime.frame(3.0 / 60.0);
+    assert!(runtime
+        .accessibility_json()
+        .to_string()
+        .contains("Role assignments have not been observed."));
+
+    runtime.update(|state, _| state.models_tab = ModelsTab::Providers);
+    runtime.frame(4.0 / 60.0);
+    let providers_tree = runtime.accessibility_json().to_string();
+    assert!(providers_tree.contains("Provider metadata has not been observed."));
+    assert!(!providers_tree.contains("Role assignments have not been observed."));
 }

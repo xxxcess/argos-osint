@@ -12,9 +12,12 @@ use rune::Cx;
 use rune::El;
 use rune::Key;
 use rune::KeyEvent;
+use rune::Live;
+use rune::Transition;
 use rune::Tx;
 use rune_kit::shell;
 use rune_kit::shell::PaneState;
+use rune_kit::shell::RowStatus;
 use rune_kit::shell::Sidebar;
 use rune_kit::shell::SidebarRow;
 use rune_kit::shell::SplitView;
@@ -37,6 +40,7 @@ use crate::connection::GatewayEffects;
 use crate::connection::RequestTask;
 use crate::connection_profiles::ConnectionProfiles;
 use crate::connection_profiles::ProfileAction;
+use crate::icons;
 use crate::job_actions::JobAction;
 use crate::job_actions::JobActions;
 use crate::jobs_query::JobsQueryState;
@@ -44,13 +48,17 @@ use crate::logs::ActivityTab;
 use crate::logs::LogAction;
 use crate::logs::LogState;
 use crate::maintenance::Maintenance;
+use crate::material::MetalFinish;
 use crate::rebind::Rebind;
 use crate::registration::Registration;
 use crate::submission::SubmissionKind;
 use crate::submission::Submissions;
 use crate::theme;
+use crate::theme::StatusTone;
 use crate::transfer::Transfer;
 use crate::transfer::TransferAction;
+use crate::ui_components;
+use crate::ui_components::ActionButton;
 use crate::views;
 use crate::workspaces::WorkspaceCommand;
 use crate::workspaces::Workspaces;
@@ -110,12 +118,73 @@ impl Page {
         }
     }
 
+    /// Crisp 16px vector icon matching this destination.
+    pub fn icon(self) -> &'static rune::Icon {
+        match self {
+            Self::Seed => &icons::SEED,
+            Self::Atlas => &icons::ATLAS,
+            Self::Brain => &icons::BRAIN,
+            Self::Tools => &icons::TOOLS,
+            Self::Models => &icons::MODELS,
+            Self::Profile | Self::Workstation | Self::Workspaces => &icons::WORKSTATION,
+            Self::Jobs => &icons::JOBS,
+        }
+    }
+
+    /// Concise contextual helper displayed in the sidebar footer for the active view.
+    pub fn summary_hint(self) -> &'static str {
+        match self {
+            Self::Seed => "Stage seeds, classifier runs & maintenance",
+            Self::Atlas => "Inspect news collection cycles & trigger runs",
+            Self::Brain => "Search actors and inspect intelligence dossiers",
+            Self::Tools => "Configure API tool providers & credentials",
+            Self::Models => "Assign routing models & verify accounts",
+            Self::Profile | Self::Workstation | Self::Workspaces => {
+                "Inspect host telemetry, registration & identity"
+            }
+            Self::Jobs => "Monitor live queue execution & workstation logs",
+        }
+    }
+
     pub fn is_backend(self) -> bool {
         matches!(
             self,
             Self::Seed | Self::Atlas | Self::Brain | Self::Tools | Self::Models | Self::Profile
         )
     }
+}
+
+/// Active progressive disclosure stage on `DB Seed & Train`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SeedStage {
+    #[default]
+    Seed,
+    Classifier,
+    Maintenance,
+}
+
+/// Active view mode on `Model Assignments`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ModelsTab {
+    #[default]
+    Roles,
+    Providers,
+}
+
+/// Active dossier tab on `Brain Search`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DossierFacet {
+    #[default]
+    Overview,
+    Associations,
+}
+
+/// Clicked host telemetry tile modal inspector on `Workstation Status`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkstationInspector {
+    Cpu,
+    Memory,
+    Disk,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -176,6 +245,20 @@ pub struct State {
     pub page: Page,
     pub setup_gateway: bool,
     pub tool_key_dialog: bool,
+    pub setup_advanced_open: bool,
+    pub workstation_inspector: Option<WorkstationInspector>,
+    pub seed_stage: SeedStage,
+    pub models_tab: ModelsTab,
+    pub models_provider_dialog: bool,
+    pub models_role_dialog: bool,
+    pub brain_facet: DossierFacet,
+    pub selected_readiness: Option<String>,
+    pub selected_cycle_id: Option<String>,
+    pub selected_job_id: Option<String>,
+    pub confirm_cycle_delete: bool,
+    pub confirm_maintenance_dialog: bool,
+    pub pointer_offset: Live<[f32; 2]>,
+    pub shadow_offset: Live<[f32; 2]>,
     pub cycles: crate::workstation_dashboard::Cycles,
     pub host_metrics: Load<crate::workstation_dashboard::HostMetrics>,
     pub(crate) host_metrics_request: Option<RequestTask>,
@@ -222,8 +305,22 @@ impl Default for State {
         Self {
             accessibility: Accessibility::default(),
             page: Page::Workstation,
-            setup_gateway: true,
+            setup_gateway: false,
             tool_key_dialog: false,
+            setup_advanced_open: false,
+            workstation_inspector: None,
+            seed_stage: SeedStage::Seed,
+            models_tab: ModelsTab::Roles,
+            models_provider_dialog: false,
+            models_role_dialog: false,
+            brain_facet: DossierFacet::Overview,
+            selected_readiness: None,
+            selected_cycle_id: None,
+            selected_job_id: None,
+            confirm_cycle_delete: false,
+            confirm_maintenance_dialog: false,
+            pointer_offset: Live::new([0.0, 0.0]),
+            shadow_offset: Live::new([0.0, 0.0]),
             cycles: crate::workstation_dashboard::Cycles::default(),
             host_metrics: Load::Idle,
             host_metrics_request: None,
@@ -299,7 +396,20 @@ impl State {
             self.disconnect();
         }
         self.setup_gateway = false;
-        self.page = page;
+        self.tool_key_dialog = false;
+        self.workstation_inspector = None;
+        self.models_provider_dialog = false;
+        self.models_role_dialog = false;
+        self.selected_readiness = None;
+        self.selected_cycle_id = None;
+        self.selected_job_id = None;
+        self.confirm_cycle_delete = false;
+        self.confirm_maintenance_dialog = false;
+        self.page = if self.connected() || page == Page::Workstation {
+            page
+        } else {
+            Page::Workstation
+        };
         self.sync_jobs_binding();
         self.sync_log_visibility();
         if self.connected() {
@@ -347,6 +457,7 @@ impl State {
         self.connection.ready = None;
         self.connection.capabilities = None;
         self.connection.status = ConnectionStatus::Disconnected;
+        self.page = Page::Workstation;
         self.readiness = Load::Idle;
         self.readiness_received_at = None;
         self.host_metrics = Load::Idle;
@@ -602,10 +713,12 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         state.sidebar.toggle();
         return true;
     }
-    for (index, page) in Page::ALL.into_iter().enumerate() {
-        if event.is_command(char::from(b'1' + index as u8)) {
-            state.navigate(page);
-            return true;
+    if state.connected() {
+        for (index, page) in Page::ALL.into_iter().enumerate() {
+            if event.is_command(char::from(b'1' + index as u8)) {
+                state.navigate(page);
+                return true;
+            }
         }
     }
     if event.is_command('f') && state.page == Page::Brain {
@@ -636,34 +749,85 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     let mut kit = theme::kit();
     let mut layers = Vec::new();
     crate::material::configure_kit(&mut kit, preferences);
+
+    let connection_tone = match &state.connection.status {
+        ConnectionStatus::Connected => StatusTone::Ok,
+        ConnectionStatus::Connecting => StatusTone::Warn,
+        ConnectionStatus::Failed(_) => StatusTone::Err,
+        ConnectionStatus::Disconnected => StatusTone::Neutral,
+    };
+    let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
+
     let mut sidebar = Sidebar::new()
         .label("Fleetworks pages")
         .header(
-            rune::text("Fleetworks")
-                .font(kit.ty.body_medium)
-                .color(kit.c.text_accent)
+            rune::row()
+                .w_full()
                 .px(8.0)
-                .py(12.0),
+                .py(10.0)
+                .gap(8.0)
+                .center_y()
+                .child(
+                    rune::icon(&icons::BRAND_MARK, 18.0)
+                        .color(theme::hex(theme::ACCENT_HOVER))
+                        .a11y_hidden(),
+                )
+                .child(
+                    rune::text("Fleetworks")
+                        .font(kit.ty.body_medium)
+                        .color(theme::hex(theme::TEXT_PRIMARY)),
+                )
+                .child(rune::spacer())
+                .child(ui_components::status_dot(connection_tone, preferences)),
         )
         .child(
             Button::new(state.connection.deployment_label().to_owned())
                 .variant(ButtonVariant::Ghost)
+                .icon(&icons::SERVER)
                 .on_press(|state: &mut State| {
-                    state.setup_gateway = false;
-                    state.navigate(Page::Workstation);
+                    if state.connected() {
+                        state.navigate(Page::Workstation);
+                    } else {
+                        state.setup_gateway = true;
+                    }
                 })
                 .build(&kit)
                 .key("gateway-status-header"),
-        );
-    for page in Page::ALL {
-        sidebar = sidebar.child(
-            SidebarRow::new(page.title())
-                .selected(state.page == page)
-                .on_select(move |state: &mut State, _| state.navigate(page))
+        )
+        .child(
+            SidebarRow::new(Page::Workstation.title())
+                .icon(Page::Workstation.icon())
+                .selected(!state.setup_gateway && state.page == Page::Workstation)
+                .on_select(|state: &mut State, _| state.navigate(Page::Workstation))
                 .build(&kit)
-                .key(format!("nav-{}", page.key())),
+                .key("nav-workstation"),
+        );
+
+    if state.connected() {
+        for page in Page::ALL {
+            let mut row_builder = SidebarRow::new(page.title())
+                .icon(page.icon())
+                .selected(!state.setup_gateway && state.page == page)
+                .on_select(move |state: &mut State, _| state.navigate(page));
+            if let Some(status) = sidebar_row_status(state, page) {
+                row_builder = row_builder.status(status);
+            }
+            if let Some(badge) = sidebar_row_badge(state, page) {
+                row_builder = row_builder.badge(badge);
+            }
+            sidebar = sidebar.child(row_builder.build(&kit).key(format!("nav-{}", page.key())));
+        }
+    } else {
+        sidebar = sidebar.child(
+            SidebarRow::new("Setup Gateway")
+                .icon(&icons::KEY)
+                .selected(state.setup_gateway)
+                .on_select(|state: &mut State, _| state.setup_gateway = true)
+                .build(&kit)
+                .key("nav-setup"),
         );
     }
+
     let scope = if state.page.is_backend() {
         "Backend-wide".to_owned()
     } else if let Some(context) = &state.registration.context {
@@ -677,43 +841,128 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     let toolbar = Toolbar::new()
         .title(if state.setup_gateway {
             "Setup Gateway"
+        } else if !state.connected() {
+            Page::Workstation.title()
         } else {
             state.page.title()
         })
         .trailing(crate::material::compact_toolbar(
-            Button::new("Setup Gateway")
-                .variant(ButtonVariant::Neutral)
+            ActionButton::new("Setup Gateway")
+                .key("connection-editor")
+                .icon(&icons::KEY)
+                .finish(if state.setup_gateway {
+                    MetalFinish::GoldCta
+                } else {
+                    MetalFinish::Gunmetal
+                })
                 .on_press(|state: &mut State| {
                     state.setup_gateway = true;
                 })
-                .build(&kit)
-                .key("connection-editor"),
+                .build(&kit, preferences, pointer_ref),
             preferences,
         ));
+
+    let any_busy = state.connection.status == ConnectionStatus::Connecting
+        || state.pairing.busy()
+        || matches!(state.readiness, Load::Pending | Load::Loading)
+        || matches!(state.host_metrics, Load::Pending | Load::Loading)
+        || state.brain.in_flight
+        || state.maintenance.busy()
+        || state.configuration.request.is_some()
+        || state.backend.busy();
+
     let mut main = rune::col().key("page-content").w_full().h_full().min_h(0.0);
     if !state.setup_gateway {
-        main = main.child(
-            rune::col()
-                .w_full()
-                .padding(20.0)
-                .gap(6.0)
+        let mut scope_bar = rune::row()
+            .w_full()
+            .px(20.0)
+            .py(10.0)
+            .gap(10.0)
+            .center_y()
+            .fill(theme::hex(theme::SURFACE))
+            .border_sides([0.0, 0.0, 1.0, 0.0], theme::hex(theme::BORDER_SUBTLE));
+        if state.connected() {
+            scope_bar = scope_bar
                 .child(
                     rune::text(scope)
                         .key("resource-scope")
                         .font(kit.ty.small_medium)
-                        .color(kit.c.text_accent)
-                        .wrap(),
+                        .color(kit.c.text_accent),
                 )
                 .child(
                     rune::text(state.connection.deployment_label().to_owned())
                         .key("deployment")
                         .font(kit.ty.small)
-                        .color(kit.c.text_muted)
-                        .wrap(),
-                ),
-        );
+                        .color(kit.c.text_muted),
+                );
+        } else {
+            scope_bar = scope_bar.child(
+                rune::text("Local Client")
+                    .key("local-client-scope")
+                    .font(kit.ty.small_medium)
+                    .color(kit.c.text_muted),
+            );
+        }
+        scope_bar = scope_bar.child(rune::spacer());
+        if any_busy {
+            scope_bar = scope_bar.child(
+                rune::row()
+                    .gap(6.0)
+                    .center_y()
+                    .child(
+                        rune_kit::Spinner::new()
+                            .size(13.0)
+                            .color(theme::hex(theme::ACCENT_HOVER))
+                            .build(&kit),
+                    )
+                    .child(
+                        rune::text("Syncing")
+                            .font(kit.ty.small_medium)
+                            .color(theme::hex(theme::ACCENT_HOVER)),
+                    ),
+            );
+        } else {
+            scope_bar = scope_bar.child(ui_components::status_pill(
+                match &state.connection.status {
+                    ConnectionStatus::Connected => "Online",
+                    ConnectionStatus::Connecting => "Connecting",
+                    ConnectionStatus::Failed(_) => "Fault",
+                    ConnectionStatus::Disconnected => "Offline",
+                },
+                None,
+                connection_tone,
+                &kit,
+            ));
+        }
+        main = main.child(scope_bar);
     }
-    let main = main.child(views::page(state, cx, &kit, &mut layers));
+
+    let screen_key = if state.setup_gateway {
+        "screen-setup".to_owned()
+    } else if !state.connected() {
+        format!("screen-{}", Page::Workstation.key())
+    } else {
+        format!("screen-{}", state.page.key())
+    };
+    let page_body = views::page(state, cx, &kit, &mut layers);
+    let animated_page = if preferences.reduced_motion {
+        rune::col()
+            .key(screen_key)
+            .w_full()
+            .grow(1.0)
+            .min_h(0.0)
+            .child(page_body)
+    } else {
+        rune::col()
+            .key(screen_key)
+            .w_full()
+            .grow(1.0)
+            .min_h(0.0)
+            .transition(Transition::offset(0.0, 12.0).combined(Transition::opacity()))
+            .child(page_body)
+    };
+    let main = main.child(animated_page);
+
     let base = SplitView::new(main)
         .sidebar(
             &state.sidebar,
@@ -739,5 +988,52 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     } else {
         base
     };
-    rune_kit::root(base, layers).on_window_focus(State::log_window_focus)
+    rune_kit::root(base, layers)
+        .on_window_focus(State::log_window_focus)
+        .on_pointer_move_local(|state: &mut State, pointer, tx| {
+            let nx = (pointer.window_x / 1180.0).clamp(0.0, 1.0);
+            let ny = (pointer.window_y / 780.0).clamp(0.0, 1.0);
+            state
+                .pointer_offset
+                .set([(nx - 0.5) * 56.0, (ny - 0.5) * 38.0]);
+            state
+                .shadow_offset
+                .set([(0.5 - nx) * 16.0, (0.5 - ny) * 14.0]);
+            tx.live_only();
+        })
+}
+
+fn sidebar_row_status(state: &State, page: Page) -> Option<RowStatus> {
+    let busy = match page {
+        Page::Seed => state.maintenance.busy(),
+        Page::Atlas => state.cycles.busy(),
+        Page::Brain => state.brain.in_flight,
+        Page::Tools => state.backend.busy(),
+        Page::Models => state.configuration.request.is_some(),
+        Page::Jobs => state.scoped_jobs.busy() || state.backend.busy(),
+        Page::Profile | Page::Workstation | Page::Workspaces => false,
+    };
+    if busy {
+        Some(RowStatus::Busy)
+    } else {
+        None
+    }
+}
+
+fn sidebar_row_badge(state: &State, page: Page) -> Option<String> {
+    match page {
+        Page::Jobs => state
+            .scoped_jobs
+            .page
+            .as_ref()
+            .filter(|page| !page.rows.is_empty())
+            .map(|page| page.rows.len().to_string()),
+        Page::Atlas => match &state.cycles.history {
+            Load::Ready(history) if !history.rows.is_empty() => {
+                Some(history.rows.len().to_string())
+            }
+            _ => None,
+        },
+        _ => None,
+    }
 }

@@ -319,6 +319,10 @@ impl Default for Backend {
 }
 
 impl Backend {
+    pub(crate) fn busy(&self) -> bool {
+        !self.requests.is_empty()
+    }
+
     pub(crate) fn cancel_reads(&mut self) {
         self.requests.clear();
     }

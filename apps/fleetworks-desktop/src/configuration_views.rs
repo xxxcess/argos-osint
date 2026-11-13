@@ -2,13 +2,16 @@
 
 use fleetworks_contracts::context::Permission;
 use rune::El;
-use rune_kit::Button;
-use rune_kit::ButtonVariant;
 use rune_kit::Kit;
 use rune_kit::Select;
 
 use crate::app::Load;
 use crate::app::State;
+use crate::icons;
+use crate::material::MetalFinish;
+use crate::theme::StatusTone;
+use crate::ui_components;
+use crate::ui_components::ActionButton;
 use crate::views::line;
 use crate::views::quiet;
 
@@ -45,6 +48,8 @@ fn model_choice(
 
 /// Current backend choices only; account binding remains part of each route.
 pub(crate) fn role_row_editor(state: &State, kit: &Kit, layers: &mut Vec<El>) -> El {
+    let preferences = state.accessibility.for_view(state.fixture, false);
+    let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
     let Load::Ready(defaults) = &state.backend.models else {
         return quiet("Model choices unavailable", kit);
     };
@@ -90,7 +95,7 @@ pub(crate) fn role_row_editor(state: &State, kit: &Kit, layers: &mut Vec<El>) ->
         .map(|entry| format!("{} · {}", entry.provider, entry.label()))
         .collect::<Vec<_>>();
     let mut body = rune::col()
-        .gap(8.0)
+        .gap(10.0)
         .child(model_choice(
             state,
             kit,
@@ -119,7 +124,12 @@ pub(crate) fn role_row_editor(state: &State, kit: &Kit, layers: &mut Vec<El>) ->
             State::select_model_variant,
             layers,
         ))
-        .child(quiet("Ordered fallbacks", kit));
+        .child(ui_components::status_pill(
+            "Ordered fallbacks",
+            Some(&icons::MODELS),
+            StatusTone::Accent,
+            kit,
+        ));
     if let Ok(routes) =
         serde_json::from_str::<Vec<crate::backend::ModelRoute>>(&state.configuration.fallbacks.text)
     {
@@ -127,39 +137,44 @@ pub(crate) fn role_row_editor(state: &State, kit: &Kit, layers: &mut Vec<El>) ->
         for (index, route) in routes.iter().enumerate() {
             body = body.child(
                 rune::col()
-                    .gap(4.0)
+                    .gap(6.0)
+                    .padding(8.0)
+                    .radius(8.0)
+                    .fill(crate::theme::hex(crate::theme::SURFACE_RAISED))
+                    .border(1.0, crate::theme::hex(crate::theme::BORDER_SUBTLE))
                     .child(line(format!("{}. {}", index + 1, route.label()), kit))
                     .child(
                         rune::row()
                             .gap(6.0)
                             .child(
-                                Button::new("Move up")
-                                    .variant(ButtonVariant::Ghost)
+                                ActionButton::new("Move up")
+                                    .key(format!("fallback-up-{index}"))
+                                    .finish(MetalFinish::ObsidianPill)
                                     .disabled(index == 0)
                                     .on_press(move |state: &mut State| {
                                         state.reorder_model_fallback(index, -1)
                                     })
-                                    .build(kit)
-                                    .key(format!("fallback-up-{index}")),
+                                    .build(kit, preferences, pointer_ref),
                             )
                             .child(
-                                Button::new("Move down")
-                                    .variant(ButtonVariant::Ghost)
+                                ActionButton::new("Move down")
+                                    .key(format!("fallback-down-{index}"))
+                                    .finish(MetalFinish::ObsidianPill)
                                     .disabled(index + 1 == count)
                                     .on_press(move |state: &mut State| {
                                         state.reorder_model_fallback(index, 1)
                                     })
-                                    .build(kit)
-                                    .key(format!("fallback-down-{index}")),
+                                    .build(kit, preferences, pointer_ref),
                             )
                             .child(
-                                Button::new("Remove")
-                                    .variant(ButtonVariant::Ghost)
+                                ActionButton::new("Remove")
+                                    .key(format!("fallback-remove-{index}"))
+                                    .icon(&icons::TRASH)
+                                    .finish(MetalFinish::CrimsonDanger)
                                     .on_press(move |state: &mut State| {
                                         state.reorder_model_fallback(index, 0)
                                     })
-                                    .build(kit)
-                                    .key(format!("fallback-remove-{index}")),
+                                    .build(kit, preferences, pointer_ref),
                             ),
                     ),
             );
@@ -175,14 +190,13 @@ pub(crate) fn role_row_editor(state: &State, kit: &Kit, layers: &mut Vec<El>) ->
         layers,
     ))
     .child(
-        Button::new("Review assignment")
-            .variant(ButtonVariant::Outline)
-            .disabled(
-                !state.permission(Permission::ManageConfiguration)
-                    || matches!(state.configuration.result, Load::Loading),
-            )
+        ActionButton::new("Review assignment")
+            .key("model-preview")
+            .icon(&icons::SHIELD_CHECK)
+            .finish(MetalFinish::GoldCta)
+            .busy(matches!(state.configuration.result, Load::Loading))
+            .disabled(!state.permission(Permission::ManageConfiguration))
             .on_press(|state: &mut State| state.preview_model_role(false))
-            .build(kit)
-            .key("model-preview"),
+            .build(kit, preferences, pointer_ref),
     )
 }

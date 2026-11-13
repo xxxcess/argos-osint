@@ -38,6 +38,14 @@ pub struct Cycles {
 }
 
 impl Cycles {
+    pub(crate) fn busy(&self) -> bool {
+        self.read_request.is_some()
+            || self.journal_request.is_some()
+            || self.delete_request.is_some()
+            || matches!(self.history, Load::Loading)
+            || matches!(self.deletion, Load::Loading)
+    }
+
     pub(crate) fn invalidate(&mut self) {
         self.read_request = None;
         self.journal_request = None;

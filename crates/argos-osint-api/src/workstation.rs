@@ -311,10 +311,10 @@ fn unavailable(id: ReadinessCheckId, at: &str) -> ReadinessCheck {
 }
 
 async fn catalog(state: &ApiState, at: &str) -> ReadinessCheck {
-    let result = tokio::time::timeout(DEADLINE, async {
-        let receipt = setup_jobs::actor_seed_observation(&state.repo).await?;
-        let mut response = state
-            .repo
+    let repo = state.repo.clone();
+    let result = crate::run_shielded_timeout(DEADLINE, async move {
+        let receipt = setup_jobs::actor_seed_observation(&repo).await?;
+        let mut response = repo
             .db()
             .query("RETURN array::len((SELECT VALUE id FROM brain_actor WHERE scope_key=$scope LIMIT 1)) > 0;
                 SELECT VALUE IF job_id != '' {
@@ -331,7 +331,7 @@ async fn catalog(state: &ApiState, at: &str) -> ReadinessCheck {
     })
     .await;
     match result {
-        Ok(Ok((receipt, has_actors, seed_active))) => {
+        Some(Ok((receipt, has_actors, seed_active))) => {
             catalog_observation(receipt.as_ref(), has_actors, seed_active, at)
         }
         _ => check(
@@ -486,15 +486,17 @@ async fn search(
     let Some(client) = client else {
         return unavailable(ReadinessCheckId::ActorSearch, at);
     };
-    let result = tokio::time::timeout(DEADLINE, async {
-        tokio::join!(client.status(), actor_search_outbox::observe(&state.repo))
+    let client = client.clone();
+    let repo = state.repo.clone();
+    let result = crate::run_shielded_timeout(DEADLINE, async move {
+        tokio::join!(client.status(), actor_search_outbox::observe(&repo))
     })
     .await;
     match result {
-        Ok((Ok(status), Ok(Some(source)))) => {
+        Some((Ok(status), Ok(Some(source)))) => {
             search_observation(&status, &source, &owners.deployment_id, at)
         }
-        Ok((Ok(_), Ok(None))) => check(
+        Some((Ok(_), Ok(None))) => check(
             ReadinessCheckId::ActorSearch,
             ReadinessState::NotReady,
             "index_source_not_started",
@@ -517,8 +519,9 @@ async fn collect(
     client: Option<&SearchClient>,
 ) -> Observations {
     let at = Utc::now().to_rfc3339();
-    let database = tokio::time::timeout(DEADLINE, async {
-        state.repo.db().query("RETURN 1").await?.check()
+    let database_repo = state.repo.clone();
+    let database = crate::run_shielded_timeout(DEADLINE, async move {
+        database_repo.db().query("RETURN 1").await?.check()
     })
     .await;
     let mut checks = vec![
@@ -529,7 +532,7 @@ async fn collect(
             "Authenticated gateway request succeeded",
             &at,
         ),
-        if matches!(database, Ok(Ok(_))) {
+        if matches!(database, Some(Ok(_))) {
             check(
                 ReadinessCheckId::Datastore,
                 ReadinessState::Ready,
@@ -547,13 +550,16 @@ async fn collect(
             )
         },
     ];
+    let natural_repo = state.repo.clone();
     let (catalog, search, services, natural) = tokio::join!(
         catalog(state, &at),
         search(state, owners, client, &at),
         join_all(owners.probes.iter().map(|probe| probe.observe(&at))),
-        tokio::time::timeout(DEADLINE, classifier_activation::observation(&state.repo))
+        crate::run_shielded_timeout(DEADLINE, async move {
+            classifier_activation::observation(&natural_repo).await
+        })
     );
-    let natural = natural.ok().and_then(Result::ok);
+    let natural = natural.and_then(Result::ok);
     checks.push(catalog);
     for service in services {
         checks.extend(service);
@@ -736,7 +742,16 @@ pub(crate) async fn read(
         }
         let usable = if let Some(dataset) = &input.dataset {
             if let Some(authority) = &authority {
-                matches!(tokio::time::timeout(DEADLINE,setup_jobs::dataset(&state.repo,authority,&dataset.id)).await,Ok(Ok(current)) if current==*dataset)
+                let repo = state.repo.clone();
+                let authority = authority.clone();
+                let dataset_id = dataset.id.clone();
+                matches!(
+                    crate::run_shielded_timeout(DEADLINE, async move {
+                        setup_jobs::dataset(&repo, &authority, &dataset_id).await
+                    })
+                    .await,
+                    Some(Ok(current)) if current == *dataset
+                )
             } else {
                 false
             }
@@ -768,13 +783,13 @@ pub(crate) async fn read(
             ReadinessActionId::RebuildActorIndex,
         ),
     ] {
+        let repo = state.repo.clone();
         let enabled = matches!(
-            tokio::time::timeout(
-                DEADLINE,
-                setup_jobs::operation_enabled(&state.repo, operation)
-            )
+            crate::run_shielded_timeout(DEADLINE, async move {
+                setup_jobs::operation_enabled(&repo, operation).await
+            })
             .await,
-            Ok(Ok(true))
+            Some(Ok(true))
         );
         if let Some(check) = checks.iter_mut().find(|check| check.id == check_id) {
             check.actions.push(maintenance_action(

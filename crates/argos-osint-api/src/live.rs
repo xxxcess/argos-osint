@@ -189,9 +189,13 @@ async fn send(socket: &mut WebSocket, payload: Value) -> bool {
 }
 
 async fn verify_context(state: &ApiState, context: &ResolvedRequest) -> Result<(), ContextFailure> {
-    tokio::time::timeout(Duration::from_secs(3), context.revalidate(&state.repo))
-        .await
-        .map_err(|_| ContextFailure::unavailable())?
+    let repo = state.repo.clone();
+    let context = context.clone();
+    crate::run_shielded_timeout(Duration::from_secs(3), async move {
+        context.revalidate(&repo).await
+    })
+    .await
+    .ok_or_else(ContextFailure::unavailable)?
 }
 
 async fn close_context(socket: &mut WebSocket) {
@@ -268,7 +272,16 @@ async fn stream(
                     if !send(&mut socket, json!({"type":"metrics","data":snapshot})).await { break; }
                 }
                 if let Some(watch) = brief.as_mut().filter(|watch| watch.active) {
-                    let result = tokio::time::timeout(Duration::from_secs(3), progress(&state, &watch.key, &context)).await;
+                    let result = {
+                    let state = state.clone();
+                    let key = watch.key.clone();
+                    let context = context.clone();
+                    crate::run_shielded_timeout(Duration::from_secs(3), async move {
+                        progress(&state, &key, &context).await
+                    })
+                    .await
+                    .ok_or(())
+                };
                     match result {
                         Ok(Ok((mut payload, refresh_key, active))) => {
                             if verify_context(&state, &context).await.is_err() { close_context(&mut socket).await; break; }

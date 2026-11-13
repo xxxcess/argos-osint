@@ -48,7 +48,10 @@ use axum::{
 use fleetworks_contracts::{AtlasCycleReceipt, ATLAS_CYCLES_PATH};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::future::Future;
+use std::sync::OnceLock;
 use std::{sync::Arc, time::Duration};
+use tokio::sync::Semaphore;
 
 pub use actor_search::SearchClient;
 pub use brain::BrainClient;
@@ -490,20 +493,76 @@ async fn private_ready(state: ApiState, service: &'static str) -> ApiResult {
     })))
 }
 
-async fn storage_ready(repo: &Repository) -> Result<(), ApiError> {
-    // Each probe reaches storage, including after startup. TCP alone is insufficient.
-    let mut response = repo
-        .db()
-        .query("SELECT VALUE version FROM ONLY storage_meta:schema")
+const MAX_DETACHED_QUERIES: usize = 32;
+
+fn detached_query_semaphore() -> &'static Arc<Semaphore> {
+    static SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    SEMAPHORE.get_or_init(|| Arc::new(Semaphore::new(MAX_DETACHED_QUERIES)))
+}
+
+/// Runs a datastore future on a bounded detached task so outer request cancellation
+/// or disconnect drains the SurrealDB channel instead of dropping it mid-flight.
+pub(crate) async fn run_shielded<F, T>(future: F) -> Result<T, ApiError>
+where
+    F: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let permit = detached_query_semaphore()
+        .clone()
+        .acquire_owned()
         .await
-        .map_err(internal)?
-        .check()
         .map_err(internal)?;
-    let version: Option<i64> = response.take(0).map_err(internal)?;
-    if version != Some(storage::bootstrap::SCHEMA_VERSION) {
-        return Err(internal("schema readiness failed"));
-    }
-    Ok(())
+    tokio::spawn(async move {
+        let _permit = permit;
+        future.await
+    })
+    .await
+    .map_err(internal)
+}
+
+/// Runs a datastore future with a deadline on a bounded detached task, returning `None`
+/// on timeout while letting the spawned task finish draining the SurrealDB reply.
+pub(crate) async fn run_shielded_timeout<F, T>(deadline: Duration, future: F) -> Option<T>
+where
+    F: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::time::timeout(deadline, async move {
+        let permit = detached_query_semaphore()
+            .clone()
+            .acquire_owned()
+            .await
+            .ok()?;
+        tokio::spawn(async move {
+            let _permit = permit;
+            future.await
+        })
+        .await
+        .ok()
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+async fn storage_ready(repo: &Repository) -> Result<(), ApiError> {
+    let repo = repo.clone();
+    run_shielded(async move {
+        // Each probe reaches storage, including after startup. TCP alone is insufficient.
+        let mut response = repo
+            .db()
+            .query("SELECT VALUE version FROM ONLY storage_meta:schema")
+            .await
+            .map_err(internal)?
+            .check()
+            .map_err(internal)?;
+        let version: Option<i64> = response.take(0).map_err(internal)?;
+        if version != Some(storage::bootstrap::SCHEMA_VERSION) {
+            return Err(internal("schema readiness failed"));
+        }
+        Ok(())
+    })
+    .await?
 }
 async fn capabilities(
     State(state): State<ApiState>,
@@ -967,4 +1026,106 @@ async fn safe_stages(
         row.detail = argos_osint_core::provider_diag::sanitize(&row.detail);
     }
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::sync::{oneshot, Mutex, Notify};
+
+    static SHIELD_TEST_LOCK: Mutex<()> = Mutex::const_new(());
+
+    #[tokio::test]
+    async fn run_shielded_drains_and_releases_permit_when_outer_future_drops() {
+        let _guard = SHIELD_TEST_LOCK.lock().await;
+        let baseline = detached_query_semaphore().available_permits();
+        assert_eq!(baseline, MAX_DETACHED_QUERIES);
+
+        let started = Arc::new(Notify::new());
+        let gate = Arc::new(Notify::new());
+        let completed = Arc::new(AtomicBool::new(false));
+        let (done_tx, done_rx) = oneshot::channel::<()>();
+
+        let started_task = started.clone();
+        let gate_task = gate.clone();
+        let completed_task = completed.clone();
+        let timed = tokio::time::timeout(
+            Duration::from_millis(20),
+            run_shielded(async move {
+                started_task.notify_one();
+                gate_task.notified().await;
+                completed_task.store(true, Ordering::SeqCst);
+                let _ = done_tx.send(());
+                7u32
+            }),
+        );
+        tokio::pin!(timed);
+
+        let started_fut = started.notified();
+        tokio::pin!(started_fut);
+        // Wait until the spawned task has started holding the permit, then let timeout expire.
+        let outcome = tokio::select! {
+            res = &mut timed => res,
+            () = &mut started_fut => timed.await,
+        };
+        assert!(outcome.is_err(), "outer future should time out");
+        assert!(
+            !completed.load(Ordering::SeqCst),
+            "detached task should still be awaiting gate"
+        );
+        assert_eq!(detached_query_semaphore().available_permits(), baseline - 1);
+
+        gate.notify_one();
+        done_rx.await.expect("detached task should finish draining");
+        // Yield briefly so the spawned task drops `_permit` after sending on `done_tx`.
+        tokio::task::yield_now().await;
+
+        assert!(completed.load(Ordering::SeqCst));
+        assert_eq!(detached_query_semaphore().available_permits(), baseline);
+    }
+
+    #[tokio::test]
+    async fn run_shielded_timeout_returns_none_and_drains_detached_task() {
+        let _guard = SHIELD_TEST_LOCK.lock().await;
+        let baseline = detached_query_semaphore().available_permits();
+        assert_eq!(baseline, MAX_DETACHED_QUERIES);
+
+        let gate = Arc::new(Notify::new());
+        let completed = Arc::new(AtomicBool::new(false));
+        let (done_tx, done_rx) = oneshot::channel::<()>();
+
+        let gate_task = gate.clone();
+        let completed_task = completed.clone();
+        let result = run_shielded_timeout(Duration::from_millis(20), async move {
+            gate_task.notified().await;
+            completed_task.store(true, Ordering::SeqCst);
+            let _ = done_tx.send(());
+            "ok"
+        })
+        .await;
+
+        assert_eq!(result, None);
+        assert!(!completed.load(Ordering::SeqCst));
+        assert_eq!(detached_query_semaphore().available_permits(), baseline - 1);
+
+        gate.notify_one();
+        done_rx.await.expect("detached task should finish draining");
+        tokio::task::yield_now().await;
+
+        assert!(completed.load(Ordering::SeqCst));
+        assert_eq!(detached_query_semaphore().available_permits(), baseline);
+    }
+
+    #[tokio::test]
+    async fn run_shielded_returns_value_and_releases_permit() {
+        let _guard = SHIELD_TEST_LOCK.lock().await;
+        let baseline = detached_query_semaphore().available_permits();
+        let Ok(value) = run_shielded(async { 42u32 }).await else {
+            panic!("expected shielded call to succeed");
+        };
+        assert_eq!(value, 42);
+        tokio::task::yield_now().await;
+        assert_eq!(detached_query_semaphore().available_permits(), baseline);
+    }
 }

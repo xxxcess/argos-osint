@@ -497,6 +497,90 @@ class PrepareReviewTests(unittest.TestCase):
             self.assertEqual(len(calls), 2)
             self.assertFalse(any(command[-1] == "stop" for command in calls))
 
+    def test_detect_docker_platform_delegates_and_rejects_unsupported_hosts(self):
+        import types
+        detected = native_review.detect_docker_platform()
+        self.assertIn(detected, {"linux/amd64", "linux/arm64"})
+        fake_info = mock.Mock(system="Windows", physical_architecture="x86_64", docker_platform="")
+        fake_module = types.ModuleType("fleetworks_platform")
+        fake_module.detect = lambda: fake_info
+        with mock.patch("importlib.util.module_from_spec", return_value=fake_module), \
+             mock.patch("importlib.util.spec_from_file_location",
+                        return_value=mock.Mock(loader=mock.Mock(exec_module=lambda m: None))):
+            with self.assertRaises(native_review.ReviewConfigurationError):
+                native_review.detect_docker_platform()
+
+    def test_init_defaults_name_port_and_auto_detected_platform(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = io.StringIO()
+            with mock.patch.object(native_review, "ROOT", root), \
+                 mock.patch.object(native_review, "detect_docker_platform", return_value="linux/arm64"), \
+                 mock.patch.object(native_review.subprocess, "check_output", return_value=("a" * 40) + "\n"), \
+                 mock.patch("sys.argv", ["native_review.py", "init"]), redirect_stdout(output):
+                self.assertEqual(native_review.main(), 0)
+            receipt = json.loads((review_path(root, "native-local") / "review.json").read_text())
+            self.assertEqual(receipt["environment"]["COMPOSE_PROJECT_NAME"], "fleetworks-native-review-native-local")
+            self.assertEqual(receipt["environment"]["FLEETWORKS_API_PORT"], "18091")
+            self.assertEqual(receipt["environment"]["PLATFORM"], "linux/arm64")
+            self.assertIn("http://127.0.0.1:18091", output.getvalue())
+
+    def test_up_auto_initializes_builds_redeploys_and_launches_native_in_one_command(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "version.txt").write_text("0.1.0\n")
+            output = io.StringIO()
+            with mock.patch.object(native_review, "ROOT", root), \
+                 mock.patch.object(native_review.sys, "platform", "darwin"), \
+                 mock.patch.object(native_review, "detect_docker_platform", return_value="linux/arm64"), \
+                 mock.patch("sys.argv", ["native_review.py", "up"]), \
+                 mock.patch.dict(os.environ, {"DOCKER_CONTEXT": "desktop-linux"}), \
+                 mock.patch.object(native_review.subprocess, "check_output", side_effect=[
+                     ("a" * 40) + "\n", "desktop-linux\n", '"unix:///var/run/docker.sock"\n', "linux/aarch64\n"]), \
+                 mock.patch.object(native_review.subprocess, "run") as processes, redirect_stdout(output):
+                self.assertEqual(native_review.main(), 0)
+            self.assertTrue((root / "compose.env").is_file())
+            self.assertFalse((root / "compose.env").is_symlink())
+            receipt = json.loads((review_path(root, "native-local") / "review.json").read_text())
+            self.assertEqual(receipt["environment"]["PLATFORM"], "linux/arm64")
+            self.assertEqual(receipt["environment"]["FLEETWORKS_API_PORT"], "18091")
+            commands = [call.args[0] for call in processes.call_args_list]
+            self.assertEqual(len(commands), 6)
+            self.assertIn("bake", commands[1])
+            self.assertEqual(commands[2][-1], "stop")
+            self.assertEqual(commands[3][-7:], ["up", "--no-build", "--pull", "never", "--force-recreate", "--detach", "--wait"])
+            self.assertEqual(commands[4][-1], "ps")
+            self.assertEqual(commands[5], [
+                native_review.sys.executable,
+                str(root.resolve() / "scripts/fleetworks_candidate.py"),
+                "build-native", "--target", "host", "--profile", "debug", "--open",
+            ])
+            self.assertIn("Prepared isolated backend review:", output.getvalue())
+            self.assertIn("[6/6]", output.getvalue())
+
+    def test_up_preserves_existing_root_compose_env_for_second_review_and_rejects_mismatched_overrides(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "version.txt").write_text("0.1.0\n")
+            existing = root / "compose.env"
+            existing.write_text("KEEP='1'\n")
+            with mock.patch.object(native_review, "ROOT", root), \
+                 mock.patch.object(native_review.sys, "platform", "linux"), \
+                 mock.patch.object(native_review, "detect_docker_platform", return_value="linux/amd64"), \
+                 mock.patch("sys.argv", ["native_review.py", "up", "--name", "second", "--api-port", "18092"]), \
+                 mock.patch.dict(os.environ, {"DOCKER_CONTEXT": "desktop-linux"}), \
+                 mock.patch.object(native_review.subprocess, "check_output", side_effect=[
+                     ("b" * 40) + "\n", "desktop-linux\n", '"unix:///var/run/docker.sock"\n', "linux/x86_64\n"]), \
+                 mock.patch.object(native_review.subprocess, "run"), redirect_stdout(io.StringIO()):
+                self.assertEqual(native_review.main(), 0)
+            self.assertEqual(existing.read_text(), "KEEP='1'\n")
+            self.assertFalse((review_path(root, "second") / "compose.env").is_symlink())
+            with mock.patch.object(native_review, "ROOT", root), \
+                 mock.patch("sys.argv", ["native_review.py", "up", "--name", "second", "--api-port", "18099"]), \
+                 redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as mismatch:
+                native_review.main()
+            self.assertEqual(mismatch.exception.code, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

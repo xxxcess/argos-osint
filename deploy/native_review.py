@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Prepare native backend reviews; explicitly build/restart with the up command."""
+"""Provision, build, and run local Fleetworks backend reviews and supported native builds."""
 
 import argparse
+import importlib.util
 import json
 import shlex
 import os
@@ -14,6 +15,8 @@ from contextlib import contextmanager
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_REVIEW_NAME = "native-local"
+DEFAULT_API_PORT = 18091
 TOKEN_NAMES = (
     "native-token", "operator-token", "web-relay-token", "gateway-health-token", "brain-token",
     "tools-token", "control-token", "jobs-token", "execution-token",
@@ -235,10 +238,48 @@ class ReviewConfigurationError(ValueError):
     """A controlled, non-secret operator action message."""
 
 
-def run_review(root, name, *, backend_only=False):
-    """Build before stopping anything; execute only the selected review's recipe."""
+def detect_docker_platform():
+    """Detect the matching Docker engine platform for the current workstation."""
+    scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+    spec = importlib.util.spec_from_file_location("fleetworks_platform", scripts_dir / "fleetworks_platform.py")
+    if spec is None or spec.loader is None:
+        raise ReviewConfigurationError("Unable to load host platform detector")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    info = module.detect()
+    if not info.docker_platform:
+        raise ReviewConfigurationError(
+            f"Unsupported host platform for Docker review: {info.system}/{info.physical_architecture}"
+        )
+    return info.docker_platform
+
+
+def run_review(root, name, *, backend_only=False, api_port=None, web_port=None, platform=None, root_env=False):
+    """Auto-initialize if needed, build before stopping, and launch the native app on macOS."""
     root = root.resolve(strict=True)
+    workspace = review_path(root, name)
+    if not workspace.exists():
+        resolved_platform = platform or detect_docker_platform()
+        resolved_port = DEFAULT_API_PORT if api_port is None else api_port
+        resolved_root_env = root_env or (
+            not (root / "compose.env").exists() and not (root / "compose.env").is_symlink()
+        )
+        revision = subprocess.check_output(["git", "rev-parse", "--verify", "HEAD"], cwd=root, text=True).strip()
+        receipt = provision(
+            root, name, resolved_port, resolved_platform, revision,
+            web_port=web_port, root_env=resolved_root_env,
+        )
+        print(f"Prepared isolated backend review: {receipt['workspace']}", flush=True)
+        if resolved_root_env:
+            print(f"Editable Compose settings: {root / 'compose.env'}", flush=True)
     prepared = prepare(root, name)
+    environment = prepared["environment"]
+    if api_port is not None and str(api_port) != environment.get("FLEETWORKS_API_PORT"):
+        raise ReviewConfigurationError("Review already exists with a different API port; edit compose.env or choose another --name")
+    if web_port is not None and str(web_port) != environment.get("FLEETWORKS_WEB_PORT"):
+        raise ReviewConfigurationError("Review already exists with a different Web port; edit compose.env or choose another --name")
+    if platform is not None and platform != environment.get("PLATFORM"):
+        raise ReviewConfigurationError("Review already exists with a different platform; edit compose.env or choose another --name")
     open_native = sys.platform == "darwin" and not backend_only
     stages = 6 if open_native else 5
     stage = "Docker preflight"
@@ -397,24 +438,29 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     subcommands = parser.add_subparsers(dest="command", required=True)
     initialize = subcommands.add_parser("init", help="create new private files under .agent-scratch/native-review")
-    initialize.add_argument("--name", required=True)
-    initialize.add_argument("--api-port", type=int, required=True)
+    initialize.add_argument("--name", default=DEFAULT_REVIEW_NAME, help=f"review name (default: {DEFAULT_REVIEW_NAME})")
+    initialize.add_argument("--api-port", type=int, default=DEFAULT_API_PORT, help=f"loopback API port (default: {DEFAULT_API_PORT})")
     initialize.add_argument("--web-port", type=int, help="optional distinct loopback Intel Web port")
     initialize.add_argument("--root-env", action="store_true", help="keep editable settings in repo-root compose.env; refuse an existing file")
-    initialize.add_argument("--platform", choices=("linux/amd64", "linux/arm64"), required=True)
+    initialize.add_argument("--platform", choices=("linux/amd64", "linux/arm64"), help="target Docker platform (auto-detected when omitted)")
     value = subcommands.add_parser("value", help="read one non-secret review setting")
-    value.add_argument("--name", required=True)
+    value.add_argument("--name", default=DEFAULT_REVIEW_NAME, help=f"review name (default: {DEFAULT_REVIEW_NAME})")
     value.add_argument("--field", choices=("workspace", "image_tag", "project"), required=True)
     existing = subcommands.add_parser("prepare", help="prepare existing credentials and print complete build/start/approval commands")
-    existing.add_argument("--name", required=True)
-    update = subcommands.add_parser("up", help="build/restart the review, then build/open the native app on macOS")
-    update.add_argument("--name", required=True)
+    existing.add_argument("--name", default=DEFAULT_REVIEW_NAME, help=f"review name (default: {DEFAULT_REVIEW_NAME})")
+    update = subcommands.add_parser("up", help="auto-init if missing, build/redeploy backend containers, and build/open the native app on macOS")
+    update.add_argument("--name", default=DEFAULT_REVIEW_NAME, help=f"review name (default: {DEFAULT_REVIEW_NAME})")
+    update.add_argument("--api-port", type=int, help=f"loopback API port when initializing a new review (default: {DEFAULT_API_PORT})")
+    update.add_argument("--web-port", type=int, help="optional distinct loopback Intel Web port when initializing")
+    update.add_argument("--root-env", action="store_true", help="require linking editable settings to repo-root compose.env on init; refuse an existing file")
+    update.add_argument("--platform", choices=("linux/amd64", "linux/arm64"), help="target Docker platform when initializing (auto-detected when omitted)")
     update.add_argument("--backend-only", action="store_true", help="skip building/opening the native app")
     args = parser.parse_args()
     try:
         if args.command == "init":
+            platform = args.platform or detect_docker_platform()
             revision = subprocess.check_output(["git", "rev-parse", "--verify", "HEAD"], cwd=ROOT, text=True).strip()
-            receipt = provision(ROOT, args.name, args.api_port, args.platform, revision,
+            receipt = provision(ROOT, args.name, args.api_port, platform, revision,
                                 web_port=args.web_port, root_env=args.root_env)
             print(f"Prepared isolated backend review: {receipt['workspace']}")
             if args.root_env:
@@ -433,7 +479,15 @@ def main():
         elif args.command == "prepare":
             print_prepared(ROOT, prepare(ROOT, args.name))
         elif args.command == "up":
-            run_review(ROOT, args.name, backend_only=args.backend_only)
+            run_review(
+                ROOT,
+                args.name,
+                backend_only=args.backend_only,
+                api_port=args.api_port,
+                web_port=args.web_port,
+                platform=args.platform,
+                root_env=args.root_env,
+            )
         else:
             receipt = json.loads((review_path(ROOT, args.name) / "review.json").read_text(encoding="utf-8"))
             print(receipt["environment"]["COMPOSE_PROJECT_NAME"] if args.field == "project" else receipt[args.field])

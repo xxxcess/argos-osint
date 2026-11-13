@@ -36,15 +36,13 @@ Enter the selectable Connect ID from **Workstation Status** into Intel Web's exi
 
 Start Docker Desktop or your local Docker engine, then run these commands from the repository root. The backend includes the gateway, private services, workers, SurrealDB, Jobs storage and actor search.
 
-**First-time setup & build/redeploy:** initialize `native-local` once for your Docker platform, then run `native_review.py up` to build backend service images, redeploy Docker containers, and build/open the native app for the detected supported macOS platform (`x86_64-apple-darwin` or `aarch64-apple-darwin`):
+**Single-command build, redeploy, and native launch:** run `native_review.py up` from the repository root. On first run it auto-detects your host Docker platform, initializes `native-local` on port `18091`, and links a private `compose.env` at the repository root (when none exists); on every run it builds the backend service images, redeploys the Docker containers, and builds/opens the native app on supported macOS hosts (`x86_64-apple-darwin` or `aarch64-apple-darwin`):
 
 ```sh
-export PLATFORM="$(python3 scripts/fleetworks_verify.py platform --format docker)"
-python3 deploy/native_review.py init --name native-local --api-port 18091 --platform "$PLATFORM" --root-env
-python3 deploy/native_review.py up --name native-local
+python3 deploy/native_review.py up
 ```
 
-`native_review.py up --name native-local` checks the active local Docker context/architecture against `PLATFORM`, builds the `backend` Bake group (`runtime`, `surrealdb`, `search-index`), stops and recreates the Compose containers with `--force-recreate --detach --wait`, and—on supported macOS hosts—runs `python3 scripts/fleetworks_candidate.py build-native --target host --profile debug --open` (pass `--backend-only` to skip the native step; non-macOS hosts skip it automatically). Existing credentials, scope/epochs and data remain preserved across reruns.
+Pass `--name <name>` (defaults to `native-local`) or `--api-port <port>` (defaults to `18091`) on a fresh review, or add `--backend-only` to skip the native build/open (non-macOS hosts skip it automatically). `native_review.py up` checks the active local Docker context/architecture against `PLATFORM`, builds the `backend` Bake group (`runtime`, `surrealdb`, `search-index`), stops and recreates the Compose containers with `--force-recreate --detach --wait`, and—on supported macOS hosts—runs `python3 scripts/fleetworks_candidate.py build-native --target host --profile debug --open`. Existing credentials, scope/epochs and data remain preserved across reruns.
 
 Edit `compose.env` at the repository root to update local Compose settings. It is private and ignored by Git. The deployment's generated env path points to this same file, so both locations use the same settings. Keep its generated access scope, epochs and storage path with the existing credentials and data.
 
@@ -58,7 +56,7 @@ docker compose --env-file compose.env \
 
 Enter `http://127.0.0.1:18091` in **Setup Gateway** and have the operator approve the displayed pairing request. Existing stacks need an independently provisioned Operator credential; see [operator setup](deploy/README.md#credentials). This backend runs independently of the app. Atlas collection uses the [additional overlay below](#collect-articles-with-atlas); Intel Web is an optional separate deployment.
 
-Rerun the start command to apply edited Compose settings. To inspect or stop the backend, use the same command prefix with `ps`, `logs --follow` or `down` in place of `up --no-build --pull never --detach --wait`. Stop preserves backend data. For concurrent deployments, omit `--root-env`, choose a different name and API port, and use that deployment's matching env file and project. [Full deployment guide](deploy/README.md#isolated-native-backend-review)
+Rerun the start command to apply edited Compose settings. To inspect or stop the backend, use the same command prefix with `ps`, `logs --follow` or `down` in place of `up --no-build --pull never --detach --wait`. Stop preserves backend data. For concurrent deployments, run `up --name <other> --api-port <port>` (an existing repo-root `compose.env` stays untouched) and use that deployment's matching env file and project. [Full deployment guide](deploy/README.md#isolated-native-backend-review)
 
 Venture, the six terminal clients and the legacy `argos` executable are retired. Their historical evidence remains available in the [retirement disposition](docs/archive/cli-retirement.md). Backend service executables and administrative support tools remain supported.
 
@@ -100,7 +98,7 @@ Choose the shortest loop for the changed surface. The native app/fixture graph i
 | Change | Loop |
 | --- | --- |
 | Rune app, client contracts or workstation manager | Scoped host debug tests, selected same-view Runtime/PNG/tree fixtures, then `python3 scripts/fleetworks_candidate.py build-native --target host --profile debug`. |
-| Service roles (`argos-api-host`) | `python3 deploy/native_review.py up --name native-local` rebuilds the `backend` Bake images, recreates Docker containers, and builds/opens the native app on supported macOS (`--backend-only` skips native). BuildKit caches dependencies. |
+| Service roles (`argos-api-host`) | `python3 deploy/native_review.py up` auto-initializes if missing, rebuilds the `backend` Bake images, recreates Docker containers, and builds/opens the native app on supported macOS (`--backend-only` skips native). BuildKit caches dependencies. |
 | Web app and `packages/*/src` | Run the separately configured Next development server; use isolated repository Playwright output for browser checks. |
 | Dependencies, Dockerfile, Compose or private search | Build the affected image with `docker buildx bake -f deploy/docker-bake.hcl <target>`, then use its isolated deployment checks. |
 | Packaging or release | Push and read the hosted CI results for that revision. |

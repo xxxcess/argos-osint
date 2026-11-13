@@ -24,13 +24,13 @@ Protected settings initialize without creating a default child. The opaque backe
 
 ## Launch the Compose stack
 
-Use the [standalone backend recipe](../../../deploy/README.md#isolated-native-backend-review): provision once with `deploy/native_review.py init --root-env`, then build backend service images, redeploy the Docker Compose containers, and trigger the native app build on supported macOS (`x86_64-apple-darwin` or `aarch64-apple-darwin`) in one command:
+Use the [standalone backend recipe](../../../deploy/README.md#isolated-native-backend-review): one command auto-detects host platform / initializes `native-local` on port `18091` when missing, builds the backend service images, redeploys the Docker Compose containers, and triggers the native app build on supported macOS (`x86_64-apple-darwin` or `aarch64-apple-darwin`):
 
 ```sh
-python3 deploy/native_review.py up --name native-local
+python3 deploy/native_review.py up
 ```
 
-`native_review.py up` preserves existing credentials/data, checks the Docker context and daemon architecture against `PLATFORM`, builds the `backend` Bake group (`runtime`, `surrealdb`, `search-index`), stops and recreates the Compose containers with `--force-recreate --detach --wait`, and runs `python3 scripts/fleetworks_candidate.py build-native --target host --profile debug --open` on supported macOS hosts (pass `--backend-only` to skip the native step; non-macOS hosts skip it cleanly). Edit the private, Git-ignored root `compose.env` for local settings and keep the same Compose project for `ps`, `logs` and `down`. Stop preserves data; no startup resets configuration or rotates credentials.
+`native_review.py up` preserves existing credentials/data (and never overwrites an existing root `compose.env`), checks the Docker context and daemon architecture against `PLATFORM`, builds the `backend` Bake group (`runtime`, `surrealdb`, `search-index`), stops and recreates the Compose containers with `--force-recreate --detach --wait`, and runs `python3 scripts/fleetworks_candidate.py build-native --target host --profile debug --open` on supported macOS hosts (pass `--backend-only` to skip the native step; non-macOS hosts skip it cleanly). Edit the private, Git-ignored root `compose.env` for local settings and keep the same Compose project for `ps`, `logs` and `down`. Stop preserves data; no startup resets configuration or rotates credentials.
 
 Optional Intel Web and Atlas services require explicit deployment configuration. The browser authenticates its Connect form with an already registered Connect ID; the ID alone grants no authority. Use native News Cycles to submit collection work when a real worker is advertised. [Deployment](../../../deploy/README.md) · [Atlas](../../../deploy/atlas-dispatch.md)
 

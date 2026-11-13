@@ -18,22 +18,22 @@ Use the standalone [native review recipe](compose.native-review.yml) for the Run
 
 | Deployment | Helper |
 | --- | --- |
-| Fresh review | `init` creates a new isolated deployment; an existing name fails without replacing files |
-| Existing review | `up --name <name>` prepares missing Operator provisioning, builds/restarts that review, then builds/opens the native app on macOS |
+| Default single-command run | `up` auto-detects host platform, initializes `native-local` on port `18091` if missing, builds/redeploys containers, and builds/opens the native app on macOS |
+| Offline pre-provisioning | `init` creates private files without starting Docker; an existing name fails without replacing files |
 
 ### Prepare an existing review
 
 ```sh
-python3 deploy/native_review.py up --name native-local
+python3 deploy/native_review.py up
 ```
 
-`up` reads the active Compose settings, including the review's root `compose.env` alias, and adds only missing Operator provisioning. It preserves existing credentials, scope/epochs and data. After checking local Docker, matching daemon architecture, native platform (`fleetworks_platform.py`) and configuration, it builds the configured backend images (`docker buildx bake`) with live output. Only a successful build proceeds to stop/recreate the selected review containers with Docker Compose, wait for readiness and show service status. When running on a supported macOS host (`x86_64-apple-darwin` or `aarch64-apple-darwin`), it then triggers `python3 scripts/fleetworks_candidate.py build-native --target host --profile debug --open`; a native build failure leaves the healthy backend running. It prints the actual gateway URL and pairing-approval command. No shell exports, `source` or `eval` are needed.
+Pass `--name native-local` (the default) or `--name <other>` for an isolated review. When the named review does not exist yet, `up` auto-detects the local Docker platform via `fleetworks_platform.py`, provisions `.agent-scratch/native-review/<name>`, and links repo-root `compose.env` if none exists (`--root-env` makes linking mandatory). On every run, `up` reads the active Compose settings, adds only missing Operator provisioning, and preserves existing credentials, scope/epochs and data. After checking local Docker, matching daemon architecture, native platform (`fleetworks_platform.py`) and configuration, it builds the configured backend images (`docker buildx bake`) with live output. Only a successful build proceeds to stop/recreate the selected review containers with Docker Compose, wait for readiness and show service status. When running on a supported macOS host (`x86_64-apple-darwin` or `aarch64-apple-darwin`), it then triggers `python3 scripts/fleetworks_candidate.py build-native --target host --profile debug --open`; a native build failure leaves the healthy backend running. It prints the actual gateway URL and pairing-approval command. No shell exports, `source` or `eval` are needed.
 
-**Flow:** `up` → backend image build → Docker container stop/recreate/wait → detected supported macOS `build-native --target host --profile debug --open` → Setup Gateway → approve the displayed request. This command operates Docker and interrupts that review during restart. Add `--backend-only` to skip the native step; non-macOS hosts skip it automatically and report that choice. For an offline preview that changes only missing Operator provisioning and prints commands without executing Docker, use `python3 deploy/native_review.py prepare --name native-local`.
+**Flow:** `up` → auto-init if missing → backend image build → Docker container stop/recreate/wait → detected supported macOS `build-native --target host --profile debug --open` → Setup Gateway → approve the displayed request. This command operates Docker and interrupts that review during restart. Add `--backend-only` to skip the native step; non-macOS hosts skip it automatically and report that choice. For an offline preview that changes only missing Operator provisioning and prints commands without executing Docker, use `python3 deploy/native_review.py prepare --name native-local`.
 
 ### Initialize a fresh review
 
-Provision a **new** task-owned deployment directory, separate from every native workspace and existing stack. Choose an unused API port. Initialization creates private files only, with no browser service or published database/search port. Then use `up --name <name>` to build/start it. The detailed manual recipe below also defines the shell values used by the optional Web examples.
+Use `init` when you want to pre-provision private files offline before building/starting containers (for example with a custom `--web-port` for the optional Intel Web manual recipe), or when scripting explicit values below. Both `init` and `up` default `--name` to `native-local`, `--api-port` to `18091`, and `--platform` to host detection via `fleetworks_platform.py`:
 
 ```sh
 export REVIEW_NAME=native-local

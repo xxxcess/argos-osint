@@ -53,13 +53,13 @@ python3 scripts/fleetworks_candidate.py build-native --agent --target host --pro
 
 Use [selected native verification](native-verification.md) for affected Runtime/PNG/tree/script evidence. The helper streams Cargo progress/diagnostics and stage markers live on stderr, then packages/validates and prints the `.app` path and result metadata. Only `--open` opens the validated app; an already running app is preserved. Native build/fixture commands do not provision a backend. Installed-app, minimum-OS and platform validation stay separate from fixture generation.
 
-**2. Runtime image loop (service changes).** Service roles run from the `runtime` image, so a host build alone does not change them. After provisioning once with `deploy/native_review.py init --root-env`, run the single helper command to rebuild the backend service images, redeploy the Docker Compose containers, and trigger `fleetworks_candidate.py build-native --target host --profile debug --open` on supported macOS (`x86_64-apple-darwin` or `aarch64-apple-darwin`; pass `--backend-only` or run on Linux to skip the native build):
+**2. Runtime image loop (service changes).** Service roles run from the `runtime` image, so a host build alone does not change them. Run the single helper command to auto-initialize `native-local` if missing, rebuild the backend service images, redeploy the Docker Compose containers, and trigger `fleetworks_candidate.py build-native --target host --profile debug --open` on supported macOS (`x86_64-apple-darwin` or `aarch64-apple-darwin`; pass `--backend-only` or run on Linux to skip the native build):
 
 ```sh
-python3 deploy/native_review.py up --name native-local
+python3 deploy/native_review.py up
 ```
 
-Edit the private, Git-ignored root `compose.env` for local settings; isolated concurrent reviews omit `--root-env` and keep their per-review env paths. Reuse the exact env file/project for `ps`, `logs` and `down`. BuildKit retains dependencies; rebuilding an image alone without `up` or `--force-recreate` does not recreate a running consumer. For a server-feature check without containers, use the `server,nlp,classifier` graph in [Targeted local Rust builds](#targeted-local-rust-builds-and-tests-fast-iteration).
+Edit the private, Git-ignored root `compose.env` for local settings; concurrent reviews (`--name <other> --api-port <port>`) keep their per-review env paths without touching an existing root `compose.env`. Reuse the exact env file/project for `ps`, `logs` and `down`. BuildKit retains dependencies; rebuilding an image alone without `up` or `--force-recreate` does not recreate a running consumer. For a server-feature check without containers, use the `server,nlp,classifier` graph in [Targeted local Rust builds](#targeted-local-rust-builds-and-tests-fast-iteration).
 
 [![Runtime service image development loop](../../diagrams/dev-loop-runtime.svg)](../../diagrams/dev-loop-runtime.html)
 

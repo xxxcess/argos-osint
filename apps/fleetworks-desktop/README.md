@@ -18,13 +18,13 @@ Build flow: live Cargo progress/diagnostics and stage markers on stderr → pack
 python3 scripts/fleetworks_candidate.py build-native --agent --target host --profile debug
 ```
 
-For an existing local review, the backend operator first runs:
+For a fresh or existing local review, run:
 
 ```sh
-python3 deploy/native_review.py up --name native-local
+python3 deploy/native_review.py up
 ```
 
-This command preserves existing credentials/data, adds missing Operator provisioning, validates local Docker/configuration, builds the configured images with live output, then restarts only that review after a successful build and waits for readiness. On macOS it then builds/opens the app using `build-native --target host --profile debug --open`; native build failure leaves the healthy backend running. Add `--backend-only` to skip the app step; non-macOS hosts skip it automatically. It prints the actual gateway URL and approval command. Use `prepare --name native-local` for an offline provisioning/command preview instead. For a new deployment, [initialize it first](../../deploy/README.md#initialize-a-fresh-review). [Backend review workflow](../../deploy/README.md#prepare-an-existing-review)
+This command auto-detects host platform and initializes `native-local` on port `18091` if needed (without overwriting an existing root `compose.env`), preserves existing credentials/data, adds missing Operator provisioning, validates local Docker/configuration, builds the configured images with live output, then restarts only that review after a successful build and waits for readiness. On supported macOS it then builds/opens the app using `build-native --target host --profile debug --open`; native build failure leaves the healthy backend running. Add `--backend-only` to skip the app step; non-macOS hosts skip it automatically. It prints the actual gateway URL and approval command. Use `prepare --name native-local` for an offline provisioning/command preview or [`init`](../../deploy/README.md#initialize-a-fresh-review) for offline setup. [Backend review workflow](../../deploy/README.md#prepare-an-existing-review)
 
 Open Setup Gateway, enter the helper's gateway URL and choose Connect. Share the displayed pairing request ID/code with the [gateway operator](../../docs/wiki/code/native-connections.md#operator-approval-and-revocation). The app authenticates approved access, saves it in macOS Keychain and registers the installation. Later connections use that exact origin/deployment; missing/denied access has no file fallback. Retry preserves an uncertain request; Pair again explicitly replaces it.
 

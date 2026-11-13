@@ -56,3 +56,11 @@ CARGO_BUILD_JOBS=2 env -u ARGOS_SURREAL_MODE -u ARGOS_SURREAL_BIN -u ARGOS_SURRE
 Focused required-storage regressions live in API `pairing::tests` and `admission::tests::captured_configuration_stays_locked_through_acceptance_then_save_fences_fresh_nonce_and_preserves_replay`. The full gate's explicit required embedded phase must execute the retained storage harness, rather than treating an ordinary absent-harness skip as success.
 
 The backend build issue was independently reproduced from BuildKit history and the lockfile fix validated against both isolated Linux dependency graphs. The old control-service SDK `SendError` represented a closed response channel after a query result; its bounded adjacent log contained no other failure and the existing service remained healthy. No vendor log suppression or existing-stack restart was applied.
+
+## Requested verification rerun
+
+At source revision `5fec2a9`, reran the three client/native/workstation library suites: **146 passed, 0 failed** (41 contracts, 79 native, 26 workstation). The operator command's six tests and fresh-review provisioning's nine tests also passed again. No actual user Keychain access or app launch occurred.
+
+The full `local_matrix.sh --storage embedded` invocation exited **1** at its first formatting step, solely on the preserved unstaged formatting changes in `crates/fleetworks-workstation/src/native/tests.rs`. Consequently, this invocation did not reach Clippy, workspace tests or the required storage phase. The focused backend pairing command was not started: free disk was about 2.8 GiB before the rerun and 2.2 GiB afterward, below the established build reserve. Those backend checks remain **BLOCKED**, rather than passed or skipped as successful.
+
+Local logs: `.agent-scratch/native-pairing-rerun-units.log` and `.agent-scratch/native-pairing-rerun-matrix.log`. Resolve the unrelated formatting diff and provide sufficient capacity before rerunning the remaining commands above. The native build/open step is reserved for the user.

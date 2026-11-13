@@ -251,11 +251,10 @@ impl ReadinessOwners {
         anyhow::ensure!(inputs.len() <= 3, "too many maintenance inputs");
         for (index, input) in inputs.iter().enumerate() {
             anyhow::ensure!(
-                input.configuration_revision > 0
-                    && !inputs[..index]
-                        .iter()
-                        .any(|other| other.operation == input.operation),
-                "ambiguous maintenance input revision"
+                !inputs[..index]
+                    .iter()
+                    .any(|other| other.operation == input.operation),
+                "ambiguous maintenance input operation"
             );
             let valid = match input.operation {
                 MaintenanceOperation::SeedActors => input.dataset.as_ref().is_some_and(|dataset| {
@@ -278,7 +277,8 @@ impl ReadinessOwners {
         Ok(self)
     }
 
-    pub(crate) fn configured_input(
+    #[cfg(test)]
+    fn configured_input(
         &self,
         operation: MaintenanceOperation,
     ) -> Option<&fleetworks_contracts::readiness::ConfiguredMaintenanceInput> {
@@ -311,13 +311,82 @@ fn unavailable(id: ReadinessCheckId, at: &str) -> ReadinessCheck {
 }
 
 async fn catalog(state: &ApiState, at: &str) -> ReadinessCheck {
-    let result =
-        tokio::time::timeout(DEADLINE, setup_jobs::actor_seed_observation(&state.repo)).await;
+    let result = tokio::time::timeout(DEADLINE, async {
+        let receipt = setup_jobs::actor_seed_observation(&state.repo).await?;
+        let mut response = state
+            .repo
+            .db()
+            .query("RETURN array::len((SELECT VALUE id FROM brain_actor WHERE scope_key=$scope LIMIT 1)) > 0;
+                SELECT VALUE IF job_id != '' {
+                    ((type::record('job',job_id).state ?? '') IN ['queued','running','waiting','reconciling']
+                    OR array::len((SELECT VALUE id FROM task WHERE job=type::record('job',$parent.job_id)
+                        AND state NOT IN ['completed','failed','cancelled','superseded','stopped','skipped'] LIMIT 1))>0)
+                } ELSE { false } FROM ONLY setup_resource:actor_catalog;")
+            .bind(("scope", argos_osint_core::actor_catalog::SCOPE))
+            .await?
+            .check()?;
+        let has_actors = response.take::<Option<bool>>(0)?.unwrap_or(false);
+        let seed_active = response.take::<Option<bool>>(1)?.unwrap_or(false);
+        Ok::<_, anyhow::Error>((receipt, has_actors, seed_active))
+    })
+    .await;
     match result {
-        Ok(Ok(Some(receipt))) if receipt.status=="complete" && receipt.total>0 && receipt.processed==receipt.total => check(ReadinessCheckId::ActorCatalog,ReadinessState::Ready,"database_seeded","A durable completed actor seed receipt exists; actor search visibility is a separate check",at),
-        Ok(Ok(Some(receipt))) if receipt.status=="running" => check(ReadinessCheckId::ActorCatalog,ReadinessState::Running,"database_seed_running","Actor seed work is running; completion is not implied",at),
-        Ok(Ok(_)) => check(ReadinessCheckId::ActorCatalog,ReadinessState::NotReady,"database_seed_incomplete","No current completed seed receipt; existing partial records are retained",at),
-        _ => check(ReadinessCheckId::ActorCatalog,ReadinessState::Unavailable,"seed_receipt_unavailable","Cannot read the durable actor seed receipt",at),
+        Ok(Ok((receipt, has_actors, seed_active))) => {
+            catalog_observation(receipt.as_ref(), has_actors, seed_active, at)
+        }
+        _ => check(
+            ReadinessCheckId::ActorCatalog,
+            ReadinessState::Unavailable,
+            "seed_receipt_unavailable",
+            "Cannot verify the actor seed receipt and canonical records",
+            at,
+        ),
+    }
+}
+
+fn catalog_observation(
+    receipt: Option<&setup_jobs::SeedObservation>,
+    has_actors: bool,
+    seed_active: bool,
+    at: &str,
+) -> ReadinessCheck {
+    if seed_active {
+        return check(
+            ReadinessCheckId::ActorCatalog,
+            ReadinessState::Running,
+            "database_seed_running",
+            "Accepted actor seed work has not settled; indexing waits for completion",
+            at,
+        );
+    }
+    match receipt {
+        Some(receipt)
+            if receipt.status == "complete"
+                && receipt.total > 0
+                && receipt.processed == receipt.total =>
+        {
+            if has_actors {
+                check(ReadinessCheckId::ActorCatalog, ReadinessState::Ready, "database_seeded",
+                    "A completed actor seed and canonical actor records are present; search visibility is a separate check", at)
+            } else {
+                check(ReadinessCheckId::ActorCatalog, ReadinessState::NotReady, "database_catalog_empty",
+                    "The completed seed receipt has no canonical actor records; seed the database again", at)
+            }
+        }
+        Some(receipt) if receipt.status == "running" => check(
+            ReadinessCheckId::ActorCatalog,
+            ReadinessState::Running,
+            "database_seed_running",
+            "Actor seed work is running; completion is not implied",
+            at,
+        ),
+        _ => check(
+            ReadinessCheckId::ActorCatalog,
+            ReadinessState::NotReady,
+            "database_seed_incomplete",
+            "No current completed seed receipt; existing partial records are retained",
+            at,
+        ),
     }
 }
 
@@ -568,6 +637,27 @@ fn action(
     action
 }
 
+fn maintenance_action(
+    id: ReadinessActionId,
+    enabled: bool,
+    permitted: bool,
+    registered: bool,
+    catalog_ready: bool,
+) -> ReadinessAction {
+    let mut available = action(id, enabled, permitted, registered);
+    if id == ReadinessActionId::RebuildActorIndex {
+        available.preconditions.extend([
+            "completed_actor_seed".into(),
+            "canonical_actor_records".into(),
+        ]);
+        if available.allowed && !catalog_ready {
+            available.allowed = false;
+            available.disabled_reason = Some("actor_seed_required".into());
+        }
+    }
+    available
+}
+
 /// Global diagnostics require backend read permission, not an arbitrary folder.
 pub(crate) async fn read(
     State(state): State<ApiState>,
@@ -658,6 +748,9 @@ pub(crate) async fn read(
         }
     }
 
+    let catalog_ready = checks.iter().any(|check| {
+        check.id == ReadinessCheckId::ActorCatalog && check.state == ReadinessState::Ready
+    });
     for (check_id, operation, action_id) in [
         (
             ReadinessCheckId::ActorCatalog,
@@ -684,17 +777,13 @@ pub(crate) async fn read(
             Ok(Ok(true))
         );
         if let Some(check) = checks.iter_mut().find(|check| check.id == check_id) {
-            check.actions.push({
-                let configured = configured_inputs
-                    .iter()
-                    .any(|input| input.operation == operation);
-                let mut available = action(action_id, enabled && configured, permitted, registered);
-                if !configured {
-                    available.disabled_reason =
-                        Some("configured_input_unavailable_or_stale".into());
-                }
-                available
-            });
+            check.actions.push(maintenance_action(
+                action_id,
+                enabled,
+                permitted,
+                registered,
+                catalog_ready,
+            ));
         }
     }
     if let Some(check) = checks
@@ -779,6 +868,72 @@ fn reply(status: StatusCode, value: serde_json::Value) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalog_requires_completed_nonempty_seed_and_settled_work() {
+        let mut receipt = setup_jobs::SeedObservation {
+            status: "complete".into(),
+            processed: 2,
+            total: 2,
+        };
+        let observe = |receipt: Option<&setup_jobs::SeedObservation>, has_actors, seed_active| {
+            catalog_observation(receipt, has_actors, seed_active, "2026-01-01T00:00:00Z")
+        };
+        assert_eq!(
+            observe(Some(&receipt), true, false).state,
+            ReadinessState::Ready
+        );
+        assert_eq!(
+            observe(Some(&receipt), false, false).state,
+            ReadinessState::NotReady
+        );
+        assert_eq!(
+            observe(Some(&receipt), true, true).state,
+            ReadinessState::Running,
+            "accepted reseed blocks indexing before its worker replaces the old receipt"
+        );
+        assert_eq!(observe(None, true, false).state, ReadinessState::NotReady);
+        receipt.processed = 1;
+        assert_eq!(
+            observe(Some(&receipt), true, false).state,
+            ReadinessState::NotReady
+        );
+        receipt.processed = 0;
+        receipt.total = 0;
+        assert_eq!(
+            observe(Some(&receipt), true, false).state,
+            ReadinessState::NotReady
+        );
+    }
+
+    #[test]
+    fn seed_and_train_select_inputs_while_index_requires_a_ready_catalog() {
+        for id in [
+            ReadinessActionId::SeedActors,
+            ReadinessActionId::TrainClassifier,
+        ] {
+            assert!(maintenance_action(id, true, true, true, false).allowed);
+            assert!(!maintenance_action(id, false, true, true, true).allowed);
+            assert!(!maintenance_action(id, true, false, true, true).allowed);
+            assert!(!maintenance_action(id, true, true, false, true).allowed);
+        }
+        let index = maintenance_action(
+            ReadinessActionId::RebuildActorIndex,
+            true,
+            true,
+            true,
+            false,
+        );
+        assert!(!index.allowed);
+        assert_eq!(
+            index.disabled_reason.as_deref(),
+            Some("actor_seed_required")
+        );
+        assert!(
+            maintenance_action(ReadinessActionId::RebuildActorIndex, true, true, true, true)
+                .allowed
+        );
+    }
 
     #[test]
     fn seeded_catalog_requires_matching_reader_visibility_before_search_is_ready() {
@@ -867,6 +1022,26 @@ mod tests {
             ReadinessState::Unknown
         );
     }
+    #[test]
+    fn configured_inputs_accept_the_initial_zero_revision() {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let file = directory.path().join("inputs.json");
+        let input = serde_json::json!({"operation":"seed_actors","dataset":{"id":"staged-actors","kind":"actor_catalog","sha256":"a".repeat(64),"size_bytes":1024},"configuration_revision":0});
+        std::fs::write(&file, serde_json::to_vec(&vec![input]).expect("JSON"))
+            .expect("initial-revision fixture");
+        let owners = ReadinessOwners::new("deployment-a".into(), vec![])
+            .expect("owners")
+            .with_configured_inputs_file(Some(&file))
+            .expect("initial revision is a valid observed configuration");
+        assert_eq!(
+            owners
+                .configured_input(MaintenanceOperation::SeedActors)
+                .expect("configured seed input")
+                .configuration_revision,
+            0
+        );
+    }
+
     #[test]
     fn configured_inputs_are_bounded_unambiguous_and_purpose_checked() {
         let directory = tempfile::tempdir().expect("fixture directory");

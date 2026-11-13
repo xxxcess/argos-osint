@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Readiness, configured inputs and durable native maintenance</title>
-<style>body{margin:0;padding:32px;color:#242424;background:#fff;font:16px/1.6 Geist,Arial,sans-serif}main{max-width:1200px;margin:auto}h1{font:36px/1.2 "Instrument Serif",Georgia,serif;margin:0 0 16px}p{max-width:88ch}svg{display:block;width:100%;height:auto;margin:24px 0}a{color:#a14b24}</style></head><body><main><h1>Readiness, configured inputs and durable native maintenance</h1><p>Readiness is a bounded observation through configured owners, never a download, seed, train, indexing or service startup side effect. Native maintenance uses operator-configured revision-bound inputs and distinguishes accepted jobs from completed effects. Natural training, activation and verified Rust-BERT inference remain separate facts.</p>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Readiness, CSV inputs and durable native maintenance</title>
+<style>body{margin:0;padding:32px;color:#242424;background:#fff;font:16px/1.6 Geist,Arial,sans-serif}main{max-width:1200px;margin:auto}h1{font:36px/1.2 "Instrument Serif",Georgia,serif;margin:0 0 16px}p{max-width:88ch}svg{display:block;width:100%;height:auto;margin:24px 0}a{color:#a14b24}</style></head><body><main><h1>Readiness, CSV inputs and durable native maintenance</h1><p>Readiness is a bounded observation through configured owners, never a download, seed, train, indexing or service startup side effect. Native maintenance uploads a chosen CSV before explicit revision-bound job confirmation and distinguishes acceptance from completion. Natural training, activation and verified Rust-BERT inference remain separate facts.</p>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" role="img" aria-labelledby="workstation-readiness-title workstation-readiness-desc">
-<title id="workstation-readiness-title">Readiness, configured inputs and durable native maintenance</title>
-<desc id="workstation-readiness-desc">Readiness is a bounded observation through configured owners, never a download, seed, train, indexing or service startup side effect. Native maintenance uses operator-configured revision-bound inputs and distinguishes accepted jobs from completed effects. Natural training, activation and verified Rust-BERT inference remain separate facts.</desc>
+<title id="workstation-readiness-title">Readiness, CSV inputs and durable native maintenance</title>
+<desc id="workstation-readiness-desc">Readiness is a bounded observation through configured owners, never a download, seed, train, indexing or service startup side effect. Native maintenance uploads a chosen CSV before explicit revision-bound job confirmation and distinguishes acceptance from completion. Natural training, activation and verified Rust-BERT inference remain separate facts.</desc>
 <style>text{font-family:Geist,Arial,sans-serif;fill:#242424}.zone{font-size:14px;letter-spacing:1.4px;fill:#666}.label{font-size:20px;font-weight:600}.note{font-size:16px;fill:#555}.small{font-size:14px;fill:#666}.node{fill:#fff;stroke:#aaa;stroke-width:1}.focus{fill:#fff4ee;stroke:#eb6c36;stroke-width:2}.wire{fill:none;stroke:#555;stroke-width:2;marker-end:url(#arrow)}.lane{fill:#fafafa;stroke:#ddd;stroke-width:1}</style>
 <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#555"/></marker></defs>
 <rect width="1200" height="720" fill="#fff"/>
@@ -24,16 +24,16 @@
 <text x="840" y="204" class="note">Optional failure is local to action</text>
 <path d="M 372 160 H 432" class="wire"/>
 <path d="M 764 160 H 824" class="wire"/>
-<text x="40" y="300" class="zone">DB SEED &amp; TRAIN · CONFIGURED INPUTS AND DURABLE ACCEPTANCE</text><rect x="40" y="344" width="332" height="148" rx="6" class="node"/>
-<text x="56" y="376" class="label">Operator-configured inputs</text>
-<text x="56" y="408" class="note">Validated staged DatasetRef</text>
-<text x="56" y="434" class="note">Exact configuration revision</text>
-<text x="56" y="460" class="note">No native picker or upload</text>
+<text x="40" y="300" class="zone">DB SEED &amp; TRAIN · CSV PICKERS AND DURABLE CONFIRMATION</text><rect x="40" y="344" width="332" height="148" rx="6" class="node"/>
+<text x="56" y="376" class="label">Choose a CSV</text>
+<text x="56" y="408" class="note">Actor picker / training picker</text>
+<text x="56" y="434" class="note">Validate / hash / upload bytes</text>
+<text x="56" y="460" class="note">Exact revision; fresh 0 is valid</text>
 <rect x="432" y="344" width="332" height="148" rx="6" class="focus"/>
-<text x="448" y="376" class="label">Allowed explicit trigger</text>
+<text x="448" y="376" class="label">Confirm durable job</text>
 <text x="448" y="408" class="note">Actor seed / index / Natural train</text>
 <text x="448" y="434" class="note">Current permission and context</text>
-<text x="448" y="460" class="note">Missing or stale input disables</text>
+<text x="448" y="460" class="note">Validated dataset for seed/train</text>
 <rect x="824" y="344" width="336" height="148" rx="6" class="node"/>
 <text x="840" y="376" class="label">Durable workstation job</text>
 <text x="840" y="408" class="note">Receipt means queued, not done</text>
@@ -41,7 +41,7 @@
 <text x="840" y="460" class="note">Training does not activate</text>
 <path d="M 372 416 H 432" class="wire"/>
 <path d="M 764 416 H 824" class="wire"/>
-<path d="M 40 552 H 1160" stroke="#bbb"/><text x="40" y="592" class="label">Candidate activation remains a separate authorized backend API.</text><text x="40" y="626" class="note">The native control allowlist exposes no activation, dataset upload or global activity toolbar.</text>
-<text x="40" y="696" class="small">Finite visible/focused reads preserve unavailable, denied, stale and failed states explicitly.</text>
+<path d="M 40 552 H 1160" stroke="#bbb"/><text x="40" y="592" class="label">Completed seed + actors in DB → enable index → wait reader ready</text><text x="40" y="626" class="note">Queued/active reseeding disables index builds. Training creates a candidate without activation.</text>
+<text x="40" y="696" class="small">Focused-page auto-refresh and Refresh checks observe only; they never submit work.</text>
 </svg>
 <p><a href="../wiki/code/native-workspaces.md">Workstation identity contract</a> · <a href="../wiki/code/native-connections.md">Connections and activity</a> · <a href="../diagrams.md">Diagram catalog</a></p></main></body></html>

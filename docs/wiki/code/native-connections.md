@@ -94,7 +94,7 @@ Richer backend APIs retain independent permissions. Opaque cursors bind proof/sc
 
 ## Readiness and maintenance
 
-Status distinguishes identity/gateway, service readiness and optional API-host metrics; missing/stale data is unavailable, never invented zero/success. Configured exact-revision inputs enable actor seed/index/Natural training. Missing/stale inputs disable only their action. Training creates a candidate without activation; Rust-BERT inference is separate. [Maintenance figure](../../diagrams/workstation-readiness.html) · [Operator inputs](../../../deploy/README.md#configured-native-maintenance-inputs)
+Status distinguishes identity/gateway, service readiness and optional API-host metrics; missing/stale data is unavailable, never invented zero/success. Seed and Natural training select purpose-validated CSV uploads and confirm the current configuration revision. Index build requires completed actor seeding and actors in the database. Training creates a candidate without activation; Rust-BERT inference is separate. [Maintenance figure](../../diagrams/workstation-readiness.html) · [Dataset workflow](../../../deploy/README.md#configured-native-maintenance-inputs)
 
 Cycles use bounded workstation summaries and revision/idempotency-bound association tombstones. Delete preserves shared evidence/audit and does not cancel a cycle. Accepted receipts mean queued, not completed.
 

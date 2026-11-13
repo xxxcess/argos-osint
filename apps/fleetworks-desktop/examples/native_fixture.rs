@@ -575,6 +575,11 @@ mod native {
             scenes: &[
                 ("redesign-status", redesign_scenes::status),
                 ("redesign-seed", redesign_scenes::seed),
+                ("redesign-seed-ready", redesign_scenes::seed_ready),
+                (
+                    "redesign-seed-confirmation",
+                    redesign_scenes::seed_confirmation,
+                ),
                 ("redesign-cycles", redesign_scenes::cycles),
                 ("redesign-brain", redesign_scenes::brain),
                 ("redesign-tools", redesign_scenes::tools),

@@ -101,64 +101,74 @@ pub fn seed(state: &mut State) {
     let Load::Ready(readiness) = &mut state.readiness else {
         return;
     };
-    for (id, action, operation, dataset) in [
+    for (id, action) in [
         (
             ReadinessCheckId::ActorCatalog,
             ReadinessActionId::SeedActors,
-            MaintenanceOperation::SeedActors,
-            Some(
-                DatasetRef::new(
-                    "synthetic-actor-catalog".into(),
-                    DatasetKind::ActorCatalog,
-                    "a".repeat(64),
-                    1024,
-                )
-                .expect("catalog reference"),
-            ),
         ),
         (
             ReadinessCheckId::ActorSearch,
             ReadinessActionId::RebuildActorIndex,
-            MaintenanceOperation::ReindexActors,
-            None,
         ),
         (
             ReadinessCheckId::ClassifierTraining,
             ReadinessActionId::TrainClassifier,
-            MaintenanceOperation::TrainClassifier,
-            Some(
-                DatasetRef::new(
-                    "synthetic-natural-training".into(),
-                    DatasetKind::ClassifierTraining,
-                    "b".repeat(64),
-                    2048,
-                )
-                .expect("training reference"),
-            ),
         ),
     ] {
         let mut check = ReadinessCheck::new(
             id,
             ReadinessState::NotReady,
-            "synthetic_configured".into(),
-            "Configured input observed; operation has not been submitted.".into(),
+            "synthetic_unseeded".into(),
+            "No completed seed or trained candidate is present.".into(),
             OBSERVED.into(),
         );
         check.fresh_for_ms = 30_000;
-        check.actions.push(ReadinessAction::new(
+        let mut available = ReadinessAction::new(
             action,
             fleetworks_contracts::context::Permission::MaintainBackend,
-            true,
-        ));
-        readiness.checks.push(check);
-        readiness.configured_inputs.push(
-            serde_json::from_value(
-                json!({"operation":operation,"dataset":dataset,"configuration_revision":7}),
-            )
-            .expect("configured operation snapshot"),
+            action != ReadinessActionId::RebuildActorIndex,
         );
+        if !available.allowed {
+            available.disabled_reason =
+                Some("Complete actor seeding with actors in the database first".into());
+        }
+        check.actions.push(available);
+        readiness.checks.push(check);
     }
     state.page = Page::Seed;
+}
+
+pub fn seed_ready(state: &mut State) {
+    seed(state);
+    let Load::Ready(readiness) = &mut state.readiness else {
+        return;
+    };
+    for check in &mut readiness.checks {
+        if check.id == ReadinessCheckId::ActorCatalog {
+            check.state = ReadinessState::Ready;
+            check.explanation = "Completed seed and canonical actor records are present.".into();
+        }
+        for action in &mut check.actions {
+            if action.id == ReadinessActionId::RebuildActorIndex {
+                action.allowed = true;
+                action.disabled_reason = None;
+            }
+        }
+    }
+}
+
+pub fn seed_confirmation(state: &mut State) {
+    seed(state);
+    state.maintenance.selected_dataset = Some(
+        DatasetRef::new(
+            "synthetic-selected-actors".into(),
+            DatasetKind::ActorCatalog,
+            "a".repeat(64),
+            1024,
+        )
+        .expect("validated selected actor CSV"),
+    );
+    state.preview_maintenance(MaintenanceOperation::SeedActors);
 }
 
 pub fn cycles(state: &mut State) {

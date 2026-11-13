@@ -6,13 +6,14 @@ use fleetworks_contracts::context::MutationContext;
 use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::context::RegisteredContext;
 use fleetworks_contracts::context::ResourceScope;
-use fleetworks_contracts::readiness::ConfiguredMaintenanceInput;
 use fleetworks_contracts::readiness::DatasetKind;
 use fleetworks_contracts::readiness::DatasetRef;
 use fleetworks_contracts::readiness::MaintenanceOperation;
 use fleetworks_contracts::readiness::MaintenanceReceipt;
 use fleetworks_contracts::readiness::MaintenanceRequest;
 use fleetworks_contracts::readiness::ReadinessActionId;
+use fleetworks_contracts::readiness::ReadinessCheckId;
+use fleetworks_contracts::readiness::ReadinessState;
 use fleetworks_contracts::readiness::ACTOR_SEED_PATH;
 use fleetworks_contracts::readiness::CLASSIFIER_TRAIN_PATH;
 use fleetworks_contracts::search::ACTOR_REINDEX_PATH;
@@ -60,6 +61,8 @@ pub struct Maintenance {
     pub confirmation: Option<MaintenanceConfirmation>,
     pub receipt: Load<MaintenanceReceipt>,
     pub message: Option<String>,
+    pub(crate) pending_preview: Option<MaintenanceOperation>,
+    pub(crate) seed_accepted_at: Option<String>,
     pub(crate) last_request: Option<MaintenanceRequest>,
     pub(crate) upload_revision: u64,
     pub(crate) datasets_revision: u64,
@@ -79,6 +82,8 @@ impl Default for Maintenance {
             confirmation: None,
             receipt: Load::Idle,
             message: None,
+            pending_preview: None,
+            seed_accepted_at: None,
             last_request: None,
             upload_revision: 0,
             datasets_revision: 0,
@@ -92,6 +97,8 @@ impl Default for Maintenance {
 
 impl Maintenance {
     pub(crate) fn invalidate_origin(&mut self) {
+        self.pending_preview = None;
+        self.seed_accepted_at = None;
         self.confirmation = None;
         self.last_request = None;
         self.operation_request = None;
@@ -107,7 +114,17 @@ impl Maintenance {
 
 impl State {
     pub fn choose_dataset(&mut self, kind: DatasetKind, tx: &mut Tx) {
-        if !self.permission(Permission::MaintainBackend) {
+        let operation = match kind {
+            DatasetKind::ActorCatalog => MaintenanceOperation::SeedActors,
+            DatasetKind::ClassifierTraining => MaintenanceOperation::TrainClassifier,
+            _ => return,
+        };
+        if let Some(reason) = self.maintenance_disabled_reason(operation) {
+            self.maintenance.message = Some(reason);
+            return;
+        }
+        self.record(Intent::ChooseDataset { kind });
+        if self.fixture {
             return;
         }
         let epoch = self.connection.epoch;
@@ -122,7 +139,10 @@ impl State {
                     return;
                 }
                 match result {
-                    Ok(Some(path)) => state.select_local_dataset(path, kind),
+                    Ok(Some(path)) => {
+                        state.select_local_dataset(path, kind);
+                        state.upload_selected_dataset();
+                    }
                     Ok(None) => {}
                     Err(_) => {
                         state.maintenance.message =
@@ -136,11 +156,10 @@ impl State {
     pub fn select_local_dataset(&mut self, path: PathBuf, kind: DatasetKind) {
         self.maintenance.local_dataset = Some(LocalDataset { path, kind });
         self.maintenance.upload = Load::Idle;
+        self.maintenance.selected_dataset = None;
+        self.maintenance.pending_preview = None;
         self.maintenance.confirmation = None;
-        self.maintenance.message = Some(
-            "Review the selected CSV purpose and size limit, then upload its bytes to the backend"
-                .into(),
-        );
+        self.maintenance.message = None;
     }
 
     pub fn upload_selected_dataset(&mut self) {
@@ -161,13 +180,24 @@ impl State {
         let (Some(services), Some(client)) = (&self.services, &self.client) else {
             return;
         };
+        let Some(context) = &self.registration.context else {
+            return;
+        };
+        let client = match client.with_registered_context(context) {
+            Ok(client) => client,
+            Err(error) => {
+                self.maintenance.message = Some(error.to_string());
+                return;
+            }
+        };
         self.maintenance.upload = Load::Loading;
         self.maintenance.upload_revision = self.maintenance.upload_revision.wrapping_add(1);
         self.maintenance.upload_request = services.upload_dataset(
-            client.clone(),
+            client,
             selection,
             self.connection.epoch,
             self.maintenance.upload_revision,
+            self.origin_revision,
         );
     }
 
@@ -245,24 +275,28 @@ impl State {
                             .into(),
                     );
                 }
-                let Some(input) = self.configured_maintenance_input(operation) else {
-                    return Some(
-                        "This operation has no unambiguous server-configured input".into(),
-                    );
-                };
-                if Some(input.configuration_revision) != self.configuration_revision() {
-                    return Some("Configured operation inputs changed; refresh backend checks and configuration".into());
-                }
-                if let Some(kind) = dataset_kind(operation) {
-                    if input
-                        .dataset
-                        .as_ref()
-                        .is_none_or(|dataset| dataset.kind != kind || dataset.validate().is_err())
-                    {
-                        return Some("A validated server-configured dataset is required".into());
+                if operation == MaintenanceOperation::ReindexActors {
+                    let catalog_ready = readiness.checks.iter().any(|check| {
+                        check.id == ReadinessCheckId::ActorCatalog
+                            && check.state == ReadinessState::Ready
+                            && self.readiness_check_fresh(check)
+                            && self
+                                .maintenance
+                                .seed_accepted_at
+                                .as_ref()
+                                .is_none_or(|accepted| {
+                                    chrono::DateTime::parse_from_rfc3339(&check.observed_at)
+                                        .ok()
+                                        .zip(chrono::DateTime::parse_from_rfc3339(accepted).ok())
+                                        .is_some_and(|(observed, accepted)| observed > accepted)
+                                })
+                    });
+                    if !catalog_ready {
+                        return Some("Complete actor seeding with actors in the database before building the index".into());
                     }
-                } else if input.dataset.is_some() {
-                    return Some("The configured operation input is inconsistent".into());
+                }
+                if matches!(self.maintenance.upload, Load::Loading) {
+                    return Some("Validating and uploading the selected CSV…".into());
                 }
                 if matches!(self.maintenance.receipt, Load::Loading) {
                     return Some("A maintenance request is awaiting its acceptance receipt".into());
@@ -273,19 +307,49 @@ impl State {
         Some("This gateway has not advertised a durable consumer for this operation".into())
     }
 
-    fn configured_maintenance_input(
-        &self,
-        operation: MaintenanceOperation,
-    ) -> Option<&ConfiguredMaintenanceInput> {
-        let Load::Ready(readiness) = &self.readiness else {
-            return None;
-        };
-        let mut matches = readiness
-            .configured_inputs
-            .iter()
-            .filter(|input| input.operation == operation);
-        let input = matches.next()?;
-        matches.next().is_none().then_some(input)
+    pub(crate) fn finish_dataset_preview(&mut self) {
+        if let Some(operation) = self.maintenance.pending_preview {
+            if self.maintenance_disabled_reason(operation).is_none() {
+                self.preview_maintenance(operation);
+                self.maintenance.pending_preview = None;
+            }
+        }
+    }
+
+    pub(crate) fn complete_dataset_upload(
+        &mut self,
+        epoch: u64,
+        revision: u64,
+        origin_revision: u64,
+        kind: DatasetKind,
+        result: Result<DatasetUpload, String>,
+    ) {
+        if self.connection.epoch != epoch
+            || self.origin_revision != origin_revision
+            || self.maintenance.upload_revision != revision
+        {
+            return;
+        }
+        self.maintenance.upload_request = None;
+        match result {
+            Ok(upload) if upload.dataset.kind == kind && upload.dataset.validate().is_ok() => {
+                self.maintenance.selected_dataset = Some(upload.dataset.clone());
+                self.maintenance.upload = Load::Ready(upload);
+                self.maintenance.last_request = None;
+                self.maintenance.pending_preview = Some(match kind {
+                    DatasetKind::ActorCatalog => MaintenanceOperation::SeedActors,
+                    DatasetKind::ClassifierTraining => MaintenanceOperation::TrainClassifier,
+                    _ => return,
+                });
+                self.refresh_readiness();
+                self.finish_dataset_preview();
+            }
+            Ok(_) => {
+                self.maintenance.upload =
+                    Load::Failed("Gateway returned a dataset for a different purpose".into())
+            }
+            Err(error) => self.maintenance.upload = Load::Failed(error),
+        }
     }
 
     pub fn preview_maintenance(&mut self, operation: MaintenanceOperation) {
@@ -293,18 +357,34 @@ impl State {
             self.maintenance.message = Some(reason);
             return;
         }
-        let (Some(context), Some(input)) = (
-            &self.registration.context,
-            self.configured_maintenance_input(operation),
-        ) else {
+        let (Some(context), Some(configuration_revision)) =
+            (&self.registration.context, self.configuration_revision())
+        else {
             return;
         };
+        let dataset = match dataset_kind(operation) {
+            Some(kind) => {
+                let Some(dataset) = self
+                    .maintenance
+                    .selected_dataset
+                    .as_ref()
+                    .filter(|dataset| dataset.kind == kind && dataset.validate().is_ok())
+                else {
+                    self.maintenance.message =
+                        Some("Select and upload a valid CSV for this operation first".into());
+                    return;
+                };
+                Some(dataset.clone())
+            }
+            None => None,
+        };
+        self.maintenance.message = None;
         self.maintenance.confirmation = Some(MaintenanceConfirmation {
             operation,
             context: context.clone(),
             origin_revision: self.origin_revision,
-            configuration_revision: input.configuration_revision,
-            dataset: input.dataset.clone(),
+            configuration_revision,
+            dataset,
         });
         self.reveal_control("maintenance-confirmation");
     }
@@ -316,12 +396,13 @@ impl State {
         if confirmation.origin_revision != self.origin_revision
             || self.registration.context.as_ref() != Some(&confirmation.context)
             || self.configuration_revision() != Some(confirmation.configuration_revision)
-            || self
-                .configured_maintenance_input(confirmation.operation)
-                .is_none_or(|input| {
-                    input.configuration_revision != confirmation.configuration_revision
-                        || input.dataset != confirmation.dataset
-                })
+            || confirmation.dataset.as_ref().map(|dataset| dataset.kind)
+                != dataset_kind(confirmation.operation)
+            || confirmation.dataset.as_ref().is_some_and(|dataset| {
+                self.maintenance.selected_dataset.as_ref() != Some(dataset)
+                    || Some(dataset.kind) != dataset_kind(confirmation.operation)
+                    || dataset.validate().is_err()
+            })
         {
             self.maintenance.message =
                 Some("Origin or backend configuration changed; review the operation again".into());
@@ -366,25 +447,14 @@ impl GatewayEffects {
         selection: LocalDataset,
         epoch: u64,
         revision: u64,
+        origin_revision: u64,
     ) -> Option<RequestTask> {
         let ui = self.ui.get()?.clone();
         let task = self.runtime.spawn(async move {
+            let kind = selection.kind;
             let result = upload(&client, selection).await;
             ui.update(move |state, _| {
-                if state.connection.epoch != epoch || state.maintenance.upload_revision != revision
-                {
-                    return;
-                }
-                state.maintenance.upload_request = None;
-                state.maintenance.upload = match result {
-                    Ok(upload) => {
-                        state.maintenance.selected_dataset = Some(upload.dataset.clone());
-                        state.maintenance.confirmation = None;
-                        state.maintenance.last_request = None;
-                        Load::Ready(upload)
-                    }
-                    Err(error) => Load::Failed(error),
-                };
+                state.complete_dataset_upload(epoch, revision, origin_revision, kind, result);
             });
         });
         Some(RequestTask(task.abort_handle()))
@@ -509,6 +579,12 @@ impl GatewayEffects {
                 }
                 state.maintenance.operation_request = None;
                 state.maintenance.last_request = saved_request;
+                if let Ok(receipt) = &result {
+                    if receipt.operation == MaintenanceOperation::SeedActors {
+                        state.maintenance.seed_accepted_at =
+                            Some(receipt.origin.submitted_at.clone());
+                    }
+                }
                 state.maintenance.receipt = match result {
                     Ok(receipt) => Load::Ready(receipt),
                     Err(error) => Load::Failed(error),
@@ -614,3 +690,6 @@ fn action_id(operation: MaintenanceOperation) -> Option<ReadinessActionId> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests;

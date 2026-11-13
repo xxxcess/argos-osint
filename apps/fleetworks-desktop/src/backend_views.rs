@@ -1,6 +1,7 @@
 //! Allowlisted backend operation cards and workstation-scoped activity.
 
 use fleetworks_contracts::context::Permission;
+use fleetworks_contracts::readiness::DatasetKind;
 use fleetworks_contracts::readiness::MaintenanceOperation;
 use rune::El;
 use rune::ScrollSpec;
@@ -727,13 +728,41 @@ fn safe_log_table(state: &State, kit: &Kit, available_width: f32) -> El {
 }
 
 pub(crate) fn maintenance(state: &State, kit: &Kit) -> El {
-    let mut body = rune::col().child(heading("DB Seed & Train", kit));
+    let mut body = rune::col()
+        .child(heading("DB Seed & Train", kit))
+        .child(quiet("Choose an actor CSV → seed the database → build the search index. Choose a separate training CSV for a Natural candidate.", kit))
+        .child(Button::new("Refresh checks")
+            .variant(ButtonVariant::Outline)
+            .disabled(!state.connected())
+            .on_press(|state: &mut State| state.refresh_page())
+            .build(kit).key("maintenance-refresh"));
+    match &state.maintenance.upload {
+        Load::Loading => {
+            body =
+                body.child(line("Validating and uploading the selected CSV…", kit).role("status"))
+        }
+        Load::Failed(error) => body = body.child(line(error.clone(), kit).role("alert")),
+        Load::Ready(upload) => {
+            let name = state
+                .maintenance
+                .local_dataset
+                .as_ref()
+                .and_then(|selection| selection.path.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Selected CSV".into());
+            body = body.child(quiet(
+                format!("{name} · {} validated bytes", upload.dataset.size_bytes),
+                kit,
+            ));
+        }
+        _ => {}
+    }
     for (label, operation, key, explanation) in [
         (
             "Seed Actors",
             MaintenanceOperation::SeedActors,
             "maintenance-seed",
-            "Seed the configured actor catalog into the shared backend.",
+            "Choose an actor CSV to validate and seed into the shared backend.",
         ),
         (
             "Build Search Index",
@@ -745,7 +774,7 @@ pub(crate) fn maintenance(state: &State, kit: &Kit) -> El {
             "Train Classifier — Natural",
             MaintenanceOperation::TrainClassifier,
             "maintenance-train",
-            "Train a candidate from the configured Natural dataset. Training does not activate it.",
+            "Choose a training CSV for a Natural candidate. Training does not activate it.",
         ),
     ] {
         let reason = state.maintenance_disabled_reason(operation);
@@ -756,7 +785,15 @@ pub(crate) fn maintenance(state: &State, kit: &Kit) -> El {
                 Button::new(label)
                     .variant(ButtonVariant::Outline)
                     .disabled(reason.is_some())
-                    .on_press(move |state: &mut State| state.preview_maintenance(operation))
+                    .on_press_tx(move |state: &mut State, tx| match operation {
+                        MaintenanceOperation::SeedActors => {
+                            state.choose_dataset(DatasetKind::ActorCatalog, tx)
+                        }
+                        MaintenanceOperation::TrainClassifier => {
+                            state.choose_dataset(DatasetKind::ClassifierTraining, tx)
+                        }
+                        _ => state.preview_maintenance(operation),
+                    })
                     .build(kit)
                     .key(key),
             );
@@ -785,7 +822,7 @@ pub(crate) fn maintenance(state: &State, kit: &Kit) -> El {
                         "No dataset is required for this operation.".into(),
                         |dataset| {
                             format!(
-                                "Configured dataset {} · SHA-256 {}",
+                                "Selected dataset {} · SHA-256 {}",
                                 dataset.id, dataset.sha256
                             )
                         },

@@ -21,7 +21,7 @@ Ordinary selection, progression, dismissal, confirmation and recovery belong to 
 | Shell | Actual native window controls; Setup Gateway; sidebar collapse; clickable gateway/status header; six sidebar destinations below |
 | Setup | Gateway URL → operator pairing approval → Keychain → authenticated checks/registration. Waiting request/code, Retry/Pair again and Change gateway URL reflect the current stage; no user-managed token file. |
 | Workstation Status, via header | Read-only Native Client, Gateway Backend and Host Resources cards; selectable Connect ID; optional authoritative API-host percentages/platform/chipset |
-| DB Seed & Train | Configured actor seed, search-index build and Natural candidate-training triggers; read-only dataset/model/status metadata |
+| DB Seed & Train | Actor/training CSV selection, validated upload and confirmed seed/Natural candidate jobs; index build only after completed seeding with actors present; refresh checks and read-only dataset/model/status metadata |
 | News Cycles | New Cycle; workstation cycle cards; selected-cycle history Delete with in-place confirmation |
 | Brain Search | One search field; bounded results; selected authoritative dossier, no native graph |
 | OSINT Tools | Provider/service cards; key-provisioning modal only for actual provisionable credentials |
@@ -30,7 +30,7 @@ Ordinary selection, progression, dismissal, confirmation and recovery belong to 
 
 Sidebar order is exactly DB Seed & Train, News Cycles, Brain Search, OSINT Tools, Model Assignments, Jobs & Logs. Status is not a seventh item. Render only the selected destination.
 
-Excluded: separate Test/Disconnect, saved-profile CRUD, workspace/folder/Trash controls, dataset picker/upload, classifier activation, account creation/deletion/base-URL forms, configuration import/export, native article filters, manual tool Run/input/results, tabs and job/log retry/cancel/filter/follow/copy/export toolbars. Backend APIs may retain these independent capabilities for authorized callers.
+Excluded: separate Test/Disconnect, saved-profile CRUD, workspace/folder/Trash controls, classifier activation, account creation/deletion/base-URL forms, configuration import/export, native article filters, manual tool Run/input/results, tabs and job/log retry/cancel/filter/follow/copy/export toolbars. Backend APIs may retain these independent capabilities for authorized callers.
 
 ## Identity, setup and actions
 

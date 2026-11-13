@@ -169,10 +169,28 @@ A live Atlas deployment requires separately staged, hash-verified architecture-m
 
 ## Configured native maintenance inputs
 
-The gateway service host reads optional `FLEETWORKS_MAINTENANCE_INPUTS_FILE` at startup. It names a bounded JSON array of at most three unique `ConfiguredMaintenanceInput` entries. Each entry pins `operation`, `dataset` and the current positive `configuration_revision`; supported operations are `seed_actors`, `train_classifier` and `reindex_actors`. Seed/train require the matching already staged, validated `DatasetRef`; reindex requires `dataset: null`. For example, a reindex-only manifest for the actual current revision 7 is:
+[![Choose CSV inputs, confirm jobs and observe completion](../docs/diagrams/workstation-readiness.svg)](../docs/diagrams/workstation-readiness.html)
 
-```json
-[{"operation":"reindex_actors","dataset":null,"configuration_revision":7}]
+Rebuild both backend and native app for this workflow. Close an already running Fleetworks app first: the build helper preserves a running instance when opening a new build.
+
+```sh
+python3 deploy/native_review.py up --name native-local
 ```
 
-Use the actual observed revision, not the example value. Missing, stale, unavailable or unauthorized inputs leave the corresponding native trigger disabled; readiness never invents a dataset or completes an operation. The native UI has no upload or dataset picker. Operator tooling must stage/validate inputs separately. For a container gateway, explicitly mount the manifest and configure the environment path inside that container; the provisioning helper does not synthesize configured datasets. Reloading this startup configuration requires restarting the affected gateway using its exact existing deployment selection.
+In **DB Seed & Train**, each dataset button opens its own CSV picker. Selection validates/hashes the file and uploads its bytes through the registered connection; only the later confirmation submits a durable job at the actual configuration revision (fresh **0** is valid).
+
+| Action | Flow |
+| --- | --- |
+| **Seed Actors** | Choose `datasets/argos_actors.csv` → validated byte upload → confirm → wait for completed seeding and actors in the database |
+| **Build Search Index** | Enabled only after completed, nonempty seeding with no queued/active reseed → confirm → wait for reader readiness |
+| **Train Classifier — Natural** | Choose a separate training CSV → validated byte upload → confirm → candidate only, without activation. `datasets/argos_atlas_strategic_domains_v2.csv` is synthetic. |
+
+The focused maintenance page refreshes bounded readiness checks automatically; **Refresh checks** requests an immediate read. Neither submits jobs. A queued receipt is not completion.
+
+Optional operator metadata remains supported through startup-loaded `FLEETWORKS_MAINTENANCE_INPUTS_FILE`; it is not required for the native CSV flow. Its bounded JSON array holds at most three unique entries, pinning `operation`, `dataset` and the actual current `configuration_revision`. Supported operations are `seed_actors`, `train_classifier` and `reindex_actors`; seed/train reference staged, validated datasets, while reindex uses `dataset: null`. For a fresh revision 0:
+
+```json
+[{"operation":"reindex_actors","dataset":null,"configuration_revision":0}]
+```
+
+Use the observed revision, not an assumed value. Operator-managed manifests require their container mount/path and a matching gateway restart. Readiness does not invent datasets or complete operations; permissions, validated chosen datasets, exact revisions and catalog readiness still govern admission.

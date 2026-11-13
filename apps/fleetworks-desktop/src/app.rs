@@ -145,6 +145,7 @@ pub enum Intent {
     RebindWorkspace { name: String, ip: String },
     ReconcileRebind { request_id: String },
     BackendRead { kind: ReadKind },
+    ChooseDataset { kind: DatasetKind },
     UploadDataset { kind: DatasetKind },
     Datasets,
     Maintenance { operation: MaintenanceOperation },
@@ -213,6 +214,7 @@ pub struct State {
     pub(crate) search_request: Option<RequestTask>,
     pub(crate) dossier_request: Option<RequestTask>,
     pub(crate) readiness_revision: u64,
+    pub(crate) readiness_refresh_at: f64,
 }
 
 impl Default for State {
@@ -259,6 +261,7 @@ impl Default for State {
             search_request: None,
             dossier_request: None,
             readiness_revision: 0,
+            readiness_refresh_at: 0.0,
         }
     }
 }
@@ -405,8 +408,11 @@ impl State {
             return;
         }
         self.readiness_revision = self.readiness_revision.wrapping_add(1);
+        self.readiness_refresh_at = self.clock + 4.0;
         self.readiness_request = None;
-        self.readiness = Load::Loading;
+        if !matches!(self.readiness, Load::Ready(_)) {
+            self.readiness = Load::Loading;
+        }
         self.record(Intent::Readiness);
         if let (Some(services), Some(client)) = (&self.services, &self.client) {
             let client = match &self.registration.context {
@@ -433,10 +439,20 @@ impl State {
             Ok(_) => Load::Failed("Gateway returned readiness for a different deployment".into()),
             Err(error) => Load::Failed(error),
         };
+        self.finish_dataset_preview();
     }
 
     pub fn connected(&self) -> bool {
         self.connection.status == ConnectionStatus::Connected
+    }
+
+    pub(crate) fn maintenance_checks_due(&self, now: f64) -> bool {
+        self.page == Page::Seed
+            && !self.setup_gateway
+            && self.connected()
+            && self.scoped_logs.window_focused
+            && self.readiness_request.is_none()
+            && now >= self.readiness_refresh_at
     }
 
     pub fn search_available(&self) -> bool {
@@ -554,6 +570,17 @@ fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
     let mut changed = false;
     changed |= state.poll_scoped_logs();
     changed |= state.sync_jobs_binding();
+    if state.page == Page::Seed
+        && !state.setup_gateway
+        && state.connected()
+        && state.scoped_logs.window_focused
+    {
+        if state.maintenance_checks_due(now) {
+            state.refresh_readiness();
+            changed = true;
+        }
+        tx.wake_after(Duration::from_secs(1));
+    }
     if let Some(key) = state.reveal.take() {
         tx.scroll_into_view(key);
         changed = true;

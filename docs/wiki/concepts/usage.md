@@ -4,7 +4,9 @@
 
 [![Provision, connect and register a workstation](../../diagrams/native-connections.svg)](../../diagrams/native-connections.html)
 
-Provision the independent Linux backend and an exact-origin Native credential-file binding. Enter its URL in Setup Gateway; authenticated checks register the installation. The opaque workstation Connect ID also selects the browser's separately authorized session. IP is optional metadata. Native launch starts no services or child folders.
+**Agreed target, not implemented:** enter Gateway URL → approve pairing once → macOS Keychain → authenticated reconnect, without managing files. [Pairing/Keychain target](../code/native-connections.md#pairing-and-keychain-agreed-target)
+
+**Current transitional setup:** provision the independent Linux backend and an exact-origin Native credential-file binding, then enter its URL in Setup Gateway. Authenticated checks register the installation. Token files remain supported for operators and automated tooling. The opaque workstation Connect ID also selects the browser's separately authorized session. IP is optional metadata. Native launch starts no services or child folders.
 
 ## Intel
 

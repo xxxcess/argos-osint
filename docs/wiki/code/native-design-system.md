@@ -10,6 +10,8 @@ Rune macOS API client. One selected destination; the backend owns data and execu
 
 Explicit user decisions govern. This page is the maintained control/design contract; [migration/authority](native-connections.md) owns active wire semantics. The unchanged [supplied handoff](../../design/native-workstation-handoff/argos_workstation_identity_implementation_spec.md) and [detailed design rationale](../../design/native-workstation-handoff/argos_native_design_system_guide.md) preserve source requirements and mockups. Their November 2026 baseline descriptions are historical, not current verification. The original structural reference's Tauri/Linux-client, workspace identity, glossy surfaces, sample hardware and Rust-BERT-training assumptions are superseded.
 
+The agreed [pairing/Keychain target](native-connections.md#pairing-and-keychain-agreed-target) supersedes manual native token-file provisioning as the intended setup experience. It is not implemented; the current file-reference wizard remains transitional.
+
 ## Complete native control allowlist
 
 Ordinary selection, progression, dismissal, confirmation and recovery belong to each listed control; they do not authorize extra administration pages.
@@ -17,7 +19,7 @@ Ordinary selection, progression, dismissal, confirmation and recovery belong to 
 | Surface | Allowed controls and content |
 | --- | --- |
 | Shell | Actual native window controls; Setup Gateway; sidebar collapse; clickable gateway/status header; six sidebar destinations below |
-| Setup | Gateway URL → authenticated connectivity/compatibility checks → registration completion; exact-origin externally provisioned credential, no picker |
+| Setup | Target: Gateway URL → one-time pairing approval → Keychain → authenticated checks/registration. Current: externally provisioned file reference + URL/check. No user-managed token file in the target flow. |
 | Workstation Status, via header | Read-only Native Client, Gateway Backend and Host Resources cards; selectable Connect ID; optional authoritative API-host percentages/platform/chipset |
 | DB Seed & Train | Configured actor seed, search-index build and Natural candidate-training triggers; read-only dataset/model/status metadata |
 | News Cycles | New Cycle; workstation cycle cards; selected-cycle history Delete with in-place confirmation |
@@ -32,16 +34,18 @@ Excluded: separate Test/Disconnect, saved-profile CRUD, workspace/folder/Trash c
 
 ## Identity, setup and actions
 
-[![Exact-origin provisioning and URL-only setup](../../diagrams/native-connections.svg)](../../diagrams/native-connections.html)
+[![Transitional setup and approved pairing target](../../diagrams/native-connections.svg)](../../diagrams/native-connections.html)
 
 | Contract | Required behavior |
 | --- | --- |
 | Installation | Protected settings initialize without a default child. Existing folders, markers and journals remain intact. |
 | Connect | Opaque backend workstation ID; authenticated scope + installation marker establish identity. Optional mutable IP never merges installations or defines identity. |
-| Credential | Provision a protected exact-origin file reference externally; no token bytes in settings. Verify private permissions/object identity again; explicit rotation/replacement. Never forward another origin's key. |
+| Credential | Target: origin-bound Keychain secret after approved pairing; revocable scoped Native authority. Current: verified private-file reference. Keep settings/journals secret-free and preserve origin fences. |
 | Authority change | Fence old requests, caches, live responses and pending confirmations. Keep permitted shared reads usable when registration/optional services are unavailable. |
 | Mutation | Explicit action + current permission/capability/readiness + context/revision/idempotency fences. Accepted/queued is not completed. Navigation never submits work. |
 | Uncertain delivery | Retain original request ID/body/context/registration. Read-only reconciliation never creates replacement work. |
+
+Setup guidance should show one actionable state: pairing approval, Keychain access or network progress. Registration/readiness appears after successful authentication. No CLI flag error paragraphs in the target UI. Pairing/Keychain implementation and actual Runtime/installed-app evidence are still pending.
 
 ## Destination contracts
 

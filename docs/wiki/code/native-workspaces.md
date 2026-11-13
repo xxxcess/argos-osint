@@ -8,9 +8,11 @@ The native installation owns protected settings under `~/.fleetworks` in the ope
 
 ## Protected settings boundary
 
-Normal startup opens settings without creating a `default` child. The manager holds directory descriptors, verifies object identity and private permissions, and serializes revisioned atomic catalog writes with its existing private lock. Unknown catalogs, symlink substitution, external paths and conflicting installation markers fail closed. The connection catalog stores exact-origin protected credential references, never token bytes.
+Normal startup opens settings without creating a `default` child. The manager holds directory descriptors, verifies object identity and private permissions, and serializes revisioned atomic catalog writes with its existing private lock. Unknown catalogs, symlink substitution, external paths and conflicting installation markers fail closed. The current connection catalog stores exact-origin protected credential-file references, never token bytes.
 
-`--provision-gateway-credential --api-origin <origin> --api-token-file <private-file>` binds an existing protected token file to one normalized origin, exits without a GUI/network/service startup, and preserves other origins. Token rotation requires explicit provisioning again. The URL-only wizard cannot forward another origin's credential.
+**Current transitional setup:** `--provision-gateway-credential --api-origin <origin> --api-token-file <private-file>` binds an existing protected token file to one normalized origin, exits without a GUI/network/service startup, and preserves other origins. Token rotation requires explicit provisioning again. The URL-only wizard cannot forward another origin's credential.
+
+**Agreed target, not implemented:** [pair once and store access in macOS Keychain](native-connections.md#pairing-and-keychain-agreed-target). Protected settings keep installation identity, non-secret references and journals; Keychain owns the origin-bound native secret. Existing token files are not silently adopted, migrated or deleted. Server revocation and explicit re-pairing remain distinct from local credential storage.
 
 ## Scope and history
 

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" role="img" aria-labelledby="native-workstation-layout-title native-workstation-layout-desc">
 <title id="native-workstation-layout-title">Native navigation and selected-view composition</title>
-<desc id="native-workstation-layout-desc">Six sidebar destinations share one selected content area. The gateway header opens Status without another navigation item; Setup Gateway opens the URL-only flow. This is a layout schematic, not runtime approval.</desc>
+<desc id="native-workstation-layout-desc">Six sidebar destinations share one selected content area. The gateway header opens Status without another navigation item; Current Setup Gateway uses URL/check; approved pairing and Keychain remain unimplemented. This is a layout schematic, not runtime approval.</desc>
 <style>text{font-family:Geist,Arial,sans-serif;fill:#242424}.zone{font-size:14px;letter-spacing:1.4px;fill:#666}.label{font-size:20px;font-weight:600}.note{font-size:16px;fill:#555}.small{font-size:14px;fill:#666}.node{fill:#fff;stroke:#aaa;stroke-width:1}.focus{fill:#fff4ee;stroke:#eb6c36;stroke-width:2}.wire{fill:none;stroke:#555;stroke-width:2;marker-end:url(#arrow)}.lane{fill:#fafafa;stroke:#ddd;stroke-width:1}</style>
 <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#555"/></marker></defs>
 <rect width="1200" height="720" fill="#fff"/>

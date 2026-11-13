@@ -2,6 +2,8 @@
 
 Fleetworks has a Rune macOS API client, an independently operated Linux backend, and the React Native Web desktop. Backend deployment uses direct Docker Compose; Venture, the six terminal clients and legacy `argos` are retired. Six native sidebar destinations share deployment resources or registered activity; the gateway header opens Workstation Status. URL-only setup uses protected installation identity and exact-origin provisioned credentials.
 
+The [approved pairing/Keychain target](docs/wiki/code/native-connections.md#pairing-and-keychain-agreed-target) is not implemented. Keep current file provisioning labeled transitional.
+
 - Start at [docs/index.md](docs/index.md), then the [Fleetworks guide](docs/wiki/code/fleetworks.md) or the relevant concept or code route. Read [contributing](docs/wiki/code/contributing.md) and [conventions](docs/wiki/code/conventions.md) before edits/checks. Preserve unrelated work. `.github` changes belong to Code Architect.
 - Follow [scope and finish-line rules](docs/wiki/code/agent-workflow.md#scope-and-finish-line): pin the requested outcome, non-goals and acceptance; review risks early; freeze before final checks. Defer unrelated findings. Late fixes require a demonstrated in-scope blocker and an affected check, not another broad audit. Honor wrap-up immediately.
 - Use subagents early when independent work shortens delivery. Assign disjoint paths and concrete outcomes; keep one integration/build owner, wake idle workers explicitly and reuse unaffected evidence. See [execution policy](docs/wiki/code/agent-workflow.md).

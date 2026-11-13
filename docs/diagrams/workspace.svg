@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" role="img" aria-labelledby="workspace-title workspace-desc">
 <title id="workspace-title">Native workstation identity and shared backend</title>
-<desc id="workspace-desc">The Mac owns protected installation settings and exact-origin credential references. The gateway resolves a stable workstation identity and enforces resource permissions and activity membership. Existing child folders remain historical data, not active identity.</desc>
+<desc id="workspace-desc">The Mac owns protected installation settings and exact-origin credential references. The gateway resolves a stable workstation identity and enforces resource permissions and activity membership. Existing child folders remain historical data, not active identity. Current file-reference setup is transitional; pairing and Keychain are an agreed, unimplemented replacement.</desc>
 <style>text{font-family:Geist,Arial,sans-serif;fill:#242424}.zone{font-size:14px;letter-spacing:1.4px;fill:#666}.label{font-size:20px;font-weight:600}.note{font-size:16px;fill:#555}.small{font-size:14px;fill:#666}.node{fill:#fff;stroke:#aaa;stroke-width:1}.focus{fill:#fff4ee;stroke:#eb6c36;stroke-width:2}.wire{fill:none;stroke:#555;stroke-width:2;marker-end:url(#arrow)}.lane{fill:#fafafa;stroke:#ddd;stroke-width:1}</style>
 <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#555"/></marker></defs>
 <rect width="1200" height="720" fill="#fff"/>
@@ -13,7 +13,7 @@
 <rect x="48" y="292" width="488" height="148" rx="6" class="node"/>
 <text x="64" y="324" class="label">OS home / .fleetworks</text>
 <text x="64" y="356" class="note">Installation marker and private settings</text>
-<text x="64" y="382" class="note">Exact-origin credential file references</text>
+<text x="64" y="382" class="note">Today: exact-origin credential file refs</text>
 <text x="64" y="408" class="note">No new default child folder</text>
 <rect x="48" y="492" width="488" height="120" rx="6" class="node"/>
 <text x="64" y="524" class="label">Preserved historical records</text>
@@ -37,5 +37,5 @@
 <path d="M 908 244 V 304" class="wire"/>
 <path d="M 908 424 V 484" class="wire"/>
 <text x="570" y="140" class="small">Current proof</text><text x="56" y="670" class="note">Independent operators own deployment files, containers and private backend stores.</text>
-<text x="40" y="696" class="small">A Connect ID selects an existing workstation. It is never a credential.</text>
+<text x="40" y="696" class="small">Target: origin-bound Keychain storage after pairing (not implemented). Connect ID is never a credential.</text>
 </svg>

@@ -16,6 +16,8 @@ External operator tooling owns deployment origins, service processes, images and
 
 Direct [Docker Compose](../../../deploy/README.md) operates backend services and optional Intel Web. Venture, the six terminal clients and legacy `argos` are retired. The Rune app connects to the gateway and never starts a backend, web server or container. [Service startup and roles](fleetworks.md)
 
+Native credential storage is planned to move from file references to [approved pairing and Keychain](native-connections.md#pairing-and-keychain-agreed-target). That replacement is not implemented.
+
 The brief worker runs stages and publication. Atlas uses a Jobs-owned embedded delivery queue with a collection worker and private NLP and classifier services. SurrealDB owns job execution state and domain records. Jobs exclusively owns disk-backed SQLite operational logs; scheduler cutover is pending the domain handoff and fencing migration.
 
 ## Persistence

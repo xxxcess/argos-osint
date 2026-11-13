@@ -8,6 +8,8 @@ The Rune/rune-kit macOS API client connects to an independently running gateway.
 
 ## Build and provision
 
+**Pairing/Keychain is [approved but pending](../../docs/wiki/code/native-connections.md#pairing-and-keychain-agreed-target).** The commands below use the current transitional token-file path.
+
 Use the complete-app helper; agent builds add `--agent` and reuse the shared debug graph. Opening the app is an explicit action.
 
 Build flow: live Cargo progress/diagnostics and stage markers on stderr → package/validate → artifact paths and result metadata. `--open` opens only after validation and preserves an already running app. [Build loop](../../docs/diagrams/dev-loop-native.html)
@@ -16,7 +18,7 @@ Build flow: live Cargo progress/diagnostics and stage markers on stderr → pack
 python3 scripts/fleetworks_candidate.py build-native --agent --target host --profile debug
 ```
 
-Before the URL-only setup, provision a protected credential binding with the built app executable:
+For the current transitional URL-only setup, provision a protected credential binding with the built app executable:
 
 ```sh
 /path/to/Fleetworks.app/Contents/MacOS/fleetworks-desktop \

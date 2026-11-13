@@ -2,14 +2,38 @@
 
 [Client](../../../apps/fleetworks-desktop/README.md) · [Protected identity](native-workspaces.md) · [Control/design guide](native-design-system.md) · [Verification](../../../.planning/2026-11-12-native-workstation-redesign/acceptance.md)
 
-[![Provision, authenticate and register](../../diagrams/native-connections.svg)](../../diagrams/native-connections.html)
+[![Current provisioning and agreed pairing flow](../../diagrams/native-connections.svg)](../../diagrams/native-connections.html)
+
+## Pairing and Keychain (agreed target)
+
+**Approved design; not implemented yet.** Native setup should be:
+
+**Gateway URL → approve pairing once → macOS Keychain → connect.**
+
+| Step | Target behavior |
+| --- | --- |
+| Enter URL | Validate and pin the exact gateway origin. Remote gateways require HTTPS; retain the existing loopback exception. |
+| Approve pairing | A separately authenticated gateway operator approves a short-lived, single-use pairing request. A URL, installation marker or Connect ID alone grants no access. |
+| Save access | Issue a revocable, scoped Native credential for this installation; store its secret only in macOS Keychain, bound to that origin. Settings retain non-secret references and recovery state. |
+| Connect again | Read Keychain, authenticate, check compatibility and register/reuse the workstation. Routine reconnect needs no token entry or file selection. |
+| Recover | Distinguish missing access, pairing denied/expired, Keychain locked/denied and gateway unreachable. Retry or re-pair explicitly; never downgrade to unauthenticated access or plaintext storage. |
+
+Token files remain an operator/headless mechanism. Browser WebRelay credentials and HttpOnly sessions keep their independent boundary. Pairing must not reuse a browser Connect ID as a secret or forward an operator token into native settings.
+
+Show one actionable setup state at a time. Before authentication succeeds, omit registration/readiness noise. Use plain messages such as **“Gateway access isn’t configured”** or **“Unlock Keychain to continue”**; keep provisioning flags out of the normal target flow.
+
+**Implementation still required:** gateway pairing/credential issuance and revocation, a Keychain adapter, native progression/recovery and scoped integration tests. Exact endpoints, approval surface and lifetimes are not specified here. No pairing or Keychain runtime pass is implied.
+
+## Current setup (transitional)
+
+The current app still requires `--provision-gateway-credential --api-origin <origin> --api-token-file <private-file>` before its URL/check wizard. A missing/changed/unsafe binding fails before HTTP. Use the actual deployment origin: the documented local-review example uses `http://127.0.0.1:18091`; `8080` is a different binding. [Working provisioning instructions](../../../apps/fleetworks-desktop/README.md#build-and-provision)
 
 ## Authority and registration
 
 | Boundary | Contract |
 | --- | --- |
 | Credentials | Native, WebRelay, InternalService and Operator purposes have explicit permissions. Connect IDs and caller-supplied headers grant no authority. |
-| Local setup | Provision an exact-origin protected token-file reference, then use Gateway URL → Connectivity Check. Verify private permissions/object identity again; rotation/replacement requires explicit provisioning. No token bytes in settings or cross-origin forwarding. |
+| Current local setup | Exact-origin private-file reference, then URL/check; revalidate file identity/permissions. The agreed replacement above uses pairing and Keychain. Neither flow forwards another origin’s credential. |
 | Identity | Connect/activity contract 2: opaque workstation ID = Connect ID; authenticated scope + protected installation marker determine identity. Optional IP never merges installations. New requests contain no workspace fields. |
 | Transport | Pin origin; disable environment proxy/redirect forwarding; bound responses. Gateway admission/read boundaries revalidate current proof, permissions and revisions. |
 | Invalidation | Gateway/access changes fence old clients, reads, caches and confirmations. Missing registration or optional services disables only dependent actions; permitted shared reads remain usable. |

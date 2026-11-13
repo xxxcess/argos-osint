@@ -12,6 +12,8 @@ Venture, the six Fleetworks terminal clients and the legacy `argos` executable a
 
 ## Build and connect the native app
 
+Pairing/Keychain is [approved but pending](native-connections.md#pairing-and-keychain-agreed-target). The commands below use current transitional file references.
+
 ```sh
 python3 scripts/fleetworks_candidate.py build-native --target host --profile debug
 ```

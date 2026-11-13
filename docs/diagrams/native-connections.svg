@@ -1,44 +1,62 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" role="img" aria-labelledby="native-connections-title native-connections-desc">
-<title id="native-connections-title">Native setup and workstation browser connection</title>
-<desc id="native-connections-desc">Exact-origin provisioning is separate from the URL-only connection flow. Authenticated registration returns a stable workstation ID; the independently authenticated browser resolves that existing identity and revalidates its own session. No folder/IP selection or backend startup occurs.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 784" role="img" aria-labelledby="native-connections-title native-connections-desc">
+<title id="native-connections-title">Native gateway setup: current and agreed target</title>
+<desc id="native-connections-desc">Current native setup uses a protected token-file reference. The agreed replacement is gateway URL, one-time pairing approval and macOS Keychain storage, followed by authenticated registration and reconnect. Pairing and Keychain are not implemented yet; browser session authority remains separate.</desc>
 <style>text{font-family:Geist,Arial,sans-serif;fill:#242424}.zone{font-size:14px;letter-spacing:1.4px;fill:#666}.label{font-size:20px;font-weight:600}.note{font-size:16px;fill:#555}.small{font-size:14px;fill:#666}.node{fill:#fff;stroke:#aaa;stroke-width:1}.focus{fill:#fff4ee;stroke:#eb6c36;stroke-width:2}.wire{fill:none;stroke:#555;stroke-width:2;marker-end:url(#arrow)}.lane{fill:#fafafa;stroke:#ddd;stroke-width:1}</style>
 <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#555"/></marker></defs>
-<rect width="1200" height="720" fill="#fff"/>
-<text x="40" y="48" class="zone">NATIVE · EXACT-ORIGIN CREDENTIAL AND STABLE INSTALLATION</text><rect x="40" y="88" width="332" height="148" rx="6" class="node"/>
-<text x="56" y="120" class="label">Provision protected binding</text>
-<text x="56" y="152" class="note">App executable provisioning mode</text>
-<text x="56" y="178" class="note">Existing private token-file reference</text>
-<text x="56" y="204" class="note">No GUI, network or service startup</text>
-<rect x="432" y="88" width="332" height="148" rx="6" class="focus"/>
-<text x="448" y="120" class="label">Gateway URL</text>
-<text x="448" y="152" class="note">Normalize one HTTP(S) origin</text>
-<text x="448" y="178" class="note">Resolve only that origin credential</text>
-<text x="448" y="204" class="note">Missing/replaced binding is an error</text>
-<rect x="824" y="88" width="336" height="148" rx="6" class="node"/>
-<text x="840" y="120" class="label">Connectivity and registration</text>
-<text x="840" y="152" class="note">Authenticate; check compatibility</text>
-<text x="840" y="178" class="note">Ensure protected installation</text>
-<text x="840" y="204" class="note">IP metadata remains optional</text>
+<rect width="1200" height="784" fill="#fff"/>
+<text x="40" y="48" class="zone">IMPLEMENTED TODAY · TRANSITIONAL TOKEN-FILE SETUP</text>
+<g data-card="true"><rect x="40" y="88" width="332" height="148" rx="6" class="node"/>
+<text x="56" y="120" class="label">Private-file provisioning</text>
+<text x="56" y="152" class="note">Origin-bound file reference</text>
+<text x="56" y="178" class="note">Existing protected Native token</text>
+<text x="56" y="204" class="note">Explicit provisioning command</text>
+</g>
+<g data-card="true"><rect x="432" y="88" width="332" height="148" rx="6" class="node"/>
+<text x="448" y="120" class="label">URL + credential check</text>
+<text x="448" y="152" class="note">Enter the same gateway origin</text>
+<text x="448" y="178" class="note">Missing/changed/unsafe file</text>
+<text x="448" y="204" class="note">fails before network checking</text>
+</g>
+<g data-card="true"><rect x="824" y="88" width="336" height="148" rx="6" class="node"/>
+<text x="840" y="120" class="label">Authenticate + register</text>
+<text x="840" y="152" class="note">Native authority is still required</text>
+<text x="840" y="178" class="note">Stable workstation identity</text>
+<text x="840" y="204" class="note">Browser has its own session</text>
+</g>
 <path d="M 372 160 H 432" class="wire"/>
 <path d="M 764 160 H 824" class="wire"/>
-<text x="40" y="300" class="zone">BROWSER · INDEPENDENT WEBRELAY AUTHORITY</text><rect x="40" y="344" width="332" height="148" rx="6" class="node"/>
-<text x="56" y="376" class="label">Workstation Status</text>
-<text x="56" y="408" class="note">Read-only selectable Connect ID</text>
-<text x="56" y="434" class="note">Opaque backend workstation ID</text>
-<text x="56" y="460" class="note">No folder or interface selection</text>
-<rect x="432" y="344" width="332" height="148" rx="6" class="focus"/>
-<text x="448" y="376" class="label">Intel Web Connect</text>
-<text x="448" y="408" class="note">Enter an existing workstation ID</text>
-<text x="448" y="434" class="note">WebRelay resolves registration</text>
-<text x="448" y="460" class="note">ID itself grants no authority</text>
-<rect x="824" y="344" width="336" height="148" rx="6" class="node"/>
-<text x="840" y="376" class="label">Protected session</text>
-<text x="840" y="408" class="note">HttpOnly fleetworks_connect_v2</text>
-<text x="840" y="434" class="note">Current context and epoch fences</text>
-<text x="840" y="460" class="note">Native app may close</text>
-<path d="M 992 236 V 324 H 206 V 344" class="wire"/>
-<path d="M 372 416 H 432" class="wire"/>
-<path d="M 764 416 H 824" class="wire"/>
-<path d="M 40 552 H 1160" stroke="#bbb"/><text x="40" y="592" class="label">Gateway changes fence old credentials, reads and confirmations.</text><text x="40" y="626" class="note">Uncertain mutations retain original request identity; reconnecting never creates replacement work.</text>
-<text x="40" y="696" class="small">Legacy child sessions and IDs require fresh Connect; shared IPs do not merge installations.</text>
+<path d="M 40 276 H 1160" stroke="#bbb"/>
+<text x="40" y="324" class="zone">AGREED TARGET · NOT IMPLEMENTED YET</text>
+<g data-card="true"><rect x="40" y="364" width="248" height="176" rx="6" class="node"/>
+<text x="56" y="396" class="label" style="font-size:18px">1 · Gateway URL</text>
+<text x="56" y="428" class="note">Pin the exact origin</text>
+<text x="56" y="454" class="note">HTTPS for remote gateways</text>
+<text x="56" y="480" class="note">Retain loopback exception</text>
+</g>
+<g data-card="true"><rect x="328" y="364" width="248" height="176" rx="6" class="focus"/>
+<text x="344" y="396" class="label" style="font-size:18px">2 · Approve pairing</text>
+<text x="344" y="428" class="note">Operator authorizes once</text>
+<text x="344" y="454" class="note">Short-lived, single-use</text>
+<text x="344" y="480" class="note">Scoped Native credential</text>
+</g>
+<g data-card="true"><rect x="616" y="364" width="248" height="176" rx="6" class="focus"/>
+<text x="632" y="396" class="label" style="font-size:18px">3 · macOS Keychain</text>
+<text x="632" y="428" class="note">Secret stays in Keychain</text>
+<text x="632" y="454" class="note">Bind to gateway origin</text>
+<text x="632" y="480" class="note">No token-file workflow</text>
+</g>
+<g data-card="true"><rect x="904" y="364" width="256" height="176" rx="6" class="node"/>
+<text x="920" y="396" class="label" style="font-size:18px">4 · Connect</text>
+<text x="920" y="428" class="note">Authenticate and register</text>
+<text x="920" y="454" class="note">Existing workstation ID</text>
+<text x="920" y="480" class="note">Reuse stored access</text>
+</g>
+<path d="M 288 452 H 328" class="wire"/>
+<path d="M 576 452 H 616" class="wire"/>
+<path d="M 864 452 H 904" class="wire"/>
+<text x="40" y="596" class="label">Reconnect → read Keychain → authenticate.</text>
+<text x="40" y="632" class="note">Access missing, denied or revoked: explain the recovery step and re-pair explicitly.</text>
+<text x="40" y="668" class="note">Keychain unavailable: keep setup pending; no plaintext or unauthenticated fallback.</text>
+<text x="40" y="716" class="note">Browser Connect stays separately authenticated; a Connect ID is not a secret.</text>
+<text x="40" y="756" class="small">Design decision only: this documentation change ships no pairing service or Keychain adapter.</text>
 </svg>

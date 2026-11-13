@@ -22,6 +22,8 @@ python3 scripts/fleetworks_candidate.py build-native --target host --profile deb
 
 The helper prints the app and manifest paths. Add `--open` to launch it. The app opens offline setup and connects to an existing gateway; backend and Intel Web startup are separate operator actions.
 
+**Agreed target, not implemented:** Gateway URL → approve pairing once → macOS Keychain → authenticated reconnect, without user-managed token files. **Current transitional setup** uses the protected file binding below. Token files remain supported for operators and automated tooling. [Pairing and Keychain target](docs/wiki/code/native-connections.md#pairing-and-keychain-agreed-target)
+
 1. Start the backend with the [Docker Compose quick start below](#backend-for-the-native-app). Backend deployment requires Docker and Docker Compose **v2.20 or newer**.
 2. Run the provisioning command printed by `deploy/native_review.py` using the app executable's `--provision-gateway-credential --api-origin <origin> --api-token-file <private-file>` mode. It stores an exact-origin protected file reference, never token bytes, and exits without network or GUI startup.
 3. Open **Setup Gateway**, enter that URL and continue through connectivity checking. The gateway registers the protected installation and returns its stable opaque workstation Connect ID. Activity and mutations use that context and explicit permissions.
@@ -54,7 +56,7 @@ docker compose --env-file compose.env \
   up --no-build --pull never --detach --wait
 ```
 
-Provision the native credential binding for `http://127.0.0.1:18091` using the existing private `.agent-scratch/native-review/native-local/secrets/native-token` file and the command printed by initialization. Then enter the URL in **Setup Gateway**. This backend runs independently of the app. Atlas collection uses the [additional overlay below](#collect-articles-with-atlas); Intel Web is an optional separate deployment.
+For the current transitional native setup, provision the credential binding for `http://127.0.0.1:18091` using the existing private `.agent-scratch/native-review/native-local/secrets/native-token` file and the command printed by initialization. Then enter the URL in **Setup Gateway**. This backend runs independently of the app. Atlas collection uses the [additional overlay below](#collect-articles-with-atlas); Intel Web is an optional separate deployment.
 
 Rerun the start command to apply edited Compose settings. To inspect or stop the backend, use the same command prefix with `ps`, `logs --follow` or `down` in place of `up --no-build --pull never --detach --wait`. Stop preserves backend data. For concurrent deployments, omit `--root-env`, choose a different name and API port, and use that deployment's matching env file and project. [Full deployment guide](deploy/README.md#isolated-native-backend-review)
 

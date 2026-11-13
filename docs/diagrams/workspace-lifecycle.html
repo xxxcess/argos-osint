@@ -1,13 +1,13 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Protected workstation setup and recovery</title>
-<style>body{margin:0;padding:32px;color:#242424;background:#fff;font:16px/1.6 Geist,Arial,sans-serif}main{max-width:1200px;margin:auto}h1{font:36px/1.2 "Instrument Serif",Georgia,serif;margin:0 0 16px}p{max-width:88ch}svg{display:block;width:100%;height:auto;margin:24px 0}a{color:#a14b24}</style></head><body><main><h1>Protected workstation setup and recovery</h1><p>Settings initialization, credential provisioning and authenticated registration are separate steps. The coordinated migration preserves identity and history while fencing old writers. A lost mutation response keeps its exact original handle and cannot be replaced by new work.</p>
+<style>body{margin:0;padding:32px;color:#242424;background:#fff;font:16px/1.6 Geist,Arial,sans-serif}main{max-width:1200px;margin:auto}h1{font:36px/1.2 "Instrument Serif",Georgia,serif;margin:0 0 16px}p{max-width:88ch}svg{display:block;width:100%;height:auto;margin:24px 0}a{color:#a14b24}</style></head><body><main><h1>Protected workstation setup and recovery</h1><p>Settings initialization, credential provisioning and authenticated registration are separate steps. The coordinated migration preserves identity and history while fencing old writers. A lost mutation response keeps its exact original handle and cannot be replaced by new work. Current file-reference setup is transitional; pairing and Keychain are an agreed, unimplemented replacement.</p>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" role="img" aria-labelledby="workspace-lifecycle-title workspace-lifecycle-desc">
 <title id="workspace-lifecycle-title">Protected workstation setup and recovery</title>
-<desc id="workspace-lifecycle-desc">Settings initialization, credential provisioning and authenticated registration are separate steps. The coordinated migration preserves identity and history while fencing old writers. A lost mutation response keeps its exact original handle and cannot be replaced by new work.</desc>
+<desc id="workspace-lifecycle-desc">Settings initialization, credential provisioning and authenticated registration are separate steps. The coordinated migration preserves identity and history while fencing old writers. A lost mutation response keeps its exact original handle and cannot be replaced by new work. Current file-reference setup is transitional; pairing and Keychain are an agreed, unimplemented replacement.</desc>
 <style>text{font-family:Geist,Arial,sans-serif;fill:#242424}.zone{font-size:14px;letter-spacing:1.4px;fill:#666}.label{font-size:20px;font-weight:600}.note{font-size:16px;fill:#555}.small{font-size:14px;fill:#666}.node{fill:#fff;stroke:#aaa;stroke-width:1}.focus{fill:#fff4ee;stroke:#eb6c36;stroke-width:2}.wire{fill:none;stroke:#555;stroke-width:2;marker-end:url(#arrow)}.lane{fill:#fafafa;stroke:#ddd;stroke-width:1}</style>
 <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#555"/></marker></defs>
 <rect width="1200" height="720" fill="#fff"/>
-<text x="40" y="48" class="zone">SETTINGS → PROVISIONING → EXPLICIT CONNECTION</text>
+<text x="40" y="48" class="zone">CURRENT: SETTINGS → FILE PROVISIONING → CONNECTION</text>
 <rect x="40" y="88" width="332" height="148" rx="6" class="node"/>
 <text x="56" y="120" class="label">Open protected settings</text>
 <text x="56" y="152" class="note">Verify installation and catalog</text>
@@ -44,6 +44,6 @@
 <path d="M 372 410 H 432" class="wire"/>
 <path d="M 764 410 H 824" class="wire"/>
 <path d="M 40 556 H 1160" stroke="#bbb"/><text x="40" y="592" class="label">Historical child folder lifecycle is preserved, not resumed by normal startup.</text><text x="40" y="626" class="note">Migration and setup never delete user folders or turn missing receipts into successful cleanup.</text>
-<text x="40" y="696" class="small">Independent backend deployment and actual installed-app/dual-Mac verification remain separate.</text>
+<text x="40" y="696" class="small">Target: pairing + Keychain replaces file provisioning; identity and recovery fences remain (not implemented).</text>
 </svg>
 <p><a href="../wiki/code/native-workspaces.md">Workstation identity contract</a> · <a href="../wiki/code/native-connections.md">Connections and activity</a> · <a href="../diagrams.md">Diagram catalog</a></p></main></body></html>

@@ -5,7 +5,11 @@ mod classifier_fixture;
 #[cfg(feature = "classifier")]
 #[path = "support/current_admission.rs"]
 mod current_admission;
+use argos_osint_api::ScopedCredential;
 use argos_osint_api::{loopback_url, network_router, router, ApiState, NetworkPolicy};
+use argos_osint_core::storage::connect_registry;
+use argos_osint_core::storage::job_actions::Action;
+use argos_osint_core::storage::job_actions::ActionReceipt;
 use argos_osint_core::{
     storage::{atlas, open::Target, repo::Repository},
     store::AtlasArticleRow,
@@ -15,10 +19,50 @@ use axum::{
     http::{Request, StatusCode},
     Router,
 };
+use fleetworks_contracts::connect::RegistrationEnsureRequest;
+use fleetworks_contracts::connect::RegistrationReceipt;
+use fleetworks_contracts::context::CredentialPurpose;
+use fleetworks_contracts::context::MutationContext;
+use fleetworks_contracts::context::Permission;
+use fleetworks_contracts::context::RegisteredContext;
+use fleetworks_contracts::AtlasCycleReceipt;
+use fleetworks_contracts::AtlasCycleRequest;
 use fleetworks_contracts::{ATLAS_CYCLES_PATH, JOB_CANCEL_PATH, JOB_DETAIL_PATH, JOB_RETRY_PATH};
 use serde_json::{json, Value};
+use std::ffi::OsString;
+use std::path::Path;
 use std::sync::Arc;
 use tower::ServiceExt;
+
+// These fixtures install process-global configuration or classifier state.
+static CONFIGURATION_ENVIRONMENT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+struct ConfigurationEnvironment(Vec<(&'static str, Option<OsString>)>);
+impl ConfigurationEnvironment {
+    fn install(root: &Path) -> Self {
+        Self(
+            ["ARGOS_HOME", "FLEETWORKS_WORKSPACE"]
+                .into_iter()
+                .map(|key| {
+                    let old = std::env::var_os(key);
+                    std::env::set_var(key, root);
+                    (key, old)
+                })
+                .collect(),
+        )
+    }
+}
+impl Drop for ConfigurationEnvironment {
+    fn drop(&mut self) {
+        for (key, old) in &self.0 {
+            if let Some(old) = old {
+                std::env::set_var(key, old);
+            } else {
+                std::env::remove_var(key);
+            }
+        }
+    }
+}
 
 async fn call(
     app: &Router,
@@ -27,7 +71,7 @@ async fn call(
     origin: Option<&str>,
     body: Value,
 ) -> (StatusCode, Value) {
-    call_as(app, method, path, origin, None, body).await
+    call_as(app, method, path, origin, None, None, body).await
 }
 
 async fn call_as(
@@ -36,6 +80,7 @@ async fn call_as(
     path: &str,
     origin: Option<&str>,
     token: Option<&str>,
+    registration: Option<&RegistrationReceipt>,
     body: Value,
 ) -> (StatusCode, Value) {
     let mut request = Request::builder()
@@ -47,6 +92,14 @@ async fn call_as(
     }
     if let Some(token) = token {
         request = request.header("authorization", format!("Bearer {token}"));
+    }
+    if let Some(registration) = registration {
+        request = request
+            .header("x-fleetworks-registration", &registration.registration_id)
+            .header(
+                "x-fleetworks-registration-revision",
+                registration.revision.to_string(),
+            );
     }
     if method == "POST" {
         request = request.header("content-type", "application/json");
@@ -90,8 +143,14 @@ fn rejects_remote_and_credentialed_endpoints() {
 async fn atlas_submission_and_job_controls_use_authenticated_durable_ids() {
     use argos_osint_core::storage::job_dispatch::{self, ATLAS_POOL};
 
-    const TOKEN: &str = "atlas-test-bearer-0123456789abcdefghijkl";
+    let _serial = CONFIGURATION_ENVIRONMENT.lock().await;
+    const LEGACY_TOKEN: &str = "atlas-test-bearer-0123456789abcdefghijkl";
+    const NATIVE_TOKEN: &str = "atlas-native-purpose-0123456789abcdefghijkl";
     let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    std::fs::create_dir(&home).expect("isolated configuration owner");
+    let home = home.canonicalize().expect("canonical configuration owner");
+    let _environment = ConfigurationEnvironment::install(&home);
     let repo = Repository::connect(
         &Target::Embedded {
             path: dir.path().join("db"),
@@ -107,32 +166,82 @@ async fn atlas_submission_and_job_controls_use_authenticated_durable_ids() {
         .unwrap()
         .check()
         .unwrap();
+    connect_registry::initialize_control(repo.db())
+        .await
+        .expect("fixture registry");
     job_dispatch::enable_pool(repo.db(), ATLAS_POOL)
         .await
         .unwrap();
     let state = ApiState {
-        repo,
+        repo: repo.clone(),
         instance_id: "dispatch-fixture".into(),
         port: 8080,
         origins: Arc::new(vec![]),
     };
+    let legacy_bearer = network_router(
+        state.clone(),
+        NetworkPolicy::new(&["127.0.0.1:8080".into()], LEGACY_TOKEN).unwrap(),
+    );
+    let native = ScopedCredential::new(
+        "atlas-native".into(),
+        "atlas-scope".into(),
+        "atlas-access".into(),
+        CredentialPurpose::Native,
+        [
+            Permission::ReadBackend,
+            Permission::RegisterWorkstation,
+            Permission::SubmitInteractive,
+            Permission::ReadWorkstationActivity,
+            Permission::CancelJob,
+            Permission::RetryJob,
+        ]
+        .into_iter()
+        .collect(),
+        NATIVE_TOKEN,
+    )
+    .expect("explicit Native authority");
     let app = network_router(
         state.clone(),
-        NetworkPolicy::new(&["127.0.0.1:8080".into()], TOKEN).unwrap(),
+        NetworkPolicy::with_credentials(&["127.0.0.1:8080".into()], vec![native])
+            .expect("scoped gateway"),
     );
     let legacy = router(state);
-    let request = json!({"request_id":"offline_cycle-1"});
+    let unconfirmed = serde_json::to_value(
+        AtlasCycleRequest::new("offline_cycle-1".into()).expect("valid request ID"),
+    )
+    .unwrap();
     assert_eq!(
-        call(&legacy, "POST", ATLAS_CYCLES_PATH, None, request.clone())
-            .await
-            .0,
+        call(
+            &legacy,
+            "POST",
+            ATLAS_CYCLES_PATH,
+            None,
+            unconfirmed.clone()
+        )
+        .await
+        .0,
         StatusCode::NOT_FOUND
     );
     assert_eq!(
-        call(&app, "POST", ATLAS_CYCLES_PATH, None, request.clone())
+        call(&app, "POST", ATLAS_CYCLES_PATH, None, unconfirmed.clone())
             .await
             .0,
         StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call_as(
+            &legacy_bearer,
+            "POST",
+            ATLAS_CYCLES_PATH,
+            None,
+            Some(LEGACY_TOKEN),
+            None,
+            unconfirmed.clone()
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED,
+        "a legacy shared bearer cannot submit registered work"
     );
     assert_eq!(
         call_as(
@@ -140,8 +249,68 @@ async fn atlas_submission_and_job_controls_use_authenticated_durable_ids() {
             "POST",
             ATLAS_CYCLES_PATH,
             None,
-            Some(TOKEN),
-            json!({"request_id":"../invalid"})
+            Some(NATIVE_TOKEN),
+            None,
+            unconfirmed
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED,
+        "Native purpose alone cannot replace registration proof"
+    );
+    let ensure = RegistrationEnsureRequest::new(
+        "atlas-registration".into(),
+        None,
+        "atlas-installation-marker".into(),
+    );
+    let (status, registration) = call_as(
+        &app,
+        "POST",
+        "/api/v1/connect/registrations/ensure",
+        None,
+        Some(NATIVE_TOKEN),
+        None,
+        serde_json::to_value(ensure).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{registration}");
+    let registration: RegistrationReceipt =
+        serde_json::from_value(registration).expect("registered workstation");
+    let (status, context) = call_as(&app, "POST", "/api/v1/connect/registrations/context", None, Some(NATIVE_TOKEN), None, json!({"registration_id":registration.registration_id,"expected_revision":registration.revision})).await;
+    assert_eq!(status, StatusCode::OK, "{context}");
+    let context: RegisteredContext = serde_json::from_value(context["context"].clone())
+        .expect("authoritative registered context");
+    let (status, models) = call_as(
+        &app,
+        "GET",
+        "/api/v1/models/defaults",
+        None,
+        Some(NATIVE_TOKEN),
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{models}");
+    let revision = models["configuration_revision"]
+        .as_u64()
+        .expect("observed configuration revision");
+    let request = serde_json::to_value(
+        AtlasCycleRequest::new("offline_cycle-1".into())
+            .expect("valid request ID")
+            .with_context(MutationContext::new(&context).with_configuration_revision(revision)),
+    )
+    .unwrap();
+    let mut invalid = request.clone();
+    invalid["request_id"] = json!("../invalid");
+    assert_eq!(
+        call_as(
+            &app,
+            "POST",
+            ATLAS_CYCLES_PATH,
+            None,
+            Some(NATIVE_TOKEN),
+            Some(&registration),
+            invalid
         )
         .await
         .0,
@@ -152,36 +321,76 @@ async fn atlas_submission_and_job_controls_use_authenticated_durable_ids() {
         "POST",
         ATLAS_CYCLES_PATH,
         None,
-        Some(TOKEN),
+        Some(NATIVE_TOKEN),
+        Some(&registration),
         request.clone(),
     )
     .await;
-    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(status, StatusCode::ACCEPTED, "{receipt}");
+    let cycle: AtlasCycleReceipt =
+        serde_json::from_value(receipt.clone()).expect("typed durable Atlas IDs");
+    assert_eq!(receipt, serde_json::to_value(&cycle).unwrap());
     assert_eq!(
-        receipt,
-        json!({
-            "job_id":"fleet-atlas-job-offline_cycle-1",
-            "run_id":"fleet-atlas-run-offline_cycle-1"
-        })
+        AtlasCycleReceipt::from_job_id(&cycle.job_id),
+        Some(cycle.clone()),
+        "run and job IDs share the public durable identity"
     );
     assert_eq!(
-        call_as(&app, "POST", ATLAS_CYCLES_PATH, None, Some(TOKEN), request).await,
-        (StatusCode::ACCEPTED, receipt.clone())
+        call_as(
+            &app,
+            "POST",
+            ATLAS_CYCLES_PATH,
+            None,
+            Some(NATIVE_TOKEN),
+            Some(&registration),
+            request
+        )
+        .await,
+        (StatusCode::ACCEPTED, receipt)
     );
-    let job_id = receipt["job_id"].as_str().unwrap();
+    let job_id = &cycle.job_id;
     let path = format!("{JOB_DETAIL_PATH}?id={job_id}");
     assert_eq!(
-        call_as(&app, "GET", &path, None, Some(TOKEN), Value::Null)
-            .await
-            .1["job"]["state"],
+        call_as(
+            &app,
+            "GET",
+            &path,
+            None,
+            Some(NATIVE_TOKEN),
+            Some(&registration),
+            Value::Null
+        )
+        .await
+        .1["job"]["state"],
         "queued"
     );
-    let cancel = json!({"id":job_id});
+    let cancel = json!({"id":job_id,"request_id":"cancel-offline-cycle"});
     assert_eq!(
         call(&legacy, "POST", JOB_CANCEL_PATH, None, cancel.clone())
             .await
             .0,
         StatusCode::NOT_FOUND
+    );
+    let (status, cancelled) = call_as(
+        &app,
+        "POST",
+        JOB_CANCEL_PATH,
+        None,
+        Some(NATIVE_TOKEN),
+        Some(&registration),
+        cancel.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cancelled}");
+    let action: ActionReceipt =
+        serde_json::from_value(cancelled["receipt"].clone()).expect("durable cancel receipt");
+    assert_eq!(action.job_id, *job_id);
+    assert_eq!(action.action, Action::Cancel);
+    assert_eq!(action.state, "cancelled");
+    assert_eq!(action.affected_tasks, 1);
+    assert_eq!(
+        cancelled,
+        json!({"done":true,"requeued":0,"receipt":action})
     );
     assert_eq!(
         call_as(
@@ -189,26 +398,61 @@ async fn atlas_submission_and_job_controls_use_authenticated_durable_ids() {
             "POST",
             JOB_CANCEL_PATH,
             None,
-            Some(TOKEN),
-            cancel.clone()
+            Some(NATIVE_TOKEN),
+            Some(&registration),
+            cancel
         )
         .await,
-        (StatusCode::OK, json!({"done":true}))
+        (StatusCode::OK, cancelled)
     );
     assert_eq!(
-        call_as(&app, "GET", &path, None, Some(TOKEN), Value::Null)
-            .await
-            .1["job"]["state"],
+        call_as(
+            &app,
+            "GET",
+            &path,
+            None,
+            Some(NATIVE_TOKEN),
+            Some(&registration),
+            Value::Null
+        )
+        .await
+        .1["job"]["state"],
         "cancelled"
     );
     assert_eq!(
-        call_as(&app, "POST", JOB_RETRY_PATH, None, Some(TOKEN), cancel).await,
-        (StatusCode::OK, json!({"requeued":0}))
+        call_as(
+            &app,
+            "POST",
+            JOB_RETRY_PATH,
+            None,
+            Some(NATIVE_TOKEN),
+            Some(&registration),
+            json!({"id":job_id,"request_id":"retry-offline-cycle"})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT,
+        "cancelled Atlas work is not an eligible failed-job retry"
+    );
+    assert_eq!(
+        call_as(
+            &app,
+            "GET",
+            &path,
+            None,
+            Some(NATIVE_TOKEN),
+            Some(&registration),
+            Value::Null
+        )
+        .await
+        .1["job"]["state"],
+        "cancelled"
     );
 }
 #[tokio::test]
 #[cfg(feature = "classifier")]
 async fn storage_api_contracts() {
+    let _serial = CONFIGURATION_ENVIRONMENT.lock().await;
     let dir = tempfile::tempdir().unwrap();
     std::env::set_var("ARGOS_HOME", dir.path().join("home"));
     let repo = Repository::connect(
@@ -666,7 +910,11 @@ async fn capabilities_advertise_only_supported_features() {
             "jobs",
             "topology",
             "live",
-            "article-search"
+            "article-search",
+            "logs",
+            "tools",
+            "model-defaults",
+            "profile"
         ])
     );
     assert_eq!(
@@ -681,6 +929,7 @@ async fn capabilities_advertise_only_supported_features() {
 #[tokio::test]
 #[cfg(feature = "classifier")]
 async fn article_search_serves_the_discovery_page_contract() {
+    let _serial = CONFIGURATION_ENVIRONMENT.lock().await;
     let (_dir, repo, app) = isolated_api().await;
     let source = |id: &str, title: &str, published: &str| AtlasArticleRow {
         run_id: "r1".into(),

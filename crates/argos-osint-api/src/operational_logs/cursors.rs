@@ -150,9 +150,36 @@ impl Entries {
 }
 #[cfg(test)]
 mod tests {
+    use fleetworks_contracts::connect::RegistrationReceipt;
+    use fleetworks_contracts::context::RegisteredContext;
+
     use super::*;
     fn snapshot() -> Arc<Snapshot> {
-        Arc::new(Snapshot {binding:"fixture-proof".into(),scope:serde_json::from_value(serde_json::json!({"deployment_id":"fixture-deployment","workstation_id":"fixture-node","workspace_id":null,"scope_revision":1})).expect("scope"),workspace_filter:None,selection:LogSelection::workstation(),filters:LogFilters::default(),limit:100,cohort_digest:"fixture-complete-cohort".into(),filter_digest:"fixture-filter".into()})
+        let registration = RegistrationReceipt::new(
+            "fixture-deployment".into(),
+            "fixture-node".into(),
+            "fixture-registration".into(),
+            None,
+            1,
+        );
+        let context = RegisteredContext::new(
+            registration,
+            1,
+            1,
+            "fixture-configuration".into(),
+            "fixture-access".into(),
+        )
+        .expect("current workstation context");
+        Arc::new(Snapshot {
+            binding: "fixture-proof".into(),
+            scope: ActivityScope::for_workstation(&context),
+            workspace_filter: None,
+            selection: LogSelection::workstation(),
+            filters: LogFilters::default(),
+            limit: 100,
+            cohort_digest: "fixture-complete-cohort".into(),
+            filter_digest: "fixture-filter".into(),
+        })
     }
     #[tokio::test]
     async fn cursor_is_opaque_proof_bound_kind_bound_and_expiration_never_widens_query() {

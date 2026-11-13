@@ -18,7 +18,7 @@ Implementation baseline: `b8da29f`. Dependency/lockfile checkpoint: `6eef4cc`. T
 | Docs/diagram checks | Original 16 Markdown files/420 links/5 figures; workflow updates cover 8 reviewed guides/entrypoints with 175 local path/anchor checks and 2 exact XML-valid rendered/inspected diagram pairs | PASS; workflow links, bounds and whitespace checked; later bounded audit: 11 relevant docs/plans, 203 local links/anchors, two unchanged diagram pairs valid |
 | Formatting | Full `cargo fmt --all -- --check` after authorized formatting repair; assertions unchanged, original formatting retained in scratch | PASS on the current test-fixture repair checkpoint |
 | Workspace all-target Clippy | Whole workspace/all targets with `-D warnings`; fixture compiler/lint repairs below | PASS after all six case repairs; final all-target rerun 3m33s |
-| Full local embedded gate | Prior collection failed six cases across four targets; all six repaired cases pass in focused required-mode execution | RUNNING at `712ed06`; formatting, Clippy and full workspace pass (3511s including 11m11s compilation/linking); host help in progress, broad required storage pending |
+| Full local embedded gate | Prior collection failed six cases across four targets; all six repaired cases pass in focused required-mode execution | RUNNING at `712ed06`; formatting, Clippy and full workspace pass (3511s including 11m11s compilation/linking); host help PASS (928s); broad required storage restarting after runner graph repair |
 
 ## Implemented boundaries
 
@@ -119,3 +119,12 @@ The normal-stack public shutdown regression passed all five subprocess rounds wi
 The complete canonical embedded gate is rerunning at `712ed06`; no overall gate pass is claimed yet. All source is frozen. API fixture checkpoint: `0e5a3a8`; workflow/docs checkpoint: `ed0b0fd`.
 
 Full workspace stage at `712ed06` exited0: **3511 seconds** including **11m11s** compilation/linking. All148 reported harness summaries completed without failures; ordinary mode-selected storage skips are not required-storage evidence. Stress8/8 passed again14.84s, core961/0fail/6ignored, API57/57 and APIcontracts9/9. Long groups: classifier admission7/7 in627.69s and indexed links1/1 in128.65s. Host CLI help now running; dedicated required embedded contracts remain pending.
+
+
+### Required-mode runner graph repair
+
+Service-host CLI help passed at `712ed06` in **928 seconds**, building its distinct normal runtime graph. The subsequent required-storage command selected only core integration targets despite its comment claiming workspace-cache reuse. It began another dependency graph (including ICU/URL/SurrealDB) with ~7 GiB free. Root interrupted only that task-owned compile group (exit130) before storage assertions; the overall script is **INTERRUPTED**, not PASS. Completed workspace and CLI evidence remain valid.
+
+The embedded runner now also selects `--lib --bins` to retain the workspace package/dev/transitive feature graph (including service-host core fixtures). All selected storage integration targets and required environment remain unchanged; unit harnesses deliberately run again. The server storage-only lane is unchanged. A locked no-run JSON-artifact probe passed in **3.61 seconds**: all13 selected executable artifacts were fresh and had the exact original workspace hashes, including core/API/host/paging/classifier admission. No Rust source changed; completed workspace evidence is reused. The dedicated required embedded phase will execute after this bounded runner repair.
+
+Actual repaired-script no-run preflight passed in **1.61 seconds** with all **98 executable artifacts fresh and matching the completed workspace paths**. Independent static audit preserved all87 storage selectors, flags/environment/extras and server behavior;42 affected local links/anchors and whitespace passed. Required embedded execution now starts with source frozen.

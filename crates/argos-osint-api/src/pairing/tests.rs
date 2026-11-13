@@ -612,8 +612,13 @@ async fn public_pairing_is_durable_scoped_single_issuance_and_installation_bound
         .expect("audit rows")
         .check()
         .expect("audit query");
-    let rows: Value = rows.take(0).expect("audit JSON");
-    let text = rows.to_string();
+    let rows: Vec<Value> = rows.take(0).expect("audit JSON rows");
+    assert!(
+        rows.iter()
+            .any(|row| row["credential_id"].as_str() == Some(credential)),
+        "secret-storage audit must include the issued credential"
+    );
+    let text = serde_json::to_string(&rows).expect("serialized audit rows");
     assert!(!text.contains(token));
     assert!(!text.contains(&"a".repeat(64)));
     assert!(!text.contains(OPERATOR));

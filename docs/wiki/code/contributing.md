@@ -96,6 +96,8 @@ One integration/build owner uses a stable feature graph and resource-based concu
 
 The service-host development dependency activates core fixtures. Matching core feature names alone does not guarantee matching `log`, `tracing`, proc-macro or build-dependency inputs; compare the resolved graph. A test-name filter limits execution; Cargo may still compile every selected test target. [Artifact costs](build-artifacts.md#build-cost-signals)
 
+Production-only checks exclude `#[cfg(test)]` fixtures. Before linking many workspace test executables, run the [workspace/all-target Clippy recipe](#targeted-local-rust-builds-and-tests-fast-iteration) in the selected graph to catch fixture API/SDK type errors early.
+
 To focus required embedded execution while retaining the workspace test graph:
 
 ```sh

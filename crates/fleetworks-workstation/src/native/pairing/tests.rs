@@ -198,7 +198,10 @@ fn start_failure_is_recoverable_but_stale_or_changed_requests_never_replace_a_se
         Err(PairingError::Keychain(KeychainError::LockedDenied))
     );
     let persisted = container.pairing_catalog().expect("durable pre-POST start");
-    assert_eq!(persisted.pending_pairings, [request.clone()]);
+    assert_eq!(
+        persisted.pending_pairings.as_slice(),
+        std::slice::from_ref(&request)
+    );
     assert_eq!(
         container.pending_pairing_secret(ORIGIN, &store),
         Err(PairingError::Keychain(KeychainError::Missing))

@@ -13,11 +13,12 @@ Implementation baseline: `b8da29f`. Dependency/lockfile checkpoint: `6eef4cc`. T
 | Locked host resolution | Full host-filtered Cargo metadata with `--locked --offline` | PASS; no dependency upgrades |
 | Linux image dependency resolution | Isolated manifest/stub-only BuildKit metadata for runtime/search graphs | PASS for both Linux graphs with --locked; no release image or stack changes |
 | Backend production compiler | Exact runtime server/nlp/classifier features through shared host debug cache, 4m40s | PASS |
-| Backend storage/security assertions | New repository/API pairing, revoke/config-lock, reset/issuer-policy and reopen cases | PENDING: required embedded workspace build running; assertions not yet executed |
+| Backend storage/security assertions | Three API pairing tests in required embedded mode: lifecycle/admission/revoke/config-lock/policy, persisted reopen and rejected authority fields | PASS 3/3 in 22.44s; the filtered workspace run is still finishing other targets |
 | Native captures | 24 actual Rune captures; 12 selected PNG/tree pairs inspected (six scenes at 1180×780/1× and 640×480/2×) | PASS for selected synthetic views; real Keychain/installed GUI separate |
-| Docs/diagram checks | Original 16 Markdown files/420 links/5 figures; workflow updates cover 8 reviewed guides/entrypoints with 172 local path/anchor checks and 2 exact XML-valid rendered/inspected diagram pairs | PASS; workflow links, bounds and whitespace checked |
+| Docs/diagram checks | Original 16 Markdown files/420 links/5 figures; workflow updates cover 8 reviewed guides/entrypoints with 175 local path/anchor checks and 2 exact XML-valid rendered/inspected diagram pairs | PASS; workflow links, bounds and whitespace checked |
 | Formatting | Full `cargo fmt --all -- --check` after authorized formatting repair; assertions unchanged, original formatting retained in scratch | PASS; tracked Rust source matches the feature commit |
-| Workspace all-target Clippy | Earlier attempt interrupted at <1 GiB reserve, exit 130; resource blocker now repaired | PENDING rerun after focused required-mode tests |
+| Workspace all-target Clippy | Whole workspace/all targets with `-D warnings`; fixture compiler/lint repairs below | PASS; repaired warm-cache rerun completed in 10.00s |
+| Full local embedded gate | Formatting, Clippy, unfiltered workspace tests, host help and required storage contracts | PENDING after the focused runtime run |
 
 ## Implemented boundaries
 
@@ -70,12 +71,12 @@ Local logs: `.agent-scratch/native-pairing-rerun-units.log` and `.agent-scratch/
 | Pitfall | Resolution / current evidence |
 | --- | --- |
 | Dirty formatting blocks the full gate | Backed up the existing edit, ran the package formatter under the user's repair instruction, preserved assertions; full formatter now passes. |
-| Disk reserve exhausted | Validated exact obsolete artifact provenance, ownership, inode/hardlinks and open-file status. Removed retired compiled artifacts (~11.75 GiB) and a bounded 108 obsolete core storage-test executables (~30.02 GiB). All current graphs and their dependencies, metadata and incrementals, plus user `target/debug`, data and QA evidence retained. Free space rose to about 39 GiB before continued compilation. |
+| Disk reserve exhausted | Validated exact obsolete artifact provenance, ownership, inode/hardlinks and open-file status. Removed retired compiled artifacts (~11.75 GiB) and bounded subsets totaling 147 obsolete core storage-test executables (~40.16 GiB). All current graphs and their dependencies, metadata and incrementals, plus user `target/debug`, data and QA evidence retained. Free space rose to about 39 GiB before continued compilation. |
 | API-only selection unexpectedly recompiles dependencies | Matching core features alone lost `log`/`tracing` and host/proc-macro unification. Interrupted that build before assertions, retained its exit-130 log, and switched once to the workspace graph with a test-name filter. |
 | Cold build is slow | Observed roughly 20 minutes in RocksDB C++ compilation on this Intel host; CPU speed limit was 43%. Full Rust debug info and the embedded/NLP/classifier/fixture graph add work. These are observations, not a benchmark. Current engine compilation completed. |
 | Workflow guidance is hard to discover | Updated contributor loop/cache decisions, build artifact guide, agent workflow, relevant READMEs and two rendered diagram pairs. Permanent guidance describes reusable choices; this tracker retains incident history. |
 
-Required-mode command currently running (workspace targets compile; only matching tests execute):
+Required-mode command (all three API cases have passed; remaining filtered workspace targets are still running):
 
 ```sh
 CARGO_BUILD_JOBS=2 env -u ARGOS_SURREAL_BIN \
@@ -84,4 +85,10 @@ CARGO_BUILD_JOBS=2 env -u ARGOS_SURREAL_BIN \
   pairing::tests:: -- --nocapture --test-threads=1
 ```
 
-The backend assertions and full gate remain pending until their processes actually complete. Native app build/open and real Keychain checks remain reserved for the user.
+The complete filtered workspace result and full gate remain pending until their processes actually complete. Native app build/open and real Keychain checks remain reserved for the user.
+
+### Test-target preflight repairs
+
+The first required-mode build exited 101 before assertions: an older static-purpose fixture omitted the new `AccessPolicy::pairing_repo` field, and the pinned SDK cannot deserialize a complete query result directly into scalar `serde_json::Value`. The fixes supply `None` only in that datastore-free fixture and use supported `Vec<Value>` rows. The privacy audit also verifies an issued-credential row is present before testing that secrets are absent. Actual API pairing tests now pass.
+
+All-target Clippy then found one unnecessary clone in a native pairing test assertion. A borrowed-slice comparison preserves the assertion; the repaired full Clippy pass succeeds. The contributor workflow now calls out test-target compilation before expensive executable generation, because a production-only check excludes `#[cfg(test)]` fixtures.

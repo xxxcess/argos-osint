@@ -411,6 +411,7 @@ mod tests {
                         port: 8080,
                         origins: Arc::new(Vec::new()),
                         network: Some(network),
+                        pairing_repo: None,
                     },
                     protect,
                 ));

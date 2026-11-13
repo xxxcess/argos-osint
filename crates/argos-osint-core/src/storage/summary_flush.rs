@@ -308,6 +308,17 @@ pub async fn drain(
     secret: impl FnOnce() -> Option<ProviderSecret>,
     lease_secs: i64,
 ) -> Result<Vec<Outcome>> {
+    // Keep the large drain operation out of callers' inline poll frames,
+    // including the synchronous scheduler worker's runtime callback.
+    Box::pin(drain_inner(repo, owner, secret, lease_secs)).await
+}
+
+async fn drain_inner(
+    repo: &Repository,
+    owner: &str,
+    secret: impl FnOnce() -> Option<ProviderSecret>,
+    lease_secs: i64,
+) -> Result<Vec<Outcome>> {
     let mut out = Vec::new();
     let mut load = Some(secret);
     let mut secret: Option<ProviderSecret> = None;

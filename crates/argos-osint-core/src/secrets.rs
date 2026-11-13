@@ -459,9 +459,21 @@ mod tests {
     #[test]
     fn auth_save_commits_only_the_auth_slot() {
         let dir = tempfile::tempdir().unwrap();
-        let before = crate::config_commit::current_generation();
+        let root_before = {
+            let lock = crate::config_commit::ConfigLock::acquire_at(dir.path()).unwrap();
+            lock.commit_files(&[crate::config_commit::CommitFile::new(
+                "auth",
+                dir.path().join("auth.json"),
+                serde_json::to_string_pretty(&AuthFile::default()).unwrap(),
+            )])
+            .unwrap()
+        };
+        let process_before = crate::config_commit::current_generation();
         let lock = crate::config_commit::ConfigLock::acquire_at(dir.path()).unwrap();
-        assert!(lock.generation() >= before);
+        assert_eq!(
+            lock.generation(), root_before,
+            "reopening the root must recover its durable revision independently of the process counter"
+        );
         let generation = lock
             .commit_files(&[crate::config_commit::CommitFile::new(
                 "auth",
@@ -469,11 +481,22 @@ mod tests {
                 serde_json::to_string_pretty(&AuthFile::default()).unwrap(),
             )])
             .unwrap();
-        assert!(generation > before, "commit must bump the generation");
+        assert!(
+            generation > root_before,
+            "commit must advance the root revision"
+        );
+        assert!(
+            generation > process_before,
+            "commit must advance the process generation"
+        );
         let after = crate::config_commit::current_generation();
         assert!(
-            after >= before,
-            "generation must advance monotonically: {before} -> {after}"
+            after >= generation,
+            "the process must observe the committed generation"
+        );
+        assert!(
+            after >= process_before,
+            "process generation must advance monotonically: {process_before} -> {after}"
         );
         assert!(dir.path().join("auth.json").exists());
         assert!(!dir.path().join("config.toml").exists());

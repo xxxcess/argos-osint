@@ -2,7 +2,6 @@
 
 use std::fs;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use crate::atlas_taxonomy::DomainId;
 use crate::classifier::dataset;
@@ -12,7 +11,6 @@ use crate::classifier::WorkControl;
 
 use super::*;
 
-static RUNTIME: Mutex<()> = Mutex::new(());
 fn trained(root: &std::path::Path) -> ArtifactStore {
     let header="sample_id,title,description,domain_labels,primary_domain,secondary_domain,subcategories,source_kind,difficulty,dataset_version,annotation_notes,split,scenario_group,language,synthetic,labels_complete,expected_admission,rejection_reason\n";
     let mut csv = header.to_owned();
@@ -88,7 +86,7 @@ fn request(preview: &CandidatePreview) -> ActivationRequest {
 
 #[test]
 fn real_activation_requires_exact_hashes_prior_and_consent_and_replays_only_its_own_effect() {
-    let _serial = RUNTIME.lock().expect("serialized finite Natural runtime");
+    let _serial = crate::classifier::TEST_RUNTIME_LOCK.blocking_lock();
     let temporary = tempfile::tempdir().expect("temporary home");
     let store = trained(temporary.path());
     let candidate_preview = preview(
@@ -158,7 +156,7 @@ fn real_activation_requires_exact_hashes_prior_and_consent_and_replays_only_its_
 #[test]
 fn started_without_owned_effect_stays_uncertain_even_when_another_operation_activated_exact_candidate(
 ) {
-    let _serial = RUNTIME.lock().expect("serialized finite Natural runtime");
+    let _serial = crate::classifier::TEST_RUNTIME_LOCK.blocking_lock();
     let temporary = tempfile::tempdir().expect("temporary home");
     let store = trained(temporary.path());
     let candidate_preview = preview(

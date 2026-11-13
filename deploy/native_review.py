@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare native backend reviews and print commands; never start Docker."""
+"""Prepare native backend reviews; explicitly build/restart with the up command."""
 
 import argparse
 import json
@@ -62,7 +62,7 @@ def read_private(path, limit=65536):
 
 
 @contextmanager
-def preparation_lock(workspace):
+def preparation_lock(workspace, filename=".prepare.lock", *, wait=True):
     import fcntl
 
     for directory in (workspace, workspace / "secrets"):
@@ -70,14 +70,17 @@ def preparation_lock(workspace):
         if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
                 or info.st_mode & 0o077):
             raise ValueError("Expected a private owned review directory")
-    descriptor = os.open(workspace / ".prepare.lock",
+    descriptor = os.open(workspace / filename,
                          os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
     with os.fdopen(descriptor, "r+") as lock:
         info = os.fstat(lock.fileno())
         if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
                 or info.st_uid != os.getuid() or info.st_mode & 0o077):
             raise ValueError("Unsafe preparation lock")
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+        except BlockingIOError:
+            raise ValueError("Another update is already running for this review") from None
         yield
 
 
@@ -95,6 +98,7 @@ def current_environment(root, workspace):
         "COMPOSE_PROJECT_NAME", "FLEETWORKS_HOST_WORKSPACE", "PLATFORM",
         "FLEETWORKS_API_PORT", "FLEETWORKS_ACCESS_SCOPE_ID", "FLEETWORKS_ACCESS_EPOCH",
         "FLEETWORKS_RUNTIME_IMAGE", "FLEETWORKS_SURREAL_IMAGE", "FLEETWORKS_SEARCH_IMAGE",
+        "FLEETWORKS_UID", "FLEETWORKS_GID", "FLEETWORKS_SEARCH_SOURCE_EPOCH",
     }
     settings = {}
     for line in contents.splitlines():
@@ -177,7 +181,7 @@ def prepare(root, name):
                 "version": version, "operator": token, "origin": f"http://127.0.0.1:{port}"}
 
 
-def print_prepared(root, prepared):
+def review_commands(root, prepared):
     environment = prepared["environment"]
     # Compose must read this review's file even after another shell exported a
     # different review's settings. Names, not authority values, reach output.
@@ -195,6 +199,18 @@ def print_prepared(root, prepared):
                         ("search-index", "FLEETWORKS_SEARCH_IMAGE")):
         build.extend(["--set", target + ".tags=" + environment[key]])
     build.extend(["--load", "backend"])
+    return build, compose
+
+
+def print_approval(root, prepared):
+    print(f"Setup Gateway → {prepared['origin']} → Pair again. Approve the displayed values:")
+    print(shlex.join(["python3", str(root / "scripts/fleetworks_pairing.py"),
+                     "--origin", prepared["origin"], "--operator-token-file", str(prepared["operator"]),
+                     "approve", "--pairing-id", "<displayed-id>", "--approval-code", "<displayed-code>"]))
+
+
+def print_prepared(root, prepared):
+    build, compose = review_commands(root, prepared)
     print(f"Prepared existing review: {prepared['workspace']}")
     print("Run from the repository root; no exports or sourcing Compose settings needed.")
     print("1. Build backend images (local review optimization, visible progress):")
@@ -203,11 +219,75 @@ def print_prepared(root, prepared):
     print(shlex.join(compose + ["stop"]) + " && " + shlex.join(compose + [
         "up", "--no-build", "--pull", "never", "--force-recreate", "--detach", "--wait"]))
     print(shlex.join(compose + ["ps"]))
-    print(f"3. Setup Gateway → {prepared['origin']} → Pair again. Approve the displayed values:")
-    print(shlex.join(["python3", str(root / "scripts/fleetworks_pairing.py"),
-                     "--origin", prepared["origin"], "--operator-token-file", str(prepared["operator"]),
-                     "approve", "--pairing-id", "<displayed-id>", "--approval-code", "<displayed-code>"]))
+    print("3. Pair the native app:")
+    print_approval(root, prepared)
     print("Credentials retained. No images built or services started.")
+
+
+class ReviewActionError(Exception):
+    def __init__(self, stage, code):
+        self.stage = stage
+        self.code = code if code > 0 else 128 - code
+
+
+class ReviewConfigurationError(ValueError):
+    """A controlled, non-secret operator action message."""
+
+
+def run_review(root, name):
+    """Build before stopping anything; execute only the selected review's recipe."""
+    root = root.resolve(strict=True)
+    prepared = prepare(root, name)
+    stage = "Docker preflight"
+    with preparation_lock(prepared["workspace"], ".up.lock", wait=False):
+        try:
+            print(f"[1/5] Checking local Docker for {name}…", flush=True)
+            if os.environ.get("DOCKER_HOST") and not os.environ.get("DOCKER_CONTEXT"):
+                raise ReviewConfigurationError("Select a named local Docker context instead of a DOCKER_HOST override")
+            context = subprocess.check_output(["docker", "context", "show"], cwd=root, text=True).strip()
+            if not re.fullmatch(r"[A-Za-z0-9_.-]+", context):
+                raise ReviewConfigurationError("Invalid Docker context name")
+            endpoint = json.loads(subprocess.check_output([
+                "docker", "context", "inspect", context, "--format", "{{json .Endpoints.docker.Host}}",
+            ], cwd=root, text=True))
+            if not isinstance(endpoint, str) or not endpoint.startswith("unix://"):
+                raise ReviewConfigurationError("This local review requires a local Docker context")
+            docker = ["docker", "--context", context]
+            platform = subprocess.check_output(
+                docker + ["info", "--format", "{{.OSType}}/{{.Architecture}}"], cwd=root, text=True).strip()
+            platform = {"linux/x86_64": "linux/amd64", "linux/aarch64": "linux/arm64"}.get(platform, platform)
+            if platform != prepared["environment"]["PLATFORM"]:
+                raise ReviewConfigurationError("Docker architecture differs from the review; choose a matching native daemon")
+
+            build, compose = review_commands(root, prepared)
+            def pin_context(command):
+                position = command.index("docker") + 1
+                return command[:position] + ["--context", context] + command[position:]
+            build, compose = pin_context(build), pin_context(compose)
+            position = build.index("bake") + 1
+            # A context's built-in builder uses that daemon, not a separately
+            # selected remote or emulating Buildx instance.
+            build[position:position] = ["--builder", context]
+            subprocess.run(compose + ["config", "--quiet"], cwd=root, check=True)
+            stage = "image build"
+            print("[2/5] Building backend images; Cargo/BuildKit output follows…", flush=True)
+            subprocess.run(build, cwd=root, check=True)
+            _, current = current_environment(root, prepared["workspace"])
+            if current != prepared["environment"]:
+                raise ReviewConfigurationError("Review settings changed during the build; rerun before restarting")
+            stage = "stop"
+            print("[3/5] Stopping the selected review after its successful build…", flush=True)
+            subprocess.run(compose + ["stop"], cwd=root, check=True)
+            stage = "startup/bootstrap"
+            print("[4/5] Recreating services and waiting for bootstrap/health…", flush=True)
+            subprocess.run(compose + ["up", "--no-build", "--pull", "never", "--force-recreate",
+                                      "--detach", "--wait"], cwd=root, check=True)
+            stage = "status"
+            print("[5/5] Review status:", flush=True)
+            subprocess.run(compose + ["ps"], cwd=root, check=True)
+            print_approval(root, prepared)
+        except subprocess.CalledProcessError as error:
+            raise ReviewActionError(stage, error.returncode) from None
 
 
 def expose_root_environment(root, name):
@@ -315,6 +395,8 @@ def main():
     value.add_argument("--field", choices=("workspace", "image_tag", "project"), required=True)
     existing = subcommands.add_parser("prepare", help="prepare existing credentials and print complete build/start/approval commands")
     existing.add_argument("--name", required=True)
+    update = subcommands.add_parser("up", help="prepare, build, then restart the existing review after a successful build")
+    update.add_argument("--name", required=True)
     args = parser.parse_args()
     try:
         if args.command == "init":
@@ -337,9 +419,17 @@ def main():
             print("No images built or services started. Keep compose.env and all credentials for restart.")
         elif args.command == "prepare":
             print_prepared(ROOT, prepare(ROOT, args.name))
+        elif args.command == "up":
+            run_review(ROOT, args.name)
         else:
             receipt = json.loads((review_path(ROOT, args.name) / "review.json").read_text(encoding="utf-8"))
             print(receipt["environment"]["COMPOSE_PROJECT_NAME"] if args.field == "project" else receipt[args.field])
+    except ReviewActionError as error:
+        parser.exit(error.code, f"Review {error.stage} failed (exit {error.code}). No later stage ran; data and credentials were retained.\n")
+    except ReviewConfigurationError as error:
+        parser.exit(2, f"Update stopped before service restart: {error}.\n")
+    except KeyboardInterrupt:
+        parser.exit(130, "Review operation interrupted. Data and credentials retained; rerun up to resume.\n")
     except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as error:
         parser.exit(1, f"Review provisioning failed: {type(error).__name__}. Existing files were retained.\n")
     return 0

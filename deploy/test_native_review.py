@@ -8,7 +8,7 @@ import shlex
 import stat
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 from unittest import mock
 
@@ -337,6 +337,132 @@ class PrepareReviewTests(unittest.TestCase):
             native_review.prepare(root, "local")
             self.assertEqual(token.read_bytes(), original_token)
             self.assertEqual(json.loads(manifest.read_text())["credentials"][-1]["purpose"], "operator")
+
+
+    def test_up_builds_before_restart_with_streaming_output_and_exact_review_scope(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = self.fixture(root, legacy=True)
+            output = io.StringIO()
+            with mock.patch.object(native_review, "ROOT", root), \
+                 mock.patch("sys.argv", ["native_review.py", "up", "--name", "local"]), \
+                 mock.patch.dict(os.environ, {"DOCKER_CONTEXT": "desktop-linux"}), \
+                 mock.patch.object(native_review.subprocess, "check_output", side_effect=[
+                     "desktop-linux\n", '"unix:///var/run/docker.sock"\n', "linux/x86_64\n"]), \
+                 mock.patch.object(native_review.subprocess, "run") as docker, redirect_stdout(output):
+                self.assertEqual(native_review.main(), 0)
+            commands = [call.args[0] for call in docker.call_args_list]
+            self.assertEqual(len(commands), 5)
+            self.assertEqual(commands[0][-2:], ["config", "--quiet"])
+            self.assertIn("bake", commands[1])
+            self.assertIn(["--builder", "desktop-linux"],
+                          [commands[1][i:i+2] for i in range(len(commands[1])-1)])
+            self.assertEqual(commands[2][-1], "stop")
+            self.assertEqual(commands[3][-7:], ["up", "--no-build", "--pull", "never", "--force-recreate", "--detach", "--wait"])
+            self.assertEqual(commands[4][-1], "ps")
+            for command in (commands[0], *commands[2:]):
+                self.assertIn(str(workspace / "compose.env"), command)
+                self.assertIn("fleetworks-native-review-local", command)
+                self.assertIn(["--context", "desktop-linux"],
+                              [command[i:i+2] for i in range(len(command)-1)])
+            for call in docker.call_args_list:
+                self.assertEqual(call.kwargs, {"cwd": root.resolve(), "check": True})
+            self.assertIn("[2/5]", output.getvalue())
+            self.assertIn("[5/5]", output.getvalue())
+            self.assertIn("http://127.0.0.1:18091", output.getvalue())
+            self.assertNotIn("No images built", output.getvalue())
+            for name in TOKEN_NAMES:
+                secret = (workspace / "secrets" / name).read_text().strip()
+                self.assertNotIn(secret, output.getvalue())
+                self.assertNotIn(secret, repr(commands))
+
+    def test_up_stops_after_each_failed_stage_and_retains_data(self):
+        for index, label in enumerate(("config", "build", "stop", "startup", "status")):
+            with self.subTest(stage=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                workspace = self.fixture(root)
+                sentinel = workspace / "storage" / "keep-data"
+                sentinel.write_text("retained")
+                credentials = {p.name: p.read_bytes() for p in (workspace / "secrets").iterdir()}
+                calls = []
+                def execute(command, **kwargs):
+                    calls.append(command)
+                    if len(calls) == index + 1:
+                        raise native_review.subprocess.CalledProcessError(17, command)
+                error = io.StringIO()
+                with mock.patch.object(native_review, "ROOT", root), \
+                     mock.patch("sys.argv", ["native_review.py", "up", "--name", "local"]), \
+                     mock.patch.dict(os.environ, {"DOCKER_CONTEXT": "desktop-linux"}), \
+                     mock.patch.object(native_review.subprocess, "check_output", side_effect=[
+                         "desktop-linux\n", '"unix:///var/run/docker.sock"\n', "linux/x86_64\n"]), \
+                     mock.patch.object(native_review.subprocess, "run", side_effect=execute), \
+                     redirect_stdout(io.StringIO()), redirect_stderr(error), \
+                     self.assertRaises(SystemExit) as stopped:
+                    native_review.main()
+                self.assertEqual(stopped.exception.code, 17)
+                self.assertEqual(len(calls), index + 1)
+                self.assertIn("No later stage ran", error.getvalue())
+                self.assertEqual(sentinel.read_text(), "retained")
+                self.assertEqual({p.name: p.read_bytes() for p in (workspace / "secrets").iterdir()}, credentials)
+
+    def test_up_rejects_remote_or_mismatched_daemon_before_any_build_or_stop(self):
+        for responses in (["remote\n", '"ssh://example.test"\n'],
+                          ["desktop-linux\n", '"unix:///var/run/docker.sock"\n', "linux/aarch64\n"]):
+            with self.subTest(responses=responses), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.fixture(root)
+                with mock.patch.dict(os.environ, {"DOCKER_CONTEXT": "desktop-linux"}), \
+                     mock.patch.object(native_review.subprocess, "check_output", side_effect=responses), \
+                     mock.patch.object(native_review.subprocess, "run") as docker, \
+                     redirect_stdout(io.StringIO()), self.assertRaises(ValueError):
+                    native_review.run_review(root, "local")
+                docker.assert_not_called()
+
+    def test_up_refuses_changed_settings_before_stopping_running_services(self):
+        for key in ("FLEETWORKS_API_PORT", "FLEETWORKS_UID", "FLEETWORKS_GID", "FLEETWORKS_SEARCH_SOURCE_EPOCH"):
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as directory:
+                self.check_changed_setting(Path(directory), key)
+
+    def check_changed_setting(self, root, key):
+        with self.subTest(setting=key):
+            self.fixture(root)
+            calls = []
+            def execute(command, **kwargs):
+                calls.append(command)
+                if "bake" in command:
+                    env = root / "compose.env"
+                    env.write_text(re.sub(r"(?m)^" + key + r"=.*$", key + "='changed'", env.read_text()))
+            with mock.patch.dict(os.environ, {"DOCKER_CONTEXT": "desktop-linux"}), \
+                 mock.patch.object(native_review.subprocess, "check_output", side_effect=[
+                     "desktop-linux\n", '"unix:///var/run/docker.sock"\n', "linux/x86_64\n"]), \
+                 mock.patch.object(native_review.subprocess, "run", side_effect=execute), \
+                 redirect_stdout(io.StringIO()), self.assertRaises(ValueError):
+                native_review.run_review(root, "local")
+            self.assertEqual(len(calls), 2)
+            self.assertFalse(any(command[-1] == "stop" for command in calls))
+
+
+    def test_up_cancelled_build_never_stops_running_services(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            calls = []
+            def execute(command, **kwargs):
+                calls.append(command)
+                if "bake" in command:
+                    raise KeyboardInterrupt
+            with mock.patch.object(native_review, "ROOT", root), \
+                 mock.patch("sys.argv", ["native_review.py", "up", "--name", "local"]), \
+                 mock.patch.dict(os.environ, {"DOCKER_CONTEXT": "desktop-linux"}), \
+                 mock.patch.object(native_review.subprocess, "check_output", side_effect=[
+                     "desktop-linux\n", '"unix:///var/run/docker.sock"\n', "linux/x86_64\n"]), \
+                 mock.patch.object(native_review.subprocess, "run", side_effect=execute), \
+                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()), \
+                 self.assertRaises(SystemExit) as stopped:
+                native_review.main()
+            self.assertEqual(stopped.exception.code, 130)
+            self.assertEqual(len(calls), 2)
+            self.assertFalse(any(command[-1] == "stop" for command in calls))
 
 
 if __name__ == "__main__":

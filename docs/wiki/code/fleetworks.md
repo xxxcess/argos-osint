@@ -2,7 +2,7 @@
 
 [Code route](index.md) · [Architecture](architecture.md) · [Deployment guide](../../../deploy/README.md)
 
-Fleetworks Desktop is the API-only macOS control hub. Its eight pages use an independently operated gateway; launching the app does not launch the backend or Intel Web. Atlas, Brain, Tools, Models and Profile target shared backend resources within the caller's permissions. Workstation, Workspaces and Jobs & Logs separate local identity from registered request activity. Start with [native connections](native-connections.md), [protected workspaces](native-workspaces.md) and the [native build/fixture guide](../../../apps/fleetworks-desktop/README.md).
+Fleetworks Desktop is the API-only macOS control hub. Its six sidebar destinations are DB Seed & Train, News Cycles, Brain Search, OSINT Tools, Model Assignments and Jobs & Logs. The gateway header opens Workstation Status; Setup Gateway opens a URL-only connectivity flow. Backend resources remain shared within permissions, while activity is attributed to the registered workstation. Start with [native connections](native-connections.md), [protected identity](native-workspaces.md), the [design system](native-design-system.md) and [native build/fixture guide](../../../apps/fleetworks-desktop/README.md). App launch never launches the backend or Intel Web.
 
 Linux domain services share the network datastore. Jobs exclusively owns its SQLite operational logs and embedded RocksDB queue; [actor discovery](actor-search.md) has a separate private Tantivy service. The [isolated native-review deployment](../../../deploy/README.md) builds backend-only images and leaves web/client launch independent. Backend network readers accept explicit current-format configuration and saved credentials; they do not migrate historical files or revive environment provider keys during ordinary reads.
 
@@ -16,15 +16,15 @@ Venture, the six Fleetworks terminal clients and the legacy `argos` executable a
 python3 scripts/fleetworks_candidate.py build-native --target host --profile debug
 ```
 
-The helper prints the complete `.app` and manifest paths. Add `--open` only for an intended GUI launch. In Workstation, save a gateway origin and protected Native-purpose token-file reference, test compatibility, then connect explicitly. Select an owned native child and current LAN/VPN address to ensure or reuse its registered context. The app does not launch services. [Connection flow](native-connections.md)
+The helper prints the complete `.app` and manifest paths. Add `--open` only for an intended GUI launch. Provision an exact-origin protected Native token-file binding using the app executable's `--provision-gateway-credential --api-origin <origin> --api-token-file <private-file>` mode. In Setup Gateway enter that URL, check authentication/compatibility and register the installation. The mode exits without GUI/network/service startup. [Connection flow](native-connections.md)
 
-Native local identities live under the protected OS-home container, independently of the current working directory. Selecting a child changes origin and activity scope while preserving backend-global actors, provider accounts and model defaults. [Workspace ownership](native-workspaces.md)
+Protected settings initialize without creating a default child. The opaque backend workstation ID is the Connect ID; optional mutable IP metadata does not define identity. New contexts and activity queries contain no workspace narrowing. Existing folders and immutable historical origins remain preserved. [Identity ownership](native-workspaces.md)
 
 ## Launch the Compose stack
 
 Use the [standalone backend recipe](../../../deploy/README.md#isolated-native-backend-review): provision with `deploy/native_review.py init --root-env`, build the `backend` Bake group, then start `compose.native-review.yml` directly with `--env-file compose.env` and its unique project. The editable env file is private and Git-ignored at the repository root. This creates separate deployment data and purpose-scoped credentials without mounting a native child. Reuse that exact Compose selection for status, logs, restart and stop. Stop preserves data; no startup resets configuration or rotates credentials.
 
-Optional Intel Web and Atlas services require explicit deployment configuration. The browser authenticates its Connect form with an already registered Connect ID; the ID alone grants no authority. Use the native Atlas page to submit collection work when a real worker is advertised. [Deployment](../../../deploy/README.md) · [Atlas](../../../deploy/atlas-dispatch.md)
+Optional Intel Web and Atlas services require explicit deployment configuration. The browser authenticates its Connect form with an already registered Connect ID; the ID alone grants no authority. Use native News Cycles to submit collection work when a real worker is advertised. [Deployment](../../../deploy/README.md) · [Atlas](../../../deploy/atlas-dispatch.md)
 
 ## Run the network API and workers
 
@@ -62,11 +62,11 @@ With the Atlas overlay, `atlas-worker` consumes Jobs-owned embedded queue delive
 
 | Area | Implemented behavior |
 | --- | --- |
-| Native app and local workspaces | Complete app packaging, saved connections, protected child identities and registered request context |
+| Native app and workstation identity | URL-only setup, provisioned exact-origin credentials, stable workstation Connect ID and scoped request context |
 | Direct Docker backend | Independently provisioned purpose credentials, private services, workers and persistent stores |
 | Atlas | Durable dispatch and replay, separate NLP/Rust-BERT services, shared daily NewsAPI quota in SurrealDB |
 | Brain and Intel | Canonical actor discovery, dossiers, retained briefs and publication recovery; explicit seed maintenance |
-| Tools, Models and Profile | Durable manual tool results, shared defaults and confirmed configuration revisions |
+| Tools and Model Assignments | Provider/service cards, protected inline keys, shared routing defaults and confirmed revisions |
 | Jobs & Logs | Workstation membership before rows/counts/pagination, private-safe logs and explicitly authorized actions |
 
 Installed-app, matching-hardware accessibility, both Mac architectures and real backend integration require their own recorded evidence. Retirement was explicitly authorized; it does not close those verification gaps or the separate production scheduler migration. [Native verification](native-verification.md) · [CI](ci.md#fleetworksyml--scoped-branch-checks)

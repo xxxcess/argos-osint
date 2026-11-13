@@ -6,7 +6,7 @@ Start with the [workspace manifest](../../../Cargo.toml). The native macOS app c
 
 | Branch | What to inspect | Next page |
 | --- | --- | --- |
-| [Native app](../../../apps/fleetworks-desktop) · [Client contracts](../../../crates/fleetworks-contracts) | Eight native pages, origin-pinned SDK and protected local identity | [Connections](native-connections.md) · [Workspaces](native-workspaces.md) |
+| [Native app](../../../apps/fleetworks-desktop) · [Client contracts](../../../crates/fleetworks-contracts) | Six sidebar destinations plus Status/setup, origin-pinned SDK and protected workstation identity | [Connections](native-connections.md) · [Identity](native-workspaces.md) · [Design system](native-design-system.md) |
 | [Core](../../../crates/argos-osint-core/src) | Atlas, Intel, Brain, providers and NLP | [Core map](core.md) |
 | [HTTP adapter](../../../crates/argos-osint-api) · [Service host](../../../services/api-host) | Versioned API, authenticated gateway, private Brain, readiness and worker roles | [Intel web](intel-web.md) |
 | [Compose](../../../deploy) · [Jobs stores](../../../crates/fleetworks-jobs) | Local service graph and embedded durable delivery | [Deployment](../../../deploy/README.md) |
@@ -31,6 +31,7 @@ Start with the [workspace manifest](../../../Cargo.toml). The native macOS app c
 | Model and provider scheduling | [Providers](../concepts/providers.md) |
 | Rust style | [Repository Rust style](../../../.opencode/skills/argos-rust-style/SKILL.md) · [Conventions](conventions.md#rust-style) |
 | React UI and fixture review | [Design rules](react-ui.md) · [Browser checks](react-ui-testing.md) |
+| Build tools, outputs and cache paths | [Visual artifact map](build-artifacts.md) |
 | Native Runtime captures and inspection | [Selected native UI verification](native-verification.md) |
 | Historical terminal evidence | [Retirement disposition](../../archive/cli-retirement.md) |
 | Agent coordination | [Execution policy](agent-workflow.md) · [OpenCode](opencode-v2.md) |

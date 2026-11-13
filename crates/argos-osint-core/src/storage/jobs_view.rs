@@ -405,19 +405,18 @@ pub(crate) fn activity_membership() -> &'static str {
         AND type::record('job_origin', record::id($parent.id)).deployment_id = $activity_deployment)) \
       AND scope_id = $activity_scope AND deployment_id = $activity_deployment \
       AND workstation_id = $activity_node \
-      AND ($activity_workspace = NONE OR workspace_id = $activity_workspace) LIMIT 1)) > 0"
+      LIMIT 1)) > 0"
 }
 
 pub(crate) fn activity_private() -> &'static str {
     "type::record('job_origin', record::id(id)).scope_id = $activity_scope \
      AND type::record('job_origin', record::id(id)).deployment_id = $activity_deployment \
      AND type::record('job_origin', record::id(id)).workstation_id = $activity_node \
-     AND ($activity_workspace = NONE OR type::record('job_origin', record::id(id)).workspace_id = $activity_workspace) \
      AND array::len((SELECT VALUE id FROM job_request \
        WHERE job_id = (type::record('job_origin', record::id($parent.id)).root_id ?? record::id($parent.id)) \
        AND (scope_id != $activity_scope OR deployment_id != $activity_deployment \
          OR workstation_id != $activity_node \
-         OR ($activity_workspace != NONE AND workspace_id != $activity_workspace)) LIMIT 1)) = 0"
+         ) LIMIT 1)) = 0"
 }
 
 pub(crate) fn validate_activity_scope(authority_scope: &str, scope: &ActivityScope) -> Result<()> {
@@ -428,8 +427,7 @@ pub(crate) fn validate_activity_scope(authority_scope: &str, scope: &ActivitySco
         valid(authority_scope)
             && valid(&scope.deployment_id)
             && valid(&scope.workstation_id)
-            && scope.scope_revision > 0
-            && scope.workspace_id.as_deref().is_none_or(valid),
+            && scope.scope_revision > 0,
         "current activity authority required"
     );
     Ok(())
@@ -535,7 +533,6 @@ pub async fn list_activity_jobs(
         .bind(("activity_scope", authority_scope.to_owned()))
         .bind(("activity_deployment", scope.deployment_id.clone()))
         .bind(("activity_node", scope.workstation_id.clone()))
-        .bind(("activity_workspace", scope.workspace_id.clone()))
         .bind(("cutoff", cutoff(Utc::now())))
         .bind(("states", states))
         .bind(("app", filter.app.clone()))
@@ -582,7 +579,6 @@ pub async fn get_activity_job(
         .bind(("activity_scope", authority_scope.to_owned()))
         .bind(("activity_deployment", scope.deployment_id.clone()))
         .bind(("activity_node", scope.workstation_id.clone()))
-        .bind(("activity_workspace", scope.workspace_id.clone()))
         .bind(("cutoff", cutoff(Utc::now())))
         .await?
         .check()?;
@@ -617,7 +613,6 @@ pub async fn activity_job_counts(
         .bind(("activity_scope", authority_scope.to_owned()))
         .bind(("activity_deployment", scope.deployment_id.clone()))
         .bind(("activity_node", scope.workstation_id.clone()))
-        .bind(("activity_workspace", scope.workspace_id.clone()))
         .bind(("cutoff", cutoff(now)))
         .bind(("day", ts(now - Duration::hours(24))))
         .await?
@@ -651,7 +646,6 @@ pub async fn activity_job_apps(
         .bind(("activity_scope", authority_scope.to_owned()))
         .bind(("activity_deployment", scope.deployment_id.clone()))
         .bind(("activity_node", scope.workstation_id.clone()))
-        .bind(("activity_workspace", scope.workspace_id.clone()))
         .bind(("cutoff", cutoff(Utc::now())))
         .await?
         .check()?

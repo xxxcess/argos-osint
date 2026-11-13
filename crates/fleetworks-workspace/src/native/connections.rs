@@ -208,6 +208,71 @@ impl NativeContainer {
         Ok(self.read_connections()?.0.snapshot)
     }
 
+    /// Provision one unambiguous exact-origin credential reference without token bytes.
+    /// Explicit provisioning is also the only way to accept a replaced token file.
+    pub fn provision_credential_binding(&self, origin: &str, path: &Path) -> Result<()> {
+        let origin = Client::canonical_origin(origin)?;
+        let credential = CredentialReference::capture(path, &origin)?;
+        drop(credential.open_verified(&origin)?);
+        let _guard = self.locked()?;
+        let (mut catalog, object) = self.read_connections()?;
+        let matches: Vec<_> = catalog
+            .snapshot
+            .profiles
+            .iter()
+            .enumerate()
+            .filter(|(_, profile)| profile.origin == origin)
+            .map(|(index, _)| index)
+            .collect();
+        anyhow::ensure!(
+            matches.len() <= 1,
+            "ambiguous credential bindings require explicit catalog repair"
+        );
+        let revision = catalog
+            .snapshot
+            .revision
+            .checked_add(1)
+            .context("credential binding revision exhausted")?;
+        let id = if let Some(index) = matches.first() {
+            let profile = &mut catalog.snapshot.profiles[*index];
+            profile.credential = credential;
+            profile.revision = revision;
+            profile.id.clone()
+        } else {
+            anyhow::ensure!(
+                catalog.snapshot.profiles.len() < MAX_PROFILES,
+                "credential binding catalog is full"
+            );
+            let id = fs::random_marker()?;
+            catalog.snapshot.profiles.push(GatewayProfile {
+                id: id.clone(),
+                revision,
+                name: format!("Gateway {}", &id[..12]),
+                origin,
+                credential,
+            });
+            id
+        };
+        catalog.snapshot.revision = revision;
+        catalog.snapshot.selected_profile_id = Some(id);
+        self.write_connections(&catalog, object)
+    }
+
+    /// Resolve a single binding; no origin fallback, token scanning or file adoption.
+    pub fn credential_binding(&self, origin: &str) -> Result<CredentialReference> {
+        let origin = Client::canonical_origin(origin)?;
+        let catalog = self.connection_profiles()?;
+        let matches: Vec<_> = catalog
+            .profiles
+            .iter()
+            .filter(|profile| profile.origin == origin)
+            .collect();
+        anyhow::ensure!(matches.len() == 1,
+            "gateway credential missing or ambiguous; run --provision-gateway-credential --api-origin <URL> --api-token-file <private-file>");
+        drop(matches[0].credential.open_verified(&origin)?);
+        Ok(matches[0].credential.clone())
+    }
+
     /// Add/edit using an explicit catalog revision; no last-writer-wins overwrite.
     /// Run on a blocking worker. This does not connect, copy token bytes or alter
     /// workspace identities, bindings or backend-global settings.

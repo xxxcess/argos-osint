@@ -64,7 +64,7 @@ Generation already validates the runtime inventory automatically. `--dry-run`
 prints the requested plan without building or asserting scene availability.
 
 Output must be a new/empty review directory outside installed applications and
-real native workspace containers. The default creates a new directory under
+real protected native settings or preserved legacy folder containers. The default creates a new directory under
 `.agent-scratch/native-ui`; existing evidence is not overwritten. Use ignored
 scratch or an output directory outside the checkout to keep clean-source checks
 meaningful. `--revision SHA --require-clean` is available for exact CI evidence.

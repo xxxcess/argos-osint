@@ -6,20 +6,24 @@ use rune_kit::Kit;
 use rune_kit::PaletteFocus;
 use rune_kit::PaletteSeed;
 
-pub const BACKGROUND: &str = "#111111";
-pub const SURFACE: &str = "#141414";
-pub const SURFACE_RAISED: &str = "#232321";
-pub const SURFACE_INSET: &str = "#0D0D0D";
+pub const BACKGROUND: &str = "#060709";
+pub const SURFACE: &str = "#0B0C0F";
+pub const SURFACE_RAISED: &str = "#111317";
+pub const SURFACE_INSET: &str = "#060709";
+/// Decorative framing; essential controls use BORDER_CONTROL.
 pub const BORDER_SUBTLE: &str = "#3A3833";
 pub const BORDER_CONTROL: &str = "#898274";
 pub const TEXT_PRIMARY: &str = "#F3EEE4";
-pub const TEXT_SECONDARY: &str = "#C6C0B5";
-pub const TEXT_MUTED: &str = "#A09A8F";
+pub const TEXT_SECONDARY: &str = "#D6D2C4";
+pub const TEXT_MUTED: &str = "#B8B4A8";
 pub const ACCENT: &str = "#C6A56E";
 pub const ACCENT_PRESSED: &str = "#C4A265";
 pub const ACCENT_HOVER: &str = "#D8BD8C";
-pub const ON_ACCENT: &str = "#111111";
+pub const ON_ACCENT: &str = "#060709";
 pub const SELECTION_SURFACE: &str = "#322C22";
+/// Static decorative edge opacity, independent of functional boundaries/focus.
+pub const CARD_EDGE_ALPHA: f32 = 0.02;
+pub const SATIN_CONTROL_EDGE_ALPHA: f32 = 0.03;
 
 fn hex(value: &str) -> Color {
     color::hex(value).expect("the static brand palette contains valid hexadecimal colors")
@@ -36,6 +40,11 @@ pub fn kit() -> Kit {
         PaletteFocus::Accent,
     );
     let colors = &mut kit.c;
+    colors.page = hex(BACKGROUND);
+    colors.bg_base = hex(BACKGROUND);
+    colors.bg_accent = hex(ACCENT);
+    colors.bg_icon_button_contrast = hex(ACCENT);
+    colors.border_focus = hex(ACCENT_HOVER);
     colors.bg_deep = hex(SURFACE_INSET);
     colors.layer_01 = hex(SURFACE);
     colors.layer_02 = hex(SURFACE_RAISED);
@@ -50,6 +59,9 @@ pub fn kit() -> Kit {
     colors.border_weak = hex(BORDER_SUBTLE);
     colors.border_hover = hex(ACCENT_HOVER);
     colors.border_active = hex(ACCENT_PRESSED);
+    colors.submit_highlight = Color::TRANSPARENT;
+    colors.submit_hover = hex(ACCENT_HOVER);
+    colors.contrast_pressed = hex(ACCENT_PRESSED);
     colors.submit_fg = hex(ON_ACCENT);
     colors.submit_icon = hex(ON_ACCENT);
     colors.text_weak = hex(TEXT_SECONDARY);
@@ -60,7 +72,7 @@ pub fn kit() -> Kit {
     colors.surface_raised_base = hex(SURFACE_RAISED);
     colors.std_border = hex(BORDER_CONTROL);
     // Keep the kit's distinct success/warning/danger/info roles. Gold is branding.
-    // Broad surfaces remain matte; control elevation is the kit's restrained sheen.
+    // All elevation/material layers are configured by material::configure_kit.
     kit.elevation.raised.clear();
     kit.elevation.md.clear();
     kit

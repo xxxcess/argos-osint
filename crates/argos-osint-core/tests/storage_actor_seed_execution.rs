@@ -20,7 +20,6 @@ use argos_osint_core::storage::setup_jobs;
 use argos_osint_core::storage::tx;
 use chrono::Utc;
 use fleetworks_contracts::connect::RegistrationEnsureRequest;
-use fleetworks_contracts::connect::WorkspaceName;
 use fleetworks_contracts::context::JobOrigin;
 use fleetworks_contracts::context::MutationContext;
 use fleetworks_contracts::context::OriginSource;
@@ -54,10 +53,8 @@ async fn claim_seed(repo: &Repository) -> ClaimedTask {
         &authority,
         &RegistrationEnsureRequest::new(
             "ensure-seed-execution".into(),
-            "192.0.2.87".parse().expect("synthetic address"),
-            WorkspaceName::new("seed-fence").expect("name"),
+            Some("192.0.2.87".parse().expect("synthetic address")),
             "synthetic-install".into(),
-            "synthetic-folder".into(),
         ),
     )
     .await

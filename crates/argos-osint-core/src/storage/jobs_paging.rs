@@ -216,7 +216,6 @@ pub async fn page(
                 .bind(("activity_scope", authority_scope.to_owned()))
                 .bind(("activity_deployment", scope.deployment_id.clone()))
                 .bind(("activity_node", scope.workstation_id.clone()))
-                .bind(("activity_workspace", scope.workspace_id.clone()))
                 .bind(("cutoff", window.cutoff.clone()))
                 .bind(("paging_upper", window.upper.clone()))
                 .bind(("paging_states", states))

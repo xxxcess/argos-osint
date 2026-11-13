@@ -15,7 +15,6 @@ use axum::extract::Query;
 use axum::extract::State;
 use axum::Json;
 use fleetworks_contracts::context::ActivityScope;
-use fleetworks_contracts::context::CredentialPurpose;
 use fleetworks_contracts::context::Permission;
 use serde::Deserialize;
 use serde_json::json;
@@ -122,31 +121,10 @@ pub(crate) async fn scope_for_request(
     }
     request.revalidate(repo).await?;
     let context = request.registered()?;
-    let browser = request.purpose() == CredentialPurpose::WebRelay;
-    if workspace_id.is_some_and(|id| !bounded(id, 128)) {
+    if workspace_id.is_some() {
         return Err(ContextFailure::invalid());
     }
-    if browser && workspace_id.is_some_and(|id| id != context.workspace_id) {
-        return Err(ContextFailure::missing());
-    }
-    let mut scope = if browser {
-        ActivityScope::for_selected_workspace(context)
-    } else {
-        ActivityScope::for_workstation(context)
-    };
-    if let Some(workspace_id) = workspace_id {
-        // Historical retired children are still valid narrow activity filters.
-        // Current request registration itself was independently revalidated.
-        let rows: Vec<Value> = repo.db().query("SELECT VALUE workspace_id FROM connect_workspace WHERE workspace_id = $workspace AND scope_id = $scope AND workstation_id = $node LIMIT 1")
-            .bind(("workspace", workspace_id.to_owned())).bind(("scope", request.scope_id().to_owned()))
-            .bind(("node", context.workstation_id.clone())).await.map_err(|_| ContextFailure::unavailable())?
-            .check().map_err(|_| ContextFailure::unavailable())?.take(0).map_err(|_| ContextFailure::unavailable())?;
-        if rows.is_empty() {
-            return Err(ContextFailure::missing());
-        }
-        scope.workspace_id = Some(workspace_id.to_owned());
-    }
-    Ok(scope)
+    Ok(ActivityScope::for_workstation(context))
 }
 
 /// Membership plus conservative shared-origin privacy check, before payload.
@@ -164,8 +142,6 @@ pub(crate) async fn authorized_job(
     if scope.deployment_id != context.deployment_id
         || scope.workstation_id != context.workstation_id
         || scope.scope_revision != context.scope_revision
-        || (request.purpose() == CredentialPurpose::WebRelay
-            && scope.workspace_id.as_deref() != Some(context.workspace_id.as_str()))
     {
         return Err(ContextFailure::forbidden());
     }

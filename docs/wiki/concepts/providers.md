@@ -4,7 +4,9 @@
 
 [![Models and roles](../../diagrams/model-roles.svg)](../../diagrams/model-roles.html)
 
-Native Profile and Models manage the selected backend's shared provider accounts and role defaults through explicit versioned gateway operations. Ordinary network readers use current-format backend configuration and do not reload old files or environment provider keys. Local child selection changes request origin, not account ownership. [Configuration boundary](../code/fleetworks.md)
+Native Model Assignments manages configured provider keys and canonical role defaults through revision-pinned gateway operations. The server advertises `catalog_source: configured_routes`: choices come from configured accounts and their saved/default role models, not an exhaustive live provider catalog. Supported reasoning choices come from resolved capabilities. Effort and variant controls address the same `provider::model` reasoning variant setting; they are not independent configuration fields. Ordered fallbacks retain their actual account/provider/model routes.
+
+Key-only edits preserve hidden account fields and saved secrets. Tool credential slots are optional patches: omitted/null preserves, an explicit empty string clears, and a nonempty value replaces. The native key modal requires explicit Clear actions. Source readers never return saved secret bytes or automatically import historical configuration/environment provider keys. Protected workstation identity supplies request origin without partitioning backend account ownership. [Configuration boundary](../code/fleetworks.md) · [Native control contract](../code/native-design-system.md)
 
 | Concern | Where |
 | --- | --- |
@@ -122,7 +124,7 @@ An available catalog entry does not establish generation availability. The histo
 
 ## Brief operation overrides and the focused path
 
-`defaults.operation_overrides` routes one Intel brief operation (`intel_brief_claims.generate`, `…inferences.generate`, `…inferences.assess`, `…links.generate`, …) to a specific provider/model without changing its logical role; empty entries inherit. The Models CLI displays canonical role chains; operation overrides remain part of workspace settings. `defaults.focused_oversized_brief` (default false) enables the measured focused oversized-story Inferences path; changing it reruns Inferences and Links only.
+`defaults.operation_overrides` routes one Intel brief operation (`intel_brief_claims.generate`, `…inferences.generate`, `…inferences.assess`, `…links.generate`, …) to a specific provider/model without changing its logical role; empty entries inherit. Native Model Assignments displays canonical role chains; operation overrides remain part of backend configuration. `defaults.focused_oversized_brief` (default false) enables the measured focused oversized-story Inferences path; changing it reruns Inferences and Links only.
 
 ## Provider adapters and resolved capabilities
 
@@ -230,7 +232,7 @@ Atlas workers reserve a logical fetch in a shared SurrealDB counter for the prov
 
 The **Brief fast preset** links `intel_brief_claims.generate` and `intel_brief_links.generate` to `brain_summary`. Their logical roles do not change, and Inference support and bounded gates keep their configured routes. The preset ships unset. It is not recommended until the held-out comparison in [benchmarks/brief-fast-preset-heldout.md](../../benchmarks/brief-fast-preset-heldout.md) has been measured with a valid key. Reset removes only the preset's own references and leaves any explicit assignment you set on those operations.
 
-**Editing one operation.** Configure the operation's explicit assignment or canonical `route_role` reference in workspace settings or a portable Profile document. Removing its entry restores the logical pipeline role; it does not edit that role's saved chain. The current Models CLI edits role defaults, not individual operation overrides.
+**Editing one operation.** Configure the operation's explicit assignment or canonical `route_role` reference in workspace settings or a portable Profile document. Removing its entry restores the logical pipeline role; it does not edit that role's saved chain. Native Model Assignments edits role defaults, not individual operation overrides.
 
 Portable profile documents retain schema 1/2 compatibility. Schema 2 added routing features rejected under schema 1:
 - override role references;

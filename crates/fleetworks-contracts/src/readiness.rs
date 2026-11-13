@@ -202,6 +202,8 @@ pub struct WorkstationReadiness {
     pub observed_at: String,
     pub checks: Vec<ReadinessCheck>,
     pub registration: Option<RegistrationReceipt>,
+    #[serde(default)]
+    pub configured_inputs: Vec<ConfiguredMaintenanceInput>,
 }
 
 impl WorkstationReadiness {
@@ -213,8 +215,19 @@ impl WorkstationReadiness {
             observed_at,
             checks,
             registration: None,
+            configured_inputs: Vec::new(),
         }
     }
+}
+
+/// Operator-configured immutable inputs. They contain no host paths or credentials.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct ConfiguredMaintenanceInput {
+    pub operation: MaintenanceOperation,
+    pub dataset: Option<DatasetRef>,
+    pub configuration_revision: u64,
 }
 
 /// Dataset purpose is validated independently of its name or selected folder.
@@ -458,13 +471,11 @@ mod tests {
     use crate::context::RegisteredContext;
 
     fn mutation() -> MutationContext {
-        let connect = "192.0.2.42:default".parse().expect("Connect ID");
         let registration = RegistrationReceipt::new(
             "deployment-a".into(),
             "node-a".into(),
-            "workspace-a".into(),
             "registration-a".into(),
-            connect,
+            None,
             1,
         );
         let context =

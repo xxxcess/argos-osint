@@ -3,9 +3,7 @@ export interface RegisteredWebContext {
   deployment_id: string;
   registration_id: string;
   workstation_id: string;
-  workstation_ip: string;
-  workspace_id: string;
-  workspace_name: string;
+  workstation_ip?: string | null;
   connect_id: string;
   registration_revision: number;
   context_revision: number;
@@ -23,9 +21,10 @@ export interface ConnectionRequestScope {
 export function connectionNamespace(context?: RegisteredWebContext): string {
   return context
     ? JSON.stringify([
+        "workstation-v2",
         context.deployment_id,
         context.access_epoch,
-        context.workspace_id,
+        context.workstation_id,
         context.registration_id,
         context.registration_revision,
         context.context_revision,

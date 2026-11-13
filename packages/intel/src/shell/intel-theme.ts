@@ -1,21 +1,23 @@
-/** Fleetworks web paint; layout/type/motion and the Rust TUI remain separate. */
+/** Matte Fleetworks paint; layout, typography and semantic colors stay separate. */
 export const intelColors = {
-  bg: "#111111",
-  panel: "#141414",
-  panelRaised: "#232321",
-  inset: "#0D0D0D",
-  scrim: "rgba(13,13,13,0.78)",
-  border: "#3A3833",
+  bg: "#060709",
+  panel: "#0B0C0F",
+  panelRaised: "#111317",
+  inset: "#060709",
+  scrim: "rgba(6,7,9,0.9)",
+  border: "rgba(243,238,228,0.02)",
+  borderDecorative: "#3A3833",
+  satinControlEdge: "rgba(243,238,228,0.03)",
   borderStrong: "#898274",
   divider: "#3A3833",
   text: "#F3EEE4",
-  dim: "#C6C0B5",
-  muted: "#A09A8F",
-  faint: "#A09A8F",
+  dim: "#D6D2C4",
+  muted: "#B8B4A8",
+  faint: "#B8B4A8",
   accent: "#C6A56E",
   accentPressed: "#C4A265",
   accentHover: "#D8BD8C",
-  onAccent: "#111111",
+  onAccent: "#060709",
   selectionSurface: "#322C22",
   accentSoft: "rgba(198,165,110,0.10)",
   accentBorder: "rgba(198,165,110,0.75)",
@@ -26,7 +28,7 @@ export const intelColors = {
   dangerSoft: "rgba(240,106,138,0.12)",
   cool: "#5AB8F0",
   warning: "#E5B45B",
-  fab: "#232321",
+  fab: "#111317",
 };
 /** Channel identifiers, not severity, confidence or API-health indicators. */
 export const intelMetricColors = {
@@ -53,8 +55,8 @@ export const intelKindFills = {
   focus: intelColors.selectionSurface,
 };
 export const intelEffects = {
-  accentGlow: "0 0 18px rgba(198,165,110,0.35)",
-  cardShadow: "0 8px 24px rgba(0,0,0,0.35)",
+  accentGlow: "none",
+  cardShadow: "none",
 };
 export const intelSpace = {
   unit: 4,
@@ -78,14 +80,14 @@ export const intelType = {
 
 /** Graph-only treatments, matching the evidence topology reference. */
 export const topologyColors = {
-  bg: "#0D0D0D",
-  panel: "rgba(20,20,20,0.94)",
+  bg: "#060709",
+  panel: "#0B0C0F",
   grid: "rgba(137,130,116,0.09)",
   axis: "rgba(137,130,116,0.18)",
   accent: "#C6A56E",
   edge: "#A79B80",
-  labelBg: "rgba(13,13,13,0.94)",
-  ghost: "rgba(20,20,20,0.9)",
+  labelBg: "#060709",
+  ghost: "#0B0C0F",
 };
 
 export const intelMotion = {
@@ -106,7 +108,7 @@ export const intelStatus = Object.fromEntries(
     succeeded: intelColors.success,
     failed: intelColors.danger,
     stale: "#C08CF5",
-  }).map(([state, color]) => [state, { color, glow: `0 0 14px ${color}` }]),
+  }).map(([state, color]) => [state, { color, glow: "none" }]),
 ) as Record<
   "idle" | "queued" | "running" | "succeeded" | "failed" | "stale",
   { color: string; glow: string }

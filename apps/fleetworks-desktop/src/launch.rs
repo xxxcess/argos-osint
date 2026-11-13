@@ -26,6 +26,8 @@ struct Options {
     api_token_file: Option<PathBuf>,
     #[arg(long)]
     workspace: Option<PathBuf>,
+    #[arg(long, requires_all = ["api_origin", "api_token_file"])]
+    provision_gateway_credential: bool,
 }
 
 fn arguments() -> Result<(Options, Vec<String>), clap::Error> {
@@ -44,6 +46,7 @@ fn arguments() -> Result<(Options, Vec<String>), clap::Error> {
         } else if argument.starts_with("--api-origin=")
             || argument.starts_with("--api-token-file=")
             || argument.starts_with("--workspace=")
+            || argument == "--provision-gateway-credential"
             || matches!(argument.as_str(), "--help" | "-h" | "--version" | "-V")
         {
             native.push(argument);
@@ -60,6 +63,24 @@ pub fn run() -> anyhow::Result<()> {
         Ok(parsed) => parsed,
         Err(error) => error.exit(),
     };
+    if options.provision_gateway_credential {
+        let container = fleetworks_workspace::native::NativeContainer::open_settings(
+            &crate::platform::home()?,
+        )?;
+        container.provision_credential_binding(
+            options.api_origin.as_deref().expect("clap requires origin"),
+            options
+                .api_token_file
+                .as_deref()
+                .expect("clap requires credential file"),
+        )?;
+        println!("Gateway credential reference provisioned. No token bytes were stored.");
+        return Ok(());
+    }
+    anyhow::ensure!(
+        options.workspace.is_none(),
+        "--workspace is retired; this installation uses workstation identity"
+    );
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()

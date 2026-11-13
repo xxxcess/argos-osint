@@ -10,6 +10,7 @@ mod native {
     mod lifecycle_scenes;
     mod log_scenes;
     mod readiness_scenes;
+    mod redesign_scenes;
     mod submission_scenes;
 
     use fleetworks_contracts::capabilities::Capabilities;
@@ -69,11 +70,11 @@ mod native {
     fn connected(state: &mut State) {
         let capabilities: Capabilities = serde_json::from_value(serde_json::json!({
         "api_version":1,
-        "features":["connect-registry-v1"],
+        "features":[fleetworks_contracts::capabilities::CONNECT_REGISTRY_FEATURE,"atlas-cycles","atlas-cycle-history-v1","tool-execution"],
         "deployment_id":"synthetic-deployment",
         "configuration_epoch":"synthetic-fresh-config-v1",
-        "connect":{"version":1,"registration_required":true},
-        "workspace_control":{"version":1,"purpose":"registration_and_activity"},
+        "connect":{"version":fleetworks_contracts::connect::CONNECT_CONTRACT_VERSION,"registration_required":true},
+        "workspace_control":{"version":fleetworks_contracts::connect::CONNECT_CONTRACT_VERSION,"purpose":"registration_and_activity"},
         "resource_scopes":{"atlas":"backend","brain":"backend","tools":"backend","models":"backend","profile":"backend","native_jobs_logs":"workstation_triggered_activity"},
         "search":{"actors":{"version":1,"engine":"tantivy"}},
         "permissions":["read_backend","register_workstation","read_workstation_activity","maintain_backend","manage_configuration","submit_interactive","rebind_workstation"],
@@ -128,9 +129,8 @@ mod native {
         let receipt = RegistrationReceipt::new(
             "synthetic-deployment".into(),
             "synthetic-node".into(),
-            "synthetic-workspace".into(),
             "synthetic-registration".into(),
-            "192.0.2.42:default".parse().expect("fixture Connect ID"),
+            Some("192.0.2.42".parse().expect("fixture IP")),
             1,
         );
         state.registration.context = Some(
@@ -171,6 +171,11 @@ mod native {
         connected(state);
         state.backend.models = Load::Ready(ModelDefaults {
             configuration_revision: 7,
+            catalog: serde_json::from_value(serde_json::json!([
+                {"provider":"local","account":"synthetic-account","model":"synthetic-primary","efforts":[]},
+                {"provider":"local","account":"synthetic-account","model":"synthetic-fallback","efforts":[]}
+            ])).expect("synthetic catalog"),
+            model_variants: Default::default(),
             roles: [
                 "recon_agent",
                 "recon_decisions",
@@ -330,6 +335,11 @@ mod native {
         if let Load::Ready(receipt) = &state.registration.receipt {
             readiness.registration = Some(receipt.clone());
         }
+        readiness.configured_inputs.push(serde_json::from_value(serde_json::json!({
+            "operation":"seed_actors",
+            "dataset": DatasetRef::new("synthetic-dataset".into(), DatasetKind::ActorCatalog, "a".repeat(64), 1024).expect("configured fixture dataset"),
+            "configuration_revision": state.configuration_revision().expect("fixture configuration")
+        })).expect("configured operation input"));
         state.readiness = Load::Ready(readiness);
         state.readiness_received_at = Some(0.0);
         state.maintenance.selected_dataset = Some(
@@ -437,23 +447,15 @@ mod native {
                 state.page = page;
             }
             Intent::Register => {
-                let (Some(row), Some(interface)) = (
-                    &state.workspaces.selected,
-                    &state.registration.selected_interface,
-                ) else {
-                    return;
-                };
-                let connect = fleetworks_contracts::connect::ConnectId::new(
-                    interface.ip,
-                    row.name.parse().expect("synthetic workspace name"),
-                )
-                .expect("synthetic Connect ID");
                 let receipt = RegistrationReceipt::new(
                     "synthetic-deployment".into(),
                     "synthetic-node".into(),
-                    format!("synthetic-workspace-{}", row.name),
-                    format!("synthetic-registration-{}", row.name),
-                    connect,
+                    "synthetic-registration".into(),
+                    state
+                        .registration
+                        .selected_interface
+                        .as_ref()
+                        .map(|interface| interface.ip),
                     1,
                 );
                 state.registration.context = Some(
@@ -571,6 +573,14 @@ mod native {
         rune::run(AppSpec {
             init,
             scenes: &[
+                ("redesign-status", redesign_scenes::status),
+                ("redesign-seed", redesign_scenes::seed),
+                ("redesign-cycles", redesign_scenes::cycles),
+                ("redesign-brain", redesign_scenes::brain),
+                ("redesign-tools", redesign_scenes::tools),
+                ("redesign-models", redesign_scenes::models),
+                ("redesign-jobs", redesign_scenes::jobs),
+                ("redesign-setup", redesign_scenes::setup),
                 ("logs-workstation-loaded", log_scenes::loaded),
                 ("logs-export-partial", log_scenes::partial_export),
                 ("logs-display-cap", log_scenes::display_cap),

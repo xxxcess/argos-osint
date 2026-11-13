@@ -51,6 +51,22 @@ class SurrealReleaseTests(unittest.TestCase):
         smoke.assert_not_called()
         fetch.assert_not_called()
 
+    def test_required_embedded_phase_executes_cycle_history_with_no_skip_environment(self):
+        with (
+            contextlib.redirect_stdout(io.StringIO()),
+            mock.patch.object(harness.sys, "argv", ["test_surreal.py", "--mode", "embedded"]),
+            mock.patch.object(harness.subprocess, "run", return_value=mock.Mock(returncode=0)) as run,
+        ):
+            harness.main()
+        run.assert_called_once()
+        command = run.call_args.args[0]
+        targets = [command[index + 1] for index, argument in enumerate(command[:-1]) if argument == "--test"]
+        self.assertEqual(targets.count("storage_cycle_history"), 1)
+        self.assertIn("--locked", command)
+        environment = run.call_args.kwargs["env"]
+        self.assertEqual(environment["ARGOS_SURREAL_MODE"], "embedded")
+        self.assertEqual(environment["ARGOS_SURREAL_REQUIRED"], "1")
+
     def test_missing_and_duplicate_pins_are_rejected(self):
         assets = self.release["archive_sha256"]
         cases = {

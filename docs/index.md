@@ -20,13 +20,15 @@ Understand the product, then follow its implementation. This is the maintained e
 | [docs/wiki/](wiki/index.md) | Two routes, searchable tags and wiki maintenance |
 | [docs/diagrams/](diagrams.md) | Diagram catalog; HTML pages and matching SVG figures |
 | [Core crate](../crates/argos-osint-core) | Domain pipelines and storage; [module map](wiki/code/core.md) |
-| [Native app](../apps/fleetworks-desktop) | API-only macOS control hub; [connections](wiki/code/native-connections.md) and [protected workspaces](wiki/code/native-workspaces.md) |
+| [Native app](../apps/fleetworks-desktop) | [Visual control guide](wiki/code/native-design-system.md) · [Setup](diagrams/native-connections.html) · [Identity](wiki/code/native-workspaces.md) |
+| [Native workstation redesign](design/native-workstation-handoff/README.md) | Supplied references, [design system](wiki/code/native-design-system.md) and [execution tracking](../.planning/2026-11-12-native-workstation-redesign/handoff.md); verification status is tracked separately |
 | [Direct Docker backend](../deploy/README.md) | Independent Linux services, purpose credentials and persistent backend data; [retired terminal disposition](archive/cli-retirement.md) |
 | [Actor search](wiki/code/actor-search.md) | Private Tantivy projection, canonical discovery, visible acknowledgements and verification boundaries |
 | [Jobs persistence](wiki/code/jobs-persistence.md) | Planned SQLite state, embedded RocksDB delivery, migration scopes and acceptance |
 | [Deployment](../deploy/README.md) | Local Compose, database profiles and the [Atlas overlay](../deploy/atlas-dispatch.md) |
 | [API adapter](../crates/argos-osint-api) / [host](../services/api-host) | Versioned HTTP contracts and authenticated service roles. [API contract](wiki/code/intel-web.md) |
 | [Web app](../apps/web-desktop) / [shared packages](../packages) | Next server/stateless API relay, React Native primitives and typed Query client |
+| [Build artifact map](wiki/code/build-artifacts.md) | Tools, compiler caches, QA evidence, app/web/image outputs and data ownership |
 | [scripts/](../scripts) | Builds, storage tests, releases and verification; [workflow](wiki/code/contributing.md) |
 | [.opencode/](../.opencode) | Role/command/skill configuration; [guide](wiki/code/opencode-v2.md) |
 | [.agents/skills/](../.agents/skills) | Repository skills for other agent hosts |

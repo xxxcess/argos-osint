@@ -6,7 +6,6 @@
 
 use std::fmt;
 use std::net::IpAddr;
-use std::net::Ipv6Addr;
 use std::str::FromStr;
 
 use serde::de;
@@ -17,7 +16,7 @@ use serde::Serializer;
 use unicode_normalization::UnicodeNormalization;
 
 /// Current registry/Connect contract version.
-pub const CONNECT_CONTRACT_VERSION: u16 = 1;
+pub const CONNECT_CONTRACT_VERSION: u16 = 2;
 /// Native-only authenticated registration creation/reconciliation route.
 pub const REGISTRATION_ENSURE_PATH: &str = "/api/v1/connect/registrations/ensure";
 /// Purpose-authorized browser session creation route.
@@ -25,7 +24,7 @@ pub const WEB_SESSION_CREATE_PATH: &str = "/api/v1/connect/sessions";
 /// Maximum UTF-8 bytes accepted for a workspace basename, before and after NFC.
 pub const MAX_WORKSPACE_NAME_BYTES: usize = 128;
 /// Maximum bytes in an input Connect ID, including IP, brackets and separator.
-pub const MAX_CONNECT_ID_BYTES: usize = 176;
+pub const MAX_CONNECT_ID_BYTES: usize = 128;
 /// Protected default child name. The parent container has no Connect ID.
 pub const DEFAULT_WORKSPACE_NAME: &str = "default";
 
@@ -162,115 +161,52 @@ impl<'de> Deserialize<'de> for WorkspaceName {
     }
 }
 
-/// Why a Connect ID cannot identify a native workstation child.
+/// A malformed opaque workstation Connect ID. Legacy IP:workspace IDs are rejected.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum ConnectIdError {
-    TooLong,
-    InvalidFormat,
-    MissingIpv6Brackets,
-    InvalidIp,
-    InvalidWorkstationIp,
-    Workspace(WorkspaceNameError),
-}
+pub struct ConnectIdError;
 
 impl fmt::Display for ConnectIdError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::TooLong => formatter.write_str("Connect ID exceeds the byte limit"),
-            Self::InvalidFormat => formatter.write_str("expected an IP address and child basename"),
-            Self::MissingIpv6Brackets => formatter.write_str("IPv6 Connect IDs require brackets"),
-            Self::InvalidIp => formatter.write_str("Connect ID contains an invalid IP address"),
-            Self::InvalidWorkstationIp => {
-                formatter.write_str("select a non-loopback unicast workstation address")
-            }
-            Self::Workspace(error) => error.fmt(formatter),
-        }
+        formatter.write_str("expected an opaque workstation ID (1–128 ASCII letters, digits, dash, underscore or dot)")
     }
 }
 
 impl std::error::Error for ConnectIdError {}
 
-/// A canonical native workstation IP plus a validated child basename.
-///
-/// IPv4-mapped IPv6 is consistently serialized as IPv4. Ordinary IPv6 uses
-/// brackets and the standard compressed lowercase representation. Zone IDs,
-/// loopback, unspecified, multicast and IPv4 broadcast are not node identities.
+/// Stable backend workstation identity; IP is optional mutable metadata, never identity.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct ConnectId {
-    ip: IpAddr,
-    workspace: WorkspaceName,
-}
+pub struct ConnectId(String);
 
 impl ConnectId {
-    /// Build a canonical identifier from a native interface and child basename.
-    pub fn new(ip: IpAddr, workspace: WorkspaceName) -> Result<Self, ConnectIdError> {
-        let ip = match ip {
-            IpAddr::V6(ip) => ip
-                .to_ipv4_mapped()
-                .map(IpAddr::V4)
-                .unwrap_or(IpAddr::V6(ip)),
-            IpAddr::V4(ip) => IpAddr::V4(ip),
-        };
-        if ip.is_unspecified()
-            || ip.is_loopback()
-            || ip.is_multicast()
-            || matches!(ip, IpAddr::V4(value) if value.is_broadcast())
+    /// Validate a backend-issued workstation identifier, rejecting legacy ID shapes.
+    pub fn new(value: &str) -> Result<Self, ConnectIdError> {
+        if !(1..=128).contains(&value.len())
+            || !value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
         {
-            return Err(ConnectIdError::InvalidWorkstationIp);
+            return Err(ConnectIdError);
         }
-        Ok(Self { ip, workspace })
+        Ok(Self(value.into()))
     }
 
-    /// Canonical selected native interface IP; not a peer-IP attestation.
+    /// Return the exact, case-preserving workstation ID.
     #[must_use]
-    pub fn ip(&self) -> IpAddr {
-        self.ip
-    }
-
-    /// Registered child basename; never a full local path.
-    #[must_use]
-    pub fn workspace_name(&self) -> &WorkspaceName {
-        &self.workspace
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
 impl fmt::Display for ConnectId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.ip {
-            IpAddr::V4(ip) => write!(formatter, "{ip}:{}", self.workspace),
-            IpAddr::V6(ip) => write!(formatter, "[{ip}]:{}", self.workspace),
-        }
+        formatter.write_str(&self.0)
     }
 }
 
 impl FromStr for ConnectId {
     type Err = ConnectIdError;
-
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        if value.len() > MAX_CONNECT_ID_BYTES {
-            return Err(ConnectIdError::TooLong);
-        }
-        let (ip, name) = if let Some(bracketed) = value.strip_prefix('[') {
-            let (address, name) = bracketed
-                .split_once("]:")
-                .ok_or(ConnectIdError::InvalidFormat)?;
-            let ip = address
-                .parse::<Ipv6Addr>()
-                .map_err(|_| ConnectIdError::InvalidIp)?;
-            (IpAddr::V6(ip), name)
-        } else {
-            if value.bytes().filter(|byte| *byte == b':').count() != 1 {
-                return Err(ConnectIdError::MissingIpv6Brackets);
-            }
-            let (address, name) = value.split_once(':').ok_or(ConnectIdError::InvalidFormat)?;
-            let ip = address
-                .parse::<IpAddr>()
-                .map_err(|_| ConnectIdError::InvalidIp)?;
-            (ip, name)
-        };
-        let workspace = WorkspaceName::new(name).map_err(ConnectIdError::Workspace)?;
-        Self::new(ip, workspace)
+        Self::new(value)
     }
 }
 
@@ -304,41 +240,36 @@ pub enum RegistrationStatus {
 #[non_exhaustive]
 pub struct RegistrationEnsureRequest {
     pub request_id: String,
-    pub workstation_ip: IpAddr,
-    pub workspace_name: WorkspaceName,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workstation_ip: Option<IpAddr>,
     pub installation_marker: String,
-    pub workspace_marker: String,
 }
 
 impl RegistrationEnsureRequest {
-    /// Build an ensure input. The server revalidates markers, IDs and authority.
+    /// Build a workstation ensure input without any folder identity.
     #[must_use]
     pub fn new(
         request_id: String,
-        workstation_ip: IpAddr,
-        workspace_name: WorkspaceName,
+        workstation_ip: Option<IpAddr>,
         installation_marker: String,
-        workspace_marker: String,
     ) -> Self {
         Self {
             request_id,
             workstation_ip,
-            workspace_name,
             installation_marker,
-            workspace_marker,
         }
     }
 }
 
-/// Non-secret receipt returned by authoritative registration ensure/reuse.
+/// Non-secret receipt returned by authoritative workstation registration ensure/reuse.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct RegistrationReceipt {
     pub deployment_id: String,
     pub workstation_id: String,
-    pub workstation_ip: IpAddr,
-    pub workspace_id: String,
-    pub workspace_name: WorkspaceName,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workstation_ip: Option<IpAddr>,
     pub registration_id: String,
     pub connect_id: ConnectId,
     pub status: RegistrationStatus,
@@ -346,22 +277,20 @@ pub struct RegistrationReceipt {
 }
 
 impl RegistrationReceipt {
-    /// Construct an active receipt from identities resolved by the server.
+    /// Construct a current receipt from server-resolved opaque identities.
     #[must_use]
     pub fn new(
         deployment_id: String,
         workstation_id: String,
-        workspace_id: String,
         registration_id: String,
-        connect_id: ConnectId,
+        workstation_ip: Option<IpAddr>,
         revision: u64,
     ) -> Self {
+        let connect_id = ConnectId(workstation_id.clone());
         Self {
             deployment_id,
             workstation_id,
-            workstation_ip: connect_id.ip(),
-            workspace_id,
-            workspace_name: connect_id.workspace_name().clone(),
+            workstation_ip,
             registration_id,
             connect_id,
             status: RegistrationStatus::Active,
@@ -369,17 +298,12 @@ impl RegistrationReceipt {
         }
     }
 
-    /// Detect inconsistent display snapshots in a decoded receipt.
-    ///
-    /// Consistency is not proof of authority; the gateway must still verify the
-    /// caller and current record before every protected operation.
+    /// Snapshot consistency is not proof of authority; every boundary revalidates it.
     #[must_use]
     pub fn is_consistent(&self) -> bool {
-        self.workstation_ip == self.connect_id.ip()
-            && self.workspace_name == *self.connect_id.workspace_name()
+        ConnectId::new(&self.workstation_id).is_ok()
+            && self.connect_id.as_str() == self.workstation_id
             && !self.deployment_id.is_empty()
-            && !self.workstation_id.is_empty()
-            && !self.workspace_id.is_empty()
             && !self.registration_id.is_empty()
             && self.revision > 0
     }
@@ -405,54 +329,49 @@ impl WebSessionCreateRequest {
 mod tests {
     use super::*;
 
-    #[derive(Deserialize)]
-    struct Fixtures {
-        valid: Vec<ValidFixture>,
-        invalid: Vec<String>,
-    }
-
-    #[derive(Deserialize)]
-    struct ValidFixture {
-        input: String,
-        canonical: String,
-        ip: String,
-        workspace: String,
+    #[test]
+    fn workstation_ids_reject_legacy_and_ambiguous_inputs() {
+        let fixtures: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/connect_ids.json"))
+                .expect("corpus");
+        for fixture in fixtures["valid"].as_array().expect("valid corpus") {
+            let input = fixture["input"].as_str().expect("input");
+            let id: ConnectId = input.parse().expect("valid workstation ID");
+            assert_eq!(
+                id.as_str(),
+                fixture["canonical"].as_str().expect("canonical")
+            );
+            assert_eq!(
+                serde_json::from_str::<ConnectId>(&serde_json::to_string(&id).expect("serialize"))
+                    .expect("deserialize"),
+                id
+            );
+        }
+        for input in fixtures["invalid"].as_array().expect("invalid corpus") {
+            assert!(input.as_str().expect("input").parse::<ConnectId>().is_err());
+        }
     }
 
     #[test]
-    fn shared_connect_id_corpus_is_canonical_and_round_trips() {
-        let fixtures: Fixtures =
-            serde_json::from_str(include_str!("../tests/fixtures/connect_ids.json"))
-                .expect("shared Connect ID fixture must decode");
-        for fixture in fixtures.valid {
-            let id: ConnectId = fixture.input.parse().expect("valid shared Connect ID");
-            assert_eq!(
-                id.to_string(),
-                fixture.canonical,
-                "input {:?}",
-                fixture.input
-            );
-            assert_eq!(id.ip().to_string(), fixture.ip);
-            assert_eq!(id.workspace_name().as_str(), fixture.workspace);
-            let json = serde_json::to_string(&id).expect("serialize ID");
-            assert_eq!(
-                serde_json::from_str::<ConnectId>(&json).expect("decode ID"),
-                id
-            );
-            assert_eq!(
-                id.to_string().parse::<ConnectId>().expect("canonical ID"),
-                id
-            );
-        }
-        for value in fixtures.invalid {
+    fn workspace_identity_is_not_a_registration_input() {
+        let valid =
+            serde_json::json!({"request_id":"request-a", "installation_marker":"installation-a"});
+        assert!(serde_json::from_value::<RegistrationEnsureRequest>(valid.clone()).is_ok());
+        for field in [
+            "workspace_name",
+            "workspace_marker",
+            "workspace_id",
+            "owner",
+            "workstation_id",
+        ] {
+            let mut forged = valid.clone();
+            forged[field] = serde_json::json!("forged");
             assert!(
-                value.parse::<ConnectId>().is_err(),
-                "invalid shared input {value:?}"
+                serde_json::from_value::<RegistrationEnsureRequest>(forged).is_err(),
+                "{field}"
             );
-            assert!(serde_json::from_value::<ConnectId>(serde_json::json!(value)).is_err());
         }
     }
-
     #[test]
     fn name_bounds_are_utf8_based_and_default_creation_is_protected() {
         assert!(WorkspaceName::new(&"a".repeat(MAX_WORKSPACE_NAME_BYTES)).is_ok());
@@ -484,7 +403,7 @@ mod tests {
 
     #[test]
     fn browser_session_input_cannot_supply_registration_or_gateway_authority() {
-        let id = "192.0.2.42:research";
+        let id = "node-a";
         assert!(serde_json::from_value::<WebSessionCreateRequest>(
             serde_json::json!({"connect_id":id})
         )

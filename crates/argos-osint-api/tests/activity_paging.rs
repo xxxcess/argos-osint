@@ -40,7 +40,6 @@ use chrono::DateTime;
 use chrono::Duration;
 use chrono::Utc;
 use fleetworks_contracts::connect::RegistrationEnsureRequest;
-use fleetworks_contracts::connect::WorkspaceName;
 use fleetworks_contracts::context::CredentialPurpose;
 use fleetworks_contracts::context::JobOrigin;
 use fleetworks_contracts::context::OriginSource;
@@ -109,27 +108,27 @@ fn authority() -> RegistryAuthority {
         .expect("explicit fixture registry authority")
 }
 
-fn ensure_request(node: &str, child: &str, key: &str) -> RegistrationEnsureRequest {
+fn ensure_request(node: &str, key: &str) -> RegistrationEnsureRequest {
     RegistrationEnsureRequest::new(
         key.into(),
-        if node == "a" {
-            "192.0.2.72"
-        } else {
-            "198.51.100.72"
-        }
-        .parse()
-        .expect("synthetic IP"),
-        WorkspaceName::new(child).expect("managed child"),
+        Some(
+            if node == "a" {
+                "192.0.2.72"
+            } else {
+                "198.51.100.72"
+            }
+            .parse()
+            .expect("synthetic IP"),
+        ),
         format!("paging-api-install-{node}"),
-        format!("paging-api-folder-{node}-{child}"),
     )
 }
 
-async fn register(repo: &Repository, node: &str, child: &str) -> RegisteredContext {
+async fn register(repo: &Repository, node: &str, registration_attempt: &str) -> RegisteredContext {
     let receipt = connect_registry::ensure(
         repo,
         &authority(),
-        &ensure_request(node, child, &format!("ensure-{node}-{child}")),
+        &ensure_request(node, &format!("ensure-{node}-{registration_attempt}")),
     )
     .await
     .expect("actual registered native identity")
@@ -257,9 +256,12 @@ impl Fixture {
         job_dispatch::enable_pool(repo.db(), POOL)
             .await
             .expect("explicit fixture consumer");
-        let first = register(&repo, "a", "research").await;
-        let sibling = register(&repo, "a", "analysis").await;
-        let foreign = register(&repo, "b", "research").await;
+        let first = register(&repo, "a", "first").await;
+        let sibling = register(&repo, "a", "repeat").await;
+        let foreign = register(&repo, "b", "other").await;
+        assert_eq!(first.workstation_id, sibling.workstation_id);
+        assert_eq!(first.registration_id, sibling.registration_id);
+        assert_ne!(first.workstation_id, foreign.workstation_id);
         let created = Utc::now() - Duration::minutes(1);
         for (id, context, offset, app, correlation) in [
             ("owned-a", &first, 3, "tools", "case-23"),
@@ -697,25 +699,22 @@ async fn jobs_paging_rejects_bad_filters_proof_cursor_changes_and_real_rebind_re
     );
     let (status, _, body) = call(
         &fixture.app,
-        &format!(
-            "/api/v1/jobs?sort=newest&workspace_id={}",
-            fixture.foreign.workspace_id
-        ),
+        &format!("/api/v1/jobs?sort=newest&workspace_id={}", "foreign-child"),
         Some(NATIVE),
         Some(first_context),
     )
     .await;
     assert_eq!(
         status,
-        StatusCode::NOT_FOUND,
-        "foreign child lookup is non-enumerating"
+        StatusCode::BAD_REQUEST,
+        "legacy workspace query fields fail explicitly"
     );
     assert!(
         body.get("rows").is_none(),
         "guessed child must never produce a foreign page"
     );
-    let mut request = ensure_request("a", "research", "confirmed-rebind");
-    request.workstation_ip = "192.0.2.73".parse().expect("synthetic new interface IP");
+    let mut request = ensure_request("a", "confirmed-rebind");
+    request.workstation_ip = Some("192.0.2.73".parse().expect("synthetic new interface IP"));
     let changed = connect_registry::rebind(
         &fixture.repo,
         &authority(),
@@ -737,8 +736,8 @@ async fn jobs_paging_rejects_bad_filters_proof_cursor_changes_and_real_rebind_re
     .await;
     assert_eq!(
         stale.0,
-        StatusCode::UNAUTHORIZED,
-        "old proof rejected before any cached cursor data"
+        StatusCode::CONFLICT,
+        "IP metadata changes invalidate the cursor snapshot without revoking identity"
     );
     let current = connect_registry::registration_context(
         &fixture.repo,

@@ -12,6 +12,7 @@ pub mod configuration_reset;
 mod connect;
 mod context_boundary;
 mod control;
+mod cycle_history;
 pub mod datasets;
 mod host_metrics;
 mod jobs_api;
@@ -310,7 +311,14 @@ fn router_with_access(
         router
             .merge(configuration_reset::routes())
             .merge(classifier_activation::routes())
-            .route(ATLAS_CYCLES_PATH, post(operations::submit_atlas_cycle))
+            .route(
+                ATLAS_CYCLES_PATH,
+                get(cycle_history::list).post(operations::submit_atlas_cycle),
+            )
+            .route(
+                fleetworks_contracts::cycle_history::CYCLE_HISTORY_DELETE_PATH,
+                post(cycle_history::delete),
+            )
             .route("/api/v1/workstation/readiness", get(workstation::read))
             .route(
                 "/api/v1/workstation/requests/detail",
@@ -541,6 +549,9 @@ async fn capabilities(
         response.deployment_id = Some(deployment.deployment_id);
         response.configuration_epoch = Some(deployment.configuration_epoch);
         response.connect = Some(capabilities::ConnectCapabilities::default());
+        response
+            .features
+            .push("workstation-cycle-history-v1".into());
         response.workspace_control = Some(capabilities::WorkspaceControlCapabilities::default());
         response.resource_scopes = Some(capabilities::ResourceScopes::default());
         response.permissions = principal.permissions().collect();

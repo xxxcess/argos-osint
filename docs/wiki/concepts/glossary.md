@@ -10,19 +10,19 @@ Service and evidence terms used across Fleetworks. See the [architecture](../cod
 
 | Name | Role |
 | --- | --- |
-| Fleetworks Desktop | API-only native macOS hub; protected local folders identify future requests and registered activity |
+| Fleetworks Desktop | API-only native macOS hub; protected installation identity identifies workstation requests and registered activity |
 | Venture | Retired operator launcher; [historical disposition](../../archive/cli-retirement.md). Current deployment uses direct Docker Compose |
 | Intel | Web workspace for Bulletin, Focus Brief, Actor Dossier and Topology |
 | Atlas | Collects headlines and hands off durable classification and derivative work |
 | Brain | Serves retained actors, brief details, Related articles and topology through a private service |
 | Native Jobs and Logs | Reads server-enforced workstation activity; eligible actions require separate permissions and current proof |
-| Tools, Models and Profile | Backend-wide tools, canonical model roles and provider accounts within the caller's permissions |
+| Tools, Models and Profile | Backend services/configuration resources; native exposes OSINT Tools cards and Model Assignments, with no separate Profile page |
 
-A native **container** is the protected `~/.fleetworks` directory under the operating system account home. A native **workspace** is one owned immediate child, including the protected `default`. An **operator workspace** holds backend deployment data and is a separate concept. A **Connect ID** locates an existing registration; it is not a credential. A **deployment** owns shared backend resources, while immutable job origin identifies the registered workstation/workspace that requested work. See [connections](../code/native-connections.md) and [local ownership](../code/native-workspaces.md).
+A native **container** is the protected `~/.fleetworks` settings directory in the operating system account home. Normal startup creates no child workspace. Historical owned child folders and journals remain preserved, while an **operator workspace** independently holds deployment data. A **workstation** is the stable backend identity for authenticated scope and protected installation marker; optional mutable IP metadata does not define it. A **Connect ID** is that opaque workstation ID and selects an existing registration without granting authority. A **deployment** owns shared resources; immutable job origin records the workstation and original registration that requested work. Legacy origins may retain child metadata for read-only history. See [connections](../code/native-connections.md) and [identity ownership](../code/native-workspaces.md).
 
 ## Model roles
 
-A role selects a provider and model with ordered fallbacks in the backend's `config.toml`. Provider accounts live in its private `auth.json`; native child folders do not copy them. Current network readers use explicit current-format configuration and saved keys. The shared provider executor owns route resolution and pacing. Live Atlas category admission uses the separate pinned Rust-BERT service. Optional Natural training produces a separate candidate and does not retrain Rust-BERT. [Providers](providers.md)
+A role selects a provider and model with ordered fallbacks in the backend's `config.toml`. Provider accounts live in its private `auth.json`; native settings and preserved legacy folders do not copy them. Current network readers use explicit current-format configuration and saved keys. The shared provider executor owns route resolution and pacing. Live Atlas category admission uses the separate pinned Rust-BERT service. Optional Natural training produces a separate candidate and does not retrain Rust-BERT. [Providers](providers.md)
 
 [![Model roles](../../diagrams/model-roles.svg)](../../diagrams/model-roles.html)
 

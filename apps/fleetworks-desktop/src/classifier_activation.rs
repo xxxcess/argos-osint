@@ -169,7 +169,7 @@ impl State {
         self.registration
             .context
             .clone()
-            .ok_or_else(|| "Register the selected workspace first".into())
+            .ok_or_else(|| "Register the workstation first".into())
     }
 
     pub fn activation_disabled_reason(&self) -> Option<String> {
@@ -190,7 +190,7 @@ impl State {
             receipt.registration_id != context.registration_id
                 || receipt.revision != context.registration_revision
         }) {
-            return Some("Refresh checks for the current registered workspace".into());
+            return Some("Refresh checks for the current registered workstation".into());
         }
         let Some((check, action)) = readiness.checks.iter().find_map(|check| {
             check
@@ -268,7 +268,7 @@ impl State {
             || self.origin_revision != candidate.origin_revision
         {
             self.classifier_activation.message =
-                Some("The registered workspace changed; inspect the candidate again".into());
+                Some("The registered workstation changed; inspect the candidate again".into());
             return;
         }
         if !candidate.preview.activation_supported {
@@ -327,7 +327,7 @@ impl State {
             || self.origin_revision != attempt.origin_revision
         {
             self.classifier_activation.message = Some(
-                "Use the read-only lookup for an activation from an earlier workspace context"
+                "Use the read-only lookup for an activation from an earlier registration context"
                     .into(),
             );
             return;
@@ -342,10 +342,9 @@ impl State {
         let Ok(current) = self.activation_read_context() else {
             return;
         };
-        if !same_workspace(&current, &attempt.context) {
-            self.classifier_activation.message = Some(
-                "Select the original workstation workspace before looking up this request".into(),
-            );
+        if !same_workstation(&current, &attempt.context) {
+            self.classifier_activation.message =
+                Some("Select the original workstation before looking up this request".into());
             return;
         }
         self.classifier_activation.association = Load::Loading;
@@ -713,10 +712,8 @@ fn identifier(value: &str, max: usize) -> bool {
 fn opaque(value: &str) -> bool {
     !value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
 }
-fn same_workspace(left: &RegisteredContext, right: &RegisteredContext) -> bool {
-    left.deployment_id == right.deployment_id
-        && left.workstation_id == right.workstation_id
-        && left.workspace_id == right.workspace_id
+fn same_workstation(left: &RegisteredContext, right: &RegisteredContext) -> bool {
+    left.deployment_id == right.deployment_id && left.workstation_id == right.workstation_id
 }
 fn origin_matches(attempt: &ActivationAttempt, origin: &JobOrigin) -> bool {
     let context = &attempt.context;
@@ -725,10 +722,10 @@ fn origin_matches(attempt: &ActivationAttempt, origin: &JobOrigin) -> bool {
         && origin.registration_id == context.registration_id
         && origin.deployment_id == context.deployment_id
         && origin.workstation_id == context.workstation_id
-        && origin.workspace_id == context.workspace_id
-        && origin.connect_id_at_submission == context.connect_id
+        && origin.workspace_id.is_none()
+        && origin.connect_id_at_submission == context.connect_id.as_str()
         && origin.workstation_ip_at_submission == context.workstation_ip
-        && origin.workspace_name_at_submission == context.workspace_name
+        && origin.workspace_name_at_submission.is_none()
         && origin.configuration_epoch == context.configuration_epoch
         && Some(origin.configuration_revision)
             == attempt.request.context.expected_configuration_revision

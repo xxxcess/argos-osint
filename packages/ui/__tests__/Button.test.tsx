@@ -45,12 +45,12 @@ describe("Button (real @argos/ui component)", () => {
     expect(handlePress).not.toHaveBeenCalled();
   });
 
-  it("applies the default (spaced density) press target on the glass surface", () => {
+  it("applies the default (spaced density) press target on the matte graphite surface", () => {
     const { container } = render(<Button onPress={() => {}}>Default</Button>);
     const button = buttonEl(container)!;
-    // minHeight 40 keeps the default touch target; default surface is glass.
+    // minHeight 40 keeps the default touch target; default surface is matte graphite.
     expect(applied(button).minHeight).toBe("40px");
-    expect(applied(button).backgroundColor).toBe("rgba(20, 20, 20, 0.55)");
+    expect(applied(button).backgroundColor).toBe("rgb(17, 19, 23)");
     expect(applied(button).borderTopColor).toBe("rgb(137, 130, 116)");
   });
 
@@ -62,10 +62,10 @@ describe("Button (real @argos/ui component)", () => {
     );
     const button = buttonEl(container)!;
     expect(applied(button).backgroundColor).toBe(
-      "rgba(198, 165, 110, 0.1)", // accentSoft
+      "rgb(198, 165, 110)", // flat accent body
     );
-    expect(applied(button).borderTopColor).toBe("rgb(198, 165, 110)"); // accent
-    expect(applied(screen.getByText("Primary")).color).toBe("rgb(198, 165, 110)");
+    expect(applied(button).borderTopColor).toBe("rgb(198, 165, 110)");
+    expect(applied(screen.getByText("Primary")).color).toBe("rgb(6, 7, 9)");
   });
 
   it("applies the quiet variant with a transparent surface", () => {
@@ -78,10 +78,10 @@ describe("Button (real @argos/ui component)", () => {
     // jsdom serializes `transparent` as rgba(0, 0, 0, 0).
     expect(applied(button).backgroundColor).toBe("rgba(0, 0, 0, 0)");
     expect(applied(button).borderTopColor).toBe("rgb(137, 130, 116)"); // border, not accent
-    expect(applied(screen.getByText("Quiet")).color).toBe("rgb(198, 192, 181)"); // dim
+    expect(applied(screen.getByText("Quiet")).color).toBe("rgb(214, 210, 196)"); // dim
   });
 
-  it("applies the active (selection) state: accent surface, bg text token, glow", () => {
+  it("applies the active (selection) state: accent surface and contrasting text without glow", () => {
     const { container } = render(
       <Button onPress={() => {}} active>
         Active
@@ -89,9 +89,9 @@ describe("Button (real @argos/ui component)", () => {
     );
     const button = buttonEl(container)!;
     expect(applied(button).backgroundColor).toBe("rgb(198, 165, 110)"); // accent
-    expect(applied(button).boxShadow).toContain("12px"); // glow
+    expect(applied(button).boxShadow).toBe("");
     // Selection uses the bg token against the accent surface for contrast.
-    expect(applied(screen.getByText("Active")).color).toBe("rgb(17, 17, 17)");
+    expect(applied(screen.getByText("Active")).color).toBe("rgb(6, 7, 9)");
   });
 
   it("renders mono uppercase telemetry text styling", () => {
@@ -134,10 +134,10 @@ describe("Button focus/selection lanes (hover + pressed)", () => {
     );
     expect(applied(button).borderTopColor).toBe("rgb(198, 165, 110)"); // accent
     await user.unhover(button);
-    expect(applied(button).backgroundColor).toBe("rgba(20, 20, 20, 0.55)");
+    expect(applied(button).backgroundColor).toBe("rgb(17, 19, 23)");
   });
 
-  it("adds the accent glow on primary hover", async () => {
+  it("changes the flat primary fill on hover without a glow", async () => {
     const user = userEvent.setup();
     const { container } = render(
       <Button onPress={() => {}} variant="primary">
@@ -146,7 +146,8 @@ describe("Button focus/selection lanes (hover + pressed)", () => {
     );
     const button = buttonEl(container)!;
     await user.hover(button);
-    expect(applied(button).boxShadow).toContain("12px");
+    expect(applied(button).backgroundColor).toBe("rgb(216, 189, 140)");
+    expect(applied(button).boxShadow).toBe("");
     await user.unhover(button);
     expect(applied(button).boxShadow).toBe("");
   });
@@ -167,8 +168,8 @@ describe("Button focus/selection lanes (hover + pressed)", () => {
       );
     });
     // React/pressability flushes after the event loop turns, so wait for it.
-    await waitFor(() =>
-      expect(applied(button).backgroundColor).toBe("rgba(35, 35, 33, 0.72)"), // glassStrong
+    await waitFor(
+      () => expect(applied(button).backgroundColor).toBe("rgb(17, 19, 23)"), // glassStrong
     );
     await act(async () => {
       button.dispatchEvent(
@@ -180,14 +181,15 @@ describe("Button focus/selection lanes (hover + pressed)", () => {
       );
     });
     // Releasing press returns to the active hover lane (still hovered).
-    await waitFor(() =>
-      expect(applied(button).backgroundColor).toBe(
-        "rgba(198, 165, 110, 0.1)",
-      ), // accentSoft
+    await waitFor(
+      () =>
+        expect(applied(button).backgroundColor).toBe(
+          "rgba(198, 165, 110, 0.1)",
+        ), // accentSoft
     );
     await user.unhover(button);
     await waitFor(() =>
-      expect(applied(button).backgroundColor).toBe("rgba(20, 20, 20, 0.55)"),
+      expect(applied(button).backgroundColor).toBe("rgb(17, 19, 23)"),
     );
   });
 
@@ -222,8 +224,8 @@ describe("Button focus/selection lanes (hover + pressed)", () => {
 describe("Button token bindings", () => {
   it("binds the glass, glassStrong, accentSoft and border tokens", () => {
     expect(colors.accent).toBe("#C6A56E");
-    expect(colors.glass).toBe("rgba(20, 20, 20, 0.55)");
-    expect(colors.glassStrong).toBe("rgba(35, 35, 33, 0.72)");
+    expect(colors.glass).toBe("#0B0C0F");
+    expect(colors.glassStrong).toBe("#111317");
     expect(colors.accentSoft).toBe("rgba(198, 165, 110, 0.1)");
     expect(colors.border).toBe("#898274");
   });

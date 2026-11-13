@@ -15,7 +15,18 @@ use rune::TextEdit;
 use rune_kit::TableState;
 
 use crate::connection::RequestTask;
-pub use crate::log_views::LogEvent;
+/// Finite safe-log intents, independent of the retired toolbar presentation.
+#[derive(Clone)]
+pub enum LogEvent {
+    Select(LogTarget),
+    Refresh,
+    Older,
+    ToggleFollow,
+    CopyLoaded,
+    PrepareExport,
+    ContinueExport,
+    SaveExport { allow_partial: bool },
+}
 
 pub const DISPLAY_LIMIT: usize = 500;
 const EXPORT_LIMIT: usize = 2 * 1024 * 1024;
@@ -219,10 +230,8 @@ impl LogState {
             self.target = LogTarget::Workstation;
             self.binding = binding;
             if self.binding.is_none() {
-                self.message = Some(
-                    "Register a workspace with workstation activity permission to view logs."
-                        .into(),
-                );
+                self.message =
+                    Some("Register this workstation with activity permission to view logs.".into());
             }
         }
     }
@@ -293,7 +302,7 @@ impl LogState {
         self.reset();
         match &target {
             LogTarget::Workstation => self.draft.selected_workspace_only = false,
-            LogTarget::SelectedWorkspace => self.draft.selected_workspace_only = true,
+            LogTarget::SelectedWorkspace => self.draft.selected_workspace_only = false,
             _ => {}
         }
         self.target = target;
@@ -306,7 +315,7 @@ impl LogState {
     }
 
     fn draft_query(&self) -> Option<LogQuery> {
-        let binding = self.binding.as_ref()?;
+        self.binding.as_ref()?;
         let text = self.draft.text.text.trim();
         let app = self.draft.app.text.trim();
         let since = self.draft.since.text.trim();
@@ -339,9 +348,6 @@ impl LogState {
         query.app = (!app.is_empty()).then(|| app.into());
         query.since = since;
         query.min_rank = self.draft.min_rank;
-        if self.draft.selected_workspace_only || self.target == LogTarget::SelectedWorkspace {
-            query.workspace_id = Some(binding.context.workspace_id.clone());
-        }
         if let LogTarget::Job { id, descendants } = &self.target {
             if id.is_empty() || id.len() > 512 || id.chars().any(char::is_control) {
                 return None;
@@ -478,8 +484,13 @@ impl LogState {
             self.reset();
             self.status = LogStatus::Unavailable;
             self.message = Some(match page.reason_code.as_deref() {
-                Some("scope_exceeds_complete_log_cohort_limit") => "This scope exceeds 512 complete eligible jobs. Select a workspace or an attributed job.".into(),
-                Some("shared_private_logs_unavailable") => "Private logs for this shared job are unavailable.".into(),
+                Some("scope_exceeds_complete_log_cohort_limit") => {
+                    "This scope exceeds 512 complete eligible jobs. Select an attributed job."
+                        .into()
+                }
+                Some("shared_private_logs_unavailable") => {
+                    "Private logs for this shared job are unavailable.".into()
+                }
                 _ => "A complete authorized operational log view is unavailable.".into(),
             });
             return Ok(());

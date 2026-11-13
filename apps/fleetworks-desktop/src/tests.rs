@@ -127,9 +127,8 @@ fn registered_fixture() -> State {
     let receipt = RegistrationReceipt::new(
         "synthetic-deployment".into(),
         "synthetic-node".into(),
-        "synthetic-workspace".into(),
         "synthetic-registration".into(),
-        "192.0.2.42:default".parse().expect("fixture Connect ID"),
+        Some("192.0.2.42".parse().expect("fixture IP")),
         1,
     );
     state.registration.context = Some(
@@ -173,16 +172,21 @@ fn global_reads_do_not_require_folder_but_activity_never_falls_back_to_global() 
     state.refresh_page();
     assert_eq!(
         state.intents,
-        vec![Intent::BackendRead {
-            kind: ReadKind::Models
-        }]
+        vec![
+            Intent::BackendRead {
+                kind: ReadKind::Models
+            },
+            Intent::BackendRead {
+                kind: ReadKind::Profile
+            }
+        ]
     );
     state.page = Page::Jobs;
     state.refresh_page();
     assert!(matches!(state.backend.jobs, Load::Failed(_)));
     assert_eq!(
         state.intents.len(),
-        1,
+        2,
         "missing registration cannot issue an unscoped activity request"
     );
 }
@@ -217,11 +221,18 @@ fn cross_page_job_link_uses_registered_activity_and_exact_job_detail() {
 #[test]
 fn provider_key_is_masked_in_real_accessibility_tree_and_confirmation() {
     let mut state = registered_fixture();
-    state.page = Page::Profile;
+    state.page = Page::Models;
     state.backend.profile = Load::Ready(crate::backend::ProfileSnapshot {
         configuration_revision: 1,
         configuration_format: 1,
-        accounts: Vec::new(),
+        accounts: vec![crate::backend::AccountMetadata {
+            id: "synthetic-account".into(),
+            provider: "local".into(),
+            base_url: "http://127.0.0.1:11434".into(),
+            model: "synthetic-model".into(),
+            has_api_key: true,
+            credential_reference: "account:synthetic-account".into(),
+        }],
         tool_credentials: Vec::new(),
         setup_required: true,
         portable_schema_version: 4,
@@ -257,23 +268,117 @@ fn provider_key_is_masked_in_real_accessibility_tree_and_confirmation() {
         runtime.find("account-api-key/value/input").is_some(),
         "the shared production input participates in the rendered view"
     );
-    let accessibility = runtime.accessibility_json().to_string();
+    fn named_secure_editor(node: &serde_json::Value) -> bool {
+        (node["role"] == "password-input" && node["name"] == "API key")
+            || node["children"]
+                .as_array()
+                .is_some_and(|children| children.iter().any(named_secure_editor))
+    }
+    let tree = runtime.accessibility_json();
     assert!(
-        accessibility.contains("New API key"),
-        "the rendered secure editor retains its accessible label"
+        named_secure_editor(&tree),
+        "the production password editor must retain its API key accessible name: {tree}"
     );
+    let accessibility = tree.to_string();
     assert!(
         !accessibility.contains("synthetic-secret-that-must-stay-masked"),
         "assistive output must not expose the entered key"
     );
-    runtime.state.change_workspace(workspace("research"));
+    runtime.state.invalidate_origin();
     assert!(
         runtime.state.configuration.confirmation.is_none(),
-        "folder changes invalidate pending confirmations"
+        "authority changes invalidate pending confirmations"
     );
     assert!(
         runtime.state.configuration.account_api_key.text
             == "synthetic-secret-that-must-stay-masked",
-        "global drafts survive folder-only switches"
+        "authority invalidation preserves the unsaved provider draft while clearing consent"
     );
+}
+
+#[test]
+fn direct_cycles_navigation_observes_configuration_before_any_mutation() {
+    let mut state = registered_fixture();
+    assert!(
+        state.configuration_revision().is_none(),
+        "fresh connection has no previous model/profile snapshot"
+    );
+    state.intents.clear();
+    state.navigate(Page::Atlas);
+    assert!(
+        state.intents.iter().any(|intent| matches!(
+            intent,
+            Intent::BackendRead {
+                kind: ReadKind::Models
+            }
+        )),
+        "cycles must request its required configuration without a prior Models visit"
+    );
+    assert!(
+        !state.intents.iter().any(|intent| matches!(
+            intent,
+            Intent::SubmitInteractive { .. }
+                | Intent::PostInteractive { .. }
+                | Intent::PostJobAction { .. }
+        )),
+        "view entry observes state and never submits work"
+    );
+}
+
+#[test]
+fn changing_model_after_variant_edit_prunes_only_inactive_pending_updates() {
+    let mut state = registered_fixture();
+    state.backend.models = Load::Ready(serde_json::from_value(serde_json::json!({
+        "configuration_revision":7,"roles":["brain_summary"],
+        "defaults":{"brain_summary":{"provider":"local","model":"model-a","account":"saved","fallbacks":[{"provider":"local","model":"fallback-c","account":"saved"}]}},
+        "catalog":[{"provider":"local","model":"model-a","account":"saved","efforts":["high"]},{"provider":"local","model":"model-b","account":"saved","efforts":[]},{"provider":"local","model":"fallback-c","account":"saved","efforts":["low"]}],
+        "model_variants":{"atlas_analyst|local|unrelated":"medium"}
+    })).expect("backend model snapshot"));
+    state.edit_model_role("brain_summary");
+    state.select_model_variant("high");
+    state
+        .configuration
+        .variant_updates
+        .insert("brain_summary|local|fallback-c".into(), Some("low".into()));
+    assert!(state
+        .configuration
+        .variant_updates
+        .contains_key("brain_summary|local|model-a"));
+    state.select_catalog_model("model-b · saved");
+    state.preview_model_role(false);
+    let confirmation = state
+        .configuration
+        .confirmation
+        .as_ref()
+        .expect("valid final-route confirmation");
+    let crate::configuration::ConfigurationChange::ModelRole(request) = &confirmation.change else {
+        panic!("model role change")
+    };
+    assert_eq!(request.primary.as_ref().expect("primary").model, "model-b");
+    assert!(!request
+        .variant_updates
+        .contains_key("brain_summary|local|model-a"));
+    assert_eq!(
+        request
+            .variant_updates
+            .get("brain_summary|local|fallback-c"),
+        Some(&Some("low".into()))
+    );
+    let Load::Ready(defaults) = &state.backend.models else {
+        panic!("unchanged snapshot")
+    };
+    assert_eq!(
+        defaults
+            .model_variants
+            .get("atlas_analyst|local|unrelated")
+            .map(String::as_str),
+        Some("medium")
+    );
+    state.confirm_configuration();
+    assert!(state.intents.iter().any(|intent| matches!(
+        intent,
+        Intent::Configuration {
+            action: crate::configuration::ConfigurationAction::ModelRole
+        }
+    )));
 }

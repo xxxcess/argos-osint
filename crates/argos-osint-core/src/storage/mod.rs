@@ -13,6 +13,7 @@
 //! `.planning/2026-10-22-surrealdb/phase1-design.md`.
 
 pub mod brain_scope;
+pub mod cycle_history;
 pub mod error;
 
 pub mod actor_bind;

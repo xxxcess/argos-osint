@@ -20,6 +20,7 @@ async fn admit(
     context: ResolvedRequest,
     request: MaintenanceRequest,
     operation: MaintenanceOperation,
+    owners: Option<crate::workstation::ReadinessOwners>,
 ) -> Result<(StatusCode, Json<MaintenanceReceipt>), ApiError> {
     if !matches!(
         context.purpose(),
@@ -28,6 +29,22 @@ async fn admit(
         return Err(ApiError(
             StatusCode::FORBIDDEN,
             "Native backend maintenance authority required",
+        ));
+    }
+    let configured = owners
+        .as_ref()
+        .and_then(|owners| owners.configured_input(operation))
+        .ok_or(ApiError(
+            StatusCode::CONFLICT,
+            "Maintenance input is not configured",
+        ))?;
+    if request.dataset != configured.dataset
+        || request.context.expected_configuration_revision
+            != Some(configured.configuration_revision)
+    {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "Configured input or configuration revision changed; refresh before retrying",
         ));
     }
     let admission = crate::admission::capture_checked(
@@ -75,13 +92,22 @@ async fn admit(
 pub(crate) async fn seed(
     State(state): State<ApiState>,
     Extension(context): Extension<ResolvedRequest>,
+    owners: Option<Extension<crate::workstation::ReadinessOwners>>,
     Json(request): Json<MaintenanceRequest>,
 ) -> Result<(StatusCode, Json<MaintenanceReceipt>), ApiError> {
-    admit(state, context, request, MaintenanceOperation::SeedActors).await
+    admit(
+        state,
+        context,
+        request,
+        MaintenanceOperation::SeedActors,
+        owners.map(|Extension(value)| value),
+    )
+    .await
 }
 pub(crate) async fn train(
     State(state): State<ApiState>,
     Extension(context): Extension<ResolvedRequest>,
+    owners: Option<Extension<crate::workstation::ReadinessOwners>>,
     Json(request): Json<MaintenanceRequest>,
 ) -> Result<(StatusCode, Json<MaintenanceReceipt>), ApiError> {
     admit(
@@ -89,6 +115,7 @@ pub(crate) async fn train(
         context,
         request,
         MaintenanceOperation::TrainClassifier,
+        owners.map(|Extension(value)| value),
     )
     .await
 }
@@ -96,7 +123,15 @@ pub(crate) async fn train(
 pub(crate) async fn reindex(
     State(state): State<ApiState>,
     Extension(context): Extension<ResolvedRequest>,
+    owners: Option<Extension<crate::workstation::ReadinessOwners>>,
     Json(request): Json<MaintenanceRequest>,
 ) -> Result<(StatusCode, Json<MaintenanceReceipt>), ApiError> {
-    admit(state, context, request, MaintenanceOperation::ReindexActors).await
+    admit(
+        state,
+        context,
+        request,
+        MaintenanceOperation::ReindexActors,
+        owners.map(|Extension(value)| value),
+    )
+    .await
 }

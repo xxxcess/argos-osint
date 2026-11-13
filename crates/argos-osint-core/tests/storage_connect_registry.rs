@@ -4,13 +4,10 @@
 mod support;
 
 use argos_osint_core::storage::connect_registry;
-use argos_osint_core::storage::connect_registry::RebindInput;
 use argos_osint_core::storage::connect_registry::RegistryAuthority;
 use argos_osint_core::storage::connect_registry::RegistryError;
 use argos_osint_core::storage::repo::Repository;
-use argos_osint_core::storage::tx;
 use fleetworks_contracts::connect::RegistrationEnsureRequest;
-use fleetworks_contracts::connect::WorkspaceName;
 
 use support::Server;
 
@@ -22,16 +19,14 @@ fn authority(scope: &str, credential: &str) -> RegistryAuthority {
 fn request(
     key: &str,
     ip: &str,
-    name: &str,
+    _name: &str,
     install: &str,
-    folder: &str,
+    _folder: &str,
 ) -> RegistrationEnsureRequest {
     RegistrationEnsureRequest::new(
         key.into(),
-        ip.parse().expect("synthetic unicast IP"),
-        WorkspaceName::new(name).expect("synthetic child name"),
+        Some(ip.parse().expect("synthetic unicast IP")),
         install.into(),
-        folder.into(),
     )
 }
 
@@ -49,104 +44,68 @@ async fn initialize(repo: &Repository, deployment: &str) {
 }
 
 #[tokio::test]
-async fn ensure_reuses_concurrent_owned_identity_and_rejects_ip_marker_and_request_collisions() {
+async fn stable_identity_ignores_ip_and_isolates_installations_and_scopes() {
     let Some(server) = Server::start() else {
         return;
     };
-    let repo = server.repo("argos", "connect_ensure").await;
+    let repo = server.repo("argos", "connect_ensure_v2").await;
     initialize(&repo, "synthetic-deployment-1").await;
     let owner = authority("scope-a", "native-a");
-    let first = request(
-        "ensure-a",
-        "192.0.2.42",
-        "research",
-        "synthetic-install-a",
-        "synthetic-folder-a",
+    let first = RegistrationEnsureRequest::new(
+        "ensure-a".into(),
+        Some("192.0.2.42".parse().expect("IP")),
+        "synthetic-install-a".into(),
     );
-    let mut retry = first.clone();
-    retry.request_id = "ensure-b".into();
+    let mut concurrent = first.clone();
+    concurrent.request_id = "ensure-b".into();
     let (one, two) = tokio::join!(
         connect_registry::ensure(&repo, &owner, &first),
-        connect_registry::ensure(&repo, &owner, &retry)
+        connect_registry::ensure(&repo, &owner, &concurrent)
     );
-    let one = one.expect("first concurrent ensure");
-    let two = two.expect("second concurrent ensure");
+    let one = one.expect("first ensure");
+    let two = two.expect("concurrent ensure");
     assert_eq!(one.receipt, two.receipt);
-    assert_ne!(
-        one.created, two.created,
-        "exactly one request creates the binding"
-    );
-    assert_eq!(one.receipt.connect_id.to_string(), "192.0.2.42:research");
-    let replay = connect_registry::ensure(&repo, &owner, &first)
+    assert_ne!(one.created, two.created);
+    assert_eq!(one.receipt.connect_id.as_str(), one.receipt.workstation_id);
+    let relay = authority("scope-a", "relay-a");
+    let session = connect_registry::create_session(&repo, &relay, &one.receipt.connect_id)
         .await
-        .expect("idempotent replay");
-    assert_eq!(replay.receipt, one.receipt);
-    assert!(!replay.created);
-    let mut observed = first.clone();
-    observed.request_id = "ensure-observed".into();
-    let observed = connect_registry::ensure_observed(
-        &repo,
-        &owner,
-        &observed,
-        Some("198.51.100.10".parse().expect("synthetic gateway peer")),
-    )
-    .await
-    .expect("separate peer audit");
-    assert_eq!(
-        observed.receipt.workstation_ip.to_string(),
-        "192.0.2.42",
-        "gateway-observed peer cannot replace native identity"
-    );
-    let mut audit = repo
-        .db()
-        .query("SELECT VALUE observed_peer_ip FROM connect_workstation WHERE workstation_id=$id")
-        .bind(("id", one.receipt.workstation_id.clone()))
-        .await
-        .expect("peer audit read")
-        .check()
-        .expect("peer audit statement");
-    assert_eq!(
-        audit.take::<Vec<String>>(0).expect("peer audit values"),
-        ["198.51.100.10"]
-    );
-    for other in [
-        request(
-            "collision-ip",
-            "192.0.2.42",
-            "other",
-            "synthetic-install-b",
-            "synthetic-folder-b",
-        ),
-        request(
-            "collision-folder",
-            "192.0.2.42",
-            "research",
-            "synthetic-install-a",
-            "synthetic-folder-c",
-        ),
-        request(
-            "ensure-a",
-            "192.0.2.42",
-            "renamed",
-            "synthetic-install-a",
-            "synthetic-folder-a",
-        ),
+        .expect("session");
+    for (key, ip) in [
+        ("changed-ip", Some("192.0.2.99".parse().expect("IP"))),
+        ("no-ip", None),
     ] {
-        assert!(matches!(
-            connect_registry::ensure(&repo, &owner, &other).await,
-            Err(RegistryError::Collision)
-        ));
+        let changed = connect_registry::ensure(
+            &repo,
+            &owner,
+            &RegistrationEnsureRequest::new(key.into(), ip, first.installation_marker.clone()),
+        )
+        .await
+        .expect("metadata ensure");
+        assert_eq!(changed.receipt.workstation_id, one.receipt.workstation_id);
+        assert_eq!(changed.receipt.registration_id, one.receipt.registration_id);
+        assert_eq!(changed.receipt.workstation_ip, ip);
+        connect_registry::validate_session(&repo, &relay, session.token.expose_secret(), None)
+            .await
+            .expect("IP metadata does not revoke identity");
     }
-    let other_scope = authority("scope-b", "native-b");
+    let mut other = first.clone();
+    other.request_id = "other-install".into();
+    other.installation_marker = "synthetic-install-b".into();
+    let other = connect_registry::ensure(&repo, &owner, &other)
+        .await
+        .expect("same IP separate installation");
+    assert_ne!(other.receipt.workstation_id, one.receipt.workstation_id);
+    let scoped = connect_registry::ensure(&repo, &authority("scope-b", "native-b"), &first)
+        .await
+        .expect("separate scope");
+    assert_ne!(scoped.receipt.workstation_id, one.receipt.workstation_id);
+    let mut conflicting = first.clone();
+    conflicting.workstation_ip = None;
     assert!(matches!(
-        connect_registry::ensure(&repo, &other_scope, &first).await,
+        connect_registry::ensure(&repo, &owner, &conflicting).await,
         Err(RegistryError::Collision)
     ));
-    let duplicate_claim = repo.db().query("CREATE connect_ip_claim:forged_duplicate SET workstation_ip='192.0.2.42', workstation_id='forged' RETURN NONE").await.expect("constraint query transport").check();
-    assert!(
-        duplicate_claim.is_err(),
-        "database uniqueness must reject a duplicate even outside application preflight"
-    );
 }
 
 #[tokio::test]
@@ -169,9 +128,7 @@ async fn session_is_hashed_revocable_revision_bound_and_does_not_register_unknow
         .await
         .expect("native registration")
         .receipt;
-    let unknown = "192.0.2.44:unregistered"
-        .parse()
-        .expect("synthetic Connect ID");
+    let unknown = "unregistered-node".parse().expect("synthetic Connect ID");
     assert!(matches!(
         connect_registry::create_session(&repo, &relay, &unknown).await,
         Err(RegistryError::NotFound)
@@ -300,117 +257,64 @@ async fn expiry_and_configuration_epoch_invalidate_old_proofs_without_domain_res
 }
 
 #[tokio::test]
-async fn rebind_keeps_node_and_folder_ids_revokes_old_sessions_and_retirement_stays_pending() {
+async fn forward_migration_preserves_legacy_mapping_and_rejects_legacy_writers() {
     let Some(server) = Server::start() else {
         return;
     };
-    let repo = server.repo("argos", "connect_rebind").await;
-    initialize(&repo, "synthetic-deployment-4").await;
-    let native = authority("scope-a", "native-a");
-    let relay = authority("scope-a", "web-a");
-    let default = request(
-        "default-a",
-        "192.0.2.46",
-        "default",
-        "synthetic-install-a",
-        "synthetic-default-a",
-    );
-    let child = request(
-        "child-a",
-        "192.0.2.46",
-        "research",
-        "synthetic-install-a",
-        "synthetic-folder-a",
-    );
-    let default = connect_registry::ensure(&repo, &native, &default)
+    let repo = server.repo("argos", "connect_migration").await;
+    initialize(&repo, "migration-deployment").await;
+    // Reconstruct version-one schema at its actual authority boundary.
+    repo.db().query("DEFINE FIELD OVERWRITE connect_id ON connect_registration TYPE string; DEFINE FIELD OVERWRITE contract_version ON connect_registration TYPE option<int>;
+        CREATE connect_workstation:legacy_node SET workstation_id='legacy_node',scope_id='scope-a',installation_hash='retained-installation-hash',workstation_ip='192.0.2.42',state='active',revision=7,last_seen_at=time::now();
+        CREATE connect_registration:old_child SET registration_id='old_child',scope_id='scope-a',workstation_id='legacy_node',workspace_id='old_workspace',workspace_name='research',workstation_ip='192.0.2.42',connect_id='192.0.2.42:research',state='active',revision=3,created_at=time::now();
+        UPDATE connect_control:configuration SET contract_version=1 RETURN NONE;")
+        .await.expect("legacy fixture").check().expect("legacy fixture statements");
+    argos_osint_core::storage::bootstrap::ensure_schema(repo.db())
         .await
-        .expect("protected default")
-        .receipt;
-    let child = connect_registry::ensure(&repo, &native, &child)
-        .await
-        .expect("ordinary child")
-        .receipt;
-    assert!(matches!(
-        connect_registry::begin_retirement(
-            &repo,
-            &native,
-            &default.registration_id,
-            default.revision
-        )
-        .await,
-        Err(RegistryError::ProtectedDefault)
-    ));
-    let old = connect_registry::create_session(&repo, &relay, &child.connect_id)
-        .await
-        .expect("old session");
-    let changed = request(
-        "rebind-a",
-        "192.0.2.47",
-        "renamed",
-        "synthetic-install-a",
-        "synthetic-folder-a",
-    );
-    let input = RebindInput::new(changed, child.registration_id.clone(), child.revision);
-    let rebound = connect_registry::rebind(&repo, &native, &input)
-        .await
-        .expect("confirmed rebind")
-        .receipt;
-    assert_eq!(rebound.workstation_id, child.workstation_id);
-    assert_eq!(rebound.workspace_id, child.workspace_id);
-    assert_ne!(rebound.registration_id, child.registration_id);
-    assert_eq!(rebound.connect_id.to_string(), "192.0.2.47:renamed");
+        .expect("forward migration");
+    let mut response=repo.db().query("SELECT VALUE state FROM ONLY connect_registration:old_child; SELECT VALUE workstation_id FROM ONLY connect_registration:old_child; SELECT VALUE installation_hash FROM ONLY connect_workstation:legacy_node;").await.expect("history read").check().expect("history statements");
     assert_eq!(
-        child.connect_id.to_string(),
-        "192.0.2.46:research",
-        "past snapshots stay unchanged"
-    );
-    assert!(
-        connect_registry::validate_session(&repo, &relay, old.token.expose_secret(), None)
-            .await
-            .is_err()
+        response
+            .take::<Option<String>>(0)
+            .expect("state")
+            .as_deref(),
+        Some("legacy_read_only")
     );
     assert_eq!(
-        connect_registry::rebind(&repo, &native, &input)
-            .await
-            .expect("rebind replay")
-            .receipt,
-        rebound
+        response.take::<Option<String>>(1).expect("node").as_deref(),
+        Some("legacy_node")
     );
-    let default_new = "192.0.2.47:default".parse().expect("new default binding");
     assert_eq!(
-        connect_registry::create_session(&repo, &relay, &default_new)
-            .await
-            .expect("default preserved across IP rebind")
-            .context
-            .workspace_id,
-        default.workspace_id
+        response
+            .take::<Option<String>>(2)
+            .expect("marker")
+            .as_deref(),
+        Some("retained-installation-hash")
     );
-    let pending = connect_registry::begin_retirement(
+    let relay = authority("scope-a", "relay-a");
+    let id = "legacy_node".parse().expect("opaque ID");
+    let session = connect_registry::create_session(&repo, &relay, &id)
+        .await
+        .expect("migrated session");
+    assert_eq!(session.context.workstation_id, "legacy_node");
+    argos_osint_core::storage::bootstrap::ensure_schema(repo.db())
+        .await
+        .expect("idempotent restart");
+    connect_registry::validate_session(&repo, &relay, session.token.expose_secret(), None)
+        .await
+        .expect("checkpoint does not revoke v2 session");
+    assert!(connect_registry::registration_context(
         &repo,
-        &native,
-        &rebound.registration_id,
-        rebound.revision,
+        &authority("scope-a", "native-a"),
+        "old_child",
+        3
     )
     .await
-    .expect("retirement fence");
-    assert_eq!(pending.workspace_id, child.workspace_id);
-    let admission = tx::run_tx(repo.db(), tx::RetryPolicy::default(), |transaction| {
-        let native = native.clone();
-        let id = rebound.registration_id.clone();
-        async move {
-            connect_registry::validate_registration_in(&transaction, &native, &id, rebound.revision)
-                .await
-        }
-    })
-    .await;
+    .is_err());
+    let old_writer=repo.db().query("CREATE connect_registration:old_writer SET registration_id='old_writer',scope_id='scope-a',workstation_id='legacy_node',workspace_id='other',workspace_name='other',workstation_ip='192.0.2.42',connect_id='192.0.2.42:other',state='active',revision=1,created_at=time::now() RETURN NONE").await.expect("old writer transport").check();
     assert!(
-        admission.is_err(),
-        "retirement fences actual admission validation"
-    );
-    assert!(
-        connect_registry::create_session(&repo, &relay, &rebound.connect_id)
-            .await
-            .is_err()
+        old_writer.is_err(),
+        "schema fences incompatible active writers"
     );
 }
 
@@ -422,7 +326,7 @@ async fn failed_resolution_is_durably_rate_limited_and_never_creates_a_registrat
     let repo = server.repo("argos", "connect_rate").await;
     initialize(&repo, "synthetic-deployment-5").await;
     let relay = authority("scope-a", "web-a");
-    let unknown = "192.0.2.48:unregistered"
+    let unknown = "unregistered-rate-limit-node"
         .parse()
         .expect("synthetic Connect ID");
     for _ in 0..20 {
@@ -480,4 +384,153 @@ async fn failed_resolution_is_durably_rate_limited_and_never_creates_a_registrat
         .take::<Vec<String>>(0)
         .expect("registration IDs")
         .is_empty());
+}
+
+#[tokio::test]
+async fn migration_preserves_inactive_admission_without_revoking_accepted_causal_work() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server.repo("argos", "connect_inactive_migration").await;
+    initialize(&repo, "inactive-migration-deployment").await;
+    for (node, state, installation) in [
+        ("revoked_node", "revoked", "revoked-installation-marker"),
+        ("retiring_node", "retiring", "retiring-installation-marker"),
+    ] {
+        use sha2::Digest;
+        let mut digest = sha2::Sha256::new();
+        digest.update((installation.len() as u64).to_be_bytes());
+        digest.update(installation.as_bytes());
+        let installation_hash = format!("{:x}", digest.finalize());
+        repo.db().query("DEFINE FIELD OVERWRITE connect_id ON connect_registration TYPE string; DEFINE FIELD OVERWRITE contract_version ON connect_registration TYPE option<int>;
+            CREATE $node_record SET workstation_id=$node,scope_id='scope-a',installation_hash=$installation,workstation_ip='192.0.2.42',state='active',revision=3,last_seen_at=time::now();
+            CREATE $registration SET registration_id=$registration_id,scope_id='scope-a',workstation_id=$node,workspace_id='old-child',workspace_name='research',workstation_ip='192.0.2.42',connect_id='192.0.2.42:research',state=$state,revision=4,created_at=time::now();
+            UPDATE connect_control:configuration SET contract_version=1 RETURN NONE;")
+            .bind(("node_record",surrealdb::types::RecordId::new("connect_workstation",node)))
+            .bind(("node",node)).bind(("installation",installation_hash))
+            .bind(("registration",surrealdb::types::RecordId::new("connect_registration",format!("old-{node}"))))
+            .bind(("registration_id",format!("old-{node}"))).bind(("state",state))
+            .await.expect("old inactive records").check().expect("old schema statements");
+    }
+    // This root was genuinely accepted before its old registration was revoked.
+    argos_osint_core::storage::jobs::create_job(
+        repo.db(),
+        &argos_osint_core::storage::jobs::NewJob {
+            id: "inactive-accepted-root",
+            kind: "task",
+            operation: "fixture_operation",
+            parent: None,
+            created_at: chrono::Utc::now(),
+        },
+        &[],
+    )
+    .await
+    .expect("historical root");
+    let old_origin = serde_json::json!({"deployment_id":"inactive-migration-deployment","registration_id":"old-revoked_node","workstation_id":"revoked_node","workspace_id":"old-child","connect_id_at_submission":"192.0.2.42:research","workstation_ip_at_submission":"192.0.2.42","workspace_name_at_submission":"research","source":"native","request_id":"old-accepted-request","submitted_at":"2026-11-01T00:00:00Z","configuration_epoch":"old-configuration","configuration_revision":1,"credential_references":[]});
+    let old_json = serde_json::to_string(&old_origin).expect("legacy JSON");
+    repo.db().query("CREATE $record SET job_id='inactive-accepted-root',root_id='inactive-accepted-root',scope_id='scope-a',deployment_id='inactive-migration-deployment',workstation_id='revoked_node',workspace_id='old-child',origin_json=$origin RETURN NONE")
+        .bind(("record",surrealdb::types::RecordId::new("job_origin","inactive-accepted-root"))).bind(("origin",old_json.clone()))
+        .await.expect("immutable accepted origin").check().expect("origin statement");
+    argos_osint_core::storage::bootstrap::ensure_schema(repo.db())
+        .await
+        .expect("migration");
+    for (node, state, installation) in [
+        ("revoked_node", "revoked", "revoked-installation-marker"),
+        ("retiring_node", "retiring", "retiring-installation-marker"),
+    ] {
+        let registration = format!("workstation-{node}");
+        let mut result = repo
+            .db()
+            .query(
+                "SELECT VALUE state FROM ONLY $registration; SELECT VALUE state FROM ONLY $node;",
+            )
+            .bind((
+                "registration",
+                surrealdb::types::RecordId::new("connect_registration", registration.clone()),
+            ))
+            .bind((
+                "node",
+                surrealdb::types::RecordId::new("connect_workstation", node),
+            ))
+            .await
+            .expect("state read")
+            .check()
+            .expect("state statements");
+        assert_eq!(
+            result
+                .take::<Option<String>>(0)
+                .expect("registration state")
+                .as_deref(),
+            Some(state)
+        );
+        assert_eq!(
+            result
+                .take::<Option<String>>(1)
+                .expect("node state")
+                .as_deref(),
+            Some("active")
+        );
+        assert!(
+            connect_registry::ensure(
+                &repo,
+                &authority("scope-a", "native-a"),
+                &RegistrationEnsureRequest::new(format!("retry-{node}"), None, installation.into())
+            )
+            .await
+            .is_err(),
+            "ensure must not revive {state} registration"
+        );
+        assert!(connect_registry::registration_context(
+            &repo,
+            &authority("scope-a", "native-a"),
+            &registration,
+            1
+        )
+        .await
+        .is_err());
+        assert!(connect_registry::create_session(
+            &repo,
+            &authority("scope-a", "relay-a"),
+            &node.parse().expect("opaque ID")
+        )
+        .await
+        .is_err());
+    }
+    argos_osint_core::storage::jobs::create_job(
+        repo.db(),
+        &argos_osint_core::storage::jobs::NewJob {
+            id: "inactive-accepted-child",
+            kind: "task",
+            operation: "fixture_child",
+            parent: Some("inactive-accepted-root"),
+            created_at: chrono::Utc::now(),
+        },
+        &[],
+    )
+    .await
+    .expect("accepted historical chain continues under active node fence");
+    let child =
+        argos_osint_core::storage::job_context::origin_for_job(&repo, "inactive-accepted-child")
+            .await
+            .expect("child origin read")
+            .expect("retained origin");
+    assert_eq!(
+        serde_json::to_value(child).expect("child snapshot"),
+        old_origin
+    );
+    let mut unchanged = repo
+        .db()
+        .query("SELECT VALUE origin_json FROM ONLY $record")
+        .bind((
+            "record",
+            surrealdb::types::RecordId::new("job_origin", "inactive-accepted-root"),
+        ))
+        .await
+        .expect("old bytes read")
+        .check()
+        .expect("old bytes statement");
+    assert_eq!(
+        unchanged.take::<Option<String>>(0).expect("old bytes"),
+        Some(old_json)
+    );
 }

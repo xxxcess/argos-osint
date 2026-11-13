@@ -28,7 +28,6 @@ use fleetworks_contracts::actor_index::ActorIndexPressure;
 use fleetworks_contracts::actor_index::ActorIndexReceipt;
 use fleetworks_contracts::actor_index::ActorIndexStatus;
 use fleetworks_contracts::connect::RegistrationEnsureRequest;
-use fleetworks_contracts::connect::WorkspaceName;
 use fleetworks_contracts::context::JobOrigin;
 use fleetworks_contracts::context::MutationContext;
 use fleetworks_contracts::context::OriginSource;
@@ -59,10 +58,8 @@ async fn fixture(repo: &Repository) -> (ClaimedTask, ActorIndexStatus) {
         &authority,
         &RegistrationEnsureRequest::new(
             "ensure-shadow".into(),
-            "192.0.2.87".parse().expect("synthetic address"),
-            WorkspaceName::new("shadow-fixture").expect("name"),
+            Some("192.0.2.87".parse().expect("synthetic address")),
             "synthetic-install".into(),
-            "synthetic-folder".into(),
         ),
     )
     .await

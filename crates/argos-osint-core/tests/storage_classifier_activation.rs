@@ -26,7 +26,6 @@ use fleetworks_contracts::classifier_activation::ActivationRequest;
 use fleetworks_contracts::classifier_activation::ActivationState;
 use fleetworks_contracts::classifier_activation::SyntheticBaselineConsent;
 use fleetworks_contracts::connect::RegistrationEnsureRequest;
-use fleetworks_contracts::connect::WorkspaceName;
 use fleetworks_contracts::context::JobOrigin;
 use fleetworks_contracts::context::MutationContext;
 use fleetworks_contracts::context::OriginSource;
@@ -46,16 +45,16 @@ async fn context(repo: &Repository, node: &str, name: &str) -> RegisteredContext
         &authority(),
         &RegistrationEnsureRequest::new(
             format!("ensure-{node}-{name}"),
-            if node == "a" {
-                "192.0.2.42"
-            } else {
-                "198.51.100.42"
-            }
-            .parse()
-            .expect("synthetic IP"),
-            WorkspaceName::new(name).expect("child"),
+            Some(
+                if node == "a" {
+                    "192.0.2.42"
+                } else {
+                    "198.51.100.42"
+                }
+                .parse()
+                .expect("synthetic IP"),
+            ),
             format!("fixture-installation-{node}"),
-            format!("fixture-folder-{node}-{name}"),
         ),
     )
     .await

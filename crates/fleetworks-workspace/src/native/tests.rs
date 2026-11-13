@@ -1,5 +1,5 @@
-use fleetworks_contracts::connect::RegistrationEnsureRequest;
-use fleetworks_contracts::connect::RegistrationReceipt;
+use crate::native::legacy_connect::RegistrationEnsureRequest;
+use crate::native::legacy_connect::RegistrationReceipt;
 
 use super::NativeContainer;
 use super::RemovalKind;

@@ -13,6 +13,7 @@ import {
   isPublicWebPath,
   relativeWebPath,
   requireConnection,
+  requireDevelopmentUpgrade,
   requireWebBoundary,
   safeReturnPath,
 } from "./connect-session.mjs";
@@ -64,9 +65,7 @@ const upgrade = async (request, socket, head) => {
   if (path === "/api/v1/live") relay.upgrade(request, socket, head);
   else {
     try {
-      await requireWebBoundary(request);
-      if (!dev || !path?.startsWith("/_next/webpack-hmr"))
-        throw new Error("Upgrade refused");
+      await requireDevelopmentUpgrade(request, dev, path);
       for (const handler of frameworkUpgrades)
         handler.call(server, request, socket, head);
     } catch {

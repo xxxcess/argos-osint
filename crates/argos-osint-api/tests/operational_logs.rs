@@ -33,7 +33,6 @@ use axum::http::StatusCode;
 use axum::Router;
 use chrono::Utc;
 use fleetworks_contracts::connect::RegistrationEnsureRequest;
-use fleetworks_contracts::connect::WorkspaceName;
 use fleetworks_contracts::context::CredentialPurpose;
 use fleetworks_contracts::context::JobOrigin;
 use fleetworks_contracts::context::OriginSource;
@@ -71,26 +70,26 @@ fn authority() -> RegistryAuthority {
     RegistryAuthority::new("logs-scope", "native", "logs-access")
         .expect("explicit fixture authority")
 }
-fn ensure_request(node: &str, child: &str, request: &str) -> RegistrationEnsureRequest {
+fn ensure_request(node: &str, request: &str) -> RegistrationEnsureRequest {
     RegistrationEnsureRequest::new(
         request.into(),
-        if node == "a" {
-            "192.0.2.42"
-        } else {
-            "198.51.100.42"
-        }
-        .parse()
-        .expect("synthetic IP"),
-        WorkspaceName::new(child).expect("fixture child"),
+        Some(
+            if node == "a" {
+                "192.0.2.42"
+            } else {
+                "198.51.100.42"
+            }
+            .parse()
+            .expect("synthetic IP"),
+        ),
         format!("fixture-installation-{node}"),
-        format!("fixture-folder-{node}-{child}"),
     )
 }
-async fn context(repo: &Repository, node: &str, child: &str) -> RegisteredContext {
+async fn context(repo: &Repository, node: &str, registration_attempt: &str) -> RegisteredContext {
     let receipt = connect_registry::ensure(
         repo,
         &authority(),
-        &ensure_request(node, child, &format!("ensure-{node}-{child}")),
+        &ensure_request(node, &format!("ensure-{node}-{registration_attempt}")),
     )
     .await
     .expect("actual registration")
@@ -241,9 +240,12 @@ async fn operational_logs_authorize_before_counts_export_follow_and_cursor_reval
     job_dispatch::enable_pool(repo.db(), "logs_fixture")
         .await
         .expect("explicit fixture pool");
-    let a = context(&repo, "a", "research").await;
-    let sibling = context(&repo, "a", "analysis").await;
-    let b = context(&repo, "b", "research").await;
+    let a = context(&repo, "a", "first").await;
+    let sibling = context(&repo, "a", "repeat").await;
+    let b = context(&repo, "b", "other").await;
+    assert_eq!(a.workstation_id, sibling.workstation_id);
+    assert_eq!(a.registration_id, sibling.registration_id);
+    assert_ne!(a.workstation_id, b.workstation_id);
     for (ctx, id, request) in [
         (&a, "a-root", "a-root-request"),
         (&sibling, "a-sibling", "a-sibling-request"),
@@ -451,10 +453,7 @@ async fn operational_logs_authorize_before_counts_export_follow_and_cursor_reval
     );
     let (_, _, body) = call(
         &app,
-        &format!(
-            "/api/v1/logs?workspace_id={}&job_id=a-root&descendants=true",
-            a.workspace_id
-        ),
+        "/api/v1/logs?job_id=a-root&descendants=true",
         NATIVE,
         &a,
     )
@@ -473,15 +472,10 @@ async fn operational_logs_authorize_before_counts_export_follow_and_cursor_reval
         StatusCode::NOT_FOUND
     );
     assert_eq!(
-        call(
-            &app,
-            &format!("/api/v1/logs?workspace_id={}", b.workspace_id),
-            NATIVE,
-            &a
-        )
-        .await
-        .0,
-        StatusCode::NOT_FOUND
+        call(&app, "/api/v1/logs?workspace_id=foreign-child", NATIVE, &a)
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
     );
     let (_, _, body) = call(&app, "/api/v1/logs?job_id=shared-root", NATIVE, &a).await;
     assert_eq!(json_body(&body)["available"], false);
@@ -565,8 +559,8 @@ async fn operational_logs_authorize_before_counts_export_follow_and_cursor_reval
         StatusCode::CONFLICT,
         "a changed complete cohort requires restart instead of skipping a new job"
     );
-    let mut changed_binding = ensure_request("a", "research", "confirmed-rebind");
-    changed_binding.workstation_ip = "192.0.2.43".parse().expect("synthetic rebind IP");
+    let mut changed_binding = ensure_request("a", "confirmed-rebind");
+    changed_binding.workstation_ip = Some("192.0.2.43".parse().expect("synthetic rebind IP"));
     connect_registry::rebind(
         &repo,
         &authority(),
@@ -588,8 +582,8 @@ async fn operational_logs_authorize_before_counts_export_follow_and_cursor_reval
     .0;
     assert_eq!(
         denied,
-        StatusCode::UNAUTHORIZED,
-        "old registered proof cannot follow after revocation"
+        StatusCode::CONFLICT,
+        "IP metadata refresh invalidates the cursor binding without revoking the workstation"
     );
     owner_task.0.abort();
     assert!(

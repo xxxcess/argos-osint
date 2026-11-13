@@ -22,7 +22,6 @@ use argos_osint_core::storage::operational_logs::OperationalLogStore;
 use argos_osint_core::storage::repo::Repository;
 use chrono::Utc;
 use fleetworks_contracts::connect::RegistrationEnsureRequest;
-use fleetworks_contracts::connect::WorkspaceName;
 use fleetworks_contracts::context::ActivityScope;
 use fleetworks_contracts::context::JobOrigin;
 use fleetworks_contracts::context::OriginSource;
@@ -40,16 +39,16 @@ async fn context(repo: &Repository, node: &str, child: &str) -> RegisteredContex
         &authority(),
         &RegistrationEnsureRequest::new(
             format!("ensure-{node}-{child}"),
-            if node == "a" {
-                "192.0.2.42"
-            } else {
-                "198.51.100.42"
-            }
-            .parse()
-            .expect("synthetic IP"),
-            WorkspaceName::new(child).expect("child"),
+            Some(
+                if node == "a" {
+                    "192.0.2.42"
+                } else {
+                    "198.51.100.42"
+                }
+                .parse()
+                .expect("synthetic IP"),
+            ),
             format!("fixture-installation-{node}"),
-            format!("fixture-folder-{node}-{child}"),
         ),
     )
     .await
@@ -246,7 +245,7 @@ async fn operational_rows_counts_and_descendants_are_filtered_before_limits_and_
         .iter()
         .all(|row| ["a-root", "a-child"].contains(&row.row.job_id.as_str())));
     assert!(!next.has_more);
-    let child_scope = ActivityScope::for_selected_workspace(&a);
+    let child_scope = ActivityScope::for_workstation(&a);
     let selected = complete(
         operational_logs::plan(
             &repo,
@@ -333,7 +332,7 @@ async fn operational_rows_counts_and_descendants_are_filtered_before_limits_and_
         operational_logs::plan(
             &repo,
             "logs-scope",
-            &ActivityScope::for_selected_workspace(&sibling),
+            &ActivityScope::for_workstation(&sibling),
             &LogSelection::workstation(),
         )
         .await

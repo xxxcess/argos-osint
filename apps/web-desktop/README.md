@@ -1,56 +1,39 @@
 # Intel Web connection boundary
 
-Intel Web is an independent browser application. The native app registers its
-workstation/managed child with a configured gateway, then opens this deployment's
-`/connect` form. The form accepts an existing Connect ID; it never creates a node,
-workspace or registration. Connect IDs select context and do not authenticate a
-person or grant administration rights.
+[![Workstation Connect and session authority](../../docs/diagrams/intel-connect-gate.svg)](../../docs/diagrams/intel-connect-gate.html)
 
-The custom server, protected server rendering, REST adapter and live upgrades use
-the same authoritative gateway session resolver. Missing or revoked sessions deny
-data before rendering/forwarding. An opaque session lives only in a host-only,
-HttpOnly, SameSite=Strict cookie. Remote HTTPS adds Secure; loopback HTTP is the
-documented local development exception. No browser bearer, localStorage unlock or
-developer bypass exists.
+Intel Web runs independently of native. Enter an existing opaque workstation
+Connect ID at `/connect`; the gateway resolves its registration. The ID selects
+context and grants no authentication or administration rights.
 
-The server's API credential needs WebRelay purpose and ResolveWebSession
-permission. It is separate from native registration/maintenance credentials.
-Configure `FLEETWORKS_API_ORIGIN` and a protected
-`FLEETWORKS_API_TOKEN_FILE` through external deployment tooling. The ordinary
-browser API allowlist does not forward native registration, dataset uploads,
-maintenance or private index operations.
+| Boundary | Requirement |
+| --- | --- |
+| Session | Host-only HttpOnly SameSite=Strict `fleetworks_connect_v2`; Secure on remote HTTPS, local loopback HTTP exception |
+| Authority | One gateway resolver gates rendering, REST and live upgrades; missing/revoked/stale sessions deny access |
+| Relay | Server-only `FLEETWORKS_API_ORIGIN` and protected `FLEETWORKS_API_TOKEN_FILE`; WebRelay purpose + ResolveWebSession permission |
+| Remote ingress | Exact HTTPS `FLEETWORKS_WEB_ORIGIN`, `FLEETWORKS_WEB_AUTHENTICATED_INGRESS=1`, private `FLEETWORKS_WEB_INGRESS_TOKEN_FILE` |
+| Proxy | Authenticate first, strip incoming ingress-token header, then inject protected token. Forwarded headers alone grant no trust |
+| Base path | Build/run with matching `FLEETWORKS_WEB_BASE_PATH`; affects assets, cookies, Connect/API/live paths and navigation |
 
-`FLEETWORKS_WEB_ORIGIN` is the exact public origin; it is independent of private
-upstream addresses. A remote origin must be HTTPS behind authenticated ingress.
-Set `FLEETWORKS_WEB_AUTHENTICATED_INGRESS=1` and provision a private, owner-only
-`FLEETWORKS_WEB_INGRESS_TOKEN_FILE`. The existing authenticated proxy must strip
-any incoming `x-fleetworks-ingress-token` and inject this protected forwarding
-token only after its normal authentication. The web server validates it on HTTP
-and WebSocket boundaries. Arbitrary Forwarded/X-Forwarded headers grant no trust.
-This forwarding secret is neither a browser credential nor the gateway bearer.
-Actual ingress authentication, TLS and remote reachability still require operator
-integration verification.
+Connect v2 rejects legacy IP:workspace IDs, workspace-bearing contexts/query
+narrowing and old sessions/cursors. Connect ID equals the authority-returned
+workstation ID; optional IP never merges installations. No browser bearer,
+localStorage unlock, production bypass or native-maintenance API forwarding.
 
-Optional `FLEETWORKS_WEB_BASE_PATH` is a validated path such as `/intel`. Set it
-consistently when building Next and running the server; it affects compiled asset
-paths, cookie scope, connection routes, browser API/live URLs and navigation.
-Changing it requires the matching web build, not only a runtime URL change.
+Switching revokes the previous session. Tabs discard Query/live state on change,
+expiry or denial; expected-context revisions reject stale submissions with 409.
+Live authority is revalidated every 5 seconds, denied after 10 seconds without
+verification, and stopped at expiry. Closing clients does not cancel accepted jobs.
 
-New requests retain the mounted context's expected revision. Switching context in
-another tab cannot silently retarget a brief submission: stale requests receive
-409 and reconnect. Successful switching revokes the previous cookie's session;
-tabs discard their Query clients/live subscriptions after change notification,
-expiry, or an authoritative denial. The server revalidates live authority every
-five seconds, stops forwarding after ten seconds without verified authority, and
-stops at expiry. App/browser closure does not cancel accepted durable jobs.
+Development permits only exact `/_next/webpack-hmr` and `/_next/hmr` sockets through
+the normal Host/Origin/ingress boundary; production retains denial. API live sockets
+still require current sessions. [Complete web contract](../../docs/wiki/code/intel-web.md)
 
-Local tests must provision their own authority. The external test harness
-`__tests__/serve-connect-fixture.mjs --port <port> [--dev]` starts a synthetic
-gateway and the real server through normal credentials/cookies. It does not add
-a production flag/header or contact user services. Guard/REST/live/browser
-fixtures are separate evidence from real SurrealDB registry persistence, Linux
-jobs, public ingress and topology visual review. Repository Playwright output
-remains isolated with `ARGOS_WEB_TEST_DEV=1`.
+Use the external `__tests__/serve-connect-fixture.mjs --port <port> [--dev]` harness
+for synthetic gateway credentials/cookies. Repository Playwright uses
+`ARGOS_WEB_TEST_DEV=1` isolation. Fixtures do not prove datastore persistence,
+Linux execution, public TLS/ingress or installed native behavior.
 
-Implementation and remaining cutover acceptance are tracked in
-`.planning/2026-11-11-rune-macos-cutover/handoff.md` and the canonical wiki routes.
+The [shared matte design](../../docs/wiki/code/native-design-system.md) changes
+paint/logo within existing web layout and topology/list behavior.
+[Verification status](../../.planning/2026-11-12-native-workstation-redesign/acceptance.md)

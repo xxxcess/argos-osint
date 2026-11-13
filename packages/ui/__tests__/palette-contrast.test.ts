@@ -101,6 +101,37 @@ describe("Fleetworks palette compositing contracts (rendered verification remain
       colors.selectionSurface,
     ]);
   });
+  it("uses canonical five-ray geometry with a transparent crescent across web assets", () => {
+    const canonical = readFileSync(
+      new URL("../../../assets/brand/fleetworks-mark.svg", import.meta.url),
+      "utf8",
+    );
+    const shared = readFileSync(
+      new URL("../src/FleetworksMark.tsx", import.meta.url),
+      "utf8",
+    );
+    const publicMark = readFileSync(
+      new URL(
+        "../../../apps/web-desktop/public/fleetworks-mark.svg",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    expect(publicMark).toBe(canonical);
+    expect(shared).toContain(canonical.trim());
+    expect(canonical.match(/<polygon /g)).toHaveLength(5);
+    expect(canonical).toContain('mask="url(#crescent)"');
+    expect(canonical).not.toContain("#141414");
+    for (const name of ["icon.svg", "apple-icon.svg"]) {
+      const icon = readFileSync(
+        new URL(`../../../apps/web-desktop/app/${name}`, import.meta.url),
+        "utf8",
+      );
+      expect(icon.match(/<polygon /g)).toHaveLength(5);
+      expect(icon).toContain('fill="#060709"');
+      expect(icon).toContain('mask="url(#crescent)"');
+    }
+  });
   it("keeps normal text readable over actual neutral, selected and glass composites", () => {
     const surfaces = [
       colors.bg,

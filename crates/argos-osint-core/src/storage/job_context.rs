@@ -28,7 +28,7 @@ DEFINE FIELD IF NOT EXISTS root_id ON job_origin TYPE string;
 DEFINE FIELD IF NOT EXISTS scope_id ON job_origin TYPE string;
 DEFINE FIELD IF NOT EXISTS deployment_id ON job_origin TYPE string;
 DEFINE FIELD IF NOT EXISTS workstation_id ON job_origin TYPE string;
-DEFINE FIELD IF NOT EXISTS workspace_id ON job_origin TYPE string;
+DEFINE FIELD OVERWRITE workspace_id ON job_origin TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS origin_json ON job_origin TYPE string;
 DEFINE INDEX IF NOT EXISTS job_origin_job ON job_origin FIELDS job_id UNIQUE;
 DEFINE INDEX IF NOT EXISTS job_origin_root ON job_origin FIELDS root_id;
@@ -40,7 +40,7 @@ DEFINE FIELD IF NOT EXISTS scope_id ON job_request TYPE string;
 DEFINE FIELD IF NOT EXISTS deployment_id ON job_request TYPE string;
 DEFINE FIELD IF NOT EXISTS registration_id ON job_request TYPE string;
 DEFINE FIELD IF NOT EXISTS workstation_id ON job_request TYPE string;
-DEFINE FIELD IF NOT EXISTS workspace_id ON job_request TYPE string;
+DEFINE FIELD OVERWRITE workspace_id ON job_request TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS requested_at ON job_request TYPE string;
 DEFINE FIELD IF NOT EXISTS origin_json ON job_request TYPE string;
 DEFINE INDEX IF NOT EXISTS job_request_identity ON job_request FIELDS request_key UNIQUE;
@@ -197,7 +197,7 @@ struct SavedOrigin {
     scope_id: String,
     deployment_id: String,
     workstation_id: String,
-    workspace_id: String,
+    workspace_id: Option<String>,
     origin_json: String,
 }
 
@@ -245,7 +245,7 @@ struct SavedAssociation {
     deployment_id: String,
     registration_id: String,
     workstation_id: String,
-    workspace_id: String,
+    workspace_id: Option<String>,
     requested_at: String,
     origin_json: String,
 }
@@ -279,7 +279,6 @@ pub async fn accepted_request(
     if saved.scope_id != authority.scope_id()
         || saved.deployment_id != context.deployment_id
         || saved.workstation_id != context.workstation_id
-        || saved.workspace_id != context.workspace_id
         || saved.registration_id != registration
         || saved.operation != operation
     {
@@ -293,7 +292,6 @@ pub async fn accepted_request(
     if origin.request_id != request_id
         || origin.registration_id != registration
         || origin.deployment_id != context.deployment_id
-        || origin.workspace_id != context.workspace_id
         || origin.workstation_id != context.workstation_id
     {
         return Err(abort("inconsistent request receipt"));
@@ -400,15 +398,12 @@ async fn record_admission_inner(
         || state.configuration_epoch != context.configuration_epoch
         || authority.access_epoch() != context.access_epoch
         || registration.workstation_id != context.workstation_id
-        || registration.workspace_id != context.workspace_id
         || registration.connect_id != context.connect_id
         || origin.deployment_id != context.deployment_id
         || origin.registration_id != context.registration_id
         || origin.workstation_id != context.workstation_id
-        || origin.workspace_id != context.workspace_id
-        || origin.connect_id_at_submission != context.connect_id
+        || origin.connect_id_at_submission != context.connect_id.as_str()
         || origin.workstation_ip_at_submission != context.workstation_ip
-        || origin.workspace_name_at_submission != context.workspace_name
         || origin.configuration_epoch != context.configuration_epoch
     {
         return Err(abort("registered admission context unavailable or changed"));
@@ -450,7 +445,7 @@ async fn record_admission_inner(
             .bind(("scope", authority.scope_id().to_owned()))
             .bind(("deployment", context.deployment_id.clone()))
             .bind(("node", context.workstation_id.clone()))
-            .bind(("workspace", context.workspace_id.clone()))
+            .bind(("workspace", None::<String>))
             .bind(("origin", origin_json.clone()))).await?;
     }
     jobs::run(tx, tx.query(
@@ -465,7 +460,7 @@ async fn record_admission_inner(
         .bind(("deployment", context.deployment_id.clone()))
         .bind(("registration", context.registration_id.clone()))
         .bind(("node", context.workstation_id.clone()))
-        .bind(("workspace", context.workspace_id.clone()))
+        .bind(("workspace", None::<String>))
         .bind(("at", origin.submitted_at.clone()))
         .bind(("origin", origin_json))).await?;
     Ok(())
@@ -499,7 +494,7 @@ pub(crate) async fn record_child_in(tx: &Tx, parent: &str, child: &str) -> Resul
         // an arbitrary workstation for visibility.
         return Ok(());
     };
-    connect_registry::fence_causal_child_in(tx, &parent.scope_id, &parent.workspace_id).await?;
+    connect_registry::fence_causal_child_in(tx, &parent.scope_id, &parent.workstation_id).await?;
     if let Some(existing) = existing {
         if existing.root_id == parent.root_id
             && existing.origin_json == parent.origin_json
@@ -541,12 +536,11 @@ pub async fn requested_job_ids(
     );
     let mut response = repo.db().query(
         "SELECT job_id, requested_at FROM job_request WHERE scope_id = $scope AND deployment_id = $deployment \
-         AND workstation_id = $node AND ($workspace = NONE OR workspace_id = $workspace) \
+         AND workstation_id = $node \
          ORDER BY requested_at DESC, job_id ASC LIMIT $limit",
     ).bind(("scope", authority_scope.to_owned()))
         .bind(("deployment", scope.deployment_id.clone()))
         .bind(("node", scope.workstation_id.clone()))
-        .bind(("workspace", scope.workspace_id.clone()))
         .bind(("limit", limit.clamp(1, 200) as i64)).await?.check()?;
     let rows: Vec<SavedRequest> = response.take(0)?;
     // Reused requests may name one job more than once. Deduplicate only after
@@ -602,14 +596,13 @@ pub async fn permits_job(
             "LET $root = (SELECT VALUE root_id FROM ONLY $origin) ?? $job; \
          SELECT VALUE count() FROM job_request WHERE job_id = $root AND scope_id = $scope \
          AND deployment_id = $deployment AND workstation_id = $node \
-         AND ($workspace = NONE OR workspace_id = $workspace) GROUP ALL",
+         GROUP ALL",
         )
         .bind(("origin", jobs::rid("job_origin", job_id)))
         .bind(("job", job_id.to_owned()))
         .bind(("scope", authority_scope.to_owned()))
         .bind(("deployment", scope.deployment_id.clone()))
         .bind(("node", scope.workstation_id.clone()))
-        .bind(("workspace", scope.workspace_id.clone()))
         .await?
         .check()?;
     let counts: Vec<i64> = response.take(1)?;

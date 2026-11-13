@@ -31,9 +31,8 @@ async fn registered_client_clone_keeps_global_reads_free_of_workspace_context() 
     let receipt = crate::connect::RegistrationReceipt::new(
         "deployment".into(),
         "node".into(),
-        "workspace".into(),
         "registration-a".into(),
-        "192.0.2.42:research".parse().unwrap(),
+        None,
         3,
     );
     let context = crate::context::RegisteredContext::new(
@@ -229,9 +228,8 @@ fn log_client(origin: &str) -> Client {
     let receipt = crate::connect::RegistrationReceipt::new(
         "deployment".into(),
         "node".into(),
-        "workspace".into(),
         "logs-registration".into(),
-        "192.0.2.42:research".parse().unwrap(),
+        None,
         3,
     );
     let context = crate::context::RegisteredContext::new(

@@ -15,6 +15,8 @@ use argos_osint_core::config_commit::ConfigLock;
 use argos_osint_core::provider;
 use argos_osint_core::provider::ModelAssignment;
 use argos_osint_core::provider::ModelRoute;
+use argos_osint_core::provider_capabilities;
+use argos_osint_core::request_policy::ReasoningEffort;
 use argos_osint_core::secrets::AuthFile;
 use argos_osint_core::secrets::ProviderSecret;
 use argos_osint_core::storage::configuration_reset;
@@ -195,7 +197,31 @@ pub(crate) async fn models() -> ApiResult {
         let snapshot = read_locked(&root, &lock)?;
         let roles: BTreeMap<&str, &ModelAssignment> = provider::CANONICAL_ROLE_KEYS.iter()
             .filter_map(|role| snapshot.settings.defaults.role(role).map(|assignment| (*role, assignment))).collect();
-        Ok(json!({"configuration_revision":snapshot.revision,"roles":provider::CANONICAL_ROLE_KEYS,"defaults":roles}))
+        let mut catalog = BTreeMap::new();
+        for (account, secret) in &snapshot.auth.accounts {
+            let kind = provider::effective_kind(secret);
+            let mut models = vec![secret.model.clone()];
+            for assignment in roles.values() {
+                models.extend(assignment.chain().into_iter().filter(|route| {
+                    route.provider == kind && (route.account == *account || route.account.is_empty() && *account == kind)
+                }).map(|route| route.model));
+            }
+            for model in models.into_iter().filter(|model| !model.is_empty()) {
+                let mut selected = secret.clone();
+                selected.model = model.clone();
+                let caps = provider_capabilities::for_secret(&selected);
+                let mut efforts = caps.reasoning.values.into_iter().filter(|value| {
+                    serde_json::from_value::<ReasoningEffort>(json!(value)).is_ok()
+                }).collect::<Vec<_>>();
+                if caps.reasoning.off.is_some() { efforts.push("off".into()); }
+                if caps.reasoning.efficient.is_some() { efforts.push("efficient".into()); }
+                efforts.sort(); efforts.dedup();
+                catalog.insert(format!("{kind}|{account}|{model}"), json!({"provider":kind,"account":account,"model":model,"efforts":efforts}));
+            }
+        }
+        Ok(json!({"configuration_revision":snapshot.revision,"roles":provider::CANONICAL_ROLE_KEYS,"defaults":roles,
+            "catalog":catalog.into_values().collect::<Vec<_>>(), "catalog_source":"configured_routes",
+            "model_variants":snapshot.settings.defaults.model_variants}))
     }).await?;
     Ok(Json(value))
 }
@@ -217,6 +243,8 @@ pub(crate) struct SetRole {
     primary: Option<Route>,
     #[serde(default)]
     fallbacks: Vec<Route>,
+    #[serde(default)]
+    variant_updates: BTreeMap<String, Option<ReasoningEffort>>,
 }
 
 fn checked_route(auth: &AuthFile, route: &Route) -> Result<ModelRoute, ApiError> {
@@ -311,6 +339,52 @@ fn set_role_locked(root: &Path, lock: &ConfigLock, request: SetRole) -> Result<u
         request.primary.as_ref(),
         &request.fallbacks,
     )?;
+    for (key, effort) in request.variant_updates {
+        let route = assignment
+            .chain()
+            .into_iter()
+            .find(|route| {
+                provider::RoleDefaults::variant_key(&request.role, &route.provider, &route.model)
+                    == key
+            })
+            .ok_or_else(bad)?;
+        if let Some(effort) = effort {
+            let account = if route.account.is_empty() {
+                &route.provider
+            } else {
+                &route.account
+            };
+            let mut secret = snapshot
+                .auth
+                .accounts
+                .get(account)
+                .cloned()
+                .ok_or_else(bad)?;
+            secret.model = route.model;
+            let caps = provider_capabilities::for_secret(&secret);
+            let allowed = effort == ReasoningEffort::Default
+                || caps
+                    .reasoning
+                    .values
+                    .iter()
+                    .any(|value| value == effort.as_str())
+                || effort == ReasoningEffort::Off && caps.reasoning.off.is_some()
+                || effort == ReasoningEffort::Efficient && caps.reasoning.efficient.is_some();
+            if !allowed {
+                return Err(ApiError(
+                    StatusCode::BAD_REQUEST,
+                    "Reasoning variant is not supported by this model",
+                ));
+            }
+            snapshot
+                .settings
+                .defaults
+                .model_variants
+                .insert(key, effort);
+        } else {
+            snapshot.settings.defaults.model_variants.remove(&key);
+        }
+    }
     *snapshot
         .settings
         .defaults
@@ -339,7 +413,7 @@ pub(crate) struct AccountInput {
     provider: String,
     base_url: String,
     #[serde(default)]
-    model: String,
+    model: Option<String>,
     api_key: Option<String>,
 }
 
@@ -397,6 +471,35 @@ fn checked_account(
     })
 }
 
+fn patched_account(
+    saved: Option<&ProviderSecret>,
+    request: &AccountInput,
+) -> Result<ProviderSecret, ApiError> {
+    let saved =
+        saved.filter(|saved| saved.kind == request.provider && saved.base_url == request.base_url);
+    let key = request
+        .api_key
+        .clone()
+        .or_else(|| saved.and_then(|saved| saved.api_key.clone()));
+    let model = request
+        .model
+        .as_deref()
+        .or_else(|| saved.map(|saved| saved.model.as_str()))
+        .unwrap_or("");
+    let mut account = checked_account(
+        &request.account_id,
+        &request.provider,
+        &request.base_url,
+        model,
+        key,
+    )?;
+    if let Some(saved) = saved {
+        account.stt_model = saved.stt_model.clone();
+        account.device = saved.device.clone();
+    }
+    Ok(account)
+}
+
 pub(crate) async fn upsert_account(
     State(state): State<ApiState>,
     context: Option<Extension<ResolvedRequest>>,
@@ -411,24 +514,7 @@ pub(crate) async fn upsert_account(
         {
             return Err(bad());
         }
-        let key = request.api_key.or_else(|| {
-            snapshot
-                .auth
-                .accounts
-                .get(&request.account_id)
-                .and_then(|saved| {
-                    (saved.kind == request.provider && saved.base_url == request.base_url)
-                        .then(|| saved.api_key.clone())
-                        .flatten()
-                })
-        });
-        let account = checked_account(
-            &request.account_id,
-            &request.provider,
-            &request.base_url,
-            &request.model,
-            key,
-        )?;
+        let account = patched_account(snapshot.auth.accounts.get(&request.account_id), &request)?;
         snapshot.auth.accounts.insert(request.account_id, account);
         commit(&root, &lock, &snapshot)
     })
@@ -486,8 +572,19 @@ pub(crate) async fn delete_account(
 pub(crate) struct ToolCredential {
     expected_revision: u64,
     provider: String,
-    primary: String,
-    fallback: String,
+    #[serde(default)]
+    primary: Option<String>,
+    #[serde(default)]
+    fallback: Option<String>,
+}
+
+fn apply_tool_credential(settings: &mut provider::SettingsFile, request: &ToolCredential) {
+    if let Some(primary) = &request.primary {
+        settings.set_saved_key(&request.provider, primary);
+    }
+    if let Some(fallback) = &request.fallback {
+        settings.set_saved_fallback_key(&request.provider, fallback);
+    }
 }
 
 pub(crate) async fn save_tool_credential(
@@ -502,18 +599,14 @@ pub(crate) async fn save_tool_credential(
             .any(|(id, _)| *id == request.provider)
             || [&request.primary, &request.fallback]
                 .into_iter()
+                .flatten()
                 .any(|key| key.len() > 4096 || key.chars().any(char::is_control))
         {
             return Err(bad());
         }
         let mut snapshot = read_locked(&root, &lock)?;
         expected(&snapshot, request.expected_revision)?;
-        snapshot
-            .settings
-            .set_saved_key(&request.provider, &request.primary);
-        snapshot
-            .settings
-            .set_saved_fallback_key(&request.provider, &request.fallback);
+        apply_tool_credential(&mut snapshot.settings, &request);
         commit(&root, &lock, &snapshot)
     })
     .await?;
@@ -721,6 +814,68 @@ mod tests {
     use super::*;
 
     #[test]
+    fn omitted_tool_slots_preserve_and_only_explicit_empty_clears() {
+        let mut settings = provider::SettingsFile::default();
+        settings.set_saved_key("firecrawl", "synthetic-primary");
+        settings.set_saved_fallback_key("firecrawl", "synthetic-fallback");
+        let request: ToolCredential =
+            serde_json::from_value(json!({"expected_revision":1,"provider":"firecrawl"}))
+                .expect("preserve patch");
+        let before = serde_json::to_value(&settings).expect("settings");
+        apply_tool_credential(&mut settings, &request);
+        assert_eq!(serde_json::to_value(&settings).expect("settings"), before);
+        let request: ToolCredential = serde_json::from_value(
+            json!({"expected_revision":1,"provider":"firecrawl","primary":""}),
+        )
+        .expect("explicit clear");
+        apply_tool_credential(&mut settings, &request);
+        assert!(settings.saved_key("firecrawl").is_empty());
+        let after = serde_json::to_value(&settings).expect("settings");
+        let mut unchanged = provider::SettingsFile::default();
+        unchanged.set_saved_fallback_key("firecrawl", "synthetic-fallback");
+        assert_eq!(
+            after,
+            serde_json::to_value(&unchanged).expect("only fallback retained")
+        );
+        // Explicit replacement is distinct from both preserve and clear.
+        let replacement: ToolCredential = serde_json::from_value(
+            json!({"expected_revision":1,"provider":"firecrawl","primary":"new-primary"}),
+        )
+        .expect("replacement");
+        apply_tool_credential(&mut settings, &replacement);
+        assert_eq!(settings.saved_key("firecrawl"), "new-primary");
+    }
+
+    #[test]
+    fn key_only_account_patch_preserves_model_and_hidden_fields() {
+        let mut saved = checked_account(
+            "local",
+            "local",
+            "http://127.0.0.1:11434/v1",
+            "saved-model",
+            Some("old-key".into()),
+        )
+        .map_err(|error| error.0)
+        .expect("account");
+        saved.stt_model = Some("saved-transcriber".into());
+        let request: AccountInput = serde_json::from_value(json!({"expected_revision":1,"account_id":"local","provider":"local","base_url":"http://127.0.0.1:11434/v1","api_key":"new-key"})).expect("key patch");
+        let account = patched_account(Some(&saved), &request)
+            .map_err(|error| error.0)
+            .expect("valid patch");
+        assert_eq!(account.model, saved.model);
+        assert_eq!(account.stt_model, saved.stt_model);
+        assert_eq!(account.api_key.as_deref(), Some("new-key"));
+        let mut changed_origin = request;
+        changed_origin.base_url = "http://127.0.0.1:11435/v1".into();
+        changed_origin.api_key = None;
+        let account = patched_account(Some(&saved), &changed_origin)
+            .map_err(|error| error.0)
+            .expect("new origin");
+        assert!(account.api_key.is_none());
+        assert!(account.stt_model.is_none());
+    }
+
+    #[test]
     fn current_bundle_reopens_with_durable_revision_and_rejects_stale_form() {
         let root = tempfile::tempdir().expect("isolated configuration");
         let lock = ConfigLock::acquire_at(root.path()).expect("lock");
@@ -753,7 +908,8 @@ mod tests {
                     expected_revision: revision - 1,
                     role: "brain_summary".into(),
                     primary: None,
-                    fallbacks: vec![]
+                    fallbacks: vec![],
+                    variant_updates: BTreeMap::new(),
                 }
             ),
             Err(ApiError(StatusCode::CONFLICT, _))
@@ -768,7 +924,8 @@ mod tests {
                     model: "model-fixture".into(),
                     account: "local".into()
                 }),
-                fallbacks: vec![]
+                fallbacks: vec![],
+                variant_updates: BTreeMap::new(),
             }
         )
         .is_ok());

@@ -25,7 +25,6 @@ use axum::Router;
 use chrono::Utc;
 use fleetworks_contracts::connect::RegistrationEnsureRequest;
 use fleetworks_contracts::connect::RegistrationReceipt;
-use fleetworks_contracts::connect::WorkspaceName;
 use fleetworks_contracts::context::CredentialPurpose;
 use fleetworks_contracts::context::JobOrigin;
 use fleetworks_contracts::context::OriginSource;
@@ -151,10 +150,8 @@ async fn scenario() {
         &authority(),
         &RegistrationEnsureRequest::new(
             "action-registration".into(),
-            "192.0.2.42".parse().expect("synthetic IP"),
-            WorkspaceName::new("research").expect("fixture name"),
+            Some("192.0.2.42".parse().expect("synthetic IP")),
             "action-installation-marker".into(),
-            "action-workspace-marker".into(),
         ),
     )
     .await

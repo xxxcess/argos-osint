@@ -198,8 +198,8 @@ pub fn reply(state: &mut State, intent: &Intent) -> bool {
                 .context
                 .as_ref()
                 .expect("current synthetic proof");
-            let result = if current.workspace_id == attempt.snapshot.context.workspace_id
-                && current.workstation_id == attempt.snapshot.context.workstation_id
+            let result = if current.workstation_id == attempt.snapshot.context.workstation_id
+                && current.deployment_id == attempt.snapshot.context.deployment_id
             {
                 let origin = JobOrigin::new(
                     &attempt.snapshot.context,
@@ -219,7 +219,7 @@ pub fn reply(state: &mut State, intent: &Intent) -> bool {
                     "2026-01-01T00:00:00Z".into(),
                 ))
             } else {
-                Err("Synthetic lookup requires the original selected workspace".into())
+                Err("Synthetic lookup requires the original workstation and deployment".into())
             };
             state.complete_submission_resolution(*kind, revision, result);
         }

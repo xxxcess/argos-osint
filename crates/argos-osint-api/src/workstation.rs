@@ -196,6 +196,7 @@ struct Observations {
 pub struct ReadinessOwners {
     deployment_id: String,
     probes: Vec<ReadinessProbe>,
+    configured_inputs: Vec<fleetworks_contracts::readiness::ConfiguredMaintenanceInput>,
     cache: Arc<Mutex<Option<Observations>>>,
 }
 
@@ -218,8 +219,72 @@ impl ReadinessOwners {
         Ok(Self {
             deployment_id,
             probes,
+            configured_inputs: Vec::new(),
             cache: Arc::new(Mutex::new(None)),
         })
+    }
+    /// Load a bounded operator-owned startup configuration, never a client-chosen path.
+    /// Call only from a blocking startup worker. Dataset bytes remain staged/validated separately.
+    pub fn with_configured_inputs_file(
+        mut self,
+        path: Option<&std::path::Path>,
+    ) -> anyhow::Result<Self> {
+        let Some(path) = path else {
+            return Ok(self);
+        };
+        let metadata = std::fs::symlink_metadata(path)?;
+        anyhow::ensure!(
+            metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() <= 65536,
+            "invalid maintenance inputs file"
+        );
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?
+            .take(65537)
+            .read_to_end(&mut bytes)?;
+        anyhow::ensure!(
+            bytes.len() <= 65536,
+            "maintenance inputs exceed the byte bound"
+        );
+        let inputs: Vec<fleetworks_contracts::readiness::ConfiguredMaintenanceInput> =
+            serde_json::from_slice(&bytes)?;
+        anyhow::ensure!(inputs.len() <= 3, "too many maintenance inputs");
+        for (index, input) in inputs.iter().enumerate() {
+            anyhow::ensure!(
+                input.configuration_revision > 0
+                    && !inputs[..index]
+                        .iter()
+                        .any(|other| other.operation == input.operation),
+                "ambiguous maintenance input revision"
+            );
+            let valid = match input.operation {
+                MaintenanceOperation::SeedActors => input.dataset.as_ref().is_some_and(|dataset| {
+                    dataset.kind == fleetworks_contracts::readiness::DatasetKind::ActorCatalog
+                        && dataset.validate().is_ok()
+                }),
+                MaintenanceOperation::TrainClassifier => {
+                    input.dataset.as_ref().is_some_and(|dataset| {
+                        dataset.kind
+                            == fleetworks_contracts::readiness::DatasetKind::ClassifierTraining
+                            && dataset.validate().is_ok()
+                    })
+                }
+                MaintenanceOperation::ReindexActors => input.dataset.is_none(),
+                _ => false,
+            };
+            anyhow::ensure!(valid, "maintenance input purpose does not match operation");
+        }
+        self.configured_inputs = inputs;
+        Ok(self)
+    }
+
+    pub(crate) fn configured_input(
+        &self,
+        operation: MaintenanceOperation,
+    ) -> Option<&fleetworks_contracts::readiness::ConfiguredMaintenanceInput> {
+        self.configured_inputs
+            .iter()
+            .find(|input| input.operation == operation)
     }
 }
 
@@ -559,6 +624,40 @@ pub(crate) async fn read(
             && context.access_epoch == principal.access_epoch()
     });
     let registered = context.is_some();
+    let revision = tokio::task::spawn_blocking(|| {
+        let root = crate::configuration::workspace()?;
+        let lock = argos_osint_core::config_commit::ConfigLock::acquire_at(&root)
+            .map_err(|_| crate::internal("configuration unavailable"))?;
+        crate::configuration::read_locked(&root, &lock).map(|snapshot| snapshot.revision)
+    })
+    .await
+    .ok()
+    .and_then(Result::ok);
+    let authority = argos_osint_core::storage::connect_registry::RegistryAuthority::new(
+        principal.scope_id(),
+        principal.credential_id(),
+        principal.access_epoch(),
+    )
+    .ok();
+    let mut configured_inputs = Vec::new();
+    for input in &owners.configured_inputs {
+        if Some(input.configuration_revision) != revision {
+            continue;
+        }
+        let usable = if let Some(dataset) = &input.dataset {
+            if let Some(authority) = &authority {
+                matches!(tokio::time::timeout(DEADLINE,setup_jobs::dataset(&state.repo,authority,&dataset.id)).await,Ok(Ok(current)) if current==*dataset)
+            } else {
+                false
+            }
+        } else {
+            true
+        };
+        if usable {
+            configured_inputs.push(input.clone());
+        }
+    }
+
     for (check_id, operation, action_id) in [
         (
             ReadinessCheckId::ActorCatalog,
@@ -585,9 +684,17 @@ pub(crate) async fn read(
             Ok(Ok(true))
         );
         if let Some(check) = checks.iter_mut().find(|check| check.id == check_id) {
-            check
-                .actions
-                .push(action(action_id, enabled, permitted, registered));
+            check.actions.push({
+                let configured = configured_inputs
+                    .iter()
+                    .any(|input| input.operation == operation);
+                let mut available = action(action_id, enabled && configured, permitted, registered);
+                if !configured {
+                    available.disabled_reason =
+                        Some("configured_input_unavailable_or_stale".into());
+                }
+                available
+            });
         }
     }
     if let Some(check) = checks
@@ -632,13 +739,13 @@ pub(crate) async fn read(
         }
     }
     let mut response = WorkstationReadiness::new(owners.deployment_id.clone(), observed_at, checks);
+    response.configured_inputs = configured_inputs;
     if let Some(context) = context {
         response.registration = Some(RegistrationReceipt::new(
             context.deployment_id,
             context.workstation_id,
-            context.workspace_id,
             context.registration_id,
-            context.connect_id,
+            context.workstation_ip,
             context.registration_revision,
         ));
         if let Some(check) = response
@@ -759,5 +866,43 @@ mod tests {
             unavailable(ReadinessCheckId::ActorSearch, "fixture").state,
             ReadinessState::Unknown
         );
+    }
+    #[test]
+    fn configured_inputs_are_bounded_unambiguous_and_purpose_checked() {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let file = directory.path().join("inputs.json");
+        let input = serde_json::json!({"operation":"seed_actors","dataset":{"id":"staged-actors","kind":"actor_catalog","sha256":"a".repeat(64),"size_bytes":1024},"configuration_revision":3});
+        std::fs::write(
+            &file,
+            serde_json::to_vec(&vec![input.clone()]).expect("JSON"),
+        )
+        .expect("fixture");
+        let owners = ReadinessOwners::new("deployment-a".into(), vec![])
+            .expect("owners")
+            .with_configured_inputs_file(Some(&file))
+            .expect("configured input");
+        assert!(owners
+            .configured_input(MaintenanceOperation::SeedActors)
+            .is_some());
+        assert!(owners
+            .configured_input(MaintenanceOperation::TrainClassifier)
+            .is_none());
+        std::fs::write(
+            &file,
+            serde_json::to_vec(&vec![input.clone(), input.clone()]).expect("JSON"),
+        )
+        .expect("duplicate fixture");
+        assert!(ReadinessOwners::new("deployment-a".into(), vec![])
+            .expect("owners")
+            .with_configured_inputs_file(Some(&file))
+            .is_err());
+        let mut mismatch = input;
+        mismatch["operation"] = serde_json::json!("train_classifier");
+        std::fs::write(&file, serde_json::to_vec(&vec![mismatch]).expect("JSON"))
+            .expect("mismatched fixture");
+        assert!(ReadinessOwners::new("deployment-a".into(), vec![])
+            .expect("owners")
+            .with_configured_inputs_file(Some(&file))
+            .is_err());
     }
 }

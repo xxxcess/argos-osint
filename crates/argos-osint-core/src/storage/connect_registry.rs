@@ -2,7 +2,7 @@
 //!
 //! IDs/markers describe registered context, not personal authentication. The HTTP
 //! boundary supplies purpose-authorized scope. Database claims plus a shared
-//! transaction guard prevent concurrent IP/name/binding collisions. Old records
+//! transaction guard prevent concurrent installation/binding collisions. Old records
 //! and submission snapshots are retained; ensure never resurrects revocation.
 
 use std::fmt;
@@ -13,7 +13,6 @@ use fleetworks_contracts::connect::ConnectId;
 use fleetworks_contracts::connect::RegistrationEnsureRequest;
 use fleetworks_contracts::connect::RegistrationReceipt;
 use fleetworks_contracts::connect::RegistrationStatus;
-use fleetworks_contracts::connect::WorkspaceName;
 use fleetworks_contracts::context::RegisteredContext;
 use sha2::Digest;
 use sha2::Sha256;
@@ -142,9 +141,7 @@ impl fmt::Display for RegistryError {
         formatter.write_str(match self {
             Self::InvalidInput => "invalid registered context input",
             Self::NotFound => "registered context unavailable",
-            Self::Collision => {
-                "workstation IP or workspace identity collision; explicitly repair or rebind"
-            }
+            Self::Collision => "installation, registration or request identity collision",
             Self::Revoked => "registration is no longer active",
             Self::ProtectedDefault => {
                 "the protected default workspace cannot be retired or renamed"
@@ -183,6 +180,7 @@ impl From<TxError> for RegistryError {
 struct ControlRow {
     configuration_epoch: String,
     admission_open: bool,
+    contract_version: i64,
 }
 
 #[derive(SurrealValue)]
@@ -216,6 +214,7 @@ struct RegistrationRow {
     workstation_ip: String,
     workspace_name: String,
     connect_id: String,
+    contract_version: i64,
     state: String,
     revision: i64,
 }
@@ -277,14 +276,14 @@ async fn guard_in(tx: &Tx) -> Result<i64, TxError> {
 }
 
 async fn deployment_in(tx: &Tx) -> Result<DeploymentState, TxError> {
-    let mut response = run(tx, tx.query("SELECT VALUE instance_id FROM ONLY storage_meta:identity; SELECT configuration_epoch, admission_open FROM ONLY connect_control:configuration;")).await?;
+    let mut response = run(tx, tx.query("SELECT VALUE instance_id FROM ONLY storage_meta:identity; SELECT configuration_epoch, admission_open, contract_version ?? 1 AS contract_version FROM ONLY connect_control:configuration;")).await?;
     let deployment_id: Option<String> = take(&mut response, 0)?;
     let control: Option<ControlRow> = take(&mut response, 1)?;
     let deployment_id = deployment_id
         .filter(|value| !value.is_empty())
         .ok_or_else(|| abort("unconfigured"))?;
     let control = control
-        .filter(|row| !row.configuration_epoch.is_empty())
+        .filter(|row| !row.configuration_epoch.is_empty() && row.contract_version == 2)
         .ok_or_else(|| abort("unconfigured"))?;
     Ok(DeploymentState {
         deployment_id,
@@ -306,7 +305,7 @@ pub async fn initialize_control(db: &Surreal<Any>) -> Result<DeploymentState, Re
         let epoch = epoch.clone();
         async move {
             guard_in(&tx).await?;
-            run(&tx, tx.query("UPSERT connect_control:configuration SET configuration_epoch = configuration_epoch ?? $epoch, admission_open = admission_open ?? true RETURN NONE").bind(("epoch", epoch))).await?;
+            run(&tx, tx.query("UPSERT connect_control:configuration SET configuration_epoch = configuration_epoch ?? $epoch, admission_open = admission_open ?? true, contract_version = contract_version ?? 2 RETURN NONE").bind(("epoch", epoch))).await?;
             deployment_in(&tx).await
         }
     }).await?;
@@ -323,19 +322,19 @@ pub async fn deployment_state(repo: &Repository) -> Result<DeploymentState, Regi
 }
 
 fn receipt(row: &RegistrationRow, deployment: &str) -> Result<RegistrationReceipt, TxError> {
-    let connect_id: ConnectId = row.connect_id.parse().map_err(|_| abort("invalid"))?;
-    if connect_id.ip().to_string() != row.workstation_ip
-        || connect_id.workspace_name().as_str() != row.workspace_name
-        || row.revision < 1
-    {
+    if row.contract_version != 2 || row.connect_id != row.workstation_id || row.revision < 1 {
         return Err(abort("invalid"));
     }
+    let ip = if row.workstation_ip.is_empty() {
+        None
+    } else {
+        Some(row.workstation_ip.parse().map_err(|_| abort("invalid"))?)
+    };
     let mut value = RegistrationReceipt::new(
         deployment.into(),
         row.workstation_id.clone(),
-        row.workspace_id.clone(),
         row.registration_id.clone(),
-        connect_id,
+        ip,
         row.revision as u64,
     );
     value.status = match row.state.as_str() {
@@ -365,7 +364,7 @@ async fn read_registration_in(
     id: &str,
     authority: &RegistryAuthority,
 ) -> Result<RegistrationRow, TxError> {
-    let mut result = run(tx, tx.query("SELECT registration_id, scope_id, workstation_id, workspace_id, workstation_ip, workspace_name, connect_id, state, revision FROM ONLY $row").bind(("row", rid("connect_registration", id)))).await?;
+    let mut result = run(tx, tx.query("SELECT registration_id, scope_id, workstation_id, workspace_id ?? '' AS workspace_id, workstation_ip ?? '' AS workstation_ip, workspace_name ?? '' AS workspace_name, connect_id, contract_version ?? 1 AS contract_version, state, revision FROM ONLY $row").bind(("row", rid("connect_registration", id)))).await?;
     let row: Option<RegistrationRow> = take(&mut result, 0)?;
     let row = row
         .filter(|row| row.scope_id == authority.scope_id)
@@ -374,7 +373,7 @@ async fn read_registration_in(
 }
 
 async fn workstation_in(tx: &Tx, id: &str) -> Result<WorkstationRow, TxError> {
-    let mut result = run(tx, tx.query("SELECT workstation_id, scope_id, installation_hash, workstation_ip, state, revision FROM ONLY $row").bind(("row", rid("connect_workstation", id)))).await?;
+    let mut result = run(tx, tx.query("SELECT workstation_id, scope_id, installation_hash, workstation_ip ?? '' AS workstation_ip, state, revision FROM ONLY $row").bind(("row", rid("connect_workstation", id)))).await?;
     take::<Option<WorkstationRow>>(&mut result, 0)?.ok_or_else(|| abort("missing"))
 }
 
@@ -416,33 +415,19 @@ pub async fn ensure_observed(
     input: &RegistrationEnsureRequest,
     observed_peer: Option<IpAddr>,
 ) -> Result<EnsureResult, RegistryError> {
-    if !valid_identity(&input.request_id)
-        || !valid_marker(&input.installation_marker)
-        || !valid_marker(&input.workspace_marker)
-    {
-        return Err(RegistryError::InvalidInput);
-    }
-    let connect = ConnectId::new(input.workstation_ip, input.workspace_name.clone())
-        .map_err(|_| RegistryError::InvalidInput)?;
-    let canonical = connect.to_string();
-    let ip = connect.ip().to_string();
-    let name = connect.workspace_name().as_str().to_owned();
-    if name.eq_ignore_ascii_case("default") && name != "default" {
+    if !valid_identity(&input.request_id) || !valid_marker(&input.installation_marker) {
         return Err(RegistryError::InvalidInput);
     }
     let installation = hash(&[&input.installation_marker]);
-    let marker = hash(&[&input.workspace_marker]);
-    let fingerprint = hash(&[&canonical, &installation, &marker]);
-    let request_key = hash(&[&authority.scope_id, "ensure", &input.request_id]);
+    let ip = input.workstation_ip.map(|ip| ip.to_string());
+    let fingerprint = hash(&[&installation, ip.as_deref().unwrap_or("")]);
+    let request_key = hash(&[&authority.scope_id, "ensure-v2", &input.request_id]);
     let new_workstation = crate::store::new_id();
-    let new_workspace = crate::store::new_id();
     let new_registration = crate::store::new_id();
     let peer = observed_peer.map(|ip| ip.to_string());
     let committed = run_tx(repo.db(), RetryPolicy::default(), |tx| {
         let authority = authority.clone();
-        let (canonical, ip, name, installation, marker, fingerprint, request_key) = (canonical.clone(), ip.clone(), name.clone(), installation.clone(), marker.clone(), fingerprint.clone(), request_key.clone());
-        let (new_workstation, new_workspace, new_registration) = (new_workstation.clone(), new_workspace.clone(), new_registration.clone());
-        let peer = peer.clone();
+        let (installation, ip, fingerprint, request_key, new_workstation, new_registration, peer) = (installation.clone(), ip.clone(), fingerprint.clone(), request_key.clone(), new_workstation.clone(), new_registration.clone(), peer.clone());
         async move {
             guard_in(&tx).await?;
             let deployment = deployment_in(&tx).await?;
@@ -454,47 +439,33 @@ pub async fn ensure_observed(
                 let registration = registration_in(&tx, &replay.registration_id, &authority).await?;
                 return Ok((receipt(&registration, &deployment.deployment_id)?, false));
             }
-            let mut found = run(&tx, tx.query("SELECT workstation_id, scope_id, installation_hash, workstation_ip, state, revision FROM connect_workstation WHERE scope_id = $scope AND installation_hash = $installation LIMIT 2").bind(("scope", authority.scope_id.clone())).bind(("installation", installation.clone()))).await?;
-            let found: Vec<WorkstationRow> = take(&mut found, 0)?;
-            let workstation = if let Some(workstation) = found.into_iter().next() {
+            let mut found = run(&tx, tx.query("SELECT workstation_id, scope_id, installation_hash, workstation_ip ?? '' AS workstation_ip, state, revision FROM connect_workstation WHERE scope_id=$scope AND installation_hash=$installation LIMIT 2").bind(("scope", authority.scope_id.clone())).bind(("installation", installation.clone()))).await?;
+            let mut found: Vec<WorkstationRow> = take(&mut found, 0)?;
+            if found.len() > 1 { return Err(abort("collision")); }
+            let workstation = if let Some(workstation) = found.pop() {
                 if workstation.state != "active" { return Err(abort("revoked")); }
-                if workstation.workstation_ip != ip { return Err(abort("collision")); }
                 workstation
             } else {
-                if claim_value(&tx, "connect_ip_claim", &hash(&[&ip]), "workstation_id").await?.is_some() { return Err(abort("collision")); }
-                run(&tx, tx.query("CREATE $row SET workstation_id=$id, scope_id=$scope, installation_hash=$installation, workstation_ip=$ip, state='active', revision=1, last_seen_at=time::now() RETURN NONE; CREATE $claim SET workstation_ip=$ip, workstation_id=$id RETURN NONE;")
-                    .bind(("row", rid("connect_workstation", &new_workstation))).bind(("claim", rid("connect_ip_claim", &hash(&[&ip])))).bind(("id", new_workstation.clone())).bind(("scope", authority.scope_id.clone())).bind(("installation", installation.clone())).bind(("ip", ip.clone()))).await?;
+                run(&tx, tx.query("CREATE $row SET workstation_id=$id, scope_id=$scope, installation_hash=$installation, workstation_ip=$ip, state='active', revision=1, last_seen_at=time::now() RETURN NONE")
+                    .bind(("row", rid("connect_workstation", &new_workstation))).bind(("id", new_workstation.clone())).bind(("scope", authority.scope_id.clone())).bind(("installation", installation)).bind(("ip", ip.clone()))).await?;
                 workstation_in(&tx, &new_workstation).await?
             };
-            if claim_value(&tx, "connect_ip_claim", &hash(&[&ip]), "workstation_id").await?.as_deref() != Some(workstation.workstation_id.as_str()) { return Err(abort("collision")); }
-            let name_key = hash(&[&workstation.workstation_id, &name]);
-            let mut found = run(&tx, tx.query("SELECT workspace_id, workstation_id, scope_id, workspace_name, marker_hash, protected_default, state, revision FROM connect_workspace WHERE workstation_id=$workstation AND marker_hash=$marker LIMIT 2").bind(("workstation", workstation.workstation_id.clone())).bind(("marker", marker.clone()))).await?;
-            let found: Vec<WorkspaceRow> = take(&mut found, 0)?;
-            let workspace = if let Some(workspace) = found.into_iter().next() {
-                if workspace.state != "active" { return Err(abort("revoked")); }
-                if workspace.workspace_name != name { return Err(abort("collision")); }
-                workspace
-            } else {
-                if claim_value(&tx, "connect_name_claim", &name_key, "workspace_id").await?.is_some() { return Err(abort("collision")); }
-                run(&tx, tx.query("CREATE $row SET workspace_id=$id, workstation_id=$workstation, scope_id=$scope, workspace_name=$name, marker_hash=$marker, protected_default=$protected, state='active', revision=1 RETURN NONE; CREATE $claim SET workstation_id=$workstation, workspace_name=$name, workspace_id=$id RETURN NONE;")
-                    .bind(("row", rid("connect_workspace", &new_workspace))).bind(("claim", rid("connect_name_claim", &name_key))).bind(("id", new_workspace.clone())).bind(("workstation", workstation.workstation_id.clone())).bind(("scope", authority.scope_id.clone())).bind(("name", name.clone())).bind(("marker", marker.clone())).bind(("protected", name == "default"))).await?;
-                workspace_in(&tx, &new_workspace).await?
-            };
-            if workspace.scope_id != authority.scope_id || claim_value(&tx, "connect_name_claim", &name_key, "workspace_id").await?.as_deref() != Some(workspace.workspace_id.as_str()) { return Err(abort("collision")); }
-            let binding_key = hash(&[&canonical]);
+            let binding_key = hash(&[&workstation.workstation_id]);
             let (registration, created) = if let Some(id) = claim_value(&tx, "connect_binding", &binding_key, "registration_id").await? {
                 let row = registration_in(&tx, &id, &authority).await?;
-                if row.workstation_id != workstation.workstation_id || row.workspace_id != workspace.workspace_id || row.connect_id != canonical { return Err(abort("collision")); }
+                if row.workstation_id != workstation.workstation_id || row.contract_version != 2 { return Err(abort("collision")); }
                 (row, false)
             } else {
-                let mut history = run(&tx, tx.query("SELECT VALUE registration_id FROM connect_registration WHERE workspace_id=$workspace LIMIT 1").bind(("workspace", workspace.workspace_id.clone()))).await?;
+                let mut history = run(&tx, tx.query("SELECT VALUE registration_id FROM connect_registration WHERE workstation_id=$node AND contract_version=2 LIMIT 1").bind(("node", workstation.workstation_id.clone()))).await?;
                 if !take::<Vec<String>>(&mut history, 0)?.is_empty() { return Err(abort("revoked")); }
-                run(&tx, tx.query("CREATE $row SET registration_id=$id, scope_id=$scope, workstation_id=$workstation, workspace_id=$workspace, workstation_ip=$ip, workspace_name=$name, connect_id=$connect, state='active', revision=1, created_at=time::now() RETURN NONE; CREATE $binding SET connect_id=$connect, registration_id=$id RETURN NONE;")
-                    .bind(("row", rid("connect_registration", &new_registration))).bind(("binding", rid("connect_binding", &binding_key))).bind(("id", new_registration.clone())).bind(("scope", authority.scope_id.clone())).bind(("workstation", workstation.workstation_id.clone())).bind(("workspace", workspace.workspace_id.clone())).bind(("ip", ip.clone())).bind(("name", name.clone())).bind(("connect", canonical.clone()))).await?;
+                run(&tx, tx.query("CREATE $row SET registration_id=$id, scope_id=$scope, workstation_id=$node, workstation_ip=$ip, connect_id=$node, contract_version=2, state='active', revision=1, created_at=time::now() RETURN NONE; CREATE $binding SET connect_id=$node, registration_id=$id RETURN NONE;")
+                    .bind(("row", rid("connect_registration", &new_registration))).bind(("binding", rid("connect_binding", &binding_key))).bind(("id", new_registration.clone())).bind(("scope", authority.scope_id.clone())).bind(("node", workstation.workstation_id.clone())).bind(("ip", ip.clone()))).await?;
                 (registration_in(&tx, &new_registration, &authority).await?, true)
             };
-            run(&tx, tx.query("CREATE $request SET request_hash=$fingerprint, registration_id=$registration RETURN NONE; UPDATE $workstation SET last_seen_at=time::now(), observed_peer_ip=$peer ?? observed_peer_ip, observed_peer_at=IF $peer != NONE { time::now() } ELSE { observed_peer_at } RETURN NONE;")
-                .bind(("request", rid("connect_request", &request_key))).bind(("fingerprint", fingerprint)).bind(("registration", registration.registration_id.clone())).bind(("workstation", rid("connect_workstation", &workstation.workstation_id))).bind(("peer", peer))).await?;
+            // IP observations never alter identity or revoke a browser session.
+            run(&tx, tx.query("UPDATE $registration SET workstation_ip=$ip RETURN NONE; CREATE $request SET request_hash=$fingerprint, registration_id=$registration_id RETURN NONE; UPDATE $node SET workstation_ip=$ip, last_seen_at=time::now(), observed_peer_ip=$peer ?? observed_peer_ip, observed_peer_at=IF $peer != NONE { time::now() } ELSE { observed_peer_at } RETURN NONE;")
+                .bind(("registration", rid("connect_registration", &registration.registration_id))).bind(("registration_id", registration.registration_id.clone())).bind(("request", rid("connect_request", &request_key))).bind(("fingerprint", fingerprint)).bind(("node", rid("connect_workstation", &workstation.workstation_id))).bind(("ip", ip)).bind(("peer", peer))).await?;
+            let registration = registration_in(&tx, &registration.registration_id, &authority).await?;
             Ok((receipt(&registration, &deployment.deployment_id)?, created))
         }
     }).await?;
@@ -521,14 +492,10 @@ async fn active_context_in(
     .await?;
     let deployment = deployment_in(tx).await?;
     let workstation = workstation_in(tx, &registration.workstation_id).await?;
-    let workspace = workspace_in(tx, &registration.workspace_id).await?;
     if registration.state != "active"
+        || registration.contract_version != 2
         || workstation.state != "active"
-        || workspace.state != "active"
         || workstation.scope_id != authority.scope_id
-        || workspace.scope_id != authority.scope_id
-        || workstation.workstation_ip != registration.workstation_ip
-        || workspace.workspace_name != registration.workspace_name
         || context_revision < 1
         || scope_revision.is_some_and(|revision| revision != workstation.revision)
     {
@@ -608,10 +575,8 @@ pub struct RebindInput {
     pub request_id: String,
     pub registration_id: String,
     pub expected_revision: u64,
-    pub workstation_ip: IpAddr,
-    pub workspace_name: WorkspaceName,
+    pub workstation_ip: Option<IpAddr>,
     pub installation_marker: String,
-    pub workspace_marker: String,
 }
 
 impl RebindInput {
@@ -625,104 +590,34 @@ impl RebindInput {
             registration_id,
             expected_revision,
             workstation_ip: request.workstation_ip,
-            workspace_name: request.workspace_name,
             installation_marker: request.installation_marker,
-            workspace_marker: request.workspace_marker,
         }
     }
 }
 
-/// Explicit rebind preserves node/folder IDs, revokes former bindings/sessions,
-/// and returns a new active binding. Historical origin snapshots are untouched.
+/// IP is mutable metadata. Rebind validates the current authority before ensuring it.
 pub async fn rebind(
     repo: &Repository,
     authority: &RegistryAuthority,
     input: &RebindInput,
 ) -> Result<EnsureResult, RegistryError> {
-    if !valid_identity(&input.request_id)
-        || !valid_identity(&input.registration_id)
-        || input.expected_revision == 0
-        || !valid_marker(&input.installation_marker)
-        || !valid_marker(&input.workspace_marker)
-    {
-        return Err(RegistryError::InvalidInput);
-    }
-    let connect = ConnectId::new(input.workstation_ip, input.workspace_name.clone())
-        .map_err(|_| RegistryError::InvalidInput)?;
-    let ip = connect.ip().to_string();
-    let name = connect.workspace_name().as_str().to_owned();
-    if name.eq_ignore_ascii_case("default") && name != "default" {
-        return Err(RegistryError::InvalidInput);
-    }
-    let request_key = hash(&[&authority.scope_id, "rebind", &input.request_id]);
-    let fingerprint = hash(&[
+    registration_context(
+        repo,
+        authority,
         &input.registration_id,
-        &input.expected_revision.to_string(),
-        &connect.to_string(),
-        &input.installation_marker,
-        &input.workspace_marker,
-    ]);
-    let committed = run_tx(repo.db(), RetryPolicy::default(), |tx| {
-        let authority = authority.clone();
-        let input = input.clone();
-        let (ip, name, request_key, fingerprint) = (ip.clone(), name.clone(), request_key.clone(), fingerprint.clone());
-        async move {
-            guard_in(&tx).await?;
-            let deployment = deployment_in(&tx).await?;
-            if !deployment.admission_open { return Err(abort("paused")); }
-            super::configuration_reset::check_user_epoch_in(&tx, &authority.scope_id, &authority.access_epoch, None).await?;
-            let mut replay = run(&tx, tx.query("SELECT request_hash, registration_id FROM ONLY $request").bind(("request", rid("connect_request", &request_key)))).await?;
-            if let Some(replay) = take::<Option<RequestRow>>(&mut replay, 0)? {
-                if replay.request_hash != fingerprint { return Err(abort("collision")); }
-                return Ok((receipt(&registration_in(&tx, &replay.registration_id, &authority).await?, &deployment.deployment_id)?, false));
-            }
-            let registration = registration_in(&tx, &input.registration_id, &authority).await?;
-            if registration.revision as u64 != input.expected_revision { return Err(abort("revision")); }
-            let workstation = workstation_in(&tx, &registration.workstation_id).await?;
-            let workspace = workspace_in(&tx, &registration.workspace_id).await?;
-            if workstation.scope_id != authority.scope_id || workspace.scope_id != authority.scope_id
-                || workstation.installation_hash != hash(&[&input.installation_marker]) || workspace.marker_hash != hash(&[&input.workspace_marker]) {
-                return Err(abort("collision"));
-            }
-            if (workspace.protected_default || workspace.workspace_name == "default") && workspace.workspace_name != name { return Err(abort("protected")); }
-            if workspace.state != "active" || workstation.state != "active" { return Err(abort("revoked")); }
-            let ip_key = hash(&[&ip]);
-            if claim_value(&tx, "connect_ip_claim", &ip_key, "workstation_id").await?.is_some_and(|id| id != workstation.workstation_id) { return Err(abort("collision")); }
-            let name_key = hash(&[&workstation.workstation_id, &name]);
-            if claim_value(&tx, "connect_name_claim", &name_key, "workspace_id").await?.is_some_and(|id| id != workspace.workspace_id) { return Err(abort("collision")); }
-            let mut rows = run(&tx, tx.query("SELECT registration_id, scope_id, workstation_id, workspace_id, workstation_ip, workspace_name, connect_id, state, revision FROM connect_registration WHERE workstation_id=$workstation AND state='active' LIMIT 257").bind(("workstation", workstation.workstation_id.clone()))).await?;
-            let rows: Vec<RegistrationRow> = take(&mut rows, 0)?;
-            // A bounded operation must not silently leave a 257th child bound to the old IP.
-            if rows.len() > 256 || rows.is_empty() { return Err(abort("invalid")); }
-            run(&tx, tx.query("DELETE $old_ip WHERE workstation_id=$workstation RETURN NONE; UPSERT $new_ip SET workstation_ip=$ip, workstation_id=$workstation RETURN NONE; DELETE $old_name WHERE workspace_id=$workspace RETURN NONE; UPSERT $new_name SET workstation_id=$workstation, workspace_name=$name, workspace_id=$workspace RETURN NONE; UPDATE $node SET workstation_ip=$ip, revision+=1, last_seen_at=time::now() RETURN NONE; UPDATE $folder SET workspace_name=$name, revision+=1 RETURN NONE;")
-                .bind(("old_ip", rid("connect_ip_claim", &hash(&[&workstation.workstation_ip])))).bind(("new_ip", rid("connect_ip_claim", &ip_key)))
-                .bind(("old_name", rid("connect_name_claim", &hash(&[&workstation.workstation_id, &workspace.workspace_name])))).bind(("new_name", rid("connect_name_claim", &name_key)))
-                .bind(("node", rid("connect_workstation", &workstation.workstation_id))).bind(("folder", rid("connect_workspace", &workspace.workspace_id)))
-                .bind(("workstation", workstation.workstation_id.clone())).bind(("workspace", workspace.workspace_id.clone())).bind(("ip", ip.clone())).bind(("name", name.clone()))).await?;
-            let mut selected = None;
-            for old in rows {
-                let child = workspace_in(&tx, &old.workspace_id).await?;
-                let new_connect = ConnectId::new(ip.parse().map_err(|_| abort("invalid"))?, WorkspaceName::new(&child.workspace_name).map_err(|_| abort("invalid"))?).map_err(|_| abort("invalid"))?.to_string();
-                let binding_key = hash(&[&new_connect]);
-                if claim_value(&tx, "connect_binding", &binding_key, "registration_id").await?.is_some_and(|id| id != old.registration_id) { return Err(abort("collision")); }
-                let id = format!("binding-{}", hash(&[&request_key, &old.registration_id]));
-                run(&tx, tx.query("UPDATE $old SET state='revoked', revision+=1 RETURN NONE; UPDATE connect_session SET revoked=true WHERE registration_id=$old_id RETURN NONE; DELETE $old_binding WHERE registration_id=$old_id RETURN NONE; CREATE $row SET registration_id=$id, scope_id=$scope, workstation_id=$workstation, workspace_id=$workspace, workstation_ip=$ip, workspace_name=$name, connect_id=$connect, state='active', revision=1, created_at=time::now() RETURN NONE; CREATE $binding SET connect_id=$connect, registration_id=$id RETURN NONE;")
-                    .bind(("old", rid("connect_registration", &old.registration_id))).bind(("old_id", old.registration_id.clone())).bind(("old_binding", rid("connect_binding", &hash(&[&old.connect_id]))))
-                    .bind(("row", rid("connect_registration", &id))).bind(("binding", rid("connect_binding", &binding_key))).bind(("id", id.clone())).bind(("scope", authority.scope_id.clone()))
-                    .bind(("workstation", workstation.workstation_id.clone())).bind(("workspace", child.workspace_id.clone())).bind(("ip", ip.clone())).bind(("name", child.workspace_name)).bind(("connect", new_connect))).await?;
-                if child.workspace_id == workspace.workspace_id { selected = Some(id); }
-            }
-            let id = selected.ok_or_else(|| abort("missing"))?;
-            run(&tx, tx.query("CREATE $request SET request_hash=$fingerprint, registration_id=$registration RETURN NONE")
-                .bind(("request", rid("connect_request", &request_key))).bind(("fingerprint", fingerprint)).bind(("registration", id.clone()))).await?;
-            Ok((receipt(&registration_in(&tx, &id, &authority).await?, &deployment.deployment_id)?, true))
-        }
-    }).await?;
-    Ok(EnsureResult {
-        receipt: committed.value.0,
-        created: committed.value.1,
-        retries: committed.retries,
-    })
+        input.expected_revision,
+    )
+    .await?;
+    ensure(
+        repo,
+        authority,
+        &RegistrationEnsureRequest::new(
+            input.request_id.clone(),
+            input.workstation_ip,
+            input.installation_marker.clone(),
+        ),
+    )
+    .await
 }
 
 /// A retirement fence is not proof that accepted/associated jobs have drained.
@@ -907,18 +802,87 @@ pub async fn finish_retirement(
 pub(crate) async fn fence_causal_child_in(
     tx: &Tx,
     scope_id: &str,
-    workspace_id: &str,
+    workstation_id: &str,
 ) -> Result<(), TxError> {
-    if !valid_identity(scope_id) || !valid_identity(workspace_id) {
+    if !valid_identity(scope_id) || !valid_identity(workstation_id) {
         return Err(abort("invalid"));
     }
     super::configuration_reset::fence_new_work_in(tx).await?;
     guard_in(tx).await?;
-    let workspace = workspace_in(tx, workspace_id).await?;
-    if workspace.scope_id != scope_id || !matches!(workspace.state.as_str(), "active" | "retiring")
+    let workstation = workstation_in(tx, workstation_id).await?;
+    if workstation.scope_id != scope_id
+        || !matches!(workstation.state.as_str(), "active" | "retiring")
     {
         return Err(abort("revoked"));
     }
+    Ok(())
+}
+
+/// Atomic forward migration, checkpointed with the schema version by operator bootstrap.
+/// Existing origins and registration-to-workstation mappings remain immutable.
+pub(crate) async fn migrate_workstation_contract_in(tx: &Tx) -> Result<(), TxError> {
+    guard_in(tx).await?;
+    let mut version = run(
+        tx,
+        tx.query("SELECT VALUE contract_version FROM ONLY connect_control:configuration"),
+    )
+    .await?;
+    if take::<Option<i64>>(&mut version, 0)? == Some(2) {
+        return Ok(());
+    }
+    let epoch = format!("configuration-{}", crate::store::new_id());
+    run(tx, tx.query("UPSERT connect_control:configuration SET configuration_epoch=configuration_epoch ?? $epoch, admission_open=admission_open ?? true RETURN NONE").bind(("epoch",epoch))).await?;
+    let mut rows = run(tx, tx.query("SELECT workstation_id, scope_id, installation_hash, workstation_ip ?? '' AS workstation_ip, state, revision FROM connect_workstation WHERE state='active' LIMIT 10001")).await?;
+    let rows: Vec<WorkstationRow> = take(&mut rows, 0)?;
+    if rows.len() > 10000 {
+        return Err(abort("invalid"));
+    }
+    // Registration revocation is independent of workstation lifecycle. Retain an
+    // inactive v2 row when no old binding can authorize new admission, while
+    // leaving accepted causal jobs under the unchanged workstation fence.
+    let mut migrations = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut states = run(tx, tx.query("SELECT VALUE state FROM connect_registration WHERE scope_id=$scope AND workstation_id=$node AND (contract_version ?? 1)<2 GROUP BY state LIMIT 5")
+            .bind(("scope",row.scope_id.clone())).bind(("node",row.workstation_id.clone()))).await?;
+        let states: Vec<String> = take(&mut states, 0)?;
+        let state = if states.iter().any(|state| state == "active") {
+            "active"
+        } else if states.iter().any(|state| state == "retiring") {
+            "retiring"
+        } else if !states.is_empty() && states.iter().all(|state| state == "retired") {
+            "retired"
+        } else {
+            "revoked"
+        };
+        migrations.push((row, state));
+    }
+    run(tx, tx.query("UPDATE connect_registration SET state='legacy_read_only', revision+=1 WHERE state='active' AND (contract_version ?? 1) < 2 RETURN NONE; UPDATE connect_session SET revoked=true RETURN NONE; DELETE connect_binding RETURN NONE;")).await?;
+    for (row, state) in migrations {
+        let registration_id = format!("workstation-{}", row.workstation_id);
+        let binding_key = hash(&[&row.workstation_id]);
+        let ip = if row.workstation_ip.is_empty() {
+            None
+        } else {
+            Some(row.workstation_ip)
+        };
+        run(tx, tx.query("CREATE $registration SET registration_id=$id, scope_id=$scope, workstation_id=$node, workstation_ip=$ip, connect_id=$node, contract_version=2, state=$state, revision=1, created_at=time::now() RETURN NONE")
+            .bind(("registration",rid("connect_registration",&registration_id))).bind(("id",registration_id.clone())).bind(("scope",row.scope_id)).bind(("node",row.workstation_id.clone())).bind(("ip",ip)).bind(("state",state))).await?;
+        if state == "active" {
+            run(
+                tx,
+                tx.query("CREATE $binding SET connect_id=$node,registration_id=$id RETURN NONE")
+                    .bind(("binding", rid("connect_binding", &binding_key)))
+                    .bind(("node", row.workstation_id))
+                    .bind(("id", registration_id)),
+            )
+            .await?;
+        }
+    }
+    run(
+        tx,
+        tx.query("UPDATE connect_control:configuration SET contract_version=2 RETURN NONE"),
+    )
+    .await?;
     Ok(())
 }
 

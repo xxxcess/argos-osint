@@ -165,59 +165,51 @@ fn saved_profile_switch_isolates_backend_data_and_keeps_explicit_workspace() {
 }
 
 #[test]
-fn actual_profile_controls_confirm_dirty_switch_before_discarding_drafts() {
+fn retained_profile_switch_confirms_dirty_drafts_and_native_setup_has_no_profile_crud() {
     let mut state = fixture();
     state.configuration.draft_revision = 1;
     state
         .configuration
         .account_api_key
         .replace_text("synthetic-unsaved-key");
+    state.profile_action(ProfileAction::Select("b".repeat(64)));
+    assert!(state.connection_profiles.confirmation.is_some());
+    assert_eq!(state.connection.origin.text, "http://127.0.0.1:8080/");
+    assert_eq!(
+        state.configuration.account_api_key.text, "synthetic-unsaved-key",
+        "review must preserve drafts until explicit confirmation"
+    );
     let mut runtime = Runtime::new(
         state,
         app::view,
-        (1280.0, 800.0),
+        (1180.0, 780.0),
         Env {
             system_dark: true,
             scale: 1.0,
         },
     );
     runtime.frame(0.0);
-    for (index, key) in [
-        format!("connection-profile-{}", "b".repeat(64)),
-        "connection-profile-switch-confirm".into(),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        // A drawn control can be outside its clipped scroll viewport. Reveal
-        // each real control before sending pointer input to its drawn centre.
-        runtime.update(|_, tx| tx.scroll_into_view(&key));
-        runtime.frame((index * 2 + 1) as f64 / 60.0);
-        let (x, y) = runtime
-            .find(&key)
-            .expect("shared production profile control");
-        let ([left, top, width, height], _) = runtime
-            .presented("workstation-body")
-            .expect("actual Workstation scroll viewport");
-        assert!(
-            x >= left && x <= left + width && y >= top && y <= top + height,
-            "{key} must be visible before clicking; centre=({x},{y}), viewport=({left},{top},{width},{height})"
-        );
-        runtime.pointer_down(x, y);
-        runtime.pointer_up(x, y);
-        runtime.frame((index * 2 + 2) as f64 / 60.0);
-        if index == 0 {
-            assert!(runtime.state.connection_profiles.confirmation.is_some());
-            assert_eq!(
-                runtime.state.connection.origin.text,
-                "http://127.0.0.1:8080/"
-            );
-            assert!(!runtime
-                .accessibility_json()
-                .to_string()
-                .contains("synthetic-unsaved-key"));
-        }
-    }
+    assert!(runtime
+        .find(&format!("connection-profile-{}", "b".repeat(64)))
+        .is_none());
+    assert!(runtime.find("connection-profile-switch-confirm").is_none());
+    assert!(!runtime
+        .accessibility_json()
+        .to_string()
+        .contains("synthetic-unsaved-key"));
+    let (x, y) = runtime
+        .find("connection-editor")
+        .expect("allowlisted Setup Gateway action");
+    runtime.pointer_down(x, y);
+    runtime.pointer_up(x, y);
+    runtime.frame(1.0 / 60.0);
+    assert!(runtime.state.setup_gateway);
+    assert!(
+        !runtime.state.configuration.account_api_key.text.is_empty(),
+        "opening URL setup alone cannot discard an unrelated draft"
+    );
+    runtime.update(|state, _| state.confirm_profile_switch());
+    runtime.frame(2.0 / 60.0);
     assert_eq!(
         runtime.state.connection.origin.text,
         "https://gateway.example.test/"

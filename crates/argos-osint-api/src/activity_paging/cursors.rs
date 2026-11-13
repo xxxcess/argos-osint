@@ -48,7 +48,6 @@ impl Snapshot {
         self.binding.len()
             + self.scope.deployment_id.len()
             + self.scope.workstation_id.len()
-            + self.scope.workspace_id.as_ref().map_or(0, String::len)
             + self.workspace_filter.as_ref().map_or(0, String::len)
             + self.filters.app.len()
             + self.filters.operation.len()
@@ -162,7 +161,7 @@ impl JobsCursors {
 mod tests {
     use super::*;
     fn snapshot() -> Snapshot {
-        Snapshot::new("fixture-proof".into(),serde_json::from_value(serde_json::json!({"deployment_id":"fixture-deployment","workstation_id":"fixture-node","scope_revision":1,"workspace_id":null})).expect("scope"),None,Filters::default(),CreationWindow::at(chrono::Utc::now()),50)
+        Snapshot::new("fixture-proof".into(),serde_json::from_value(serde_json::json!({"deployment_id":"fixture-deployment","workstation_id":"fixture-node","scope_revision":1})).expect("scope"),None,Filters::default(),CreationWindow::at(chrono::Utc::now()),50)
     }
     #[tokio::test]
     async fn exact_expiry_is_anchored_to_first_window_and_proof_mismatch_never_widens() {

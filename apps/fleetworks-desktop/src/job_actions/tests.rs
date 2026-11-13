@@ -35,9 +35,8 @@ fn fixture() -> State {
     let registration = RegistrationReceipt::new(
         "synthetic-deployment".into(),
         "synthetic-node".into(),
-        "synthetic-workspace".into(),
         "synthetic-registration".into(),
-        "192.0.2.42:default".parse().expect("synthetic Connect ID"),
+        Some("192.0.2.42".parse().expect("synthetic IP")),
         1,
     );
     let context = RegisteredContext::new(
@@ -153,38 +152,41 @@ fn queued_state_does_not_grant_an_action_without_server_availability_and_permiss
 }
 
 #[test]
-fn real_cancel_controls_require_confirmation_and_keep_status_read_authoritative() {
+fn legacy_cancel_handler_requires_confirmation_while_native_jobs_remains_read_only() {
+    let mut state = fixture();
+    state.preview_job_action(JobAction::Cancel);
+    assert!(state.job_actions.confirmation.is_some());
+    assert!(!state
+        .intents
+        .iter()
+        .any(|intent| matches!(intent, Intent::PostJobAction { .. })));
+    state.confirm_job_action();
+    assert!(matches!(state.job_actions.response, Load::Ready(_)));
+    assert!(
+        matches!(&state.backend.detail,Load::Ready(detail) if detail.job.state=="queued"),
+        "a receipt does not optimistically overwrite the authoritative job row"
+    );
     let mut runtime = Runtime::new(
-        fixture(),
+        state,
         app::view,
-        (1280.0, 2400.0),
+        (1180.0, 780.0),
         Env {
             system_dark: true,
             scale: 1.0,
         },
     );
     runtime.frame(0.0);
-    for (index, key) in ["job-cancel-preview", "job-action-confirm"]
-        .into_iter()
-        .enumerate()
-    {
-        let (x, y) = runtime.find(key).expect("shared production job control");
-        runtime.pointer_down(x, y);
-        runtime.pointer_up(x, y);
-        runtime.frame((index + 1) as f64 / 60.0);
-        if index == 0 {
-            assert!(!runtime
-                .state
-                .intents
-                .iter()
-                .any(|intent| matches!(intent, Intent::PostJobAction { .. })));
-        }
+    for key in [
+        "job-cancel-preview",
+        "job-retry-preview",
+        "job-action-confirm",
+    ] {
+        assert!(
+            runtime.find(key).is_none(),
+            "retired native job action {key} is outside the allowlist"
+        );
     }
-    assert!(matches!(runtime.state.job_actions.response, Load::Ready(_)));
-    assert!(
-        matches!(&runtime.state.backend.detail, Load::Ready(detail) if detail.job.state == "queued"),
-        "a receipt does not optimistically overwrite the separately observed job row"
-    );
+    assert!(runtime.accessibility_json().to_string().contains("queued"));
 }
 
 #[test]

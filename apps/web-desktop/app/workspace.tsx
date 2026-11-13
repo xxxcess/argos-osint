@@ -105,10 +105,7 @@ export function WebWorkspace({
       style={{ display: "flex", flexDirection: "column" }}
     >
       <View style={styles.bar}>
-        <Text style={styles.context}>
-          Workstation: {connection.workstation_ip} · Workspace:{" "}
-          {connection.workspace_name}
-        </Text>
+        <Text style={styles.context}>Workstation: {connection.connect_id}</Text>
         <Button
           onPress={() => window.location.assign(`${basePath}/connect`)}
           label="Change registered context"

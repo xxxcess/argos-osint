@@ -79,3 +79,16 @@ DEFINE INDEX IF NOT EXISTS connect_session_expiry ON connect_session FIELDS expi
 DEFINE TABLE IF NOT EXISTS connect_rate_window SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS started_at ON connect_rate_window TYPE datetime;
 DEFINE FIELD IF NOT EXISTS attempts ON connect_rate_window TYPE int;
+
+-- Version-two migration deliberately overwrites old required folder/IP fields.
+-- Legacy records retain their values; new registrations have no folder identity.
+DEFINE FIELD OVERWRITE contract_version ON connect_control TYPE option<int>;
+DEFINE FIELD OVERWRITE workstation_ip ON connect_workstation TYPE option<string>;
+DEFINE FIELD OVERWRITE workspace_id ON connect_registration TYPE option<string>;
+DEFINE FIELD OVERWRITE workspace_name ON connect_registration TYPE option<string>;
+DEFINE FIELD OVERWRITE workstation_ip ON connect_registration TYPE option<string>;
+DEFINE FIELD OVERWRITE contract_version ON connect_registration TYPE option<int>
+    ASSERT $this.state != 'active' OR $value = 2;
+DEFINE FIELD OVERWRITE connect_id ON connect_registration TYPE string
+    ASSERT $this.state != 'active' OR $value = $this.workstation_id;
+DEFINE INDEX IF NOT EXISTS connect_registration_workstation ON connect_registration FIELDS workstation_id, contract_version;

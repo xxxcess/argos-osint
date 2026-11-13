@@ -29,7 +29,6 @@ use axum::Extension;
 use axum::Json;
 use axum::Router;
 use fleetworks_contracts::connect::RegistrationEnsureRequest;
-use fleetworks_contracts::connect::WorkspaceName;
 use fleetworks_contracts::context::CredentialPurpose;
 use fleetworks_contracts::context::MutationContext;
 use fleetworks_contracts::context::Permission;
@@ -173,10 +172,8 @@ async fn captured_configuration_stays_locked_through_acceptance_then_save_fences
         &authority,
         &RegistrationEnsureRequest::new(
             "ensure-admission-guard".into(),
-            "192.0.2.93".parse().expect("synthetic IP"),
-            WorkspaceName::new("guard-review").expect("child name"),
+            Some("192.0.2.93".parse().expect("synthetic IP")),
             "synthetic-admission-install".into(),
-            "synthetic-admission-child".into(),
         ),
     )
     .await
@@ -192,6 +189,7 @@ async fn captured_configuration_stays_locked_through_acceptance_then_save_fences
         CredentialPurpose::Native,
         [
             Permission::ReadBackend,
+            Permission::ReadWorkstationActivity,
             Permission::RegisterWorkstation,
             Permission::SubmitInteractive,
             Permission::ManageConfiguration,
@@ -390,4 +388,99 @@ async fn captured_configuration_stays_locked_through_acceptance_then_save_fences
         [accepted.call_id]
     );
     drop(replay);
+
+    // Exercise the actual collection/delete handlers with the native typed body,
+    // using this fixture's existing isolated configuration environment.
+    let cycle_state = ApiState {
+        repo: repo.clone(),
+        instance_id: "cycle-config-fixture".into(),
+        port: 8080,
+        origins: Arc::new(Vec::new()),
+    };
+    job_dispatch::enable_pool(repo.db(), job_dispatch::ATLAS_POOL)
+        .await
+        .expect("cycle consumer");
+    let current = MutationContext::new(context.registered().expect("registered origin"))
+        .with_configuration_revision(saved_revision);
+    let collect = fleetworks_contracts::AtlasCycleRequest::new("cycle-config-fixture".into())
+        .expect("cycle request")
+        .with_context(current.clone());
+    let (_, Json(cycle)) = crate::operations::submit_atlas_cycle(
+        State(cycle_state.clone()),
+        Extension(context.clone()),
+        Json(collect),
+    )
+    .await
+    .map_err(|ApiError(status, message)| (status, message))
+    .expect("actual collection admission");
+    let delete = fleetworks_contracts::cycle_history::DeleteCycleRequest::new(
+        "cycle-delete-config-fixture".into(),
+        current,
+        cycle.job_id.clone(),
+        1,
+    );
+    let mut missing = delete.clone();
+    missing.context.expected_configuration_revision = None;
+    assert!(matches!(
+        crate::cycle_history::delete(
+            State(cycle_state.clone()),
+            Extension(context.clone()),
+            Json(missing),
+        )
+        .await,
+        Err(ApiError(StatusCode::PRECONDITION_REQUIRED, _))
+    ));
+    let mut stale_delete = delete.clone();
+    stale_delete.context.expected_configuration_revision = Some(initial_revision);
+    assert!(matches!(
+        crate::cycle_history::delete(
+            State(cycle_state.clone()),
+            Extension(context.clone()),
+            Json(stale_delete),
+        )
+        .await,
+        Err(ApiError(StatusCode::CONFLICT, _))
+    ));
+    let Json(deleted) = crate::cycle_history::delete(
+        State(cycle_state.clone()),
+        Extension(context.clone()),
+        Json(delete.clone()),
+    )
+    .await
+    .map_err(|ApiError(status, message)| (status, message))
+    .expect("native revision accepted");
+    assert!(deleted.hidden);
+    assert_eq!(deleted.job_id, cycle.job_id);
+    let role_save = serde_json::from_value::<configuration::SetRole>(json!({"expected_revision":saved_revision,"role":"brain_summary","primary":null,"fallbacks":[]})).expect("later config save");
+    let Json(later) = configuration::save_role(
+        State(cycle_state.clone()),
+        Some(Extension(context.clone())),
+        Json(role_save),
+    )
+    .await
+    .map_err(|ApiError(status, message)| (status, message))
+    .expect("later configuration saved");
+    let later_revision = later["configuration_revision"]
+        .as_u64()
+        .expect("later revision");
+    assert!(later_revision > saved_revision);
+    let Json(replayed_delete) = crate::cycle_history::delete(
+        State(cycle_state.clone()),
+        Extension(context.clone()),
+        Json(delete.clone()),
+    )
+    .await
+    .map_err(|ApiError(status, message)| (status, message))
+    .expect("exact accepted deletion replay after config change");
+    assert_eq!(replayed_delete, deleted);
+    let mut altered = delete;
+    altered.context.expected_configuration_revision = Some(later_revision);
+    assert!(
+        matches!(
+            crate::cycle_history::delete(State(cycle_state), Extension(context), Json(altered),)
+                .await,
+            Err(ApiError(StatusCode::CONFLICT, _))
+        ),
+        "an accepted nonce cannot acquire a refreshed request body"
+    );
 }

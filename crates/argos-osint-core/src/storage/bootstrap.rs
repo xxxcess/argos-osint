@@ -14,9 +14,9 @@
 //! definitions still roll back. As in the legacy store (`user_version`), a
 //! database written by a newer build is refused and the transaction rolls
 //! back. Every definition is `IF NOT EXISTS`, so a re-run (or a concurrent
-//! bootstrap, which retries on conflict) is a no-op. There is no in-place
-//! migration ladder: the SurrealDB database starts fresh (wipe, no import;
-//! acceptance.md P4).
+//! bootstrap, which retries on conflict) is a no-op. Version nine adds the
+//! explicit atomic workstation-contract migration after definitions and before
+//! the version checkpoint; it preserves domain records and historical origins.
 
 use surrealdb::engine::any::Any;
 use surrealdb::Surreal;
@@ -32,7 +32,9 @@ use super::tx::{run_tx, RetryPolicy, TxError};
 /// durable dispatch outbox for opt-in worker pools. v6 adds leased model account admission.
 /// v8 includes native registry/origin/reset fences and durable actor rebuild state;
 /// runtime readers reject incomplete earlier metadata until explicit bootstrap.
-pub const SCHEMA_VERSION: i64 = 8;
+/// v9 migrates active workspace registrations to workstation-only identity atomically,
+/// preserving immutable origins and fencing incompatible writers.
+pub const SCHEMA_VERSION: i64 = 9;
 
 /// Module schemas in apply order: counters before the outbox; the graph
 /// before lifecycle (which indexes `brain_graph_node`); Atlas before its
@@ -40,7 +42,7 @@ pub const SCHEMA_VERSION: i64 = 8;
 /// before refresh. The event logs (`argos_event`, `investigation_event`)
 /// stand alone; telemetry writes use `profile_view`'s tables, with
 /// `telemetry_meta` after them.
-pub fn schemas() -> [(&'static str, &'static str); 55] {
+pub fn schemas() -> [(&'static str, &'static str); 56] {
     [
         ("counters", super::counters::SCHEMA),
         ("outbox", super::outbox::SCHEMA),
@@ -102,6 +104,7 @@ pub fn schemas() -> [(&'static str, &'static str); 55] {
         ("brief_stages", super::brief_stages::SCHEMA),
         ("meta", META_SCHEMA),
         ("connect_registry", super::connect_registry::SCHEMA),
+        ("cycle_history", super::cycle_history::SCHEMA),
         ("configuration_reset", super::configuration_reset::SCHEMA),
         ("job_context", super::job_context::SCHEMA),
         ("job_actions", super::job_actions::SCHEMA),
@@ -218,6 +221,7 @@ pub async fn ensure_schema(db: &Surreal<Any>) -> Result<Bootstrap, TxError> {
                     "database schema version {previous} is newer than this Argos build"
                 )));
             }
+            super::connect_registry::migrate_workstation_contract_in(&tx).await?;
             run(
                 &tx,
                 tx.query(

@@ -112,8 +112,8 @@ for (const width of [1440, 768, 390, 320]) {
       focus: getComputedStyle(document.activeElement!).outlineColor,
       selection: getComputedStyle(document.body, "::selection").backgroundColor,
     }));
-    expect(interactionColors.focus).toBe("rgb(127, 224, 180)");
-    expect(interactionColors.selection).toBe("rgb(46, 56, 80)");
+    expect(interactionColors.focus).toBe("rgb(216, 189, 140)");
+    expect(interactionColors.selection).toBe("rgb(50, 44, 34)");
     expect(interactionColors.selection).not.toBe(interactionColors.focus);
     await expect(page).toHaveScreenshot(`bulletin-focus-${width}.png`, {
       fullPage: false,

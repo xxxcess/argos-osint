@@ -18,15 +18,17 @@ Install the pinned Rust **1.95.0** toolchain and Xcode or its Command Line Tools
 python3 scripts/fleetworks_candidate.py build-native --target host --profile debug
 ```
 
+[![Provision and connect](docs/diagrams/native-connections.svg)](docs/diagrams/native-connections.html)
+
 The helper prints the app and manifest paths. Add `--open` to launch it. The app opens offline setup and connects to an existing gateway; backend and Intel Web startup are separate operator actions.
 
 1. Start the backend with the [Docker Compose quick start below](#backend-for-the-native-app). Backend deployment requires Docker and Docker Compose **v2.20 or newer**.
-2. In **Workstation**, add a named connection with the gateway origin and its private Native-purpose token file. **Test** checks compatibility; **Connect** establishes the connection. Saved profiles keep protected file references, and reconnect is explicit.
-3. Select a current LAN/VPN interface and an owned workspace to register request context. Activity and mutations use that registration and the credential's permissions.
+2. Run the provisioning command printed by `deploy/native_review.py` using the app executable's `--provision-gateway-credential --api-origin <origin> --api-token-file <private-file>` mode. It stores an exact-origin protected file reference, never token bytes, and exits without network or GUI startup.
+3. Open **Setup Gateway**, enter that URL and continue through connectivity checking. The gateway registers the protected installation and returns its stable opaque workstation Connect ID. Activity and mutations use that context and explicit permissions.
 
-Native workspaces are protected children of `~/.fleetworks`, with a `default` child created on first use. Selecting a child changes request origin and activity scope; actors, model defaults and provider accounts remain shared backend resources. See [workspace ownership](docs/wiki/code/native-workspaces.md).
+Normal startup initializes protected settings in `~/.fleetworks` without creating a default child. IP is optional metadata; folders do not select identity or partition shared actors, model defaults and provider accounts. Existing folders and historical receipts remain preserved. See [workstation identity](docs/wiki/code/native-workspaces.md).
 
-When the gateway advertises an Intel Web URL, **Open Intel Web** opens its Connect form and copies the registered Connect ID. The browser uses its own server credential and session; the Connect ID alone is not a credential. See [connection and browser handoff](docs/wiki/code/native-connections.md#browser-handoff).
+Enter the selectable Connect ID from **Workstation Status** into Intel Web's existing Connect form. The browser uses its separately provisioned WebRelay credential and session; the Connect ID alone grants no authority. See [connection and browser handoff](docs/wiki/code/native-connections.md#browser-handoff).
 
 ### Backend for the native app
 
@@ -52,14 +54,7 @@ docker compose --env-file compose.env \
   up --no-build --pull never --detach --wait
 ```
 
-In the native app's **Workstation** connection editor, use:
-
-| Field | Value |
-| --- | --- |
-| Gateway origin | `http://127.0.0.1:18091` |
-| Token file | `.agent-scratch/native-review/native-local/secrets/native-token` under this checkout |
-
-Choose **Test**, then **Connect**. This recipe runs the backend independently from the app. Atlas collection uses the [additional overlay below](#collect-articles-with-atlas); Intel Web is an optional separate deployment.
+Provision the native credential binding for `http://127.0.0.1:18091` using the existing private `.agent-scratch/native-review/native-local/secrets/native-token` file and the command printed by initialization. Then enter the URL in **Setup Gateway**. This backend runs independently of the app. Atlas collection uses the [additional overlay below](#collect-articles-with-atlas); Intel Web is an optional separate deployment.
 
 Rerun the start command to apply edited Compose settings. To inspect or stop the backend, use the same command prefix with `ps`, `logs --follow` or `down` in place of `up --no-build --pull never --detach --wait`. Stop preserves backend data. For concurrent deployments, omit `--root-env`, choose a different name and API port, and use that deployment's matching env file and project. [Full deployment guide](deploy/README.md#isolated-native-backend-review)
 
@@ -67,17 +62,17 @@ Venture, the six terminal clients and the legacy `argos` executable are retired.
 
 ### Collect articles with Atlas
 
-Provision provider credentials, the Atlas worker, private NLP and a Rust-BERT model for the container architecture. Enable the separately configured [Atlas Compose overlay](deploy/atlas-dispatch.md). Submit through the native Atlas page after connecting and registering; submission requires an advertised durable worker and permission. A job receipt confirms acceptance, while Jobs reports progress and completion. The [Atlas deployment guide](deploy/atlas-dispatch.md) lists the files and settings.
+Provision provider credentials, the Atlas worker, private NLP and a Rust-BERT model for the container architecture. Enable the separately configured [Atlas Compose overlay](deploy/atlas-dispatch.md). Submit through native News Cycles after connecting and registering; submission requires an advertised durable worker and permission. A job receipt confirms acceptance, while Jobs reports progress and completion. The [Atlas deployment guide](deploy/atlas-dispatch.md) lists the files and settings.
 
 ## Applications and services
 
 | Area | What you can do |
 | --- | --- |
-| Native Atlas and Brain | Submit collection cycles, browse articles, discover actors and read dossiers through the gateway. |
-| Native Tools, Models and Profile | Submit permitted tools, inspect results, manage shared model defaults and provider configuration with confirmed revisions. |
-| Workstation | Manage saved gateway connections, select a LAN/VPN address and inspect backend readiness. |
-| Workspaces | Create, select and attach owned local children; track registration and guarded retirement/removal. |
-| Jobs & Logs | Filter and page registered activity, inspect safe operational summaries and export bounded logs. Retry/cancel controls require explicit permission and a supported job state. |
+| DB Seed & Train | Trigger configured actor seed, search-index build and Natural candidate training; acceptance is distinct from completion. |
+| News Cycles and Brain Search | Queue cycles, inspect workstation cycle history, discover actors and read dossiers. |
+| OSINT Tools and Model Assignments | Read service/provider cards, provision keys and edit supported model routing with confirmed revisions. |
+| Workstation Status and Setup Gateway | Inspect identity/readiness/API-host resources and complete URL-only setup with protected provisioned credentials. |
+| Jobs & Logs | Read the bounded workstation queue and selected-job safe operational summaries. |
 | Intel Web | Browse the Bulletin, Focus Briefs, Related articles, actor dossiers and topology behind the Connect/session gate. |
 
 [![Fleetworks service boundaries](docs/diagrams/fleetworks.svg)](docs/diagrams/fleetworks.html)

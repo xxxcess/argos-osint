@@ -4,13 +4,15 @@
 
 Follow these routes from setup to implementation.
 
+[![Native setup and workstation browser connection](../diagrams/native-connections.svg)](../diagrams/native-connections.html)
+
 ## What this repository is
 
 Fleetworks collects public-source intelligence and prepares cited Focus Briefs. The native macOS app and Intel Web connect to an independently deployed authenticated Linux backend with SurrealDB, private services and workers.
 
 Start with the [README](../../README.md), [concepts](concepts/index.md), and [glossary](concepts/glossary.md). Follow the [code map](code/index.md) and [diagrams](../diagrams.md) for implementation.
 
-## Run a workspace
+## Run the client and backend
 
 Install the pinned Rust 1.95.0 toolchain and Xcode tools for native app packaging. Docker and Compose v2.20+ operate the separate backend. Start at the [quick start](../../README.md#quick-start), then follow [native connections](code/native-connections.md) and [direct deployment](../../deploy/README.md). The app never launches services.
 
@@ -28,7 +30,7 @@ Clients call the gateway API, which routes retained operations to private servic
 | Atlas | Durable collection and six-domain admission | [Usage](concepts/usage.md#atlas) · [Classification](concepts/atlas-classification-and-related-articles.md) · [Taxonomy](concepts/strategic-domains-taxonomy.md) · [Pipeline](../diagrams/atlas-pipeline.html) |
 | Brain | Sourced memory, associations, topology, and the seeded actor catalog | [Usage](concepts/usage.md#brain) · [Topology](concepts/topology-mapper.md) · [Actor catalog](code/actor-catalog.md) |
 | Jobs and Logs | Durable work and operational events | [Usage](concepts/usage.md#jobs-and-logs) · [Lifecycle](../diagrams/jobs-lifecycle.html) |
-| Tools, Models, and Profile | Catalog calls, role defaults, workspace health, and portable configuration | [Usage](concepts/usage.md#profile) · [Providers](concepts/providers.md) · [Model roles](../diagrams/model-roles.html) |
+| Tools and Model Assignments | Service cards, inline credential provisioning and supported shared role defaults | [Usage](concepts/usage.md#profile) · [Providers](concepts/providers.md) · [Model roles](../diagrams/model-roles.html) |
 
 [Interfaces](code/interfaces.md) ties supported native, browser and service entry points to their verification.
 

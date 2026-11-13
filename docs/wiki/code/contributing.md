@@ -49,7 +49,7 @@ python3 scripts/agent_cargo.py test --locked -p fleetworks-desktop -p fleetworks
 python3 scripts/fleetworks_candidate.py build-native --agent --target host --profile debug
 ```
 
-Use [selected native verification](native-verification.md) for affected Runtime/PNG/tree/script evidence. The helper prints the `.app` and manifest paths; add `--open` only when an actual GUI launch is intended. Native build/fixture commands do not provision a backend. Installed-app, minimum-OS and platform validation stay separate from fixture generation.
+Use [selected native verification](native-verification.md) for affected Runtime/PNG/tree/script evidence. The helper streams Cargo progress/diagnostics and stage markers live on stderr, then packages/validates and prints the `.app` path and result metadata. Only `--open` opens the validated app; an already running app is preserved. Native build/fixture commands do not provision a backend. Installed-app, minimum-OS and platform validation stay separate from fixture generation.
 
 **2. Runtime image loop (service changes).** Service roles run from the `runtime` image, so a host build alone does not change them. Provision the independent local deployment with `deploy/native_review.py init --root-env`, build the `backend` Bake group, then explicitly start its preloaded images with `compose.native-review.yml --env-file compose.env`. Edit the private, Git-ignored root env file for local settings; isolated concurrent reviews omit `--root-env` and keep their per-review env paths. Reuse the exact env file/project for `ps`, `logs` and `down`. BuildKit retains dependencies; rebuilding an image does not recreate a running consumer. For a server-feature check without containers, use the `server,nlp,classifier` graph in [Targeted local Rust builds](#targeted-local-rust-builds-and-tests-fast-iteration).
 
@@ -85,6 +85,12 @@ Stable iteration order: static checks and unit tests (loop 1), then the affected
 ### Verification ownership and host resources
 
 One integration/build owner uses a stable feature graph and resource-based concurrency; see [execution policy](agent-workflow.md#coordinate-work-that-can-actually-run-in-parallel). Freeze edits before builds and reuse unaffected evidence. The service-host development dependency activates core fixtures for workspace tests; changing activating targets may rebuild dependencies.
+
+### Build artifacts and paths
+
+[![Build outputs, QA evidence and persistent data](../../diagrams/build-artifacts.svg)](../../diagrams/build-artifacts.html)
+
+Storage/compatibility test binaries may link embedded SurrealDB/RocksDB: they are QA harnesses, not extra deployed services. The native API client stays engine-free. See the [build artifact map](build-artifacts.md) for tools, target/profile paths, packages, web/Docker outputs and persistent-data boundaries. Preserve active graphs and user outputs.
 
 ### Build cache hygiene
 

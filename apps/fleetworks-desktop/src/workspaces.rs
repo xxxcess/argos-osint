@@ -4,7 +4,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use fleetworks_contracts::connect::RegistrationReceipt;
 use fleetworks_workspace::native::BackendBinding;
 use fleetworks_workspace::native::NativeContainer;
 use fleetworks_workspace::native::NativeWorkspace;
@@ -298,12 +297,19 @@ impl GatewayEffects {
         let ui = self.ui.get()?.clone();
         let task = self.runtime.spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
-                let container = Arc::new(NativeContainer::open(&platform::home()?)?);
-                let selected = container.select(selection.as_deref())?;
+                anyhow::ensure!(selection.is_none(), "workspace selection is retired");
+                let container = Arc::new(NativeContainer::open_settings(&platform::home()?)?);
                 Ok(WorkspaceUpdate {
-                    snapshot: snapshot(&container)?,
+                    snapshot: WorkspaceSnapshot {
+                        root: container.root().to_path_buf(),
+                        installation_marker: container.installation_marker().to_owned(),
+                        rows: Vec::new(),
+                        operations: Vec::new(),
+                        registration_attempts: Vec::new(),
+                        rebind_attempts: Vec::new(),
+                    },
                     container,
-                    selected: Some(selected.into()),
+                    selected: None,
                     message: None,
                 })
             })
@@ -392,20 +398,4 @@ fn run_command(
         selected,
         message,
     })
-}
-
-/// Persist only a gateway-validated active registration on the blocking worker.
-pub(crate) fn persist_registration(
-    container: &NativeContainer,
-    name: &str,
-    marker: &str,
-    receipt: &RegistrationReceipt,
-) -> Result<()> {
-    let workspace = container.select(Some(name.as_ref()))?;
-    anyhow::ensure!(
-        workspace.marker() == marker,
-        "Registration workspace identity changed; reconcile its original folder before continuing"
-    );
-    container.record_registration(&workspace, receipt)?;
-    Ok(())
 }

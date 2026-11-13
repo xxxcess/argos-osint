@@ -1,100 +1,46 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Connect registry identities and revocation</title>
-<style>body{margin:32px;background:#f5f5f5;color:#2d3142;font-family:Geist,system-ui,sans-serif}main{max-width:1440px;margin:auto}h1{font-family:'Instrument Serif',Georgia,serif;font-size:38px;font-weight:400}svg{width:100%;height:auto}p{max-width:110ch;line-height:1.6}a{color:#394b65}code{font-family:'Geist Mono',ui-monospace,monospace}</style></head><body><main>
-<h1>Connect registry identities and revocation</h1>
-<p>Local filesystem verification and backend authority meet at an explicit authenticated transaction. Stable workstation and child IDs survive mutable IP bindings; uniqueness and revocation are enforced by the registry rather than inferred by the client.</p>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 1040" role="img" aria-labelledby="connect-registry-title connect-registry-desc">
-<title id="connect-registry-title">Stable workstation and child identities with revocable backend bindings</title>
-<desc id="connect-registry-desc">A protected native container verifies local direct children; its root is never a workspace registration. A purpose-authorized backend transaction validates epochs and request fingerprints, enforces unique installation, IP, child-name and Connect ID claims, and creates or reuses actual workstation, workspace and registration records. Workstation and child IDs are stable while IP and active binding revisions can change through an explicit confirmed rebind. Rebind revokes former sessions and preserves historical job origin. Non-default retirement fences admission and waits for genuinely drained associated work; incomplete or uncertain work keeps retirement pending. Tombstones remain, and recreating a deleted child name requires a new identity rather than reviving a retired record. The registry never creates or adopts a remote filesystem folder.</desc>
-<defs><marker id="connect-registry-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker></defs>
-<style>text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}.figure-title{font-family:'Instrument Serif',Georgia,serif;font-size:30px}.label{font-size:20px;font-weight:600}.note{font-size:16px}.mono{font-family:'Geist Mono',ui-monospace,monospace;font-size:14px}.zone{font-size:13px;font-weight:600;letter-spacing:1px}.minor{font-size:14px;fill:#4f5d75}.node{fill:#fff;stroke:#4f5d75}.accent{fill:#fff6ed;stroke:#eb6c36}.edge{fill:none;stroke:#4f5d75;stroke-width:2;marker-end:url(#connect-registry-arrow)}</style>
-<rect width="1440" height="1040" fill="#f5f5f5"/>
-<text x="48" y="44" class="figure-title">Stable identities, unique claims, explicit binding changes</text>
-<text x="48" y="76" class="zone">LOCAL OWNERSHIP PROOF AND BACKEND AUTHORITY ARE DISTINCT</text>
-<path d="M464 184H544" class="edge"/>
-<path d="M704 272V320H240V376" class="edge"/>
-<path d="M432 464H528" class="edge"/>
-<path d="M912 464H1008" class="edge"/>
-<path d="M1200 552V680" class="edge"/>
-<path d="M240 552V680" class="edge"/>
-<path d="M720 552V680" class="edge"/>
-<g id="connect-registry-local">
-<rect x="48" y="104" width="416" height="168" rx="6" class="node"/>
-<text x="64" y="136" class="label">Verified native container and child</text>
-<text x="64" y="168" class="note">Protected home root contains default + children</text>
-<text x="64" y="196" class="note">Local object / parent / marker checks precede use</text>
-<text x="64" y="224" class="note">Folder references use a contained child basename</text>
-<text x="64" y="252" class="minor">Root is not registrable; no arbitrary path adoption</text>
-</g>
-<g id="connect-registry-authority">
-<rect x="544" y="104" width="848" height="168" rx="6" class="node accent"/>
-<text x="560" y="136" class="label">Purpose-authorized registry transaction</text>
-<text x="560" y="168" class="mono">POST /api/v1/connect/registrations/ensure</text>
-<text x="560" y="196" class="note">Native registration permission + server-derived scope / access epoch</text>
-<text x="560" y="224" class="note">Shared transaction guard, unique claims and exact idempotent request fingerprint</text>
-<text x="560" y="252" class="minor">A local marker describes identity; it does not authenticate a person or grant backend rights</text>
-</g>
-<text x="48" y="304" class="zone">DURABLE BACKEND RECORDS · THE DEPLOYMENT OWNS THE REGISTRY</text>
-<g id="connect-registry-node">
-<rect x="48" y="376" width="384" height="176" rx="6" class="node"/>
-<text x="64" y="408" class="label">Workstation: stable ID</text>
-<text x="64" y="440" class="note">Scope + installation-marker hash identify it</text>
-<text x="64" y="468" class="note">Current canonical IP has one backend claim</text>
-<text x="64" y="496" class="note">IP is mutable through confirmed rebind</text>
-<text x="64" y="528" class="minor">Observed peer address is diagnostic, not authority</text>
-</g>
-<g id="connect-registry-child">
-<rect x="528" y="376" width="384" height="176" rx="6" class="node"/>
-<text x="544" y="408" class="label">Child workspace: stable ID</text>
-<text x="544" y="440" class="note">Belongs to one registered workstation</text>
-<text x="544" y="468" class="note">Unique child marker and canonical name claim</text>
-<text x="544" y="496" class="note">Default child may register; stays protected</text>
-<text x="544" y="528" class="minor">Registry identity never means remote folder creation</text>
-</g>
-<g id="connect-registry-binding">
-<rect x="1008" y="376" width="384" height="176" rx="6" class="node accent"/>
-<text x="1024" y="408" class="label">Active backend binding</text>
-<text x="1024" y="440" class="note">Registration ID + current independent revisions</text>
-<text x="1024" y="468" class="mono">IP:basename · [IPv6]:basename</text>
-<text x="1024" y="496" class="note">Connect ID has one active registration claim</text>
-<text x="1024" y="528" class="minor">Collision fails; ensure never revives revocation</text>
-</g>
-<text x="64" y="616" class="minor">Explicit confirmed change</text>
-<text x="544" y="616" class="minor">Confirmed retirement</text>
-<text x="1024" y="616" class="minor">Existing-ID lookup only</text>
-<g id="connect-registry-rebind">
-<rect x="48" y="680" width="416" height="232" rx="6" class="node"/>
-<text x="64" y="712" class="label">Rebind preserves identity and history</text>
-<text x="64" y="744" class="note">Require explicit rebind permission + confirmation</text>
-<text x="64" y="772" class="note">Retain workstation / child IDs; issue new bindings</text>
-<text x="64" y="800" class="note">Revoke former registrations and web sessions</text>
-<text x="64" y="828" class="note">Do not rewrite immutable accepted-job origins</text>
-<text x="64" y="856" class="note">Refresh locally stale child receipts before reuse</text>
-<text x="64" y="892" class="minor">At most 256 active children; fail rather than truncate</text>
-</g>
-<g id="connect-registry-retire">
-<rect x="528" y="680" width="384" height="232" rx="6" class="node"/>
-<text x="544" y="712" class="label">Retire, drain and retain tombstones</text>
-<text x="544" y="744" class="note">Root / default cannot be retired or renamed</text>
-<text x="544" y="772" class="note">Fence admission; revoke sessions; await drain</text>
-<text x="544" y="800" class="note">Active causal work or uncertain effect: pending</text>
-<text x="544" y="828" class="note">No shared-work cancellation or history deletion</text>
-<text x="544" y="856" class="note">Recreated deleted name needs a new identity</text>
-<text x="544" y="892" class="minor">Authoritative deletion-ready receipts permit cleanup</text>
-</g>
-<g id="connect-registry-session">
-<rect x="1008" y="680" width="384" height="232" rx="6" class="node"/>
-<text x="1024" y="712" class="label">Web session / context lookup</text>
-<text x="1024" y="744" class="note">Separately authorized server-only WebRelay</text>
-<text x="1024" y="772" class="note">Unknown / revoked IDs never auto-register</text>
-<text x="1024" y="800" class="note">Opaque token; authoritative 30-minute lifetime</text>
-<text x="1024" y="828" class="note">Recheck binding, epochs and context revision</text>
-<text x="1024" y="856" class="note">20 create attempts / minute / relay credential</text>
-<text x="1024" y="892" class="minor">Context selection is not a user credential</text>
-</g>
-<text x="48" y="968" class="note">The native filesystem manager owns folder containment and protected roots; the backend owns registry, sessions and admission.</text>
-<text x="48" y="1004" class="minor">Source contract only. No diagram node creates infrastructure, adopts a legacy root or proves a real Mac filesystem journey.</text>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Workstation registry v2 and historical recovery</title>
+<style>body{margin:0;padding:32px;color:#242424;background:#fff;font:16px/1.6 Geist,Arial,sans-serif}main{max-width:1200px;margin:auto}h1{font:36px/1.2 "Instrument Serif",Georgia,serif;margin:0 0 16px}p{max-width:88ch}svg{display:block;width:100%;height:auto;margin:24px 0}a{color:#a14b24}</style></head><body><main><h1>Workstation registry v2 and historical recovery</h1><p>The registry resolves workstation identity from authenticated scope and protected installation identity. The coordinated forward migration preserves IDs and immutable origins, keeps old registrations for read-only recovery, revokes old sessions and creates current workstation bindings. It never treats IP or a folder name as authority.</p>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" role="img" aria-labelledby="connect-registry-title connect-registry-desc">
+<title id="connect-registry-title">Workstation registry v2 and historical recovery</title>
+<desc id="connect-registry-desc">The registry resolves workstation identity from authenticated scope and protected installation identity. The coordinated forward migration preserves IDs and immutable origins, keeps old registrations for read-only recovery, revokes old sessions and creates current workstation bindings. It never treats IP or a folder name as authority.</desc>
+<style>text{font-family:Geist,Arial,sans-serif;fill:#242424}.zone{font-size:14px;letter-spacing:1.4px;fill:#666}.label{font-size:20px;font-weight:600}.note{font-size:16px;fill:#555}.small{font-size:14px;fill:#666}.node{fill:#fff;stroke:#aaa;stroke-width:1}.focus{fill:#fff4ee;stroke:#eb6c36;stroke-width:2}.wire{fill:none;stroke:#555;stroke-width:2;marker-end:url(#arrow)}.lane{fill:#fafafa;stroke:#ddd;stroke-width:1}</style>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#555"/></marker></defs>
+<rect width="1200" height="720" fill="#fff"/>
+<text x="40" y="48" class="zone">IDENTITY · AUTHENTICATED SCOPE AND INSTALLATION</text><rect x="40" y="88" width="480" height="148" rx="6" class="node"/>
+<text x="56" y="120" class="label">Protected local installation</text>
+<text x="56" y="152" class="note">Stable installation marker + private catalogs</text>
+<text x="56" y="178" class="note">Origin-bound credential file references</text>
+<text x="56" y="204" class="note">No hidden default-child dependency</text>
+<rect x="680" y="88" width="480" height="148" rx="6" class="focus"/>
+<text x="696" y="120" class="label">Current registration transaction</text>
+<text x="696" y="152" class="note">Authenticated scope + installation hash</text>
+<text x="696" y="178" class="note">Stable workstation ID = Connect ID</text>
+<text x="696" y="204" class="note">Contract 2; IP is optional metadata</text>
+<path d="M 520 162 H 680" class="wire"/>
+<text x="40" y="300" class="zone">COORDINATED FORWARD MIGRATION</text><rect x="40" y="340" width="332" height="148" rx="6" class="node"/>
+<text x="56" y="372" class="label">Version and writer fence</text>
+<text x="56" y="404" class="note">Operator bootstraps new schema</text>
+<text x="56" y="430" class="note">Compatible rollout before admission</text>
+<text x="56" y="456" class="note">Checkpoint commits atomically</text>
+<rect x="432" y="340" width="332" height="148" rx="6" class="focus"/>
+<text x="448" y="372" class="label">Preserve identity and history</text>
+<text x="448" y="404" class="note">Keep workstation ID + installation</text>
+<text x="448" y="430" class="note">Old registrations become read-only</text>
+<text x="448" y="456" class="note">Existing origins stay immutable</text>
+<rect x="824" y="340" width="336" height="148" rx="6" class="node"/>
+<text x="840" y="372" class="label">Invalidate stale proof</text>
+<text x="840" y="404" class="note">Revoke old browser sessions</text>
+<text x="840" y="430" class="note">Rebuild workstation ID bindings</text>
+<text x="840" y="456" class="note">Old cursors/cache require restart</text>
+<path d="M 372 414 H 432" class="wire"/>
+<path d="M 764 414 H 824" class="wire"/>
+<rect x="432" y="552" width="728" height="100" rx="6" class="node"/>
+<text x="448" y="584" class="label">Historical request recovery</text>
+<text x="448" y="616" class="note">Current proof + original registration resolve accepted receipts read-only.</text>
+<text x="448" y="642" class="note">Unknown outcomes keep the original request; causal jobs retain their lifecycle fence.</text>
+<path d="M 598 488 V 552" class="wire"/>
+
+<text x="40" y="696" class="small">Migration does not remove user folders or make legacy registrations eligible for new admission.</text>
 </svg>
-<p>Source: <a href="../../crates/argos-osint-core/src/storage/connect_registry.rs">registry transactions</a>, <a href="../../crates/argos-osint-core/src/storage/schema/connect_registry.surql">unique claim schema</a>, <a href="../../crates/fleetworks-contracts/src/connect.rs">canonical identity contracts</a> and <a href="../../crates/fleetworks-workspace/src/native/mod.rs">protected native manager</a>. Local folder deletion remains a separate verified retirement/Trash operation.</p>
-</main></body></html>
+<p><a href="../wiki/code/native-workspaces.md">Workstation identity contract</a> · <a href="../wiki/code/native-connections.md">Connections and activity</a> · <a href="../diagrams.md">Diagram catalog</a></p></main></body></html>

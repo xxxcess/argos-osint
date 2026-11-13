@@ -121,8 +121,6 @@ pub struct JobsQuery {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<JobsStatusFilter>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub workspace_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub app: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation: Option<String>,
@@ -271,7 +269,7 @@ impl JobsQueryState {
         }
         if self.binding.is_none() && self.message.is_none() {
             self.message =
-                Some("Register a workspace with activity permission to view Jobs.".into());
+                Some("Register this workstation with activity permission to view Jobs.".into());
         }
     }
 
@@ -299,11 +297,8 @@ impl JobsQueryState {
         match event {
             JobsEvent::Apply | JobsEvent::Clear => {
                 if matches!(event, JobsEvent::Clear) {
-                    // Clearing filters must not widen an explicitly narrowed scope.
-                    self.draft = JobsDraft {
-                        selected_workspace_only: self.draft.selected_workspace_only,
-                        ..Default::default()
-                    };
+                    // Registration fixes the workstation scope independently of filters.
+                    self.draft = JobsDraft::default();
                 }
                 self.reset();
                 let query = self.first_query(now);
@@ -347,9 +342,9 @@ impl JobsQueryState {
     }
 
     fn first_query(&self, now: DateTime<Utc>) -> Result<JobsQuery, String> {
-        let Some(binding) = &self.binding else {
-            return Err("Register a workspace with activity permission first.".into());
-        };
+        if self.binding.is_none() {
+            return Err("Register this workstation with activity permission first.".into());
+        }
         let field = |edit: &TextEdit| -> Result<Option<String>, String> {
             let value = edit.text.trim();
             if edit.text.len() > 256 || edit.text.chars().any(char::is_control) {
@@ -368,10 +363,6 @@ impl JobsQueryState {
         Ok(JobsQuery {
             limit: Some(PAGE_SIZE),
             status: Some(self.draft.status),
-            workspace_id: self
-                .draft
-                .selected_workspace_only
-                .then(|| binding.context.workspace_id.clone()),
             app: field(&self.draft.app)?,
             operation: field(&self.draft.operation)?,
             kind: field(&self.draft.kind)?,
@@ -466,14 +457,9 @@ impl JobsQueryState {
 
     fn valid_page(&self, page: &JobsPage, ticket: &JobsTicket) -> bool {
         let context = &ticket.binding.context;
-        let workspace = self
-            .applied
-            .as_ref()
-            .and_then(|query| query.workspace_id.as_ref());
         page.activity_scope.deployment_id == context.deployment_id
             && page.activity_scope.workstation_id == context.workstation_id
             && page.activity_scope.scope_revision == context.scope_revision
-            && page.activity_scope.workspace_id.as_ref() == workspace
             && page.rows.len() <= usize::from(PAGE_SIZE)
             && page.apps.len() <= 32
             && page.dashboard_counts_scope == "unfiltered_top_level_workstation_activity"

@@ -21,17 +21,15 @@ describe("Frame (real @argos/ui component)", () => {
       </Frame>,
     );
     const frame = container.firstElementChild as HTMLElement;
-    expect(paint(frame, "backgroundColor")).toBe(colors.glass);
+    expect(paint(frame, "backgroundColor")).toBe(colors.glass.toLowerCase());
     expect(sheetProp(frame, "borderTopWidth")).toBe("2px"); // accent top rule
     expect(paint(frame, "borderTopColor")).toBe(toneColor.accent.toLowerCase());
-    expect(paint(frame, "borderLeftColor")).toBe(colors.glassBorder);
+    expect(paint(frame, "borderLeftColor")).toBe(colors.cardEdge);
     expect(sheetProp(frame, "padding")).toBe("16px");
     expect(sheetProp(frame, "gap")).toBe("12px");
   });
 
-  // FINDING: Frame's runtime `glass` spread loses `backdrop-filter` (RNW drops
-  // unknown props from runtime style arrays); Panel keeps the blur.
-  it("does NOT apply HUD backdrop blur (known RNW limitation)", () => {
+  it("does not apply backdrop blur to the opaque matte card", () => {
     const { container } = render(
       <Frame>
         <Copy>x</Copy>

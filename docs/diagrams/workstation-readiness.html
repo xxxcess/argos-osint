@@ -1,100 +1,47 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Workstation readiness and explicit maintenance</title>
-<style>body{margin:32px;background:#f5f5f5;color:#2d3142;font-family:Geist,system-ui,sans-serif}main{max-width:1440px;margin:auto}h1{font-family:'Instrument Serif',Georgia,serif;font-size:38px;font-weight:400}svg{width:100%;height:auto}p{max-width:110ch;line-height:1.6}a{color:#394b65}code{font-family:'Geist Mono',ui-monospace,monospace}</style></head><body><main>
-<h1>Workstation readiness and explicit maintenance</h1>
-<p>Readiness is an observation, not a repair operation. Seed receipts, search visibility, a retained Natural candidate, operation-owned activation and verified Rust-BERT inference answer different questions. The separate mutation lane shows the permissions, durable acceptance and authorized activity needed to perform real work.</p>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 1064" role="img" aria-labelledby="workstation-readiness-title workstation-readiness-desc">
-<title id="workstation-readiness-title">Read-only readiness observations and separate durable maintenance</title>
-<desc id="workstation-readiness-desc">The native Workstation page reads timestamped partial backend observations through a bounded readiness GET, using configured owners rather than caller-selected origins. A completed database seed receipt, source-consistent search visibility, a trained Natural candidate, a separately confirmed operation-owned activation and verified Rust-BERT inference are distinct evidence. Missing or stale observations never become successful setup. Explicit maintenance requires current registered authority, permissions, configuration revision and an enabled real consumer. Acceptance records immutable origin, a durable job and outbox; it is not completion. Only current authorized workstation membership grants Jobs and private result links. A later explicit read refresh observes resulting state without starting downloads, seeds, training, indexing or services.</desc>
-<defs><marker id="workstation-readiness-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker></defs>
-<style>text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}.figure-title{font-family:'Instrument Serif',Georgia,serif;font-size:30px}.label{font-size:20px;font-weight:600}.note{font-size:16px}.mono{font-family:'Geist Mono',ui-monospace,monospace;font-size:14px}.zone{font-size:13px;font-weight:600;letter-spacing:1px}.minor{font-size:14px;fill:#4f5d75}.node{fill:#fff;stroke:#4f5d75}.accent{fill:#fff6ed;stroke:#eb6c36}.edge{fill:none;stroke:#4f5d75;stroke-width:2;marker-end:url(#workstation-readiness-arrow)}</style>
-<rect width="1440" height="1064" fill="#f5f5f5"/>
-<text x="48" y="44" class="figure-title">Observe safely; perform maintenance only by an explicit durable request</text>
-<text x="48" y="76" class="zone">READ-ONLY OBSERVATIONS · PARTIAL EVIDENCE IS STILL PARTIAL</text>
-<path d="M608 176H688" class="edge"/>
-<path d="M752 256V304H256V352" class="edge"/>
-<path d="M1040 256V320H720V352" class="edge"/>
-<path d="M1264 256V352" class="edge"/>
-<path d="M464 756H512" class="edge"/>
-<path d="M928 756H976" class="edge"/>
-<path d="M1392 756H1420V288H1360V256" class="edge"/>
-
-<g id="workstation-readiness-get">
-<rect x="48" y="96" width="560" height="160" rx="6" class="node accent"/>
-<text x="64" y="128" class="label">Workstation readiness GET</text>
-<text x="64" y="160" class="mono">GET /api/v1/workstation/readiness</text>
-<text x="64" y="188" class="note">Safe connection diagnostics before a child is registered</text>
-<text x="64" y="216" class="note">No download, model warm-up, seed, train, index or startup</text>
-<text x="64" y="240" class="minor">Current registration governs actions and private activity separately</text>
-</g>
-<g id="workstation-readiness-observations">
-<rect x="688" y="96" width="704" height="160" rx="6" class="node"/>
-<text x="704" y="128" class="label">Bounded, timestamped owner observations</text>
-<text x="704" y="160" class="note">Configured process / datastore / source / index / inference owners</text>
-<text x="704" y="188" class="note">2-second owner bounds; coalesced 5-second observation cache</text>
-<text x="704" y="216" class="note">Ready, not ready, running, degraded, unknown and unavailable stay distinct</text>
-<text x="704" y="240" class="minor">The native view marks stale checks; reachability never proves resource readiness</text>
-</g>
-<text x="48" y="280" class="minor">Each card reports separate evidence; no resource substitutes for another.</text>
-<g id="workstation-readiness-actors">
-<rect x="48" y="352" width="416" height="208" rx="6" class="node"/>
-<text x="64" y="384" class="label">Actor seed and searchable source</text>
-<text x="64" y="416" class="note">Database: a completed durable seed receipt</text>
-<text x="64" y="444" class="note">Search: current generation + source watermark</text>
-<text x="64" y="472" class="note">Seeded records alone do not prove visible search</text>
-<text x="64" y="500" class="note">Incomplete / paused / degraded remain explicit</text>
-<text x="64" y="536" class="minor">No catalog scan or rebuild is triggered by this GET</text>
-</g>
-<g id="workstation-readiness-natural">
-<rect x="512" y="352" width="416" height="208" rx="6" class="node"/>
-<text x="528" y="384" class="label">Natural candidate and activation</text>
-<text x="528" y="416" class="note">Training retains an immutable candidate only</text>
-<text x="528" y="444" class="note">Inspect exact hashes + prior model revision</text>
-<text x="528" y="472" class="note">Separate activation; explicit synthetic consent</text>
-<text x="528" y="500" class="note">Operation-owned proof, or EffectUncertain</text>
-<text x="528" y="536" class="minor">Training / pointer equality never proves this effect</text>
-</g>
-<g id="workstation-readiness-inference">
-<rect x="976" y="352" width="416" height="208" rx="6" class="node"/>
-<text x="992" y="384" class="label">Rust-BERT verified inference</text>
-<text x="992" y="416" class="note">Configured inference owner reports verified model</text>
-<text x="992" y="444" class="note">A ready process with no proof stays unknown</text>
-<text x="992" y="472" class="note">Natural training does not retrain Rust-BERT</text>
-<text x="992" y="500" class="note">Missing owner or artifacts remain unavailable</text>
-<text x="992" y="536" class="minor">Real inference and matching-model evidence are separate</text>
-</g>
-<path d="M48 608H1392" fill="none" stroke="#a0a5b0"/>
-<text x="48" y="640" class="zone">EXPLICIT USER ACTIONS · NO MUTATION ARROW FROM THE READINESS GET</text>
-<g id="workstation-readiness-actions">
-<rect x="48" y="676" width="416" height="176" rx="6" class="node accent"/>
-<text x="64" y="708" class="label">Review a permitted maintenance action</text>
-<text x="64" y="740" class="note">Choose / upload CSV, then seed or train; or reindex</text>
-<text x="64" y="768" class="note">Activation needs its own candidate confirmation</text>
-<text x="64" y="796" class="note">Pin current origin, config revision and request ID</text>
-<text x="64" y="828" class="minor">Permission + current registration + real consumer</text>
-</g>
-<g id="workstation-readiness-acceptance">
-<rect x="512" y="676" width="416" height="176" rx="6" class="node"/>
-<text x="528" y="708" class="label">Durable acceptance + actual worker</text>
-<text x="528" y="740" class="note">Same-transaction immutable origin + association</text>
-<text x="528" y="768" class="note">Job / task / dispatch outbox and shared fences</text>
-<text x="528" y="796" class="note">Exact retry reuses the accepted request</text>
-<text x="528" y="828" class="minor">202 means accepted, never completed or activated</text>
-</g>
-<g id="workstation-readiness-jobs">
-<rect x="976" y="676" width="416" height="176" rx="6" class="node"/>
-<text x="992" y="708" class="label">Authorized Jobs and safe result</text>
-<text x="992" y="740" class="note">Current proof + workstation / child membership</text>
-<text x="992" y="768" class="note">Private-result eligibility before material or links</text>
-<text x="992" y="796" class="note">Observe actual progress and operation-owned result</text>
-<text x="992" y="828" class="minor">No global job feed or inferred activation success</text>
-</g>
-<text x="1080" y="876" class="minor">A later refresh observes evidence; it starts no work.</text>
-<text x="48" y="916" class="mono">/api/v1/workstation/maintenance/seed-actors · /api/v1/workstation/maintenance/train-classifier · /api/v1/search/actors/reindex</text>
-<text x="48" y="944" class="mono">/api/v1/classifier/candidates/detail · /api/v1/classifier/activate · /api/v1/classifier/activation/result</text>
-<text x="48" y="988" class="note">Observations never disclose unrelated global job IDs. Unknown activation effects stay blocked for reconciliation.</text>
-<text x="48" y="1024" class="minor">Source contract only. Genuine disposable fixtures, public backend journeys and verified real inference each need their own evidence.</text>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Readiness, configured inputs and durable native maintenance</title>
+<style>body{margin:0;padding:32px;color:#242424;background:#fff;font:16px/1.6 Geist,Arial,sans-serif}main{max-width:1200px;margin:auto}h1{font:36px/1.2 "Instrument Serif",Georgia,serif;margin:0 0 16px}p{max-width:88ch}svg{display:block;width:100%;height:auto;margin:24px 0}a{color:#a14b24}</style></head><body><main><h1>Readiness, configured inputs and durable native maintenance</h1><p>Readiness is a bounded observation through configured owners, never a download, seed, train, indexing or service startup side effect. Native maintenance uses operator-configured revision-bound inputs and distinguishes accepted jobs from completed effects. Natural training, activation and verified Rust-BERT inference remain separate facts.</p>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" role="img" aria-labelledby="workstation-readiness-title workstation-readiness-desc">
+<title id="workstation-readiness-title">Readiness, configured inputs and durable native maintenance</title>
+<desc id="workstation-readiness-desc">Readiness is a bounded observation through configured owners, never a download, seed, train, indexing or service startup side effect. Native maintenance uses operator-configured revision-bound inputs and distinguishes accepted jobs from completed effects. Natural training, activation and verified Rust-BERT inference remain separate facts.</desc>
+<style>text{font-family:Geist,Arial,sans-serif;fill:#242424}.zone{font-size:14px;letter-spacing:1.4px;fill:#666}.label{font-size:20px;font-weight:600}.note{font-size:16px;fill:#555}.small{font-size:14px;fill:#666}.node{fill:#fff;stroke:#aaa;stroke-width:1}.focus{fill:#fff4ee;stroke:#eb6c36;stroke-width:2}.wire{fill:none;stroke:#555;stroke-width:2;marker-end:url(#arrow)}.lane{fill:#fafafa;stroke:#ddd;stroke-width:1}</style>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#555"/></marker></defs>
+<rect width="1200" height="720" fill="#fff"/>
+<text x="40" y="48" class="zone">READ-ONLY OBSERVATIONS · PERMISSION AND FRESHNESS ARE SEPARATE</text><rect x="40" y="88" width="332" height="148" rx="6" class="focus"/>
+<text x="56" y="120" class="label">Workstation Status</text>
+<text x="56" y="152" class="note">Gateway, registration, services</text>
+<text x="56" y="178" class="note">Timestamped readiness checks</text>
+<text x="56" y="204" class="note">Optional API-host metrics</text>
+<rect x="432" y="88" width="332" height="148" rx="6" class="node"/>
+<text x="448" y="120" class="label">Backend-owned observations</text>
+<text x="448" y="152" class="note">Catalog and reader-visible index</text>
+<text x="448" y="178" class="note">Natural candidate vs activation</text>
+<text x="448" y="204" class="note">Rust-BERT inference separately</text>
+<rect x="824" y="88" width="336" height="148" rx="6" class="node"/>
+<text x="840" y="120" class="label">Partial and stale states</text>
+<text x="840" y="152" class="note">Unknown is not zero or success</text>
+<text x="840" y="178" class="note">No work is started by a GET</text>
+<text x="840" y="204" class="note">Optional failure is local to action</text>
+<path d="M 372 160 H 432" class="wire"/>
+<path d="M 764 160 H 824" class="wire"/>
+<text x="40" y="300" class="zone">DB SEED &amp; TRAIN · CONFIGURED INPUTS AND DURABLE ACCEPTANCE</text><rect x="40" y="344" width="332" height="148" rx="6" class="node"/>
+<text x="56" y="376" class="label">Operator-configured inputs</text>
+<text x="56" y="408" class="note">Validated staged DatasetRef</text>
+<text x="56" y="434" class="note">Exact configuration revision</text>
+<text x="56" y="460" class="note">No native picker or upload</text>
+<rect x="432" y="344" width="332" height="148" rx="6" class="focus"/>
+<text x="448" y="376" class="label">Allowed explicit trigger</text>
+<text x="448" y="408" class="note">Actor seed / index / Natural train</text>
+<text x="448" y="434" class="note">Current permission and context</text>
+<text x="448" y="460" class="note">Missing or stale input disables</text>
+<rect x="824" y="344" width="336" height="148" rx="6" class="node"/>
+<text x="840" y="376" class="label">Durable workstation job</text>
+<text x="840" y="408" class="note">Receipt means queued, not done</text>
+<text x="840" y="434" class="note">Safe result through Jobs</text>
+<text x="840" y="460" class="note">Training does not activate</text>
+<path d="M 372 416 H 432" class="wire"/>
+<path d="M 764 416 H 824" class="wire"/>
+<path d="M 40 552 H 1160" stroke="#bbb"/><text x="40" y="592" class="label">Candidate activation remains a separate authorized backend API.</text><text x="40" y="626" class="note">The native control allowlist exposes no activation, dataset upload or global activity toolbar.</text>
+<text x="40" y="696" class="small">Finite visible/focused reads preserve unavailable, denied, stale and failed states explicitly.</text>
 </svg>
-<p>Source: <a href="../../crates/argos-osint-api/src/workstation.rs">bounded read-only readiness</a>, <a href="../../crates/argos-osint-api/src/maintenance.rs">explicit setup admission</a>, <a href="../../crates/argos-osint-api/src/classifier_activation.rs">candidate preview and activation</a> and <a href="../../crates/argos-osint-api/src/activity.rs">authorized workstation Jobs</a>. Partial, stale and unavailable evidence remains explicit; no visual or deployment verification is implied.</p>
-</main></body></html>
+<p><a href="../wiki/code/native-workspaces.md">Workstation identity contract</a> · <a href="../wiki/code/native-connections.md">Connections and activity</a> · <a href="../diagrams.md">Diagram catalog</a></p></main></body></html>

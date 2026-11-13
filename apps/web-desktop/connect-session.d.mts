@@ -33,6 +33,11 @@ export function requireWebBoundary(
   request: ConnectRequest,
   mutation?: boolean,
 ): Promise<string>;
+export function requireDevelopmentUpgrade(
+  request: ConnectRequest,
+  development: boolean,
+  path: string | undefined,
+): Promise<void>;
 export function sessionTokenFromCookie(raw: unknown): string;
 export function requireConnection(
   request: ConnectRequest,

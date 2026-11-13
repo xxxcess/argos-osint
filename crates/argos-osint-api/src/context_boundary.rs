@@ -37,7 +37,10 @@ fn requirement(request: &Request) -> Option<(Permission, ContextRequirement)> {
     ) {
         return Some((Permission::MaintainBackend, ContextRequirement::Registered));
     }
-    if path.starts_with("/api/v1/workstation/activity")
+    if (path == fleetworks_contracts::cycle_history::CYCLE_HISTORY_PATH
+        && request.method() == Method::GET)
+        || path == fleetworks_contracts::cycle_history::CYCLE_HISTORY_DELETE_PATH
+        || path.starts_with("/api/v1/workstation/activity")
         || path.starts_with("/api/v1/workstation/requests/")
         || matches!(
             path,

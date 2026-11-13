@@ -60,6 +60,7 @@ use fleetworks_contracts::readiness::MaintenanceOperation;
 /// All native pages. Backend resources and local activity have distinct ownership.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Page {
+    Seed,
     Atlas,
     Brain,
     Tools,
@@ -72,25 +73,24 @@ pub enum Page {
 }
 
 impl Page {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 6] = [
+        Self::Seed,
         Self::Atlas,
         Self::Brain,
         Self::Tools,
         Self::Models,
-        Self::Profile,
-        Self::Workstation,
-        Self::Workspaces,
         Self::Jobs,
     ];
 
     pub fn title(self) -> &'static str {
         match self {
-            Self::Atlas => "Atlas",
-            Self::Brain => "Brain",
-            Self::Tools => "Tools",
-            Self::Models => "Models",
+            Self::Seed => "DB Seed & Train",
+            Self::Atlas => "News Cycles",
+            Self::Brain => "Brain Search",
+            Self::Tools => "OSINT Tools",
+            Self::Models => "Model Assignments",
             Self::Profile => "Profile",
-            Self::Workstation => "Workstation",
+            Self::Workstation => "Workstation Status",
             Self::Workspaces => "Workspaces",
             Self::Jobs => "Jobs & Logs",
         }
@@ -98,6 +98,7 @@ impl Page {
 
     pub fn key(self) -> &'static str {
         match self {
+            Self::Seed => "seed",
             Self::Atlas => "atlas",
             Self::Brain => "brain",
             Self::Tools => "tools",
@@ -112,7 +113,7 @@ impl Page {
     pub fn is_backend(self) -> bool {
         matches!(
             self,
-            Self::Atlas | Self::Brain | Self::Tools | Self::Models | Self::Profile
+            Self::Seed | Self::Atlas | Self::Brain | Self::Tools | Self::Models | Self::Profile
         )
     }
 }
@@ -170,6 +171,11 @@ pub enum Intent {
 pub struct State {
     pub accessibility: Accessibility,
     pub page: Page,
+    pub setup_gateway: bool,
+    pub tool_key_dialog: bool,
+    pub cycles: crate::workstation_dashboard::Cycles,
+    pub host_metrics: Load<crate::workstation_dashboard::HostMetrics>,
+    pub(crate) host_metrics_request: Option<RequestTask>,
     pub sidebar: PaneState,
     pub connection: Connection,
     pub connection_profiles: ConnectionProfiles,
@@ -211,6 +217,11 @@ impl Default for State {
         Self {
             accessibility: Accessibility::default(),
             page: Page::Workstation,
+            setup_gateway: true,
+            tool_key_dialog: false,
+            cycles: crate::workstation_dashboard::Cycles::default(),
+            host_metrics: Load::Idle,
+            host_metrics_request: None,
             sidebar: PaneState::new(220.0).range(180.0, 340.0),
             connection: Connection::default(),
             connection_profiles: ConnectionProfiles::initial(),
@@ -261,6 +272,7 @@ impl State {
     pub fn fixture() -> Self {
         Self {
             fixture: true,
+            setup_gateway: false,
             ..Self::default()
         }
     }
@@ -276,14 +288,20 @@ impl State {
     }
 
     pub fn navigate(&mut self, page: Page) {
+        self.setup_gateway = false;
         self.page = page;
         self.sync_jobs_binding();
         self.sync_log_visibility();
+        if self.connected() {
+            self.refresh_page();
+        }
     }
 
     /// Drop ephemeral reads only. Accepted backend work has an independent lifetime.
     pub fn cancel_requests(&mut self) {
         self.connection_request = None;
+        self.host_metrics_request = None;
+        self.cycles.invalidate();
         self.connection_profiles.cancel_tests();
         self.readiness_request = None;
         self.search_request = None;
@@ -320,6 +338,7 @@ impl State {
         self.connection.status = ConnectionStatus::Disconnected;
         self.readiness = Load::Idle;
         self.readiness_received_at = None;
+        self.host_metrics = Load::Idle;
         self.brain = Brain::default();
         self.backend = Backend::default();
         self.backend.article_day =
@@ -360,6 +379,8 @@ impl State {
                 self.connection.ready = Some(connected.ready);
                 self.connection.capabilities = Some(connected.capabilities);
                 self.connection.status = ConnectionStatus::Connected;
+                self.ensure_registration();
+                self.refresh_readiness();
             }
             Err(error) => self.connection.status = ConnectionStatus::Failed(error),
         }
@@ -574,15 +595,8 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
         cx.reduced_motion(true);
     }
     let mut kit = theme::kit();
+    let mut layers = Vec::new();
     crate::material::configure_kit(&mut kit, preferences);
-    let group = |label: &str| {
-        rune::text(label.to_owned())
-            .font(kit.ty.small_medium)
-            .color(kit.c.text_muted)
-            .wrap()
-            .px(8.0)
-            .py(10.0)
-    };
     let mut sidebar = Sidebar::new()
         .label("Fleetworks pages")
         .header(
@@ -592,11 +606,17 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
                 .px(8.0)
                 .py(12.0),
         )
-        .child(group("Backend — selected deployment"));
+        .child(
+            Button::new(state.connection.deployment_label().to_owned())
+                .variant(ButtonVariant::Ghost)
+                .on_press(|state: &mut State| {
+                    state.setup_gateway = false;
+                    state.navigate(Page::Workstation);
+                })
+                .build(&kit)
+                .key("gateway-status-header"),
+        );
     for page in Page::ALL {
-        if page == Page::Workstation {
-            sidebar = sidebar.child(group("Workstation — scoped node/IP"));
-        }
         sidebar = sidebar.child(
             SidebarRow::new(page.title())
                 .selected(state.page == page)
@@ -609,8 +629,8 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
         "Backend-wide".to_owned()
     } else if let Some(context) = &state.registration.context {
         format!(
-            "Workstation {} · workspace {}",
-            context.workstation_ip, context.workspace_name
+            "Workstation {} · Connect ID {}",
+            context.workstation_id, context.connect_id
         )
     } else {
         "Workstation activity: registration required".to_owned()
@@ -619,9 +639,11 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
         Toolbar::new()
             .title(state.page.title())
             .trailing(crate::material::compact_toolbar(
-                Button::new("Connection")
+                Button::new("Setup Gateway")
                     .variant(ButtonVariant::Neutral)
-                    .on_press(|state: &mut State| state.navigate(Page::Workstation))
+                    .on_press(|state: &mut State| {
+                        state.setup_gateway = true;
+                    })
                     .build(&kit)
                     .key("connection-editor"),
                 preferences,
@@ -651,7 +673,7 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
                         .wrap(),
                 ),
         )
-        .child(views::page(state, cx, &kit));
+        .child(views::page(state, cx, &kit, &mut layers));
     let base = SplitView::new(main)
         .sidebar(
             &state.sidebar,
@@ -677,5 +699,5 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     } else {
         base
     };
-    rune_kit::root(base, std::iter::empty()).on_window_focus(State::log_window_focus)
+    rune_kit::root(base, layers).on_window_focus(State::log_window_focus)
 }

@@ -32,7 +32,6 @@ use axum::Router;
 use chrono::Utc;
 use fleetworks_contracts::connect::RegistrationEnsureRequest;
 use fleetworks_contracts::connect::RegistrationReceipt;
-use fleetworks_contracts::connect::WorkspaceName;
 use fleetworks_contracts::context::CredentialPurpose;
 use fleetworks_contracts::context::MutationContext;
 use fleetworks_contracts::context::Permission;
@@ -193,22 +192,14 @@ async fn call(
     )
 }
 
-async fn register(
-    repo: &Repository,
-    key: &str,
-    ip: &str,
-    install: &str,
-    child: &str,
-) -> RegistrationReceipt {
+async fn register(repo: &Repository, key: &str, ip: &str, install: &str) -> RegistrationReceipt {
     connect_registry::ensure(
         repo,
         &authority("fixture-native"),
         &RegistrationEnsureRequest::new(
             key.into(),
-            ip.parse().expect("synthetic unicast IP"),
-            WorkspaceName::new(child).expect("fixture child name"),
+            Some(ip.parse().expect("synthetic unicast IP")),
             install.into(),
-            format!("fixture-folder-{child}"),
         ),
     )
     .await
@@ -249,22 +240,9 @@ async fn acceptance_scenario() {
     job_dispatch::enable_pool(repo.db(), manual::TOOLS_POOL)
         .await
         .expect("explicit fixture Tools consumer enablement");
-    let native = register(
-        &repo,
-        "native-a",
-        "192.0.2.42",
-        "fixture-install-a",
-        "research",
-    )
-    .await;
-    let other_node = register(
-        &repo,
-        "native-b",
-        "198.51.100.42",
-        "fixture-install-b",
-        "analysis",
-    )
-    .await;
+    let native = register(&repo, "native-a", "192.0.2.42", "fixture-install-a").await;
+    let other_node = register(&repo, "native-b", "198.51.100.42", "fixture-install-b").await;
+    assert_ne!(native.workstation_id, other_node.workstation_id);
     let native_context = connect_registry::registration_context(
         &repo,
         &authority("fixture-native"),
@@ -391,7 +369,7 @@ async fn acceptance_scenario() {
     .expect("immutable origin JSON");
     assert_eq!(origin["source"], "native");
     assert_eq!(origin["workstation_id"], native.workstation_id);
-    assert_eq!(origin["workspace_id"], native.workspace_id);
+    assert_eq!(origin["workspace_id"], serde_json::Value::Null);
     assert_ne!(origin["workstation_id"], "forged-other-node");
     assert_eq!(
         response.take::<Vec<i64>>(1).expect("request count"),
@@ -494,7 +472,7 @@ async fn acceptance_scenario() {
     // result URL cannot expose private shared payload to either participant.
     repo.db().query("CREATE job_request:shared_tool_result SET request_key='shared-tool-result',operation='manual_tool',job_id=$job,scope_id='fixture-scope',deployment_id=$deployment,registration_id=$registration,workstation_id=$node,workspace_id=$workspace,requested_at=$now,origin_json='{}' RETURN NONE")
         .bind(("job",job_id.clone())).bind(("deployment",other_node.deployment_id.clone())).bind(("registration",other_node.registration_id.clone()))
-        .bind(("node",other_node.workstation_id.clone())).bind(("workspace",other_node.workspace_id.clone())).bind(("now",Utc::now().to_rfc3339()))
+        .bind(("node",other_node.workstation_id.clone())).bind(("workspace",None::<String>)).bind(("now",Utc::now().to_rfc3339()))
         .await.expect("genuine shared association fixture").check().expect("shared association statement");
     assert_eq!(
         call(

@@ -1,11 +1,11 @@
-use fleetworks_contracts::connect::RegistrationEnsureRequest;
-use fleetworks_contracts::connect::RegistrationReceipt;
 use fleetworks_desktop::app::Intent;
 use fleetworks_desktop::app::Load;
 use fleetworks_desktop::registration::NativeInterface;
 use fleetworks_desktop::workspaces::WorkspaceCommand;
 use fleetworks_desktop::Page;
 use fleetworks_desktop::State;
+use fleetworks_workspace::native::legacy_connect::RegistrationEnsureRequest;
+use fleetworks_workspace::native::legacy_connect::RegistrationReceipt;
 use fleetworks_workspace::native::BackendBinding;
 use fleetworks_workspace::native::RemovalKind;
 use fleetworks_workspace::native::WorkspaceOperation;

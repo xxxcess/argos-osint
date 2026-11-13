@@ -116,6 +116,30 @@ fn validated_origin(origin: &str) -> Result<(Url, bool), ClientError> {
 }
 
 impl Client {
+    /// Read only this registration's visible cycle associations, newest first.
+    pub async fn cycle_history(
+        &self,
+        limit: usize,
+    ) -> Result<crate::cycle_history::CycleHistory, ClientError> {
+        if !(1..=100).contains(&limit) {
+            return Err(ClientError::InvalidRequest);
+        }
+        self.get_with_query(
+            crate::cycle_history::CYCLE_HISTORY_PATH,
+            &[("limit", limit.to_string())],
+        )
+        .await
+    }
+
+    /// Hide a cycle association after an in-place confirmation and revision check.
+    pub async fn delete_cycle(
+        &self,
+        request: &crate::cycle_history::DeleteCycleRequest,
+    ) -> Result<crate::cycle_history::DeleteCycleReceipt, ClientError> {
+        self.post(crate::cycle_history::CYCLE_HISTORY_DELETE_PATH, request)
+            .await
+    }
+
     /// Validate and normalize an origin for a local connection profile.
     ///
     /// This uses the same origin policy as `new` without creating an HTTP

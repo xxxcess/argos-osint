@@ -49,14 +49,12 @@ fn row(id: &str, app: &str, operation: &str, state: &str) -> ActivityJob {
 }
 fn response(
     ticket: &JobsTicket,
-    workspace_id: Option<String>,
     rows: Vec<ActivityJob>,
     number: usize,
     total: Option<u64>,
     next: Option<usize>,
 ) -> JobsPage {
-    let mut scope = ActivityScope::for_workstation(&ticket.binding.context);
-    scope.workspace_id = workspace_id;
+    let scope = ActivityScope::for_workstation(&ticket.binding.context);
     JobsPage {
         apps: rows
             .iter()
@@ -94,14 +92,7 @@ pub fn install(state: &mut State, rows: Vec<ActivityJob>) {
         .read
         .expect("synthetic registered query");
     let count = rows.len() as u64;
-    let page = response(
-        &ticket,
-        ticket.query.workspace_id.clone(),
-        rows,
-        1,
-        Some(count),
-        None,
-    );
+    let page = response(&ticket, rows, 1, Some(count), None);
     state.complete_scoped_jobs(ticket, Ok(page));
 }
 
@@ -183,7 +174,7 @@ pub fn status_only(state: &mut State) {
     shared.phase.clear();
     shared.private_details_available = false;
     shared.status_only = true;
-    let page = response(&ticket, None, vec![shared], 1, Some(1), None);
+    let page = response(&ticket, vec![shared], 1, Some(1), None);
     state.complete_scoped_jobs(ticket, Ok(page));
 }
 
@@ -260,14 +251,7 @@ pub fn reply(state: &mut State, intent: &Intent) -> bool {
         vec![row("synthetic-query-next-job", app, operation, status)]
     };
     let next = (!empty && number == 1).then_some(2);
-    let mut page = response(
-        &ticket,
-        query.workspace_id,
-        rows,
-        number,
-        Some(if empty { 0 } else { 3 }),
-        next,
-    );
+    let mut page = response(&ticket, rows, number, Some(if empty { 0 } else { 3 }), next);
     page.apps_complete = empty || number == 2;
     state.complete_scoped_jobs(ticket, Ok(page));
     true

@@ -7,9 +7,7 @@ const context: RegisteredWebContext = {
   registration_id: "registration-a",
   workstation_id: "node-a",
   workstation_ip: "192.0.2.42",
-  workspace_id: "workspace-a",
-  workspace_name: "research",
-  connect_id: "192.0.2.42:research",
+  connect_id: "node-a",
   registration_revision: 1,
   context_revision: 7,
   scope_revision: 2,
@@ -18,13 +16,13 @@ const context: RegisteredWebContext = {
 };
 
 describe("registered browser cache scope", () => {
-  it("isolates deployments, access, workspaces and independent context/scope epochs", () => {
+  it("isolates deployments, access, workstations and independent context/scope epochs", () => {
     const original = connectionNamespace(context);
     expect(connectionNamespace({ ...context })).toBe(original);
     for (const change of [
       { deployment_id: "deployment-b" },
       { access_epoch: "access-2" },
-      { workspace_id: "workspace-b" },
+      { workstation_id: "node-b", connect_id: "node-b" },
       { registration_id: "registration-b" },
       { registration_revision: 2 },
       { context_revision: 8 },
@@ -32,6 +30,13 @@ describe("registered browser cache scope", () => {
       { configuration_epoch: "reset-2" },
     ])
       expect(connectionNamespace({ ...context, ...change })).not.toBe(original);
+    expect(connectionNamespace({ ...context, workstation_ip: null })).toBe(
+      original,
+    );
+    expect(
+      connectionNamespace({ ...context, workstation_ip: "198.51.100.9" }),
+    ).toBe(original);
+    expect(original).toContain("workstation-v2");
     expect(connectionNamespace()).toBe("");
     expect(original).not.toContain("token");
   });

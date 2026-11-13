@@ -326,10 +326,8 @@ async fn actual_fence_drain_epoch_once_reprovision_and_completed_replay_preserve
         &registry,
         &fleetworks_contracts::connect::RegistrationEnsureRequest::new(
             "fixture-register".into(),
-            "192.0.2.42".parse().expect("fixture IP"),
-            fleetworks_contracts::connect::WorkspaceName::new("research").expect("fixture child"),
+            Some("192.0.2.42".parse().expect("fixture IP")),
             "fixture-reset-installation".into(),
-            "fixture-reset-workspace".into(),
         ),
     )
     .await

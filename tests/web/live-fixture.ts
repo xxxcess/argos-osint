@@ -11,17 +11,15 @@ const fixtures = new WeakMap<Page, Awaited<ReturnType<typeof createFixture>>>();
 async function createFixture(page: Page) {
   // The external server harness owns a synthetic registered session. This is a
   // real HttpOnly cookie checked by SSR, not an application bypass flag/header.
-  await page
-    .context()
-    .addCookies([
-      {
-        name: "fleetworks_connect",
-        value: "a".repeat(64),
-        url: `http://127.0.0.1:${process.env.ARGOS_WEB_TEST_PORT || 3100}`,
-        httpOnly: true,
-        sameSite: "Strict",
-      },
-    ]);
+  await page.context().addCookies([
+    {
+      name: "fleetworks_connect_v2",
+      value: "a".repeat(64),
+      url: `http://127.0.0.1:${process.env.ARGOS_WEB_TEST_PORT || 3100}`,
+      httpOnly: true,
+      sameSite: "Strict",
+    },
+  ]);
   const sockets = new Map<WebSocketRoute, Subscription>();
   const subscriptions: Subscription[] = [];
   let available = true;

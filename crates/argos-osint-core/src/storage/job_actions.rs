@@ -33,7 +33,7 @@ DEFINE FIELD IF NOT EXISTS scope_id ON job_action TYPE string;
 DEFINE FIELD IF NOT EXISTS deployment_id ON job_action TYPE string;
 DEFINE FIELD IF NOT EXISTS registration_id ON job_action TYPE string;
 DEFINE FIELD IF NOT EXISTS workstation_id ON job_action TYPE string;
-DEFINE FIELD IF NOT EXISTS workspace_id ON job_action TYPE string;
+DEFINE FIELD OVERWRITE workspace_id ON job_action TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS request_id ON job_action TYPE string;
 DEFINE FIELD IF NOT EXISTS source ON job_action TYPE string;
 DEFINE FIELD IF NOT EXISTS context_revision ON job_action TYPE int;
@@ -136,11 +136,10 @@ fn head_query() -> &'static str {
      (type::record('job_origin',record::id(id)).scope_id=$scope
        AND type::record('job_origin',record::id(id)).deployment_id=$deployment
        AND type::record('job_origin',record::id(id)).workstation_id=$node
-       AND type::record('job_origin',record::id(id)).workspace_id=$workspace
        AND array::len((SELECT VALUE id FROM job_request WHERE job_id=record::id($parent.id)
-         AND scope_id=$scope AND deployment_id=$deployment AND workstation_id=$node AND workspace_id=$workspace LIMIT 1))>0
+         AND scope_id=$scope AND deployment_id=$deployment AND workstation_id=$node LIMIT 1))>0
        AND array::len((SELECT VALUE id FROM job_request WHERE job_id=record::id($parent.id)
-         AND (scope_id!=$scope OR deployment_id!=$deployment OR workstation_id!=$node OR workspace_id!=$workspace) LIMIT 1))=0) ?? false AS owned,
+         AND (scope_id!=$scope OR deployment_id!=$deployment OR workstation_id!=$node) LIMIT 1))=0) ?? false AS owned,
      (array::len((SELECT VALUE id FROM job WHERE parent=$parent.id LIMIT 1))>0
        OR array::len((SELECT VALUE id FROM job_ancestor WHERE ancestor=$parent.id LIMIT 1))>0) AS children,
      array::len((SELECT VALUE id FROM task WHERE job=$parent.id LIMIT 2)) AS task_count,
@@ -226,7 +225,6 @@ pub async fn availability(
         .bind(("scope", authority_scope.to_owned()))
         .bind(("deployment", context.deployment_id.clone()))
         .bind(("node", context.workstation_id.clone()))
-        .bind(("workspace", context.workspace_id.clone()))
         .bind((
             "cutoff",
             jobs::ts(Utc::now() - Duration::hours(jobs::EXECUTION_WINDOW_HOURS)),
@@ -294,7 +292,7 @@ pub async fn perform(
             jobs::bump(&tx,"job_guard",job_id).await?;
             let mut response=jobs::run(&tx,tx.query(head_query()).bind(("jobs",vec![jobs::rid("job",job_id)]))
                 .bind(("scope",admission.authority().scope_id().to_owned())).bind(("deployment",context.deployment_id.clone()))
-                .bind(("node",context.workstation_id.clone())).bind(("workspace",context.workspace_id.clone()))
+                .bind(("node",context.workstation_id.clone()))
                 .bind(("cutoff",jobs::ts(Utc::now()-Duration::hours(jobs::EXECUTION_WINDOW_HOURS))))).await?;
             let heads:Vec<Head>=jobs::take(&mut response,0)?;
             let head=heads.into_iter().next().ok_or_else(||abort("unavailable"))?;
@@ -325,10 +323,10 @@ pub async fn perform(
             };
             let receipt=ActionReceipt{action_id:format!("job-action-{key}"),job_id:job_id.to_owned(),action,state:state.into(),affected_tasks:1};
             let source=match admission.origin().source {fleetworks_contracts::context::OriginSource::Native=>"native",fleetworks_contracts::context::OriginSource::IntelWeb=>"intel_web",_=>return Err(abort("invalid"))};
-            jobs::run(&tx,tx.query("CREATE $record SET action_key=$key,job_id=$job,action=$action,scope_id=$scope,deployment_id=$deployment,registration_id=$registration,workstation_id=$node,workspace_id=$workspace,request_id=$request,source=$source,context_revision=$revision,configuration_epoch=$configuration,access_epoch=$principal_epoch,performed_at=$at,receipt_json=$receipt RETURN NONE")
+            jobs::run(&tx,tx.query("CREATE $record SET action_key=$key,job_id=$job,action=$action,scope_id=$scope,deployment_id=$deployment,registration_id=$registration,workstation_id=$node,request_id=$request,source=$source,context_revision=$revision,configuration_epoch=$configuration,access_epoch=$principal_epoch,performed_at=$at,receipt_json=$receipt RETURN NONE")
                 .bind(("record",jobs::rid("job_action",key))).bind(("key",key.clone())).bind(("job",job_id.to_owned())).bind(("action",action.as_str()))
                 .bind(("scope",admission.authority().scope_id().to_owned())).bind(("deployment",context.deployment_id.clone())).bind(("registration",context.registration_id.clone()))
-                .bind(("node",context.workstation_id.clone())).bind(("workspace",context.workspace_id.clone())).bind(("request",request_id.clone())).bind(("source",source))
+                .bind(("node",context.workstation_id.clone())).bind(("request",request_id.clone())).bind(("source",source))
                 .bind(("revision",context.context_revision as i64)).bind(("configuration",context.configuration_epoch.clone())).bind(("principal_epoch",context.access_epoch.clone()))
                 .bind(("at",at.clone())).bind(("receipt",serde_json::to_string(&receipt).map_err(|_|abort("invalid"))?))).await?;
             jobs::log_transition_in(&tx,job_id,&receipt.action_id,&format!("job.{}",action.as_str()),

@@ -1,6 +1,6 @@
 use fleetworks_contracts::capabilities::Capabilities;
-use fleetworks_contracts::connect::RegistrationReceipt;
 use fleetworks_contracts::context::Permission;
+use fleetworks_workspace::native::legacy_connect::RegistrationReceipt;
 use fleetworks_workspace::native::BackendBinding;
 use fleetworks_workspace::native::WorkspaceState;
 use rune::Env;
@@ -106,42 +106,19 @@ fn fixture() -> State {
 }
 
 #[test]
-fn real_runtime_ip_change_requires_confirmation_and_keeps_global_drafts() {
-    let mut state = fixture();
-    state.brain.query.text = "preserved actor draft".into();
+fn workstation_status_never_exposes_retired_folder_or_ip_rebind_controls() {
     let mut runtime = Runtime::new(
-        state,
+        fixture(),
         app::view,
-        (1280.0, 2400.0),
+        (1180.0, 780.0),
         Env {
             system_dark: true,
             scale: 1.0,
         },
     );
     runtime.frame(0.0);
-    let (x, y) = runtime
-        .find("workspace-rebind-preview")
-        .expect("shared production IP-change control");
-    runtime.pointer_down(x, y);
-    runtime.pointer_up(x, y);
-    runtime.frame(1.0 / 60.0);
-    assert!(runtime.state.rebind.confirmation.is_some());
-    assert!(!runtime
-        .state
-        .intents
-        .iter()
-        .any(|intent| matches!(intent, Intent::RebindWorkspace { .. })));
-    let tree = runtime.accessibility_json().to_string();
-    assert!(tree.contains("192.0.2.42") && tree.contains("192.0.2.43"));
-    let (x, y) = runtime
-        .find("workspace-rebind-confirm")
-        .expect("shared production IP confirmation");
-    runtime.pointer_down(x, y);
-    runtime.pointer_up(x, y);
-    runtime.frame(2.0 / 60.0);
-    assert!(runtime.state.intents.iter().any(|intent| matches!(intent, Intent::RebindWorkspace { name, ip } if name == "research" && ip == "192.0.2.43")));
-    assert!(runtime.state.registration.context.is_none());
-    assert_eq!(runtime.state.brain.query.text, "preserved actor draft");
+    assert!(runtime.find("workspace-rebind-preview").is_none());
+    assert!(runtime.find("workspace-rebind-confirm").is_none());
 }
 
 #[test]
@@ -169,6 +146,22 @@ fn removed_permission_or_changed_interface_fences_ip_confirmation() {
 fn maintenance_result_shows_safe_candidate_but_never_raw_report_or_shared_details() {
     let mut state = fixture();
     state.page = Page::Jobs;
+    state.registration.context = Some(
+        fleetworks_contracts::context::RegisteredContext::new(
+            fleetworks_contracts::connect::RegistrationReceipt::new(
+                "synthetic-deployment".into(),
+                "synthetic-node".into(),
+                "synthetic-registration".into(),
+                None,
+                1,
+            ),
+            1,
+            1,
+            "synthetic-config".into(),
+            "synthetic-access".into(),
+        )
+        .expect("current registered workstation"),
+    );
     let detail = serde_json::json!({"job":{"id":"synthetic-train","app":"workstation","title":"Synthetic training","operation":"classifier_train",
         "state":"completed","phase":"completed","progress_done":100,"progress_total":100,"error_summary":"",
         "private_details_available":true,"activity_actions_available":false,"status_only":false},"stages":[],

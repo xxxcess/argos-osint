@@ -1,4 +1,5 @@
 import { timingSafeEqual } from "node:crypto";
+import { isIP } from "node:net";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import {
@@ -11,7 +12,8 @@ import {
 } from "./server-origin.mjs";
 import { parseConnectId } from "./connect-id.mjs";
 
-export const CONNECT_COOKIE = "fleetworks_connect";
+// A new name forces a fresh Connect instead of reviving a workspace session.
+export const CONNECT_COOKIE = "fleetworks_connect_v2";
 export const EXPECTED_CONTEXT_HEADER = "x-fleetworks-expected-context-revision";
 export const CONNECT_RESPONSE_HEADERS = Object.freeze({
   "cache-control": "private, no-store, max-age=0",
@@ -165,6 +167,13 @@ export async function requireWebBoundary(request, mutation = false) {
   return origin;
 }
 
+/** Exact development-only framework sockets retain the ordinary origin boundary. */
+export async function requireDevelopmentUpgrade(request, development, path) {
+  await requireWebBoundary(request);
+  if (!development || !["/_next/webpack-hmr", "/_next/hmr"].includes(path))
+    throw new ConnectFailure(403, "upgrade_refused");
+}
+
 export function sessionTokenFromCookie(raw) {
   if (typeof raw !== "string" || raw.length > 8192)
     throw new ConnectFailure(401, "connection_required");
@@ -195,7 +204,6 @@ function validateContext(context) {
     "deployment_id",
     "registration_id",
     "workstation_id",
-    "workspace_id",
     "configuration_epoch",
     "access_epoch",
   ]) {
@@ -223,8 +231,13 @@ function validateContext(context) {
   }
   if (
     parsed.connectId !== context.connect_id ||
-    parsed.ip !== context.workstation_ip ||
-    parsed.workspaceName !== context.workspace_name
+    parsed.workstationId !== context.workstation_id ||
+    ["workspace", "workspace_id", "workspace_name", "workspace_marker"].some(
+      (field) => Object.hasOwn(context, field),
+    ) ||
+    (context.workstation_ip != null &&
+      (typeof context.workstation_ip !== "string" ||
+        isIP(context.workstation_ip) === 0))
   )
     throw new ConnectFailure(503, "invalid_authority_response");
   // Explicit allowlist prevents accidental future secret-bearing fields entering RSC/JSON.
@@ -234,8 +247,6 @@ function validateContext(context) {
       "registration_id",
       "workstation_id",
       "workstation_ip",
-      "workspace_id",
-      "workspace_name",
       "connect_id",
       "registration_revision",
       "context_revision",
@@ -337,7 +348,10 @@ export function createConnectAuthority({
         !/^[a-f0-9]{64}$/u.test(payload.session_token)
       )
         throw new ConnectFailure(503, "invalid_authority_response");
-      return validateSession(payload, payload.session_token);
+      const session = validateSession(payload, payload.session_token);
+      if (session.context.connect_id !== parsed.connectId)
+        throw new ConnectFailure(503, "invalid_authority_response");
+      return session;
     },
     async resolve(token, expectedRevision) {
       const payload = await request("/resolve", {

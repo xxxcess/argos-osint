@@ -6,7 +6,7 @@
 
 Actor discovery uses a private Linux Tantivy service behind the authenticated
 gateway. SurrealDB actor, alias, lifecycle and dossier records remain authoritative.
-The shared backend corpus is independent of the selected native workspace. The
+The shared backend corpus is independent of native workstation identity and preserved legacy folders. The
 desktop receives canonical actor IDs and bounded gateway projections; it receives
 no index origin, write token, filesystem path or engine document address.
 
@@ -117,13 +117,13 @@ shadow. Separate private explicit retirement names the inactive generation and
 expected serving generation/checksum/epoch. It refuses active/pending generations,
 unsafe file layouts and stale evidence; its journal reconciles interrupted
 cleanup. There is no arbitrary path endpoint, recursive blind deletion or
-automatic generation/tombstone GC. Configuration reset and native workspace
-retirement preserve this shared corpus and index.
+automatic generation/tombstone GC. Configuration reset and retained legacy workspace
+retirement paths preserve this shared corpus and index.
 
 ## Shared bounds and pressure
 
 The validated [ActorIndexLimits](../../../crates/fleetworks-contracts/src/actor_index.rs)
-policy applies to one backend resource, not once per native workspace.
+policy applies to one backend resource, not once per native workstation.
 
 | Control | Current starting policy |
 | --- | --- |

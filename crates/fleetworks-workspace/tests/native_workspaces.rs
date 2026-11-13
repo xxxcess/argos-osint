@@ -5,7 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 
-use fleetworks_contracts::connect::RegistrationReceipt;
+use fleetworks_workspace::native::legacy_connect::RegistrationReceipt;
 use fleetworks_workspace::native::NativeContainer;
 use fleetworks_workspace::native::NativeWorkspace;
 use fleetworks_workspace::native::OperationPhase;

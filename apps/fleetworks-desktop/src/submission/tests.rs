@@ -48,9 +48,8 @@ fn fixture() -> State {
     let receipt = RegistrationReceipt::new(
         "synthetic-deployment".into(),
         "synthetic-node".into(),
-        "synthetic-workspace".into(),
         "synthetic-registration".into(),
-        "192.0.2.42:default".parse().expect("synthetic Connect ID"),
+        Some("192.0.2.42".parse().expect("synthetic IP")),
         1,
     );
     state.registration.context = Some(
@@ -329,41 +328,63 @@ fn receipt_requires_matching_authorized_job_and_private_eligibility_for_results(
 }
 
 #[test]
-fn production_tool_confirmation_and_result_controls_use_the_shared_handlers() {
+fn production_cycle_confirmation_uses_shared_handlers_and_navigation_never_resubmits() {
+    let mut state = fixture();
+    state.page = Page::Atlas;
     let mut runtime = Runtime::new(
-        fixture(),
+        state,
         app::view,
-        (1280.0, 2400.0),
+        (1180.0, 780.0),
         Env {
             system_dark: true,
             scale: 1.0,
         },
     );
     runtime.frame(0.0);
-    for (step, key) in [
-        "tool-submit-preview",
-        "tool-submit-confirm",
-        "tool-result-refresh",
-    ]
-    .into_iter()
-    .enumerate()
+    assert!(runtime.find("tool-submit-preview").is_none());
+    assert!(runtime.find("atlas-submit-confirm").is_none());
+    for (step, key) in ["atlas-submit-preview", "atlas-submit-confirm"]
+        .into_iter()
+        .enumerate()
     {
+        runtime.update(|_, tx| tx.scroll_into_view(key));
+        runtime.frame((step * 2 + 1) as f64 / 60.0);
         let (x, y) = runtime
             .find(key)
-            .expect("production submission control exists");
+            .expect("allowlisted production cycle control");
         runtime.pointer_down(x, y);
         runtime.pointer_up(x, y);
-        runtime.frame((step + 1) as f64 / 60.0);
+        runtime.frame((step * 2 + 2) as f64 / 60.0);
+        if step == 0 {
+            assert!(
+                !runtime
+                    .state
+                    .intents
+                    .iter()
+                    .any(|intent| matches!(intent, Intent::PostInteractive { .. })),
+                "review is not consent to submit"
+            );
+        }
     }
     assert_eq!(
-        runtime.state.submissions.tools.phase,
+        runtime.state.submissions.atlas.phase,
         SubmissionPhase::Verified
     );
     assert!(matches!(
-        runtime.state.submissions.tools.result,
-        Load::Ready(_)
+        runtime.state.submissions.atlas.receipt,
+        Some(AcceptedReceipt::Atlas(_))
     ));
-    assert!(runtime.find("tool-result-observations").is_some());
+    assert!(
+        runtime
+            .accessibility_json()
+            .to_string()
+            .contains("Completion pending"),
+        "accepted receipts never invent completion"
+    );
+    runtime.update(|state, _| state.navigate(Page::Tools));
+    runtime.frame(6.0 / 60.0);
+    runtime.update(|state, _| state.navigate(Page::Atlas));
+    runtime.frame(7.0 / 60.0);
     let posts = runtime
         .state
         .intents
@@ -372,7 +393,7 @@ fn production_tool_confirmation_and_result_controls_use_the_shared_handlers() {
         .count();
     assert_eq!(
         posts, 1,
-        "result refresh never submits or reissues a provider request"
+        "revisiting the destination never resubmits accepted work"
     );
 }
 
@@ -406,9 +427,8 @@ fn changed_origin_retains_unknown_identity_but_cannot_replay_its_body() {
     let receipt = RegistrationReceipt::new(
         "synthetic-deployment".into(),
         "synthetic-node".into(),
-        "synthetic-other-workspace".into(),
         "synthetic-other-registration".into(),
-        "192.0.2.42:research".parse().expect("new synthetic origin"),
+        Some("192.0.2.42".parse().expect("new synthetic IP")),
         1,
     );
     state.registration.context = Some(
@@ -465,11 +485,8 @@ fn read_only_resolution_recovers_exact_association_without_another_post() {
     let receipt = RegistrationReceipt::new(
         "synthetic-deployment".into(),
         "synthetic-node".into(),
-        "synthetic-workspace".into(),
         "synthetic-new-registration".into(),
-        "192.0.2.42:default"
-            .parse()
-            .expect("same selected synthetic workspace"),
+        Some("192.0.2.42".parse().expect("same synthetic IP")),
         2,
     );
     state.registration.context = Some(

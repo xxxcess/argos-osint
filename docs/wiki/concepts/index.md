@@ -11,7 +11,7 @@ Start with [usage](usage.md) for the native macOS app and Intel Web with indepen
 | Intel | Retained article briefs, claim analysis and staged publication. [Brief jobs](glossary.md#intel-brief-jobs-and-historical-reports) | [Brief chain](../../diagrams/intel-brief-chain.html) | [Core](../code/core.md#intel) |
 | Atlas | Durable headline collection and six-domain admission. [Classification and Related](atlas-classification-and-related-articles.md) · [Taxonomy](strategic-domains-taxonomy.md) | [Atlas cycle](../../diagrams/atlas-pipeline.html) | [Core](../code/core.md#atlas) |
 | Brain | Sourced memory, direct associations and topology. [Browsing](../code/architecture.md#brain-browsing-and-direct-associations) · [Topology](topology-mapper.md) | [Source lifecycle](../../diagrams/brain-source-lifecycle.html) | [Core](../code/core.md#brain) |
-| Jobs and Logs | Durable work and operational events. [Terminal session](usage.md#jobs-and-logs) | [Jobs lifecycle](../../diagrams/jobs-lifecycle.html) | [Architecture](../code/architecture.md#fleetworks-service-boundaries) |
+| Jobs and Logs | Durable work and operational events. [Workstation activity](usage.md#jobs-and-logs) | [Jobs lifecycle](../../diagrams/jobs-lifecycle.html) | [Architecture](../code/architecture.md#fleetworks-service-boundaries) |
 
 ## Shared contracts
 

@@ -8,30 +8,32 @@ import {
   ActivityIndicator,
 } from "react-native";
 
-// Fleetworks web colors. HUD/glass geometry and the Rust terminal palette
-// remain separate; these tokens change only the existing web paint.
+// Matte Fleetworks paint. Existing geometry and semantic colors remain separate.
 export const colors = {
-  bg: "#111111",
-  panel: "#141414",
-  raised: "#232321",
-  inset: "#0D0D0D",
+  bg: "#060709",
+  panel: "#0B0C0F",
+  raised: "#111317",
+  inset: "#060709",
   border: "#898274",
   borderSubtle: "#3A3833",
   text: "#F3EEE4",
-  dim: "#C6C0B5",
-  muted: "#A09A8F",
+  dim: "#D6D2C4",
+  muted: "#B8B4A8",
   accent: "#C6A56E",
   accentPressed: "#C4A265",
   accentHover: "#D8BD8C",
-  onAccent: "#111111",
+  onAccent: "#060709",
   selectionSurface: "#322C22",
   accent2: "#c678dd",
   success: "#98c379",
   warning: "#e5c07b",
   danger: "#f08a8a",
-  glass: "rgba(20, 20, 20, 0.55)",
-  glassStrong: "rgba(35, 35, 33, 0.72)",
-  glassBorder: "rgba(137, 130, 116, 0.85)",
+  // Compatibility names retain existing consumers with opaque matte fills.
+  glass: "#0B0C0F",
+  glassStrong: "#111317",
+  glassBorder: "#898274",
+  cardEdge: "rgba(243, 238, 228, 0.02)",
+  satinControlEdge: "rgba(243, 238, 228, 0.03)",
   accentSoft: "rgba(198, 165, 110, 0.1)",
 };
 export const fonts = {
@@ -40,15 +42,24 @@ export const fonts = {
 };
 // Web-only style props (RN Web supports them); typed loosely for RN.
 type WebStyle = Record<string, unknown>;
-export const glass: WebStyle = {
-  backgroundColor: colors.glass,
+export const matteCard: WebStyle = {
+  backgroundColor: colors.panel,
   borderWidth: 1,
-  borderColor: colors.glassBorder,
-  backdropFilter: "blur(12px)",
-  WebkitBackdropFilter: "blur(12px)",
+  borderColor: colors.cardEdge,
 };
+export const matteDarkControl: WebStyle = {
+  backgroundColor: colors.raised,
+  borderWidth: 1,
+  borderColor: colors.border,
+};
+export const mutedGoldPrimary: WebStyle = {
+  backgroundColor: colors.accent,
+  borderColor: colors.accent,
+};
+// Existing consumers retain their API while the visual treatment becomes matte.
+export const glass = matteCard;
 export const glow = (color: string): WebStyle => ({
-  boxShadow: `0 0 12px ${color}55, inset 0 0 0 1px ${color}33`,
+  boxShadow: `inset 0 0 0 1px ${color}`,
 });
 export type Tone = "accent" | "success" | "warning" | "danger" | "purple";
 export const toneColor: Record<Tone, string> = {
@@ -74,7 +85,7 @@ export function StatusTag({
     </Text>
   );
 }
-/** Glass container with corner-accent HUD edge; `tone` tints the top rule. */
+/** Matte container retaining the existing tone-tinted top rule. */
 export function Frame({
   children,
   tone = "accent",
@@ -261,7 +272,7 @@ const s = StyleSheet.create({
     paddingHorizontal: 12,
     borderWidth: 1,
     borderRadius: 2,
-    backgroundColor: colors.glass,
+    backgroundColor: colors.raised,
     borderColor: colors.border,
   },
   buttonText: {
@@ -277,17 +288,16 @@ const s = StyleSheet.create({
   quietText: { color: colors.dim },
   primary: {
     borderColor: colors.accent,
-    backgroundColor: colors.accentSoft,
+    backgroundColor: colors.accent,
   },
-  primaryText: { color: colors.accent },
+  primaryText: { color: colors.onAccent },
   hovered: {
     backgroundColor: colors.accentSoft,
     borderColor: colors.accent,
   },
   primaryHover: {
-    backgroundColor: colors.accentSoft,
+    backgroundColor: colors.accentHover,
     borderColor: colors.accentHover,
-    ...(glow(colors.accent) as object),
   },
   pressed: {
     borderColor: colors.accent,
@@ -295,13 +305,11 @@ const s = StyleSheet.create({
   },
   primaryPressed: {
     borderColor: colors.accentPressed,
-    backgroundColor: colors.glassStrong,
-    color: colors.accentPressed,
+    backgroundColor: colors.accentPressed,
   },
   active: {
     borderColor: colors.accent,
     backgroundColor: colors.accent,
-    ...(glow(colors.accent) as object),
   },
   activeText: { color: colors.onAccent, fontWeight: "700" },
   disabled: {

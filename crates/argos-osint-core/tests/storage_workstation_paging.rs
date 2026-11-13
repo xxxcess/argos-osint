@@ -24,7 +24,6 @@ use chrono::DateTime;
 use chrono::Duration;
 use chrono::Utc;
 use fleetworks_contracts::connect::RegistrationEnsureRequest;
-use fleetworks_contracts::connect::WorkspaceName;
 use fleetworks_contracts::context::ActivityScope;
 use fleetworks_contracts::context::JobOrigin;
 use fleetworks_contracts::context::OriginSource;
@@ -66,10 +65,8 @@ async fn register(repo: &Repository, node: &str, child: &str) -> RegisteredConte
         &authority(),
         &RegistrationEnsureRequest::new(
             format!("ensure-{node}-{child}"),
-            ip.parse().expect("synthetic IP"),
-            WorkspaceName::new(child).expect("managed child"),
+            Some(ip.parse().expect("synthetic IP")),
             format!("paging-installation-{node}"),
-            format!("paging-folder-{node}-{child}"),
         ),
     )
     .await
@@ -262,12 +259,18 @@ async fn registered_scope_precedes_window_counts_facets_and_newest_tied_keysets(
     );
     assert_eq!(second_page.matched_total, Some(4));
     assert!(!second_page.has_more && second_page.next_anchor.is_none());
-    let mut child_scope = scope.clone();
-    child_scope.workspace_id = Some(first.workspace_id.clone());
+    let child_scope = scope.clone();
+    // Version two has no child narrowing.
     let child_page = jobs_paging::page(repo.db(), SCOPE, &child_scope, &filters, &window, None, 20)
         .await
         .expect("child narrows the actual node cohort");
-    assert_eq!(ids(&child_page), ["newest", "tie-a", "causal-child"]);
+    assert_eq!(
+        ids(&child_page),
+        ids(&first_page)
+            .into_iter()
+            .chain(ids(&second_page))
+            .collect::<Vec<_>>()
+    );
     let wrong = jobs_paging::page(
         repo.db(),
         "wrong-authority",

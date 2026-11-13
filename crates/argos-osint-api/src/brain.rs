@@ -121,7 +121,6 @@ mod tests {
         #[cfg(feature = "embedded")]
         use argos_osint_core::storage::repo::Repository;
         use fleetworks_contracts::connect::RegistrationEnsureRequest;
-        use fleetworks_contracts::connect::WorkspaceName;
         use fleetworks_contracts::context::CredentialPurpose;
         use fleetworks_contracts::context::Permission;
 
@@ -155,10 +154,8 @@ mod tests {
             &authority,
             &RegistrationEnsureRequest::new(
                 "relay-ensure".into(),
-                "192.0.2.42".parse().expect("synthetic native IP"),
-                WorkspaceName::new("research").expect("child name"),
+                Some("192.0.2.42".parse().expect("synthetic native IP")),
                 "synthetic-relay-installation".into(),
-                "synthetic-relay-folder".into(),
             ),
         )
         .await

@@ -18,7 +18,7 @@ use crate::connect::RegistrationStatus;
 use crate::connect::WorkspaceName;
 
 /// Version of server-enforced workstation-triggered activity semantics.
-pub const ACTIVITY_SCOPE_VERSION: u16 = 1;
+pub const ACTIVITY_SCOPE_VERSION: u16 = 2;
 
 /// A purpose-scoped operation permission, always granted by server policy.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -136,9 +136,8 @@ pub struct RegisteredContext {
     pub deployment_id: String,
     pub registration_id: String,
     pub workstation_id: String,
-    pub workstation_ip: IpAddr,
-    pub workspace_id: String,
-    pub workspace_name: WorkspaceName,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workstation_ip: Option<IpAddr>,
     pub connect_id: ConnectId,
     pub registration_revision: u64,
     pub context_revision: u64,
@@ -196,8 +195,6 @@ impl RegisteredContext {
             registration_id: registration.registration_id,
             workstation_id: registration.workstation_id,
             workstation_ip: registration.workstation_ip,
-            workspace_id: registration.workspace_id,
-            workspace_name: registration.workspace_name,
             connect_id: registration.connect_id,
             registration_revision: registration.revision,
             context_revision,
@@ -273,10 +270,15 @@ pub struct JobOrigin {
     pub deployment_id: String,
     pub registration_id: String,
     pub workstation_id: String,
-    pub workspace_id: String,
-    pub connect_id_at_submission: ConnectId,
-    pub workstation_ip_at_submission: IpAddr,
-    pub workspace_name_at_submission: WorkspaceName,
+    /// Immutable legacy snapshot only; absent from version-two submissions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    /// String preserves historical IP:workspace IDs without admitting them as current IDs.
+    pub connect_id_at_submission: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workstation_ip_at_submission: Option<IpAddr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_name_at_submission: Option<WorkspaceName>,
     pub source: OriginSource,
     pub request_id: String,
     pub submitted_at: String,
@@ -301,10 +303,10 @@ impl JobOrigin {
             deployment_id: context.deployment_id.clone(),
             registration_id: context.registration_id.clone(),
             workstation_id: context.workstation_id.clone(),
-            workspace_id: context.workspace_id.clone(),
-            connect_id_at_submission: context.connect_id.clone(),
+            workspace_id: None,
+            connect_id_at_submission: context.connect_id.to_string(),
             workstation_ip_at_submission: context.workstation_ip,
-            workspace_name_at_submission: context.workspace_name.clone(),
+            workspace_name_at_submission: None,
             source,
             request_id,
             submitted_at,
@@ -336,10 +338,10 @@ impl JobRequestAssociation {
     }
 }
 
-/// Required workstation activity scope with an optional narrowing child filter.
+/// Required workstation activity scope; legacy child narrowing is rejected.
 ///
 /// This type has no all-backend/all-node/system mode. The server resolves and
-/// authorizes the node and every child filter before querying or streaming.
+/// authorizes the workstation before querying or streaming.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -347,28 +349,16 @@ pub struct ActivityScope {
     pub deployment_id: String,
     pub workstation_id: String,
     pub scope_revision: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_id: Option<String>,
 }
 
 impl ActivityScope {
-    /// Show the selected workstation's eligible activity across its children.
+    /// Select eligible workstation activity, including authorized historical associations.
     #[must_use]
     pub fn for_workstation(context: &RegisteredContext) -> Self {
         Self {
             deployment_id: context.deployment_id.clone(),
             workstation_id: context.workstation_id.clone(),
             scope_revision: context.scope_revision,
-            workspace_id: None,
-        }
-    }
-
-    /// Narrow the same node scope to the currently selected child.
-    #[must_use]
-    pub fn for_selected_workspace(context: &RegisteredContext) -> Self {
-        Self {
-            workspace_id: Some(context.workspace_id.clone()),
-            ..Self::for_workstation(context)
         }
     }
 }
@@ -377,22 +367,52 @@ impl ActivityScope {
 mod tests {
     use super::*;
 
-    fn context(child: &str, registration: &str) -> RegisteredContext {
-        let id = format!("192.0.2.42:{child}")
-            .parse()
-            .expect("synthetic Connect ID");
-        let receipt = RegistrationReceipt::new(
+    #[test]
+    fn current_origin_omits_workspace_identity_and_activity_rejects_narrowing() {
+        let registration = RegistrationReceipt::new(
             "deployment-a".into(),
             "node-a".into(),
-            child.into(),
-            registration.into(),
-            id,
-            3,
+            "registration-a".into(),
+            None,
+            1,
         );
-        RegisteredContext::new(receipt, 7, 11, "reset-1".into(), "access-2".into())
-            .expect("synthetic context")
+        let context =
+            RegisteredContext::new(registration, 1, 1, "config-a".into(), "access-a".into())
+                .expect("context");
+        let origin = JobOrigin::new(
+            &context,
+            OriginSource::Native,
+            "request-a".into(),
+            "2026-11-12T00:00:00Z".into(),
+            1,
+            vec![],
+        );
+        let value = serde_json::to_value(origin).expect("origin");
+        assert!(value.get("workspace_id").is_none());
+        assert!(value.get("workspace_name_at_submission").is_none());
+        assert_eq!(value["connect_id_at_submission"], "node-a");
+        let mut scope =
+            serde_json::to_value(ActivityScope::for_workstation(&context)).expect("scope");
+        scope["workspace_id"] = serde_json::json!("legacy");
+        assert!(serde_json::from_value::<ActivityScope>(scope).is_err());
     }
 
+    fn context(child: &str, registration: &str) -> RegisteredContext {
+        RegisteredContext::new(
+            RegistrationReceipt::new(
+                "deployment-a".into(),
+                format!("node-{child}"),
+                registration.into(),
+                None,
+                3,
+            ),
+            7,
+            11,
+            "reset-1".into(),
+            "access-2".into(),
+        )
+        .expect("context")
+    }
     #[test]
     fn permission_spellings_are_explicit_and_unknown_values_fail_closed() {
         for permission in [
@@ -420,50 +440,6 @@ mod tests {
     }
 
     #[test]
-    fn immutable_job_origin_survives_later_workspace_and_ip_switching() {
-        let mut current = context("research", "registration-a");
-        let origin = JobOrigin::new(
-            &current,
-            OriginSource::Native,
-            "request-1".into(),
-            "2026-01-01T00:00:00Z".into(),
-            19,
-            vec!["account-ref".into()],
-        );
-        current.workspace_name = WorkspaceName::new("review").expect("child");
-        current.workstation_ip = "192.0.2.99".parse().expect("IP");
-        current.registration_id = "registration-b".into();
-        assert_eq!(origin.workspace_name_at_submission.as_str(), "research");
-        assert_eq!(
-            origin.workstation_ip_at_submission.to_string(),
-            "192.0.2.42"
-        );
-        assert_eq!(origin.registration_id, "registration-a");
-        assert_eq!(origin.configuration_revision, 19);
-    }
-
-    #[test]
-    fn activity_child_filter_only_narrows_and_replies_fence_on_context_revision() {
-        let first = context("research", "registration-a");
-        let second = context("review", "registration-b");
-        let all = ActivityScope::for_workstation(&first);
-        let child = ActivityScope::for_selected_workspace(&first);
-        assert_eq!(all.workstation_id, child.workstation_id);
-        assert_eq!(all.deployment_id, child.deployment_id);
-        assert_eq!(all.scope_revision, child.scope_revision);
-        assert!(all.workspace_id.is_none());
-        assert_eq!(child.workspace_id.as_deref(), Some("research"));
-        assert!(first.same_request_context(&first));
-        assert!(!first.same_request_context(&second));
-        let mut stale = first.clone();
-        stale.context_revision += 1;
-        assert!(!first.same_request_context(&stale));
-        assert!(
-            serde_json::from_value::<ActivityScope>(serde_json::json!({"all_nodes":true})).is_err()
-        );
-    }
-
-    #[test]
     fn mutation_input_cannot_assign_source_or_immutable_origin() {
         let valid =
             serde_json::to_value(MutationContext::new(&context("research", "registration-a")))
@@ -477,5 +453,16 @@ mod tests {
             );
         }
         assert!(serde_json::from_value::<OriginSource>(serde_json::json!("system")).is_err());
+    }
+    #[test]
+    fn historical_workspace_origin_decodes_without_becoming_a_current_connect_id() {
+        let value = serde_json::json!({"deployment_id":"deployment-a","registration_id":"old-registration","workstation_id":"node-a","workspace_id":"old-child","connect_id_at_submission":"192.0.2.42:research","workstation_ip_at_submission":"192.0.2.42","workspace_name_at_submission":"research","source":"native","request_id":"accepted-request","submitted_at":"2026-11-01T00:00:00Z","configuration_epoch":"config-a","configuration_revision":1,"credential_references":[]});
+        let origin: JobOrigin = serde_json::from_value(value).expect("immutable legacy origin");
+        assert_eq!(origin.workspace_id.as_deref(), Some("old-child"));
+        assert_eq!(origin.connect_id_at_submission, "192.0.2.42:research");
+        assert!(origin
+            .connect_id_at_submission
+            .parse::<ConnectId>()
+            .is_err());
     }
 }

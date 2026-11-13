@@ -144,7 +144,6 @@ pub async fn plan(
         .bind(("activity_scope", authority_scope.to_owned()))
         .bind(("activity_deployment", scope.deployment_id.clone()))
         .bind(("activity_node", scope.workstation_id.clone()))
-        .bind(("activity_workspace", scope.workspace_id.clone()))
         .bind(("cutoff", jobs_view::cutoff(Utc::now())))
         .bind(("n", (COHORT_LIMIT + 1) as i64));
     if let Some(selected) = &selection.job_id {

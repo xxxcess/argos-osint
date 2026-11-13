@@ -6,9 +6,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 
+use crate::native::legacy_connect::RegistrationEnsureRequest;
+use crate::native::legacy_connect::RegistrationReceipt;
 use anyhow::Result;
-use fleetworks_contracts::connect::RegistrationEnsureRequest;
-use fleetworks_contracts::connect::RegistrationReceipt;
 
 use super::NativeContainer;
 use super::OperationPhase;

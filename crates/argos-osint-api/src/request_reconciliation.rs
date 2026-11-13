@@ -37,6 +37,7 @@ pub(crate) async fn read(
             | "classifier_train"
             | "classifier_activate"
             | "actor_reindex"
+            | "atlas.cycle_history.delete"
     ) {
         return Err(ContextFailure::invalid().into());
     }

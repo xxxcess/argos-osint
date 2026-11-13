@@ -1,67 +1,65 @@
 # Native connections and registered context
 
-[Fleetworks](fleetworks.md) · [Native app](../../../apps/fleetworks-desktop/README.md) · [Endpoint inventory](../../../.planning/2026-11-11-rune-macos-cutover/phase1-design.md)
+[Client](../../../apps/fleetworks-desktop/README.md) · [Protected identity](native-workspaces.md) · [Control/design guide](native-design-system.md) · [Verification](../../../.planning/2026-11-12-native-workstation-redesign/acceptance.md)
 
-The macOS app connects to an independently running gateway. Connecting never starts containers, services, Intel Web, catalog seeding or model downloads. Atlas, Brain, Tools, Models and Profile show resources in the selected backend. Workstation, Workspaces and Jobs & Logs show local identity and registered activity. Registration records request provenance; it does not create a private actor catalog, model configuration or provider account for a folder.
-
-[![Explicit native connection and registered browser handoff](../../diagrams/native-connections.svg)](../../diagrams/native-connections.html)
+[![Provision, authenticate and register](../../diagrams/native-connections.svg)](../../diagrams/native-connections.html)
 
 ## Authority and registration
 
-The gateway loads a versioned private credential manifest with distinct Native, WebRelay, InternalService and Operator tokens. Purpose and explicit permissions govern operations. A Connect ID is a lookup value, not an authentication credential. The compatibility bearer constructor grants none of the new purpose permissions. Invalid explicitly configured manifests fail startup instead of falling back to a shared token.
+| Boundary | Contract |
+| --- | --- |
+| Credentials | Native, WebRelay, InternalService and Operator purposes have explicit permissions. Connect IDs and caller-supplied headers grant no authority. |
+| Local setup | Provision an exact-origin protected token-file reference, then use Gateway URL → Connectivity Check. Verify private permissions/object identity again; rotation/replacement requires explicit provisioning. No token bytes in settings or cross-origin forwarding. |
+| Identity | Connect/activity contract 2: opaque workstation ID = Connect ID; authenticated scope + protected installation marker determine identity. Optional IP never merges installations. New requests contain no workspace fields. |
+| Transport | Pin origin; disable environment proxy/redirect forwarding; bound responses. Gateway admission/read boundaries revalidate current proof, permissions and revisions. |
+| Invalidation | Gateway/access changes fence old clients, reads, caches and confirmations. Missing registration or optional services disables only dependent actions; permitted shared reads remain usable. |
 
-The app reads an explicit private token file, pins one HTTP origin, disables environment proxies and redirects, and bounds responses. The gateway validates current proof again at admission. Private services receive reduced server-created delegation through their fixed authenticated clients; public forwarded context headers cannot create authority.
-
-Workstation Add/Edit saves a name, canonical gateway origin and a protected token-file reference in the installation-bound `.native-connections.json` catalog. The catalog contains no token bytes. The reference is bound to that exact origin and owned file object; replacing the file requires explicit selection again. Unknown formats, unsafe permissions, stale catalog revisions and another installation's catalog fail closed. The catalog is independent of workspace identity and retirement journals.
-
-Test authenticates and checks compatibility without installing a connected client, registering a workspace or changing backend configuration. Connect performs the connection flow explicitly. Selecting or editing a destination invalidates old requests and scoped data; unsaved backend changes require an explicit discard decision. Saved selection never connects automatically. Local loopback and remote authenticated HTTPS profiles are both connect-only.
-
-Native registration combines an explicitly selected current LAN/VPN address with one owned local child. The route to a remote gateway can suggest an interface; loopback does not select an external IP. The gateway enforces active IP, child-name and Connect-binding uniqueness transactionally. Installation/folder markers detect collisions but do not authorize claiming another workstation. Registration responses contain deployment, workstation, workspace and registration IDs plus a revision.
-
-Before sending ensure, the local manager persists its exact registration attempt. An uncertain response keeps that attempt for exact retry and prevents removal until reconciled. Global reads can work before a folder is registered. Activity and mutations require the actual registered context and appropriate permissions. Configuration mutations carry an expected revision; a workspace change invalidates pending origin-dependent confirmations while keeping global drafts.
-
-The [registry figure](../../diagrams/connect-registry.html) separates protected local identity from backend claims, active bindings, rebind and session revocation.
+Coordinate incompatible deployment: stop/fence old writers, run current operator bootstrap against retained data, then start compatible gateway/workers/clients. The atomic migration checkpoints contract/schema state, preserves workstation IDs and old registration mappings, marks legacy registrations read-only and revokes old browser sessions. Require fresh native/browser registration proof; preserve immutable origins and unresolved requests. [Registry migration](../../diagrams/connect-registry.html)
 
 ## Browser handoff
 
-The gateway may advertise an explicit Intel Web URL. Native Open Intel Web opens its Connect form and copies the canonical Connect ID. The browser server uses its separately provisioned WebRelay credential to resolve an existing registration and sets an HttpOnly session. It cannot register a guessed or unknown ID.
+[![Central browser authority gate](../../diagrams/intel-connect-gate.svg)](../../diagrams/intel-connect-gate.html)
 
-The central web gate protects page loads, RSC/prefetch, API/export and live access. Session/context revisions fence old tabs and outstanding requests. Reconnection clears scoped caches and transport state; logout revokes server proof. IP/name lookup is not a fallback for an absent session.
-
-[![Intel Connect authority and access gate](../../diagrams/intel-connect-gate.svg)](../../diagrams/intel-connect-gate.html)
+| Boundary | Contract |
+| --- | --- |
+| Connect | Enter an existing opaque workstation ID. Separately provisioned WebRelay resolves it; the browser cannot register guessed IDs. |
+| Session | Host-only HttpOnly SameSite=Strict `fleetworks_connect_v2`; HTTPS adds Secure. Old workspace cookies require fresh Connect. Allowlist public fields and require Connect ID = workstation ID. |
+| Cache/cursors | `workstation-v2` namespace includes deployment, workstation, registration and authority revisions/epochs; IP is not identity. Old workspace contexts/narrowing/cursors fail explicitly. |
+| Protected access | Central server guard precedes page/RSC/prefetch, REST/export and live data. Host/Origin/ingress and expected context revisions fence forged requests/stale-tab mutations. |
+| Lifecycle | Switch/expiry/denial clears Query/live state; logout revokes server proof. Bounded live rechecks include deployment/workstation/registration/revisions/epochs and close stale streams. Native may close independently. |
 
 ## Durable requests and activity
 
-Atlas, manual Tools, brief and maintenance admission preserve immutable creator context with the actual job transaction. Reuse adds a genuine requester association without rewriting the creator. Causal children inherit origin through the storage boundary. Legacy and system work stay unattributed.
+[![Immutable origin before scoped projections](../../diagrams/brief-job-context.svg)](../../diagrams/brief-job-context.html)
 
-Jobs queries filter requester membership before page limits, counts and facets. Native activity can cover the verified workstation or narrow to an owned child; browser activity stays in its selected child. Shared jobs expose lifecycle status while private details, results, logs and control remain unavailable to an incompatible cohort. Each retry/cancel action independently checks its permission, current proof, ownership and supported state.
-
-The additive `sort=newest` Jobs route filters status, app, operation, kind, exact private correlation, text and creation time before paging. It includes eligible attributed causal children. Creation time descending and ID ascending anchor a fixed 72-hour window; current membership and status are rechecked on every response. An opaque `page_cursor` identifies the current page, including the first page, and `next_cursor` identifies an available continuation. Tokens expire after two minutes and bind the credential proof, scope, filters and window. Expired or changed context requires an explicit restart. The retained no-sort route keeps its existing active-first root view.
-
-`matched_total` and app-facet completeness describe the current filtered cohort. Dashboard status buckets retain the separately labelled unfiltered top-level workstation scope. Neither value promises an immutable historical snapshot. Native paging keeps bounded cursor history without caching old page rows; applying filters clears stale selection and action confirmations. Jobs and Logs have separate tabs and drafts.
-
-An uncertain submission retains its exact nonce and input/configuration snapshot. The read-only request lookup can recover a previously accepted association under current proof; a returned opaque job ID is verified through scoped Jobs before displaying results. Closing the app or cancelling an HTTP request does not cancel durable work.
-
-[![Durable creator and requester context before activity projection](../../diagrams/brief-job-context.svg)](../../diagrams/brief-job-context.html)
+- Admission captures immutable creator context transactionally; reuse adds a genuine requester association. Causal jobs retain their accepted origin/lifecycle fence. Version-aware readers preserve historical child metadata without allowing new child admission.
+- Membership precedes rows, totals, facets, paging, private details, results, logs, exports, streams and mutations. Shared status does not grant private access; unknown/system/unregistered work has no all-backend fallback.
+- Uncertain delivery retains original operation/request ID, exact body/context and original registration. `GET /api/v1/workstation/requests/detail` resolves it read-only using `original_registration_id`. Unknown stays unresolved; navigation/reconnection never creates a replacement POST.
 
 ## Bounded operational logs
 
 `@tag:jobs-persistence`
 
-The registered `/api/v1/logs`, `/logs/export` and `/logs/follow` routes use the same durable activity membership policy before querying the private Jobs SQLite owner. Whole-workstation reads may narrow to a child or selected job and its eligible descendants. Unassigned, other-node, other-deployment and incompatible mixed-origin private rows cannot affect returned rows, counts, facets or cursors. Historical domain event storage is not a fallback.
+Jobs SQLite owns safe summaries, not provider stdout/payloads. Membership/private eligibility applies before querying that owner, including counts/facets/cursors. Native displays a bounded selected-job queue/log view; finite updates pause when hidden/unfocused and never cancel accepted jobs. No tabs or filter/follow/copy/export/retry/cancel toolbar.
 
-An eligible cohort over 512 jobs returns an explicit unavailable state with a narrowing hint. A page contains at most 100 safe summaries; raw payloads and sequence numbers never reach clients. App facets probe beyond the 32-name display limit and report completeness separately from counts. Search matches only the returned summary, including its 1,000-character bound. SQLite reads have an actual interruptible scan deadline and restore connection settings after interruption.
+Richer backend APIs retain independent permissions. Opaque cursors bind proof/scope/snapshot, expire and require restart after invalidation. Follow/export stay bounded; partial exports and unavailable counts remain explicit.
 
-Opaque cursors bind the current credential proof, registered scope, filters and snapshot. They expire after two minutes, are process-local, and require an explicit restart after expiry, failover, revocation or membership change. Follow waits at most four seconds per request and rechecks authority; it is not a global subscription. Export is paged NDJSON with a continuation header. A page with a continuation is a partial export, and unavailable counts are unknown rather than zero.
+## Readiness and maintenance
+
+Status distinguishes identity/gateway, service readiness and optional API-host metrics; missing/stale data is unavailable, never invented zero/success. Configured exact-revision inputs enable actor seed/index/Natural training. Missing/stale inputs disable only their action. Training creates a candidate without activation; Rust-BERT inference is separate. [Maintenance figure](../../diagrams/workstation-readiness.html) · [Operator inputs](../../../deploy/README.md#configured-native-maintenance-inputs)
+
+Cycles use bounded workstation summaries and revision/idempotency-bound association tombstones. Delete preserves shared evidence/audit and does not cancel a cycle. Accepted receipts mean queued, not completed.
+
+## Configuration and model choices
+
+| Edit | Contract |
+| --- | --- |
+| Models | `/api/v1/models/defaults` advertises canonical roles and `configured_routes` choices, not exhaustive remote discovery. Select the actual provider/account/model tuple. Effort/variant share one supported provider/model setting. |
+| Provider key | Preserve hidden account fields and unchanged secrets. Permissions/revisions still apply; conflicts retain pending edits. |
+| Tool slots | Independent optional patches: omitted/null preserves; empty explicitly clears; nonempty replaces. Native blank fields preserve; Clear actions are explicit. Saved bytes are never returned. |
 
 ## Source and verification
 
-Workstation observations are a separate read-only contract: database seed completion, reader-visible actor search, a trained Natural candidate, explicit activation and verified Rust-BERT inference are distinct facts. Bounded checks preserve partial, unknown, stale and unavailable states. Seed/train/reindex and activation each require an explicit attributed mutation and a real durable consumer; accepting a job does not mean it finished.
+[Contracts/SDK](../../../crates/fleetworks-contracts/src/) · [Native effects](../../../apps/fleetworks-desktop/src/) · [Protected settings](../../../crates/fleetworks-workspace/src/native/) · [Registry](../../../crates/argos-osint-core/src/storage/connect_registry.rs) · [Job context](../../../crates/argos-osint-core/src/storage/job_context.rs) · [Gateway boundary](../../../crates/argos-osint-api/src/context_boundary.rs)
 
-[![Read-only readiness and explicit durable maintenance](../../diagrams/workstation-readiness.svg)](../../diagrams/workstation-readiness.html)
-
-- [Shared IDs/context and SDK](../../../crates/fleetworks-contracts/src/) own canonical parsing, permissions, DTOs and bounded origin-pinned transport.
-- [Native connection effects](../../../apps/fleetworks-desktop/src/connection.rs), registration and submission modules own asynchronous UI transitions and stale-reply fences.
-- [Saved profiles](../../../crates/fleetworks-workspace/src/native/connections.rs) own the protected local catalog; [operational logs](../../../crates/argos-osint-api/src/operational_logs.rs) join authority to the private owner and bounded cursors.
-- [Registry](../../../crates/argos-osint-core/src/storage/connect_registry.rs), [job context](../../../crates/argos-osint-core/src/storage/job_context.rs), [activity storage](../../../crates/argos-osint-core/src/storage/jobs_view.rs) and [gateway boundary](../../../crates/argos-osint-api/src/context_boundary.rs) own durable authority and membership.
-- Contract/native/workspace tests and isolated storage fixtures cover identities, replay, revocation, retirement and privacy. Repository Playwright covers the real Connect gate, stale tabs and logout. Fixture and source checks do not replace installed-app validation on both Mac architectures or real isolated backend integration.
+The [acceptance tracker](../../../.planning/2026-11-12-native-workstation-redesign/acceptance.md) separates implementation, actual focused/gate results, inspected Runtime evidence, hosted platforms and installed-app checks. A source audit or generated image is not runtime approval.

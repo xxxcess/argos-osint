@@ -6,7 +6,12 @@
     <polygon points="46,92 58,114 34,114"/>
     <polygon points="210,92 222,114 198,114"/>
   </g>
-  <circle cx="128" cy="168" r="62" fill="#C4A265"/>
-  <circle cx="128" cy="132" r="50" fill="#141414"/>
+  <defs>
+    <mask id="crescent" maskUnits="userSpaceOnUse" x="0" y="0" width="256" height="256">
+      <rect width="256" height="256" fill="white"/>
+      <circle cx="128" cy="132" r="50" fill="black"/>
+    </mask>
+  </defs>
+  <circle cx="128" cy="168" r="62" fill="#C4A265" mask="url(#crescent)"/>
   <circle cx="128" cy="124" r="40" fill="#F3EEE4"/>
 </svg>

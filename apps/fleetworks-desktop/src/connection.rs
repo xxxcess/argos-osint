@@ -1,6 +1,5 @@
 //! Gateway-only effects. No application operation starts a process or service.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -82,45 +81,16 @@ pub(crate) struct Connected {
 #[derive(Clone)]
 pub(crate) enum ConnectionCredential {
     None,
-    File(PathBuf),
     Reference(CredentialReference),
-    Saved {
-        reference: CredentialReference,
-        container: Arc<NativeContainer>,
-        catalog_revision: u64,
-        profile_id: String,
-        profile_revision: u64,
-    },
+    Provisioned(Arc<NativeContainer>),
     Unavailable,
 }
 impl ConnectionCredential {
     pub(crate) fn reference(&self, origin: &str) -> anyhow::Result<Option<CredentialReference>> {
         match self {
             Self::None => Ok(None),
-            Self::File(path) => CredentialReference::capture(path, origin).map(Some),
+            Self::Provisioned(container) => container.credential_binding(origin).map(Some),
             Self::Reference(reference) => {
-                drop(reference.open_verified(origin)?);
-                Ok(Some(reference.clone()))
-            }
-            Self::Saved {
-                reference,
-                container,
-                catalog_revision,
-                profile_id,
-                profile_revision,
-            } => {
-                let catalog = container.connection_profiles()?;
-                anyhow::ensure!(
-                    catalog.revision == *catalog_revision
-                        && catalog
-                            .profiles
-                            .iter()
-                            .any(|profile| &profile.id == profile_id
-                                && profile.revision == *profile_revision
-                                && &profile.credential == reference
-                                && profile.origin == origin),
-                    "saved connection changed; refresh before using its credential reference"
-                );
                 drop(reference.open_verified(origin)?);
                 Ok(Some(reference.clone()))
             }
@@ -354,7 +324,7 @@ async fn read_private_token(
         let value = String::from_utf8(bytes)?;
         Ok((Some(value.trim_end_matches(['\r','\n']).to_owned()),Some(reference)))
     }).await.map_err(|_| ConnectionTestFailure { phase:ConnectionTestPhase::CredentialReference,message:"Credential reference worker stopped".into() })?
-        .map_err(|_| ConnectionTestFailure { phase:ConnectionTestPhase::CredentialReference,message:"Protected credential reference is missing, changed or unsafe; select its private file again".into() })
+        .map_err(|_| ConnectionTestFailure { phase:ConnectionTestPhase::CredentialReference,message:"Protected gateway credential missing, changed or unsafe; run --provision-gateway-credential with this --api-origin and a private --api-token-file".into() })
 }
 
 fn client_failure(error: ClientError, phase: ConnectionTestPhase) -> ConnectionTestFailure {

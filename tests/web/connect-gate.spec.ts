@@ -37,15 +37,15 @@ test("unknown registration cannot self-register; valid connection stays HttpOnly
   await page.goto("/connect");
   const input = page.getByRole("textbox", { name: "Connect ID", exact: true });
   const connect = page.getByRole("button", {
-    name: "Connect registered workspace",
+    name: "Connect registered workstation",
   });
-  await input.fill("192.0.2.42:unknown");
+  await input.fill("fixture-workstation-unknown");
   await connect.click();
   await expect(
     page.getByRole("alert").filter({ hasText: "Connection required" }),
   ).toContainText("Connection required or registration no longer available");
   await expect(page.locator("#intel-web-workspace")).toHaveCount(0);
-  await input.fill("192.0.2.42:research");
+  await input.fill("fixture-workstation-research");
   // Read the real upstream response before the form's successful full
   // navigation disposes Chrome's network body. Keep the normal server guard.
   let acceptedBody: Record<string, unknown> | undefined;
@@ -60,19 +60,19 @@ test("unknown registration cannot self-register; valid connection stays HttpOnly
   });
   await connect.click();
   await expect(
-    page.getByText("Workstation: 192.0.2.42 · Workspace: research", {
+    page.getByText("Workstation: fixture-workstation-research", {
       exact: true,
     }),
   ).toBeVisible();
   expect(acceptedBody).toBeDefined();
   expect(acceptedBody?.session_token).toBeUndefined();
   const cookie = (await page.context().cookies()).find(
-    (item) => item.name === "fleetworks_connect",
+    (item) => item.name === "fleetworks_connect_v2",
   )!;
   expect(cookie.httpOnly).toBe(true);
   expect(cookie.sameSite).toBe("Strict");
   expect(await page.evaluate(() => document.cookie)).not.toContain(
-    "fleetworks_connect",
+    "fleetworks_connect_v2",
   );
   const html = await (await page.request.get("/")).text();
   expect(html).not.toContain(cookie.value);
@@ -85,12 +85,12 @@ test("switching in another tab invalidates the old view and stale mutations rece
   await page.goto("/connect");
   await page
     .getByRole("textbox", { name: "Connect ID", exact: true })
-    .fill("192.0.2.42:research");
+    .fill("fixture-workstation-research");
   await page
-    .getByRole("button", { name: "Connect registered workspace" })
+    .getByRole("button", { name: "Connect registered workstation" })
     .click();
   await expect(
-    page.getByText("Workstation: 192.0.2.42 · Workspace: research", {
+    page.getByText("Workstation: fixture-workstation-research", {
       exact: true,
     }),
   ).toBeVisible();
@@ -99,12 +99,12 @@ test("switching in another tab invalidates the old view and stale mutations rece
   await second.goto("/connect");
   await second
     .getByRole("textbox", { name: "Connect ID", exact: true })
-    .fill("192.0.2.42:review");
+    .fill("fixture-workstation-review");
   await second
-    .getByRole("button", { name: "Connect registered workspace" })
+    .getByRole("button", { name: "Connect registered workstation" })
     .click();
   await expect(
-    second.getByText("Workstation: 192.0.2.42 · Workspace: review", {
+    second.getByText("Workstation: fixture-workstation-review", {
       exact: true,
     }),
   ).toBeVisible();
@@ -131,17 +131,44 @@ test("disconnect revokes the session and removes protected UI and live state", a
   await page.goto("/connect");
   await page
     .getByRole("textbox", { name: "Connect ID", exact: true })
-    .fill("192.0.2.42:research");
+    .fill("fixture-workstation-research");
   await page
-    .getByRole("button", { name: "Connect registered workspace" })
+    .getByRole("button", { name: "Connect registered workstation" })
     .click();
   await expect(
     page.getByRole("button", { name: "Disconnect Intel Web" }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Disconnect Intel Web" }).click();
+  // The connection bar is server-rendered before its event handlers hydrate.
+  // API_OK requires the mounted client query to finish, so the click below
+  // exercises the actual logout handler rather than an inert SSR button.
+  await expect(page.getByLabel("API connected", { exact: true })).toHaveText(
+    "● API_OK",
+  );
+  const priorCookie = (await page.context().cookies()).find(
+    (cookie) => cookie.name === "fleetworks_connect_v2",
+  );
+  expect(priorCookie).toBeDefined();
+  const [logout] = await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/connect/logout" &&
+        response.request().method() === "POST",
+    ),
+    page.getByRole("button", { name: "Disconnect Intel Web" }).click(),
+  ]);
+  expect(logout.status()).toBe(200);
   await expect(
     page.getByRole("heading", { name: "Reconnect this tab" }),
   ).toBeVisible();
   await expect(page.locator("#intel-web-workspace")).toHaveCount(0);
   expect((await page.request.get("/api/v1/articles")).status()).toBe(401);
+  // Cookie removal alone cannot prove server revocation. Replaying the original
+  // opaque cookie must also fail at the same authoritative data boundary.
+  expect(
+    (
+      await page.request.get("/api/v1/articles", {
+        headers: { cookie: `${priorCookie!.name}=${priorCookie!.value}` },
+      })
+    ).status(),
+  ).toBe(401);
 });

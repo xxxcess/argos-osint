@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import shlex
 import os
 import re
 import secrets
@@ -154,6 +155,11 @@ def main():
             print(f"Prepared isolated backend review: {receipt['workspace']}")
             if args.root_env:
                 print(f"Editable Compose settings: {ROOT / 'compose.env'}")
+            credential = Path(receipt["workspace"]) / "secrets" / "native-token"
+            origin = f"http://127.0.0.1:{args.api_port}"
+            print("Provision the native app credential reference:")
+            print("fleetworks-desktop --provision-gateway-credential --api-origin "
+                  + shlex.quote(origin) + " --api-token-file " + shlex.quote(str(credential)))
             print("No images built or services started. Keep compose.env and all credentials for restart.")
         else:
             receipt = json.loads((review_path(ROOT, args.name) / "review.json").read_text(encoding="utf-8"))

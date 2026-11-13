@@ -441,11 +441,11 @@ impl State {
             return Some("Interactive submission permission required".into());
         }
         if self.registration.context.is_none() {
-            return Some("Register the selected workspace before submitting work".into());
+            return Some("Register the workstation before submitting work".into());
         }
         if self.configuration_revision().is_none() {
             return Some(
-                "Refresh Profile or Models to confirm the backend configuration revision".into(),
+                "Backend configuration is unavailable; check the gateway connection".into(),
             );
         }
         if !self
@@ -639,9 +639,8 @@ impl State {
             return;
         };
         let Some(context) = self.registration.context.clone() else {
-            self.submissions.lane_mut(kind).message = Some(
-                "Register the original selected workspace to resolve its prior request".into(),
-            );
+            self.submissions.lane_mut(kind).message =
+                Some("Register the original workstation to resolve its prior request".into());
             return;
         };
         if !self.permission(Permission::ReadWorkstationActivity) {
@@ -1194,10 +1193,10 @@ fn association_matches(attempt: &SubmissionAttempt, association: &JobRequestAsso
         && origin.registration_id == context.registration_id
         && origin.deployment_id == context.deployment_id
         && origin.workstation_id == context.workstation_id
-        && origin.workspace_id == context.workspace_id
-        && origin.connect_id_at_submission == context.connect_id
+        && origin.workspace_id.is_none()
+        && origin.connect_id_at_submission == context.connect_id.as_str()
         && origin.workstation_ip_at_submission == context.workstation_ip
-        && origin.workspace_name_at_submission == context.workspace_name
+        && origin.workspace_name_at_submission.is_none()
         && origin.configuration_epoch == context.configuration_epoch
         && origin.configuration_revision == attempt.snapshot.configuration_revision
 }

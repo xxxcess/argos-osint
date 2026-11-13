@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Build tools, artifact paths and ownership</title>
+<style>body{margin:0;padding:32px;color:#242424;background:#fff;font:16px/1.6 Geist,Arial,sans-serif}main{max-width:1200px;margin:auto}h1{font:36px/1.2 "Instrument Serif",Georgia,serif;margin:0 0 16px}p{max-width:88ch}svg{display:block;width:100%;height:auto;margin:24px 0}a{color:#a14b24}</style></head><body><main><h1>Build tools, artifact paths and ownership</h1><p>A checkout produces reusable compiler caches, review packages, web output, Linux images and QA evidence. Embedded storage test executables are verification harnesses, not additional deployed services; the native API client remains engine-free. Persistent settings and backend stores have separate ownership.</p>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 936" role="img" aria-labelledby="build-artifacts-title build-artifacts-desc">
+<title id="build-artifacts-title">Build tools, artifact paths and ownership</title>
+<desc id="build-artifacts-desc">A checkout produces reusable compiler caches, review packages, web output, Linux images and QA evidence. Embedded storage test executables are verification harnesses, not additional deployed services; the native API client remains engine-free. Persistent settings and backend stores have separate ownership.</desc>
+<style>text{font-family:Geist,Arial,sans-serif;fill:#242424}.zone{font-size:14px;letter-spacing:1.4px;fill:#666}.label{font-size:20px;font-weight:600}.note{font-size:16px;fill:#555}.small{font-size:14px;fill:#666}.node{fill:#fff;stroke:#aaa;stroke-width:1}.focus{fill:#fff4ee;stroke:#eb6c36;stroke-width:2}.wire{fill:none;stroke:#555;stroke-width:2;marker-end:url(#arrow)}.lane{fill:#fafafa;stroke:#ddd;stroke-width:1}</style>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#555"/></marker></defs>
+<rect width="1200" height="936" fill="#fff"/>
+<text x="40" y="48" class="zone">TOOLS → REUSABLE OUTPUTS → PRODUCTS OR EVIDENCE</text><rect x="40" y="88" width="240" height="592" rx="6" class="node"/>
+<text x="56" y="120" class="label">Pinned tools</text>
+<text x="56" y="152" class="note">Rust + Cargo / rustc</text>
+<text x="56" y="178" class="note">Xcode / macOS SDK</text>
+<text x="56" y="204" class="note">Node / pnpm / Next</text>
+<text x="56" y="230" class="note">Python repo helpers</text>
+<text x="56" y="256" class="note">Docker Buildx / BuildKit</text>
+<path d="M 56 340 H 264" stroke="#bbb"/><text x="56" y="380" class="label">One checkout</text><text x="56" y="416" class="note">Locked dependencies</text><text x="56" y="452" class="note">One Cargo build owner</text><text x="56" y="580" class="note">Compile/test output</text><text x="56" y="608" class="note">is not a deployment.</text><rect x="336" y="88" width="376" height="160" rx="6" class="node"/>
+<text x="352" y="120" class="label">Cargo · one reusable graph</text>
+<text x="352" y="152" class="note">User: target/debug</text>
+<text x="352" y="178" class="note">Agent: target/agents/debug</text>
+<text x="352" y="204" class="note">Explicit triple = separate graph</text>
+<text x="352" y="230" class="note">deps / build / .fingerprint / incremental</text>
+<rect x="768" y="88" width="392" height="160" rx="6" class="focus"/>
+<text x="784" y="120" class="label">Native review package</text>
+<text x="784" y="152" class="note">dist/native/&lt;triple&gt;/&lt;profile&gt;/</text>
+<text x="784" y="178" class="note">Fleetworks.app + manifests</text>
+<text x="784" y="204" class="note">Optional ZIP / checksum</text>
+<text x="784" y="230" class="note">API-only client; no backend engines</text>
+<rect x="336" y="312" width="376" height="152" rx="6" class="node"/>
+<text x="352" y="344" class="label">Node / pnpm + Next</text>
+<text x="352" y="376" class="note">apps/web-desktop/.next</text>
+<text x="352" y="402" class="note">or .agent-scratch/next-web-tests</text>
+<text x="352" y="428" class="note">Typecheck/lint: diagnostics, no app</text>
+<text x="352" y="454" class="note">Classifier: tracked bundle + identity</text>
+<rect x="768" y="312" width="392" height="152" rx="6" class="focus"/>
+<text x="784" y="344" class="label">QA evidence ≠ extra services</text>
+<text x="784" y="376" class="note">Hashed Cargo test executables</text>
+<text x="784" y="402" class="note">Embedded engines only where tested</text>
+<text x="784" y="428" class="note">Rune PNG / tree / script / manifest</text>
+<text x="784" y="454" class="note">Playwright snapshots / failure traces</text>
+<rect x="336" y="528" width="376" height="152" rx="6" class="node"/>
+<text x="352" y="560" class="label">Docker BuildKit · Linux</text>
+<text x="352" y="592" class="note">Builder-managed cache and layers</text>
+<text x="352" y="618" class="note">Builder /src/target is not host target</text>
+<text x="352" y="644" class="note">runtime / surrealdb / search-index / web</text>
+<text x="352" y="670" class="note">Release binaries stay inside images</text>
+<rect x="768" y="528" width="392" height="152" rx="6" class="node"/>
+<text x="784" y="560" class="label">Deployable images / archives</text>
+<text x="784" y="592" class="note">Selected Docker image store / exporter</text>
+<text x="784" y="618" class="note">images.tar.gz + images.json + checksum</text>
+<text x="784" y="644" class="note">Native .app ≠ Linux service image</text>
+<text x="784" y="670" class="note">Build and launch are separate actions</text>
+<path d="M 280 168 H 336" class="wire"/>
+<path d="M 280 388 H 336" class="wire"/>
+<path d="M 280 604 H 336" class="wire"/>
+<path d="M 712 168 H 768" class="wire"/>
+<path d="M 524 248 V 280 H 740 V 388 H 768" class="wire"/>
+<path d="M 712 388 H 768" class="wire"/>
+<path d="M 712 604 H 768" class="wire"/>
+<text x="40" y="726" class="zone">PERSISTENT IDENTITY AND DATA · NOT COMPILER CACHE</text><rect x="40" y="752" width="1120" height="108" rx="6" class="node"/>
+<text x="56" y="784" class="label">Protected client settings and independent backend data</text>
+<text x="56" y="816" class="note">~/.fleetworks  ·  deployment config/secrets/storage/models/staged datasets  ·  private compose.env</text>
+<text x="56" y="842" class="note">Preserve identity, credentials, active locks and unresolved evidence; stopping services retains data.</text>
+
+<text x="40" y="912" class="small">Use matching target/profile/features; preserve active graphs and user outputs. Detailed paths and tools are in the build-artifact guide.</text>
+</svg>
+<p><a href="../wiki/code/build-artifacts.md">Build tools and exact paths</a> · <a href="../wiki/code/contributing.md">Contributor workflow</a> · <a href="../diagrams.md">Diagram catalog</a></p></main></body></html>

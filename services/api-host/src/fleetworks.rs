@@ -231,7 +231,12 @@ pub(crate) async fn workstation_services(
             argos_osint_api::classifier_activation::ActivationArtifacts::new(workspace.clone())?;
         Ok(services
             .with_workstation(
-                ReadinessOwners::new(deployment.deployment_id, probes)?,
+                ReadinessOwners::new(deployment.deployment_id, probes)?
+                    .with_configured_inputs_file(
+                        env::var_os("FLEETWORKS_MAINTENANCE_INPUTS_FILE")
+                            .as_deref()
+                            .map(std::path::Path::new),
+                    )?,
                 argos_osint_api::datasets::DatasetStore::open(workspace.join("staged-datasets"))?,
             )
             .with_activation_artifacts(artifacts))

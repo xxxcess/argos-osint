@@ -1,90 +1,49 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Protected workspace lifecycle and recovery</title>
-<style>body{margin:32px;background:#f5f5f5;color:#2d3142;font-family:Geist,system-ui,sans-serif}main{max-width:1320px;margin:auto}h1{font-family:'Instrument Serif',Georgia,serif;font-size:38px;font-weight:400}svg{width:100%;height:auto}p{max-width:100ch;line-height:1.6}a{color:#394b65}</style></head><body><main>
-<h1>Local folder lifecycle, backend retirement</h1>
-<p>Create, attach and select are distinct local operations. Registration remains a separate authenticated backend action. A non-default removal journals its intent, obtains every known backend retirement receipt and preserves pending recovery. Remove from app keeps the directory; Delete requires the guarded identity-reference OS Trash path.</p>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 1010" role="img" aria-labelledby="workspace-lifecycle-title workspace-lifecycle-desc">
-<title id="workspace-lifecycle-title">Protected workspace lifecycle and recoverable all-backend retirement</title>
-<desc id="workspace-lifecycle-desc">Create makes a named owned immediate child, attach accepts an already owned marker, and select verifies an existing child. Authenticated backend registration is separate and may follow offline local creation. Root and default are always protected. A confirmed non-default remove or delete journals its intent before requesting retirement of every known backend binding. Each backend fences new admission, revokes sessions and drains associated work, including historical registrations. Pending, unreachable or uncertain outcomes preserve the journal and files. Remove from app keeps the folder. Delete invokes a guarded macOS Trash adapter only after all verified receipts, persisting an exact file reference before the effect and verifying that object inside Trash with the old entry absent. Uncertainty returns to recovery without recursive deletion or removal of a replacement object.</desc>
-<defs><marker id="workspace-lifecycle-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker></defs>
-<style>text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}.label{font-size:20px;font-weight:600}.small-label{font-size:18px;font-weight:600}.note{font-size:16px}.zone{font-size:13px;font-weight:600;letter-spacing:1px}.node{fill:#fff;stroke:#4f5d75}.accent{fill:#fff6ed;stroke:#eb6c36}.edge{fill:none;stroke:#4f5d75;stroke-width:2;marker-end:url(#workspace-lifecycle-arrow)}.retry{fill:none;stroke:#4f5d75;stroke-width:2;stroke-dasharray:5 4;marker-end:url(#workspace-lifecycle-arrow)}.minor{fill:#4f5d75;font-size:14px}</style>
-<rect width="1320" height="1010" fill="#f5f5f5"/>
-<rect x="24" y="40" width="1272" height="356" fill="none" stroke="#a0a5b0" stroke-dasharray="6 5"/>
-<text x="48" y="68" class="zone">LOCAL IDENTITY · REGISTRATION IS A SEPARATE OPERATION</text>
-
-<path d="M660 164H720" class="edge"/>
-<path d="M522 232V280" class="edge"/>
-<path d="M996 232V280" class="edge"/>
-<path d="M828 372V418H198V484" class="edge"/>
-<path d="M348 548H420" class="edge"/>
-<path d="M780 548H852" class="edge"/>
-<path d="M600 612V660" class="edge"/>
-<path d="M1062 612V648H952V686" class="edge"/>
-<path d="M1062 648H1176V848" class="edge"/>
-<path d="M852 900H816V754H780" class="retry"/>
-<path d="M420 734H396V548H420" class="retry"/>
-
-<rect x="48" y="96" width="612" height="136" rx="6" class="node"/>
-<text x="64" y="128" class="label">Owned container and direct child</text>
-<text x="64" y="158" class="note">Create: name-only; attach: matching owned marker</text>
-<text x="64" y="186" class="note">Select: verify existing child; reject external or unowned paths</text>
-<text x="64" y="214" class="note">Private root identity; never adopt a legacy layout</text>
-
-<rect x="720" y="96" width="552" height="136" rx="6" class="accent"/>
-<text x="736" y="128" class="label">Authenticated ensure / reuse</text>
-<text x="736" y="158" class="note">Persist exact request before HTTP; record only a validated receipt</text>
-<text x="736" y="186" class="note">Backend owns workstation / child / active binding and revisions</text>
-<text x="736" y="214" class="note">Registration never creates a remote filesystem folder</text>
-<text x="536" y="258" class="minor">Local creation can finish offline</text>
-<text x="1010" y="258" class="minor">Validated binding recorded locally</text>
-
-<text x="64" y="310" class="label">Root + default protected</text>
-<text x="64" y="338" class="note">Also reject aliases / external paths</text>
-<text x="64" y="360" class="minor">No remove, rename or delete</text>
-<rect x="384" y="280" width="888" height="92" rx="6" class="node"/>
-<text x="400" y="310" class="label">Local / registered owned child</text>
-<text x="400" y="338" class="note">Keep known backend receipts and stable IDs; a rebind retains history and marks other children stale.</text>
-<text x="400" y="362" class="minor">Unknown ensure / rebind outcomes must reconcile before removal. Refresh stale current bindings first.</text>
-
-<text x="48" y="452" class="zone">REMOVE / DELETE</text>
-<rect x="48" y="484" width="300" height="128" rx="6" class="node"/>
-<text x="64" y="516" class="label">Confirm non-default child</text>
-<text x="64" y="546" class="note">Choose Remove from app or Delete</text>
-<text x="64" y="574" class="note">Review path + known backends</text>
-<text x="64" y="600" class="note">Persist the local operation journal</text>
-
-<rect x="420" y="484" width="360" height="128" rx="6" class="node"/>
-<text x="436" y="516" class="label">Retire every known backend binding</text>
-<text x="436" y="546" class="note">Fence new admission / revoke sessions</text>
-<text x="436" y="574" class="note">Drain associated work across old registrations</text>
-<text x="436" y="600" class="note">No shared-job cancellation or history rewrite</text>
-
-<rect x="852" y="484" width="420" height="128" rx="6" class="accent"/>
-<text x="868" y="516" class="label">All deletion-ready receipts verified</text>
-<text x="868" y="546" class="note">Exact deployment / child / registration revisions</text>
-<text x="868" y="574" class="note">Fenced + sessions revoked + active work drained</text>
-<text x="868" y="600" class="note">Only authenticated proof advances local cleanup</text>
-<text x="618" y="640" class="minor">202 / unreachable / active work</text>
-
-<rect x="420" y="660" width="360" height="152" rx="6" class="node"/>
-<text x="436" y="692" class="label">Pending / recovery</text>
-<text x="436" y="722" class="note">Keep the journal and folder bytes</text>
-<text x="436" y="750" class="note">Retry exact identity and revisions</text>
-<text x="436" y="778" class="note">Restart resumes the recorded phase</text>
-<text x="436" y="800" class="minor">Never infer success from missing work or files</text>
-<text x="336" y="646" class="minor">Recheck</text>
-
-<rect x="852" y="686" width="200" height="112" rx="6" class="node"/>
-<text x="868" y="718" class="small-label">Remove from app</text>
-<text x="868" y="748" class="note">Forget association</text>
-<text x="868" y="776" class="note">Keep folder bytes</text>
-<rect x="852" y="848" width="420" height="112" rx="6" class="node"/>
-<text x="868" y="880" class="label">Delete: guarded OS Trash</text>
-<text x="868" y="910" class="note">Persist exact reference before the OS effect</text>
-<text x="868" y="938" class="note">Check Trash identity and old entry absence</text>
-<text x="48" y="990" class="minor">Never recursively delete or touch replacements. Real OS Trash / installed dual-Mac verification remains separate.</text>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Protected workstation setup and recovery</title>
+<style>body{margin:0;padding:32px;color:#242424;background:#fff;font:16px/1.6 Geist,Arial,sans-serif}main{max-width:1200px;margin:auto}h1{font:36px/1.2 "Instrument Serif",Georgia,serif;margin:0 0 16px}p{max-width:88ch}svg{display:block;width:100%;height:auto;margin:24px 0}a{color:#a14b24}</style></head><body><main><h1>Protected workstation setup and recovery</h1><p>Settings initialization, credential provisioning and authenticated registration are separate steps. The coordinated migration preserves identity and history while fencing old writers. A lost mutation response keeps its exact original handle and cannot be replaced by new work.</p>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" role="img" aria-labelledby="workspace-lifecycle-title workspace-lifecycle-desc">
+<title id="workspace-lifecycle-title">Protected workstation setup and recovery</title>
+<desc id="workspace-lifecycle-desc">Settings initialization, credential provisioning and authenticated registration are separate steps. The coordinated migration preserves identity and history while fencing old writers. A lost mutation response keeps its exact original handle and cannot be replaced by new work.</desc>
+<style>text{font-family:Geist,Arial,sans-serif;fill:#242424}.zone{font-size:14px;letter-spacing:1.4px;fill:#666}.label{font-size:20px;font-weight:600}.note{font-size:16px;fill:#555}.small{font-size:14px;fill:#666}.node{fill:#fff;stroke:#aaa;stroke-width:1}.focus{fill:#fff4ee;stroke:#eb6c36;stroke-width:2}.wire{fill:none;stroke:#555;stroke-width:2;marker-end:url(#arrow)}.lane{fill:#fafafa;stroke:#ddd;stroke-width:1}</style>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#555"/></marker></defs>
+<rect width="1200" height="720" fill="#fff"/>
+<text x="40" y="48" class="zone">SETTINGS → PROVISIONING → EXPLICIT CONNECTION</text>
+<rect x="40" y="88" width="332" height="148" rx="6" class="node"/>
+<text x="56" y="120" class="label">Open protected settings</text>
+<text x="56" y="152" class="note">Verify installation and catalog</text>
+<text x="56" y="178" class="note">Do not create default children</text>
+<text x="56" y="204" class="note">Preserve legacy folders/journals</text>
+<rect x="432" y="88" width="332" height="148" rx="6" class="focus"/>
+<text x="448" y="120" class="label">Provision exact origin</text>
+<text x="448" y="152" class="note">Private token-file reference</text>
+<text x="448" y="178" class="note">Locked revisioned atomic write</text>
+<text x="448" y="204" class="note">No GUI, network or services</text>
+<rect x="824" y="88" width="336" height="148" rx="6" class="node"/>
+<text x="840" y="120" class="label">Gateway URL check</text>
+<text x="840" y="152" class="note">Authenticate and check versions</text>
+<text x="840" y="178" class="note">Register/reuse installation</text>
+<text x="840" y="204" class="note">Optional services stay distinct</text>
+<path d="M 372 160 H 432" class="wire"/>
+<path d="M 764 160 H 824" class="wire"/>
+<rect x="40" y="336" width="332" height="148" rx="6" class="node"/>
+<text x="56" y="368" class="label">Forward migration</text>
+<text x="56" y="400" class="note">Preserve workstation IDs</text>
+<text x="56" y="426" class="note">Retain old registration mappings</text>
+<text x="56" y="452" class="note">Fence incompatible writers</text>
+<rect x="432" y="336" width="332" height="148" rx="6" class="focus"/>
+<text x="448" y="368" class="label">Current workstation context</text>
+<text x="448" y="400" class="note">Connect ID = opaque identity</text>
+<text x="448" y="426" class="note">New browser Connect required</text>
+<text x="448" y="452" class="note">No active workspace fields</text>
+<rect x="824" y="336" width="336" height="148" rx="6" class="node"/>
+<text x="840" y="368" class="label">Uncertain request recovery</text>
+<text x="840" y="400" class="note">Original request/body/context</text>
+<text x="840" y="426" class="note">Read-only historical lookup</text>
+<text x="840" y="452" class="note">Unknown stays unresolved</text>
+<path d="M 992 236 V 284 H 598 V 336" class="wire"/>
+<path d="M 372 410 H 432" class="wire"/>
+<path d="M 764 410 H 824" class="wire"/>
+<path d="M 40 556 H 1160" stroke="#bbb"/><text x="40" y="592" class="label">Historical child folder lifecycle is preserved, not resumed by normal startup.</text><text x="40" y="626" class="note">Migration and setup never delete user folders or turn missing receipts into successful cleanup.</text>
+<text x="40" y="696" class="small">Independent backend deployment and actual installed-app/dual-Mac verification remain separate.</text>
 </svg>
-<p>The figure documents implemented source contracts and isolated recovery cases. It does not claim a real user-folder Trash operation or a completed installed-app journey. Old revoked rebind registrations remain history; the current workspace retirement drains their associated work without fabricating separate retirement receipts.</p>
-<p><a href="../wiki/code/native-workspaces.md">Protected native workspaces</a> · <a href="../wiki/code/native-connections.md">Connections and activity</a> · <a href="../diagrams.md">Diagram catalog</a></p>
-</main></body></html>
+<p><a href="../wiki/code/native-workspaces.md">Workstation identity contract</a> · <a href="../wiki/code/native-connections.md">Connections and activity</a> · <a href="../diagrams.md">Diagram catalog</a></p></main></body></html>

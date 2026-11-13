@@ -202,3 +202,43 @@ fn corrupt_binding_permissions_and_record_limits_are_rejected_without_secrets() 
     .expect("replace test metadata");
     assert!(container.connection_profiles().is_err());
 }
+
+#[test]
+fn provisioning_is_exact_origin_and_accepts_rotation_only_explicitly() {
+    use std::os::unix::fs::PermissionsExt;
+    let temporary = tempfile::tempdir().expect("temporary home");
+    let home_path = temporary
+        .path()
+        .canonicalize()
+        .expect("physical temporary home");
+    let container = NativeContainer::open_settings(&home_path).expect("settings installation");
+    let token = home_path.join("native-token");
+    std::fs::write(&token, "synthetic-native-token").expect("write token");
+    std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600))
+        .expect("private token");
+    container
+        .provision_credential_binding("http://127.0.0.1:8080", &token)
+        .expect("provision binding");
+    assert!(container
+        .credential_binding("http://127.0.0.1:8081")
+        .is_err());
+    let previous = container
+        .credential_binding("http://127.0.0.1:8080")
+        .expect("exact binding");
+    let replacement = home_path.join("replacement-token");
+    std::fs::write(&replacement, "rotated-synthetic-token").expect("replacement");
+    std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o600))
+        .expect("private replacement");
+    std::fs::rename(replacement, &token).expect("replace object");
+    assert!(previous.open_verified("http://127.0.0.1:8080").is_err());
+    assert!(container
+        .credential_binding("http://127.0.0.1:8080")
+        .is_err());
+    container
+        .provision_credential_binding("http://127.0.0.1:8080", &token)
+        .expect("explicit rotation");
+    assert!(container
+        .credential_binding("http://127.0.0.1:8080")
+        .is_ok());
+    assert!(!container.root().join("default").exists());
+}

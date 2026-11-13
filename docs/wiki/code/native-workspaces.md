@@ -1,31 +1,33 @@
-# Native workspace ownership
+# Native workstation identity
 
-[Fleetworks](fleetworks.md) · [Native connections](native-connections.md) · [Protected manager](../../../crates/fleetworks-workspace/src/native/)
+[Fleetworks](fleetworks.md) · [Connections](native-connections.md) · [Protected manager](../../../crates/fleetworks-workspace/src/native/)
 
-The native container is `~/.fleetworks` under the operating system's account home. The root is a protected container, never a selectable workspace. Its protected `default` child is created on first use with stable local identity. Additional workspaces are validated immediate children. Backend storage, credentials, provider accounts and model roles are not copied into children.
+The native installation owns protected settings under `~/.fleetworks` in the operating system account home. Workstation registration uses that installation marker and authenticated backend scope. The gateway-issued opaque `workstation_id` is the Connect ID. IP is optional mutable metadata; changing or omitting it does not create a new identity, and two installations sharing an IP remain distinct.
 
-[![Local identity and shared backend resources](../../diagrams/workspace.svg)](../../diagrams/workspace.html)
+[![Protected installation and shared backend](../../diagrams/workspace.svg)](../../diagrams/workspace.html)
 
-## Filesystem boundary
+## Protected settings boundary
 
-The manager holds directory descriptors and checks actual file identity. It rejects symlink substitutions, external paths, unsafe permissions, missing/conflicting markers and case/Unicode aliases that collide with another child. Names are one basename with canonical normalization and explicit bounds. Existing unknown directories and historical operator roots are repair states, not automatic adoption or recursive cleanup targets.
+Normal startup opens settings without creating a `default` child. The manager holds directory descriptors, verifies object identity and private permissions, and serializes revisioned atomic catalog writes with its existing private lock. Unknown catalogs, symlink substitution, external paths and conflicting installation markers fail closed. The connection catalog stores exact-origin protected credential references, never token bytes.
 
-Create is private and create-new. Attach accepts an existing owned child with matching markers. Remove from app and physical deletion are separate operations. The default child cannot be removed, retired or renamed. Missing default identity is a repair condition; startup does not silently recreate a competing identity.
+`--provision-gateway-credential --api-origin <origin> --api-token-file <private-file>` binds an existing protected token file to one normalized origin, exits without a GUI/network/service startup, and preserves other origins. Token rotation requires explicit provisioning again. The URL-only wizard cannot forward another origin's credential.
 
-The manager serializes catalog changes with its private lock and journals pending operations. Unknown registration outcomes persist across process restart and block removal. Selecting another child changes future origin, not backend-wide settings or already accepted work.
+## Scope and history
 
-The [scope figure](../../diagrams/workspace-scope.html) contrasts backend-global resources with captured child origin and workstation-only activity.
+New registrations, request contexts and activity queries contain workstation identity without workspace IDs, names or markers. Backend models, keys, actor corpus and search remain shared within authorized deployment scope. Membership is resolved before counts, pagination, details, logs, results, streams and mutations. Unknown/system jobs are never assigned to a workstation as a fallback.
 
-## Backend lifecycle before removal
+The versioned registry migration preserves workstation IDs and `(scope_id, installation_hash)`, retains old registration mappings and immutable origins for historical readers, fences incompatible admission and requires a fresh browser Connect. Accepted causal children retain the correct workstation lifecycle fence. Legacy child registrations cannot admit new work.
 
-A child can have known bindings to more than one backend. Removal snapshots the exact child identity and known bindings. Every relevant backend must provide its actual retirement outcome; an unavailable gateway, pending response or incomplete receipt preserves local bytes and the pending journal. A local folder marker cannot manufacture server retirement authority.
+[![Backend resources and workstation origin](../../diagrams/workspace-scope.svg)](../../diagrams/workspace-scope.html)
 
-The backend fences new admission, revokes sessions and waits for associated jobs and tasks, including genuine causal descendants, before returning deletion-ready evidence. It preserves Jobs/domain history and keeps old identities distinct from a newly created same-name child. A cancelled HTTP request does not prove that work drained.
+Uncertain submissions retain original operation/request ID, exact body/context and original registration. Authenticated read-only reconciliation uses `original_registration_id`; an unknown lookup keeps the unresolved handle and never sends a replacement POST under a newer registration.
 
-Only a completed, identity-checked local lifecycle may proceed to a separately guarded macOS Trash adapter. A cleanup-pending state means bytes remain. Inspect the selected revision's native action/fixture evidence before treating that platform operation as verified; tests use isolated adapters and do not trash the user's workspaces.
+## Legacy folder records
 
-[![Protected workspace lifecycle and retirement recovery](../../diagrams/workspace-lifecycle.svg)](../../diagrams/workspace-lifecycle.html)
+Existing default/named child folders, markers, pending operation journals and unresolved receipts are preserved. They are historical local data, not the active identity or a prerequisite for setup. The native interface exposes no folder creation, attach, selection, removal, Finder or Trash workflow. The retained manager compatibility paths do not authorize deleting user folders during this migration. Cargo workspaces, deployment directories and Jobs' private stores have separate ownership.
+
+[![Settings, provisioning and registration recovery](../../diagrams/workspace-lifecycle.svg)](../../diagrams/workspace-lifecycle.html)
 
 ## Verification
 
-[Native manager integration tests](../../../crates/fleetworks-workspace/tests/native_workspaces.rs) exercise fresh/default identity, direct-child names, remove versus attach, all-backend retirement receipts, restart recovery and link/substitution rejection. [Registry and job-action fixtures](../../../crates/argos-osint-core/tests/storage_job_actions.rs) exercise real admission and retirement fences. Native Runtime/PNG/tree fixtures verify the same UI handlers. Actual Finder/Trash behavior and installed-app launch remain separate matching-hardware checks.
+Manager fixtures cover settings-only initialization, installation identity, credential-origin/file binding and retained catalogs. Registry/API tests cover forward migration, IP-independent identity, session invalidation and historical request recovery. Actual Rune fixtures exercise the same production views/handlers. See the [acceptance tracker](../../../.planning/2026-11-12-native-workstation-redesign/acceptance.md) for executed results; unit fixtures do not establish installed-app or both-architecture approval.

@@ -9,7 +9,7 @@ Use the canonical [agent workflow](../../../docs/wiki/code/agent-workflow.md) wi
 
 Read `docs/wiki/code/react-ui.md` for the design baseline and evidence workflow; follow `docs/wiki/code/intel-web.md` for product semantics. Paths are relative to the repository root.
 
-- Before editing, run the design process in `docs/wiki/code/react-ui.md#argos-look--feel-reference`: screen type, density (default or compact), nearest primitive, then type, space, accent, component treatment, and states. Use the Fleetworks charcoal, gold and ivory tokens with the existing HUD/glass treatment. Design the component creatively inside that theme; do not switch palette, typeface, or brand.
+- Before editing, run the design process in `docs/wiki/code/react-ui.md#argos-look--feel-reference`: screen type, density (default or compact), nearest primitive, then type, space, accent, component treatment, and states. Use the Fleetworks matte obsidian/graphite and gold/ivory tokens while preserving the existing terminal-desk/HUD structure. Follow the shared native design guide for paint/branding; keep web layout and topology behavior. Design the component creatively inside that theme; do not switch palette, typeface, or brand.
 - Use React Native primitives and keep the Next React Compiler pipeline and Hooks/compiler lint enabled; fix diagnostics and verify compiled-build behavior.
 - Reuse `@argos/ui`; keep feature composition in `@argos/intel` and browser-only behavior in the web app. For component APIs, remote state or render performance also load `argos-react-patterns`.
 - Cover wide/narrow layouts, long content and relevant loading/empty/error/offline states. Preserve source attribution, evidence distinctions, image fallback and ready-gated actions.

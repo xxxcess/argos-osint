@@ -11,14 +11,14 @@ import { paint, sheetProp, sheetStyle } from "../../../vitest.test-support";
  * prove real components consume them rather than redeclaring values.
  */
 describe("Theme tokens (imported from @argos/ui source)", () => {
-  it("defines the logo charcoal/ivory and warm neutral surfaces", () => {
-    expect(colors.bg).toBe("#111111");
-    expect(colors.panel).toBe("#141414");
-    expect(colors.raised).toBe("#232321");
+  it("defines the matte obsidian/ivory and graphite surfaces", () => {
+    expect(colors.bg).toBe("#060709");
+    expect(colors.panel).toBe("#0B0C0F");
+    expect(colors.raised).toBe("#111317");
     expect(colors.border).toBe("#898274");
     expect(colors.text).toBe("#F3EEE4");
-    expect(colors.dim).toBe("#C6C0B5");
-    expect(colors.muted).toBe("#A09A8F");
+    expect(colors.dim).toBe("#D6D2C4");
+    expect(colors.muted).toBe("#B8B4A8");
   });
 
   it("defines accent/accent2 plus the four status hues", () => {
@@ -29,10 +29,12 @@ describe("Theme tokens (imported from @argos/ui source)", () => {
     expect(colors.danger).toBe("#f08a8a");
   });
 
-  it("defines glass translucency values for the HUD treatment", () => {
-    expect(colors.glass).toBe("rgba(20, 20, 20, 0.55)");
-    expect(colors.glassStrong).toBe("rgba(35, 35, 33, 0.72)");
-    expect(colors.glassBorder).toBe("rgba(137, 130, 116, 0.85)");
+  it("retains compatibility names as opaque matte fills and faint decorative edges", () => {
+    expect(colors.glass).toBe("#0B0C0F");
+    expect(colors.glassStrong).toBe("#111317");
+    expect(colors.glassBorder).toBe("#898274");
+    expect(colors.cardEdge).toBe("rgba(243, 238, 228, 0.02)");
+    expect(colors.satinControlEdge).toBe("rgba(243, 238, 228, 0.03)");
     expect(colors.accentSoft).toBe("rgba(198, 165, 110, 0.1)");
   });
 
@@ -51,18 +53,17 @@ describe("Theme tokens (imported from @argos/ui source)", () => {
     expect(toneColor["purple"]).toBe(colors.accent2);
   });
 
-  it("glow composes an outer bloom plus an inset rim from the given color", () => {
+  it("the legacy glow helper retains a static state rim without an outer bloom", () => {
     const g = glow(colors.accent);
-    expect(g.boxShadow).toContain(`12px ${colors.accent}55`);
-    expect(g.boxShadow).toContain(`inset 0 0 0 1px ${colors.accent}33`);
+    expect(g.boxShadow).toBe(`inset 0 0 0 1px ${colors.accent}`);
   });
 
-  it("glass treatment combines translucency, rim and backdrop blur", () => {
-    expect(glass.backgroundColor).toBe(colors.glass);
+  it("the legacy glass recipe is an opaque matte card without backdrop blur", () => {
+    expect(glass.backgroundColor).toBe(colors.panel);
     expect(glass.borderWidth).toBe(1);
-    expect(glass.borderColor).toBe(colors.glassBorder);
-    expect(glass.backdropFilter).toBe("blur(12px)");
-    expect(glass.WebkitBackdropFilter).toBe("blur(12px)");
+    expect(glass.borderColor).toBe(colors.cardEdge);
+    expect(glass).not.toHaveProperty("backdropFilter");
+    expect(glass).not.toHaveProperty("WebkitBackdropFilter");
   });
 
   it("real components consume the tokens (Panel spreads the shared glass)", () => {
@@ -74,9 +75,9 @@ describe("Theme tokens (imported from @argos/ui source)", () => {
     const panel = container.firstElementChild as HTMLElement;
     // The Panel's resolved declarations equal the token declarations one to one.
     const appliedStyle = sheetStyle(panel);
-    expect(paint(panel, "backgroundColor")).toBe(colors.glass);
-    expect(appliedStyle["backdrop-filter"]).toBe(glass.backdropFilter);
-    expect(paint(panel, "borderTopColor")).toBe(glass.borderColor);
+    expect(paint(panel, "backgroundColor")).toBe(colors.glass.toLowerCase());
+    expect(appliedStyle["backdrop-filter"]).toBeUndefined();
+    expect(paint(panel, "borderTopColor")).toBe(colors.cardEdge);
     expect(appliedStyle["border-top-width"]).toBe("1px");
     expect(screen.getByText("token consumer")).toBeVisible();
   });

@@ -21,7 +21,6 @@ use axum::Extension;
 use axum::Json;
 use fleetworks_contracts::connect::RegistrationEnsureRequest;
 use fleetworks_contracts::connect::WebSessionCreateRequest;
-use fleetworks_contracts::connect::WorkspaceName;
 use fleetworks_contracts::context::CredentialPurpose;
 use fleetworks_contracts::context::Permission;
 use serde::Deserialize;
@@ -118,7 +117,7 @@ fn failure(error: RegistryError, browser: bool) -> ConnectError {
         ),
         RegistryError::Collision if !browser => ConnectError(
             StatusCode::CONFLICT,
-            "Workstation IP or workspace identity collision; explicitly repair or rebind",
+            "Installation, registration or request identity collision",
         ),
         RegistryError::NotFound
         | RegistryError::Revoked
@@ -166,10 +165,8 @@ pub(crate) struct RebindRequest {
     request_id: String,
     registration_id: String,
     expected_revision: u64,
-    workstation_ip: IpAddr,
-    workspace_name: WorkspaceName,
+    workstation_ip: Option<IpAddr>,
     installation_marker: String,
-    workspace_marker: String,
 }
 
 pub(crate) async fn rebind(
@@ -181,9 +178,7 @@ pub(crate) async fn rebind(
     let request = RegistrationEnsureRequest::new(
         input.request_id,
         input.workstation_ip,
-        input.workspace_name,
         input.installation_marker,
-        input.workspace_marker,
     );
     let input =
         connect_registry::RebindInput::new(request, input.registration_id, input.expected_revision);

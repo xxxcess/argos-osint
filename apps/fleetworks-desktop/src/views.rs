@@ -1,4 +1,4 @@
-//! Simple native controls and lists. Topology presentation belongs to Intel Web.
+//! Selected native workstation destinations. Topology presentation belongs to Intel Web.
 
 use fleetworks_contracts::search::IndexState;
 use rune::Cx;
@@ -14,9 +14,6 @@ use crate::app::Page;
 use crate::app::State;
 use crate::brain::Association;
 use crate::connection::ConnectionStatus;
-use crate::workspaces::WorkspaceCommand;
-use fleetworks_workspace::native::RemovalKind;
-use fleetworks_workspace::native::WorkspaceState;
 
 pub(crate) fn line(value: impl Into<String>, kit: &Kit) -> El {
     rune::text(value.into())
@@ -53,412 +50,176 @@ pub(crate) fn scroll(body: El, key: &str) -> El {
         .child(body.w_full().padding(20.0).gap(14.0))
 }
 
-pub(crate) fn page(state: &State, cx: &mut Cx<State>, kit: &Kit) -> El {
+pub(crate) fn page(state: &State, cx: &mut Cx<State>, kit: &Kit, layers: &mut Vec<El>) -> El {
+    if state.setup_gateway {
+        return setup_gateway(state, kit);
+    }
     match state.page {
-        Page::Workstation => workstation(state, kit),
+        Page::Workstation | Page::Workspaces | Page::Profile => workstation(state, kit),
         Page::Brain => brain(state, cx, kit),
-        Page::Workspaces => workspaces(state, kit),
-        Page::Jobs | Page::Atlas | Page::Tools | Page::Models | Page::Profile => {
-            crate::backend_views::page(state, kit)
+        Page::Seed | Page::Jobs | Page::Atlas | Page::Tools | Page::Models => {
+            let log_width = cx
+                .layout_size("scoped-logs-table")
+                .map(|size| size[0])
+                .or_else(|| {
+                    cx.layout_size("page-content")
+                        .map(|size| (size[0] - 80.0).max(0.0))
+                })
+                .unwrap_or(340.0);
+            crate::backend_views::page(state, kit, layers, log_width)
         }
     }
 }
 
-fn workspaces(state: &State, kit: &Kit) -> El {
-    let busy = state.workspaces.busy;
+fn connection_status(state: &State) -> String {
+    match &state.connection.status {
+        ConnectionStatus::Disconnected => "No gateway connection".into(),
+        ConnectionStatus::Connecting => "Checking gateway authentication and compatibility…".into(),
+        ConnectionStatus::Connected => "Connected to a compatible gateway".into(),
+        ConnectionStatus::Failed(error) => error.clone(),
+    }
+}
+
+fn setup_gateway(state: &State, kit: &Kit) -> El {
+    let connecting = state.connection.status == ConnectionStatus::Connecting;
+    let origin = TextInput::new(&state.connection.origin)
+        .label("Gateway URL")
+        .placeholder("https://gateway.example.test")
+        .width(None)
+        .disabled(connecting)
+        .on_edit(|state: &mut State| &mut state.connection.origin)
+        .on_change(|state: &mut State, _| state.profile_editor_changed(true))
+        .on_submit(|state: &mut State, _| state.connect())
+        .build(kit)
+        .key("gateway-origin");
     let mut body = rune::col()
-        .child(heading("Managed workspace folders", kit))
-        .child(quiet("Select a folder for future request origin. Backend keys, model roles, corpus and search remain shared across folders.", kit))
-        .child(Button::new("Refresh folders").disabled(busy)
-            .on_press(|state: &mut State| {
-                if matches!(state.workspaces.snapshot, Load::Idle | Load::Failed(_)) { state.initialize_workspaces(None); }
-                else { state.workspace_command(WorkspaceCommand::Refresh); }
-            }).build(kit).key("workspace-refresh"));
-    match &state.workspaces.snapshot {
-        Load::Idle => {
-            body = body.child(quiet(
-                "The protected home container has not been opened.",
-                kit,
-            ))
-        }
-        Load::Pending | Load::Loading => {
-            body = body.child(quiet("Opening protected workspace identities…", kit).role("status"))
-        }
-        Load::Failed(error) => body = body.child(line(error.clone(), kit).role("alert")),
-        Load::Ready(snapshot) => {
-            body = body.child(quiet(snapshot.root.display().to_string(), kit));
-            for attempt in &snapshot.registration_attempts {
-                let id = attempt.request.request_id.clone();
-                body = body.child(rune::col().gap(6.0).key(format!("registration-attempt-{id}"))
-                    .child(heading(format!("Registration outcome pending: {}", attempt.request.workspace_name), kit))
-                    .child(quiet(format!("Deployment {} · IP {}. The folder cannot be removed until this exact request is reconciled.", attempt.deployment_id, attempt.request.workstation_ip), kit))
-                    .child(Button::new("Reconcile registration").disabled(busy || !state.permission(fleetworks_contracts::context::Permission::RegisterWorkstation)
-                        || state.connection.deployment_label() != attempt.deployment_id)
-                        .on_press(move |state: &mut State| state.reconcile_registration_attempt(&id)).build(kit).key("registration-reconcile")));
-            }
-            for attempt in &snapshot.rebind_attempts {
-                let id = attempt.request.request_id.clone();
-                body = body.child(rune::col().gap(6.0).key(format!("rebind-attempt-{id}"))
-                    .child(heading(format!("IP change outcome pending: {}", attempt.request.workspace_name), kit))
-                    .child(quiet(format!("Backend {} · {} → {}. Recheck this exact request before changing registration or removing folders.", attempt.prior.deployment_id, attempt.prior.workstation_ip, attempt.request.workstation_ip), kit))
-                    .child(Button::new("Recheck IP change").disabled(busy || !state.permission(fleetworks_contracts::context::Permission::RebindWorkstation)
-                        || state.connection.deployment_label() != attempt.prior.deployment_id)
-                        .on_press(move |state: &mut State| state.reconcile_rebind(&id)).build(kit).key("workspace-rebind-reconcile")));
-            }
-            for row in &snapshot.rows {
-                let selected = state
-                    .workspaces
-                    .selected
-                    .as_ref()
-                    .is_some_and(|selected| selected.marker == row.marker);
-                let name = row.name.clone();
-                let reveal_name = name.clone();
-                let remove_name = name.clone();
-                let delete_name = name.clone();
-                let copy_name = name.clone();
-                let path = row.path.display().to_string();
-                let selectable = matches!(
-                    row.state,
-                    WorkspaceState::Local | WorkspaceState::Registered
-                );
-                body = body.child(
-                    rune::col()
-                        .gap(6.0)
-                        .py(8.0)
-                        .key(format!("workspace-{}", row.marker))
-                        .child(heading(
-                            format!(
-                                "{}{}{}",
-                                row.name,
-                                if row.protected_default {
-                                    " · protected default"
-                                } else {
-                                    ""
-                                },
-                                if selected { " · selected" } else { "" }
-                            ),
-                            kit,
-                        ))
-                        .child(quiet(format!("{:?} · {}", row.state, path), kit))
-                        .child(
-                            rune::row()
-                                .gap(8.0)
-                                .child(
-                                    Button::new("Select")
-                                        .variant(if selected {
-                                            ButtonVariant::Submit
-                                        } else {
-                                            ButtonVariant::Outline
-                                        })
-                                        .disabled(busy || !selectable || selected)
-                                        .on_press(move |state: &mut State| {
-                                            state.workspace_command(WorkspaceCommand::Select(
-                                                name.clone(),
-                                            ))
-                                        })
-                                        .build(kit)
-                                        .key("workspace-select"),
-                                )
-                                .child(
-                                    Button::new("Reveal in Finder")
-                                        .variant(ButtonVariant::Ghost)
-                                        .disabled(busy || !selectable)
-                                        .on_press(move |state: &mut State| {
-                                            state.workspace_command(WorkspaceCommand::Reveal(
-                                                reveal_name.clone(),
-                                            ))
-                                        })
-                                        .build(kit)
-                                        .key("workspace-reveal"),
-                                )
-                                .child(
-                                    Button::new("Copy path")
-                                        .variant(ButtonVariant::Ghost)
-                                        .on_press_tx(move |state: &mut State, tx| {
-                                            state.copy_workspace_path(&copy_name, tx)
-                                        })
-                                        .build(kit)
-                                        .key("workspace-copy"),
-                                ),
-                        )
-                        .child(
-                            rune::row()
-                                .gap(8.0)
-                                .child(
-                                    Button::new("Remove from app")
-                                        .variant(ButtonVariant::Ghost)
-                                        .disabled(busy || row.protected_default || !selectable)
-                                        .on_press(move |state: &mut State| {
-                                            state.preview_removal(
-                                                &remove_name,
-                                                RemovalKind::RemoveFromApp,
-                                            )
-                                        })
-                                        .build(kit)
-                                        .key("workspace-remove"),
-                                )
-                                .child(
-                                    Button::new("Delete…")
-                                        .variant(ButtonVariant::Outline)
-                                        .disabled(busy || row.protected_default || !selectable)
-                                        .on_press(move |state: &mut State| {
-                                            state.preview_removal(&delete_name, RemovalKind::Delete)
-                                        })
-                                        .build(kit)
-                                        .key("workspace-delete"),
-                                ),
-                        ),
-                );
-                for binding in &row.bindings {
-                    body = body.child(quiet(
-                        format!(
-                            "Backend {} · {}{}",
-                            binding.deployment_id,
-                            if binding.retired {
-                                "retired"
-                            } else if binding.stale {
-                                "refresh registration after IP change"
-                            } else {
-                                "registered"
-                            },
-                            if binding.receipt.is_none() {
-                                " · refresh complete receipt"
-                            } else {
-                                ""
-                            }
-                        ),
-                        kit,
-                    ));
-                }
-            }
-            if !snapshot.operations.is_empty() {
-                body = body.child(heading("Pending folder operations", kit));
-                for operation in &snapshot.operations {
-                    let id = operation.operation_id.clone();
-                    body = body.child(rune::col().gap(5.0).key(format!("workspace-operation-{id}"))
-                        .child(line(format!("{} · {:?} · {:?}", operation.workspace_name, operation.kind, operation.phase), kit))
-                        .child(quiet(format!("{} known backend bindings · {} retirement receipts. Files stay intact while any receipt is pending.", operation.bindings.len(), operation.receipts.len()), kit))
-                        .child(Button::new("Recheck pending operation").disabled(busy)
-                            .on_press(move |state: &mut State| state.workspace_command(WorkspaceCommand::Resume(id.clone())))
-                            .build(kit).key("workspace-resume")));
-                    for binding in &operation.bindings {
-                        body = body.child(quiet(
-                            format!(
-                                "{} · {}",
-                                binding.deployment_id,
-                                if operation.receipts.contains_key(&binding.deployment_id) {
-                                    "retirement confirmed"
-                                } else {
-                                    "retirement pending"
-                                }
-                            ),
-                            kit,
-                        ));
-                    }
-                }
-            }
-        }
+        .child(heading("Setup Gateway", kit))
+        .child(quiet("Connect to your independently running gateway. Accepted jobs continue when this app closes.", kit))
+        .child(crate::material::matte_card(rune::col().padding(16.0).gap(10.0)
+            .child(heading("1. Gateway URL", kit))
+            .child(origin)
+            .child(Button::new("Check gateway")
+                .variant(ButtonVariant::Submit)
+                .disabled(connecting || state.connection.origin.text.trim().is_empty())
+                .on_press(|state: &mut State| state.connect())
+                .build(kit).key("connect"))))
+        .child(crate::material::matte_card(rune::col().padding(16.0).gap(8.0)
+            .child(heading("2. Connectivity Check", kit))
+            .child(line(connection_status(state), kit).key("connection-status").role("status"))
+            .child(quiet("The gateway URL uses its already provisioned protected credential binding. Missing or replaced credentials require provisioning before this check can succeed.", kit))
+            .child(registration_status(state, kit))
+            .child(crate::readiness_cards::checks(state, kit))));
+    if state.connected() && state.registration.context.is_some() {
+        body = body.child(
+            Button::new("Done")
+                .on_press(|state: &mut State| state.setup_gateway = false)
+                .build(kit)
+                .key("gateway-setup-done"),
+        );
     }
-    if let Some(confirmation) = &state.workspaces.confirmation {
-        body = body.child(rune::col().gap(8.0).key("workspace-removal-confirmation")
-            .child(heading(format!("Confirm {:?}: {}", confirmation.kind, confirmation.name), kit))
-            .child(quiet(confirmation.path.display().to_string(), kit))
-            .child(quiet(format!("{} known backend bindings. Existing work must finish before removal. Unreachable backends keep this pending. Remove from app keeps all files; Delete moves this entire folder and its contents to macOS Trash after every backend confirms retirement.", confirmation.bindings.iter().filter(|binding| !binding.retired).count()), kit))
-            .child(rune::row().gap(8.0)
-                .child(Button::new("Confirm removal").disabled(busy).on_press(|state: &mut State| state.confirm_removal()).build(kit).key("workspace-confirm-remove"))
-                .child(Button::new("Keep workspace").variant(ButtonVariant::Ghost).on_press(|state: &mut State| state.workspaces.confirmation = None).build(kit))));
-    }
-    let available = matches!(state.workspaces.snapshot, Load::Ready(_)) && !busy;
-    body = body
-        .child(heading("Create a named child", kit))
-        .child(TextInput::new(&state.workspaces.create_name).label("New workspace name").placeholder("research")
-            .width(None).on_edit(|state: &mut State| &mut state.workspaces.create_name).build(kit).key("workspace-create-name"))
-        .child(Button::new("Create workspace").disabled(!available || state.workspaces.create_name.text.is_empty())
-            .on_press(|state: &mut State| state.workspace_command(WorkspaceCommand::Create(state.workspaces.create_name.text.clone())))
-            .build(kit).key("workspace-create"))
-        .child(heading("Attach an existing owned child", kit))
-        .child(quiet("Enter one immediate child name and its existing identity marker. External paths, symbolic links and unowned folders are rejected.", kit))
-        .child(TextInput::new(&state.workspaces.attach_name).label("Owned child name").width(None)
-            .on_edit(|state: &mut State| &mut state.workspaces.attach_name).build(kit).key("workspace-attach-name"))
-        .child(TextInput::new(&state.workspaces.attach_marker).label("Existing folder identity marker").width(None)
-            .on_edit(|state: &mut State| &mut state.workspaces.attach_marker).build(kit).key("workspace-attach-marker"))
-        .child(Button::new("Attach owned child").disabled(!available || state.workspaces.attach_name.text.is_empty() || state.workspaces.attach_marker.text.is_empty())
-            .on_press(|state: &mut State| state.workspace_command(WorkspaceCommand::Attach {
-                name: state.workspaces.attach_name.text.clone(), marker: state.workspaces.attach_marker.text.clone(),
-            })).build(kit).key("workspace-attach"));
-    if let Some(message) = &state.workspaces.message {
-        body = body.child(line(message.clone(), kit).role("status"));
-    }
-    scroll(body, "workspaces-body")
+    scroll(body, "gateway-setup-body")
 }
 
-fn registration(state: &State, kit: &Kit) -> El {
-    let selected = state
-        .workspaces
-        .selected
-        .as_ref()
-        .map_or("No owned workspace selected".to_owned(), |row| {
-            format!("Selected workspace: {}", row.name)
-        });
-    let mut body = rune::col().gap(8.0).child(line(selected, kit)).child(
-        Button::new("Choose LAN/VPN interface")
-            .disabled(matches!(state.registration.interfaces, Load::Loading))
-            .on_press(|state: &mut State| state.refresh_interfaces())
-            .build(kit)
-            .key("interfaces-refresh"),
-    );
-    match &state.registration.interfaces {
-        Load::Idle => body = body.child(quiet("Native IP is selected from this Mac. For a loopback gateway, choose the LAN or VPN address that browser users should identify.", kit)),
-        Load::Pending | Load::Loading => body = body.child(quiet("Reading local interfaces and the gateway route…", kit)),
-        Load::Failed(error) => body = body.child(line(error.clone(), kit).role("alert")),
-        Load::Ready(snapshot) => {
-            if snapshot.interfaces.is_empty() { body = body.child(quiet("No usable LAN/VPN address is available. Connect an interface and refresh.", kit)); }
-            for (index, interface) in snapshot.interfaces.iter().enumerate() {
-                let selected = state.registration.selected_interface.as_ref() == Some(interface);
-                let suggestion = snapshot.route_suggestion == Some(interface.ip);
-                body = body.child(Button::new(format!("{} · {}{}{}", interface.name, interface.ip,
-                    if suggestion { " · gateway route" } else { "" }, if selected { " · selected" } else { "" }))
-                    .variant(if selected { ButtonVariant::Submit } else { ButtonVariant::Outline })
-                    .on_press(move |state: &mut State| state.choose_interface(index)).build(kit).key(format!("native-interface-{index}")));
-            }
-        }
+fn registration_status(state: &State, kit: &Kit) -> El {
+    if let Some(context) = &state.registration.context {
+        return line(format!("Connect ID: {}", context.connect_id), kit).key("connect-id");
     }
-    body = body.child(
-        Button::new("Register selected workspace")
-            .disabled(!state.can_register())
-            .on_press(|state: &mut State| state.ensure_registration())
-            .build(kit)
-            .key("registration-ensure"),
-    );
     match &state.registration.receipt {
-        Load::Loading | Load::Pending => {
-            body = body.child(
-                quiet(
-                    "Ensuring registration and verifying current authority…",
-                    kit,
-                )
-                .role("status"),
-            )
-        }
-        Load::Failed(error) => body = body.child(line(error.clone(), kit).role("alert")),
-        Load::Ready(receipt) => {
-            body = body.child(
-                line(
-                    format!(
-                        "Connect ID: {} · revision {}",
-                        receipt.connect_id, receipt.revision
-                    ),
-                    kit,
-                )
-                .key("connect-id"),
-            )
-        }
-        Load::Idle => {}
+        Load::Pending | Load::Loading => quiet("Registering this workstation…", kit).role("status"),
+        Load::Failed(error) => line(error.clone(), kit).role("alert"),
+        _ => quiet(
+            "Workstation registration unavailable. Permitted shared backend reads remain usable.",
+            kit,
+        ),
     }
-    let active = state.registration.context.is_some();
-    body = body.child(
-        rune::row()
-            .gap(8.0)
-            .child(
-                Button::new("Copy Connect ID")
-                    .disabled(!active)
-                    .on_press_tx(|state: &mut State, tx| state.copy_connect_id(tx))
-                    .build(kit)
-                    .key("connect-id-copy"),
-            )
-            .child(
-                Button::new("Open Intel Web")
-                    .disabled(!active)
-                    .on_press_tx(|state: &mut State, tx| state.open_intel_web(tx))
-                    .build(kit)
-                    .key("intel-web-open"),
-            ),
-    );
-    if let Some(message) = &state.registration.message {
-        body = body.child(quiet(message.clone(), kit).role("status"));
-    }
-    body.child(crate::rebind_views::controls(state, kit))
 }
 
 fn workstation(state: &State, kit: &Kit) -> El {
-    let connecting = state.connection.status == ConnectionStatus::Connecting;
-    let status = match &state.connection.status {
-        ConnectionStatus::Disconnected => {
-            "Disconnected — connection settings remain available offline".to_owned()
-        }
-        ConnectionStatus::Connecting => {
-            "Checking gateway authentication and capabilities…".to_owned()
-        }
-        ConnectionStatus::Connected => "Connected to a compatible gateway".to_owned(),
-        ConnectionStatus::Failed(error) => error.clone(),
-    };
-    let origin = TextInput::new(&state.connection.origin)
-        .label("Gateway API origin")
-        .placeholder("https://gateway.example.test")
-        .width(None)
-        .disabled(
-            state.connection_profiles.busy
-                || !state.connection_profiles.editing
-                || state.connected(),
-        )
-        .on_edit(|state: &mut State| &mut state.connection.origin)
-        .on_change(|state: &mut State, _| state.profile_editor_changed(true))
-        .build(kit)
-        .key("gateway-origin");
-    let credential = TextInput::new(&state.connection.token_file)
-        .label("Protected gateway credential file")
-        .placeholder("Select an existing private token file")
-        .width(None)
-        .disabled(
-            state.connection_profiles.busy
-                || !state.connection_profiles.editing
-                || state.connected(),
-        )
-        .on_edit(|state: &mut State| &mut state.connection.token_file)
-        .on_change(|state: &mut State, _| state.profile_credential_edited())
-        .build(kit)
-        .key("gateway-token-file");
-    let actions = rune::row()
+    let native = crate::material::matte_card(
+        rune::col()
+            .padding(16.0)
+            .gap(8.0)
+            .key("native-client-card")
+            .child(heading("Native Client", kit))
+            .child(line(
+                format!(
+                    "Fleetworks {} · macOS · {}",
+                    env!("CARGO_PKG_VERSION"),
+                    std::env::consts::ARCH
+                ),
+                kit,
+            ))
+            .child(registration_status(state, kit)),
+    );
+    let gateway = crate::material::matte_card(
+        rune::col()
+            .padding(16.0)
+            .gap(8.0)
+            .key("gateway-backend-card")
+            .child(heading("Gateway Backend", kit))
+            .child(
+                line(connection_status(state), kit)
+                    .key("connection-status")
+                    .role("status"),
+            )
+            .child(quiet(state.connection.origin.text.clone(), kit))
+            .child(quiet(
+                format!("Deployment {}", state.connection.deployment_label()),
+                kit,
+            ))
+            .child(crate::readiness_cards::checks(state, kit)),
+    );
+    let mut resources = rune::col()
+        .padding(16.0)
         .gap(8.0)
-        .child(
-            Button::new("Connect")
-                .variant(ButtonVariant::Submit)
-                .disabled(connecting || state.connection_profiles.busy)
-                .on_press(|state: &mut State| {
-                    state.profile_action(crate::connection_profiles::ProfileAction::Connect)
-                })
-                .build(kit)
-                .key("connect"),
-        )
-        .child(
-            Button::new("Disconnect")
-                .variant(ButtonVariant::Ghost)
-                .disabled(!state.connected() && !connecting)
-                .on_press(|state: &mut State| state.disconnect())
-                .build(kit)
-                .key("disconnect"),
-        );
-    let mut body = rune::col()
-        .child(heading("Connection and local workstation", kit))
-        .child(quiet("Local and remote profiles connect to independently running gateways. Accepted jobs continue after this app closes.", kit))
-        .child(crate::connection_profile_views::profiles(state,kit))
-        .child(quiet("Gateway API origin", kit))
-        .child(origin)
-        .child(quiet("Protected gateway credential file", kit))
-        .child(credential)
-        .child(crate::connection_profile_views::actions(state,kit))
-        .child(actions)
-        .child(line(status, kit).key("connection-status").role("status"))
-        .child(heading("Registration", kit))
-        .child(quiet("Select a verified managed child and native interface, then register through the gateway before interactive submission or browser launch.", kit))
-        .child(registration(state, kit))
-        .child(heading("Backend readiness & maintenance", kit))
-        .child(quiet("These checks describe shared backend resources. Refresh is read-only; seed, training, activation and reindex are separate authorized jobs.", kit))
-        .child(Button::new("Refresh Checks").disabled(!state.connected() || matches!(state.readiness, Load::Loading))
-            .on_press(|state: &mut State| state.refresh_page()).build(kit).key("refresh-checks"));
-    body = body.child(crate::readiness_cards::checks(state, kit));
-    body = body.child(crate::backend_views::maintenance(state, kit));
-    scroll(body, "workstation-body")
+        .key("host-resources-card")
+        .child(heading("Host Resources", kit));
+    match &state.host_metrics {
+        Load::Idle => {
+            resources =
+                resources.child(quiet("Host resource telemetry has not been observed.", kit))
+        }
+        Load::Pending | Load::Loading => {
+            resources = resources.child(quiet("Reading API host resources…", kit).role("status"))
+        }
+        Load::Failed(error) => resources = resources.child(line(error.clone(), kit).role("alert")),
+        Load::Ready(metrics) => {
+            for (label, value) in [
+                ("CPU", metrics.cpu_percent),
+                ("Memory", metrics.memory_percent),
+                ("Disk", metrics.disk_percent),
+            ] {
+                resources = resources.child(line(
+                    value
+                        .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
+                        .map_or_else(
+                            || format!("{label}: unavailable"),
+                            |value| format!("{label}: {value:.1}%"),
+                        ),
+                    kit,
+                ));
+            }
+            if let Some(platform) = &metrics.platform {
+                resources = resources.child(quiet(platform.clone(), kit));
+            }
+            if let Some(chipset) = &metrics.chipset {
+                resources = resources.child(quiet(chipset.clone(), kit));
+            }
+            resources = resources.child(quiet(
+                "Measurements describe the API host. Unreported measurements remain unavailable.",
+                kit,
+            ));
+        }
+    }
+    let resources = crate::material::matte_card(resources);
+    scroll(
+        rune::col()
+            .child(heading("Workstation Status", kit))
+            .child(native)
+            .child(gateway)
+            .child(resources),
+        "workstation-body",
+    )
 }
 
 fn brain(state: &State, cx: &mut Cx<State>, kit: &Kit) -> El {
@@ -492,14 +253,7 @@ fn brain(state: &State, cx: &mut Cx<State>, kit: &Kit) -> El {
     let mut list = rune::col()
         .gap(10.0)
         .child(heading("Search actors", kit))
-        .child(search)
-        .child(
-            Button::new("Search")
-                .disabled(!state.search_available())
-                .on_press(|state: &mut State| state.search_now())
-                .build(kit)
-                .key("search-submit"),
-        );
+        .child(search);
     match &state.brain.results {
         Load::Idle => {
             list = list.child(
@@ -663,4 +417,104 @@ fn associations(label: &str, rows: &[Association], kit: &Kit) -> El {
         ));
     }
     body
+}
+
+#[cfg(test)]
+mod tests {
+    use rune::Env;
+    use rune::Runtime;
+
+    use crate::app;
+    use crate::app::Page;
+    use crate::app::State;
+
+    fn runtime(page: Page, setup: bool, size: (f32, f32)) -> Runtime<State> {
+        let mut state = State::fixture();
+        state.page = page;
+        state.setup_gateway = setup;
+        let mut runtime = Runtime::new(
+            state,
+            app::view,
+            size,
+            Env {
+                system_dark: true,
+                scale: 1.0,
+            },
+        );
+        runtime.frame(0.0);
+        runtime
+    }
+
+    #[test]
+    fn status_uses_only_identity_gateway_and_resource_cards_at_both_sizes() {
+        for size in [(1180.0, 780.0), (640.0, 480.0)] {
+            let runtime = runtime(Page::Workstation, false, size);
+            let tree = runtime.accessibility_json().to_string();
+            for title in ["Native Client", "Gateway Backend", "Host Resources"] {
+                assert!(tree.contains(title), "missing {title} at {size:?}");
+            }
+            for key in [
+                "gateway-origin",
+                "gateway-token-file",
+                "disconnect",
+                "registration-ensure",
+                "workspace-create",
+                "refresh-checks",
+                "dataset-upload",
+            ] {
+                assert!(runtime.find(key).is_none(), "retired status control {key}");
+            }
+            assert!(
+                runtime.state.intents.is_empty(),
+                "rendering status cannot submit work"
+            );
+        }
+    }
+
+    #[test]
+    fn setup_has_url_and_connectivity_progress_without_credential_picker() {
+        let runtime = runtime(Page::Workstation, true, (1180.0, 780.0));
+        let tree = runtime.accessibility_json().to_string();
+        assert!(runtime.find("gateway-origin").is_some());
+        assert!(runtime.find("connect").is_some());
+        assert!(tree.contains("Connectivity Check"));
+        for key in [
+            "gateway-token-file",
+            "disconnect",
+            "workspace-create-name",
+            "profile-save",
+            "registration-ensure",
+        ] {
+            assert!(runtime.find(key).is_none(), "unlisted setup control {key}");
+        }
+        assert!(runtime.state.intents.is_empty());
+    }
+
+    #[test]
+    fn maintained_destinations_do_not_render_retired_administration_controls() {
+        for page in Page::ALL {
+            let runtime = runtime(page, false, (1180.0, 780.0));
+            for key in [
+                "article-day",
+                "article-category",
+                "article-search",
+                "tool-inputs",
+                "dataset-choose-actors",
+                "dataset-upload",
+                "jobs-workspace-scope",
+                "activity-tabs",
+                "account-base-url",
+                "workspace-create-name",
+            ] {
+                assert!(
+                    runtime.find(key).is_none(),
+                    "unlisted control {key} on {page:?}"
+                );
+            }
+            assert!(
+                runtime.state.intents.is_empty(),
+                "rendering a destination cannot submit work"
+            );
+        }
+    }
 }

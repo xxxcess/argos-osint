@@ -1,33 +1,32 @@
-//! Simple endpoint-backed lists, setup forms and scoped activity.
+//! Allowlisted backend operation cards and workstation-scoped activity.
 
 use fleetworks_contracts::context::Permission;
-use fleetworks_contracts::readiness::DatasetKind;
 use fleetworks_contracts::readiness::MaintenanceOperation;
 use rune::El;
-use rune_kit::shell::TabItem;
-use rune_kit::shell::TabOrientation;
+use rune::ScrollSpec;
+use rune::TextEdit;
 use rune_kit::Button;
 use rune_kit::ButtonVariant;
+use rune_kit::Cell;
+use rune_kit::Dialog;
 use rune_kit::Kit;
-use rune_kit::TabStrip;
-use rune_kit::TextArea;
+use rune_kit::Table;
+use rune_kit::TableColumn;
 use rune_kit::TextInput;
 
 use crate::app::Load;
 use crate::app::Page;
 use crate::app::State;
-use crate::maintenance::dataset_kind_label;
+use crate::submission::AcceptedReceipt;
+use crate::submission::SubmissionKind;
+use crate::submission::SubmissionPhase;
 use crate::views::heading;
 use crate::views::line;
 use crate::views::quiet;
 use crate::views::scroll;
 
-fn refresh(state: &State, label: &str, kit: &Kit) -> El {
-    Button::new(label.to_owned())
-        .disabled(!state.connected())
-        .on_press(|state: &mut State| state.refresh_page())
-        .build(kit)
-        .key("backend-refresh")
+fn card(body: El) -> El {
+    crate::material::matte_card(body.padding(16.0).gap(8.0).w_full())
 }
 
 fn load_message<T>(load: &Load<T>, empty: &str, kit: &Kit) -> Option<El> {
@@ -41,152 +40,417 @@ fn load_message<T>(load: &Load<T>, empty: &str, kit: &Kit) -> Option<El> {
     }
 }
 
-pub(crate) fn page(state: &State, kit: &Kit) -> El {
+pub(crate) fn page(state: &State, kit: &Kit, layers: &mut Vec<El>, log_width: f32) -> El {
     match state.page {
+        Page::Seed => scroll(maintenance(state, kit), "seed-body"),
         Page::Atlas => atlas(state, kit),
-        Page::Tools => tools(state, kit),
-        Page::Models => models(state, kit),
-        Page::Profile => profile(state, kit),
-        Page::Jobs => jobs(state, kit),
+        Page::Tools => tools(state, kit, layers),
+        Page::Models => models(state, kit, layers),
+        Page::Jobs => jobs(state, kit, log_width),
         _ => rune::col(),
     }
 }
 
 fn atlas(state: &State, kit: &Kit) -> El {
-    let mut body = rune::col().child(heading("Collection and articles", kit))
-        .child(quiet("Articles belong to the selected backend. Read a bounded calendar day and category; collection is a separate confirmed job.", kit))
-        .child(TextInput::new(&state.backend.article_day).label("Article day (UTC)").placeholder("YYYY-MM-DD").width(None)
-            .on_edit(|state: &mut State| &mut state.backend.article_day).build(kit).key("article-day"))
-        .child(TextInput::new(&state.backend.article_category).label("Category").placeholder("all").width(None)
-            .on_edit(|state: &mut State| &mut state.backend.article_category).build(kit).key("article-category"))
-        .child(TextInput::new(&state.backend.article_search).label("Search these articles").width(None)
-            .on_edit(|state: &mut State| &mut state.backend.article_search)
-            .on_submit(|state: &mut State, _| state.refresh_page()).build(kit).key("article-search"))
-        .child(refresh(state, "Refresh articles", kit));
+    let lane = state.submissions.lane(SubmissionKind::Atlas);
+    let reason = state.submission_disabled_reason(SubmissionKind::Atlas);
+    let unresolved = lane.attempt.is_some() && lane.receipt.is_none();
+    let mut action = rune::col().child(heading("News Cycles", kit)).child(
+        Button::new(if unresolved {
+            "Resolve pending cycle"
+        } else {
+            "New Cycle"
+        })
+        .variant(ButtonVariant::Submit)
+        .disabled(
+            lane.busy()
+                || if unresolved {
+                    !state.permission(Permission::ReadWorkstationActivity)
+                } else {
+                    reason.is_some()
+                },
+        )
+        .on_press(|state: &mut State| {
+            if state
+                .submissions
+                .lane(SubmissionKind::Atlas)
+                .attempt
+                .is_some()
+                && state
+                    .submissions
+                    .lane(SubmissionKind::Atlas)
+                    .receipt
+                    .is_none()
+            {
+                state.resolve_submission(SubmissionKind::Atlas);
+            } else {
+                state.preview_atlas_cycle();
+            }
+        })
+        .build(kit)
+        .key("atlas-submit-preview"),
+    );
+    if let Some(reason) = reason {
+        action = action.child(quiet(reason, kit));
+    }
+    if let Some(snapshot) = &lane.confirmation {
+        action = action.child(rune::col().gap(8.0).key("atlas-submit-confirmation")
+            .child(heading("Confirm New Cycle", kit))
+            .child(quiet(format!("Deployment {} · configuration revision {}", snapshot.context.deployment_id, snapshot.configuration_revision), kit))
+            .child(quiet("Queue one collection cycle. Acceptance means queued; only the gateway can report completion.", kit))
+            .child(Button::new("Confirm New Cycle").variant(ButtonVariant::Outline)
+                .on_press(|state: &mut State| state.confirm_submission(SubmissionKind::Atlas)).build(kit).key("atlas-submit-confirm"))
+            .child(Button::new("Keep current cycles").variant(ButtonVariant::Ghost)
+                .on_press(|state: &mut State| state.submissions.lane_mut(SubmissionKind::Atlas).confirmation = None).build(kit)));
+    }
+    let status = match lane.phase {
+        SubmissionPhase::Preparing => Some("Preparing the durable cycle request…"),
+        SubmissionPhase::Posting => Some("Waiting for the gateway acceptance receipt…"),
+        SubmissionPhase::OutcomeUnknown => Some("Delivery is uncertain. The original request is retained; resolving it does not submit a replacement cycle."),
+        _ => None,
+    };
+    if let Some(status) = status {
+        action = action.child(quiet(status, kit).role("status"));
+    }
+    if let Some(AcceptedReceipt::Atlas(receipt)) = &lane.receipt {
+        action = action.child(
+            line(
+                format!(
+                    "Accepted cycle {} · job {}. Completion pending.",
+                    receipt.run_id, receipt.job_id
+                ),
+                kit,
+            )
+            .role("status"),
+        );
+    }
+    if let Some(message) = load_message(&lane.resolution, "", kit) {
+        if !matches!(lane.resolution, Load::Idle) {
+            action = action.child(message);
+        }
+    }
+    if let Some(message) = &lane.message {
+        action = action.child(line(message.clone(), kit).role("status"));
+    }
+    let mut history = rune::col().child(heading("Cycle history", kit));
     if let Some(message) = load_message(
-        &state.backend.articles,
-        "Choose a day and refresh to read articles.",
+        &state.cycles.history,
+        "Cycle history has not been observed.",
         kit,
     ) {
-        body = body.child(message);
+        history = history.child(message);
     }
-    if let Load::Ready(page) = &state.backend.articles {
-        body = body.child(quiet(
-            format!("{} articles · revision {}", page.rows.len(), page.revision),
-            kit,
-        ));
-        if page.rows.is_empty() {
-            body = body.child(quiet(
-                "No articles match this page of the selected day and category.",
+    if let Load::Ready(cycles) = &state.cycles.history {
+        if cycles.rows.is_empty() {
+            history = history.child(quiet(
+                "No cycles are associated with this workstation.",
                 kit,
             ));
         }
-        for article in &page.rows {
-            body = body.child(
-                rune::col()
-                    .gap(5.0)
-                    .py(8.0)
-                    .key(format!("article-{}", article.id))
-                    .child(heading(article.title.clone(), kit))
-                    .child(line(article.description.clone(), kit))
-                    .child(quiet(
-                        format!(
-                            "{} · {} · {}",
-                            article.source_name,
-                            article.published_at,
-                            article.categories.join(", ")
-                        ),
-                        kit,
-                    )),
-            );
+        for cycle in &cycles.rows {
+            let id = cycle.job_id.clone();
+            let selected = state.cycles.selected.as_deref() == Some(cycle.job_id.as_str());
+            let mut row = rune::col()
+                .key(format!("cycle-{}", cycle.job_id))
+                .child(
+                    Button::new(format!("{} · {}", cycle.created_at, cycle.state))
+                        .variant(if selected {
+                            ButtonVariant::Outline
+                        } else {
+                            ButtonVariant::Ghost
+                        })
+                        .on_press(move |state: &mut State| state.select_cycle(&id))
+                        .build(kit)
+                        .key(format!("cycle-select-{}", cycle.job_id)),
+                )
+                .child(quiet(
+                    format!(
+                        "Run {} · articles {}",
+                        cycle.run_id,
+                        cycle
+                            .article_count
+                            .map_or("unavailable".into(), |count| count.to_string())
+                    ),
+                    kit,
+                ));
+            if let Some(finished) = &cycle.finished_at {
+                row = row.child(quiet(format!("Finished {finished}"), kit));
+            }
+            if selected {
+                row = row.child(
+                    Button::new("Delete cycle history…")
+                        .variant(ButtonVariant::Ghost)
+                        .disabled(state.cycle_deletion_disabled_reason().is_some())
+                        .on_press(|state: &mut State| state.preview_delete_cycle())
+                        .build(kit)
+                        .key("cycle-delete-preview"),
+                );
+                if let Some(reason) = state.cycle_deletion_disabled_reason() {
+                    row = row.child(quiet(reason, kit));
+                }
+            }
+            history = history.child(card(row));
         }
-        body = body.child(
-            Button::new("Next article page")
-                .disabled(page.next_cursor.is_none())
-                .on_press(|state: &mut State| state.next_articles())
+    }
+    if let Some(id) = &state.cycles.confirmation {
+        history = history.child(rune::col().key("cycle-delete-confirmation")
+            .child(heading("Delete this cycle from workstation history?", kit))
+            .child(quiet(format!("Job {id}. Shared articles, evidence and durable job audit remain intact. This does not cancel the cycle."), kit))
+            .child(Button::new("Delete from history").variant(ButtonVariant::Outline)
+                .disabled(matches!(state.cycles.deletion, Load::Loading))
+                .on_press(|state: &mut State| state.confirm_delete_cycle()).build(kit).key("cycle-delete-confirm"))
+            .child(Button::new("Keep cycle history").variant(ButtonVariant::Ghost)
+                .on_press(|state: &mut State| state.cycles.confirmation = None).build(kit)));
+    }
+    if let Some(message) = load_message(&state.cycles.deletion, "", kit) {
+        if !matches!(state.cycles.deletion, Load::Idle) {
+            history = history.child(message);
+        }
+    }
+    if matches!(state.cycles.deletion, Load::Failed(_)) {
+        history = history.child(
+            Button::new("Resolve pending deletion")
+                .variant(ButtonVariant::Outline)
+                .on_press(|state: &mut State| state.confirm_delete_cycle())
                 .build(kit)
-                .key("articles-next"),
+                .key("cycle-delete-resolve"),
         );
     }
-    body = body.child(crate::submission_views::atlas(state, kit));
-    scroll(body, "atlas-body")
+    if let Load::Ready(receipt) = &state.cycles.deletion {
+        history = history.child(quiet(
+            if receipt.hidden {
+                "Cycle hidden from this workstation's history."
+            } else {
+                "The gateway did not report the cycle as hidden."
+            },
+            kit,
+        ));
+    }
+    if let Some(message) = &state.cycles.message {
+        history = history.child(line(message.clone(), kit).role("status"));
+    }
+    scroll(
+        rune::col().child(card(action)).child(card(history)),
+        "atlas-body",
+    )
 }
 
-fn tools(state: &State, kit: &Kit) -> El {
-    let mut body = rune::col().child(heading("Tool catalog", kit))
-        .child(quiet("Read catalog entries independently of provider credential administration. Execution needs an authorized registered origin and a durable acceptance contract.", kit))
-        .child(refresh(state, "Refresh tool catalog", kit));
+fn tools(state: &State, kit: &Kit, layers: &mut Vec<El>) -> El {
+    let mut body = rune::col().child(heading("OSINT Tools", kit));
     if let Some(message) = load_message(
         &state.backend.tools,
-        "Refresh to read the gateway's tool catalog.",
+        "Tool availability has not been observed.",
         kit,
     ) {
         body = body.child(message);
     }
     if let Load::Ready(catalog) = &state.backend.tools {
-        for tool in &catalog.tools {
-            let id = tool.id.clone();
-            body = body.child(
-                Button::new(format!("{} · {}", tool.name, tool.category))
-                    .variant(
-                        if state.backend.selected_tool.as_deref() == Some(&tool.id) {
-                            ButtonVariant::Submit
-                        } else {
-                            ButtonVariant::Outline
-                        },
-                    )
-                    .on_press(move |state: &mut State| {
-                        state.backend.selected_tool = Some(id.clone());
-                        state.backend.tool_inputs = rune::TextEdit::new("{}");
-                        state.interactive_draft_edited(crate::submission::SubmissionKind::Tool);
-                    })
-                    .build(kit)
-                    .key(format!("tool-{}", tool.id)),
-            );
+        if catalog.tools.is_empty() {
+            body = body.child(quiet("No services are advertised by this gateway.", kit));
         }
-        if let Some(tool) = state
-            .backend
-            .selected_tool
-            .as_ref()
-            .and_then(|id| catalog.tools.iter().find(|tool| &tool.id == id))
-        {
-            body = body
-                .child(heading(tool.name.clone(), kit))
-                .child(line(tool.description.clone(), kit))
-                .child(quiet(
-                    format!(
-                        "Inputs: {} · timeout {}s",
-                        tool.inputs.join(", "),
-                        tool.timeout_seconds
-                    ),
-                    kit,
-                ))
-                .child(quiet(tool.restrictions.clone(), kit))
-                .child(
-                    TextArea::new(&state.backend.tool_inputs)
-                        .label("Tool inputs (JSON)")
-                        .rows(4)
-                        .width(None)
-                        .on_edit(|state: &mut State| &mut state.backend.tool_inputs)
-                        .on_change(|state: &mut State, _| {
-                            state.interactive_draft_edited(crate::submission::SubmissionKind::Tool)
-                        })
-                        .build(kit)
-                        .key("tool-inputs"),
-                );
+        for tool in &catalog.tools {
+            body = body.child(card(
+                rune::col()
+                    .key(format!("tool-{}", tool.id))
+                    .child(heading(tool.name.clone(), kit))
+                    .child(quiet(tool.category.clone(), kit))
+                    .child(line(tool.description.clone(), kit))
+                    .child(quiet(tool.restrictions.clone(), kit)),
+            ));
         }
     }
-    body = body.child(crate::submission_views::tools(state, kit));
+    if let Some(message) = load_message(
+        &state.backend.profile,
+        "Credential availability has not been observed.",
+        kit,
+    ) {
+        body = body.child(message);
+    }
+    if let Load::Ready(profile) = &state.backend.profile {
+        for credential in &profile.tool_credentials {
+            let provider = credential.provider.clone();
+            body = body.child(card(
+                rune::col()
+                    .key(format!("tool-provider-{}", credential.provider))
+                    .child(heading(credential.provider.clone(), kit))
+                    .child(quiet(
+                        format!(
+                            "Primary key {} · fallback key {}",
+                            if credential.primary_present {
+                                "configured"
+                            } else {
+                                "not configured"
+                            },
+                            if credential.fallback_present {
+                                "configured"
+                            } else {
+                                "not configured"
+                            }
+                        ),
+                        kit,
+                    ))
+                    .child(
+                        Button::new("Configure API keys")
+                            .variant(ButtonVariant::Outline)
+                            .disabled(!state.permission(Permission::ManageConfiguration))
+                            .on_press(move |state: &mut State| {
+                                state.configuration.tool_provider = TextEdit::new(&provider);
+                                state.configuration.tool_primary.replace_text("");
+                                state.configuration.tool_fallback.replace_text("");
+                                state.configuration.clear_tool_primary = false;
+                                state.configuration.clear_tool_fallback = false;
+                                state.configuration_edited();
+                                state.tool_key_dialog = true;
+                            })
+                            .build(kit)
+                            .key(format!("tool-key-open-{}", credential.provider)),
+                    ),
+            ));
+        }
+    }
+    Dialog::new("tool-api-key", format!("{} API keys", state.configuration.tool_provider.text))
+        .open(state.tool_key_dialog)
+        .description("Keys remain masked and are sent only after confirmation. Blank fields preserve saved keys; clearing a slot requires its explicit Clear action.")
+        .width(480.0).click_outside(false)
+        .on_close(|state: &mut State| {
+            state.tool_key_dialog = false;
+            state.configuration.tool_primary.replace_text("");
+            state.configuration.tool_fallback.replace_text("");
+            state.configuration.clear_tool_primary = false;
+            state.configuration.clear_tool_fallback = false;
+            state.configuration_edited();
+        })
+        .child(rune::col().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).padding(16.0).gap(10.0)
+            .child(input("Primary API key", &state.configuration.tool_primary, |state| &mut state.configuration.tool_primary, true, "tool-key-primary", kit))
+            .child(input("Fallback API key", &state.configuration.tool_fallback, |state| &mut state.configuration.tool_fallback, true, "tool-key-fallback", kit))
+            .child(Button::new(if state.configuration.clear_tool_primary { "Keep saved primary key" } else { "Clear primary key…" })
+                .variant(ButtonVariant::Ghost)
+                .on_press(|state: &mut State| {
+                    state.configuration.clear_tool_primary = !state.configuration.clear_tool_primary;
+                    state.configuration.tool_primary.replace_text("");
+                    state.configuration_edited();
+                }).build(kit).key("tool-key-clear-primary"))
+            .child(Button::new(if state.configuration.clear_tool_fallback { "Keep saved fallback key" } else { "Clear fallback key…" })
+                .variant(ButtonVariant::Ghost)
+                .on_press(|state: &mut State| {
+                    state.configuration.clear_tool_fallback = !state.configuration.clear_tool_fallback;
+                    state.configuration.tool_fallback.replace_text("");
+                    state.configuration_edited();
+                }).build(kit).key("tool-key-clear-fallback"))
+            .child(Button::new("Review key replacement")
+                .disabled(!state.permission(Permission::ManageConfiguration) || matches!(state.configuration.result, Load::Loading))
+                .on_press(|state: &mut State| state.preview_tool_credentials()).build(kit).key("tool-credentials-preview"))
+            .child(configuration_status(state, kit)))
+        .build(kit, layers);
     scroll(body, "tools-body")
 }
 
-fn models(state: &State, kit: &Kit) -> El {
-    let mut body = rune::col().child(heading("Backend model roles", kit))
-        .child(quiet("Primary and ordered fallback routes are backend-wide. A new workspace uses these same role defaults.", kit))
-        .child(refresh(state, "Refresh model roles", kit));
+fn input(
+    label: &str,
+    edit: &TextEdit,
+    getter: for<'a> fn(&'a mut State) -> &'a mut TextEdit,
+    secure: bool,
+    key: &str,
+    kit: &Kit,
+) -> El {
+    let field = TextInput::new(edit)
+        .label(label.to_owned())
+        .width(None)
+        .on_edit(getter)
+        .on_change(|state: &mut State, _| state.configuration_edited());
+    let field = if secure { field.secure() } else { field };
+    rune::col()
+        .gap(4.0)
+        .child(quiet(label.to_owned(), kit))
+        .child(field.build(kit).key(key.to_owned()))
+}
+
+fn models(state: &State, kit: &Kit, layers: &mut Vec<El>) -> El {
+    let mut body = rune::col()
+        .child(heading("Model Assignments", kit))
+        .child(heading("Providers", kit));
+    if let Some(message) = load_message(
+        &state.backend.profile,
+        "Provider metadata has not been observed.",
+        kit,
+    ) {
+        body = body.child(message);
+    }
+    if let Load::Ready(profile) = &state.backend.profile {
+        if profile.accounts.is_empty() {
+            body = body.child(quiet(
+                "No provider accounts are configured on this gateway.",
+                kit,
+            ));
+        }
+        for account in &profile.accounts {
+            let id = account.id.clone();
+            let editing = state.configuration.account_id.text == account.id;
+            let mut row = rune::col()
+                .key(format!("provider-account-{}", account.id))
+                .child(heading(
+                    format!("{} · {}", account.provider, account.id),
+                    kit,
+                ))
+                .child(quiet(
+                    if account.has_api_key {
+                        "API key configured"
+                    } else {
+                        "API key unavailable"
+                    },
+                    kit,
+                ));
+            if editing {
+                row = row
+                    .child(input(
+                        "API key",
+                        &state.configuration.account_api_key,
+                        |state| &mut state.configuration.account_api_key,
+                        true,
+                        "account-api-key",
+                        kit,
+                    ))
+                    .child(
+                        Button::new("Review key change")
+                            .variant(ButtonVariant::Outline)
+                            .disabled(
+                                !state.permission(Permission::ManageConfiguration)
+                                    || matches!(state.configuration.result, Load::Loading),
+                            )
+                            .on_press(|state: &mut State| state.preview_provider_account())
+                            .build(kit)
+                            .key("account-preview"),
+                    )
+                    .child(
+                        Button::new("Clear key…")
+                            .variant(ButtonVariant::Ghost)
+                            .disabled(!state.permission(Permission::ManageConfiguration))
+                            .on_press(|state: &mut State| {
+                                state.configuration.account_api_key.replace_text("");
+                                state.configuration.preserve_account_key = false;
+                                state.configuration_edited();
+                                state.preview_provider_account();
+                            })
+                            .build(kit)
+                            .key("account-clear-key"),
+                    );
+            } else {
+                row = row.child(
+                    Button::new("Configure key")
+                        .variant(ButtonVariant::Outline)
+                        .disabled(!state.permission(Permission::ManageConfiguration))
+                        .on_press(move |state: &mut State| state.edit_provider_account(&id))
+                        .build(kit)
+                        .key(format!("account-key-edit-{}", account.id)),
+                );
+            }
+            body = body.child(card(row));
+        }
+    }
+    body = body.child(heading("Role assignments", kit));
     if let Some(message) = load_message(
         &state.backend.models,
-        "Refresh to inspect the current canonical role assignments.",
+        "Role assignments have not been observed.",
         kit,
     ) {
         body = body.child(message);
@@ -197,255 +461,103 @@ fn models(state: &State, kit: &Kit) -> El {
             kit,
         ));
         for role in &defaults.roles {
-            let edited_role = role.clone();
-            let assignment = defaults.assignment(role);
+            let edited = role.clone();
             let mut row = rune::col()
-                .gap(5.0)
-                .py(8.0)
                 .key(format!("model-role-{role}"))
                 .child(heading(role.clone(), kit));
-            if let Some(assignment) = assignment {
-                row = row.child(line(
-                    format!("Primary: {}", assignment.primary.label()),
-                    kit,
+            if state.configuration.role.text == *role {
+                row = row.child(crate::configuration_views::role_row_editor(
+                    state, kit, layers,
                 ));
-                for (index, route) in assignment.fallbacks.iter().enumerate() {
-                    row = row.child(quiet(
-                        format!("Fallback {}: {}", index + 1, route.label()),
-                        kit,
-                    ));
-                }
             } else {
-                row = row.child(quiet(
-                    "Unconfigured — assign an explicit primary route",
-                    kit,
-                ));
-            }
-            body = body.child(
-                row.child(
-                    Button::new("Edit role")
+                if let Some(assignment) = defaults.assignment(role) {
+                    row = row.child(line(assignment.primary.label(), kit));
+                    for (index, fallback) in assignment.fallbacks.iter().enumerate() {
+                        row = row.child(quiet(
+                            format!("Fallback {}: {}", index + 1, fallback.label()),
+                            kit,
+                        ));
+                    }
+                } else {
+                    row = row.child(quiet("Unconfigured", kit));
+                }
+                row = row.child(
+                    Button::new("Edit assignment")
                         .variant(ButtonVariant::Ghost)
                         .disabled(!state.permission(Permission::ManageConfiguration))
-                        .on_press_tx(move |state: &mut State, tx| {
-                            state.edit_model_role(&edited_role);
-                            tx.scroll_into_view("model-role-name");
-                        })
+                        .on_press(move |state: &mut State| state.edit_model_role(&edited))
                         .build(kit)
-                        .key("model-role-edit"),
-                ),
-            );
+                        .key(format!("model-role-edit-{role}")),
+                );
+            }
+            body = body.child(card(row));
         }
     }
-    body = body.child(crate::configuration_views::model_editor(state, kit));
+    body = body.child(configuration_status(state, kit));
     scroll(body, "models-body")
 }
 
-fn profile(state: &State, kit: &Kit) -> El {
-    let mut body = rune::col().child(heading("Backend profile and provider accounts", kit))
-        .child(quiet("The backend owns credentials and role routing. This view reads credential presence and opaque references; secret values are never returned.", kit))
-        .child(refresh(state, "Refresh backend profile", kit));
+fn configuration_status(state: &State, kit: &Kit) -> El {
+    let mut body = rune::col().gap(8.0);
+    if let Some(confirmation) = &state.configuration.confirmation {
+        body = body
+            .key("configuration-confirmation")
+            .child(quiet(confirmation.change.summary(), kit))
+            .child(
+                Button::new("Confirm change")
+                    .variant(ButtonVariant::Outline)
+                    .on_press(|state: &mut State| state.confirm_configuration())
+                    .build(kit)
+                    .key("configuration-confirm"),
+            )
+            .child(
+                Button::new("Keep current configuration")
+                    .variant(ButtonVariant::Ghost)
+                    .on_press(|state: &mut State| state.configuration.confirmation = None)
+                    .build(kit)
+                    .key("configuration-cancel"),
+            );
+    }
+    if let Some(message) = load_message(&state.configuration.result, "", kit) {
+        if !matches!(state.configuration.result, Load::Idle) {
+            body = body.child(message);
+        }
+    }
+    if let Load::Ready(saved) = &state.configuration.result {
+        body = body.child(
+            quiet(
+                format!(
+                    "Configuration saved at revision {}",
+                    saved.configuration_revision
+                ),
+                kit,
+            )
+            .role("status"),
+        );
+    }
+    if let Some(message) = &state.configuration.message {
+        body = body.child(line(message.clone(), kit).role("status"));
+    }
+    body
+}
+
+fn jobs(state: &State, kit: &Kit, log_width: f32) -> El {
+    let mut body = rune::col().child(heading("Jobs & Logs", kit));
+    if state.registration.context.is_none() {
+        return scroll(body.child(quiet("Workstation registration is required to read activity. No global jobs or logs are displayed.", kit)), "jobs-body");
+    }
     if let Some(message) = load_message(
-        &state.backend.profile,
-        "Refresh to inspect this backend's current configuration format and account metadata.",
+        &state.backend.jobs,
+        "Workstation activity has not been observed.",
         kit,
     ) {
         body = body.child(message);
     }
-    if let Load::Ready(profile) = &state.backend.profile {
-        body = body.child(quiet(
-            format!(
-                "Configuration revision {} · format {} · portable schema {}",
-                profile.configuration_revision,
-                profile.configuration_format,
-                profile.portable_schema_version
-            ),
-            kit,
-        ));
-        if profile.setup_required {
-            body = body.child(line("Backend setup required: enter current provider accounts and explicit model roles.", kit).role("status"));
-        }
-        for account in &profile.accounts {
-            let edit_id = account.id.clone();
-            let delete_id = account.id.clone();
-            body = body.child(
-                rune::col()
-                    .gap(5.0)
-                    .py(8.0)
-                    .key(format!("provider-account-{}", account.id))
-                    .child(heading(
-                        format!("{} / {}", account.provider, account.id),
-                        kit,
-                    ))
-                    .child(line(
-                        format!("{} · {}", account.base_url, account.model),
-                        kit,
-                    ))
-                    .child(quiet(
-                        if account.has_api_key {
-                            "API key configured"
-                        } else {
-                            "API key not configured"
-                        },
-                        kit,
-                    ))
-                    .child(
-                        rune::row()
-                            .gap(8.0)
-                            .child(
-                                Button::new("Edit account")
-                                    .variant(ButtonVariant::Ghost)
-                                    .disabled(!state.permission(Permission::ManageConfiguration))
-                                    .on_press_tx(move |state: &mut State, tx| {
-                                        state.edit_provider_account(&edit_id);
-                                        tx.scroll_into_view("account-id");
-                                    })
-                                    .build(kit)
-                                    .key("account-edit"),
-                            )
-                            .child(
-                                Button::new("Delete account…")
-                                    .variant(ButtonVariant::Outline)
-                                    .disabled(!state.permission(Permission::ManageConfiguration))
-                                    .on_press_tx(move |state: &mut State, tx| {
-                                        state.preview_delete_account(&delete_id);
-                                        tx.scroll_into_view("configuration-confirmation");
-                                    })
-                                    .build(kit)
-                                    .key("account-delete"),
-                            ),
-                    ),
-            );
-        }
-        for credential in &profile.tool_credentials {
-            let provider = credential.provider.clone();
-            body = body.child(quiet(
-                format!(
-                    "{} tool credentials · primary {} · fallback {}",
-                    credential.provider,
-                    if credential.primary_present {
-                        "configured"
-                    } else {
-                        "empty"
-                    },
-                    if credential.fallback_present {
-                        "configured"
-                    } else {
-                        "empty"
-                    }
-                ),
-                kit,
-            ));
-            body = body.child(
-                Button::new("Edit these tool credential slots")
-                    .variant(ButtonVariant::Ghost)
-                    .disabled(!state.permission(Permission::ManageConfiguration))
-                    .on_press(move |state: &mut State| {
-                        state.configuration.tool_provider = rune::TextEdit::new(&provider);
-                        state.configuration.tool_primary.replace_text("");
-                        state.configuration.tool_fallback.replace_text("");
-                        state.configuration_edited();
-                    })
-                    .build(kit)
-                    .key(format!("tool-credential-edit-{}", credential.provider)),
-            );
-        }
-    }
-    body = body
-        .child(crate::configuration_views::profile_editor(state, kit))
-        .child(crate::configuration_views::profile_transfer(state, kit));
-    scroll(body, "profile-body")
-}
-
-fn jobs(state: &State, kit: &Kit) -> El {
-    let tabs = rune::col().w_full().padding(12.0).child(
-        TabStrip::new("activity-tabs", TabOrientation::Horizontal)
-            .label("Workstation activity")
-            .tabs([
-                TabItem::new("jobs", "Jobs").closable(false),
-                TabItem::new("logs", "Logs").closable(false),
-            ])
-            .active(Some(
-                if state.activity_tab == crate::logs::ActivityTab::Jobs {
-                    "jobs"
-                } else {
-                    "logs"
-                },
-            ))
-            .on_select(|state: &mut State, id, _| {
-                state.select_activity_tab(if id == "logs" {
-                    crate::logs::ActivityTab::Logs
-                } else {
-                    crate::logs::ActivityTab::Jobs
-                })
-            })
-            .build(kit)
-            .grow(0.0)
-            .h(32.0)
-            .w_full(),
-    );
-    if state.activity_tab == crate::logs::ActivityTab::Logs {
-        return rune::col()
-            .w_full()
-            .grow(1.0)
-            .min_h(0.0)
-            .child(tabs)
-            .child(scroll(
-                rune::col()
-                    .gap(8.0)
-                    .child(crate::log_views::panel(
-                        &state.scoped_logs,
-                        state.backend.selected_job.as_deref(),
-                        kit,
-                        |state| &mut state.scoped_logs,
-                        State::log_event,
-                    ))
-                    .child(crate::log_views::loaded_rows(state, kit)),
-                "logs-body",
-            ));
-    }
-    let registered = state.registration.context.is_some();
-    let mut body = rune::col().child(heading("Workstation jobs and operational logs", kit))
-        .child(quiet("Only jobs attributed or associated with this registered workstation are requested. Shared jobs may expose status while private details and logs remain unavailable.", kit))
-        .child(rune::row().gap(8.0)
-            .child(Button::new("This workstation").variant(if !state.backend.selected_workspace_only { ButtonVariant::Submit } else { ButtonVariant::Outline }).disabled(!registered)
-                .on_press(|state: &mut State| state.set_activity_workspace_filter(false)).build(kit).key("jobs-node-scope"))
-            .child(Button::new("Selected workspace").variant(if state.backend.selected_workspace_only { ButtonVariant::Submit } else { ButtonVariant::Outline }).disabled(!registered)
-                .on_press(|state: &mut State| state.set_activity_workspace_filter(true)).build(kit).key("jobs-workspace-scope")))
-        .child(Button::new("Show operational logs").variant(ButtonVariant::Ghost)
-            .on_press(|state:&mut State|state.reveal_operational_logs()).build(kit).key("jobs-open-operational-logs"));
-    if let Some(context) = &state.registration.context {
-        body = body.child(line(
-            format!(
-                "{} · {}",
-                context.workstation_ip,
-                if state.backend.selected_workspace_only {
-                    context.workspace_name.as_str()
-                } else {
-                    "all attributed children on this node"
-                }
-            ),
-            kit,
-        ));
-    } else {
-        body = body.child(quiet(
-            "Register an owned workspace to establish this workstation's activity boundary.",
-            kit,
-        ));
-    }
-    body = body.child(crate::jobs_query_views::controls(
-        &state.scoped_jobs,
-        kit,
-        |state| &mut state.scoped_jobs,
-        State::jobs_event,
-    ));
     if let Load::Ready(jobs) = &state.backend.jobs {
         if jobs.rows.is_empty() {
-            body = body.child(quiet(
-                "No attributed jobs match this workstation scope.",
-                kit,
-            ));
+            body = body.child(quiet("No jobs are associated with this workstation.", kit));
         }
-        for job in &jobs.rows {
+        for job in jobs.rows.iter().take(100) {
             let id = job.id.clone();
             body = body.child(
                 Button::new(format!(
@@ -463,40 +575,37 @@ fn jobs(state: &State, kit: &Kit) -> El {
                         ""
                     }
                 ))
-                .variant(if state.backend.selected_job.as_deref() == Some(&job.id) {
-                    ButtonVariant::Submit
-                } else {
-                    ButtonVariant::Outline
-                })
+                .variant(
+                    if state.backend.selected_job.as_deref() == Some(job.id.as_str()) {
+                        ButtonVariant::Outline
+                    } else {
+                        ButtonVariant::Ghost
+                    },
+                )
                 .on_press(move |state: &mut State| state.select_job(&id))
                 .build(kit)
                 .key(format!("activity-job-{}", job.id)),
             );
         }
     }
-    body = body.child(crate::jobs_query_views::pager(
-        &state.scoped_jobs,
-        kit,
-        State::jobs_event,
-    ));
     if let Some(message) = load_message(
         &state.backend.detail,
-        "Select an attributed job to inspect its current lifecycle.",
+        "Select a job to view its safe operational summaries.",
         kit,
     ) {
         body = body.child(message);
     }
     if let Load::Ready(detail) = &state.backend.detail {
-        body = body
+        let mut details = rune::col()
             .child(heading(
                 if detail.job.title.is_empty() {
-                    "Job status".into()
+                    detail.job.operation.clone()
                 } else {
                     detail.job.title.clone()
                 },
                 kit,
             ))
-            .child(line(
+            .child(quiet(
                 format!(
                     "{} · {} · {}",
                     detail.job.id, detail.job.state, detail.job.phase
@@ -504,217 +613,214 @@ fn jobs(state: &State, kit: &Kit) -> El {
                 kit,
             ));
         if let (Some(done), Some(total)) = (detail.job.progress_done, detail.job.progress_total) {
-            body = body.child(quiet(format!("Progress {done} / {total}"), kit));
+            details = details.child(quiet(format!("Progress {done} / {total}"), kit));
         }
-        if detail.private_details_available
-            && detail.job.private_details_available
-            && !detail.job.status_only
+        if !detail.private_details_available
+            || !detail.job.private_details_available
+            || detail.job.status_only
         {
-            if !detail.job.error_summary.is_empty() {
-                body = body.child(line(detail.job.error_summary.clone(), kit));
-            }
-            for stage in &detail.stages {
-                body = body.child(quiet(format!("{} · {}", stage.operation, stage.state), kit));
-            }
-            if let Some(result) = &detail.maintenance_result {
-                body = body.child(result.view(kit));
-                if result.operation == "classifier_train"
-                    && detail.job.operation == "classifier_train"
-                    && matches!(detail.job.state.as_str(), "completed" | "succeeded")
-                {
-                    if let Some(candidate) = &result.candidate_model_id {
-                        let candidate = candidate.clone();
-                        let training = detail.job.id.clone();
-                        body = body.child(
-                            Button::new("Inspect this activation candidate")
-                                .disabled(
-                                    !state.permission(Permission::MaintainBackend)
-                                        || !state.permission(Permission::ReadWorkstationActivity),
-                                )
-                                .on_press(move |state: &mut State| {
-                                    state.inspect_training_candidate(&training, &candidate)
-                                })
-                                .build(kit)
-                                .key("training-inspect-candidate"),
-                        );
-                    }
-                }
-            }
-        } else {
-            body = body.child(quiet(
-                "Private details are unavailable for this shared job.",
+            details = details.child(quiet(
+                "Private details and logs are unavailable for this shared job.",
                 kit,
             ));
+        } else {
+            if !detail.job.error_summary.is_empty() {
+                details = details.child(line(detail.job.error_summary.clone(), kit));
+            }
+            if let Some(result) = &detail.maintenance_result {
+                details = details.child(result.view(kit));
+            }
+            details = details.child(heading("Operational logs", kit));
+            if let Some(message) = &state.scoped_logs.message {
+                details = details.child(line(message.clone(), kit).role("status"));
+            }
+            if state.scoped_logs.busy() {
+                details =
+                    details.child(quiet("Reading safe operational summaries…", kit).role("status"));
+            }
+            if state.scoped_logs.rows.is_empty() && !state.scoped_logs.busy() {
+                details = details.child(quiet(
+                    "No safe operational summaries are available for this job.",
+                    kit,
+                ));
+            }
+            details = details.child(safe_log_table(state, kit, log_width));
         }
-        body = body.child(crate::job_action_views::actions(state, kit));
+        body = body.child(card(details));
     }
-    rune::col()
+    scroll(body, "jobs-body")
+}
+
+fn safe_log_table(state: &State, kit: &Kit, available_width: f32) -> El {
+    let mut table = Table::new(
+        |state: &State| &state.scoped_logs.table,
+        |state: &mut State| &mut state.scoped_logs.table,
+        |state: &State| state.scoped_logs.rows.len(),
+        |state: &State, index| state.scoped_logs.rows[index].id.as_str().into(),
+    )
+    .name("Loaded safe operational log summaries");
+    // The actual table budget includes page/card padding and sidebar resizing.
+    // At very narrow widths keep the summary first; full timestamp/severity
+    // remain in the read-only selected-row detail below the virtual viewport.
+    if available_width >= 320.0 {
+        let timestamp_width = if available_width < 500.0 {
+            112.0
+        } else {
+            176.0
+        };
+        table = table.column(
+            TableColumn::new("timestamp", "Timestamp")
+                .width(timestamp_width)
+                .min(timestamp_width)
+                .resizable(false),
+        );
+    }
+    if available_width >= 180.0 {
+        table = table.column(
+            TableColumn::new("severity", "Severity")
+                .width(64.0)
+                .min(64.0)
+                .resizable(false),
+        );
+    }
+    let table = table
+        .column(
+            TableColumn::new("message", "Safe summary")
+                .flex(1.0)
+                .min(0.0)
+                .resizable(false),
+        )
+        .cell(|state: &State, index, column| {
+            let row = &state.scoped_logs.rows[index];
+            match column {
+                "timestamp" => Cell::text(row.ts.clone()).mono().muted(),
+                "severity" => Cell::text(row.severity.clone()),
+                _ => Cell::text(row.message.clone()),
+            }
+        })
+        .build(state, kit)
         .w_full()
-        .grow(1.0)
-        .min_h(0.0)
-        .child(tabs)
-        .child(scroll(body, "jobs-body"))
+        .h(320.0)
+        .min_h(320.0)
+        .grow(0.0)
+        .fill(kit.c.surface_base);
+    let mut body = rune::col().gap(8.0).child(table);
+    if let Some(selected) = state
+        .scoped_logs
+        .table
+        .cursor()
+        .and_then(|id| state.scoped_logs.rows.iter().find(|row| row.id == id))
+    {
+        body = body.child(
+            rune::col()
+                .gap(4.0)
+                .key("logs-selected-detail")
+                .child(heading("Selected safe log summary", kit))
+                .child(quiet(
+                    format!("{} · {} · {}", selected.ts, selected.severity, selected.app),
+                    kit,
+                ))
+                .child(line(selected.message.clone(), kit).key("logs-selected-summary")),
+        );
+    }
+    body
 }
 
 pub(crate) fn maintenance(state: &State, kit: &Kit) -> El {
-    let can_upload = state.permission(Permission::MaintainBackend);
-    let mut body = rune::col().gap(10.0).child(heading("Backend datasets", kit))
-        .child(quiet("Select CSV bytes on this Mac or an existing opaque backend dataset. The backend validates kind, schema, byte count and hash. Local paths are never sent as a dataset reference.", kit))
-        .child(rune::row().gap(8.0)
-            .child(Button::new("Choose actor catalog CSV").disabled(!can_upload).on_press_tx(|state: &mut State, tx| state.choose_dataset(DatasetKind::ActorCatalog, tx)).build(kit).key("dataset-choose-actors"))
-            .child(Button::new("Choose Natural training CSV").disabled(!can_upload).on_press_tx(|state: &mut State, tx| state.choose_dataset(DatasetKind::ClassifierTraining, tx)).build(kit).key("dataset-choose-training")));
-    if let Some(selection) = &state.maintenance.local_dataset {
-        body = body
-            .child(line(
-                format!(
-                    "Selected {}: {} · limit {} MiB",
-                    dataset_kind_label(selection.kind),
-                    selection
-                        .path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy(),
-                    crate::maintenance::dataset_limit(selection.kind) / 1024 / 1024
-                ),
-                kit,
-            ))
-            .child(
-                Button::new("Upload selected CSV bytes")
-                    .disabled(!can_upload || matches!(state.maintenance.upload, Load::Loading))
-                    .on_press(|state: &mut State| state.upload_selected_dataset())
-                    .build(kit)
-                    .key("dataset-upload"),
-            );
-    }
-    if let Some(message) = load_message(
-        &state.maintenance.upload,
-        "No local dataset upload has been performed.",
-        kit,
-    ) {
-        body = body.child(message);
-    }
-    if let Load::Ready(upload) = &state.maintenance.upload {
-        body = body.child(line(
-            format!(
-                "Validated backend dataset {} · {} bytes · expires in {} seconds",
-                upload.dataset.id, upload.dataset.size_bytes, upload.expires_in_seconds
-            ),
-            kit,
-        ));
-    }
-    body = body.child(
-        Button::new("Refresh backend dataset inventory")
-            .disabled(!state.permission(Permission::ReadBackend))
-            .on_press(|state: &mut State| state.refresh_datasets())
-            .build(kit)
-            .key("datasets-refresh"),
-    );
-    if let Some(message) = load_message(
-        &state.maintenance.datasets,
-        "Dataset inventory has not been read.",
-        kit,
-    ) {
-        body = body.child(message);
-    }
-    if let Load::Ready(list) = &state.maintenance.datasets {
-        for dataset in &list.rows {
-            let id = dataset.id.clone();
-            body = body.child(
-                Button::new(format!(
-                    "{} · {} · {} bytes{}",
-                    dataset.id,
-                    dataset_kind_label(dataset.kind),
-                    dataset.size_bytes,
-                    if state.maintenance.selected_dataset.as_ref() == Some(dataset) {
-                        " · selected"
-                    } else {
-                        ""
-                    }
-                ))
-                .on_press(move |state: &mut State| state.select_backend_dataset(&id))
-                .build(kit)
-                .key(format!("dataset-{}", dataset.id)),
-            );
-        }
-        if list.truncated {
-            body = body.child(quiet(
-                "Inventory was bounded by the backend; only the returned datasets are selectable.",
-                kit,
-            ));
-        }
-    }
-    for (label, operation, key) in [
+    let mut body = rune::col().child(heading("DB Seed & Train", kit));
+    for (label, operation, key, explanation) in [
         (
             "Seed Actors",
             MaintenanceOperation::SeedActors,
             "maintenance-seed",
+            "Seed the configured actor catalog into the shared backend.",
         ),
         (
-            "Train Classifier — Natural (optional)",
-            MaintenanceOperation::TrainClassifier,
-            "maintenance-train",
-        ),
-        (
-            "Rebuild Actor Index",
+            "Build Search Index",
             MaintenanceOperation::ReindexActors,
             "maintenance-reindex",
+            "Build the actor-search projection from the backend catalog.",
+        ),
+        (
+            "Train Classifier — Natural",
+            MaintenanceOperation::TrainClassifier,
+            "maintenance-train",
+            "Train a candidate from the configured Natural dataset. Training does not activate it.",
         ),
     ] {
         let reason = state.maintenance_disabled_reason(operation);
-        body = body.child(
-            Button::new(label)
-                .disabled(reason.is_some())
-                .on_press_tx(move |state: &mut State, tx| {
-                    state.preview_maintenance(operation);
-                    tx.scroll_into_view("maintenance-confirmation");
-                })
-                .build(kit)
-                .key(key),
-        );
+        let mut operation_card = rune::col()
+            .child(heading(label, kit))
+            .child(quiet(explanation, kit))
+            .child(
+                Button::new(label)
+                    .variant(ButtonVariant::Outline)
+                    .disabled(reason.is_some())
+                    .on_press(move |state: &mut State| state.preview_maintenance(operation))
+                    .build(kit)
+                    .key(key),
+            );
         if let Some(reason) = reason {
-            body = body.child(quiet(reason, kit));
+            operation_card = operation_card.child(quiet(reason, kit));
         }
+        body = body.child(card(operation_card));
     }
     if let Some(confirmation) = &state.maintenance.confirmation {
-        body = body.child(rune::col().gap(8.0).key("maintenance-confirmation")
-            .child(heading(format!("Confirm {:?}", confirmation.operation), kit))
-            .child(line(format!("Origin {} · backend {} · configuration revision {}", confirmation.context.connect_id, confirmation.context.deployment_id, confirmation.configuration_revision), kit))
-            .child(quiet(confirmation.dataset.as_ref().map_or("No uploaded dataset is used by this rebuild.".into(), |dataset| format!("Dataset {} · SHA-256 {} · {} bytes", dataset.id, dataset.sha256, dataset.size_bytes)), kit))
-            .child(quiet("This changes a shared backend resource. Acceptance returns a durable job receipt; it does not mean completion. Natural training never activates a candidate automatically.", kit))
-            .child(Button::new("Confirm backend operation").on_press(|state: &mut State| state.confirm_maintenance()).build(kit).key("maintenance-confirm"))
-            .child(Button::new("Cancel preview").variant(ButtonVariant::Ghost).on_press(|state: &mut State| state.maintenance.confirmation = None).build(kit)));
+        body = body.child(card(
+            rune::col()
+                .key("maintenance-confirmation")
+                .child(heading(
+                    format!("Confirm {:?}", confirmation.operation),
+                    kit,
+                ))
+                .child(quiet(
+                    format!(
+                        "Deployment {} · configuration revision {}",
+                        confirmation.context.deployment_id, confirmation.configuration_revision
+                    ),
+                    kit,
+                ))
+                .child(quiet(
+                    confirmation.dataset.as_ref().map_or(
+                        "No dataset is required for this operation.".into(),
+                        |dataset| {
+                            format!(
+                                "Configured dataset {} · SHA-256 {}",
+                                dataset.id, dataset.sha256
+                            )
+                        },
+                    ),
+                    kit,
+                ))
+                .child(
+                    Button::new("Confirm operation")
+                        .variant(ButtonVariant::Outline)
+                        .on_press(|state: &mut State| state.confirm_maintenance())
+                        .build(kit)
+                        .key("maintenance-confirm"),
+                )
+                .child(
+                    Button::new("Keep current backend state")
+                        .variant(ButtonVariant::Ghost)
+                        .on_press(|state: &mut State| state.maintenance.confirmation = None)
+                        .build(kit),
+                ),
+        ));
     }
-    if let Some(message) = load_message(
-        &state.maintenance.receipt,
-        "No maintenance job has been accepted in this context.",
-        kit,
-    ) {
-        body = body.child(message);
+    if let Some(message) = load_message(&state.maintenance.receipt, "", kit) {
+        if !matches!(state.maintenance.receipt, Load::Idle) {
+            body = body.child(message);
+        }
     }
     if let Load::Ready(receipt) = &state.maintenance.receipt {
-        let id = receipt.job_id.clone();
-        body = body
-            .child(line(
-                format!(
-                    "{} job {} · accepted, completion pending",
-                    if receipt.reused {
-                        "Associated with existing"
-                    } else {
-                        "Created"
-                    },
-                    receipt.job_id
-                ),
+        body = body.child(
+            line(
+                format!("Accepted job {} · completion pending", receipt.job_id),
                 kit,
-            ))
-            .child(
-                Button::new("View this workstation job")
-                    .disabled(state.registration.context.is_none())
-                    .on_press(move |state: &mut State| state.open_job(&id))
-                    .build(kit)
-                    .key("maintenance-view-job"),
-            );
+            )
+            .role("status"),
+        );
     }
-    body = body.child(crate::classifier_activation_views::panel(state, kit));
     if let Some(message) = &state.maintenance.message {
         body = body.child(line(message.clone(), kit).role("status"));
     }

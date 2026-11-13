@@ -3,16 +3,16 @@ import { describe, expect, it } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Button, StatusTag, colors } from "@argos/ui";
-import { paint } from "../../../vitest.test-support";
+import { paint, normColor } from "../../../vitest.test-support";
 
 const applied = (el: Element) => getComputedStyle(el);
 const buttonEl = (container: HTMLElement, index = 0) =>
   container.querySelectorAll('[role="button"]')[index] as HTMLElement;
 
 /**
- * Design contract (react-ui): the focus/hover lane = accent token + glow on
- * accentSoft; selection (`active`) is a distinct state — full accent surface
- * with bg-colored text. Focus or press must never hide other content.
+ * Matte state contract: hover and selection have distinct solid fills/borders.
+ * Selection remains semantic (aria-pressed); glow is not required for state.
+ * Focus or press must never hide other content.
  */
 describe("Focus vs selection states (real components)", () => {
   it("hover lane paints accent border on accentSoft ground without glow", async () => {
@@ -27,7 +27,7 @@ describe("Focus vs selection states (real components)", () => {
     expect(applied(button).boxShadow).toBe(""); // no glow in the hover lane
   });
 
-  it("the primary variant adds the accent glow when hovered/focused", async () => {
+  it("the primary variant changes its solid fill without glow on hover", async () => {
     const user = userEvent.setup();
     const { container } = render(
       <Button onPress={() => {}} variant="primary">
@@ -36,12 +36,15 @@ describe("Focus vs selection states (real components)", () => {
     );
     const button = buttonEl(container)!;
     await user.hover(button);
-    expect(applied(button).boxShadow).toContain("12px");
+    expect(paint(button, "backgroundColor")).toBe(
+      colors.accentHover.toLowerCase(),
+    );
+    expect(applied(button).boxShadow).toBe("");
     await user.unhover(button);
     expect(applied(button).boxShadow).toBe("");
   });
 
-  it("selection (`active`) is distinct from hover: full accent surface + glow", () => {
+  it("selection (`active`) is distinct from hover: flat accent surface without glow", () => {
     render(
       <div>
         <Button onPress={() => {}} active>
@@ -50,11 +53,13 @@ describe("Focus vs selection states (real components)", () => {
         <Button onPress={() => {}}>Plain</Button>
       </div>,
     );
-    const selected = document.querySelector('[aria-pressed="true"]') as HTMLElement;
+    const selected = document.querySelector(
+      '[aria-pressed="true"]',
+    ) as HTMLElement;
     const plain = buttonEl(document.body, 1);
     expect(applied(selected).backgroundColor).toBe("rgb(198, 165, 110)"); // accent fill
-    expect(applied(selected).boxShadow).toContain("12px"); // glow reserved for select
-    expect(applied(plain).backgroundColor).toBe(colors.glass);
+    expect(applied(selected).boxShadow).toBe("");
+    expect(paint(plain, "backgroundColor")).toBe(colors.raised.toLowerCase());
   });
 
   it("aria-pressed marks only the selected control; hover alone does not", async () => {
@@ -76,7 +81,9 @@ describe("Focus vs selection states (real components)", () => {
 
   it("keyboard press uses the pressed lane (glassStrong), distinct from hover", async () => {
     const user = userEvent.setup();
-    const { container } = render(<Button onPress={() => {}}>Press lane</Button>);
+    const { container } = render(
+      <Button onPress={() => {}}>Press lane</Button>,
+    );
     const button = buttonEl(container)!;
     await user.hover(button);
     await act(async () => {
@@ -90,7 +97,9 @@ describe("Focus vs selection states (real components)", () => {
       );
     });
     await waitFor(() =>
-      expect(applied(button).backgroundColor).toBe(colors.glassStrong),
+      expect(normColor(applied(button).backgroundColor)).toBe(
+        colors.glassStrong.toLowerCase(),
+      ),
     );
   });
 
@@ -104,15 +113,15 @@ describe("Focus vs selection states (real components)", () => {
         <p>Neighboring evidence panel content.</p>
       </div>,
     );
-    const target = document.querySelector(
-      '[role="button"]',
-    ) as HTMLElement;
+    const target = document.querySelector('[role="button"]') as HTMLElement;
     await act(async () => {
       target.focus();
     });
     await user.hover(target);
     expect(target).toBeVisible();
-    expect(screen.getByText("Neighboring evidence panel content.")).toBeVisible();
+    expect(
+      screen.getByText("Neighboring evidence panel content."),
+    ).toBeVisible();
   });
 
   it("StatusTag tone stays stable while a sibling button is hovered (tones ≠ focus)", async () => {
@@ -124,6 +133,8 @@ describe("Focus vs selection states (real components)", () => {
       </div>,
     );
     await user.hover(buttonEl(container)!);
-    expect(paint(screen.getByText("[ALERT]"), "color")).toBe(colors.accent.toLowerCase());
+    expect(paint(screen.getByText("[ALERT]"), "color")).toBe(
+      colors.accent.toLowerCase(),
+    );
   });
 });

@@ -16,7 +16,6 @@ use argos_osint_core::storage::jobs_view as view;
 use argos_osint_core::storage::repo::Repository;
 use chrono::Utc;
 use fleetworks_contracts::connect::RegistrationEnsureRequest;
-use fleetworks_contracts::connect::WorkspaceName;
 use fleetworks_contracts::context::ActivityScope;
 use fleetworks_contracts::context::JobOrigin;
 use fleetworks_contracts::context::OriginSource;
@@ -47,10 +46,8 @@ async fn register(repo: &Repository, node: &str, child: &str) -> RegisteredConte
         &authority(),
         &RegistrationEnsureRequest::new(
             format!("ensure-{node}-{child}"),
-            ip.parse().expect("synthetic IP"),
-            WorkspaceName::new(child).expect("child name"),
+            Some(ip.parse().expect("synthetic IP")),
             format!("installation-{node}"),
-            format!("folder-{node}-{child}"),
         ),
     )
     .await
@@ -67,9 +64,8 @@ async fn register(repo: &Repository, node: &str, child: &str) -> RegisteredConte
 }
 
 fn scope(context: &RegisteredContext, child: bool) -> ActivityScope {
-    let mut scope = ActivityScope::for_workstation(context);
-    scope.workspace_id = child.then(|| context.workspace_id.clone());
-    scope
+    let _ = child;
+    ActivityScope::for_workstation(context)
 }
 
 async fn job(db: &Surreal<Any>, id: &str, parent: Option<&str>, kind: &str) {
@@ -162,7 +158,7 @@ async fn node_child_deployment_and_causal_membership_filter_before_limits_and_fa
     job(db, "other-deployment", None, "task").await;
     // Adversarial foreign-deployment metadata must not grant membership.
     db.query("CREATE job_origin:other_deployment SET job_id='other-deployment', root_id='other-deployment', scope_id='scope-a', deployment_id='foreign-deployment', workstation_id=$node, workspace_id=$child, origin_json='{}'; CREATE job_request:other_deployment SET request_key='foreign-deployment', operation='summaries', job_id='other-deployment', scope_id='scope-a', deployment_id='foreign-deployment', registration_id=$registration, workstation_id=$node, workspace_id=$child, requested_at=$now, origin_json='{}';")
-        .bind(("node",first.workstation_id.clone())).bind(("child",first.workspace_id.clone()))
+        .bind(("node",first.workstation_id.clone())).bind(("child",String::from("legacy-child")))
         .bind(("registration",first.registration_id.clone())).bind(("now",Utc::now().to_rfc3339()))
         .await.expect("adversarial foreign fixture").check().expect("foreign fixture statement");
     job(db, "legacy", None, "task").await;
@@ -224,7 +220,6 @@ async fn node_child_deployment_and_causal_membership_filter_before_limits_and_fa
             .is_some()
     );
     for id in [
-        "owned-b",
         "other-node",
         "other-deployment",
         "legacy",

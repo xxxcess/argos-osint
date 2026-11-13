@@ -8,7 +8,7 @@
 
 | Component | Owns |
 | --- | --- |
-| [Rune macOS desktop](../../../apps/fleetworks-desktop) | Native pages, input and accessibility; protected local workspace identities and saved gateway references through the [workspace library](../../../crates/fleetworks-workspace); bounded gateway requests through shared [contracts](../../../crates/fleetworks-contracts). Connects to independently running services. |
+| [Rune macOS desktop](../../../apps/fleetworks-desktop) | Native pages, input and accessibility; protected installation identity and exact-origin provisioned credential references through the [workspace library](../../../crates/fleetworks-workspace); bounded gateway requests through shared [contracts](../../../crates/fleetworks-contracts). Connects to independently running services. |
 | [Intel Web](../../../apps/web-desktop) | React Native Web presentation, topology and its accessible list, Connect/session gate, and a same-origin server relay using its separately provisioned gateway credential. |
 | Linux backend: [API](../../../crates/argos-osint-api), [service host](../../../services/api-host) and [Core](../../../crates/argos-osint-core) | Authenticated gateway/live streams, private services, durable workers, shared configuration and domain storage. Linux owns [classifier/NLP execution](classifier.md), [Tantivy discovery](actor-search.md), SurrealDB and [Jobs persistence](../../../crates/fleetworks-jobs). |
 
@@ -35,9 +35,15 @@ Service processes share the explicitly configured private SurrealDB endpoint. Th
 
 The native Models page reads and saves the selected backend's configured role defaults. The [shared provider executor](../concepts/providers.md) resolves primary and fallback routes, tracks attempts and keeps provider credentials server-side. Network model scheduling uses database-clock pacing and cooldowns for OpenRouter, Google and Nvidia, plus shared account tickets with interactive priority and lease expiry. Retained API-key model attempts cross an authenticated private execution boundary. The caller owns retries, validation and the shared account lease. The execution service resolves provider credentials and pacing for those attempts. Local model endpoints and the ChatGPT subscription stay in the calling process. Atlas's daily news provider admission uses shared datastore reservations. [Model scheduling](../../diagrams/model-request-scheduling.html)
 
-Profile manages the selected backend's shared provider accounts and tool credentials; Models manages its shared roles and defaults. Authorized changes and portable import/export use explicit gateway operations and confirmed configuration revisions. Workstation observes readiness. Selecting a different local child changes future request origin and its activity filter while preserving the same backend-global configuration, actors and models. Accepted work retains its captured workstation/child origin and configuration revision; later selection or configuration changes preserve that history. [Native connections and context](native-connections.md) · [Protected local workspaces](native-workspaces.md)
+| Boundary | Owner and rule |
+| --- | --- |
+| Native controls | Model Assignments edits configured keys/routes; Tools is cards/key modal; no Profile, manual execution or portable configuration screen. [Control allowlist](native-design-system.md) |
+| Workstation identity | Contract 2 uses authenticated scope + installation marker; opaque workstation ID is Connect ID, IP is optional metadata. New requests have no workspace narrowing. [Registry](../../diagrams/connect-registry.html) |
+| Historical authority | Atomic migration keeps IDs/mappings/origins, fences legacy admission and revokes old sessions. Original request/context is recovered read-only; no replacement submission. [Connections](native-connections.md) |
+| Local settings | Exact-origin private file references, not token bytes. URL-only setup creates no default child; preserved folders/journals are historical. [Identity](native-workspaces.md) |
+| Backend activity | Membership/private eligibility before projections; accepted creators remain immutable. Missing context never falls back globally. [Origin and activity](../../diagrams/brief-job-context.html) |
 
-Saved gateway connections are separate local metadata: a name, canonical origin and protected credential-file reference under the verified native container. Token bytes remain in the explicitly selected private file. Destination changes invalidate the old client/context and require review of unsaved backend drafts. The user independently selects a managed child; a connection profile does not partition the backend corpus or launch services. Portable configuration import/export is an explicit confirmed backend operation; the native client performs no automatic legacy import.
+[![Backend scope and immutable workstation origin](../../diagrams/workspace-scope.svg)](../../diagrams/workspace-scope.html)
 
 ## Brain browsing and direct associations
 

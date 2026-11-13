@@ -14,11 +14,9 @@ export async function startConnectGateway({
     const parsed = parseConnectId(id);
     return {
       deployment_id: "fixture-deployment",
-      registration_id: `fixture-registration-${parsed.workspaceName}`,
-      workstation_id: `fixture-node-${parsed.ip}`,
-      workstation_ip: parsed.ip,
-      workspace_id: `fixture-workspace-${parsed.workspaceName}`,
-      workspace_name: parsed.workspaceName,
+      registration_id: `fixture-registration-${parsed.workstationId}`,
+      workstation_id: parsed.workstationId,
+      workstation_ip: "192.0.2.42",
       connect_id: parsed.connectId,
       registration_revision: 1,
       context_revision: contextRevision,
@@ -27,13 +25,13 @@ export async function startConnectGateway({
       access_epoch: "fixture-web-access-1",
     };
   };
-  const context = contextFor("192.0.2.42:research", revision);
+  const context = contextFor("fixture-workstation-research", revision);
   const sessions = new Map([[sessionToken, context]]);
   const registered = new Set([
-    "192.0.2.42:research",
-    "192.0.2.42:review",
-    "192.0.2.42:default",
-    "192.0.2.43:research",
+    "fixture-workstation-research",
+    "fixture-workstation-review",
+    "fixture-workstation-default",
+    "fixture-workstation-other",
   ]);
   const revoked = new Set();
   const received = [];

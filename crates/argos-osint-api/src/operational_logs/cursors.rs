@@ -37,7 +37,6 @@ impl Snapshot {
             + self.filter_digest.len()
             + self.scope.deployment_id.len()
             + self.scope.workstation_id.len()
-            + self.scope.workspace_id.as_ref().map_or(0, String::len)
             + self.workspace_filter.as_ref().map_or(0, String::len)
             + self.selection.job_id.as_ref().map_or(0, String::len)
             + self.filters.app.len()

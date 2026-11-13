@@ -1,5 +1,7 @@
 //! Confirmed global configuration writes with optimistic backend revisions.
 
+use std::collections::BTreeMap;
+
 use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::Client;
 use fleetworks_contracts::ClientError;
@@ -29,6 +31,7 @@ pub struct SetModelRole {
     pub role: String,
     pub primary: Option<ModelRoute>,
     pub fallbacks: Vec<ModelRoute>,
+    pub variant_updates: BTreeMap<String, Option<String>>,
 }
 
 #[derive(Serialize)]
@@ -53,8 +56,10 @@ pub struct DeleteAccount {
 pub struct SetToolCredentials {
     pub expected_revision: u64,
     pub provider: String,
-    pub primary: String,
-    pub fallback: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<String>,
 }
 
 /// Secret-bearing changes deliberately have no Debug or fixture intent payload.
@@ -111,15 +116,15 @@ impl ConfigurationChange {
             Self::ToolCredentials(request) => format!(
                 "{} tool credentials · primary {} · fallback {}",
                 request.provider,
-                if request.primary.is_empty() {
-                    "cleared"
-                } else {
-                    "replaced"
+                match &request.primary {
+                    None => "preserved",
+                    Some(value) if value.is_empty() => "cleared",
+                    Some(_) => "replaced",
                 },
-                if request.fallback.is_empty() {
-                    "cleared"
-                } else {
-                    "replaced"
+                match &request.fallback {
+                    None => "preserved",
+                    Some(value) if value.is_empty() => "cleared",
+                    Some(_) => "replaced",
                 }
             ),
         }
@@ -142,6 +147,9 @@ pub struct Configuration {
     pub model_provider: TextEdit,
     pub model: TextEdit,
     pub model_account: TextEdit,
+    pub model_extra: BTreeMap<String, serde_json::Value>,
+    pub model_picker: Option<String>,
+    pub variant_updates: BTreeMap<String, Option<String>>,
     pub fallbacks: TextEdit,
     pub account_id: TextEdit,
     pub account_provider: TextEdit,
@@ -152,6 +160,8 @@ pub struct Configuration {
     pub tool_provider: TextEdit,
     pub tool_primary: TextEdit,
     pub tool_fallback: TextEdit,
+    pub clear_tool_primary: bool,
+    pub clear_tool_fallback: bool,
     pub confirmation: Option<ConfigurationConfirmation>,
     pub result: Load<ConfigurationSaved>,
     pub message: Option<String>,
@@ -174,6 +184,9 @@ impl Default for Configuration {
             model_provider: TextEdit::new(""),
             model: TextEdit::new(""),
             model_account: TextEdit::new(""),
+            model_extra: BTreeMap::new(),
+            model_picker: None,
+            variant_updates: BTreeMap::new(),
             fallbacks: TextEdit::new("[]"),
             account_id: TextEdit::new(""),
             account_provider: TextEdit::new(""),
@@ -184,6 +197,8 @@ impl Default for Configuration {
             tool_provider: TextEdit::new(""),
             tool_primary: secret(),
             tool_fallback: secret(),
+            clear_tool_primary: false,
+            clear_tool_fallback: false,
             confirmation: None,
             result: Load::Idle,
             message: None,
@@ -213,9 +228,131 @@ impl State {
         self.configuration.model_provider = TextEdit::new(assignment.primary.provider);
         self.configuration.model = TextEdit::new(assignment.primary.model);
         self.configuration.model_account = TextEdit::new(assignment.primary.account);
+        self.configuration.model_extra = assignment.primary.extra;
+        self.configuration.variant_updates.clear();
+        self.configuration.model_picker = None;
         self.configuration.fallbacks = TextEdit::new(
             serde_json::to_string_pretty(&assignment.fallbacks).unwrap_or_else(|_| "[]".into()),
         );
+        self.configuration_edited();
+    }
+
+    pub fn select_model_provider(&mut self, provider: &str) {
+        let Load::Ready(defaults) = &self.backend.models else {
+            return;
+        };
+        let matches = defaults
+            .catalog
+            .iter()
+            .filter(|entry| entry.provider == provider)
+            .collect::<Vec<_>>();
+        let Some(selected) = matches.first() else {
+            return;
+        };
+        self.configuration.model_provider = TextEdit::new(provider);
+        if matches.len() == 1 {
+            self.configuration.model_account = TextEdit::new(&selected.account);
+            self.configuration.model = TextEdit::new(&selected.model);
+        } else {
+            self.configuration.model_account = TextEdit::new("");
+            self.configuration.model = TextEdit::new("");
+        }
+        self.configuration.model_extra.clear();
+        self.configuration.model_picker = None;
+        self.configuration_edited();
+    }
+
+    pub fn select_catalog_model(&mut self, label: &str) {
+        let Load::Ready(defaults) = &self.backend.models else {
+            return;
+        };
+        let Some(selected) = defaults.catalog.iter().find(|entry| {
+            entry.provider == self.configuration.model_provider.text && entry.label() == label
+        }) else {
+            return;
+        };
+        self.configuration.model = TextEdit::new(&selected.model);
+        self.configuration.model_account = TextEdit::new(&selected.account);
+        self.configuration.model_extra.clear();
+        self.configuration.model_picker = None;
+        self.configuration_edited();
+    }
+
+    pub fn select_model_variant(&mut self, value: &str) {
+        let Load::Ready(defaults) = &self.backend.models else {
+            return;
+        };
+        let Some(entry) = defaults.catalog.iter().find(|entry| {
+            entry.provider == self.configuration.model_provider.text
+                && entry.account == self.configuration.model_account.text
+                && entry.model == self.configuration.model.text
+        }) else {
+            return;
+        };
+        if value != "Provider default" && !entry.efforts.iter().any(|effort| effort == value) {
+            return;
+        }
+        let key = format!(
+            "{}|{}|{}",
+            self.configuration.role.text, entry.provider, entry.model
+        );
+        self.configuration
+            .variant_updates
+            .insert(key, (value != "Provider default").then(|| value.to_owned()));
+        self.configuration.model_picker = None;
+        self.configuration_edited();
+    }
+
+    pub fn add_model_fallback(&mut self, label: &str) {
+        let Load::Ready(defaults) = &self.backend.models else {
+            return;
+        };
+        let Some(entry) = defaults
+            .catalog
+            .iter()
+            .find(|entry| format!("{} · {}", entry.provider, entry.label()) == label)
+        else {
+            return;
+        };
+        let Ok(mut routes) =
+            serde_json::from_str::<Vec<ModelRoute>>(&self.configuration.fallbacks.text)
+        else {
+            return;
+        };
+        if routes.len() >= 16 {
+            return;
+        }
+        routes.push(ModelRoute {
+            provider: entry.provider.clone(),
+            model: entry.model.clone(),
+            account: entry.account.clone(),
+            extra: BTreeMap::new(),
+        });
+        self.configuration.fallbacks =
+            TextEdit::new(serde_json::to_string(&routes).unwrap_or_else(|_| "[]".into()));
+        self.configuration.model_picker = None;
+        self.configuration_edited();
+    }
+
+    pub fn reorder_model_fallback(&mut self, index: usize, delta: isize) {
+        let Ok(mut routes) =
+            serde_json::from_str::<Vec<ModelRoute>>(&self.configuration.fallbacks.text)
+        else {
+            return;
+        };
+        if index >= routes.len() {
+            return;
+        }
+        if delta == 0 {
+            routes.remove(index);
+        } else if let Some(destination) = index
+            .checked_add_signed(delta)
+            .filter(|destination| *destination < routes.len())
+        {
+            routes.swap(index, destination);
+        }
+        self.configuration.fallbacks =
+            TextEdit::new(serde_json::to_string(&routes).unwrap_or_else(|_| "[]".into()));
         self.configuration_edited();
     }
 
@@ -234,6 +371,7 @@ impl State {
             provider: self.configuration.model_provider.text.trim().to_owned(),
             model: self.configuration.model.text.trim().to_owned(),
             account: self.configuration.model_account.text.trim().to_owned(),
+            extra: self.configuration.model_extra.clone(),
         });
         let fallbacks: Vec<ModelRoute> = if clear {
             Vec::new()
@@ -264,11 +402,22 @@ impl State {
             );
             return;
         }
+        let active_variant_keys = primary
+            .iter()
+            .chain(fallbacks.iter())
+            .map(|route| format!("{role}|{}|{}", route.provider, route.model))
+            .collect::<std::collections::BTreeSet<_>>();
+        // Pending edits for a replaced route are no longer part of this save.
+        // Existing server variants, including other roles, remain untouched.
+        self.configuration
+            .variant_updates
+            .retain(|key, _| active_variant_keys.contains(key));
         self.preview_configuration(ConfigurationChange::ModelRole(SetModelRole {
             expected_revision: defaults.configuration_revision,
             role: role.to_owned(),
             primary,
             fallbacks,
+            variant_updates: self.configuration.variant_updates.clone(),
         }));
     }
 
@@ -369,8 +518,18 @@ impl State {
         self.preview_configuration(ConfigurationChange::ToolCredentials(SetToolCredentials {
             expected_revision: profile.configuration_revision,
             provider: provider.to_owned(),
-            primary: self.configuration.tool_primary.text.clone(),
-            fallback: self.configuration.tool_fallback.text.clone(),
+            primary: if self.configuration.clear_tool_primary {
+                Some(String::new())
+            } else {
+                (!self.configuration.tool_primary.text.is_empty())
+                    .then(|| self.configuration.tool_primary.text.clone())
+            },
+            fallback: if self.configuration.clear_tool_fallback {
+                Some(String::new())
+            } else {
+                (!self.configuration.tool_fallback.text.is_empty())
+                    .then(|| self.configuration.tool_fallback.text.clone())
+            },
         }));
     }
 

@@ -70,6 +70,8 @@ pub struct ModelRoute {
     pub model: String,
     #[serde(default)]
     pub account: String,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 impl ModelRoute {
@@ -97,6 +99,24 @@ pub struct ModelDefaults {
     pub roles: Vec<String>,
     pub defaults: BTreeMap<String, serde_json::Value>,
     pub configuration_revision: u64,
+    #[serde(default)]
+    pub catalog: Vec<ModelCatalogEntry>,
+    #[serde(default)]
+    pub model_variants: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ModelCatalogEntry {
+    pub provider: String,
+    pub account: String,
+    pub model: String,
+    pub efforts: Vec<String>,
+}
+
+impl ModelCatalogEntry {
+    pub fn label(&self) -> String {
+        format!("{} · {}", self.model, self.account)
+    }
 }
 
 impl ModelDefaults {
@@ -226,17 +246,9 @@ pub enum ReadRequest {
     Tools,
     Models,
     Profile,
-    Jobs {
-        workspace_id: Option<String>,
-    },
-    JobDetail {
-        id: String,
-        workspace_id: Option<String>,
-    },
-    Logs {
-        id: String,
-        workspace_id: Option<String>,
-    },
+    Jobs {},
+    JobDetail { id: String },
+    Logs { id: String },
 }
 
 impl ReadRequest {
@@ -362,43 +374,32 @@ impl State {
     }
 
     pub fn refresh_page(&mut self) {
-        let request = match self.page {
+        match self.page {
             Page::Atlas => {
-                let day = self.backend.article_day.text.trim();
-                if day.len() != 10 || chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").is_err() {
-                    self.backend.articles =
-                        Load::Failed("Enter a calendar day as YYYY-MM-DD".into());
-                    return;
-                }
-                ReadRequest::Articles(ArticleQuery {
-                    day: day.to_owned(),
-                    category: self.backend.article_category.text.clone(),
-                    search: self.backend.article_search.text.clone(),
-                    sort: "latest",
-                    limit: 30,
-                    cursor: None,
-                })
+                self.backend_read(ReadRequest::Models);
+                self.refresh_cycles();
             }
-            Page::Tools => ReadRequest::Tools,
-            Page::Models => ReadRequest::Models,
-            Page::Profile => ReadRequest::Profile,
-            Page::Jobs => {
-                if self.activity_tab == crate::logs::ActivityTab::Logs {
-                    self.refresh_operational_logs();
-                    return;
-                }
-                ReadRequest::Jobs {
-                    workspace_id: self.activity_workspace_filter(),
-                }
+            Page::Seed => {
+                self.refresh_readiness();
+                self.backend_read(ReadRequest::Models);
+                self.backend_read(ReadRequest::Profile);
             }
+            Page::Tools => {
+                self.backend_read(ReadRequest::Tools);
+                self.backend_read(ReadRequest::Profile);
+            }
+            Page::Models => {
+                self.backend_read(ReadRequest::Models);
+                self.backend_read(ReadRequest::Profile);
+            }
+            Page::Profile => self.backend_read(ReadRequest::Profile),
+            Page::Jobs => self.backend_read(ReadRequest::Jobs {}),
             Page::Workstation => {
                 self.refresh_readiness();
-                self.backend_read(ReadRequest::Profile);
-                return;
+                self.refresh_host_metrics();
             }
-            _ => return,
-        };
-        self.backend_read(request);
+            _ => {}
+        }
     }
 
     pub fn next_articles(&mut self) {
@@ -432,10 +433,7 @@ impl State {
         self.backend.selected_job = Some(id.to_owned());
         self.selected_log_job_changed(id);
         self.backend.logs = Load::Idle;
-        self.backend_read(ReadRequest::JobDetail {
-            id: id.to_owned(),
-            workspace_id: self.activity_workspace_filter(),
-        });
+        self.backend_read(ReadRequest::JobDetail { id: id.to_owned() });
     }
 
     /// Cross-page links still resolve through the current registered node; the
@@ -449,49 +447,27 @@ impl State {
         }
         self.page = Page::Jobs;
         self.select_activity_tab(crate::logs::ActivityTab::Jobs);
-        self.backend_read(ReadRequest::Jobs {
-            workspace_id: self.activity_workspace_filter(),
-        });
+        self.backend_read(ReadRequest::Jobs {});
         self.backend.selected_job = Some(id.to_owned());
         self.selected_log_job_changed(id);
         self.backend.logs = Load::Idle;
-        self.backend_read(ReadRequest::JobDetail {
-            id: id.to_owned(),
-            workspace_id: self.activity_workspace_filter(),
-        });
+        self.backend_read(ReadRequest::JobDetail { id: id.to_owned() });
     }
 
     pub fn refresh_job_logs(&mut self) {
         let Some(id) = &self.backend.selected_job else {
             return;
         };
-        self.backend_read(ReadRequest::Logs {
-            id: id.clone(),
-            workspace_id: self.activity_workspace_filter(),
-        });
+        self.backend_read(ReadRequest::Logs { id: id.clone() });
     }
 
-    pub fn set_activity_workspace_filter(&mut self, narrow: bool) {
-        self.backend.selected_workspace_only = narrow;
-        self.scoped_logs.select_target(if narrow {
-            crate::logs::LogTarget::SelectedWorkspace
-        } else {
-            crate::logs::LogTarget::Workstation
-        });
+    /// Legacy fixture entrypoint; current activity is always workstation-scoped.
+    pub fn set_activity_workspace_filter(&mut self, _narrow: bool) {
+        self.backend.selected_workspace_only = false;
+        self.scoped_logs
+            .select_target(crate::logs::LogTarget::Workstation);
         self.backend.invalidate_activity();
         self.refresh_page();
-    }
-
-    fn activity_workspace_filter(&self) -> Option<String> {
-        self.backend
-            .selected_workspace_only
-            .then(|| {
-                self.registration
-                    .context
-                    .as_ref()
-                    .map(|context| context.workspace_id.clone())
-            })
-            .flatten()
     }
 
     pub fn backend_read(&mut self, request: ReadRequest) {
@@ -513,7 +489,7 @@ impl State {
         if kind.is_activity() && self.registration.context.is_none() {
             self.backend.failed(
                 kind,
-                "Register an owned workspace before loading workstation activity".into(),
+                "Register this workstation before loading its activity".into(),
             );
             return;
         }
@@ -647,8 +623,6 @@ async fn read(
     struct ActivityQuery<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         id: Option<&'a str>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        workspace_id: Option<&'a str>,
         limit: u16,
     }
     match request {
@@ -665,23 +639,21 @@ async fn read(
         // Lists use the registered Jobs controller's explicit newest/cursor
         // contract; this generic detail adapter cannot issue a legacy list.
         ReadRequest::Jobs { .. } => Err(fleetworks_contracts::ClientError::InvalidRequest),
-        ReadRequest::JobDetail { id, workspace_id } => client
+        ReadRequest::JobDetail { id } => client
             .get_with_query(
                 "/api/v1/jobs/detail",
                 &ActivityQuery {
                     id: Some(&id),
-                    workspace_id: workspace_id.as_deref(),
                     limit: 100,
                 },
             )
             .await
             .map(ReadResult::JobDetail),
-        ReadRequest::Logs { id, workspace_id } => client
+        ReadRequest::Logs { id } => client
             .get_with_query(
                 "/api/v1/logs",
                 &ActivityQuery {
                     id: Some(&id),
-                    workspace_id: workspace_id.as_deref(),
                     limit: 100,
                 },
             )

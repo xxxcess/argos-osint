@@ -1,5 +1,6 @@
-//! Restrained static satin on compact toolbar controls only. No content panels,
-//! text, input field or dense row receives a decorative material layer.
+//! Opaque matte surfaces and static satin edges, shared by production views.
+//!
+//! Decorative edges never stand in for functional boundaries or keyboard focus.
 
 use rune::color;
 use rune::Color;
@@ -11,45 +12,48 @@ use rune_kit::Kit;
 use crate::accessibility::ViewPreferences;
 use crate::theme;
 
-/// Keep the kit's component behavior and metrics. Opaque base fills remain;
-/// reduced-transparency replaces sheen/elevation with a fine visible matte edge.
+/// Keep component behavior/metrics and functional boundaries, removing broad
+/// reflections and elevation in every appearance preference. Reduced motion and
+/// reduced transparency therefore use the same static opaque surface recipes.
 pub(crate) fn configure_kit(kit: &mut Kit, preferences: ViewPreferences) {
-    if !preferences.matte() {
-        return;
-    }
-    let edge = Shadow {
+    let functional_edge = Shadow {
         spread: 1.0,
         color: hex(theme::BORDER_CONTROL),
         inset: true,
         ..Shadow::default()
     };
+    let satin_edge = Shadow {
+        spread: 1.0,
+        color: hex(theme::TEXT_PRIMARY).alpha(if preferences.matte() {
+            theme::CARD_EDGE_ALPHA
+        } else {
+            theme::SATIN_CONTROL_EDGE_ALPHA
+        }),
+        inset: true,
+        ..Shadow::default()
+    };
     let mut elevation = Elevation::default();
-    elevation.button_neutral = vec![edge];
-    elevation.button_contrast = vec![edge];
-    elevation.elements = vec![edge];
+    elevation.button_neutral = vec![functional_edge];
+    elevation.button_contrast = vec![satin_edge];
+    elevation.elements = vec![functional_edge];
     kit.elevation = elevation;
     kit.c.submit_highlight = Color::TRANSPARENT;
     kit.c.depth_top = Color::TRANSPARENT;
     kit.c.depth_bottom = Color::TRANSPARENT;
 }
 
-/// Modify the existing control's paint without wrapping it or changing its
-/// accessibility role, hit bounds, child keys, focus ring or layout.
-pub(crate) fn compact_toolbar(control: El, preferences: ViewPreferences) -> El {
-    if preferences.matte() {
-        return control;
-    }
-    // A translucent static reflection leaves the kit's actual hover/pressed
-    // fill visible. The base stays opaque graphite; these never animate or sample
-    // time. The matte path simply omits this additional reflection.
-    let stops = [
-        (0.0, hex("#171716").alpha(0.36)),
-        (0.24, hex("#252522").alpha(0.36)),
-        (0.48, hex("#30302C").alpha(0.36)),
-        (0.73, hex("#20201E").alpha(0.36)),
-        (1.0, hex("#151514").alpha(0.36)),
-    ];
-    control.linear_gradient(std::f32::consts::PI, stops)
+/// Paint a read-only card without making it focusable or interactive.
+pub(crate) fn matte_card(content: El) -> El {
+    content
+        .fill(hex(theme::SURFACE))
+        .border(1.0, hex(theme::TEXT_PRIMARY).alpha(theme::CARD_EDGE_ALPHA))
+        .radius(8.0)
+}
+
+/// Toolbar controls share the Kit's matte recipe without a reflection overlay.
+/// Do not wrap the control or change accessibility keys, layout or focus rings.
+pub(crate) fn compact_toolbar(control: El, _preferences: ViewPreferences) -> El {
+    control
 }
 
 fn hex(value: &str) -> Color {

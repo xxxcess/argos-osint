@@ -43,7 +43,6 @@ use fleetworks_contracts::classifier_activation::ACTIVATION_PATH;
 use fleetworks_contracts::classifier_activation::ACTIVATION_RESULT_PATH;
 use fleetworks_contracts::classifier_activation::CANDIDATE_DETAIL_PATH;
 use fleetworks_contracts::connect::RegistrationEnsureRequest;
-use fleetworks_contracts::connect::WorkspaceName;
 use fleetworks_contracts::context::CredentialPurpose;
 use fleetworks_contracts::context::JobOrigin;
 use fleetworks_contracts::context::MutationContext;
@@ -80,16 +79,16 @@ async fn registration(repo: &Repository, node: &str) -> RegisteredContext {
         &authority(),
         &RegistrationEnsureRequest::new(
             format!("ensure-{node}"),
-            if node == "a" {
-                "192.0.2.42"
-            } else {
-                "198.51.100.42"
-            }
-            .parse()
-            .expect("synthetic IP"),
-            WorkspaceName::new("research").expect("child"),
+            Some(
+                if node == "a" {
+                    "192.0.2.42"
+                } else {
+                    "198.51.100.42"
+                }
+                .parse()
+                .expect("synthetic IP"),
+            ),
             format!("fixture-installation-{node}"),
-            format!("fixture-folder-{node}"),
         ),
     )
     .await

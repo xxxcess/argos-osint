@@ -15,6 +15,7 @@ import {
   logoutConnectionResponse,
   publicConnection,
   requireConnection,
+  requireDevelopmentUpgrade,
   safeReturnPath,
   sessionTokenFromCookie,
 } from "../connect-session.mjs";
@@ -36,8 +37,7 @@ test("browser/Node Connect parser consumes the same Rust corpus", async () => {
   for (const fixture of corpus.valid) {
     assert.deepEqual(parseConnectId(fixture.input), {
       connectId: fixture.canonical,
-      ip: fixture.ip,
-      workspaceName: fixture.workspace,
+      workstationId: fixture.canonical,
     });
   }
   for (const fixture of corpus.invalid)
@@ -101,7 +101,7 @@ test("same authoritative guard denies forged/revoked/stale requests before prote
       },
     });
   const valid = await requireConnection(request());
-  assert.equal(valid.context.workspace_id, gateway.context.workspace_id);
+  assert.equal(valid.context.workstation_id, gateway.context.workstation_id);
   assert.deepEqual(connectionProofHeaders(valid), {
     "x-fleetworks-session": gateway.sessionToken,
     "x-fleetworks-context-revision": "1",
@@ -151,7 +151,7 @@ test("Connect creates a cookie for existing registration only and never exposes 
       body: JSON.stringify(body),
     });
   const valid = await createConnectionResponse(
-    make({ connect_id: "192.0.2.42:research" }),
+    make({ connect_id: "fixture-workstation-research" }),
   );
   assert.equal(valid.status, 200);
   const cookie = valid.headers.get("set-cookie");
@@ -161,16 +161,19 @@ test("Connect creates a cookie for existing registration only and never exposes 
   const body = await valid.json();
   assert.equal(body.session_token, undefined);
   assert.equal(body.token, undefined);
-  assert.equal(body.context.connect_id, "192.0.2.42:research");
+  assert.equal(body.context.connect_id, "fixture-workstation-research");
   assert.equal(
-    (await createConnectionResponse(make({ connect_id: "192.0.2.42:unknown" })))
-      .status,
+    (
+      await createConnectionResponse(
+        make({ connect_id: "fixture-workstation-unknown" }),
+      )
+    ).status,
     401,
   );
   assert.equal(
     (
       await createConnectionResponse(
-        make({ connect_id: "192.0.2.42:research", owner: "forged" }),
+        make({ connect_id: "fixture-workstation-research", owner: "forged" }),
       )
     ).status,
     400,
@@ -178,7 +181,10 @@ test("Connect creates a cookie for existing registration only and never exposes 
   assert.equal(
     (
       await createConnectionResponse(
-        make({ connect_id: "192.0.2.42:research" }, "http://untrusted.example"),
+        make(
+          { connect_id: "fixture-workstation-research" },
+          "http://untrusted.example",
+        ),
       )
     ).status,
     403,
@@ -232,7 +238,9 @@ test("authority responses reject expired, malformed and secret-bearing extra con
     });
     assert.equal(
       JSON.stringify(
-        publicConnection(await authority.create("192.0.2.42:research")),
+        publicConnection(
+          await authority.create("fixture-workstation-research"),
+        ),
       ).includes("must-not-serialize"),
       false,
     );
@@ -244,7 +252,7 @@ test("authority responses reject expired, malformed and secret-bearing extra con
         expires_at: "2025-01-01T00:00:00Z",
       }),
     });
-    await assert.rejects(expired.create("192.0.2.42:research"));
+    await assert.rejects(expired.create("fixture-workstation-research"));
   } finally {
     await gateway.close();
   }
@@ -278,7 +286,7 @@ test("remote HTTPS still requires authenticated ingress proof and emits Secure c
         ...(proof ? { "x-fleetworks-ingress-token": proof } : {}),
         forwarded: "for=127.0.0.1;proto=https",
       },
-      body: JSON.stringify({ connect_id: "192.0.2.42:research" }),
+      body: JSON.stringify({ connect_id: "fixture-workstation-research" }),
     });
   assert.equal((await createConnectionResponse(input())).status, 403);
   assert.equal((await createConnectionResponse(input("forged"))).status, 403);
@@ -325,8 +333,110 @@ test("base paths, malformed bodies and bounded JSON do not widen public access",
   );
   assert.equal((await createConnectionResponse(input("{bad"))).status, 400);
   const accepted = await createConnectionResponse(
-    input(JSON.stringify({ connect_id: "192.0.2.42:research" })),
+    input(JSON.stringify({ connect_id: "fixture-workstation-research" })),
   );
   assert.equal(accepted.status, 200);
   assert.match(accepted.headers.get("set-cookie"), /Path=\/intel;/u);
+});
+
+test("opaque workstation IDs reject legacy names and never trim or normalize authority", () => {
+  for (const value of [
+    "192.0.2.42:research",
+    "[2001:db8::42]:default",
+    "workstation-a\n",
+    " workstation-a",
+    "workstation-a ",
+    "workstation/a",
+    "workstation\\a",
+    "café",
+    "",
+    "a".repeat(129),
+  ])
+    assert.throws(() => parseConnectId(value), value);
+  assert.deepEqual(parseConnectId("Node-A_123.4"), {
+    connectId: "Node-A_123.4",
+    workstationId: "Node-A_123.4",
+  });
+  assert.throws(() =>
+    sessionTokenFromCookie(`fleetworks_connect=${"a".repeat(64)}`),
+  );
+});
+
+test("workstation authority accepts optional changing IP metadata but rejects legacy context and mismatched identity", async (t) => {
+  const gateway = await startConnectGateway();
+  t.after(() => gateway.close());
+  const id = gateway.context.workstation_id;
+  const payload = (context) => ({
+    session_token: "b".repeat(64),
+    context,
+    expires_at: new Date(Date.now() + 60_000).toISOString(),
+  });
+  for (const workstation_ip of [
+    undefined,
+    null,
+    "198.51.100.9",
+    "2001:db8::42",
+  ]) {
+    const authority = createConnectAuthority({
+      request: async () => payload({ ...gateway.context, workstation_ip }),
+    });
+    const result = await authority.create(id);
+    assert.equal(result.context.workstation_id, id);
+    assert.equal(result.context.connect_id, id);
+    assert.equal(result.context.workstation_ip, workstation_ip);
+  }
+  for (const change of [
+    { workspace_id: "legacy" },
+    { workspace_name: "research" },
+    { workspace_marker: "legacy-marker" },
+    { connect_id: "192.0.2.42:research" },
+    { workstation_id: "different-installation" },
+    { workstation_ip: "not-an-ip" },
+    { workstation_ip: 42 },
+  ]) {
+    const authority = createConnectAuthority({
+      request: async () => payload({ ...gateway.context, ...change }),
+    });
+    await assert.rejects(
+      authority.create(id),
+      (error) => error instanceof ConnectFailure && error.status === 503,
+    );
+  }
+  const swapped = createConnectAuthority({
+    request: async () =>
+      payload({
+        ...gateway.context,
+        workstation_id: "different-installation",
+        connect_id: "different-installation",
+      }),
+  });
+  await assert.rejects(swapped.create(id));
+});
+
+test("development HMR permits exact current/legacy framework paths only under the normal origin boundary", async (t) => {
+  const gateway = await startConnectGateway();
+  const restore = installGatewayEnvironment(gateway);
+  t.after(async () => {
+    restore();
+    await gateway.close();
+  });
+  const request = (origin = "http://127.0.0.1:3000") => ({
+    url: "http://127.0.0.1:3000/_next/hmr",
+    headers: { host: "127.0.0.1:3000", origin },
+  });
+  for (const path of ["/_next/hmr", "/_next/webpack-hmr"]) {
+    await requireDevelopmentUpgrade(request(), true, path);
+    await assert.rejects(requireDevelopmentUpgrade(request(), false, path));
+    await assert.rejects(
+      requireDevelopmentUpgrade(request("https://foreign.example"), true, path),
+    );
+  }
+  for (const path of [
+    "/_next/hmr/extra",
+    "/_next/webpack-hmr-forged",
+    "/api/v1/live",
+    undefined,
+  ])
+    await assert.rejects(requireDevelopmentUpgrade(request(), true, path));
+  assert.equal(gateway.received.length, 0);
 });

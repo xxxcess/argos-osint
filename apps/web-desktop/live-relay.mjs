@@ -145,6 +145,12 @@ export function createLiveRelay(port) {
           );
           if (
             current.context.deployment_id !== session.context.deployment_id ||
+            current.context.workstation_id !== session.context.workstation_id ||
+            current.context.connect_id !== session.context.connect_id ||
+            current.context.registration_revision !==
+              session.context.registration_revision ||
+            current.context.configuration_epoch !==
+              session.context.configuration_epoch ||
             current.context.registration_id !==
               session.context.registration_id ||
             current.context.access_epoch !== session.context.access_epoch ||

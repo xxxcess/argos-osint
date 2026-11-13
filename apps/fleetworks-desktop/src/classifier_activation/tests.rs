@@ -32,9 +32,8 @@ fn context(registration: &str) -> RegisteredContext {
         RegistrationReceipt::new(
             "synthetic-deployment".into(),
             "synthetic-node".into(),
-            "synthetic-workspace".into(),
             registration.into(),
-            "192.0.2.42:default".parse().expect("synthetic Connect ID"),
+            Some("192.0.2.42".parse().expect("synthetic IP")),
             1,
         ),
         1,
@@ -78,9 +77,8 @@ fn fixture() -> State {
     readiness.registration = Some(RegistrationReceipt::new(
         context.deployment_id.clone(),
         context.workstation_id.clone(),
-        context.workspace_id.clone(),
         context.registration_id.clone(),
-        context.connect_id.clone(),
+        context.workstation_ip,
         context.registration_revision,
     ));
     state.readiness = Load::Ready(readiness);
@@ -157,58 +155,59 @@ fn lose_post(state: &mut State, intent: &Intent) {
 }
 
 #[test]
-fn production_activation_controls_require_distinct_consent_and_confirm_exact_candidate() {
+fn retained_activation_handler_requires_exact_consent_and_native_never_exposes_activation() {
     let mut state = fixture();
     state.load_activation_candidate();
     state.preview_candidate_activation();
     assert!(
         state.classifier_activation.confirmation.is_none(),
-        "synthetic baseline consent is never inferred from training"
+        "training never implies activation consent"
+    );
+    state.classifier_activation.consent = true;
+    state.preview_candidate_activation();
+    let confirmation = state
+        .classifier_activation
+        .confirmation
+        .as_ref()
+        .expect("explicit candidate confirmation");
+    assert_eq!(confirmation.candidate.preview.candidate, candidate());
+    assert!(!state.intents.iter().any(|intent| matches!(
+        intent,
+        Intent::ClassifierActivation {
+            action: ActivationAction::Post
+        }
+    )));
+    state.confirm_candidate_activation();
+    assert!(
+        matches!(state.classifier_activation.result,Load::Ready(ref result) if result.state==ActivationState::Activated)
+    );
+    assert!(
+        matches!(state.classifier_activation.job,Load::Ready(ref detail) if detail.job.id=="opaque-server-activation-job")
     );
     let mut runtime = Runtime::new(
         state,
         app::view,
-        (1280.0, 3200.0),
+        (1180.0, 780.0),
         Env {
             system_dark: true,
             scale: 1.0,
         },
     );
     runtime.frame(0.0);
-    for (index, key) in [
+    for key in [
         "activation-synthetic-consent",
         "activation-review",
         "activation-confirm",
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let (x, y) = runtime
-            .find(key)
-            .expect("same production activation control");
-        runtime.pointer_down(x, y);
-        runtime.pointer_up(x, y);
-        runtime.frame((index + 1) as f64 / 60.0);
-        if index < 2 {
-            assert!(!runtime.state.intents.iter().any(|intent| matches!(
-                intent,
-                Intent::ClassifierActivation {
-                    action: ActivationAction::Post
-                }
-            )));
-        }
+    ] {
+        assert!(
+            runtime.find(key).is_none(),
+            "activation control {key} is excluded from native UI"
+        );
     }
-    assert!(
-        matches!(runtime.state.classifier_activation.result,Load::Ready(ref result) if result.state == ActivationState::Activated)
-    );
-    let tree = runtime.accessibility_json().to_string();
-    assert!(
-        tree.contains("operation") && tree.contains("Real inference readiness remains separate")
-    );
-    assert!(!tree.contains("inference: Ready"));
-    assert!(
-        matches!(runtime.state.classifier_activation.job,Load::Ready(ref detail) if detail.job.id == "opaque-server-activation-job")
-    );
+    assert!(!runtime
+        .accessibility_json()
+        .to_string()
+        .contains("inference: Ready"));
 }
 
 #[test]
@@ -334,7 +333,10 @@ fn matching_current_pointer_does_not_turn_effect_uncertain_into_owned_success() 
     );
     runtime.frame(0.0);
     let tree = runtime.accessibility_json().to_string();
-    assert!(tree.contains("no owned success is proven"));
+    assert!(
+        matches!(&runtime.state.classifier_activation.result,Load::Ready(result) if result.state==ActivationState::EffectUncertain),
+        "matching active pointer cannot turn uncertain operation ownership into success"
+    );
     assert!(!tree.contains("activated by this operation"));
 }
 

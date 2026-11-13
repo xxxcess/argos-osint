@@ -70,6 +70,21 @@ describe("authoritative registered REST boundary", () => {
     ).toBe(true);
   });
 
+  it("rejects legacy workspace query narrowing before any authority or data request", async () => {
+    for (const field of [
+      "workspace",
+      "workspace_id",
+      "workspace_name",
+      "workspace_marker",
+    ]) {
+      const response = await proxyRust(input(`articles?${field}=legacy`), [
+        "articles",
+      ]);
+      expect(response.status).toBe(400);
+    }
+    expect(gateway.received).toHaveLength(0);
+  });
+
   it("creates backend proof only from current authoritative resolution and never forwards browser credentials", async () => {
     const request = input("articles?cursor=opaque%2B%2F%3D", {
       headers: {

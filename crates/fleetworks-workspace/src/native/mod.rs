@@ -1,8 +1,10 @@
-//! Protected native-client home container and managed child identities.
+//! Protected workstation settings and retained legacy child identities.
 //!
 //! This API is separate from the operator [`crate::Workspace`]. It never loads
 //! old configuration, copies keys/roles, starts services or contacts a backend.
-//! Run filesystem work on a blocking worker, never a native view/UI callback.
+//! Normal startup uses [`NativeContainer::open_settings`] without creating a child.
+//! Legacy folder operations remain explicit recovery APIs. Run filesystem work
+//! on a blocking worker, never a native view/UI callback.
 //!
 //! Removal journals and verifies retirement before producing a [`TrashIntent`].
 //! The guarded platform path persists an exact object reference before its OS
@@ -11,6 +13,7 @@
 
 mod connections;
 mod fs;
+pub mod legacy_connect;
 mod lifecycle_catalog;
 #[cfg(test)]
 mod lifecycle_tests;
@@ -19,6 +22,7 @@ mod state;
 #[cfg(test)]
 mod tests;
 mod trash;
+mod workstation;
 
 pub use connections::ConnectionProfilesSnapshot;
 pub use connections::CredentialReference;
@@ -37,17 +41,18 @@ pub use trash::PreparedTrash;
 pub use trash::TrashAdapter;
 pub use trash::TrashReference;
 pub use trash::TrashTarget;
+pub use workstation::PendingCycleDeletion;
 
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::path::Path;
 use std::path::PathBuf;
 
+use crate::native::legacy_connect::RegistrationEnsureRequest;
+use crate::native::legacy_connect::RegistrationReceipt;
+use crate::native::legacy_connect::RegistrationStatus;
 use anyhow::Context;
 use anyhow::Result;
-use fleetworks_contracts::connect::RegistrationEnsureRequest;
-use fleetworks_contracts::connect::RegistrationReceipt;
-use fleetworks_contracts::connect::RegistrationStatus;
 use fleetworks_contracts::connect::WorkspaceName;
 use fleetworks_contracts::connect::DEFAULT_WORKSPACE_NAME;
 use rustix::fd::OwnedFd;
@@ -124,6 +129,7 @@ pub struct NativeContainer {
     home_object: ObjectIdentity,
     root_object: ObjectIdentity,
     installation_marker: String,
+    legacy_default: bool,
 }
 
 struct LockedCatalog {
@@ -170,6 +176,16 @@ impl NativeContainer {
     /// Fixtures pass a temporary owned home. Existing legacy roots or unsafe
     /// markers are repair states, never automatically adopted or overwritten.
     pub fn open(home: &Path) -> Result<Self> {
+        Self::open_mode(home, true)
+    }
+
+    /// Initialize protected settings and installation identity without creating a child folder.
+    /// Existing child identities and unresolved legacy journals remain intact.
+    pub fn open_settings(home: &Path) -> Result<Self> {
+        Self::open_mode(home, false)
+    }
+
+    fn open_mode(home: &Path, legacy_default: bool) -> Result<Self> {
         let home_fd = fs::open_absolute_directory(home)?;
         let home_object = fs::directory_identity(&home_fd, false)?;
         let created =
@@ -200,15 +216,19 @@ impl NativeContainer {
                 version: state::FORMAT_VERSION,
                 installation_marker: fs::random_marker()?,
                 root_object,
-                workspaces: vec![WorkspaceRecord {
-                    name: WorkspaceName::new(DEFAULT_WORKSPACE_NAME)?,
-                    marker: fs::random_marker()?,
-                    object: None,
-                    protected_default: true,
-                    state: WorkspaceState::CreationPending,
-                    bindings: Vec::new(),
-                    binding_history: Vec::new(),
-                }],
+                workspaces: if legacy_default {
+                    vec![WorkspaceRecord {
+                        name: WorkspaceName::new(DEFAULT_WORKSPACE_NAME)?,
+                        marker: fs::random_marker()?,
+                        object: None,
+                        protected_default: true,
+                        state: WorkspaceState::CreationPending,
+                        bindings: Vec::new(),
+                        binding_history: Vec::new(),
+                    }]
+                } else {
+                    Vec::new()
+                },
                 operations: Vec::new(),
                 registration_attempts: Vec::new(),
                 rebind_attempts: Vec::new(),
@@ -232,9 +252,12 @@ impl NativeContainer {
             home_object,
             root_object,
             installation_marker: catalog.installation_marker,
+            legacy_default,
         };
         drop(lock);
-        container.ensure_default()?;
+        if legacy_default {
+            container.ensure_default()?;
+        }
         Ok(container)
     }
 
@@ -444,7 +467,7 @@ impl NativeContainer {
     ) -> Result<RegistrationAttempt> {
         require_operation_id(deployment_id)?;
         require_operation_id(&request.request_id)?;
-        fleetworks_contracts::connect::ConnectId::new(
+        crate::native::legacy_connect::ConnectId::new(
             request.workstation_ip,
             request.workspace_name.clone(),
         )?;
@@ -946,7 +969,7 @@ impl NativeContainer {
             .iter()
             .find(|record| record.name.is_default())
         {
-            if default.state != WorkspaceState::CreationPending {
+            if self.legacy_default && default.state != WorkspaceState::CreationPending {
                 self.verify_record(default)?;
             }
         }
@@ -1003,14 +1026,15 @@ impl NativeContainer {
             .filter(|record| record.name.is_default())
             .collect();
         anyhow::ensure!(
-            defaults.len() == 1
-                && defaults[0].protected_default
-                && !matches!(
-                    defaults[0].state,
-                    WorkspaceState::DeletionPending
-                        | WorkspaceState::CleanupPending
-                        | WorkspaceState::Removed
-                ),
+            defaults.is_empty()
+                || (defaults.len() == 1
+                    && defaults[0].protected_default
+                    && !matches!(
+                        defaults[0].state,
+                        WorkspaceState::DeletionPending
+                            | WorkspaceState::CleanupPending
+                            | WorkspaceState::Removed
+                    )),
             "protected default identity/state is invalid"
         );
         let mut markers = BTreeSet::new();

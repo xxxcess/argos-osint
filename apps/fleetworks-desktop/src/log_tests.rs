@@ -2,6 +2,7 @@
 //! home, credentials, clipboard or file dialogs are opened by these fixtures.
 
 use super::*;
+use crate::app::Load;
 use fleetworks_contracts::connect::RegistrationReceipt;
 use rune::Env;
 use rune::Runtime;
@@ -11,11 +12,8 @@ fn binding(node: &str) -> LogBinding {
     let receipt = RegistrationReceipt::new(
         "fixture-deployment".into(),
         format!("fixture-node-{node}"),
-        format!("fixture-child-{node}"),
         format!("fixture-registration-{node}"),
-        format!("192.0.2.42:research-{node}")
-            .parse()
-            .expect("synthetic Connect ID"),
+        Some("192.0.2.42".parse().expect("synthetic IP")),
         1,
     );
     LogBinding {
@@ -79,10 +77,17 @@ fn query_scopes_filters_and_cursor_continuation_never_supply_backend_authority()
     let mut logs = LogState::default();
     logs.bind(Some(binding("a")), true);
     let whole = logs.refresh().expect("whole workstation");
-    assert!(whole.query.workspace_id.is_none() && whole.query.job_id.is_none());
+    assert!(whole.query.job_id.is_none());
+    assert!(serde_json::to_value(&whole.query)
+        .expect("query")
+        .get("workspace_id")
+        .is_none());
     logs.select_target(LogTarget::SelectedWorkspace);
     let child = logs.refresh().expect("selected child");
-    assert_eq!(child.query.workspace_id.as_deref(), Some("fixture-child-a"));
+    assert!(serde_json::to_value(&child.query)
+        .expect("legacy selector cannot narrow current scope")
+        .get("workspace_id")
+        .is_none());
     logs.select_target(LogTarget::Job {
         id: "fixture-job".into(),
         descendants: true,
@@ -359,6 +364,24 @@ fn shell() -> crate::app::State {
     state.navigate(crate::app::Page::Jobs);
     state.sync_log_binding();
     state.backend.selected_job = Some("fixture-job".into());
+    let job: crate::backend::ActivityJob = serde_json::from_value(json!({"id":"fixture-job","app":"tools","title":"Synthetic selected job","operation":"tool_run","state":"running","phase":"running","progress_done":null,"progress_total":null,"error_summary":"","private_details_available":true,"activity_actions_available":false,"status_only":false})).expect("safe scoped job");
+    state.backend.jobs = Load::Ready(crate::backend::ActivityJobs {
+        rows: vec![job.clone()],
+        activity_scope: fleetworks_contracts::context::ActivityScope::for_workstation(
+            state.registration.context.as_ref().expect("context"),
+        ),
+        relation_counts_available: false,
+        activity_actions_available: false,
+    });
+    state.backend.detail = Load::Ready(crate::backend::JobDetail {
+        job,
+        stages: Vec::new(),
+        private_details_available: true,
+        activity_actions_available: false,
+        maintenance_result: None,
+    });
+    state.sync_log_visibility();
+    state.intents.clear();
     state
 }
 
@@ -487,7 +510,7 @@ fn fake_reply(state: &mut crate::app::State, intent: &crate::app::Intent) {
     state.complete_scoped_logs(ticket, Ok(result));
 }
 #[test]
-fn actual_shell_logs_controls_use_production_handlers_and_fake_copy_save_effects() {
+fn actual_shell_job_selection_automatically_reads_safe_logs_and_fences_hidden_replies() {
     let mut state = shell();
     state.fixture_effect = Some(fake_reply);
     let mut runtime = Runtime::new(
@@ -500,100 +523,65 @@ fn actual_shell_logs_controls_use_production_handlers_and_fake_copy_save_effects
         },
     );
     runtime.frame(0.0);
-    assert_eq!(runtime.state.activity_tab, ActivityTab::Jobs);
-    assert!(
-        runtime.find("scoped-operational-logs").is_none(),
-        "default Jobs does not render the Logs panel"
-    );
-    let (x, y) = runtime.find("t-logs").expect("shared Kit Logs tab");
-    runtime.pointer_down(x, y);
-    runtime.pointer_up(x, y);
-    runtime.frame(1.0 / 60.0);
-    assert_eq!(runtime.state.activity_tab, ActivityTab::Logs);
-    for key in ["logs-label-summary", "logs-label-app", "logs-label-since"] {
-        assert!(
-            runtime.find(key).is_some(),
-            "visible filter-label element {key}"
-        );
-    }
-    for (index, key) in [
-        "logs-scope-descendants",
+    for key in [
+        "t-logs",
+        "t-jobs",
         "logs-refresh",
         "logs-copy-loaded",
         "logs-export-prepare",
         "logs-export-save",
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        // Runtime::find returns a drawn centre even outside a clipped scroll
-        // viewport. Use the real scroll transaction before dispatching input.
-        runtime.update(|_, tx| tx.scroll_into_view(key));
-        runtime.frame((index * 2 + 2) as f64 / 60.0);
-        let (x, y) = runtime
-            .find(key)
-            .unwrap_or_else(|| panic!("actual production control {key}"));
-        let ([left, top, width, height], _) = runtime
-            .presented("logs-body")
-            .expect("actual Logs scroll viewport");
-        assert!(x>=left && x<=left+width && y>=top && y<=top+height,
-            "{key} must be revealed inside the real viewport before clicking; centre=({x},{y}), viewport=({left},{top},{width},{height})");
-        runtime.pointer_down(x, y);
-        runtime.pointer_up(x, y);
-        runtime.frame((index * 2 + 3) as f64 / 60.0);
-        if key == "logs-export-prepare" {
-            assert!(
-                runtime.state.scoped_logs.export.prepared()
-                    && !runtime.state.scoped_logs.export.complete,
-                "the real Prepare handler must produce the partial snapshot before Save is clicked"
-            );
-        }
+    ] {
+        assert!(
+            runtime.find(key).is_none(),
+            "retired toolbar/tab control {key} must not reappear"
+        );
     }
-    assert!(matches!(
-        runtime.state.scoped_logs.target,
-        LogTarget::Job {
-            descendants: true,
-            ..
-        }
-    ));
+    runtime.update(|_, tx| tx.scroll_into_view("activity-job-fixture-job"));
+    runtime.frame(1.0 / 60.0);
+    let (x, y) = runtime
+        .find("activity-job-fixture-job")
+        .expect("actual selected-job control");
+    runtime.pointer_down(x, y);
+    runtime.pointer_up(x, y);
+    runtime.frame(2.0 / 60.0);
     assert_eq!(runtime.state.scoped_logs.rows[0].id, "event-0");
-    assert!(runtime
-        .state
-        .intents
-        .iter()
-        .any(|intent| matches!(intent, crate::app::Intent::CopyLogSummaries)));
-    assert!(runtime
-        .state
-        .intents
-        .iter()
-        .any(|intent| matches!(intent, crate::app::Intent::SaveLogExport { partial: true })));
+    assert!(
+        matches!(&runtime.state.scoped_logs.target,LogTarget::Job { id, descendants:false } if id=="fixture-job")
+    );
+    assert!(runtime.state.intents.iter().any(|intent| matches!(
+        intent,
+        crate::app::Intent::OperationalLogs {
+            action: LogAction::Refresh
+        }
+    )));
     assert!(!runtime.state.intents.iter().any(|intent| matches!(
         intent,
-        crate::app::Intent::PostJobAction { .. } | crate::app::Intent::PostInteractive { .. }
+        crate::app::Intent::PostJobAction { .. }
+            | crate::app::Intent::PostInteractive { .. }
+            | crate::app::Intent::CopyLogSummaries
+            | crate::app::Intent::SaveLogExport { .. }
     )));
     runtime.window_focus(true);
-    runtime.frame(12.0 / 60.0);
+    runtime.frame(3.0 / 60.0);
     runtime.state.scoped_logs.set_following(true);
     runtime.window_focus(false);
-    runtime.frame(13.0 / 60.0);
-    assert!(
-        !runtime.state.scoped_logs.following && !runtime.state.scoped_logs.visible,
-        "the actual root element receives Rune focus-loss events"
-    );
+    runtime.frame(4.0 / 60.0);
+    assert!(!runtime.state.scoped_logs.following && !runtime.state.scoped_logs.visible);
     runtime.window_focus(true);
-    runtime.frame(14.0 / 60.0);
+    runtime.frame(5.0 / 60.0);
     runtime.state.scoped_logs.set_following(true);
     let pending = runtime
         .state
         .scoped_logs
         .follow()
-        .expect("current visible finite follow");
-    let (x, y) = runtime.find("t-jobs").expect("shared Kit Jobs tab");
+        .expect("visible finite follow");
+    let (x, y) = runtime
+        .find("nav-models")
+        .expect("current sidebar navigation");
     runtime.pointer_down(x, y);
     runtime.pointer_up(x, y);
-    runtime.frame(15.0 / 60.0);
-    assert_eq!(runtime.state.activity_tab, ActivityTab::Jobs);
-    assert!(runtime.find("scoped-operational-logs").is_none());
+    runtime.frame(6.0 / 60.0);
+    assert_eq!(runtime.state.page, crate::app::Page::Models);
     assert!(!runtime.state.scoped_logs.following && !runtime.state.scoped_logs.busy());
     runtime.state.complete_scoped_logs(
         pending,
@@ -601,22 +589,7 @@ fn actual_shell_logs_controls_use_production_handlers_and_fake_copy_save_effects
     );
     assert_eq!(
         runtime.state.scoped_logs.rows[0].id, "event-0",
-        "hidden-tab completion cannot re-populate data"
-    );
-    let (x, y) = runtime.find("t-logs").expect("Logs tab reentry");
-    runtime.pointer_down(x, y);
-    runtime.pointer_up(x, y);
-    runtime.frame(16.0 / 60.0);
-    assert_eq!(runtime.state.activity_tab, ActivityTab::Logs);
-    assert!(
-        !runtime.state.scoped_logs.following,
-        "reentry needs an explicit visible follow request"
-    );
-    runtime.state.open_job("fixture-job");
-    assert_eq!(
-        runtime.state.activity_tab,
-        ActivityTab::Jobs,
-        "View Job selects the Jobs tab"
+        "hidden-view completion cannot repopulate safe summaries"
     );
 }
 #[test]
@@ -652,7 +625,66 @@ fn production_navigation_origin_and_disconnect_hooks_fence_log_reads_without_can
     state.complete_scoped_logs(old, Ok(LogReply::Page(page(0, 1, 1, None, None))));
     assert!(state.scoped_logs.rows.is_empty() && state.scoped_logs.counts.is_none());
     assert!(
-        state.intents.is_empty(),
+        !state.intents.iter().any(|intent| matches!(
+            intent,
+            crate::app::Intent::PostJobAction { .. } | crate::app::Intent::PostInteractive { .. }
+        )),
         "local read lifecycle never submits cancel/retry or any replacement job"
+    );
+}
+
+#[test]
+fn compact_log_headers_fit_the_real_viewport_and_selection_reveals_full_summary() {
+    let mut state = shell();
+    state.reveal_operational_logs();
+    let ticket = state.scoped_logs.refresh().expect("registered log read");
+    state
+        .scoped_logs
+        .complete(&ticket, Ok(LogReply::Page(page(0, 1, 1, None, None))));
+    state.scoped_logs.rows[0].message =
+        "Full safe summary retained while the compact cell truncates ".repeat(8);
+    let mut runtime = Runtime::new(
+        state,
+        crate::app::view,
+        (640.0, 480.0),
+        Env {
+            system_dark: true,
+            scale: 2.0,
+        },
+    );
+    runtime.frame(0.0);
+    runtime.update(|_, tx| tx.scroll_into_view("scoped-logs-table"));
+    runtime.frame(1.0 / 60.0);
+    let ([left, _, width, _], _) = runtime
+        .presented("scoped-logs-table")
+        .expect("real compact grid");
+    let headers = runtime
+        .elements()
+        .into_iter()
+        .filter(|element| {
+            element.role == "columnheader" && element.path.contains("scoped-logs-table/")
+        })
+        .collect::<Vec<_>>();
+    assert!(!headers.is_empty());
+    for header in headers {
+        assert!(
+            header.rect[0] >= left - 0.5 && header.rect[0] + header.rect[2] <= left + width + 0.5,
+            "{} header overflows actual compact grid: {:?}, grid left={left}, width={width}",
+            header.label.as_deref().unwrap_or("unnamed"),
+            header.rect
+        );
+    }
+    let (x, y) = runtime.find("event-0").expect("real safe row");
+    runtime.pointer_down(x, y);
+    runtime.pointer_up(x, y);
+    runtime.frame(2.0 / 60.0);
+    let detail = runtime
+        .elements()
+        .into_iter()
+        .find(|element| element.key.as_deref() == Some("logs-selected-summary"))
+        .expect("full selected safe summary");
+    assert_eq!(
+        detail.text.as_deref(),
+        Some(runtime.state.scoped_logs.rows[0].message.as_str())
     );
 }

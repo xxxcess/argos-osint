@@ -13,10 +13,10 @@ use crate::app::Page;
 use crate::app::State;
 use crate::connection::GatewayEffects;
 use crate::connection::RequestTask;
-use crate::log_views::LogEvent;
 use crate::logs;
 use crate::logs::ActivityTab;
 use crate::logs::LogBinding;
+use crate::logs::LogEvent;
 use crate::logs::LogReply;
 use crate::logs::LogTicket;
 
@@ -37,24 +37,21 @@ impl State {
     pub(crate) fn refresh_operational_logs(&mut self) {
         self.sync_log_binding();
         self.sync_log_visibility();
+        if !self.scoped_logs.visible || self.backend.selected_job.is_none() {
+            return;
+        }
         if let Some(ticket) = self.scoped_logs.refresh() {
             self.start_scoped_logs(ticket);
         }
     }
 
     pub(crate) fn selected_log_job_changed(&mut self, id: &str) {
-        if let crate::logs::LogTarget::Job {
-            id: previous,
-            descendants,
-        } = self.scoped_logs.target.clone()
-        {
-            if previous != id {
-                self.scoped_logs.select_target(crate::logs::LogTarget::Job {
-                    id: id.into(),
-                    descendants,
-                });
-            }
-        }
+        self.sync_log_binding();
+        self.scoped_logs.select_target(crate::logs::LogTarget::Job {
+            id: id.into(),
+            descendants: false,
+        });
+        self.refresh_operational_logs();
     }
     fn log_binding(&self) -> Option<LogBinding> {
         if !self.connected() || !self.permission(Permission::ReadWorkstationActivity) {
@@ -76,7 +73,7 @@ impl State {
     pub(crate) fn sync_log_visibility(&mut self) {
         self.scoped_logs.set_visible(
             self.page == Page::Jobs
-                && self.activity_tab == ActivityTab::Logs
+                && self.backend.selected_job.is_some()
                 && self.scoped_logs.window_focused,
         );
     }
@@ -84,6 +81,13 @@ impl State {
     pub(crate) fn log_window_focus(&mut self, focused: bool, _: &mut Tx) {
         self.scoped_logs.window_focused = focused;
         self.sync_log_visibility();
+        if focused
+            && self.scoped_logs.visible
+            && !self.scoped_logs.available()
+            && !self.scoped_logs.busy()
+        {
+            self.refresh_operational_logs();
+        }
     }
 
     pub(crate) fn poll_scoped_logs(&mut self) -> bool {
@@ -171,6 +175,7 @@ impl State {
         self.sync_log_binding();
         self.sync_log_visibility();
         self.scoped_logs.complete(&ticket, result);
+        self.scoped_logs.set_following(self.scoped_logs.visible);
         // Poll owns resubscription. A fixture completion remains finite and
         // never recursively invents a stream of backend events.
     }

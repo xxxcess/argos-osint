@@ -10,9 +10,10 @@ Open a file under `docs/diagrams/` in a browser for the HTML page. Matching `.sv
 | --- | --- | --- | --- |
 | Backend NLP preprocessing | Data flow | [nlp-preprocessing.html](diagrams/nlp-preprocessing.html) | [nlp-preprocessing.svg](diagrams/nlp-preprocessing.svg) |
 | Fleetworks service boundaries | Architecture | [fleetworks.html](diagrams/fleetworks.html) | [fleetworks.svg](diagrams/fleetworks.svg) |
+| Native navigation and selected content | Layout | [native-workstation-layout.html](diagrams/native-workstation-layout.html) | [native-workstation-layout.svg](diagrams/native-workstation-layout.svg) |
 | Native identity and shared backend | Architecture | [workspace.html](diagrams/workspace.html) | [workspace.svg](diagrams/workspace.svg) |
-| Backend resources and registered local origin | Architecture | [workspace-scope.html](diagrams/workspace-scope.html) | [workspace-scope.svg](diagrams/workspace-scope.svg) |
-| Protected child lifecycle and retirement recovery | Process | [workspace-lifecycle.html](diagrams/workspace-lifecycle.html) | [workspace-lifecycle.svg](diagrams/workspace-lifecycle.svg) |
+| Backend resources and workstation origin | Architecture | [workspace-scope.html](diagrams/workspace-scope.html) | [workspace-scope.svg](diagrams/workspace-scope.svg) |
+| Protected workstation setup and recovery | Process | [workspace-lifecycle.html](diagrams/workspace-lifecycle.html) | [workspace-lifecycle.svg](diagrams/workspace-lifecycle.svg) |
 | Native connection and registered browser handoff | Process | [native-connections.html](diagrams/native-connections.html) | [native-connections.svg](diagrams/native-connections.svg) |
 | Partial readiness and explicit maintenance | Data flow | [workstation-readiness.html](diagrams/workstation-readiness.html) | [workstation-readiness.svg](diagrams/workstation-readiness.svg) |
 | Workstation registry and active bindings | Architecture | [connect-registry.html](diagrams/connect-registry.html) | [connect-registry.svg](diagrams/connect-registry.svg) |
@@ -40,6 +41,7 @@ Open a file under `docs/diagrams/` in a browser for the HTML page. Matching `.sv
 | Durable jobs and terminal operations | State machine | [jobs-lifecycle.html](diagrams/jobs-lifecycle.html) | [jobs-lifecycle.svg](diagrams/jobs-lifecycle.svg) |
 | Fleetworks documentation routes | Hierarchy | [wiki-navigation.html](diagrams/wiki-navigation.html) | [wiki-navigation.svg](diagrams/wiki-navigation.svg) |
 | Development iteration loops | Process | [dev-loops.html](diagrams/dev-loops.html) | [dev-loops.svg](diagrams/dev-loops.svg) |
+| Build tools, artifacts and persistent-data boundaries | Artifact map | [build-artifacts.html](diagrams/build-artifacts.html) | [build-artifacts.svg](diagrams/build-artifacts.svg) |
 | Native app development loop | Process | [dev-loop-native.html](diagrams/dev-loop-native.html) | [dev-loop-native.svg](diagrams/dev-loop-native.svg) |
 | Runtime service image development loop | Process | [dev-loop-runtime.html](diagrams/dev-loop-runtime.html) | [dev-loop-runtime.svg](diagrams/dev-loop-runtime.svg) |
 | Web development container and browser loop | Data flow | [dev-loop-web.html](diagrams/dev-loop-web.html) | [dev-loop-web.svg](diagrams/dev-loop-web.svg) |

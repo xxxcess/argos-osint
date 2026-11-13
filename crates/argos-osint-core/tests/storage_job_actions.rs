@@ -5,8 +5,6 @@ mod support;
 
 use argos_osint_core::storage::connect_registry;
 use argos_osint_core::storage::connect_registry::RegistryAuthority;
-use argos_osint_core::storage::connect_registry::RegistryError;
-use argos_osint_core::storage::connect_registry::RetirementResult;
 use argos_osint_core::storage::job_actions;
 use argos_osint_core::storage::job_actions::Action;
 use argos_osint_core::storage::job_context::InteractiveAdmission;
@@ -18,7 +16,6 @@ use argos_osint_core::storage::repo::Repository;
 use chrono::Utc;
 use fleetworks_contracts::connect::RegistrationEnsureRequest;
 use fleetworks_contracts::connect::RegistrationReceipt;
-use fleetworks_contracts::connect::WorkspaceName;
 use fleetworks_contracts::context::JobOrigin;
 use fleetworks_contracts::context::OriginSource;
 use fleetworks_contracts::context::RegisteredContext;
@@ -52,7 +49,11 @@ async fn initialize(repo: &Repository) {
         .expect("action schema statements");
 }
 
-async fn register(repo: &Repository, node: &str, name: &str, marker: &str) -> RegistrationReceipt {
+async fn register(
+    repo: &Repository,
+    node: &str,
+    registration_attempt: &str,
+) -> RegistrationReceipt {
     let ip = if node == "node-a" {
         "192.0.2.42"
     } else {
@@ -62,11 +63,9 @@ async fn register(repo: &Repository, node: &str, name: &str, marker: &str) -> Re
         repo,
         &authority("native-fixture"),
         &RegistrationEnsureRequest::new(
-            format!("ensure-{node}-{marker}"),
-            ip.parse().expect("synthetic node IP"),
-            WorkspaceName::new(name).expect("fixture workspace"),
+            format!("ensure-{node}-{registration_attempt}"),
+            Some(ip.parse().expect("synthetic node IP")),
             format!("fixture-installation-{node}"),
-            format!("fixture-workspace-{marker}"),
         ),
     )
     .await
@@ -145,10 +144,11 @@ async fn queued_cancel_is_atomic_idempotent_and_shared_or_attempted_work_is_not_
     };
     let repo = server.repo("argos", "scoped_cancel_actions").await;
     initialize(&repo).await;
-    let receipt = register(&repo, "node-a", "research", "research").await;
+    let receipt = register(&repo, "node-a", "first-registration").await;
     let creator = context(&repo, &receipt).await;
-    let other_receipt = register(&repo, "node-b", "analysis", "analysis").await;
+    let other_receipt = register(&repo, "node-b", "other-registration").await;
     let other = context(&repo, &other_receipt).await;
+    assert_ne!(creator.workstation_id, other.workstation_id);
     enqueue(&repo, &native(&creator, "submit-cancel"), "queued-owned").await;
     let action = native(&creator, "cancel-once");
     let availability =
@@ -185,7 +185,7 @@ async fn queued_cancel_is_atomic_idempotent_and_shared_or_attempted_work_is_not_
             .expect("uncertain-response replay"),
         first
     );
-    let mut response=repo.db().query("SELECT VALUE request_id FROM job_action WHERE job_id='queued-owned' LIMIT 2; SELECT VALUE origin_json FROM job_origin WHERE job_id='queued-owned'; SELECT VALUE [scope_id,deployment_id,registration_id,workstation_id,workspace_id,origin_json] FROM job_request WHERE job_id='queued-owned' LIMIT 2;")
+    let mut response=repo.db().query("SELECT VALUE request_id FROM job_action WHERE job_id='queued-owned' LIMIT 2; SELECT VALUE origin_json FROM job_origin WHERE job_id='queued-owned'; SELECT VALUE [scope_id,deployment_id,registration_id,workstation_id,origin_json] FROM job_request WHERE job_id='queued-owned' LIMIT 2;")
         .await.expect("separate action audit").check().expect("audit statements");
     assert_eq!(
         response.take::<Vec<String>>(0).expect("one action receipt"),
@@ -204,7 +204,6 @@ async fn queued_cancel_is_atomic_idempotent_and_shared_or_attempted_work_is_not_
             creator.deployment_id.clone(),
             creator.registration_id.clone(),
             creator.workstation_id.clone(),
-            creator.workspace_id.clone(),
             before[0].clone(),
         ]],
         "the separate action receipt cannot rewrite or add requester membership"
@@ -279,7 +278,7 @@ async fn atlas_retry_retains_creator_and_browser_revocation_is_checked_at_actual
     };
     let repo = server.repo("argos", "scoped_retry_actions").await;
     initialize(&repo).await;
-    let receipt = register(&repo, "node-a", "research", "research").await;
+    let receipt = register(&repo, "node-a", "first-registration").await;
     let creator = context(&repo, &receipt).await;
     enqueue(&repo, &native(&creator, "submit-retry"), "retry-owned").await;
     repo.db().query("UPDATE type::record('job','retry-owned') SET state='failed',finished_at=time::now() RETURN NONE; UPDATE type::record('task','retry-owned:execute') SET state='failed',attempts=1,finished_at=time::now() RETURN NONE;")
@@ -371,191 +370,75 @@ async fn atlas_retry_retains_creator_and_browser_revocation_is_checked_at_actual
 }
 
 #[tokio::test]
-async fn final_retirement_waits_for_tasks_and_causal_children_then_releases_only_name_claims() {
+async fn accepted_causal_work_survives_registration_replacement_but_node_revocation_fences_children(
+) {
     let Some(server) = Server::start() else {
         return;
     };
-    let repo = server.repo("argos", "complete_workspace_retirement").await;
+    let repo = server.repo("argos", "workstation_causal_fence").await;
     initialize(&repo).await;
-    let default = register(&repo, "node-a", "default", "default").await;
-    assert!(matches!(
-        connect_registry::begin_retirement(
-            &repo,
-            &authority("native-fixture"),
-            &default.registration_id,
-            default.revision
-        )
-        .await,
-        Err(RegistryError::ProtectedDefault)
-    ));
-    let receipt = register(&repo, "node-a", "research", "old-research").await;
-    let creator = context(&repo, &receipt).await;
+    let receipt = register(&repo, "node-a", "first-registration").await;
+    let context = context(&repo, &receipt).await;
     enqueue(
         &repo,
-        &native(&creator, "submit-before-retire"),
-        "retiring-root",
+        &native(&context, "parent-request"),
+        "accepted-parent",
     )
     .await;
-    let relay = authority("web-fixture");
-    let session = connect_registry::create_session(&repo, &relay, &receipt.connect_id)
+    // A migration retires the former registration, not the workstation lifecycle.
+    repo.db()
+        .query("UPDATE $record SET state='legacy_read_only',revision+=1 RETURN NONE")
+        .bind((
+            "record",
+            surrealdb::types::RecordId::new(
+                "connect_registration",
+                receipt.registration_id.clone(),
+            ),
+        ))
         .await
-        .expect("session before retirement");
-    let pending = connect_registry::begin_retirement(
-        &repo,
-        &authority("native-fixture"),
-        &receipt.registration_id,
-        receipt.revision,
-    )
-    .await
-    .expect("admission retirement fence");
-    assert!(connect_registry::validate_session(
-        &repo,
-        &relay,
-        session.token.expose_secret(),
-        Some(session.context.context_revision)
-    )
-    .await
-    .is_err());
-    assert!(matches!(
-        connect_registry::finish_retirement(
-            &repo,
-            &authority("native-fixture"),
-            &receipt.registration_id,
-            pending.revision
-        )
-        .await
-        .expect("active job drain check"),
-        RetirementResult::Pending(_)
-    ));
-    repo.db().query("UPDATE type::record('job','retiring-root') SET state='completed' RETURN NONE; UPDATE type::record('task','retiring-root:execute') SET state='running' RETURN NONE;")
-        .await.expect("terminal job/live task fixture").check().expect("state statements");
-    assert!(matches!(
-        connect_registry::finish_retirement(
-            &repo,
-            &authority("native-fixture"),
-            &receipt.registration_id,
-            pending.revision
-        )
-        .await
-        .expect("active task drain check"),
-        RetirementResult::Pending(_)
-    ));
+        .expect("legacy fence")
+        .check()
+        .expect("legacy state");
     jobs::create_job(
         repo.db(),
         &NewJob {
-            id: "accepted-causal-child",
+            id: "accepted-child",
             kind: "task",
             operation: "fixture_child",
-            parent: Some("retiring-root"),
+            parent: Some("accepted-parent"),
             created_at: Utc::now(),
         },
         &[],
     )
     .await
-    .expect("already accepted parent may extend while retiring");
+    .expect("accepted chain continues under workstation fence");
+    let origin = argos_osint_core::storage::job_context::origin_for_job(&repo, "accepted-child")
+        .await
+        .expect("origin lookup")
+        .expect("causal origin");
+    assert_eq!(origin.registration_id, receipt.registration_id);
+    assert_eq!(origin.workstation_id, receipt.workstation_id);
     repo.db()
-        .query(
-            "UPDATE type::record('task','retiring-root:execute') SET state='completed' RETURN NONE",
-        )
+        .query("UPDATE $node SET state='revoked',revision+=1 RETURN NONE")
+        .bind((
+            "node",
+            surrealdb::types::RecordId::new("connect_workstation", receipt.workstation_id),
+        ))
         .await
-        .expect("task drained")
+        .expect("node fence")
         .check()
-        .expect("task statement");
-    assert!(matches!(
-        connect_registry::finish_retirement(
-            &repo,
-            &authority("native-fixture"),
-            &receipt.registration_id,
-            pending.revision
-        )
-        .await
-        .expect("causal child drain check"),
-        RetirementResult::Pending(_)
-    ));
-    repo.db()
-        .query(
-            "UPDATE type::record('job','accepted-causal-child') SET state='completed' RETURN NONE",
-        )
-        .await
-        .expect("child drained")
-        .check()
-        .expect("child statement");
-    let RetirementResult::Complete(complete) = connect_registry::finish_retirement(
-        &repo,
-        &authority("native-fixture"),
-        &receipt.registration_id,
-        pending.revision,
+        .expect("node state");
+    assert!(jobs::create_job(
+        repo.db(),
+        &NewJob {
+            id: "denied-child",
+            kind: "task",
+            operation: "fixture_child",
+            parent: Some("accepted-parent"),
+            created_at: Utc::now()
+        },
+        &[]
     )
     .await
-    .expect("authoritative final retirement") else {
-        panic!("all associated work is terminal");
-    };
-    assert!(complete.admission_fenced && complete.sessions_revoked && complete.active_work_drained);
-    let replay = connect_registry::begin_retirement(
-        &repo,
-        &authority("native-fixture"),
-        &receipt.registration_id,
-        receipt.revision,
-    )
-    .await
-    .expect("old-revision retirement reconciliation");
-    assert_eq!(
-        connect_registry::finish_retirement(
-            &repo,
-            &authority("native-fixture"),
-            &receipt.registration_id,
-            replay.revision
-        )
-        .await
-        .expect("stable completed receipt"),
-        RetirementResult::Complete(complete)
-    );
-    assert!(
-        jobs::create_job(
-            repo.db(),
-            &NewJob {
-                id: "too-late-child",
-                kind: "task",
-                operation: "fixture_child",
-                parent: Some("retiring-root"),
-                created_at: Utc::now()
-            },
-            &[]
-        )
-        .await
-        .is_err(),
-        "a drained receipt fences subsequent causal child creation"
-    );
-    assert!(
-        connect_registry::ensure(
-            &repo,
-            &authority("native-fixture"),
-            &RegistrationEnsureRequest::new(
-                "old-marker-retry".into(),
-                "192.0.2.42".parse().expect("node IP"),
-                WorkspaceName::new("research").expect("child name"),
-                "fixture-installation-node-a".into(),
-                "fixture-workspace-old-research".into()
-            )
-        )
-        .await
-        .is_err(),
-        "old marker cannot revive tombstone"
-    );
-    let fresh = register(&repo, "node-a", "research", "new-research").await;
-    assert_ne!(fresh.workspace_id, receipt.workspace_id);
-    assert_ne!(fresh.registration_id, receipt.registration_id);
-    assert_eq!(fresh.connect_id, receipt.connect_id);
-    assert_eq!(
-        state(&repo, "connect_registration", &receipt.registration_id)
-            .await
-            .as_deref(),
-        Some("retired")
-    );
-    assert_eq!(
-        state(&repo, "connect_workspace", &receipt.workspace_id)
-            .await
-            .as_deref(),
-        Some("retired")
-    );
+    .is_err());
 }

@@ -11,8 +11,6 @@ pub struct LogQuery {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub workspace_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub descendants: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_rank: Option<i64>,
@@ -48,7 +46,7 @@ impl LogQuery {
         {
             return Err(LogInputError);
         }
-        for value in [&self.job_id, &self.workspace_id].into_iter().flatten() {
+        for value in [&self.job_id].into_iter().flatten() {
             if value.is_empty() || !bounded(value, 512) {
                 return Err(LogInputError);
             }

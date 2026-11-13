@@ -252,40 +252,18 @@ impl State {
     }
 
     pub(crate) fn editor_credential(&self) -> ConnectionCredential {
-        if !self.connection_profiles.editing
-            && self.connection_profiles.selected_id.is_some()
-            && !self.fixture
-        {
-            if let (Load::Ready(catalog), Some(container), Some(id), Some(reference)) = (
-                &self.connection_profiles.catalog,
-                &self.workspaces.container,
-                &self.connection_profiles.selected_id,
-                &self.connection_profiles.credential,
-            ) {
-                if let Some(profile) = catalog.profiles.iter().find(|profile| {
-                    &profile.id == id
-                        && profile.credential == *reference
-                        && profile.origin == self.connection.origin.text
-                }) {
-                    return ConnectionCredential::Saved {
-                        reference: reference.clone(),
-                        container: container.clone(),
-                        catalog_revision: catalog.revision,
-                        profile_id: id.clone(),
-                        profile_revision: profile.revision,
-                    };
-                }
+        match &self.workspaces.container {
+            Some(container) if !self.fixture => {
+                ConnectionCredential::Provisioned(container.clone())
             }
-            return ConnectionCredential::Unavailable;
-        }
-        match &self.connection_profiles.credential {
-            Some(reference) => ConnectionCredential::Reference(reference.clone()),
-            None if !self.connection.token_file.text.is_empty() => {
-                ConnectionCredential::File(PathBuf::from(&self.connection.token_file.text))
-            }
-            None => ConnectionCredential::None,
+            _ if self.fixture => match &self.connection_profiles.credential {
+                Some(reference) => ConnectionCredential::Reference(reference.clone()),
+                None => ConnectionCredential::None,
+            },
+            _ => ConnectionCredential::Unavailable,
         }
     }
+
     fn test_profile(&mut self) {
         self.connection_profiles.cancel_tests();
         self.connection_profiles.test = Load::Loading;

@@ -1,15 +1,12 @@
-//! Synthetic effects over the production Jobs query controller and controls.
+//! Synthetic effects over the production Jobs query controller, adapter and current shell.
 //! No gateway, user home, credential, clipboard or backend job is touched.
 
 use fleetworks_contracts::connect::RegistrationReceipt;
-use rune::Cx;
-use rune::El;
 use rune::Env;
 use rune::Runtime;
 use serde_json::json;
 
 use super::*;
-use crate::jobs_query_views;
 
 fn now() -> DateTime<Utc> {
     DateTime::parse_from_rfc3339("2026-11-12T12:00:00Z")
@@ -20,11 +17,8 @@ fn binding(node: &str) -> JobsBinding {
     let receipt = RegistrationReceipt::new(
         "fixture-deployment".into(),
         format!("fixture-node-{node}"),
-        format!("fixture-child-{node}"),
         format!("fixture-registration-{node}"),
-        format!("192.0.2.42:research-{node}")
-            .parse()
-            .expect("synthetic Connect ID"),
+        Some("192.0.2.42".parse().expect("synthetic IP")),
         1,
     );
     JobsBinding {
@@ -68,172 +62,169 @@ fn page(binding: &JobsBinding, number: usize, next: Option<usize>) -> JobsPage {
     }
 }
 
-struct Scene {
-    jobs: JobsQueryState,
-    sent: Vec<JobsTicket>,
-    selected_job: Option<String>,
-    action_confirmation: bool,
-}
-impl Scene {
-    fn new() -> Self {
-        let mut jobs = JobsQueryState::default();
-        jobs.bind(Some(binding("a")), true);
-        Self {
-            jobs,
-            sent: Vec::new(),
-            selected_job: Some("fixture-selected-job".into()),
-            action_confirmation: true,
-        }
-    }
-}
-fn dispatch(scene: &mut Scene, event: JobsEvent, _: &mut rune::Tx) {
-    let effect = scene.jobs.handle(event, now());
-    if effect.clear_selection {
-        scene.selected_job = None;
-        scene.action_confirmation = false;
-    }
-    if let Some(ticket) = effect.read {
-        scene.sent.push(ticket);
-    }
-}
-fn view(scene: &Scene, _: &mut Cx<Scene>) -> El {
-    let kit = crate::theme::kit();
-    crate::views::scroll(
-        rune::col()
-            .child(jobs_query_views::controls(
-                &scene.jobs,
-                &kit,
-                |scene| &mut scene.jobs,
-                dispatch,
+#[test]
+fn registered_handler_applies_filters_and_pins_requests_while_drafts_change() {
+    use crate::app::Intent;
+    use crate::backend::ReadKind;
+    let mut state = registered_app();
+    state.backend.selected_job = Some("fixture-selected-job".into());
+    state.scoped_jobs.draft.status = JobsStatusFilter::Failed;
+    state.scoped_jobs.draft.time = JobsTime::Hour;
+    state.scoped_jobs.draft.app = TextEdit::new("tools");
+    state.scoped_jobs.draft.operation = TextEdit::new("manual_tool");
+    state.scoped_jobs.draft.kind = TextEdit::new("task");
+    state.scoped_jobs.draft.correlation_id = TextEdit::new("fixture-correlation");
+    state.scoped_jobs.draft.text = TextEdit::new("needle");
+    state.scoped_jobs.draft_edited();
+    assert!(
+        state.scoped_jobs.active_ticket().is_none(),
+        "draft edits alone issue no read"
+    );
+    state.request_jobs(JobsEvent::Apply);
+    assert!(state.backend.selected_job.is_none() && state.job_actions.confirmation.is_none());
+    let first = state
+        .scoped_jobs
+        .active_ticket()
+        .expect("actual registered adapter request")
+        .clone();
+    assert_eq!(
+        state
+            .intents
+            .iter()
+            .filter(|intent| matches!(
+                intent,
+                Intent::BackendRead {
+                    kind: ReadKind::Jobs
+                }
             ))
-            .child(jobs_query_views::pager(&scene.jobs, &kit, dispatch)),
-        "jobs-query-fixture-body",
-    )
+            .count(),
+        1
+    );
+    assert_eq!(
+        serde_json::to_value(&first.query).expect("safe query wire"),
+        json!({"sort":"newest","limit":50,"status":"failed","app":"tools","operation":"manual_tool","kind":"task","correlation_id":"fixture-correlation","text":"needle","since":"2026-11-12T11:00:00Z"})
+    );
+    state.scoped_jobs.draft.text = TextEdit::new("needle edited");
+    state.scoped_jobs.draft_edited();
+    assert!(state.scoped_jobs.dirty && !state.scoped_jobs.can_next());
+    assert_eq!(first.query.text.as_deref(), Some("needle"));
+    state.complete_scoped_jobs(first.clone(), Ok(page(&first.binding, 1, Some(2))));
+    assert!(state.scoped_jobs.page.is_some() && state.scoped_jobs.dirty);
 }
-fn runtime() -> Runtime<Scene> {
+
+#[test]
+fn registered_paging_uses_server_tokens_and_keeps_dashboard_counts_separate() {
+    let mut state = registered_app();
+    state.request_jobs(JobsEvent::Apply);
+    let first = state
+        .scoped_jobs
+        .active_ticket()
+        .expect("newest registered read")
+        .clone();
+    state.complete_scoped_jobs(first.clone(), Ok(page(&first.binding, 1, Some(2))));
+    let observed = state
+        .scoped_jobs
+        .page
+        .as_ref()
+        .expect("validated current page");
+    assert_eq!(observed.matched_total, Some(3));
+    assert_eq!(
+        observed.counts.as_ref().expect("separate dashboard").active,
+        700
+    );
+    assert!(
+        !observed.apps_complete,
+        "incomplete facets cannot claim completeness"
+    );
+    state.request_jobs(JobsEvent::Next);
+    let next = state
+        .scoped_jobs
+        .active_ticket()
+        .expect("actual continuation")
+        .clone();
+    assert_eq!(
+        serde_json::to_value(&next.query).expect("cursor-only continuation"),
+        json!({"sort":"newest","cursor":cursor(2)})
+    );
+    let mut reply = page(&next.binding, 2, Some(3));
+    reply.matched_total = None;
+    state.complete_scoped_jobs(next, Ok(reply));
+    assert_eq!(state.scoped_jobs.page_number(), 2);
+    assert!(
+        state
+            .scoped_jobs
+            .page
+            .as_ref()
+            .expect("second page")
+            .matched_total
+            .is_none(),
+        "unavailable total never becomes zero or a dashboard bucket"
+    );
+    state.request_jobs(JobsEvent::Previous);
+    let previous = state
+        .scoped_jobs
+        .active_ticket()
+        .expect("server-issued previous token")
+        .clone();
+    assert_eq!(
+        serde_json::to_value(&previous.query).expect("fixed first-page cursor"),
+        json!({"sort":"newest","cursor":cursor(1)})
+    );
+    state.complete_scoped_jobs(previous.clone(), Ok(page(&previous.binding, 1, Some(2))));
+    assert_eq!(state.scoped_jobs.page_number(), 1);
+    assert!(!state.scoped_jobs.can_previous());
+    state.page = crate::app::Page::Jobs;
     let mut runtime = Runtime::new(
-        Scene::new(),
-        view,
-        (1000.0, 800.0),
+        state,
+        crate::app::view,
+        (1180.0, 780.0),
         Env {
             system_dark: true,
             scale: 1.0,
         },
     );
     runtime.frame(0.0);
-    runtime
-}
-fn frame(runtime: &mut Runtime<Scene>, clock: &mut f64) {
-    *clock += 1.0 / 60.0;
-    runtime.frame(*clock);
-}
-fn click(runtime: &mut Runtime<Scene>, key: &str, clock: &mut f64) {
-    runtime.update(|_, tx| tx.scroll_into_view(key));
-    frame(runtime, clock);
-    let (x, y) = runtime.find(key).expect("actual production Jobs control");
-    let ([left, top, width, height], _) = runtime
-        .presented("jobs-query-fixture-body")
-        .expect("actual fixture scroll viewport");
     assert!(
-        x >= left && x <= left + width && y >= top && y <= top + height,
-        "{key} must be visible before input; centre=({x},{y}), viewport=({left},{top},{width},{height})"
+        runtime.find("activity-job-fixture-job-1").is_some(),
+        "validated current rows reach the production list"
     );
-    runtime.pointer_down(x, y);
-    runtime.pointer_up(x, y);
-    frame(runtime, clock);
-}
-fn type_text(runtime: &mut Runtime<Scene>, key: &str, text: &str, clock: &mut f64) {
-    click(runtime, key, clock);
-    runtime.paste(text);
-    frame(runtime, clock);
-}
-
-#[test]
-fn real_controls_apply_all_filters_and_pin_the_request_while_drafts_change() {
-    let mut runtime = runtime();
-    let mut clock = 0.0;
-    click(&mut runtime, "jobs-status-failed", &mut clock);
-    click(&mut runtime, "jobs-time-hour", &mut clock);
-    for (key, value) in [
-        ("jobs-filter-app", "tools"),
-        ("jobs-filter-operation", "manual_tool"),
-        ("jobs-filter-kind", "task"),
-        ("jobs-filter-correlation", "fixture-correlation"),
-        ("jobs-filter-text", "needle"),
+    for key in [
+        "jobs-query-controls",
+        "jobs-query-apply",
+        "jobs-page-next",
+        "jobs-page-previous",
     ] {
-        type_text(&mut runtime, key, value, &mut clock);
+        assert!(
+            runtime.find(key).is_none(),
+            "retired query/pager control {key} cannot reappear"
+        );
     }
-    assert!(runtime.state.sent.is_empty(), "drafts alone issue no read");
-    click(&mut runtime, "jobs-query-apply", &mut clock);
-    assert!(runtime.state.selected_job.is_none() && !runtime.state.action_confirmation);
-    assert_eq!(runtime.state.sent.len(), 1);
-    let first = runtime.state.sent[0].clone();
-    assert_eq!(
-        serde_json::to_value(&first.query).expect("safe query wire"),
-        json!({"sort":"newest","limit":50,"status":"failed","app":"tools","operation":"manual_tool","kind":"task","correlation_id":"fixture-correlation","text":"needle","since":"2026-11-12T11:00:00Z"})
+    fn announces_dashboard_bucket(node: &serde_json::Value) -> bool {
+        ["name", "value", "description"].into_iter().any(|field| {
+            node[field]
+                .as_str()
+                .is_some_and(|text| text.contains("700"))
+        }) || node["children"]
+            .as_array()
+            .is_some_and(|children| children.iter().any(announces_dashboard_bucket))
+    }
+    let tree = runtime.accessibility_json();
+    assert!(
+        runtime.elements().iter().any(|element| {
+            element
+                .label
+                .as_deref()
+                .or(element.text.as_deref())
+                .is_some_and(|text| text.contains("Synthetic eligible job 1"))
+        }),
+        "the production list must announce the validated current job"
     );
-    type_text(&mut runtime, "jobs-filter-text", " edited", &mut clock);
-    assert!(runtime.state.jobs.dirty && !runtime.state.jobs.can_next());
-    assert_eq!(first.query.text.as_deref(), Some("needle"));
-    assert!(runtime
-        .state
-        .jobs
-        .complete(&first, Ok(page(&binding("a"), 1, Some(2)))));
-    assert!(runtime.state.jobs.page.is_some() && runtime.state.jobs.dirty);
-}
-
-#[test]
-fn actual_next_previous_use_server_tokens_and_totals_never_come_from_dashboard_buckets() {
-    let mut runtime = runtime();
-    let mut clock = 0.0;
-    click(&mut runtime, "jobs-query-apply", &mut clock);
-    let first = runtime.state.sent.last().expect("first read").clone();
-    runtime.update(|scene, _| {
-        scene
-            .jobs
-            .complete(&first, Ok(page(&binding("a"), 1, Some(2))));
-    });
-    frame(&mut runtime, &mut clock);
-    let tree = runtime.accessibility_json().to_string();
-    assert!(tree.contains("Observed matching jobs: 3"));
-    assert!(tree.contains("Unfiltered root-job dashboard: 700"));
-    assert!(tree.contains("App choices are incomplete"));
-    click(&mut runtime, "jobs-page-next", &mut clock);
-    let next = runtime.state.sent.last().expect("real Next read").clone();
-    assert_eq!(
-        serde_json::to_value(&next.query).expect("cursor-only continuation"),
-        json!({"sort":"newest","cursor":cursor(2)})
+    // Bounds may legitimately contain 700.0; only announced content can
+    // mislabel the unfiltered dashboard bucket as a matching-job total.
+    assert!(
+        !announces_dashboard_bucket(&tree),
+        "the current list cannot mislabel dashboard buckets as matching totals: {tree}"
     );
-    runtime.update(|scene, _| {
-        let mut reply = page(&binding("a"), 2, Some(3));
-        reply.matched_total = None;
-        scene.jobs.complete(&next, Ok(reply));
-    });
-    frame(&mut runtime, &mut clock);
-    assert_eq!(runtime.state.jobs.page_number(), 2);
-    assert!(runtime
-        .accessibility_json()
-        .to_string()
-        .contains("Observed matching jobs: unavailable"));
-    click(&mut runtime, "jobs-page-previous", &mut clock);
-    let previous = runtime
-        .state
-        .sent
-        .last()
-        .expect("real Previous read")
-        .clone();
-    assert_eq!(
-        serde_json::to_value(&previous.query).expect("fixed first-page cursor"),
-        json!({"sort":"newest","cursor":cursor(1)})
-    );
-    runtime.update(|scene, _| {
-        scene
-            .jobs
-            .complete(&previous, Ok(page(&binding("a"), 1, Some(2))));
-    });
-    frame(&mut runtime, &mut clock);
-    assert_eq!(runtime.state.jobs.page_number(), 1);
-    assert!(!runtime.state.jobs.can_previous());
 }
 
 #[test]
@@ -268,10 +259,13 @@ fn stale_query_context_auth_and_expired_cursor_never_repopulate_private_rows() {
         .handle(JobsEvent::Clear, now())
         .read
         .expect("explicit reset");
-    assert_eq!(reset.query.workspace_id.as_deref(), Some("fixture-child-b"));
+    assert!(serde_json::to_value(&reset.query)
+        .expect("query")
+        .get("workspace_id")
+        .is_none());
     assert!(
         reset.query.text.is_none(),
-        "Clear preserves child narrowing"
+        "Clear cannot change registered workstation scope"
     );
     jobs.complete(&reset, Err(ClientError::Status(409)));
     assert_eq!(jobs.status, JobsLoad::RestartRequired);

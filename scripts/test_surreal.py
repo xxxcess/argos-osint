@@ -52,6 +52,7 @@ HOST_ASSETS = {
 # These required-mode fixtures otherwise skip in the ordinary workspace run.
 CUTOVER_CONTRACTS = (
     "storage_connect_registry",
+    "storage_cycle_history",
     "storage_workstation_activity",
     "storage_workstation_paging",
     "storage_job_actions",

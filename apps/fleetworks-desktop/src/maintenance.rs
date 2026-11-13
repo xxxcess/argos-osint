@@ -6,6 +6,7 @@ use fleetworks_contracts::context::MutationContext;
 use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::context::RegisteredContext;
 use fleetworks_contracts::context::ResourceScope;
+use fleetworks_contracts::readiness::ConfiguredMaintenanceInput;
 use fleetworks_contracts::readiness::DatasetKind;
 use fleetworks_contracts::readiness::DatasetRef;
 use fleetworks_contracts::readiness::MaintenanceOperation;
@@ -210,7 +211,7 @@ impl State {
             return Some("Backend maintenance permission required".into());
         }
         let Some(context) = &self.registration.context else {
-            return Some("Register the selected workspace first".into());
+            return Some("Register this workstation first".into());
         };
         let Load::Ready(readiness) = &self.readiness else {
             return Some("Refresh backend checks to observe operation availability".into());
@@ -244,14 +245,24 @@ impl State {
                             .into(),
                     );
                 }
-                let kind = dataset_kind(operation);
-                if kind.is_some_and(|kind| {
-                    self.maintenance
-                        .selected_dataset
+                let Some(input) = self.configured_maintenance_input(operation) else {
+                    return Some(
+                        "This operation has no unambiguous server-configured input".into(),
+                    );
+                };
+                if Some(input.configuration_revision) != self.configuration_revision() {
+                    return Some("Configured operation inputs changed; refresh backend checks and configuration".into());
+                }
+                if let Some(kind) = dataset_kind(operation) {
+                    if input
+                        .dataset
                         .as_ref()
-                        .is_none_or(|dataset| dataset.kind != kind)
-                }) {
-                    return Some("Select a validated backend dataset for this operation".into());
+                        .is_none_or(|dataset| dataset.kind != kind || dataset.validate().is_err())
+                    {
+                        return Some("A validated server-configured dataset is required".into());
+                    }
+                } else if input.dataset.is_some() {
+                    return Some("The configured operation input is inconsistent".into());
                 }
                 if matches!(self.maintenance.receipt, Load::Loading) {
                     return Some("A maintenance request is awaiting its acceptance receipt".into());
@@ -262,22 +273,38 @@ impl State {
         Some("This gateway has not advertised a durable consumer for this operation".into())
     }
 
+    fn configured_maintenance_input(
+        &self,
+        operation: MaintenanceOperation,
+    ) -> Option<&ConfiguredMaintenanceInput> {
+        let Load::Ready(readiness) = &self.readiness else {
+            return None;
+        };
+        let mut matches = readiness
+            .configured_inputs
+            .iter()
+            .filter(|input| input.operation == operation);
+        let input = matches.next()?;
+        matches.next().is_none().then_some(input)
+    }
+
     pub fn preview_maintenance(&mut self, operation: MaintenanceOperation) {
         if let Some(reason) = self.maintenance_disabled_reason(operation) {
             self.maintenance.message = Some(reason);
             return;
         }
-        let (Some(context), Some(configuration_revision)) =
-            (&self.registration.context, self.configuration_revision())
-        else {
+        let (Some(context), Some(input)) = (
+            &self.registration.context,
+            self.configured_maintenance_input(operation),
+        ) else {
             return;
         };
         self.maintenance.confirmation = Some(MaintenanceConfirmation {
             operation,
             context: context.clone(),
             origin_revision: self.origin_revision,
-            configuration_revision,
-            dataset: dataset_kind(operation).and(self.maintenance.selected_dataset.clone()),
+            configuration_revision: input.configuration_revision,
+            dataset: input.dataset.clone(),
         });
         self.reveal_control("maintenance-confirmation");
     }
@@ -289,6 +316,12 @@ impl State {
         if confirmation.origin_revision != self.origin_revision
             || self.registration.context.as_ref() != Some(&confirmation.context)
             || self.configuration_revision() != Some(confirmation.configuration_revision)
+            || self
+                .configured_maintenance_input(confirmation.operation)
+                .is_none_or(|input| {
+                    input.configuration_revision != confirmation.configuration_revision
+                        || input.dataset != confirmation.dataset
+                })
         {
             self.maintenance.message =
                 Some("Origin or backend configuration changed; review the operation again".into());
@@ -455,7 +488,7 @@ impl GatewayEffects {
                     || receipt.dataset != request.dataset
                     || receipt.origin.request_id != request.request_id
                     || receipt.origin.registration_id != confirmation.context.registration_id
-                    || receipt.origin.workspace_id != confirmation.context.workspace_id
+                    || receipt.origin.workspace_id.is_some()
                     || receipt.origin.workstation_id != confirmation.context.workstation_id
                     || receipt.origin.deployment_id != confirmation.context.deployment_id
                     || receipt.origin.configuration_revision != confirmation.configuration_revision

@@ -232,11 +232,7 @@ export function JobDropUp({ jobs }: { jobs: StatusJob[] }) {
             s.jobDot,
             {
               backgroundColor: tone,
-              boxShadow: ["failed", "running", "queued", "stale"].includes(
-                state,
-              )
-                ? `0 0 9px 3px ${tone}`
-                : "none",
+              boxShadow: "none",
             },
           ]}
         />

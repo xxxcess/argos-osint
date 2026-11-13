@@ -10,7 +10,6 @@ use argos_osint_core::storage::repo::Repository;
 use argos_osint_core::storage::setup_jobs;
 use argos_osint_core::storage::tx;
 use fleetworks_contracts::connect::RegistrationEnsureRequest;
-use fleetworks_contracts::connect::WorkspaceName;
 use fleetworks_contracts::context::JobOrigin;
 use fleetworks_contracts::context::MutationContext;
 use fleetworks_contracts::context::OriginSource;
@@ -45,10 +44,8 @@ async fn initialize(repo: &Repository) {
 async fn context(repo: &Repository, ip: &str, marker: &str) -> RegisteredContext {
     let input = RegistrationEnsureRequest::new(
         format!("ensure-{marker}"),
-        ip.parse().expect("synthetic native IP"),
-        WorkspaceName::new("research").expect("child name"),
+        Some(ip.parse().expect("synthetic native IP")),
         format!("synthetic-install-{marker}"),
-        format!("synthetic-folder-{marker}"),
     );
     let authority = authority();
     let receipt = connect_registry::ensure(repo, &authority, &input)

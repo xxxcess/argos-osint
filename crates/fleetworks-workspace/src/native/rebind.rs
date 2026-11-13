@@ -1,11 +1,11 @@
 //! Persist-before-network workstation IP rebinding and immutable receipt history.
 
+use crate::native::legacy_connect::ConnectId;
+use crate::native::legacy_connect::RegistrationEnsureRequest;
+use crate::native::legacy_connect::RegistrationReceipt;
+use crate::native::legacy_connect::RegistrationStatus;
 use anyhow::Context;
 use anyhow::Result;
-use fleetworks_contracts::connect::ConnectId;
-use fleetworks_contracts::connect::RegistrationEnsureRequest;
-use fleetworks_contracts::connect::RegistrationReceipt;
-use fleetworks_contracts::connect::RegistrationStatus;
 use serde::Deserialize;
 use serde::Serialize;
 

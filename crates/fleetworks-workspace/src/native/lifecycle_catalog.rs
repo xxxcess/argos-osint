@@ -2,8 +2,8 @@
 
 use std::collections::BTreeSet;
 
+use crate::native::legacy_connect::RegistrationReceipt;
 use anyhow::Result;
-use fleetworks_contracts::connect::RegistrationReceipt;
 
 use super::state::Catalog;
 use super::state::OperationPhase;

@@ -48,6 +48,20 @@ export async function proxyRust(
   if (!method) return failure(404, "Unknown API route");
   if (request.method !== method) return failure(405, "Method not allowed");
   const url = new URL(request.url);
+  if (
+    [...url.searchParams.keys()].some((key) =>
+      [
+        "workspace",
+        "workspace_id",
+        "workspace_name",
+        "workspace_marker",
+      ].includes(key),
+    )
+  )
+    return failure(
+      400,
+      "Legacy workspace scope is unsupported; reconnect with a workstation Connect ID",
+    );
   try {
     await requireWebBoundary(request, method === "POST");
   } catch (error) {
@@ -120,7 +134,7 @@ export async function proxyRust(
   } catch {
     return failure(
       503,
-      "Workspace service unavailable; retry or inspect server diagnostics",
+      "Backend service unavailable; retry or inspect server diagnostics",
     );
   }
 }

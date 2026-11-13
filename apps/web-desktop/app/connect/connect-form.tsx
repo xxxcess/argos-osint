@@ -72,7 +72,7 @@ export function ConnectForm({
         </Text>
         <Copy>
           Enter the Connect ID returned by Fleetworks for an existing registered
-          workstation and workspace. Your browser can use a different IP.
+          workstation. Its identity stays the same when its IP changes.
         </Copy>
         <Panel title="Registered context">
           <Text nativeID="connect-id-label" style={styles.label}>
@@ -84,8 +84,8 @@ export function ConnectForm({
             autoCapitalize="none"
             autoCorrect={false}
             editable={!pending}
-            maxLength={176}
-            placeholder="192.168.1.42:research"
+            maxLength={128}
+            placeholder="Workstation ID from the native app"
             placeholderTextColor={colors.muted}
             value={connectId}
             onChangeText={setConnectId}
@@ -101,7 +101,7 @@ export function ConnectForm({
                 void connect();
               }}
               disabled={pending || !connectId}
-              label="Connect registered workspace"
+              label="Connect registered workstation"
               variant="primary"
             >
               {pending ? "Verifying…" : "Connect"}

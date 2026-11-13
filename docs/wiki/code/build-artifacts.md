@@ -34,7 +34,12 @@ Within a selected graph:
 
 `check`/Clippy can populate libraries/metadata without producing an app; `cargo fmt` changes source only.
 
-Embedded compatibility tests deliberately exercise the library engine rather than the independently deployed database. The network backend still uses its configured SurrealDB service; Jobs owns its embedded RocksDB delivery queue. Native-only builds need neither backend engines nor Docker. [Storage boundaries](jobs-persistence.md)
+| Owner / use | RocksDB role |
+| --- | --- |
+| Embedded domain QA — [core manifest](../../../crates/argos-osint-core/Cargo.toml) | SurrealDB's `kv-rocksdb` engine runs inside the isolated test process. |
+| Production Jobs — [Jobs manifest](../../../crates/fleetworks-jobs/Cargo.toml) | The same `surrealdb-rocksdb` binding supplies the C++ engine for durable dispatch. Backend network-storage builds still include this queue dependency. |
+
+The native API client stays engine-free. A backend using a separate network SurrealDB service still builds Jobs' embedded RocksDB queue. [Store ownership and boundaries](jobs-persistence.md)
 
 ### Build cost signals
 

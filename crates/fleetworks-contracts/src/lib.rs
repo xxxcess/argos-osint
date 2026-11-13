@@ -8,6 +8,7 @@ pub mod classifier_activation;
 pub mod connect;
 pub mod context;
 pub mod cycle_history;
+pub mod dataset_upload;
 pub mod operational_logs;
 pub mod pairing;
 pub mod readiness;

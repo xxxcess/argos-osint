@@ -577,6 +577,11 @@ mod native {
                 ("redesign-seed", redesign_scenes::seed),
                 ("redesign-seed-ready", redesign_scenes::seed_ready),
                 (
+                    "redesign-seed-invalid-header",
+                    redesign_scenes::seed_invalid_header,
+                ),
+                ("redesign-seed-uploading", redesign_scenes::seed_uploading),
+                (
                     "redesign-seed-confirmation",
                     redesign_scenes::seed_confirmation,
                 ),

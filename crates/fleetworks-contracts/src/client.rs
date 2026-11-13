@@ -253,17 +253,18 @@ impl Client {
         mut file: tokio::fs::File,
         size: u64,
     ) -> Result<DatasetUpload, ClientError> {
-        use crate::readiness::DatasetKind;
-        let (wire_kind, limit) = match kind {
-            DatasetKind::ActorCatalog => ("actor_catalog", 256 * 1024 * 1024),
-            DatasetKind::ClassifierTraining => ("classifier_training", 128 * 1024 * 1024),
-        };
-        if size == 0 || size > limit {
-            return Err(ClientError::RequestTooLarge);
-        }
-        if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        use crate::dataset_upload::DatasetUploadRequest;
+        use crate::dataset_upload::DatasetUploadTicket;
+        use crate::dataset_upload::DATASET_UPLOADS_PATH;
+
+        if self.registration.is_none() {
             return Err(ClientError::InvalidRequest);
         }
+        if size == 0 || size > crate::dataset_upload::dataset_upload_limit(kind) {
+            return Err(ClientError::RequestTooLarge);
+        }
+        let upload = DatasetUploadRequest::new(kind, sha256.to_owned(), size)
+            .map_err(|_| ClientError::InvalidRequest)?;
         let metadata = file
             .metadata()
             .await
@@ -274,6 +275,10 @@ impl Client {
         file.rewind()
             .await
             .map_err(|_| ClientError::InvalidRequest)?;
+        let ticket: DatasetUploadTicket = self.post(DATASET_UPLOADS_PATH, &upload).await?;
+        ticket
+            .validate()
+            .map_err(|_| ClientError::InvalidResponse)?;
         let stream =
             futures_util::stream::try_unfold((file, 0u64), move |(mut file, read)| async move {
                 let mut chunk = vec![0u8; 64 * 1024];
@@ -292,8 +297,7 @@ impl Client {
                 Ok(Some((chunk, (file, read))))
             });
         let request = self
-            .request(Method::POST, "/api/v1/workstation/datasets/upload")?
-            .query(&[("kind", wire_kind), ("sha256", sha256)])
+            .request(Method::PUT, &ticket.upload_path)?
             .header(header::CONTENT_TYPE, "text/csv")
             .header(header::CONTENT_LENGTH, size)
             .timeout(Duration::from_secs(600))

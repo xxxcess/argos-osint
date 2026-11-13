@@ -302,3 +302,106 @@ fn accepted_reseed_cannot_use_a_cached_ready_catalog_to_enable_index() {
         .maintenance_disabled_reason(MaintenanceOperation::ReindexActors)
         .is_none());
 }
+
+#[tokio::test]
+async fn invalid_csv_columns_fail_locally_before_any_upload_link_or_stream_request() {
+    use std::io::ErrorKind;
+    let directory = tempfile::tempdir().expect("isolated selected CSV");
+    for (kind, content) in [
+        (DatasetKind::ActorCatalog, "sample_id,title\nfixture,Example\n"),
+        (DatasetKind::ClassifierTraining, "actor_id,actor_name,actor_type,aliases,name_normalized\nfixture,Example,group,[],example\n"),
+    ] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let client = Client::new(&format!("http://{}", listener.local_addr().unwrap()), None).unwrap();
+        let path = directory.path().join("selected.csv");
+        std::fs::write(&path, content).unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), upload(&client, LocalDataset { path, kind }))
+            .await.expect("invalid columns must fail locally without waiting for HTTP");
+        assert!(result.as_ref().is_err_and(|error| error.to_ascii_lowercase().contains("column")), "a file for the other purpose must report a local column error");
+        assert!(matches!(listener.accept(), Err(error) if error.kind() == ErrorKind::WouldBlock),
+            "header validation must finish before requesting an upload URL or sending bytes");
+    }
+}
+
+#[test]
+fn valid_local_actor_header_is_checked_without_changing_the_hashed_upload_bytes() {
+    use std::io::Read;
+    let directory = tempfile::tempdir().expect("isolated selected CSV");
+    let path = directory.path().join("selected.csv");
+    let content = b"\xef\xbb\xbfactor_id,actor_name,actor_type,aliases,name_normalized,description\r\nfixture,Example,group,[],example,\"comma, and quoted content\"\r\n";
+    std::fs::write(&path, content).unwrap();
+    let (mut file, digest, size) = open_and_hash(LocalDataset {
+        path,
+        kind: DatasetKind::ActorCatalog,
+    })
+    .unwrap();
+    assert_eq!(size, content.len() as u64);
+    assert_eq!(digest, format!("{:x}", Sha256::digest(content)));
+    let mut actual = Vec::new();
+    file.read_to_end(&mut actual).unwrap();
+    assert_eq!(
+        actual, content,
+        "header inspection must rewind the same file for upload"
+    );
+}
+
+#[test]
+fn csv_hashing_checks_cancellation_between_bounded_chunks() {
+    struct CancelAfterChunk<'a> {
+        cancel: &'a AtomicBool,
+        reads: usize,
+    }
+    impl std::io::Read for CancelAfterChunk<'_> {
+        fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+            self.reads += 1;
+            assert_eq!(
+                self.reads, 1,
+                "cancelled preparation cannot read another chunk"
+            );
+            assert_eq!(output.len(), 64 * 1024);
+            output.fill(b'x');
+            self.cancel.store(true, Ordering::Release);
+            Ok(output.len())
+        }
+    }
+    let cancel = AtomicBool::new(false);
+    let mut reader = CancelAfterChunk {
+        cancel: &cancel,
+        reads: 0,
+    };
+    assert!(
+        hash_selected_bytes(&mut reader, 256 * 1024 * 1024, 128 * 1024, &cancel)
+            .unwrap_err()
+            .contains("cancelled")
+    );
+    assert_eq!(reader.reads, 1);
+}
+
+#[tokio::test]
+async fn cancelled_csv_preparation_retains_capacity_until_blocking_work_exits() {
+    let slots = preparation_slots();
+    let permit = slots.clone().acquire_owned().await.unwrap();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let guard = CancelPreparation(Arc::clone(&cancel));
+    let (entered, started) = tokio::sync::oneshot::channel();
+    let (release, finish) = std::sync::mpsc::channel();
+    let work = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        entered.send(()).unwrap();
+        finish.recv().unwrap();
+    });
+    started.await.unwrap();
+    drop(guard);
+    assert!(cancel.load(Ordering::Acquire));
+    assert!(
+        slots.clone().try_acquire_owned().is_err(),
+        "cancellation must not admit a replacement reader while blocking work is alive"
+    );
+    release.send(()).unwrap();
+    work.await.unwrap();
+    let _next = tokio::time::timeout(std::time::Duration::from_secs(5), slots.acquire_owned())
+        .await
+        .expect("completed preparation must release capacity")
+        .unwrap();
+}

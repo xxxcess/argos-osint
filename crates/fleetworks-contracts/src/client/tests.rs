@@ -190,6 +190,191 @@ async fn serve_once(status: &str, headers: &str, body: &[u8]) -> (String, JoinHa
     (format!("http://{address}"), handle)
 }
 
+async fn selected_upload_file(bytes: &[u8]) -> (std::path::PathBuf, tokio::fs::File) {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "fleetworks-upload-test-{}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    ));
+    let mut file = tokio::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .await
+        .unwrap();
+    file.write_all(bytes).await.unwrap();
+    file.flush().await.unwrap();
+    (path, file)
+}
+
+async fn upload_request(socket: &mut tokio::net::TcpStream) -> (String, Vec<u8>) {
+    let mut header = Vec::new();
+    while !header.ends_with(b"\r\n\r\n") {
+        header.push(socket.read_u8().await.unwrap());
+        assert!(header.len() <= 8192);
+    }
+    let header = String::from_utf8(header).unwrap().to_ascii_lowercase();
+    let size = header
+        .lines()
+        .find_map(|line| line.strip_prefix("content-length:"))
+        .unwrap()
+        .trim()
+        .parse::<usize>()
+        .unwrap();
+    assert!(size < 256 * 1024, "synthetic upload fixture stays bounded");
+    let mut body = vec![0; size];
+    socket.read_exact(&mut body).await.unwrap();
+    (header, body)
+}
+
+#[tokio::test]
+async fn dataset_upload_requests_then_streams_only_the_issued_same_origin_path() {
+    use sha2::Digest;
+
+    let mut payload = crate::dataset_upload::ACTOR_CSV_COLUMNS.join(",") + "\n";
+    for index in 0..2000 {
+        payload.push_str(&format!("{index},Actor {index},person,[],actor {index}\n"));
+    }
+    let payload = payload.into_bytes();
+    assert!(payload.len() > MAX_REQUEST_BYTES);
+    let sha256 = format!("{:x}", sha2::Sha256::digest(&payload));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let expected = payload.clone();
+    let hash = sha256.clone();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let (start, body) = upload_request(&mut socket).await;
+        assert!(start.starts_with("post /api/v1/workstation/datasets/uploads http/1.1\r\n"));
+        let metadata: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(metadata["kind"], "actor_catalog");
+        assert_eq!(metadata["sha256"], hash);
+        assert_eq!(metadata["size_bytes"], expected.len());
+        let ticket = br#"{"upload_path":"/api/v1/workstation/datasets/uploads/issued-id","expires_in_seconds":300}"#;
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 201 Created\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    ticket.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        socket.write_all(ticket).await.unwrap();
+        drop(socket);
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let (put, bytes) = upload_request(&mut socket).await;
+        assert!(put.starts_with("put /api/v1/workstation/datasets/uploads/issued-id http/1.1\r\n"));
+        assert!(put.contains("\r\ncontent-type: text/csv\r\n"));
+        assert_eq!(bytes, expected);
+        for headers in [&start, &put] {
+            assert!(headers.contains("\r\nauthorization: bearer fixture-token\r\n"));
+            assert!(headers.contains("\r\nx-fleetworks-registration: logs-registration\r\n"));
+            assert!(headers.contains("\r\nx-fleetworks-registration-revision: 3\r\n"));
+            assert!(!headers.lines().next().unwrap().contains('?'));
+        }
+        let response = serde_json::json!({"dataset":{"id":"dataset-issued","kind":"actor_catalog","sha256":hash,"size_bytes":expected.len()},"expires_in_seconds":86400}).to_string();
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 201 Created\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+    let (path, file) = selected_upload_file(&payload).await;
+    let uploaded = log_client(&origin)
+        .upload_dataset(
+            crate::readiness::DatasetKind::ActorCatalog,
+            &sha256,
+            file,
+            payload.len() as u64,
+        )
+        .await
+        .unwrap();
+    assert_eq!(uploaded.dataset.id, "dataset-issued");
+    tokio::time::timeout(std::time::Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::fs::remove_file(path).await.unwrap();
+}
+
+#[tokio::test]
+async fn dataset_upload_rejects_untrusted_ticket_before_streaming() {
+    for path in [
+        "https://other.invalid/api/v1/workstation/datasets/uploads/id",
+        "//other.invalid/api/v1/workstation/datasets/uploads/id",
+        "/api/v1/workstation/datasets/uploads/id?secret=private",
+        "/api/v1/workstation/datasets/uploads/../id",
+    ] {
+        let body = serde_json::json!({"upload_path":path,"expires_in_seconds":300}).to_string();
+        let (origin, request) = serve_once("201 Created", "", body.as_bytes()).await;
+        let (path, file) = selected_upload_file(b"synthetic").await;
+        assert_eq!(
+            log_client(&origin)
+                .upload_dataset(
+                    crate::readiness::DatasetKind::ActorCatalog,
+                    &"a".repeat(64),
+                    file,
+                    9
+                )
+                .await
+                .unwrap_err(),
+            ClientError::InvalidResponse
+        );
+        assert!(request
+            .await
+            .unwrap()
+            .starts_with("POST /api/v1/workstation/datasets/uploads HTTP/1.1\r\n"));
+        tokio::fs::remove_file(path).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn dataset_upload_requires_registration_and_exact_local_size_before_network() {
+    let (path, file) = selected_upload_file(b"synthetic").await;
+    let client = Client::new("http://127.0.0.1:1", None).unwrap();
+    assert_eq!(
+        client
+            .upload_dataset(
+                crate::readiness::DatasetKind::ActorCatalog,
+                &"a".repeat(64),
+                file,
+                9
+            )
+            .await
+            .unwrap_err(),
+        ClientError::InvalidRequest
+    );
+    tokio::fs::remove_file(path).await.unwrap();
+    let (path, file) = selected_upload_file(b"synthetic").await;
+    assert_eq!(
+        log_client("http://127.0.0.1:1")
+            .upload_dataset(
+                crate::readiness::DatasetKind::ActorCatalog,
+                &"a".repeat(64),
+                file,
+                8
+            )
+            .await
+            .unwrap_err(),
+        ClientError::InvalidRequest
+    );
+    tokio::fs::remove_file(path).await.unwrap();
+}
+
 #[test]
 fn canonical_profile_origin_reuses_transport_policy_without_requiring_credentials() {
     assert_eq!(

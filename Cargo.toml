@@ -25,6 +25,7 @@ rust-version = "1.95"
 anyhow = "1"
 chrono = { version = "0.4", features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
+csv = "1.4"
 dirs = "5"
 futures-util = "0.3"
 regex = "1"

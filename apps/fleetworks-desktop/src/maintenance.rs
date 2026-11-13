@@ -1,6 +1,10 @@
 //! Explicit dataset transfer and confirmed backend maintenance admission.
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::OnceLock;
 
 use fleetworks_contracts::context::MutationContext;
 use fleetworks_contracts::context::Permission;
@@ -597,20 +601,51 @@ impl GatewayEffects {
 
 async fn upload(client: &Client, selection: LocalDataset) -> Result<DatasetUpload, String> {
     let kind = selection.kind;
-    let (file, sha256, size) = tokio::task::spawn_blocking(move || open_and_hash(selection))
+    let cancel = Arc::new(AtomicBool::new(false));
+    let _cancel = CancelPreparation(Arc::clone(&cancel));
+    let permit = preparation_slots()
+        .acquire_owned()
         .await
-        .map_err(|_| "Dataset verification worker stopped".to_owned())??;
+        .map_err(|_| "CSV preparation is unavailable".to_owned())?;
+    let (file, sha256, size) = tokio::task::spawn_blocking(move || {
+        // The blocking reader retains capacity even if its awaiting UI task is dropped.
+        let _permit = permit;
+        open_and_hash_cancellable(selection, &cancel)
+    })
+    .await
+    .map_err(|_| "Dataset verification worker stopped".to_owned())??;
     client
         .upload_dataset(kind, &sha256, tokio::fs::File::from_std(file), size)
         .await
         .map_err(|error| error.to_string())
 }
 
+fn preparation_slots() -> Arc<tokio::sync::Semaphore> {
+    static SLOTS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    Arc::clone(SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1))))
+}
+
+struct CancelPreparation(Arc<AtomicBool>);
+
+impl Drop for CancelPreparation {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+#[cfg(test)]
 fn open_and_hash(selection: LocalDataset) -> Result<(std::fs::File, String, u64), String> {
-    use std::io::Read;
+    open_and_hash_cancellable(selection, &AtomicBool::new(false))
+}
+
+fn open_and_hash_cancellable(
+    selection: LocalDataset,
+    cancel: &AtomicBool,
+) -> Result<(std::fs::File, String, u64), String> {
     use std::io::Seek;
     use std::os::unix::fs::MetadataExt;
     use std::os::unix::fs::OpenOptionsExt;
+    check_preparation_cancelled(cancel)?;
     let metadata = std::fs::symlink_metadata(&selection.path)
         .map_err(|_| "Cannot inspect the selected CSV".to_owned())?;
     let limit = dataset_limit(selection.kind);
@@ -636,10 +671,35 @@ fn open_and_hash(selection: LocalDataset) -> Result<(std::fs::File, String, u64)
     {
         return Err("Selected CSV identity changed before it was opened".into());
     }
+    fleetworks_contracts::dataset_upload::validate_csv_header(&mut file, selection.kind)
+        .map_err(|error| error.to_string())?;
+    check_preparation_cancelled(cancel)?;
+    file.rewind()
+        .map_err(|_| "Cannot rewind the validated CSV".to_owned())?;
+    let (sha256, count) = hash_selected_bytes(&mut file, limit, opened.len(), cancel)?;
+    file.rewind()
+        .map_err(|_| "Cannot rewind the selected CSV".to_owned())?;
+    Ok((file, sha256, count))
+}
+
+fn check_preparation_cancelled(cancel: &AtomicBool) -> Result<(), String> {
+    if cancel.load(Ordering::Acquire) {
+        return Err("CSV preparation was cancelled".into());
+    }
+    Ok(())
+}
+
+fn hash_selected_bytes(
+    file: &mut impl std::io::Read,
+    limit: u64,
+    expected_size: u64,
+    cancel: &AtomicBool,
+) -> Result<(String, u64), String> {
     let mut sha = Sha256::new();
     let mut count = 0_u64;
     let mut bytes = vec![0; 64 * 1024];
     loop {
+        check_preparation_cancelled(cancel)?;
         let read = file
             .read(&mut bytes)
             .map_err(|_| "Cannot read the selected CSV".to_owned())?;
@@ -652,13 +712,11 @@ fn open_and_hash(selection: LocalDataset) -> Result<(std::fs::File, String, u64)
         }
         sha.update(&bytes[..read]);
     }
-    if count != opened.len() {
+    if count != expected_size {
         return Err("Selected CSV size changed while hashing".into());
     }
     let sha256 = format!("{:x}", sha.finalize());
-    file.rewind()
-        .map_err(|_| "Cannot rewind the selected CSV".to_owned())?;
-    Ok((file, sha256, count))
+    Ok((sha256, count))
 }
 
 pub fn dataset_kind_label(kind: DatasetKind) -> &'static str {

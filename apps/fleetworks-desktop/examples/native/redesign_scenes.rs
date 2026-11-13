@@ -171,6 +171,21 @@ pub fn seed_confirmation(state: &mut State) {
     state.preview_maintenance(MaintenanceOperation::SeedActors);
 }
 
+pub fn seed_invalid_header(state: &mut State) {
+    seed(state);
+    let error = fleetworks_contracts::dataset_upload::validate_csv_header(
+        &mut "sample_id,title\nfixture,Example\n".as_bytes(),
+        DatasetKind::ActorCatalog,
+    )
+    .expect_err("training-shaped columns do not describe an actor CSV");
+    state.maintenance.upload = Load::Failed(error.to_string());
+}
+
+pub fn seed_uploading(state: &mut State) {
+    seed(state);
+    state.maintenance.upload = Load::Loading;
+}
+
 pub fn cycles(state: &mut State) {
     base(state);
     super::models_ready(state);

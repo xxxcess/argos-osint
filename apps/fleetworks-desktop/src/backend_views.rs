@@ -738,8 +738,13 @@ pub(crate) fn maintenance(state: &State, kit: &Kit) -> El {
             .build(kit).key("maintenance-refresh"));
     match &state.maintenance.upload {
         Load::Loading => {
-            body =
-                body.child(line("Validating and uploading the selected CSV…", kit).role("status"))
+            body = body.child(
+                line(
+                    "Checking CSV columns locally, then streaming to the backend…",
+                    kit,
+                )
+                .role("status"),
+            )
         }
         Load::Failed(error) => body = body.child(line(error.clone(), kit).role("alert")),
         Load::Ready(upload) => {

@@ -9,11 +9,12 @@ inherits `workspace.package.version` from `Cargo.toml` with
 `version.workspace = true`.
 Database schema numbers and provider/API/model versions are separate contracts.
 
-The initial baseline is **0.1.0**. No historical tag or release is implied.
-`release-please-config.json` records a bootstrap commit, excluding earlier
-history from the first generated changelog. After the first generated release,
-Release Please tracks subsequent releases instead of the bootstrap boundary.
-Do not move that boundary to hide unreleased work.
+`Cargo.toml`, local-package entries in `Cargo.lock`, `version.txt` and the retained
+`.release-please-manifest.json` agree on the source baseline. Published artifact
+versions are calculated separately from reachable commits and release tags.
+`release-please-config.json` retains the historical bootstrap boundary; the old
+automatic Release Please workflow is retired. Do not move that boundary to hide
+unreleased work or rewrite shipped tags.
 
 ## Commit and PR convention
 
@@ -105,98 +106,120 @@ OpenCode `architect` agent prepares messages/impact only; it does not stage or c
 OpenCode `coder` and `architect` can load `argos-commit`; `/ecc-commit` routes to it.
 `argos-plan`, `argos-implement`, editors and reviewers carry the same policy.
 Never manually edit release versions/changelog for an ordinary feature/fix.
-Release Please owns their synchronized update. Explicit release/baseline repair
-tasks may change them together and must pass the checker.
+Artifact CI calculates versions without editing those source files. Explicit
+maintainer baseline/repair tasks may update them together and must pass the checker.
 
 ## Release automation
 
-[Release Please](https://github.com/googleapis/release-please-action) runs on
-pushes to `main`, or manual dispatch on `main`. It collects eligible commits
-since the last release and maintains a release PR. Merging a reviewed, green
-release PR authorizes its `vX.Y.Z` tag and GitHub Release on the next run.
-Release Please publishes the tag and release notes. The
-[Fleetworks workflow](ci.md#fleetworksyml--scoped-branch-checks) separately
-verifies native app builds and direct isolated Compose startup from an exact
-source revision. The separate [candidate workflow](../../../.github/workflows/fleetworks-candidate.yml)
-produces downloadable native bundles and Linux image archives for release review. Development server images are tagged with the same workspace SemVer, read from `version.txt` with no leading `v`, and also keep a `:local` alias. Git tags keep the `v` prefix. [Deployment guide](../../../deploy/README.md)
+[CI event and scope map](ci.md) · [Native checks and publication](../../diagrams/native-release.html)
 
-The release PR updates:
+| Landing branch | Artifact channel | Version shape |
+| --- | --- | --- |
+| `nightly` | `nightly` | `X.Y.Z-nightly.<commit-count>.g<full-sha>` |
+| `dev`, `main` | `stable` | `X.Y.Z+<branch>.g<full-sha>` |
 
-- The canonical workspace version in `Cargo.toml`.
-- The local workspace package versions in `Cargo.lock`. Dependency versions stay pinned.
-- `version.txt`, the simple strategy's synchronized mirror.
-- `.release-please-manifest.json`, the automation's synchronized release state.
-- `CHANGELOG.md` and GitHub release notes.
+The [release planner](../../../scripts/fleetworks_release.py) runs without network
+writes. It takes an exact source/scope plan, finds reachable published ancestors,
+and applies the highest Conventional Commit impact since those releases. Stable
+`dev` and `main` share reachable stable history: promoting already released dev
+commits does not bump them again. Stable excludes nightly prereleases as release
+anchors, so nightly publication cannot hide unreleased stable changes.
 
-The `simple` strategy plus explicit
-[TOML updaters](https://github.com/googleapis/release-please/blob/main/docs/customizing.md#updating-arbitrary-toml-files)
-preserves inherited crate versions. This virtual workspace has no root
-`[package]`, so the built-in Rust updater is not used. Adding a crate requires
-updating the lockfile selector and version checks together. The selector uses
-`@.name.value` because Release Please’s TOML parser wraps string values with
-source-position metadata; this is tested against its actual updater. The lightweight
-checker reads the explicit version tables; Cargo CI remains the full TOML and
-dependency-resolution check. `node scripts/release_check.mjs versions vX.Y.Z`
-also checks a prospective tag against the workspace version.
+Historical untyped feature commits conservatively contribute patch impact and
+are reported as `untyped_commits`; they are not silently discarded. Recorded PR
+titles and breaking footers in actual merge commits retain their impact. New
+malformed breaking commits still fail policy. The PR title/body gate and
+integration first-parent landing checks permit feature WIP without requiring
+history rewrites.
 
-The **Commit policy** workflow validates PR title/body on creation, edits and
-updates; validates every new commit pushed to `main`; checks version equality;
-and runs the offline release-policy and agent-registration tests. Feature branches can contain
-WIP commits because their final squash commit is the release input. Agents
-still use Conventional Commits for their own commits. Historical commits before
-the workflow are not rewritten. Workflow actions added here are pinned to full
-SHAs; review pins when updating them.
+Every artifact identity includes its full source SHA. Maintenance-only changes
+can rebuild an affected component with the same base SemVer and a distinct build
+identity. The workspace baseline remains a floor; source version files and
+changelog are not rewritten on every build.
+
+### Artifact and channel identities
+
+| Output | Identity / ownership |
+| --- | --- |
+| Immutable GitHub Release tag | `fleetworks-<branch>-v<artifact-version>`; never repointed |
+| Native app | Both supported Mac targets; versioned ZIP, SHA256 and complete source/bundle manifest |
+| Immutable GHCR image | `ghcr.io/<owner>/fleetworks-<role>:<channel>-<branch>-X.Y.Z-g<full-sha>`; verified AMD64/ARM64 index |
+| Channel aliases | Git refs `nightly` / `stable` and selected image `:nightly` / `:stable`; advance only after artifact verification |
+| Release inventory | `release.json` and per-architecture image identity/digest records; exact source, version and selected components |
+
+Runtime, SurrealDB, private search and Web are the only production image targets.
+API, control, Jobs, tools, NLP/classifier and worker roles share the runtime image.
+No terminal executable, Venture image or automatic Docker-save archive is released.
+Optional Rust-BERT bundles remain separate verified inference/deployment inputs.
+
+### Scope, publication and retries
+
+```mermaid
+flowchart LR
+  A[PR creation / update] --> B[Read-only scoped checks]
+  C[Merge into nightly / dev / main] --> D[Recover unpublished source scope]
+  D --> E[Checks + native app verification]
+  E --> F[Build / smoke selected images]
+  F --> G[Verify versioned assets + digests]
+  G --> H[Publish release and advance channel]
+```
+
+Publication scope includes every changed component since the last reachable
+published artifact, even when a pending workflow was replaced or an earlier
+build failed. The first publication covers all production targets. Later
+native-only or web-only changes leave unrelated images alone; documentation-only
+changes publish nothing once that baseline exists.
+
+PRs and manual verification dispatches never publish. Trusted integration pushes
+publish only after selected checks pass. Native release packaging receives the
+calculated `--version`, so app metadata, its manifest and archive agree without
+editing Cargo source versions. Linux jobs smoke exact loaded image IDs, verify
+pushed per-architecture digests and verify their combined index before promotion.
+
+Retries preserve already published source/version identities and original assets.
+A changed source, incomplete architecture set, mismatched digest or failed
+publication cannot pass **Fleetworks required**. A release/build failure needs its
+original diagnostic and affected retry; do not move immutable tags or reset the
+version baseline as a workaround.
 
 ## Release candidates
 
-Dispatch the candidate workflow against a published ref and its exact local commit.
+The previous candidate workflows and their duplicate image-tar builds are
+retired. Use exact-revision verification dispatches without publication:
 
 ```sh
-branch=$(git branch --show-current)
-gh workflow run fleetworks-candidate.yml --ref "$branch" -f head="$(git rev-parse HEAD)" -f components=all
+python3 scripts/fleetworks_verify.py dispatch full --ref <published-branch>
+python3 scripts/fleetworks_verify.py dispatch pr --ref <published-branch> --base <full-base-sha>
 ```
 
-Select `components=native` (the default), `backend` or `all`. Native packages the complete Rune app on Intel and Apple silicon Macs. Each app archive carries source revision, version, target, bundle inventory and per-file hashes; the reusable native workflow downloads the exact artifact ID and verifies its bytes. No CLI archive or terminal executable is produced.
+Local app review still uses `scripts/fleetworks_candidate.py build-native` and
+`verify-native`. `--archive` produces an optional local ZIP; `--version` requires
+an explicit valid artifact SemVer and must also be supplied when verifying that
+archive. The image candidate module remains a shared native-daemon/image-ID
+helper and optional manual export tool, not an automatic CI archive lane.
 
-Backend selection packages runtime, SurrealDB and private search images on native Linux AMD64 and ARM64; `components=all` additionally includes Web. An identity manifest binds archive checksum and exact image IDs. A fresh job loads the downloaded archive and uses the direct standalone Compose smoke without building or pulling; every created service must match the expected image ID. [Deployment](../../../deploy/README.md)
+Published app archives are unsigned. Signing/notarization, installed GUI/input/
+accessibility and minimum-OS testing remain separate evidence. A configured
+workflow does not prove that its hosted builds or publication passed.
 
-Review the actual selected jobs for the requested commit. Candidate artifacts expire after 14 days and remain review artifacts, with no trusted publication implied. Release Please owns public tags and release notes. Signing, notarization, installed native GUI/input/accessibility, minimum OS, both-platform runtime integration and registry manifest digest verification remain separate evidence. Retirement of terminal entry points does not close those gaps.
+## GitHub repository setup
 
-## GitHub setup and first release
+1. Protect `dev`, `nightly` and `main` with reviews, **Fleetworks required** and
+   **Conventional commits and shared version**. The files do not change external
+   branch rules or remove old required-check names from existing rulesets.
+2. Use Conventional Commit PR titles and retain breaking footers in squash or
+   recorded merge messages. Squash and normal PR merges are supported; direct
+   integration commits must satisfy landing policy.
+3. Allow the workflow's `GITHUB_TOKEN` to publish repository release assets and
+   GHCR packages. Only trusted publisher jobs request writes; PR jobs stay
+   read-only. No Release Please App/PAT or bot-created release PR is required.
+4. Keep source/version tags protected and immutable. Permit the workflow-owned
+   channel refs to advance. Existing package ownership or organization policies
+   may require granting this repository Actions access to its GHCR packages.
+5. After landing, inspect the exact revision's required checks, Release assets,
+   both native architecture records and multiarchitecture registry digests.
+   Missing or pending hosted evidence stays unverified.
 
-Repository settings are external to these files; merging this setup does not
-change them. Configure them once:
-
-1. Enable squash merging. Set the squash title default to **PR title** and the
-   message default to **PR body**. Protect `main` with required reviews, the
-   **Conventional commits and shared version** check and the repository's
-   required CI gates. Prefer disabling merge/rebase merging to keep the
-   inspected PR title/body as the release input. If another merge mode is used,
-   every commit reaching `main` must follow this policy; merge-generated subjects
-   are intentionally rejected.
-2. Enable **Allow GitHub Actions to create and approve pull requests** under
-   Actions settings when using the default token. Prefer a dedicated GitHub App
-   installed only on this repository, with contents, issues, pull-request and
-   workflow write access. Set repository variable `RELEASE_APP_ID` and secret
-   `RELEASE_APP_PRIVATE_KEY`; the workflow mints a fresh repository-scoped token
-   each run and revokes it afterward using
-   [actions/create-github-app-token](https://github.com/actions/create-github-app-token).
-   Alternatively, set a fine-grained PAT as `RELEASE_PLEASE_TOKEN` with those
-   permissions. Workflow permission lets an existing release branch incorporate
-   changes to workflow files. Token preference is App → PAT → default token.
-   Do not store credentials in files.
-3. With only `GITHUB_TOKEN`, release PRs/releases can be created, but their events
-   do not trigger normal CI. A human must close and reopen the release PR to
-   start its required checks. The workflow warns about this fallback. Configure
-   the App or `RELEASE_PLEASE_TOKEN` for unattended release PR CI; see the
-   [action's token guidance](https://github.com/googleapis/release-please-action#token).
-4. Merge ordinary work with a valid Conventional Commit title/body. Review the
-   generated release PR's proposed version, migration notes, unchanged external
-   dependency versions and inherited crate manifests. Let CI finish, then merge.
-   Confirm the matching `vX.Y.Z` tag and GitHub Release exist afterward.
-
-For the initial stable 1.0.0 release, explicitly assess API/config/data guarantees
-and migration documentation, then use a maintainer-requested releasable commit
-with `Release-As: 1.0.0`. Do not retroactively tag the baseline or rewrite shipped
-tags. If automation fails, rerun it after fixing the cause; avoid manually moving
-release labels/tags or resetting its manifest without a release-repair task.
+An explicit promotion to `1.0.0` remains a maintainer decision after assessing
+API, configuration and persisted-data guarantees. Do not invent `Release-As` or
+retroactively tag a baseline during ordinary feature work.

@@ -17,7 +17,7 @@ from unittest import mock
 
 from fleetworks_candidate import NATIVE_APP, NATIVE_BINARY, NATIVE_MANIFEST
 from fleetworks_candidate import main, native_main, open_native, _run_cargo, apple_versions, cargo_executable, cargo_native_command
-from fleetworks_candidate import checksum_line, extract_native, native_output, package_native, sha256
+from fleetworks_candidate import artifact_version, checksum_line, extract_native, native_output, package_native, sha256
 
 
 class NativeAppTests(unittest.TestCase):
@@ -192,6 +192,39 @@ class NativeAppTests(unittest.TestCase):
         self.assertEqual(apple_versions("0.2.1-beta.1+review"), ("0.2.1", "1.2.1"))
         with self.assertRaisesRegex(ValueError, "numeric bundle version"):
             apple_versions("0.2.1", "0.2.1-beta")
+
+    def test_explicit_channel_version_is_bound_to_bundle_archive_and_verifier(self):
+        version = "0.3.0+dev.g" + "1" * 40
+        result = self.pack(version=version, archive=True)
+        manifest = json.loads(Path(result["manifest"]).read_text())
+        self.assertEqual(manifest["version"], version)
+        self.assertIn("Fleetworks-" + version + "-", Path(result["archive"]).name)
+        with (Path(result["app"]) / "Contents/Info.plist").open("rb") as source:
+            self.assertEqual(plistlib.load(source)["CFBundleShortVersionString"], "0.3.0")
+        archive = Path(result["archive"])
+        destination = self.root / "channel download"
+        command = ["fleetworks_candidate.py", "verify-native", "--archive", str(archive),
+                   "--sha256", result["sha256"], "--revision", "1" * 40,
+                   "--target", "x86_64-apple-darwin", "--rune-revision", "2" * 40,
+                   "--version", version, "--directory", str(destination)]
+        output = io.StringIO()
+        with mock.patch.object(sys, "argv", command), mock.patch("sys.stdout", output), \
+             mock.patch("fleetworks_candidate._run", side_effect=lambda args, **_: self.command_runner(args).stdout):
+            self.assertEqual(main(), 0)
+        self.assertEqual(json.loads(output.getvalue())["version"], version)
+        self.assertTrue((destination / NATIVE_APP).is_dir())
+
+    def test_explicit_version_is_strict_safe_and_preserves_source_baseline(self):
+        baseline = self.root / "version.txt"
+        baseline.write_text("0.2.1\n")
+        self.assertEqual(artifact_version(root=self.root), "0.2.1")
+        for version in ("0.3.0-nightly.2.g" + "1" * 40, "0.3.0+main.g" + "1" * 40):
+            with self.subTest(version=version):
+                self.assertEqual(artifact_version(version, root=self.root), version)
+        for version in ("../0.3.0", "0.3.0\npublish=true", "01.2.3", "0.3.0-01", "0.3.0-..", "0.3.0+", "0.3.0+" + "x" * 161):
+            with self.subTest(version=version), self.assertRaises(ValueError):
+                artifact_version(version, root=self.root)
+        self.assertEqual(baseline.read_text(), "0.2.1\n")
 
     def verify(self, result, **overrides):
         arguments = dict(expected_digest=result["sha256"], version="0.2.1",

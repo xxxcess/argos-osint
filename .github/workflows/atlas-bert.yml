@@ -24,6 +24,7 @@ concurrency:
 
 env:
   ATLAS_BERT_HEAD: ${{ inputs.head || github.event.pull_request.head.sha || github.sha }}
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   CARGO_TERM_COLOR: never
   CARGO_INCREMENTAL: 0
   CARGO_PROFILE_DEV_DEBUG: 0
@@ -31,8 +32,7 @@ env:
   PYTHONDONTWRITEBYTECODE: 1
 
 jobs:
-  # Engine work is native Linux only. embedded.yml retains separate legacy
-  # macOS compatibility gates until their reviewed retirement criteria pass.
+  # Engine work is native Linux only; Rune client checks do not install Torch.
   runtime:
     name: Native Linux ${{ matrix.arch }} / real checkpoint and bundle
     strategy:
@@ -62,6 +62,8 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$ATLAS_BERT_HEAD" =~ ^[0-9a-f]{40}$ ]]
+          # checkout is host-owned while this isolated container runs as root.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           test "$(git rev-parse HEAD)" = "$ATLAS_BERT_HEAD"
           python - <<'PY'
           import os

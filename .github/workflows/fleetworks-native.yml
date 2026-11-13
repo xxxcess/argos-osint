@@ -6,6 +6,10 @@ on:
       expected-head:
         type: string
         required: true
+      release-version:
+        description: Empty for PR debug checks; exact artifact version for trusted publication
+        type: string
+        default: ''
       target:
         type: string
         required: true
@@ -22,7 +26,7 @@ on:
       evidence-url:
         value: ${{ jobs.package.outputs.evidence-url }}
 
-# No signing, release, PR-comment or package-write credentials are available.
+# No signing, publication, PR-comment or package-write credentials are available.
 # Native build/fixture jobs never install Docker, Node or backend engines.
 permissions:
   contents: read
@@ -31,6 +35,8 @@ permissions:
 env:
   FLEETWORKS_HEAD: ${{ inputs.expected-head }}
   NATIVE_TARGET: ${{ inputs.target }}
+  RELEASE_VERSION: ${{ inputs.release-version }}
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   CARGO_TERM_COLOR: never
   CARGO_INCREMENTAL: 0
   CARGO_PROFILE_DEV_DEBUG: 0
@@ -121,14 +127,24 @@ jobs:
             --size 1280x800 --size 640x480 --scale 1 --scale 2 \
             --script brain-search-ready=apps/fleetworks-desktop/tests/fixtures/scripts/brain-search-open.json \
             --script-expect-key brain-search-ready=dossier-name
-      - name: Build and package the complete local-review app
+      - name: Build the debug app for pull-request review
+        if: inputs.release-version == ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/fleetworks_candidate.py build-native --agent \
+            --target "$NATIVE_TARGET" --profile debug \
+            --output "$RUNNER_TEMP/fleetworks-native-debug" \
+            --revision "$FLEETWORKS_HEAD" --require-clean
+      - name: Package the trusted versioned release app
+        if: inputs.release-version != ''
         id: package
         shell: bash
         run: |
           set -euo pipefail
           output="$RUNNER_TEMP/fleetworks-native-candidate"
           python3 scripts/fleetworks_candidate.py build-native --agent \
-            --target "$NATIVE_TARGET" --profile release --output "$output" \
+            --target "$NATIVE_TARGET" --profile release --output "$output" --version "$RELEASE_VERSION" \
             --revision "$FLEETWORKS_HEAD" --run-id "$GITHUB_RUN_ID" \
             --run-attempt "$GITHUB_RUN_ATTEMPT" --archive --require-clean
           CANDIDATE_DIRECTORY="$output" python3 - <<'PY'
@@ -143,13 +159,16 @@ jobs:
           if len(archives) != 1:
               raise SystemExit("Exactly one versioned app ZIP is required")
           manifest = json.loads((directory / "Fleetworks.app.manifest.json").read_text())
-          if manifest["revision"] != os.environ["FLEETWORKS_HEAD"] or manifest["dirty"] is not False:
+          if (manifest["revision"] != os.environ["FLEETWORKS_HEAD"]
+                  or manifest["version"] != os.environ["RELEASE_VERSION"]
+                  or manifest["dirty"] is not False):
               raise SystemExit("Candidate source identity differs from the selected exact revision")
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
               print("sha256=" + sha256(archives[0]), file=output)
               print("rune-revision=" + locked_rune_revision(), file=output)
           PY
       - name: Upload immutable app ZIP, manifest and checksum
+        if: inputs.release-version != ''
         id: upload
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
@@ -173,6 +192,7 @@ jobs:
 
   verify:
     name: Verify exact downloaded app bytes
+    if: inputs.release-version != ''
     needs: package
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 15
@@ -206,7 +226,7 @@ jobs:
           test "${#archives[@]}" = 1
           python3 scripts/fleetworks_candidate.py verify-native --archive "${archives[0]}" \
             --sha256 "$EXPECTED_SHA256" --revision "$FLEETWORKS_HEAD" \
-            --target "$NATIVE_TARGET" --profile release --rune-revision "$RUNE_REVISION" \
+            --target "$NATIVE_TARGET" --profile release --version "$RELEASE_VERSION" --rune-revision "$RUNE_REVISION" \
             --require-clean --directory "$RUNNER_TEMP/fleetworks-native-extracted"
       - name: Record actual review URLs and verification limits
         env:
@@ -224,5 +244,5 @@ jobs:
             printf -- '- [Real-view PNG/tree/test evidence](%s). Actions retention: 14 days.\n' "$EVIDENCE_URL"
             printf -- '- Bundle architecture, libraries, identity and checksums passed on downloaded bytes.\n'
             printf -- '- PNGs generated; human visual inspection and matching-hardware GUI launch remain pending.\n'
-            printf -- '- Unsigned review candidate; notarization, minimum-macOS testing and publication remain pending.\n'
+            printf -- '- Unsigned app; notarization, minimum-macOS testing and matching-hardware launch remain pending.\n'
           } >> "$GITHUB_STEP_SUMMARY"

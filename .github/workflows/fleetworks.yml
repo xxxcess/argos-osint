@@ -1,14 +1,13 @@
 name: Fleetworks
 
-# Development checks for pull requests and the listed branch pushes.
-# The four-platform embedded suite is embedded.yml and does not run here.
+# Scoped checks share one event-head planner. Backend engines stay in Linux
+# lanes; Rune Mac lanes build only the native client.
 on:
   push:
-    branches: [main, feat/atlas-zero-shot]
+    branches: [dev, nightly, main]
   pull_request:
+    branches: [dev, nightly, main]
     types: [opened, synchronize, reopened, ready_for_review]
-  schedule:
-    - cron: '17 6 * * *'
   workflow_dispatch:
     inputs:
       mode:
@@ -33,11 +32,12 @@ permissions:
   actions: read
 
 concurrency:
-  group: fleetworks-${{ github.event_name }}-${{ github.event_name == 'push' && github.sha || github.event.pull_request.number || github.ref }}
+  group: fleetworks-${{ github.event_name }}-${{ github.event_name == 'push' && github.ref != 'refs/heads/nightly' && 'stable' || github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name != 'push' }}
 
 env:
   FLEETWORKS_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   CARGO_PROFILE_DEV_DEBUG: 0
@@ -49,19 +49,24 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
-      head: ${{ steps.plan.outputs.head }}
-      desktop: ${{ steps.plan.outputs.desktop }}
-      server: ${{ steps.plan.outputs.server }}
-      compose: ${{ steps.plan.outputs.compose }}
-      queue: ${{ steps.plan.outputs.queue }}
-      storage: ${{ steps.plan.outputs.storage }}
-      bert: ${{ steps.plan.outputs.bert }}
-      web: ${{ steps.plan.outputs.web }}
-      web_dev: ${{ steps.plan.outputs.web_dev }}
-      images: ${{ steps.plan.outputs.images }}
-      image_targets: ${{ steps.plan.outputs.image_targets }}
-      image_arch_json: ${{ steps.plan.outputs.image_arch_json }}
-      full: ${{ steps.plan.outputs.full }}
+      head: ${{ steps.release.outputs.head }}
+      desktop: ${{ steps.release.outputs.desktop }}
+      server: ${{ steps.release.outputs.server }}
+      compose: ${{ steps.release.outputs.compose }}
+      queue: ${{ steps.release.outputs.queue }}
+      storage: ${{ steps.release.outputs.storage }}
+      bert: ${{ steps.release.outputs.bert }}
+      web: ${{ steps.release.outputs.web }}
+      web_dev: ${{ steps.release.outputs.web_dev }}
+      images: ${{ steps.release.outputs.images }}
+      image_targets: ${{ steps.release.outputs.image_targets }}
+      image_arch_json: ${{ steps.release.outputs.image_arch_json }}
+      full: ${{ steps.release.outputs.full }}
+      publish: ${{ steps.release.outputs.publish }}
+      release_version: ${{ steps.release.outputs.version }}
+      release_tag: ${{ steps.release.outputs.tag }}
+      release_image_tag: ${{ steps.release.outputs.image_tag }}
+      release_plan: ${{ steps.release.outputs.plan }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -76,7 +81,9 @@ jobs:
         run: |
           python3 scripts/fleetworks_doc_links.py
           node scripts/release_check.mjs versions
+          node scripts/release_check.mjs event
           node --test .opencode/tests/*.test.mjs
+          python3 -B -m unittest discover -s .github/scripts -p 'test_*.py'
       - name: Classify changes at the event head
         id: plan
         env:
@@ -115,8 +122,32 @@ jobs:
           python3 scripts/fleetworks_verify.py "$mode" \
             --event "$event" --base "$base" \
             --head "$FLEETWORKS_HEAD" --components "${DISPATCH_COMPONENTS:-auto}" \
-            --github-output "$GITHUB_OUTPUT"
+            --github-output "$GITHUB_OUTPUT" --json-output "$RUNNER_TEMP/scope.json"
           printf 'head=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Plan source-scoped branch publication
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, subprocess, sys
+          from pathlib import Path
+          temporary = Path(os.environ["RUNNER_TEMP"])
+          scope = json.loads((temporary / "scope.json").read_text())
+          # A scoped manual dispatch compares like a PR, but cannot publish.
+          scope["event"] = os.environ["GITHUB_EVENT_NAME"]
+          (temporary / "release-scope.json").write_text(json.dumps(scope))
+          subprocess.run([sys.executable, "scripts/fleetworks_release.py", "plan",
+              "--event", scope["event"], "--ref", os.environ["GITHUB_REF"],
+              "--head", os.environ["FLEETWORKS_HEAD"], "--base", scope["base"] or "",
+              "--scope-plan", str(temporary / "release-scope.json"),
+              "--json-output", str(temporary / "release.json"),
+              "--github-output", os.environ["GITHUB_OUTPUT"]], check=True)
+          plan = json.loads((temporary / "release.json").read_text())
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print("plan=" + json.dumps(plan, separators=(",", ":")), file=output)
+          PY
 
   desktop:
     name: Mac app / ${{ matrix.target }}
@@ -135,13 +166,41 @@ jobs:
       expected-head: ${{ needs.scope.outputs.head }}
       target: ${{ matrix.target }}
       runner: ${{ matrix.runner }}
+      release-version: ${{ needs.scope.outputs.publish == 'true' && needs.scope.outputs.release_version || '' }}
+
+  embedded:
+    name: Affected embedded storage / Linux AMD64 and ARM64
+    needs: scope
+    if: needs.scope.outputs.storage == 'true'
+    uses: ./.github/workflows/embedded.yml
+    with:
+      head: ${{ needs.scope.outputs.head }}
 
   server:
-    name: Server build / Linux ARM64
+    name: Backend suite / Linux ${{ matrix.arch }}
     needs: scope
     if: needs.scope.outputs.server == 'true'
-    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            machine: x86_64
+            target: x86_64-unknown-linux-gnu
+            executable: 'ELF 64-bit.*x86-64'
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            machine: aarch64
+            target: aarch64-unknown-linux-gnu
+            executable: 'ELF 64-bit.*(aarch64|ARM aarch64)'
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
+    env:
+      EXPECTED_MACHINE: ${{ matrix.machine }}
+      EXPECTED_TARGET: ${{ matrix.target }}
+      EXPECTED_EXECUTABLE: ${{ matrix.executable }}
+      REVIEW_ARCH: ${{ matrix.arch }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -152,13 +211,23 @@ jobs:
           components: rustfmt
       - name: Install libclang for the embedded delivery queue
         run: sudo apt-get update && sudo apt-get install -y libclang-dev
-      - name: Check, build, and test the ARM64 server
+      - name: Resolve pinned isolated datastore before API tests
+        id: surreal
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="$(python3 scripts/test_surreal.py --mode server --fetch-only |
+            sed -n 's/^test-surreal: server binary //p')"
+          test -x "$binary"
+          printf 'binary=%s\n' "$binary" >> "$GITHUB_OUTPUT"
+          printf 'ARGOS_SURREAL_BIN=%s\nARGOS_SURREAL_MODE=server\nARGOS_SURREAL_REQUIRED=1\n' "$binary" >> "$GITHUB_ENV"
+      - name: Check, build, and test the backend
         shell: bash
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$FLEETWORKS_HEAD"
-          test "$(uname -m)" = aarch64
-          test "$(rustc -vV | sed -n 's/^host: //p')" = aarch64-unknown-linux-gnu
+          test "$(uname -m)" = "$EXPECTED_MACHINE"
+          test "$(rustc -vV | sed -n 's/^host: //p')" = "$EXPECTED_TARGET"
           rustc --version | grep -q '^rustc 1\.95\.0 '
           cargo fmt --all -- --check
           features=(--no-default-features --features server,nlp,classifier)
@@ -166,7 +235,7 @@ jobs:
             python3 scripts/agent_cargo.py check --timings --locked -p argos-api-host "${features[@]}"
           python3 scripts/fleetworks_verify.py timed --phase server-build -- \
             python3 scripts/agent_cargo.py build --timings --locked -p argos-api-host --bin argos-api-host "${features[@]}"
-          file target/agents/debug/argos-api-host | grep -Ei 'ELF 64-bit.*(aarch64|ARM aarch64)'
+          file target/agents/debug/argos-api-host | grep -Ei "$EXPECTED_EXECUTABLE"
           python3 scripts/fleetworks_verify.py timed --phase server-test -- \
             python3 scripts/agent_cargo.py test --timings --locked -p argos-api-host -p argos-osint-api \
               "${features[@]}" --bin argos-api-host --lib
@@ -184,16 +253,12 @@ jobs:
           verify_core_tests execution-transport-test provider_attempt::remote::tests
           verify_core_tests config-commit-test config_commit::tests
       - name: Exercise bootstrap and network service roles on loopback
-        id: surreal
         shell: bash
         run: |
           set -euo pipefail
-          binary="$(python3 scripts/test_surreal.py --mode server --fetch-only |
-            sed -n 's/^test-surreal: server binary //p')"
-          test -x "$binary"
+          test -x "$ARGOS_SURREAL_BIN"
           python3 scripts/fleetworks_verify.py timed --phase network-smoke -- \
-            python3 scripts/fleetworks_network_smoke.py --host target/agents/debug/argos-api-host --surreal "$binary"
-          printf 'binary=%s\n' "$binary" >> "$GITHUB_OUTPUT"
+            python3 scripts/fleetworks_network_smoke.py --host target/agents/debug/argos-api-host --surreal "$ARGOS_SURREAL_BIN"
       - name: Run pinned disk storage contracts
         if: needs.scope.outputs.full == 'true'
         env:
@@ -255,8 +320,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          review="config-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          python3 deploy/native_review.py init --name "$review" --api-port 18091 --web-port 18092 --platform linux/arm64
+          review="config-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$REVIEW_ARCH"
+          python3 deploy/native_review.py init --name "$review" --api-port 18091 --web-port 18092 --platform "linux/$REVIEW_ARCH"
           workspace="$(python3 deploy/native_review.py value --name "$review" --field workspace)"
           base=(docker compose --env-file "$workspace/compose.env" -f deploy/compose.native-review.yml)
           "${base[@]}" config --quiet
@@ -267,7 +332,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: fleetworks-server-timings
+          name: fleetworks-server-timings-${{ matrix.arch }}
           path: |
             ${{ runner.temp }}/fleetworks-timings.jsonl
             target/agents/cargo-timings/*.html
@@ -275,93 +340,59 @@ jobs:
           retention-days: 7
 
   images:
-    name: Server images / ${{ matrix.arch }}
+    name: Image checks / Linux ${{ matrix.arch }}
     needs: scope
-    if: needs.scope.outputs.images == 'true'
+    if: needs.scope.outputs.images == 'true' && needs.scope.outputs.publish != 'true'
     strategy:
       fail-fast: false
       matrix:
-        arch: ${{ fromJson(needs.scope.outputs.image_arch_json) }}
-    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
-    timeout-minutes: 60
+        include:
+          - {arch: amd64, runner: ubuntu-24.04}
+          - {arch: arm64, runner: ubuntu-24.04-arm}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ env.FLEETWORKS_HEAD }}
+          ref: ${{ needs.scope.outputs.head }}
           persist-credentials: false
-      - name: Verify selected private search disk and transport contracts
+          lfs: false
+      - name: Test selected private search contracts
         if: contains(needs.scope.outputs.image_targets, 'search-index')
-        shell: bash
         run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$FLEETWORKS_HEAD"
-          toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
-          rustup toolchain install "$toolchain" --profile minimal
-          python3 scripts/fleetworks_verify.py timed --phase search-contracts -- \
-            python3 scripts/agent_cargo.py test --locked --no-default-features -p fleetworks-search-index
-      - name: Validate isolated backend review recipe
-        if: contains(needs.scope.outputs.image_targets, 'runtime') || contains(needs.scope.outputs.image_targets, 'search-index')
-        env:
-          REVIEW_ARCH: ${{ matrix.arch }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 -B -m unittest discover -s deploy -p test_native_review.py
-          review="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${REVIEW_ARCH}"
-          python3 deploy/native_review.py init --name "$review" --api-port 18091 --platform "linux/${REVIEW_ARCH}"
-          workspace="$(python3 deploy/native_review.py value --name "$review" --field workspace)"
-          docker compose --env-file "$workspace/compose.env" -f deploy/compose.native-review.yml config --quiet
-      - name: Build selected server images
+          rustup toolchain install 1.95.0 --profile minimal
+          python3 scripts/agent_cargo.py test --locked --no-default-features -p fleetworks-search-index
+      - name: Build selected image closure and smoke exact container IDs
         env:
           IMAGE_TARGETS: ${{ needs.scope.outputs.image_targets }}
           IMAGE_ARCH: ${{ matrix.arch }}
+          OWNER: ${{ github.repository_owner }}
+          COMPOSE_SELECTED: ${{ needs.scope.outputs.compose }}
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$FLEETWORKS_HEAD"
-          test -n "$IMAGE_TARGETS"
-          VERSION="$(tr -d '[:space:]' < version.txt)"
-          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
-          export VERSION
-          read -r -a targets <<< "${IMAGE_TARGETS//,/ }"
-          python3 scripts/fleetworks_verify.py timed --phase server-images -- \
-            docker buildx bake -f deploy/docker-bake.hcl \
-            --load --set "*.platforms=linux/${IMAGE_ARCH}" "${targets[@]}"
-      - name: Smoke selected server images
-        env:
-          IMAGE_TARGETS: ${{ needs.scope.outputs.image_targets }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          VERSION="$(tr -d '[:space:]' < version.txt)"
-          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
-          for target in ${IMAGE_TARGETS//,/ }; do
-            case "$target" in
-              web)
-                image=fleetworks-web
-                docker run --rm --entrypoint node "${image}:${VERSION}" -e 'process.exit(0)' ;;
-              runtime)
-                image=fleetworks-runtime
-                docker run --rm "${image}:${VERSION}" --help >/dev/null ;;
-              surrealdb)
-                image=fleetworks-surrealdb
-                docker run --rm --entrypoint /surreal "${image}:${VERSION}" version >/dev/null ;;
-              search-index)
-                image=fleetworks-search-index
-                # Executable packaging evidence only; the tests above exercise
-                # real disk/HTTP behavior without inventing a --help interface.
-                docker run --rm --entrypoint /usr/bin/test "${image}:${VERSION}" -x /usr/local/bin/fleetworks-search-index ;;
-              *)
-                image="$target"
-                docker run --rm "${image}:${VERSION}" --help >/dev/null ;;
-            esac
-            docker image inspect "${image}:local" >/dev/null
-          done
+          compose=()
+          if [[ "$COMPOSE_SELECTED" == true ]]; then compose=(--compose); fi
+          python3 -B -m unittest discover -s deploy -p 'test_*.py'
+          python3 .github/scripts/release_images.py --revision "$FLEETWORKS_HEAD" \
+            --version "$(cat version.txt)" --image-tag "review-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --targets "$IMAGE_TARGETS" --arch "$IMAGE_ARCH" --registry "ghcr.io/${OWNER,,}" \
+            --directory "$RUNNER_TEMP/image-checks" "${compose[@]}"
+      - name: Retain exact image smoke evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: fleetworks-image-checks-${{ matrix.arch }}-${{ github.run_id }}.${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/image-checks/*.json
+            .agent-scratch/native-review/images-*/public-smoke-*.json
+          if-no-files-found: ignore
+          retention-days: 7
 
   compose:
     name: Packaged Compose / ${{ matrix.name }}
     needs: scope
-    if: needs.scope.outputs.compose == 'true'
+    if: needs.scope.outputs.compose == 'true' && needs.scope.outputs.images != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -433,9 +464,9 @@ jobs:
       head: ${{ github.event.pull_request.head.sha || github.sha }}
       development: ${{ needs.scope.outputs.web_dev == 'true' }}
 
-  required:
-    name: Fleetworks required
-    needs: [scope, desktop, server, compose, bert, web, images]
+  source_checks:
+    name: Fleetworks source checks
+    needs: [scope, desktop, server, embedded, compose, bert, web, images]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -445,16 +476,18 @@ jobs:
           SCOPE_RESULT: ${{ needs.scope.result }}
           DESKTOP_SELECTED: ${{ needs.scope.outputs.desktop }}
           SERVER_SELECTED: ${{ needs.scope.outputs.server }}
-          COMPOSE_SELECTED: ${{ needs.scope.outputs.compose }}
+          COMPOSE_SELECTED: ${{ needs.scope.outputs.compose == 'true' && needs.scope.outputs.images != 'true' }}
           BERT_SELECTED: ${{ needs.scope.outputs.bert }}
           WEB_SELECTED: ${{ needs.scope.outputs.web }}
           WEB_DEV_SELECTED: ${{ needs.scope.outputs.web_dev }}
-          IMAGES_SELECTED: ${{ needs.scope.outputs.images }}
+          IMAGES_SELECTED: ${{ needs.scope.outputs.images == 'true' && needs.scope.outputs.publish != 'true' }}
+          RELEASE_IMAGES_SELECTED: ${{ needs.scope.outputs.images == 'true' && needs.scope.outputs.publish == 'true' }}
           IMAGE_TARGETS: ${{ needs.scope.outputs.image_targets }}
           QUEUE_SELECTED: ${{ needs.scope.outputs.queue }}
           STORAGE_SELECTED: ${{ needs.scope.outputs.storage }}
           DESKTOP_RESULT: ${{ needs.desktop.result }}
           SERVER_RESULT: ${{ needs.server.result }}
+          EMBEDDED_RESULT: ${{ needs.embedded.result }}
           COMPOSE_RESULT: ${{ needs.compose.result }}
           BERT_RESULT: ${{ needs.bert.result }}
           WEB_RESULT: ${{ needs.web.result }}
@@ -488,6 +521,7 @@ jobs:
           esac
           verify desktop "$DESKTOP_SELECTED" "$DESKTOP_RESULT" || failed=1
           verify server "$SERVER_SELECTED" "$SERVER_RESULT" || failed=1
+          verify embedded "$STORAGE_SELECTED" "$EMBEDDED_RESULT" || failed=1
           verify compose "$COMPOSE_SELECTED" "$COMPOSE_RESULT" || failed=1
           verify bert "$BERT_SELECTED" "$BERT_RESULT" || failed=1
           verify web "$WEB_SELECTED" "$WEB_RESULT" || failed=1
@@ -497,3 +531,96 @@ jobs:
             "${QUEUE_SELECTED:-missing}" "${STORAGE_SELECTED:-missing}" \
             "${WEB_DEV_SELECTED:-missing}" >> "$GITHUB_STEP_SUMMARY"
           exit "$failed"
+
+  release_images:
+    name: Verified release image staging
+    needs: [scope, source_checks]
+    if: needs.source_checks.result == 'success' && needs.scope.outputs.publish == 'true' && needs.scope.outputs.images == 'true'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/fleetworks-release-images.yml
+    with:
+      head: ${{ needs.scope.outputs.head }}
+      version: ${{ needs.scope.outputs.release_version }}
+      image-tag: ${{ needs.scope.outputs.release_image_tag }}
+      image-targets: ${{ needs.scope.outputs.image_targets }}
+      compose: ${{ needs.scope.outputs.compose == 'true' }}
+
+  prepublish:
+    name: Fleetworks artifact checks
+    needs: [scope, source_checks, release_images]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require source checks and every selected release image
+        env:
+          SOURCE_RESULT: ${{ needs.source_checks.result }}
+          IMAGES_SELECTED: ${{ needs.scope.outputs.publish == 'true' && needs.scope.outputs.images == 'true' }}
+          IMAGE_RESULT: ${{ needs.release_images.result }}
+        run: |
+          test "$SOURCE_RESULT" = success
+          case "$IMAGES_SELECTED:$IMAGE_RESULT" in
+            true:success|false:skipped) ;;
+            *) exit 1 ;;
+          esac
+
+  publish:
+    name: Publish verified version and channel
+    needs: [scope, prepublish]
+    if: needs.prepublish.result == 'success' && needs.scope.outputs.publish == 'true' && github.event_name == 'push' && contains(fromJson('["refs/heads/dev","refs/heads/nightly","refs/heads/main"]'), github.ref)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      packages: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.scope.outputs.head }}
+          persist-credentials: false
+      - name: Download current-run verified native archives
+        if: fromJson(needs.scope.outputs.release_plan).native
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: Fleetworks-app-*-${{ github.run_id }}.${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release
+          digest-mismatch: error
+      - name: Download current-run verified Linux digests
+        if: needs.scope.outputs.images == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: fleetworks-release-images-*-${{ github.run_id }}.${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release
+          digest-mismatch: error
+      - name: Promote only the verified source plan
+        env:
+          RELEASE_PLAN: ${{ needs.scope.outputs.release_plan }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          mkdir -p "$RUNNER_TEMP/release"
+          printf '%s\n' "$RELEASE_PLAN" > "$RUNNER_TEMP/release-plan.json"
+          python3 .github/scripts/publish_release.py --plan "$RUNNER_TEMP/release-plan.json" \
+            --directory "$RUNNER_TEMP/release"
+
+  required:
+    name: Fleetworks required
+    needs: [scope, prepublish, publish]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every selected check and publication
+        env:
+          CHECKS_RESULT: ${{ needs.prepublish.result }}
+          PUBLISH_SELECTED: ${{ needs.scope.outputs.publish }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+        run: |
+          test "$CHECKS_RESULT" = success
+          case "$PUBLISH_SELECTED:$PUBLISH_RESULT" in
+            true:success|false:skipped) ;;
+            *) exit 1 ;;
+          esac

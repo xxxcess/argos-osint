@@ -1,11 +1,15 @@
 name: Embedded compatibility
 
-# Four platform builds of the compatibility suite. Merges into main run them.
-# Any other branch runs them only by dispatch:
-#   gh workflow run embedded.yml --ref <branch>
+# Linux backend compatibility is selected by Fleetworks. Manual dispatch keeps
+# the four-platform compatibility diagnostic available without installing
+# backend engines in the normal Rune macOS client lanes.
 on:
-  push:
-    branches: [main]
+  workflow_call:
+    inputs:
+      head:
+        description: Exact source revision selected by the scope planner
+        type: string
+        required: true
   workflow_dispatch:
 
 concurrency:
@@ -13,6 +17,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
 
 env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   # No debuginfo in CI: smaller target dirs, faster codegen, and cc builds librocksdb without -g.
@@ -24,25 +29,23 @@ permissions:
 
 jobs:
   embedded:
-    # Push events are limited to main above. This refuses a pull_request or
-    # feature-branch push if one is added later without the same limit.
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     name: ${{ matrix.platform.name }} / embedded
     strategy:
       fail-fast: false
       matrix:
-        platform:
-          - { name: Linux x86_64, os: ubuntu-24.04 }
-          - { name: Linux aarch64, os: ubuntu-24.04-arm }
-          - { name: macOS arm64, os: macos-15 }
-          - { name: macOS Intel, os: macos-15-intel }
+        platform: ${{ fromJson(github.event_name == 'workflow_dispatch' && inputs.head == '' && '[{"name":"Linux x86_64","os":"ubuntu-24.04"},{"name":"Linux aarch64","os":"ubuntu-24.04-arm"},{"name":"macOS arm64","os":"macos-15"},{"name":"macOS Intel","os":"macos-15-intel"}]' || '[{"name":"Linux x86_64","os":"ubuntu-24.04"},{"name":"Linux aarch64","os":"ubuntu-24.04-arm"}]') }}
     runs-on: ${{ matrix.platform.os }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ inputs.head || github.sha }}
           lfs: false
           persist-credentials: false
+      - name: Verify selected revision
+        env:
+          EXPECTED_HEAD: ${{ inputs.head || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: clippy, rustfmt

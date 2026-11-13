@@ -32,16 +32,20 @@ class PathScopesTests(unittest.TestCase):
             "apps/fleetworks-desktop/resources/Info.plist": {"desktop"},
             "scripts/fleetworks_native_verify.py": {"desktop"},
             "scripts/test_fleetworks_native_verify.py": {"desktop"},
+            "scripts/fleetworks_candidate.py": {"desktop"},
+            "scripts/test_fleetworks_candidate.py": {"desktop"},
             ".github/workflows/fleetworks-native.yml": {"desktop"},
-            "apps/web-desktop/server.mjs": {"web", "web_dev", "server", "compose", "images"},
-            "apps/web-desktop/app/page.tsx": {"web", "server", "compose", "images"},
-            "apps/web-desktop/app/api/v1/route.ts": {"web", "web_dev", "server", "compose", "images"},
-            "tests/web/intel.spec.ts": {"web", "images"},
+            "apps/web-desktop/server.mjs": {"web", "web_dev", "compose", "images"},
+            "apps/web-desktop/app/page.tsx": {"web", "images"},
+            "apps/web-desktop/app/api/v1/route.ts": {"web", "web_dev", "compose", "images"},
+            "tests/web/intel.spec.ts": {"web"},
+            "apps/web-desktop/__tests__/live-transport.test.tsx": {"web"},
+            "packages/ui/__tests__/Label.test.tsx": {"web"},
             "deploy/Dockerfile": {"server", "compose", "images"},
             "deploy/docker-bake.hcl": {"server", "compose", "images"},
             "deploy/Dockerfile.dockerignore": {"server", "compose", "images"},
-            "deploy/compose.yml": {"web", "web_dev", "server", "compose"},
-            "deploy/compose.dev.yml": {"web", "web_dev", "server", "compose"},
+            "deploy/compose.yml": {"web", "web_dev", "compose"},
+            "deploy/compose.dev.yml": {"web", "web_dev", "compose"},
             "deploy/compose.native-review.yml": {"server", "compose"},
             "deploy/start-search-index.sh": {"server", "compose", "images"},
             "deploy/compose.atlas.yml": {"server", "compose", "bert"},
@@ -61,11 +65,11 @@ class PathScopesTests(unittest.TestCase):
             "scripts/fixtures/atlas_bert": {"bert", "server", "queue", "web", "web_dev"},
             ".github/workflows/atlas-bert.yml": {"bert"},
             "Cargo.lock": {"desktop", "server", "storage", "compose", "queue", "images"},
-            "pnpm-lock.yaml": {"web", "web_dev", "server", "compose", "images"},
+            "pnpm-lock.yaml": {"web", "web_dev", "compose", "images"},
             "crates/fleetworks-contracts/src/lib.rs": {"desktop", "server", "storage", "compose", "queue", "images"},
-            "crates/fleetworks-workstation/src/native/mod.rs": {"desktop", "server", "storage", "compose", "queue", "images"},
-            "crates/fleetworks-workspace/src/native/mod.rs": {"desktop", "server", "storage", "compose", "queue", "images"},
-            "packages/api-client/src/index.ts": {"web", "server", "compose", "images"},
+            "crates/fleetworks-workstation/src/native/mod.rs": {"desktop"},
+            "crates/fleetworks-workspace/src/native/mod.rs": {"desktop"},
+            "packages/api-client/src/index.ts": {"web", "images"},
             "scripts/surrealdb-release.json": {"server", "storage", "queue"},
             ".github/workflows/fleetworks.yml": set(),
             ".github/workflows/embedded.yml": set(),
@@ -85,6 +89,9 @@ class PathScopesTests(unittest.TestCase):
         self.assertEqual(path_images("deploy/Dockerfile"), ALL_IMAGES)
         self.assertEqual(path_images("README.md"), set())
         self.assertEqual(path_images("apps/fleetworks-desktop/src/views/brain.rs"), set())
+        self.assertEqual(path_images("packages/ui/__tests__/Label.test.tsx"), set())
+        self.assertEqual(path_images("apps/web-desktop/__tests__/live-transport.test.tsx"), set())
+        self.assertEqual(path_images("tests/web/intel.spec.ts"), set())
 
     def test_search_and_backend_inputs_select_only_affected_linux_images(self):
         for path in ("services/search-index/src/engine.rs", "services/search-index/src/schema.rs", "services/search-index/tests/index_contract.rs", "deploy/check-search.sh", "deploy/start-search-index.sh"):
@@ -97,7 +104,7 @@ class PathScopesTests(unittest.TestCase):
         self.assertEqual(path_images("Cargo.lock"), set(RUST_IMAGES))
         self.assertEqual(path_images("crates/fleetworks-contracts/src/actor_index.rs"), set(RUST_IMAGES))
         for crate in ("fleetworks-workstation", "fleetworks-workspace"):
-            self.assertEqual(path_images(f"crates/{crate}/src/native/mod.rs"), set(RUST_IMAGES))
+            self.assertEqual(path_images(f"crates/{crate}/src/native/mod.rs"), set())
         self.assertEqual(path_images("deploy/Dockerfile.dockerignore"), ALL_IMAGES)
         self.assertEqual(component_plan("backend", set(), set())[1], {"runtime", "surrealdb", "search-index"})
 
@@ -130,7 +137,7 @@ class GitScopeTests(unittest.TestCase):
         self.git("commit", "-qm", "fixture")
         return self.git("rev-parse", "HEAD")
 
-    def plan(self, base, event="push", head=None, mode="plan"):
+    def plan(self, base, event="push", head=None, mode="plan", json_output=None):
         self.output.unlink(missing_ok=True)
         command = [
             sys.executable, str(PLANNER), mode, "--event", event, "--base", base,
@@ -138,6 +145,8 @@ class GitScopeTests(unittest.TestCase):
         ]
         if head is not None:
             command += ["--head", head]
+        if json_output is not None:
+            command += ["--json-output", str(json_output)]
         return subprocess.run(command, cwd=self.repo, capture_output=True, text=True, check=False)
 
     def assert_scopes(self, run, expected, *, full=False, images=()):
@@ -147,11 +156,24 @@ class GitScopeTests(unittest.TestCase):
         }
         expected_outputs["full"] = str(full).lower()
         expected_outputs["image_targets"] = ",".join(sorted(images))
-        expected_outputs["image_arch_json"] = json.dumps(["amd64", "arm64"] if full else ["amd64"])
+        expected_outputs["image_arch_json"] = json.dumps(["amd64", "arm64"])
         actual_outputs = dict(
             line.split("=", 1) for line in self.output.read_text(encoding="utf-8").splitlines()
         )
         self.assertEqual(actual_outputs, expected_outputs)
+
+    def test_release_plan_binds_exact_revision_and_component_scope(self):
+        head = self.commit("packages/ui/src/Copy.tsx")
+        output = self.repo / "scope.json"
+        self.assert_scopes(self.plan(self.start, head=head, json_output=output),
+                           {"web", "images"}, images={"web"})
+        actual = json.loads(output.read_text())
+        self.assertEqual(actual, {
+            "format": 1, "head": head, "event": "push", "base": self.start,
+            "scopes": ["images", "web"], "image_targets": ["web"],
+            "image_arches": ["amd64", "arm64"], "full": False,
+            "components": "auto", "reason": None,
+        })
 
     def test_union_includes_each_changed_path_with_spaces(self):
         head = self.commit("services/api-host/src/job list.rs", "deploy/start.sh")
@@ -191,7 +213,7 @@ class GitScopeTests(unittest.TestCase):
 
     def test_pr_and_full_produce_distinct_hosted_plans(self):
         head = self.commit("apps/web-desktop/app/page.tsx")
-        self.assert_scopes(self.plan(self.start, head=head, mode="pr"), {"web", "server", "compose", "images"}, images={"web"})
+        self.assert_scopes(self.plan(self.start, head=head, mode="pr"), {"web", "images"}, images={"web"})
         self.assert_scopes(self.plan(self.start, head=head, mode="full"), ALL_SCOPES, full=True, images=ALL_IMAGES)
 
     def test_workflow_edit_does_not_select_unrelated_lanes(self):

@@ -34,6 +34,12 @@ NATIVE_MANIFEST = "Fleetworks.app.manifest.json"
 NATIVE_FORMAT = "fleetworks-native-1"
 NATIVE_CPU_TYPES = {"x86_64-apple-darwin": 0x01000007, "aarch64-apple-darwin": 0x0100000C}
 VERSION_PATTERN = r"([0-9]+)\.([0-9]+)\.([0-9]+)(?:-[A-Za-z0-9.-]+)?(?:\+[A-Za-z0-9.-]+)?"
+ARTIFACT_VERSION_PATTERN = (
+    r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+    r"(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+    r"(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+)
 
 
 def sha256(path):
@@ -139,6 +145,18 @@ def apple_versions(version, bundle_version=None):
     if not re.fullmatch(r"[1-9][0-9]{0,3}(?:\.(?:0|[1-9][0-9]?)){0,2}", bundle_version):
         raise ValueError("Invalid Apple numeric bundle version")
     return short, bundle_version
+
+
+def artifact_version(override=None, *, root=ROOT):
+    """Select an explicit channel artifact SemVer without rewriting the source."""
+    version = override if override is not None else (root / "version.txt").read_text(encoding="utf-8").strip()
+    if not isinstance(version, str) or not re.fullmatch(ARTIFACT_VERSION_PATTERN, version):
+        raise ValueError("Invalid release version")
+    # Artifact versions appear in ZIP paths as well as manifests. Bound the
+    # explicit override before any build/package operation or filesystem write.
+    if len(version) > 160:
+        raise ValueError("Release version exceeds the artifact identity limit")
+    return version
 
 
 def cargo_native_command(target, profile, *, agent=False, root=ROOT, implicit_host=False):
@@ -548,19 +566,19 @@ def native_main(args):
         _progress("Inspecting host, toolchain and native target")
     info = detect()
     target = resolve_native_target(info, args.target)
+    version = artifact_version(getattr(args, "version", None), root=ROOT)
     if args.open and target != info.native_target:
         raise ValueError("--open cannot launch an artifact for the other physical Mac architecture")
     toolchain = validate_toolchain(info)
     destination = native_output(args.output, target, args.profile)
     command = cargo_native_command(target, args.profile, agent=args.agent, implicit_host=args.target == "host") if args.command == "build-native" else None
     if args.dry_run:
-        print(json.dumps({"target": target, "platform": info.as_dict(), "profile": args.profile,
+        print(json.dumps({"target": target, "platform": info.as_dict(), "profile": args.profile, "version": version,
                           "build_command": command, "app": str(destination / NATIVE_APP),
                           "archive_requested": args.archive, "open_requested": args.open,
                           "prerequisites": "SDK/package inputs checked during build/package, not this dry run"}, indent=2))
         return 0
     _progress("Checking source identity and pinned Rune dependencies")
-    version = (ROOT / "version.txt").read_text(encoding="utf-8").strip()
     revision, dirty = repository_identity(revision=args.revision)
     if (args.require_clean or os.environ.get("CI") == "true") and dirty:
         raise ValueError("CI/release native candidates require a clean exact-revision checkout")
@@ -603,6 +621,7 @@ def main():
         command.add_argument("--output", type=Path)
         command.add_argument("--resources", type=Path)
         command.add_argument("--revision")
+        command.add_argument("--version", help="Explicit calculated artifact SemVer; source workspace versions are preserved")
         command.add_argument("--minimum-macos")
         command.add_argument("--bundle-version")
         command.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID"))
@@ -618,6 +637,7 @@ def main():
     verify_native.add_argument("--archive", type=Path, required=True)
     verify_native.add_argument("--sha256", required=True)
     verify_native.add_argument("--revision", required=True)
+    verify_native.add_argument("--version", help="Require this exact calculated artifact SemVer instead of version.txt")
     verify_native.add_argument("--target", choices=NATIVE_TARGETS, required=True)
     verify_native.add_argument("--profile", choices=("debug", "release"))
     verify_native.add_argument("--rune-revision")
@@ -629,7 +649,7 @@ def main():
         if args.command in ("build-native", "package-native"):
             return native_main(args)
         if args.command == "verify-native":
-            version = (ROOT / "version.txt").read_text(encoding="utf-8").strip()
+            version = artifact_version(args.version, root=ROOT)
             if args.open and not args.directory:
                 raise ValueError("--open needs --directory so the exact verified app remains available for GUI review")
             options = dict(expected_digest=args.sha256, version=version, target=args.target,
@@ -644,7 +664,7 @@ def main():
             if args.open:
                 print(open_native(app, detect(), args.target))
             print(json.dumps({"archive": str(args.archive.resolve()), "sha256": args.sha256,
-                              "revision": manifest["revision"], "target": manifest["target"],
+                              "version": manifest["version"], "revision": manifest["revision"], "target": manifest["target"],
                               "bundle_checks": "pass", "gui_launch": "not_run",
                               "signing": manifest["signing"]}, indent=2))
             return 0

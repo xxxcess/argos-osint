@@ -76,42 +76,32 @@ export function checkVersions(root = ROOT, tag) {
       throw new Error(`Cargo.lock local package ${name} differs from workspace version`);
     }
   }
-  const config = JSON.parse(read("release-please-config.json"));
-  const packages = config.packages ?? {};
-  if (Object.keys(packages).join() !== ".") throw new Error("Configure one root release for the workspace");
-  const pkg = packages["."];
-  if (pkg["release-type"] !== "simple" || pkg["version-file"] !== "version.txt"
-      || pkg["include-component-in-tag"] !== false || pkg["include-v-in-tag"] !== true
-      || pkg["bump-minor-pre-major"] !== true || pkg["bump-patch-for-minor-pre-major"] !== false) {
-    throw new Error("Release strategy differs from the documented single-version/0.x policy");
-  }
-  const expected = new Set(["feat", "fix", "perf"]);
-  for (const section of pkg["changelog-sections"] ?? []) {
-    if (!section.hidden) expected.delete(section.type);
-    if (!section.hidden && !["feat", "fix", "perf"].includes(section.type)) throw new Error(`Unexpected releasable type: ${section.type}`);
-  }
-  if (expected.size) throw new Error("Feature, fix and performance changes must be releasable");
-  const extras = pkg["extra-files"] ?? [];
-  if (extras.length !== 2) throw new Error("Use exactly the workspace and local lockfile version updaters");
-  if (!extras.some(file => file.type === "toml" && file.path === "Cargo.toml" && file.jsonpath === "$.workspace.package.version")) {
-    throw new Error("Missing workspace version updater");
-  }
-  const selector = '$.package[?(' + names.map(name => `@.name.value == ${JSON.stringify(name)}`).join(" || ") + ')].version';
-  if (!extras.some(file => file.type === "toml" && file.path === "Cargo.lock" && file.jsonpath === selector)) {
-    throw new Error("Cargo.lock updater must select exactly the workspace package names in member order");
-  }
   return version;
 }
 
 export function checkRange(base, head, cwd = ROOT) {
   if (!/^[0-9a-f]{40}$/.test(base) || !/^[0-9a-f]{40}$/.test(head)) throw new Error("Commit range endpoints must be full Git SHAs");
   if (/^0+$/.test(base)) throw new Error("Missing base commit; fetch history rather than guessing the range");
-  const output = execFileSync("git", ["log", "--format=%H%x00%B%x00", `${base}..${head}`], { cwd, encoding: "utf8" });
+  const output = execFileSync("git", ["log", "--first-parent", "--format=%H%x00%P%x00%B%x00", `${base}..${head}`], { cwd, encoding: "utf8" });
   const fields = output.split("\0");
   let count = 0;
-  for (let i = 0; i + 1 < fields.length; i += 2) {
+  for (let i = 0; i + 2 < fields.length; i += 3) {
     const sha = fields[i].trim();
-    try { checkMessage(fields[i + 1]); }
+    const merge = fields[i + 1].trim().split(/\s+/).length > 1;
+    const message = fields[i + 2];
+    // PR title/body policy covers feature history, which can contain WIP.
+    // Validate GitHub's recorded PR title when a mechanical merge carries it;
+    // commit-derived versioning separately accounts for all introduced history.
+    if (merge && /^Merge (?:pull request #\d+ from |branch |remote-tracking branch |tag )/.test(message)) {
+      const body = message.split("\n").slice(1).join("\n").trim();
+      if (/^[a-z]+(?:\([a-z0-9,._/-]+\))?!?: /.test(body)) {
+        try { checkMessage(body); }
+        catch (error) { throw new Error(`${sha}: ${error.message}`); }
+        count++;
+      }
+      continue;
+    }
+    try { checkMessage(message); }
     catch (error) { throw new Error(`${sha}: ${error.message}`); }
     count++;
   }

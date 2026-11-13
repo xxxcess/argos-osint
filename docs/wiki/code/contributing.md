@@ -173,7 +173,7 @@ env -u ARGOS_SURREAL_MODE -u ARGOS_SURREAL_BIN -u ARGOS_SURREAL_REQUIRED \
 
 The gate runs format, Clippy, workspace tests, actual service-host CLI help and required embedded storage. Its broad workspace test phase uses `--no-fail-fast` to collect independent target failures while retaining a failing exit status; the earlier formatting and compile/lint preflight still stop on errors. Parent mode variables stay unset so mode-selected storage runs once. Targeted storage tests set mode and required execution explicitly. Embedded storage retains workspace library/binary unit targets to preserve dependency-feature unification; those units and some native-only fixtures execute in both phases. Selecting only storage integration targets can create another cold graph. CLI help prints Cargo progress while building the normal service executable and may require a separate runtime graph.
 
-A pull request into any branch other than `main` runs the selected Fleetworks checks and commit policy. It does not run the four-platform embedded builds. Those run on the push to `main` and by `gh workflow run embedded.yml --ref <branch>`. Dispatch `mutation.yml` for hosted mutation evidence. Once changes are published, inspect the checks for the exact revision with `gh pr checks`, `gh run list` or `gh run view --log-failed`. `.github` remains Code Architect-owned. MiniLM requires explicit opt-in.
+Pull requests into `dev`, `nightly` and `main` run selected Fleetworks checks on creation and every pushed update. Affected Linux storage changes select embedded compatibility; the normal Rune Mac lanes stay engine-free. Direct `gh workflow run embedded.yml --ref <branch>` retains the four-platform diagnostic. Integration pushes publish only verified, source-scoped [channel artifacts](versioning.md#release-automation). Dispatch `mutation.yml` for hosted mutation evidence. Once changes are published, inspect the checks for the exact revision with `gh pr checks`, `gh run list` or `gh run view --log-failed`. `.github` remains Code Architect-owned. MiniLM requires explicit opt-in.
 
 ## Storage facts
 
@@ -213,7 +213,7 @@ The seed corpus resolution order for the classifier is:
 
 - **Worktrees are edit-only:** run only `cargo fmt` there. The integration checkout owns scoped verification and any affected compatibility gate.
 - **Scope and verification:** follow the [finish-line policy](agent-workflow.md#scope-and-finish-line); no unrequested cleanup, late broad audits or unchanged full-suite retries.
-- **Commits:** Conventional Commits (`feat` minor, `fix`/`perf` patch; breaking = `!` + `BREAKING CHANGE:` footer). Check with `node scripts/release_check.mjs message --file <path>` and `… versions`. Release Please owns version bumps; never hand-bump or invent `Release-As`. Stage exact paths; preserve unrelated changes.
+- **Commits:** Conventional Commits (`feat` minor, `fix`/`perf` patch; breaking = `!` + `BREAKING CHANGE:` footer). Check with `node scripts/release_check.mjs message --file <path>` and `… versions`. Artifact CI calculates commit-derived versions; source baseline updates remain explicit maintainer work. Never hand-bump during ordinary work or invent `Release-As`. Stage exact paths; preserve unrelated changes.
 - **`.github`** changes go through Code Architect.
 - **Planning:** multi-phase work uses `.planning/<YYYY-MM-DD-slug>/` (`task_plan.md`, `findings.md`, `progress.md`); see [planning-artifacts](planning-artifacts.md).
 - **Scratch** lives only in `.agent-scratch/`, never in `crates/`, `docs/`, `scripts/`; never stage it.

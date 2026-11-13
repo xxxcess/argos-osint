@@ -2,8 +2,9 @@ name: Commit policy
 
 on:
   push:
-    branches: [main]
+    branches: [dev, nightly, main]
   pull_request:
+    branches: [dev, nightly, main]
     types: [opened, edited, synchronize, reopened, ready_for_review]
 
 permissions:
@@ -24,9 +25,7 @@ jobs:
         with:
           node-version: '22'
       # Event fields are read as JSON data, never interpolated into shell code.
-      - name: Check PR title/body or new main commits
+      - name: Check PR title/body or integration commits
         run: node scripts/release_check.mjs event
       - name: Check workspace, lockfile and release manifest
         run: node scripts/release_check.mjs versions
-      - name: Test agent tooling and release policy
-        run: node --test .opencode/tests/*.test.mjs

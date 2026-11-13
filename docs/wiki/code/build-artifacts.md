@@ -57,11 +57,27 @@ Capacity recovery follows [proof-based cache hygiene](contributing.md#build-cach
 | Tool | Output |
 | --- | --- |
 | `scripts/fleetworks_candidate.py build-native --agent` | Default `dist/native/<resolved-triple>/<debug-or-release>/Fleetworks.app` and `Fleetworks.app.manifest.json`; `--output <review-dir>` may select task-owned scratch |
-| Same helper, `--archive` | `Fleetworks-<version>-<sha12>-<run>.<attempt>-<triple>.zip` and `.zip.sha256` beside the app; [candidate naming/verification](../../../scripts/fleetworks_candidate.py) |
+| Same helper, `--archive --version <artifact-version>` | `Fleetworks-<version>-<sha12>-<run>.<attempt>-<triple>.zip` and `.zip.sha256` beside the app; trusted CI supplies the source-derived version. [Packaging/verification](../../../scripts/fleetworks_candidate.py) |
 | App bundle | `Contents/MacOS/fleetworks-desktop`, `Contents/Info.plist`, `Contents/Resources/`, embedded `Contents/Resources/fleetworks-manifest.json`; no service engines |
 | `scripts/fleetworks_verify.py native-ui --agent` | Default `.agent-scratch/native-ui/selected-*/`, or new/empty `--output`; selected `.png`, `.tree.json`, optional `.trace.jsonl`, bounded command logs and `manifest.json` |
 
 Build flow: flushed stage/command markers and live Cargo diagnostics on **stderr** → package/validate → app path and result metadata on **stdout**. `--open` opens only the validated app and preserves an already running app. Building, packaging, fixture generation, inspected captures and installed GUI approval are separate results.
+
+### Hosted artifacts and publication
+
+[![PR checks and trusted publication](../../diagrams/native-release.svg)](../../diagrams/native-release.html)
+
+| Event / stage | Output |
+| --- | --- |
+| PR opened or updated, targeting `dev`, `nightly` or `main` | Selected debug tests/builds and Rune PNG/tree evidence on both Mac architectures; no app ZIP or publication |
+| Trusted push to `nightly` / `dev` / `main` | Selected release-profile, versioned unsigned Mac ZIPs for Intel and Apple Silicon; manifests/checksums retained as 14-day Actions artifacts |
+| Native verification | Download by immutable artifact ID, require artifact digest, then verify ZIP checksum/source/version/target/bundle identity without installing or launching |
+| Selected Linux image verification | Native AMD64 + ARM64 build → exact-image-ID smoke → push verified digests; `release-images-{amd64,arm64}.json` records source/version/image identity. No automatic Docker-save archive. |
+| Required checks pass | GitHub Release assets for selected native ZIPs; selected multiarchitecture GHCR image indexes with immutable version/full-SHA tags and `nightly` or `stable` aliases |
+
+Source checks gate trusted image staging; artifact checks gate publication, and final **Fleetworks required** includes its result. `nightly` publishes prereleases/nightly images; `dev` and `main` share the stable channel. Publication and its verification scopes widen from the last published ancestor, so pending changes are covered; first publication selects all components, while docs-only changes skip products after a baseline. Pure RN Web UI changes select web checks/images without backend engines or Mac builds. [CI](ci.md) · [Version rules](versioning.md)
+
+Published apps remain unsigned. Signing/notarization, minimum-macOS and matching-hardware GUI/Keychain evidence are separate; they are not implemented prerequisites for this automatic unsigned publication.
 
 ## Web: dependencies, compiler output and QA
 
@@ -89,7 +105,7 @@ Use `ARGOS_WEB_PROFILE=dev ARGOS_WEB_TEST_DEV=1` for the isolated repository dev
 | Bake `backend` | `runtime`, `surrealdb`, `search-index`; `server` adds `web`. Individual Bake targets use those same four names |
 | Image names | `fleetworks-runtime`, `fleetworks-surrealdb`, `fleetworks-search-index`, `fleetworks-web`; explicit review tags or `local`/version aliases. Build output lives in the selected exporter/image store, not a host Cargo directory |
 | `runtime` / `search-index` | **Inside image:** `/usr/local/bin/argos-api-host` / `/usr/local/bin/fleetworks-search-index`; the service host selects roles. `surrealdb` packages the pinned database, `web` packages Next output/server dependencies |
-| `scripts/fleetworks_candidate_images.py pack --directory <dir>` | `<dir>/images.tar.gz`, `images.tar.gz.sha256`, `images.json`; exact revision/platform/image identities for candidate verification |
+| `scripts/fleetworks_candidate_images.py pack --directory <dir>` | Optional **manual export**: `<dir>/images.tar.gz`, `images.tar.gz.sha256`, `images.json`. The helper also supplies shared image inspection/smoke functions; automatic branch publication pushes digests without these tar artifacts. |
 | `pnpm build:classifier` | Generated source assets under `crates/argos-osint-core/assets/classifier/`: `natural-classifier.js`, `natural-bayes.patch`, `source-manifest.json`, `bundle-identity.rs` |
 | Optional Linux Rust-BERT worker | `tools/atlas-bert` is a separate LibTorch workspace, not the macOS client. Its Linux verification helper uses the agent debug graph with `--agent`, or `<output>/cargo-target/` otherwise; the [standalone release recipe](classifier.md#linux-deployment-and-retained-standalone-worker-setup) uses `target/atlas-bert/release/argos-atlas-bert` |
 | Linux worker bundle helper | `tools/atlas-bert/scripts/verify_linux.py` writes selected `<output>/bundle/{bin,model,python,licenses}`, `manifest.json`/`SHA256SUMS` inside the bundle, `atlas-bert-linux-{amd64,arm64}.tar.gz`, `evidence.json` and bounded logs. It checks native Linux architecture, libraries and checkpoint inference; this map does not claim those checks ran |

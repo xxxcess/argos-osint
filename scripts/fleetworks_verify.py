@@ -36,14 +36,14 @@ BERT_SHARED_PREFIXES = (
 )
 SHARED_PRIMARY_PATHS = {"Cargo.lock", "Cargo.toml", "rust-toolchain.toml", "scripts/agent_cargo.py"}
 SHARED_PRIMARY_PREFIXES = (
-    ".cargo/", "crates/fleetworks-contracts/", "crates/fleetworks-workstation/",
-    # Git comparisons include deleted paths when this crate is renamed.
-    "crates/fleetworks-workspace/",
+    ".cargo/", "crates/fleetworks-contracts/",
 )
+WORKSTATION_PREFIXES = ("crates/fleetworks-workstation/", "crates/fleetworks-workspace/")
 WEB_BUILD_PATHS = {
     ".github/workflows/intel-web.yml", ".node-version", ".nvmrc", "package.json", "pnpm-lock.yaml",
     "pnpm-workspace.yaml", "tsconfig.json", "playwright.config.ts", "scripts/check_web_build.mjs",
     "scripts/serve_web.mjs",
+    "apps/web-desktop/server.mjs",
 }
 SERVER_PREFIXES = (
     "services/api-host/",
@@ -75,12 +75,32 @@ def component_plan(components, scopes, images):
     return set(scopes), set(images)
 
 
+def github_plan_outputs(scopes, images, full=False):
+    """Serialize one validated scope plan for checks and artifact publication."""
+    if not set(scopes) <= ALL_SCOPES or not set(images) <= ALL_IMAGES:
+        raise ValueError("Unknown verification scope or production image target")
+    if bool(images) != ("images" in scopes):
+        raise ValueError("Image selection must agree with its verification scope")
+    return {
+        **{scope: str(scope in scopes).lower() for scope in sorted(ALL_SCOPES)},
+        "full": str(full).lower(),
+        "image_targets": ",".join(sorted(images)),
+        "image_arch_json": json.dumps(["amd64", "arm64"]),
+    }
+
+
 def path_images(path):
     """Linux server image targets affected by one changed path."""
     if not path or path.endswith(".md"):
         return set()
+    if path.startswith("tests/web/") or (
+        path.startswith(("apps/web-desktop/", "packages/")) and "/__tests__/" in path
+    ):
+        return set()
     if path in SHARED_PRIMARY_PATHS or path.startswith(SHARED_PRIMARY_PREFIXES):
         return set(RUST_IMAGES)
+    if path.startswith(WORKSTATION_PREFIXES):
+        return set()
     if path.startswith("services/search-index/") or path in {"deploy/start-search-index.sh", "deploy/check-search.sh"}:
         return {"search-index"}
     if path == "deploy/start-surreal.sh":
@@ -91,7 +111,7 @@ def path_images(path):
         return set(ALL_IMAGES)
     if (
         path in WEB_BUILD_PATHS
-        or path.startswith(("patches/", "tests/web/", "apps/web-desktop/", "packages/"))
+        or path.startswith(("patches/", "apps/web-desktop/", "packages/"))
         or path == "eslint.config.mjs"
         or path.startswith("vitest")
     ):
@@ -108,6 +128,8 @@ def raw_path_scopes(path):
         return {"bert"}
     if path in SHARED_PRIMARY_PATHS or path.startswith(SHARED_PRIMARY_PREFIXES):
         return PRIMARY_SCOPES | {"desktop"}
+    if path.startswith(WORKSTATION_PREFIXES):
+        return {"desktop"}
     if path in {"scripts/test_surreal.py", "scripts/test_surreal_release.py", "scripts/surrealdb-release.json"}:
         return {"server", "storage", "queue"}
     if path == "scripts/fixtures/atlas_bert":
@@ -115,25 +137,29 @@ def raw_path_scopes(path):
     if path == "scripts/fleetworks_network_smoke.py":
         return {"server"}
     if path in {"deploy/compose.yml", "deploy/compose.dev.yml", "deploy/check-web.mjs"}:
-        return {"web", "web_dev", "server", "compose"}
+        return {"web", "web_dev", "compose"}
     if path in WEB_BUILD_PATHS or path.startswith("patches/"):
-        return {"web", "web_dev", "server", "compose"}
+        return {"web", "web_dev", "compose"}
     if path.startswith(("tests/web/", "vitest")) or path == "eslint.config.mjs":
         return {"web"}
 
     scopes = {"bert"} if path in BERT_SHARED_PATHS or path.startswith(BERT_SHARED_PREFIXES) else set()
     if path.startswith("apps/fleetworks-desktop/"):
         return {"desktop"}
+    if path.startswith("apps/web-desktop/__tests__/"):
+        return {"web"}
     if path in {"scripts/fleetworks_native_verify.py", "scripts/test_fleetworks_native_verify.py", ".github/workflows/fleetworks-native.yml"}:
+        return {"desktop"}
+    if path in {"scripts/fleetworks_candidate.py", "scripts/test_fleetworks_candidate.py"}:
         return {"desktop"}
     if path.startswith("services/search-index/"):
         return {"server"}
     if path.startswith("apps/web-desktop/app/api/"):
-        return {"web", "web_dev", "server", "compose"}
+        return {"web", "web_dev", "compose"}
     if path.startswith(("apps/web-desktop/app/", "packages/")) and not path.endswith(("/package.json", "/tsconfig.json")):
-        return {"web", "server", "compose"}
+        return {"web"}
     if path.startswith(("apps/web-desktop/", "packages/")):
-        return {"web", "web_dev", "server", "compose"}
+        return {"web", "web_dev"}
     if path in {"deploy/Dockerfile", "deploy/Dockerfile.dockerignore", "deploy/docker-bake.hcl"}:
         return scopes | {"server", "compose", "images"}
     if path.startswith("deploy/"):
@@ -171,6 +197,8 @@ def raw_path_scopes(path):
         "scripts/fleetworks_config_reset.py",
         "scripts/test_fleetworks_config_reset.py",
         "scripts/release_check.mjs",
+        "scripts/fleetworks_release.py",
+        "scripts/test_fleetworks_release.py",
     }:
         return set()
 
@@ -187,8 +215,8 @@ def path_scopes(path):
     return scopes
 
 
-def git_paths(*args):
-    raw = subprocess.check_output(["git", *args], stderr=subprocess.DEVNULL)
+def git_paths(*args, cwd=None):
+    raw = subprocess.check_output(["git", *args], stderr=subprocess.DEVNULL, cwd=cwd)
     return map(os.fsdecode, raw.split(b"\0"))
 
 
@@ -208,7 +236,7 @@ def select_scopes(event, base, head, *, worktree=False):
     return scopes, reason
 
 
-def select_plan(event, base, head, *, worktree=False):
+def select_plan(event, base, head, *, worktree=False, root=None):
     if event in {"workflow_dispatch", "schedule"} or not valid_sha(base):
         return ALL_SCOPES, set(ALL_IMAGES), "No comparison requested or available"
     separator = "..." if event == "pull_request" else ".."
@@ -216,14 +244,14 @@ def select_plan(event, base, head, *, worktree=False):
     scopes = set()
     images = set()
     try:
-        for path in git_paths(*diff, f"{base}{separator}{head}", "--"):
+        for path in git_paths(*diff, f"{base}{separator}{head}", "--", cwd=root):
             scopes.update(path_scopes(path))
             images.update(images_for(path))
         if worktree:
-            for path in git_paths(*diff, "HEAD", "--"):
+            for path in git_paths(*diff, "HEAD", "--", cwd=root):
                 scopes.update(path_scopes(path))
                 images.update(images_for(path))
-            for path in git_paths("ls-files", "--others", "--exclude-standard", "-z"):
+            for path in git_paths("ls-files", "--others", "--exclude-standard", "-z", cwd=root):
                 scopes.update(path_scopes(path))
                 images.update(images_for(path))
     except (OSError, subprocess.CalledProcessError):
@@ -327,6 +355,7 @@ def main():
         mode.add_argument("--components", choices=COMPONENTS, default="auto", help="explicit selection; native always selects both Mac app lanes")
         if name != "local":
             mode.add_argument("--github-output", type=Path, help="append Boolean scope outputs for GitHub Actions")
+            mode.add_argument("--json-output", type=Path, help="write the exact source/scope plan for channel packaging")
     remote = commands.add_parser("dispatch", help="explicitly start a GitHub Actions workflow run")
     remote.add_argument("mode", choices=("pr", "full"))
     remote.add_argument("--ref", required=True, help="remote branch or tag at the checked-out commit")
@@ -359,14 +388,18 @@ def main():
         if reason and args.components == "auto":
             print(f"{reason}. Selecting all scopes.")
         full = args.components in {"backend", "all"} or (args.command == "full" and args.components == "auto")
-        arches = ["amd64", "arm64"] if full else ["amd64"]
+        arches = ["amd64", "arm64"]
+        if output_path := getattr(args, "json_output", None):
+            output_path.write_text(json.dumps({
+                "format": 1, "head": actual, "event": event, "base": args.base,
+                "scopes": sorted(scopes), "image_targets": sorted(images),
+                "image_arches": arches, "full": full, "components": args.components,
+                "reason": reason,
+            }, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         if output_path := getattr(args, "github_output", None):
             with output_path.open("a", encoding="utf-8") as output:
-                for scope in sorted(ALL_SCOPES):
-                    print(f"{scope}={str(scope in scopes).lower()}", file=output)
-                print(f"full={str(full).lower()}", file=output)
-                print(f"image_targets={','.join(sorted(images))}", file=output)
-                print(f"image_arch_json={json.dumps(arches)}", file=output)
+                for key, value in github_plan_outputs(scopes, images, full).items():
+                    print(f"{key}={value}", file=output)
         selected = ", ".join(sorted(scopes)) or "no runtime scopes selected"
         built = ", ".join(sorted(images)) or "no server images"
         print(f"{actual}: {selected}; server images: {built}", flush=True)

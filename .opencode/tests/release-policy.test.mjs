@@ -10,7 +10,7 @@ function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), "argos-release-policy-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const members = workspaceMemberPaths(readFileSync(join(ROOT, "Cargo.toml"), "utf8"));
-  for (const path of ["Cargo.toml", "Cargo.lock", "version.txt", ".release-please-manifest.json", "release-please-config.json",
+  for (const path of ["Cargo.toml", "Cargo.lock", "version.txt", ".release-please-manifest.json",
     ...members.map(member => `${member}/Cargo.toml`)]) {
     const dest = join(root, path);
     mkdirSync(join(dest, ".."), { recursive: true });
@@ -46,7 +46,7 @@ test("workspace, local lockfile, mirrors and prospective tag agree", t => {
   assert.throws(() => checkVersions(root, "v99.0.0"), /Expected tag/);
 });
 
-test("drift in each release-managed version is rejected", t => {
+test("drift in each source baseline version is rejected", t => {
   for (const path of ["version.txt", ".release-please-manifest.json", "Cargo.lock"]) {
     const root = fixture(t);
     const file = join(root, path);
@@ -60,36 +60,17 @@ test("drift in each release-managed version is rejected", t => {
   }
 });
 
-test("crate version overrides and broad dependency updaters are rejected", t => {
+test("individual crate version overrides are rejected", t => {
   const root = fixture(t);
   const member = join(root, "crates/argos-osint-core/Cargo.toml");
   const original = readFileSync(member, "utf8");
   writeFileSync(member, original.replace("version.workspace = true", 'version = "0.1.0"'));
   assert.throws(() => checkVersions(root), /must inherit/);
   writeFileSync(member, original);
-  const configPath = join(root, "release-please-config.json");
-  const config = JSON.parse(readFileSync(configPath, "utf8"));
-  config.packages["."]["extra-files"].find(file => file.path === "Cargo.lock").jsonpath = "$.package[*].version";
-  writeFileSync(configPath, JSON.stringify(config));
-  assert.throws(() => checkVersions(root), /exactly the workspace package names/);
+  assert.equal(checkVersions(root), readFileSync(join(root, "version.txt"), "utf8").trim());
 });
 
-test("release configuration preserves 0.x behavior and maintenance-only releases stay disabled", t => {
-  for (const mutate of [
-    pkg => { pkg["bump-patch-for-minor-pre-major"] = true; },
-    pkg => { pkg["include-component-in-tag"] = true; },
-    pkg => { pkg["changelog-sections"].find(section => section.type === "chore").hidden = false; },
-  ]) {
-    const root = fixture(t);
-    const file = join(root, "release-please-config.json");
-    const config = JSON.parse(readFileSync(file, "utf8"));
-    mutate(config.packages["."]);
-    writeFileSync(file, JSON.stringify(config));
-    assert.throws(() => checkVersions(root));
-  }
-});
-
-test("main commit range validates each commit and rejects missing history", t => {
+test("integration commit range validates each commit and rejects missing history", t => {
   const root = mkdtempSync(join(tmpdir(), "argos-commit-range-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const git = (...args) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
@@ -103,6 +84,24 @@ test("main commit range validates each commit and rejects missing history", t =>
   commit("oops malformed message");
   assert.throws(() => checkRange(base, git("rev-parse", "HEAD"), root), /Use <type>/);
   assert.throws(() => checkRange("0".repeat(40), git("rev-parse", "HEAD"), root), /Missing base/);
+});
+
+test("landing policy permits feature WIP but validates recorded PR titles and direct commits", t => {
+  const root = mkdtempSync(join(tmpdir(), "argos-merge-policy-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const git = (...args) => execFileSync("git", ["-c", "user.name=Release policy test",
+    "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", ...args],
+  { cwd: root, encoding: "utf8" }).trim();
+  git("init", "--quiet", "-b", "dev");
+  git("commit", "--quiet", "--allow-empty", "-m", "chore: baseline");
+  const base = git("rev-parse", "HEAD");
+  git("checkout", "-qb", "feat/synthetic");
+  git("commit", "--quiet", "--allow-empty", "-m", "WIP synthetic capability");
+  git("checkout", "-q", "dev");
+  git("merge", "--quiet", "--no-ff", "feat/synthetic", "-m", "Merge pull request #1 from fixture/feat/synthetic\n\nfeat: synthetic capability");
+  assert.equal(checkRange(base, git("rev-parse", "HEAD"), root), 1);
+  git("commit", "--quiet", "--allow-empty", "-m", "Merge branch 'pretend'");
+  assert.throws(() => checkRange(base, git("rev-parse", "HEAD"), root), /Use <type>/);
 });
 
 test("PR title/body are checked as event data and title-only breaking changes fail", t => {

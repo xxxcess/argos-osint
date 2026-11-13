@@ -79,7 +79,7 @@ The [core map](code/core.md) is the module index inside the domain crate.
 
 ## Change, check, and release
 
-Read [contributing](code/contributing.md) and [conventions](code/conventions.md) before editing. [CI scopes](code/ci.md#fleetworksyml--scoped-branch-checks) select checks by changed paths. Embedded compatibility runs on `main` or by dispatch. [Versioning](code/versioning.md) defines the shared workspace version, commits, and releases. Agents follow [execution policy](code/agent-workflow.md).
+Read [contributing](code/contributing.md) and [conventions](code/conventions.md) before editing. [CI scopes](code/ci.md#fleetworksyml--scoped-branch-checks) select checks by changed paths. Affected Linux storage selects embedded compatibility; the four-platform diagnostic remains available by direct dispatch. [Versioning](code/versioning.md) defines the shared workspace version, commits, and releases. Agents follow [execution policy](code/agent-workflow.md).
 
 ## Docs, tags, and history
 

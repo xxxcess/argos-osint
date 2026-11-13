@@ -22,6 +22,13 @@ Domain storage is SurrealDB; the Jobs service owns SQLite operational logs. Read
 - Coverage tests in core: every tool input has a binding kind, extractors, and producers.
 - Native: use actual Rune production views and Runtime handlers, with selected PNG/tree inspection; the retired terminal TestBackend records are historical.
 
+| Test boundary | Fixture practice |
+| --- | --- |
+| Registered authorization | Exercise real registration/admission in integration tests; use forged claims to verify rejection. |
+| Process environment | Share one guard across consumers and restore previous values. |
+| Runtime budgets | Reuse the existing shared test gate; a module-local mutex cannot coordinate other consumers. |
+| Revisions | Compare durable values within the same root/context; keep process counters separate. |
+
 ## Planning and scratch
 
 Use the [planning format and retention policy](planning-artifacts.md#working-format); the plan owner updates phase checkboxes and Next Step as work completes. [Contributor workflow](contributing.md#workflow-rules) owns scratch and staging rules.
@@ -51,7 +58,7 @@ Rust edits and reviews load the [argos-rust-style skill](../../../.opencode/skil
 Rules for asynchronous execution and process management:
 
 - **Non-blocking worker threads**: Never invoke synchronous sleeps (`std::thread::sleep`), blocking disk I/O, or CPU-bound loops on Tokio runtime threads. Use `tokio::task::spawn_blocking` to offload synchronous work (such as hardware metric sampling or synchronous NLP parsing) or native `tokio::fs` and `tokio::net` primitives.
-- **Large async callbacks**: For large operations wrapped in task-local scopes, box the operation before constructing the scope. Boxing an outer async wrapper can leave the callback inline in its poll frame. Diagnose stack overflows with native traces and measured frame sizes; fix the allocation boundary and rerun the real public path on the normal stack instead of increasing test stacks.
+- **Large async callbacks**: Box large operations at their actual async boundary, including worker callbacks. For task-local scopes, box the operation before constructing the scope. Boxing an outer async wrapper can leave the callback inline in its poll frame. Diagnose stack overflows with native traces and measured frame sizes; fix the allocation boundary and rerun the real public path on the normal stack instead of increasing test stacks.
 - **Synchronous drop safety**: Never spawn detached async tasks (`tokio::spawn`) within `Drop::drop` to perform state cleanup. State maps requiring teardown on drop must use synchronous synchronization (`std::sync::Mutex`) so entries are cleared synchronously and deterministically.
 - **RAII task cancellation**: Any background loop or lease renewal task spawned during stage execution must be held by an RAII guard that stores an atomic cancellation flag and invokes `handle.abort()` on drop. When exiting normally, the guard's handle is taken and cleanly awaited.
 - **Subprocess ownership**: Always set `.kill_on_drop(true)` on `tokio::process::Command` when spawning external processes, guaranteeing that children are terminated if the supervising future or task is cancelled or dropped.

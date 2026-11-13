@@ -94,9 +94,9 @@ One integration/build owner uses a stable feature graph and resource-based concu
 | Focused API/storage test matching the embedded gate | Retain the gate's exact workspace package/target set, features, profile, host and storage mode; narrow execution with the relevant test filter |
 | Deliberately smaller package graph | Inspect its resolved dependency features once, record the difference and budget a separate build |
 
-The service-host development dependency activates core fixtures. Matching core feature names alone does not guarantee matching `log`, `tracing`, proc-macro or build-dependency inputs; compare the resolved graph. A test-name filter limits execution; Cargo may still compile every selected test target. [Artifact costs](build-artifacts.md#build-cost-signals)
+The service-host development dependency activates core fixtures. Matching core feature names alone does not guarantee matching `log`, `tracing`, proc-macro or build-dependency inputs; compare the resolved graph. A test-name filter limits cases; Cargo may still compile and launch every selected test harness, including harnesses with zero matches. [Artifact costs](build-artifacts.md#build-cost-signals)
 
-Production-only checks exclude `#[cfg(test)]` fixtures. Before linking many workspace test executables, run the [workspace/all-target Clippy recipe](#targeted-local-rust-builds-and-tests-fast-iteration) in the selected graph to catch fixture API/SDK type errors early.
+Prefer public typed constructors for internal test fixtures; use literal JSON when the wire format or its rejection is the contract under test. Production-only checks exclude `#[cfg(test)]` fixtures. Before linking many workspace test executables, run the [workspace/all-target Clippy recipe](#targeted-local-rust-builds-and-tests-fast-iteration) in the selected graph to catch fixture API/SDK type errors early.
 
 To focus required embedded execution while retaining the workspace test graph:
 
@@ -171,7 +171,7 @@ env -u ARGOS_SURREAL_MODE -u ARGOS_SURREAL_BIN -u ARGOS_SURREAL_REQUIRED \
   scripts/local_matrix.sh --storage embedded
 ```
 
-The gate runs format, Clippy, workspace tests and required embedded storage. Parent mode variables stay unset so mode-selected storage runs once. Targeted storage tests set mode and required execution explicitly. Some native-only fixtures execute in both phases.
+The gate runs format, Clippy, workspace tests and required embedded storage. Its broad workspace test phase uses `--no-fail-fast` to collect independent target failures while retaining a failing exit status; the earlier formatting and compile/lint preflight still stop on errors. Parent mode variables stay unset so mode-selected storage runs once. Targeted storage tests set mode and required execution explicitly. Some native-only fixtures execute in both phases.
 
 A pull request into any branch other than `main` runs the selected Fleetworks checks and commit policy. It does not run the four-platform embedded builds. Those run on the push to `main` and by `gh workflow run embedded.yml --ref <branch>`. Dispatch `mutation.yml` for hosted mutation evidence. Once changes are published, inspect the checks for the exact revision with `gh pr checks`, `gh run list` or `gh run view --log-failed`. `.github` remains Code Architect-owned. MiniLM requires explicit opt-in.
 

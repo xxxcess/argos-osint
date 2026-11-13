@@ -40,7 +40,8 @@ case "$storage" in
   embedded)
     step cargo fmt --all -- --check
     step "${cargo[@]}" clippy --workspace --all-targets --locked -- -D warnings
-    step "${cargo[@]}" test --workspace --locked
+    # Collect independent runtime failures after the compile/lint preflight.
+    step "${cargo[@]}" test --workspace --locked --no-fail-fast
     # The retained service host must expose its actual role/bootstrap interface.
     step "${cargo[@]}" run -q -p argos-api-host --locked -- --help
     step python3 scripts/test_surreal.py --mode embedded --no-fail-fast

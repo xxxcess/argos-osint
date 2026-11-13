@@ -13,12 +13,12 @@ Implementation baseline: `b8da29f`. Dependency/lockfile checkpoint: `6eef4cc`. T
 | Locked host resolution | Full host-filtered Cargo metadata with `--locked --offline` | PASS; no dependency upgrades |
 | Linux image dependency resolution | Isolated manifest/stub-only BuildKit metadata for runtime/search graphs | PASS for both Linux graphs with --locked; no release image or stack changes |
 | Backend production compiler | Exact runtime server/nlp/classifier features through shared host debug cache, 4m40s | PASS |
-| Backend storage/security assertions | Three API pairing tests in required embedded mode: lifecycle/admission/revoke/config-lock/policy, persisted reopen and rejected authority fields | PASS 3/3 in 22.44s; the filtered workspace run is still finishing other targets |
+| Backend storage/security assertions | Three API pairing tests in required embedded mode: lifecycle/admission/revoke/config-lock/policy, persisted reopen and rejected authority fields | PASS 3/3 in 22.44s; overall filtered driver intentionally interrupted afterward (exit 130) |
 | Native captures | 24 actual Rune captures; 12 selected PNG/tree pairs inspected (six scenes at 1180×780/1× and 640×480/2×) | PASS for selected synthetic views; real Keychain/installed GUI separate |
-| Docs/diagram checks | Original 16 Markdown files/420 links/5 figures; workflow updates cover 8 reviewed guides/entrypoints with 175 local path/anchor checks and 2 exact XML-valid rendered/inspected diagram pairs | PASS; workflow links, bounds and whitespace checked |
-| Formatting | Full `cargo fmt --all -- --check` after authorized formatting repair; assertions unchanged, original formatting retained in scratch | PASS; tracked Rust source matches the feature commit |
-| Workspace all-target Clippy | Whole workspace/all targets with `-D warnings`; fixture compiler/lint repairs below | PASS; repaired warm-cache rerun completed in 10.00s |
-| Full local embedded gate | Formatting, Clippy, unfiltered workspace tests, host help and required storage contracts | PENDING after the focused runtime run |
+| Docs/diagram checks | Original 16 Markdown files/420 links/5 figures; workflow updates cover 8 reviewed guides/entrypoints with 175 local path/anchor checks and 2 exact XML-valid rendered/inspected diagram pairs | PASS; workflow links, bounds and whitespace checked; later bounded audit: 11 relevant docs/plans, 203 local links/anchors, two unchanged diagram pairs valid |
+| Formatting | Full `cargo fmt --all -- --check` after authorized formatting repair; assertions unchanged, original formatting retained in scratch | PASS on the current test-fixture repair checkpoint |
+| Workspace all-target Clippy | Whole workspace/all targets with `-D warnings`; fixture compiler/lint repairs below | PASS after all six case repairs; final all-target rerun 3m33s |
+| Full local embedded gate | Formatting and Clippy passed; collected unfiltered workspace run exited 101 with six failing cases across four targets | FAIL; repairs in verification, host help and required storage phase not reached |
 
 ## Implemented boundaries
 
@@ -45,7 +45,7 @@ Actual user Keychain access, installed GUI/OS dialogs, signing, both Mac/Linux a
 
 Earlier attempts were capacity-blocked, including workspace Clippy interrupted at <1 GiB free reserve (exit 130). The repairs below now provide room for the remaining checks. Source/tests or compiler success alone do not prove stored authorization behavior.
 
-## Reproduce remaining checks after capacity is available
+## Reproduce remaining checks
 
 Use a clean checkout of the feature commit so unrelated working-tree edits do not affect formatting. Reuse the shared implicit host debug graph; preserve user/global caches.
 
@@ -58,13 +58,13 @@ Focused required-storage regressions live in API `pairing::tests` and `admission
 
 The backend build issue was independently reproduced from BuildKit history and the lockfile fix validated against both isolated Linux dependency graphs. The old control-service SDK `SendError` represented a closed response channel after a query result; its bounded adjacent log contained no other failure and the existing service remained healthy. No vendor log suppression or existing-stack restart was applied.
 
-## Requested verification rerun
+## Historical verification rerun (5fec2a9)
 
 At source revision `5fec2a9`, reran the three client/native/workstation library suites: **146 passed, 0 failed** (41 contracts, 79 native, 26 workstation). The operator command's six tests and fresh-review provisioning's nine tests also passed again. No actual user Keychain access or app launch occurred.
 
-The full `local_matrix.sh --storage embedded` invocation exited **1** at its first formatting step, solely on the preserved unstaged formatting changes in `crates/fleetworks-workstation/src/native/tests.rs`. Consequently, this invocation did not reach Clippy, workspace tests or the required storage phase. The focused backend pairing command was not started: free disk was about 2.8 GiB before the rerun and 2.2 GiB afterward, below the established build reserve. Those backend checks remain **BLOCKED**, rather than passed or skipped as successful.
+The full `local_matrix.sh --storage embedded` invocation exited **1** at its first formatting step, solely on the preserved unstaged formatting changes in `crates/fleetworks-workstation/src/native/tests.rs`. Consequently, this invocation did not reach Clippy, workspace tests or the required storage phase. The focused backend pairing command was not started: free disk was about 2.8 GiB before the rerun and 2.2 GiB afterward, below the established build reserve. Those backend checks were **BLOCKED** at that checkpoint; the later scoped API pass supersedes this blocker.
 
-Local logs: `.agent-scratch/native-pairing-rerun-units.log` and `.agent-scratch/native-pairing-rerun-matrix.log`. Resolve the unrelated formatting diff and provide sufficient capacity before rerunning the remaining commands above. The native build/open step is reserved for the user.
+Local logs: `.agent-scratch/native-pairing-rerun-units.log` and `.agent-scratch/native-pairing-rerun-matrix.log`. The later repair checkpoint resolved this formatting/capacity block. The native build/open step is reserved for the user.
 
 ## Blocker repairs and workflow guidance
 
@@ -76,7 +76,7 @@ Local logs: `.agent-scratch/native-pairing-rerun-units.log` and `.agent-scratch/
 | Cold build is slow | Observed roughly 20 minutes in RocksDB C++ compilation on this Intel host; CPU speed limit was 43%. Full Rust debug info and the embedded/NLP/classifier/fixture graph add work. These are observations, not a benchmark. Current engine compilation completed. |
 | Workflow guidance is hard to discover | Updated contributor loop/cache decisions, build artifact guide, agent workflow, relevant READMEs and two rendered diagram pairs. Permanent guidance describes reusable choices; this tracker retains incident history. |
 
-Required-mode command (all three API cases have passed; remaining filtered workspace targets are still running):
+Required-mode command (all three API cases passed; the driver was then intentionally interrupted while launching unrelated zero-match harnesses):
 
 ```sh
 CARGO_BUILD_JOBS=2 env -u ARGOS_SURREAL_BIN \
@@ -85,10 +85,26 @@ CARGO_BUILD_JOBS=2 env -u ARGOS_SURREAL_BIN \
   pairing::tests:: -- --nocapture --test-threads=1
 ```
 
-The complete filtered workspace result and full gate remain pending until their processes actually complete. Native app build/open and real Keychain checks remain reserved for the user.
+The filtered workspace command is INTERRUPTED, not an overall pass. Its three completed API tests remain valid scoped evidence. The collected full workspace run exited 101; repairs and required remaining phases are tracked below. Native app build/open and real Keychain checks remain reserved for the user.
 
 ### Test-target preflight repairs
 
 The first required-mode build exited 101 before assertions: an older static-purpose fixture omitted the new `AccessPolicy::pairing_repo` field, and the pinned SDK cannot deserialize a complete query result directly into scalar `serde_json::Value`. The fixes supply `None` only in that datastore-free fixture and use supported `Vec<Value>` rows. The privacy audit also verifies an issued-credential row is present before testing that secrets are absent. Actual API pairing tests now pass.
 
 All-target Clippy then found one unnecessary clone in a native pairing test assertion. A borrowed-slice comparison preserves the assertion; the repaired full Clippy pass succeeds. The contributor workflow now calls out test-target compilation before expensive executable generation, because a production-only check excludes `#[cfg(test)]` fixtures.
+
+### Collected workspace failures and bounded repairs
+
+Log: `.agent-scratch/native-pairing-check-repairs/full-matrix-collect.log`. Formatting/Clippy passed; workspace exited **101** with four failed targets (six cases). Host help and required storage were not reached. API unit tests **57/57** and API contracts **9/9** passed after typed-context/real-registration fixture repairs. The seven-case classifier admission group passed in **840.48 seconds**; that is group duration, including serialized durable work, not a single-test measurement.
+
+| Failed boundary | Repair under verification |
+| --- | --- |
+| WebSocket live fixture | Real scoped Native authority, public registration and brief admission; keep Origin/auth rejection and no-polling assertions. |
+| Classifier activation runtime budget | Use the existing cross-module runtime gate; preserve production budget and activation/uncertainty assertions. |
+| Auth-only commit generation | Compare durable revisions within the same root; assert the independent process counter also advances. |
+| Summary worker stack overflow | Box the actual drain operation before callers embed its future. Preserve normal thread stacks, five real subprocess rounds and 500 ms shutdown bound. |
+| Paging fixtures in optional workspace phase | Follow shared optional harness contract. Required embedded mode still executes both full paging/privacy cases; REQUIRED=1 cannot skip. |
+
+The old linked summary-worker chain had about 1.43 MB across four nested first-party frames. This diagnoses allocation pressure; only the rebuilt real public path can establish the repair. No stack-size or timing-limit increase is used. `--no-fail-fast` collects independent workspace failures without changing the final failing exit status. Ordinary absent-harness returns remain **SKIPPED**, never required-storage evidence.
+
+Post-repair preflight: full workspace/all-target Clippy with `-D warnings` passed (3m33s). Its initial attempt found one cloned-reference lint in the new live fixture; fixed with `std::slice::from_ref`, without suppression. Required-mode focused library/live/stress/paging verification is now running on the workspace graph.

@@ -18,7 +18,15 @@ Build flow: live Cargo progress/diagnostics and stage markers on stderr → pack
 python3 scripts/fleetworks_candidate.py build-native --agent --target host --profile debug
 ```
 
-Open Setup Gateway, enter its URL and choose Connect. Share the displayed pairing request ID/code with the [gateway operator](../../docs/wiki/code/native-connections.md#operator-approval-and-revocation). The app authenticates approved access, saves it in macOS Keychain and registers the installation. Later connections use that exact origin/deployment; missing/denied access has no file fallback. Retry preserves an uncertain request; Pair again explicitly replaces it.
+For an existing local review, the backend operator first runs:
+
+```sh
+python3 deploy/native_review.py prepare --name native-local
+```
+
+This offline helper reads current Compose settings and adds only missing Operator provisioning, preserving existing credentials/data. It prints self-contained build, restart and approval commands for the configured images and actual gateway port; the operator chooses when to run them. For a new deployment, use [init instead](../../deploy/README.md#initialize-a-fresh-review). [Existing review preparation](../../deploy/README.md#prepare-an-existing-review)
+
+Open Setup Gateway, enter the helper's gateway URL and choose Connect. Share the displayed pairing request ID/code with the [gateway operator](../../docs/wiki/code/native-connections.md#operator-approval-and-revocation). The app authenticates approved access, saves it in macOS Keychain and registers the installation. Later connections use that exact origin/deployment; missing/denied access has no file fallback. Retry preserves an uncertain request; Pair again explicitly replaces it.
 
 Protected settings create no default child and contain no polling/access secrets. The opaque workstation ID is the browser Connect ID, not a credential. Optional IP metadata never defines identity; WebRelay remains independent.
 

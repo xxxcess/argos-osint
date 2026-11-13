@@ -171,5 +171,173 @@ class NativeReviewTests(unittest.TestCase):
                 self.assertFalse(review_path(root, "fixture").exists())
 
 
+class PrepareReviewTests(unittest.TestCase):
+    def fixture(self, root, *, legacy=False, root_env=True):
+        receipt = provision(root, "local", 18091, "linux/amd64", "a" * 40, root_env=root_env)
+        (root / "version.txt").write_text("0.2.1\n")
+        workspace = Path(receipt["workspace"])
+        if legacy:
+            manifest = workspace / "secrets/gateway-credentials.json"
+            data = json.loads(manifest.read_text())
+            data["credentials"] = [c for c in data["credentials"] if c["purpose"] != "operator"]
+            manifest.write_text(json.dumps(data))
+            (workspace / "secrets/operator-token").unlink()
+        return workspace
+
+    def test_prepare_upgrades_legacy_once_without_rotating_any_existing_authority(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = self.fixture(root, legacy=True)
+            manifest = workspace / "secrets/gateway-credentials.json"
+            previous = json.loads(manifest.read_text())
+            files = {p.name: p.read_bytes() for p in (workspace / "secrets").iterdir()}
+            with mock.patch.object(native_review.subprocess, "run") as docker:
+                result = native_review.prepare(root, "local")
+                docker.assert_not_called()
+            current = json.loads(manifest.read_text())
+            self.assertEqual(current["credentials"][:-1], previous["credentials"])
+            self.assertEqual(current["scope_id"], previous["scope_id"])
+            self.assertEqual(current["access_epoch"], previous["access_epoch"])
+            for name, data in files.items():
+                if name != manifest.name:
+                    self.assertEqual((workspace / "secrets" / name).read_bytes(), data)
+            token = result["operator"]
+            self.assertEqual(stat.S_IMODE(token.stat().st_mode), 0o600)
+            self.assertNotIn(token.read_bytes(), files.values())
+            identity = (manifest.stat().st_ino, token.stat().st_ino, token.read_bytes())
+            native_review.prepare(root, "local")
+            self.assertEqual((manifest.stat().st_ino, token.stat().st_ino, token.read_bytes()), identity)
+
+    def test_prepare_reads_live_root_settings_and_prints_self_contained_redacted_commands(self):
+        with tempfile.TemporaryDirectory(prefix="review commands ") as directory:
+            root = Path(directory)
+            workspace = self.fixture(root)
+            env_file = root / "compose.env"
+            env_file.write_text(env_file.read_text().replace("'18091'", "'18093'")
+                                .replace("fleetworks-runtime:native-review-local-" + "a" * 12,
+                                         "custom-runtime:edited"))
+            output = io.StringIO()
+            with mock.patch.object(native_review, "ROOT", root), \
+                 mock.patch("sys.argv", ["native_review.py", "prepare", "--name", "local"]), \
+                 mock.patch.object(native_review.subprocess, "run") as docker, redirect_stdout(output):
+                self.assertEqual(native_review.main(), 0)
+                docker.assert_not_called()
+            text = output.getvalue()
+            build = shlex.split(next(line for line in text.splitlines() if "buildx" in line))
+            self.assertIn("runtime.tags=custom-runtime:edited", build)
+            self.assertIn("PLATFORM=linux/amd64", build)
+            self.assertIn("VERSION=0.2.1", build)
+            self.assertIn("--progress=plain", build)
+            self.assertIn("http://127.0.0.1:18093", text)
+            self.assertNotIn("export ", text)
+            restart = shlex.split(next(line for line in text.splitlines() if " && " in line))
+            self.assertIn(str(workspace / "compose.env"), restart)
+            self.assertIn("fleetworks-native-review-local", restart)
+            self.assertIn("--force-recreate", restart)
+            for key in ("FLEETWORKS_ACCESS_SCOPE_ID", "FLEETWORKS_ACCESS_EPOCH", "FLEETWORKS_API_PORT"):
+                self.assertIn(["-u", key], [restart[i:i + 2] for i in range(len(restart) - 1)])
+            manifest = json.loads((workspace / "secrets/gateway-credentials.json").read_text())
+            for value in (manifest["scope_id"], manifest["access_epoch"]):
+                self.assertNotIn(value, text)
+            for name in TOKEN_NAMES:
+                self.assertNotIn((workspace / "secrets" / name).read_text().strip(), text)
+
+    def test_existing_operator_with_missing_file_is_not_silently_rotated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = self.fixture(root)
+            token = workspace / "secrets/operator-token"
+            manifest = workspace / "secrets/gateway-credentials.json"
+            previous = manifest.read_bytes()
+            token.unlink()
+            with self.assertRaises(FileNotFoundError):
+                native_review.prepare(root, "local")
+            self.assertFalse(token.exists())
+            self.assertEqual(manifest.read_bytes(), previous)
+
+    def test_unsafe_operator_files_are_rejected_without_rewriting_manifest(self):
+        for kind in ("public", "symlink", "hardlink", "fifo"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                workspace = self.fixture(root)
+                token = workspace / "secrets/operator-token"
+                manifest = workspace / "secrets/gateway-credentials.json"
+                previous = manifest.read_bytes()
+                if kind == "public":
+                    token.chmod(0o644)
+                elif kind == "fifo":
+                    token.unlink()
+                    os.mkfifo(token, 0o600)
+                else:
+                    token.unlink()
+                    target = root / "outside-token"
+                    target.write_text("x" * 64)
+                    target.chmod(0o600)
+                    if kind == "symlink":
+                        token.symlink_to(target)
+                    else:
+                        os.link(target, token)
+                with self.assertRaises((ValueError, OSError)):
+                    native_review.prepare(root, "local")
+                self.assertEqual(manifest.read_bytes(), previous)
+
+    def test_orphan_operator_cannot_reuse_native_authority(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = self.fixture(root, legacy=True)
+            manifest = workspace / "secrets/gateway-credentials.json"
+            before = manifest.read_bytes()
+            native_review.private_file(workspace / "secrets/operator-token",
+                                       (workspace / "secrets/native-token").read_text())
+            with self.assertRaises(ValueError):
+                native_review.prepare(root, "local")
+            self.assertEqual(manifest.read_bytes(), before)
+
+    def test_epoch_drift_rejected_before_operator_creation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = self.fixture(root, legacy=True)
+            manifest = workspace / "secrets/gateway-credentials.json"
+            before = manifest.read_bytes()
+            env_file = root / "compose.env"
+            data = json.loads(before)
+            env_file.write_text(env_file.read_text().replace(data["access_epoch"], "different-epoch"))
+            with self.assertRaises(ValueError):
+                native_review.prepare(root, "local")
+            self.assertFalse((workspace / "secrets/operator-token").exists())
+            self.assertEqual(manifest.read_bytes(), before)
+
+    def test_unsupported_environment_alias_cannot_touch_another_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = self.fixture(root, legacy=True)
+            alias = workspace / "compose.env"
+            outside = root / "outside.env"
+            outside.write_bytes((root / "compose.env").read_bytes())
+            outside.chmod(0o600)
+            alias.unlink()
+            alias.symlink_to(outside)
+            with self.assertRaises(ValueError):
+                native_review.prepare(root, "local")
+            self.assertFalse((workspace / "secrets/operator-token").exists())
+
+    def test_interrupted_manifest_update_reuses_private_orphan_on_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = self.fixture(root, legacy=True)
+            manifest = workspace / "secrets/gateway-credentials.json"
+            previous = manifest.read_bytes()
+            with mock.patch.object(native_review.os, "replace", side_effect=OSError("injected replacement failure")):
+                with self.assertRaises(OSError):
+                    native_review.prepare(root, "local")
+            token = workspace / "secrets/operator-token"
+            original_token = token.read_bytes()
+            self.assertEqual(manifest.read_bytes(), previous)
+            self.assertEqual(list((workspace / "secrets").glob(".gateway-*.tmp")), [])
+            native_review.prepare(root, "local")
+            self.assertEqual(token.read_bytes(), original_token)
+            self.assertEqual(json.loads(manifest.read_text())["credentials"][-1]["purpose"], "operator")
+
+
 if __name__ == "__main__":
     unittest.main()

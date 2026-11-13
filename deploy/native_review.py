@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Provision a fresh isolated backend review directory; never start Docker."""
+"""Prepare native backend reviews and print commands; never start Docker."""
 
 import argparse
 import json
@@ -7,7 +7,9 @@ import shlex
 import os
 import re
 import secrets
+import stat
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,6 +44,170 @@ def private_file(path, value):
         output.write(value)
         output.flush()
         os.fsync(output.fileno())
+
+
+def read_private(path, limit=65536):
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                         | getattr(os, "O_NONBLOCK", 0))
+    with os.fdopen(descriptor, "rb") as source:
+        info = os.fstat(source.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_uid != os.getuid() or info.st_mode & 0o077
+                or info.st_size > limit):
+            raise ValueError("Expected a bounded private owned regular file")
+        data = source.read(limit + 1)
+        if len(data) > limit:
+            raise ValueError("Private file exceeds its bound")
+        return data.decode("utf-8")
+
+
+@contextmanager
+def preparation_lock(workspace):
+    import fcntl
+
+    for directory in (workspace, workspace / "secrets"):
+        info = directory.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_mode & 0o077):
+            raise ValueError("Expected a private owned review directory")
+    descriptor = os.open(workspace / ".prepare.lock",
+                         os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with os.fdopen(descriptor, "r+") as lock:
+        info = os.fstat(lock.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_uid != os.getuid() or info.st_mode & 0o077):
+            raise ValueError("Unsafe preparation lock")
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def current_environment(root, workspace):
+    """Read generated Compose settings as data, including the supported root alias."""
+    env_file = workspace / "compose.env"
+    if env_file.is_symlink():
+        target = root / "compose.env"
+        if target.is_symlink() or env_file.resolve(strict=True) != target:
+            raise ValueError("Unsupported Compose environment alias")
+        contents = read_private(target)
+    else:
+        contents = read_private(env_file)
+    allowed = {
+        "COMPOSE_PROJECT_NAME", "FLEETWORKS_HOST_WORKSPACE", "PLATFORM",
+        "FLEETWORKS_API_PORT", "FLEETWORKS_ACCESS_SCOPE_ID", "FLEETWORKS_ACCESS_EPOCH",
+        "FLEETWORKS_RUNTIME_IMAGE", "FLEETWORKS_SURREAL_IMAGE", "FLEETWORKS_SEARCH_IMAGE",
+    }
+    settings = {}
+    for line in contents.splitlines():
+        key, separator, value = line.partition("=")
+        key = key.strip()
+        if not separator or key not in allowed:
+            continue
+        parts = shlex.split(value, comments=True)
+        if key in settings or len(parts) != 1:
+            raise ValueError("Ambiguous Compose setting")
+        settings[key] = parts[0]
+    if set(settings) != allowed:
+        raise ValueError("Missing review Compose settings")
+    return env_file, settings
+
+
+def prepare(root, name):
+    """Add only missing Operator authority, then resolve reusable command inputs."""
+    if os.name != "posix":
+        raise ValueError("Preparation requires POSIX private-file protections")
+    root = root.resolve(strict=True)
+    workspace = review_path(root, name)
+    with preparation_lock(workspace):
+        receipt = json.loads(read_private(workspace / "review.json"))
+        env_file, environment = current_environment(root, workspace)
+        if (receipt["version"] != 1 or Path(environment["FLEETWORKS_HOST_WORKSPACE"]) != workspace
+                or receipt["workspace"] != str(workspace)
+                or environment["COMPOSE_PROJECT_NAME"] != receipt["environment"]["COMPOSE_PROJECT_NAME"]):
+            raise ValueError("Review identity differs from its recorded deployment")
+        if environment["PLATFORM"] not in {"linux/amd64", "linux/arm64"}:
+            raise ValueError("Unsupported review platform")
+        port = int(environment["FLEETWORKS_API_PORT"])
+        if not 1024 <= port <= 65535:
+            raise ValueError("Invalid review API port")
+        for key in ("FLEETWORKS_RUNTIME_IMAGE", "FLEETWORKS_SURREAL_IMAGE", "FLEETWORKS_SEARCH_IMAGE"):
+            if not re.fullmatch(r"[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9._-]+", environment[key]):
+                raise ValueError("Review images must have explicit tags")
+        version = (root / "version.txt").read_text().strip()
+        if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.+-]+)?", version):
+            raise ValueError("Invalid workspace version")
+        manifest = workspace / "secrets/gateway-credentials.json"
+        data = json.loads(read_private(manifest))
+        if (data["version"] != 1 or data["scope_id"] != environment["FLEETWORKS_ACCESS_SCOPE_ID"]
+                or data["access_epoch"] != environment["FLEETWORKS_ACCESS_EPOCH"]):
+            raise ValueError("Gateway authority differs from Compose settings")
+        entries = data["credentials"]
+        if (not isinstance(entries, list) or any(not isinstance(entry, dict) for entry in entries)
+                or len({entry["id"] for entry in entries}) != len(entries)):
+            raise ValueError("Invalid credential catalog")
+        operators = [entry for entry in entries if entry["purpose"] == "operator"]
+        token = workspace / "secrets/operator-token"
+        container_token = "/run/secrets/gateway_operator_token"
+        if operators:
+            if (len(operators) != 1 or operators[0]["token_file"] != container_token
+                    or not {"read_backend", "register_workstation", "manage_configuration"}.issubset(operators[0]["permissions"])):
+                raise ValueError("Existing Operator configuration needs explicit operator review")
+        elif any(entry["id"] == "operator-review" for entry in entries):
+            raise ValueError("Operator identifier already belongs to another purpose")
+        # Never relabel another purpose's file, or rotate an existing authority.
+        if any(entry["purpose"] != "operator" and entry["token_file"] == container_token for entry in entries):
+            raise ValueError("Operator token file is shared with another purpose")
+        existing = [read_private(workspace / "secrets" / filename, 4096).strip()
+                    for filename in ("native-token", "web-relay-token", "gateway-health-token")]
+        if not operators and not token.exists() and not token.is_symlink():
+            private_file(token, secrets.token_urlsafe(48) + "\n")
+        operator_secret = read_private(token, 4096).strip()
+        if (not 32 <= len(operator_secret) <= 4096
+                or any(secrets.compare_digest(operator_secret, value) for value in existing)):
+            raise ValueError("Operator authority must use its own private credential")
+        if not operators:
+            entries.append({"id": "operator-review", "purpose": "operator",
+                            "permissions": list(NATIVE_PERMISSIONS), "token_file": container_token})
+            temporary = manifest.with_name(".gateway-" + secrets.token_hex(8) + ".tmp")
+            try:
+                private_file(temporary, json.dumps(data, indent=2) + "\n")
+                os.replace(temporary, manifest)
+            finally:
+                temporary.unlink(missing_ok=True)
+        return {"workspace": workspace, "env_file": env_file, "environment": environment,
+                "version": version, "operator": token, "origin": f"http://127.0.0.1:{port}"}
+
+
+def print_prepared(root, prepared):
+    environment = prepared["environment"]
+    # Compose must read this review's file even after another shell exported a
+    # different review's settings. Names, not authority values, reach output.
+    compose = ["env"]
+    for key in sorted(set(environment) | {"FLEETWORKS_UID", "FLEETWORKS_GID", "FLEETWORKS_SEARCH_SOURCE_EPOCH"}):
+        compose.extend(["-u", key])
+    compose += ["docker", "compose", "--env-file", str(prepared["env_file"]),
+               "-f", str(root / "deploy/compose.native-review.yml"),
+               "--project-name", environment["COMPOSE_PROJECT_NAME"]]
+    build = ["env", "PLATFORM=" + environment["PLATFORM"], "VERSION=" + prepared["version"],
+             "docker", "buildx", "bake", "-f", str(root / "deploy/docker-bake.hcl"),
+             "--progress=plain", "--set", "runtime.args.FLEETWORKS_CORE_OPT_LEVEL=1"]
+    for target, key in (("runtime", "FLEETWORKS_RUNTIME_IMAGE"),
+                        ("surrealdb", "FLEETWORKS_SURREAL_IMAGE"),
+                        ("search-index", "FLEETWORKS_SEARCH_IMAGE")):
+        build.extend(["--set", target + ".tags=" + environment[key]])
+    build.extend(["--load", "backend"])
+    print(f"Prepared existing review: {prepared['workspace']}")
+    print("Run from the repository root; no exports or sourcing Compose settings needed.")
+    print("1. Build backend images (local review optimization, visible progress):")
+    print(shlex.join(build))
+    print("2. After the build succeeds, restart this review; bootstrap precedes dependents:")
+    print(shlex.join(compose + ["stop"]) + " && " + shlex.join(compose + [
+        "up", "--no-build", "--pull", "never", "--force-recreate", "--detach", "--wait"]))
+    print(shlex.join(compose + ["ps"]))
+    print(f"3. Setup Gateway → {prepared['origin']} → Pair again. Approve the displayed values:")
+    print(shlex.join(["python3", str(root / "scripts/fleetworks_pairing.py"),
+                     "--origin", prepared["origin"], "--operator-token-file", str(prepared["operator"]),
+                     "approve", "--pairing-id", "<displayed-id>", "--approval-code", "<displayed-code>"]))
+    print("Credentials retained. No images built or services started.")
 
 
 def expose_root_environment(root, name):
@@ -147,6 +313,8 @@ def main():
     value = subcommands.add_parser("value", help="read one non-secret review setting")
     value.add_argument("--name", required=True)
     value.add_argument("--field", choices=("workspace", "image_tag", "project"), required=True)
+    existing = subcommands.add_parser("prepare", help="prepare existing credentials and print complete build/start/approval commands")
+    existing.add_argument("--name", required=True)
     args = parser.parse_args()
     try:
         if args.command == "init":
@@ -167,10 +335,12 @@ def main():
             ]))
             print("Keep the operator credential outside the native client; native-token remains for explicit operator/headless provisioning.")
             print("No images built or services started. Keep compose.env and all credentials for restart.")
+        elif args.command == "prepare":
+            print_prepared(ROOT, prepare(ROOT, args.name))
         else:
             receipt = json.loads((review_path(ROOT, args.name) / "review.json").read_text(encoding="utf-8"))
             print(receipt["environment"]["COMPOSE_PROJECT_NAME"] if args.field == "project" else receipt[args.field])
-    except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
+    except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as error:
         parser.exit(1, f"Review provisioning failed: {type(error).__name__}. Existing files were retained.\n")
     return 0
 

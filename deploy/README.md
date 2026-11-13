@@ -16,7 +16,24 @@ The Rune app builds on macOS; Linux services, web and the database use the `runt
 
 Use the standalone [native review recipe](compose.native-review.yml) for the Rune app's independently running backend. Its `backend` Bake group builds only `runtime`, digest-pinned `surrealdb`, and `search-index`. The search image selects only `fleetworks-search-index` and shared contracts; it compiles no core inference, terminal, native view or Next.js bundle. Web deployment is an explicit separate selection. No launcher or terminal-client image is built.
 
-Provision a **new** task-owned deployment directory, separate from every native workspace and existing stack. The helper creates private files and directories only; an existing review name fails without replacing credentials or data. Choose an unused API port. It creates no browser service or published database/search port.
+| Deployment | Helper |
+| --- | --- |
+| Fresh review | `init` creates a new isolated deployment; an existing name fails without replacing files |
+| Existing review | `prepare --name <name>` reads its active Compose settings and adds only missing Operator provisioning |
+
+### Prepare an existing review
+
+```sh
+python3 deploy/native_review.py prepare --name native-local
+```
+
+Prepare is offline and idempotent: it preserves existing credentials, scope/epochs and data. It follows the review's root `compose.env` alias and honors current root-file edits. It prints self-contained build, gateway restart and pairing-approval commands using the actual configured port, platform, image tags and project; no shell exports, `source` or `eval` are needed. Run the printed commands explicitly after reviewing the Docker context. Preparation itself builds no images and starts/restarts no services.
+
+**Flow:** prepare → run the printed image build → run the printed restart → native Setup Gateway URL/Connect → approve the displayed request. Generated build commands target the configured review images; building alone does not replace running consumers.
+
+### Initialize a fresh review
+
+Provision a **new** task-owned deployment directory, separate from every native workspace and existing stack. Choose an unused API port. Initialization creates private files only, with no browser service or published database/search port. The detailed manual recipe below also defines the shell values used by the optional Web examples; use Prepare's printed commands for an existing review.
 
 ```sh
 export REVIEW_NAME=native-local
@@ -85,7 +102,7 @@ Do not use `down -v` or global image/cache cleanup as routine review cleanup. Do
 
 Fresh initialization creates a FORMAT 1 gateway manifest and distinct private Native, Operator, WebRelay and internal-health token files. `secrets/operator-token` is create-exclusive mode 0600; its `operator-review` entry shares this deployment’s scope/epoch and Native grant set, excluding ResolveWebSession. Compose mounts it as `gateway_operator_token` only in the API gateway. Operator approval requires ReadBackend, RegisterWorkstation and ManageConfiguration; grants are server-derived. [Approval/revocation command](../docs/wiki/code/native-connections.md#operator-approval-and-revocation)
 
-Existing deployment directories are never backfilled or overwritten. Their operator must provision an independent private Operator token and matching manifest entry/mount, then restart the gateway using its exact existing env file/project selection. Never relabel/reuse Native or WebRelay tokens. Preserve scope/epoch, credentials, source identity and data; changing a mounted file alone does not prove policy reload.
+`init` never overwrites an existing review. For an existing review missing Operator provisioning, explicitly run [Prepare](#prepare-an-existing-review): it adds the independent Operator credential/manifest entry without replacing existing credentials, scope/epoch or data. Then run its printed gateway restart command to load the policy using the matching active env/project. Never relabel/reuse Native or WebRelay tokens; changing a mounted file alone does not prove policy reload.
 
 Normal native clients pair into Keychain. `secrets/native-token` remains for explicit file-based tooling; Next uses `secrets/web-relay-token` independently. WebRelay cannot register/approve; health and old shared bearers grant no mutation rights. Private-service/storage/search credentials retain their separate owners. Schema 10 requires coordinated bootstrap and compatible readers; preserve existing identity/origins and static/headless credentials.
 
@@ -96,7 +113,7 @@ Normal native clients pair into Keychain. `secrets/native-token` remains for exp
 | Cargo exits 101 during an image build | Read the first Cargo error; 101 is not a diagnosis. If `--locked` reports a stale lock, synchronize changed manifests and `Cargo.lock` together. Retain `--locked`; do not discard the lock to force a build. |
 | Host/backend check rebuilds large dependencies | Selected test targets can enable extra dependency features. Use the [graph/resource policy](../docs/wiki/code/contributing.md#verification-ownership-and-host-resources) before changing the build selection; the [artifact map](../docs/wiki/code/build-artifacts.md) identifies reusable outputs. |
 | Rebuilt image, old behavior | A successful build does not replace running consumers. Recreate only the intended services with their existing env file/Compose project; preserve data and credentials. |
-| Pairing unavailable on an existing review | Schema 10 needs compatible bootstrap/readers. Existing reviews are not backfilled: explicitly provision independent Operator authority and restart the matching gateway. Native GUI setup needs no token file. [Credentials](#credentials) |
+| Pairing unavailable on an existing review | Run [Prepare](#prepare-an-existing-review), then explicitly run its printed build/restart commands. Schema 10 still needs compatible bootstrap/readers; normal GUI setup needs no token file. [Credentials](#credentials) |
 | SDK WebSocket `SendError` / closed response channel | This can follow request cancellation or timeout. Correlate request timing, surrounding client/server logs and service health first; it alone does not establish corruption. Preserve evidence; do not delete stores or blindly suppress/vendor-patch the diagnostic. |
 
 Native app/fixture checks do not build backend engines; backend storage test executables may embed engines as QA harnesses. Record actual build, service-health and integration evidence in the task's acceptance tracker. Installed native/Keychain checks remain separate from these diagnostics.

@@ -98,10 +98,14 @@ fn real_shell_navigation_works_offline_without_boundary_effects() {
     );
     connected.frame(0.0);
     assert!(connected.find("sidebar-context-footer").is_none());
+    assert!(connected.find("deployment").is_none());
+    assert!(connected.find("gateway-status-header").is_some());
     assert!(connected.find("connect-id").is_none());
     assert!(connected.find("workstation-registered").is_some());
     let connected_tree = connected.accessibility_json().to_string();
     assert!(!connected_tree.contains("Connect ID"));
+    assert!(connected_tree.contains("Gateway connected"));
+    assert!(connected_tree.contains("synthetic-deployment"));
     let hidden_connect_id = connected
         .state
         .registration
@@ -122,6 +126,15 @@ fn real_shell_navigation_works_offline_without_boundary_effects() {
         connected.pointer_up(x, y);
         connected.frame(1.0 / 60.0);
         assert_eq!(connected.state.page, page);
+        if page != Page::Workstation {
+            assert!(
+                !connected
+                    .accessibility_json()
+                    .to_string()
+                    .contains("synthetic-deployment"),
+                "deployment ID stays restricted to Workstation Status Gateway Backend"
+            );
+        }
     }
 }
 
@@ -192,6 +205,7 @@ pub(crate) fn registered_fixture() -> State {
     let mut state = State::fixture();
     state.connection.status = ConnectionStatus::Connected;
     let mut capabilities = Capabilities::default();
+    capabilities.deployment_id = Some("synthetic-deployment".into());
     capabilities.permissions = vec![
         Permission::ReadBackend,
         Permission::ReadWorkstationActivity,

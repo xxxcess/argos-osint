@@ -780,18 +780,23 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
                 .child(ui_components::status_dot(connection_tone, preferences)),
         )
         .child(
-            Button::new(state.connection.deployment_label().to_owned())
-                .variant(ButtonVariant::Ghost)
-                .icon(&icons::SERVER)
-                .on_press(|state: &mut State| {
-                    if state.connected() {
-                        state.navigate(Page::Workstation);
-                    } else {
-                        state.setup_gateway = true;
-                    }
-                })
-                .build(&kit)
-                .key("gateway-status-header"),
+            Button::new(match &state.connection.status {
+                ConnectionStatus::Connected => "Gateway connected",
+                ConnectionStatus::Connecting => "Connecting…",
+                ConnectionStatus::Failed(_) => "Connection fault",
+                ConnectionStatus::Disconnected => "Gateway disconnected",
+            })
+            .variant(ButtonVariant::Ghost)
+            .icon(&icons::SERVER)
+            .on_press(|state: &mut State| {
+                if state.connected() {
+                    state.navigate(Page::Workstation);
+                } else {
+                    state.setup_gateway = true;
+                }
+            })
+            .build(&kit)
+            .key("gateway-status-header"),
         )
         .child(
             SidebarRow::new(Page::Workstation.title())
@@ -878,19 +883,12 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
             .fill(theme::hex(theme::SURFACE))
             .border_sides([0.0, 0.0, 1.0, 0.0], theme::hex(theme::BORDER_SUBTLE));
         if state.connected() {
-            scope_bar = scope_bar
-                .child(
-                    rune::text(scope)
-                        .key("resource-scope")
-                        .font(kit.ty.small_medium)
-                        .color(kit.c.text_accent),
-                )
-                .child(
-                    rune::text(state.connection.deployment_label().to_owned())
-                        .key("deployment")
-                        .font(kit.ty.small)
-                        .color(kit.c.text_muted),
-                );
+            scope_bar = scope_bar.child(
+                rune::text(scope)
+                    .key("resource-scope")
+                    .font(kit.ty.small_medium)
+                    .color(kit.c.text_accent),
+            );
         } else {
             scope_bar = scope_bar.child(
                 rune::text("Local Client")

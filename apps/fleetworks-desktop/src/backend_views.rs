@@ -189,10 +189,7 @@ fn atlas(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
                 .key("atlas-submit-confirmation")
                 .child(heading("Confirm New Cycle", kit))
                 .child(quiet(
-                    format!(
-                        "Deployment {} · configuration revision {}",
-                        snapshot.context.deployment_id, snapshot.configuration_revision
-                    ),
+                    format!("Configuration revision {}", snapshot.configuration_revision),
                     kit,
                 ))
                 .child(quiet(
@@ -1639,8 +1636,8 @@ pub(crate) fn maintenance(
                 ))
                 .child(quiet(
                     format!(
-                        "Deployment {} · configuration revision {}",
-                        confirmation.context.deployment_id, confirmation.configuration_revision
+                        "Configuration revision {}",
+                        confirmation.configuration_revision
                     ),
                     kit,
                 ))

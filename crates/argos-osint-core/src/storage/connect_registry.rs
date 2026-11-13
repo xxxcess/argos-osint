@@ -369,6 +369,20 @@ async fn read_registration_in(
     let row = row
         .filter(|row| row.scope_id == authority.scope_id)
         .ok_or_else(|| abort("missing"))?;
+    if authority
+        .credential_id
+        .starts_with(super::native_pairing::CREDENTIAL_PREFIX)
+    {
+        let node = workstation_in(tx, &row.workstation_id).await?;
+        super::native_pairing::check_installation_in(
+            tx,
+            &authority.scope_id,
+            &authority.credential_id,
+            &authority.access_epoch,
+            Some(&node.installation_hash),
+        )
+        .await?;
+    }
     Ok(row)
 }
 
@@ -433,6 +447,7 @@ pub async fn ensure_observed(
             let deployment = deployment_in(&tx).await?;
             if !deployment.admission_open { return Err(abort("paused")); }
             super::configuration_reset::check_user_epoch_in(&tx, &authority.scope_id, &authority.access_epoch, None).await?;
+            super::native_pairing::check_installation_in(&tx, &authority.scope_id, &authority.credential_id, &authority.access_epoch, Some(&installation)).await?;
             let mut replay = run(&tx, tx.query("SELECT request_hash, registration_id FROM ONLY $request").bind(("request", rid("connect_request", &request_key)))).await?;
             if let Some(replay) = take::<Option<RequestRow>>(&mut replay, 0)? {
                 if replay.request_hash != fingerprint { return Err(abort("collision")); }

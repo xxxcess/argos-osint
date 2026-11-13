@@ -80,6 +80,7 @@ pub mod lifecycle;
 pub mod live_evidence;
 pub mod memories;
 pub mod memory;
+pub mod native_pairing;
 pub(crate) mod native_visibility;
 pub mod neighborhood_brief;
 pub mod nlp_cache;

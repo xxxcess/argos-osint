@@ -11,6 +11,9 @@ use url::Url;
 
 use crate::{Ready, API_VERSION, READY_PATH};
 
+mod pairing;
+pub use pairing::PairingClient;
+
 mod log_transfer;
 pub use log_transfer::LogExportPage;
 

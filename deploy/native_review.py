@@ -12,7 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 TOKEN_NAMES = (
-    "native-token", "web-relay-token", "gateway-health-token", "brain-token",
+    "native-token", "operator-token", "web-relay-token", "gateway-health-token", "brain-token",
     "tools-token", "control-token", "jobs-token", "execution-token",
     "internal-token", "storage-password", "storage-root-password", "search-read-token", "search-write-token",
 )
@@ -102,6 +102,7 @@ def provision(root, name, api_port, platform, revision, *, web_port=None, images
             {"id": "native-review", "purpose": "native", "permissions": list(NATIVE_PERMISSIONS), "token_file": "/run/secrets/gateway_native_token"},
             {"id": "web-relay-review", "purpose": "web_relay", "permissions": ["read_backend", "resolve_web_session", "submit_interactive", "read_workstation_activity", "retry_job", "cancel_job"], "token_file": "/run/secrets/gateway_web_token"},
             {"id": "internal-health-review", "purpose": "internal_service", "permissions": ["read_backend"], "token_file": "/run/secrets/gateway_health_token"},
+            {"id": "operator-review", "purpose": "operator", "permissions": list(NATIVE_PERMISSIONS), "token_file": "/run/secrets/gateway_operator_token"},
         ],
     }
     private_file(workspace / "secrets/gateway-credentials.json", json.dumps(credentials, indent=2) + "\n")
@@ -155,11 +156,16 @@ def main():
             print(f"Prepared isolated backend review: {receipt['workspace']}")
             if args.root_env:
                 print(f"Editable Compose settings: {ROOT / 'compose.env'}")
-            credential = Path(receipt["workspace"]) / "secrets" / "native-token"
             origin = f"http://127.0.0.1:{args.api_port}"
-            print("Provision the native app credential reference:")
-            print("fleetworks-desktop --provision-gateway-credential --api-origin "
-                  + shlex.quote(origin) + " --api-token-file " + shlex.quote(str(credential)))
+            operator = Path(receipt["workspace"]) / "secrets" / "operator-token"
+            print(f"After starting the backend, enter Gateway URL {origin} in Setup Gateway.")
+            print("Approve the pairing ID and code displayed by the app from a separate operator terminal:")
+            print(shlex.join([
+                "python3", "scripts/fleetworks_pairing.py", "--origin", origin,
+                "--operator-token-file", str(operator), "approve",
+                "--pairing-id", "<pairing-id>", "--approval-code", "<approval-code>",
+            ]))
+            print("Keep the operator credential outside the native client; native-token remains for explicit operator/headless provisioning.")
             print("No images built or services started. Keep compose.env and all credentials for restart.")
         else:
             receipt = json.loads((review_path(ROOT, args.name) / "review.json").read_text(encoding="utf-8"))

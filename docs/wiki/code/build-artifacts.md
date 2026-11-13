@@ -87,7 +87,7 @@ Atlas NLP/classifier service roles reuse the runtime image; their architecture-m
 
 | Location | Keep separate |
 | --- | --- |
-| `~/.fleetworks/` | Protected identity, current credential-file references and unresolved journals. [Planned pairing](native-connections.md#pairing-and-keychain-agreed-target) stores native secrets in macOS Keychain; settings keep non-secret references. Neither is build output. |
+| `~/.fleetworks/` | Protected identity, non-secret `.native-pairing.json` references/recovery and retained operator file references. [Pairing](native-connections.md#pairing-and-keychain-agreed-target) stores polling/access secrets in macOS Keychain; neither is build output. |
 | `.agent-scratch/native-review/<name>/` | An isolated **deployment**, despite its scratch location: private `secrets/`, `config/`, `storage/{surrealdb,jobs,search-index}`, `staged-datasets/`, `models/`, logs and deployment metadata |
 | `compose.env` with `--root-env` | Private ignored configuration pointing to retained deployment data; not generated code or disposable compilation cache |
 

@@ -83,6 +83,7 @@ pub(crate) enum ConnectionCredential {
     None,
     Reference(CredentialReference),
     Provisioned(Arc<NativeContainer>),
+    Explicit(std::path::PathBuf),
     Unavailable,
 }
 impl ConnectionCredential {
@@ -90,6 +91,11 @@ impl ConnectionCredential {
         match self {
             Self::None => Ok(None),
             Self::Provisioned(container) => container.credential_binding(origin).map(Some),
+            Self::Explicit(path) => {
+                let reference = CredentialReference::capture(path, origin)?;
+                drop(reference.open_verified(origin)?);
+                Ok(Some(reference))
+            }
             Self::Reference(reference) => {
                 drop(reference.open_verified(origin)?);
                 Ok(Some(reference.clone()))
@@ -129,6 +135,7 @@ pub struct ConnectionTestSummary {
 pub struct GatewayEffects {
     pub(crate) runtime: Handle,
     pub(crate) ui: OnceLock<AppHandle<State>>,
+    pub(crate) keychain: Arc<dyn fleetworks_workstation::native::keychain::KeychainStore>,
 }
 
 impl GatewayEffects {
@@ -136,6 +143,7 @@ impl GatewayEffects {
         Self {
             runtime,
             ui: OnceLock::new(),
+            keychain: Arc::new(fleetworks_workstation::native::keychain::SystemKeychain),
         }
     }
 
@@ -288,7 +296,25 @@ async fn handshake(
         });
     }
     let (token, credential) = read_private_token(origin.clone(), credential).await?;
-    let client = Client::new(&origin, token.as_deref())
+    handshake_token(&origin, token.as_deref(), credential).await
+}
+
+pub(crate) async fn handshake_token(
+    origin: &str,
+    token: Option<&str>,
+    credential: Option<CredentialReference>,
+) -> Result<Connected, ConnectionTestFailure> {
+    let origin = Client::canonical_origin(origin).map_err(|error| ConnectionTestFailure {
+        phase: ConnectionTestPhase::Origin,
+        message: error.to_string(),
+    })?;
+    if origin.len() > 2048 {
+        return Err(ConnectionTestFailure {
+            phase: ConnectionTestPhase::Origin,
+            message: "Gateway URL is too long".into(),
+        });
+    }
+    let client = Client::new(&origin, token)
         .map_err(|error| client_failure(error, ConnectionTestPhase::Authentication))?;
     let ready = client
         .ready()
@@ -318,13 +344,33 @@ async fn read_private_token(
 ) -> Result<(Option<String>, Option<CredentialReference>), ConnectionTestFailure> {
     tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
         use std::io::Read;
-        let Some(reference) = source.reference(&origin)? else { return Ok((None,None)); };
-        let file = reference.open_verified(&origin)?; let mut bytes = Vec::new(); file.take(TOKEN_LIMIT + 1).read_to_end(&mut bytes)?;
-        anyhow::ensure!(bytes.len() as u64 <= TOKEN_LIMIT,"credential file exceeds bound");
+        let Some(reference) = source.reference(&origin)? else {
+            return Ok((None, None));
+        };
+        let file = reference.open_verified(&origin)?;
+        let mut bytes = Vec::new();
+        file.take(TOKEN_LIMIT + 1).read_to_end(&mut bytes)?;
+        anyhow::ensure!(
+            bytes.len() as u64 <= TOKEN_LIMIT,
+            "credential file exceeds bound"
+        );
         let value = String::from_utf8(bytes)?;
-        Ok((Some(value.trim_end_matches(['\r','\n']).to_owned()),Some(reference)))
-    }).await.map_err(|_| ConnectionTestFailure { phase:ConnectionTestPhase::CredentialReference,message:"Credential reference worker stopped".into() })?
-        .map_err(|_| ConnectionTestFailure { phase:ConnectionTestPhase::CredentialReference,message:"Protected gateway credential missing, changed or unsafe; run --provision-gateway-credential with this --api-origin and a private --api-token-file".into() })
+        Ok((
+            Some(value.trim_end_matches(['\r', '\n']).to_owned()),
+            Some(reference),
+        ))
+    })
+    .await
+    .map_err(|_| ConnectionTestFailure {
+        phase: ConnectionTestPhase::CredentialReference,
+        message: "Credential reference worker stopped".into(),
+    })?
+    .map_err(|_| ConnectionTestFailure {
+        phase: ConnectionTestPhase::CredentialReference,
+        message:
+            "The explicitly configured gateway credential file is missing, changed or unavailable"
+                .into(),
+    })
 }
 
 fn client_failure(error: ClientError, phase: ConnectionTestPhase) -> ConnectionTestFailure {

@@ -14,7 +14,7 @@ Open a file under `docs/diagrams/` in a browser for the HTML page. Matching `.sv
 | Native identity and shared backend | Architecture | [workspace.html](diagrams/workspace.html) | [workspace.svg](diagrams/workspace.svg) |
 | Backend resources and workstation origin | Architecture | [workspace-scope.html](diagrams/workspace-scope.html) | [workspace-scope.svg](diagrams/workspace-scope.svg) |
 | Protected workstation setup and recovery | Process | [workspace-lifecycle.html](diagrams/workspace-lifecycle.html) | [workspace-lifecycle.svg](diagrams/workspace-lifecycle.svg) |
-| Native setup: current files and agreed pairing/Keychain target | Process | [native-connections.html](diagrams/native-connections.html) | [native-connections.svg](diagrams/native-connections.svg) |
+| Native pairing, Keychain and authenticated reconnect | Process | [native-connections.html](diagrams/native-connections.html) | [native-connections.svg](diagrams/native-connections.svg) |
 | Partial readiness and explicit maintenance | Data flow | [workstation-readiness.html](diagrams/workstation-readiness.html) | [workstation-readiness.svg](diagrams/workstation-readiness.svg) |
 | Workstation registry and active bindings | Architecture | [connect-registry.html](diagrams/connect-registry.html) | [connect-registry.svg](diagrams/connect-registry.svg) |
 | Intel Connect authority and central gate | Process | [intel-connect-gate.html](diagrams/intel-connect-gate.html) | [intel-connect-gate.svg](diagrams/intel-connect-gate.svg) |

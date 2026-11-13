@@ -14,6 +14,8 @@ use crate::app::Page;
 use crate::app::State;
 use crate::brain::Association;
 use crate::connection::ConnectionStatus;
+use crate::pairing::PairingFailure;
+use crate::pairing::PairingStage;
 
 pub(crate) fn line(value: impl Into<String>, kit: &Kit) -> El {
     rune::text(value.into())
@@ -81,43 +83,92 @@ fn connection_status(state: &State) -> String {
 }
 
 fn setup_gateway(state: &State, kit: &Kit) -> El {
-    let connecting = state.connection.status == ConnectionStatus::Connecting;
+    let busy = state.pairing.busy() || state.connection.status == ConnectionStatus::Connecting;
     let origin = TextInput::new(&state.connection.origin)
         .label("Gateway URL")
         .placeholder("https://gateway.example.test")
         .width(None)
-        .disabled(connecting)
+        .disabled(busy || state.connected())
         .on_edit(|state: &mut State| &mut state.connection.origin)
         .on_change(|state: &mut State, _| state.profile_editor_changed(true))
         .on_submit(|state: &mut State, _| state.connect())
         .build(kit)
         .key("gateway-origin");
-    let mut body = rune::col()
+    let body = rune::col()
         .child(heading("Setup Gateway", kit))
         .child(quiet("Connect to your independently running gateway. Accepted jobs continue when this app closes.", kit))
         .child(crate::material::matte_card(rune::col().padding(16.0).gap(10.0)
-            .child(heading("1. Gateway URL", kit))
-            .child(origin)
-            .child(Button::new("Check gateway")
-                .variant(ButtonVariant::Submit)
-                .disabled(connecting || state.connection.origin.text.trim().is_empty())
-                .on_press(|state: &mut State| state.connect())
-                .build(kit).key("connect"))))
-        .child(crate::material::matte_card(rune::col().padding(16.0).gap(8.0)
-            .child(heading("2. Connectivity Check", kit))
-            .child(line(connection_status(state), kit).key("connection-status").role("status"))
-            .child(quiet("The gateway URL uses its already provisioned protected credential binding. Missing or replaced credentials require provisioning before this check can succeed.", kit))
+            .child(heading("Gateway URL", kit))
+            .child(origin)))
+        .child(pairing_status(state, kit));
+    scroll(body, "gateway-setup-body")
+}
+
+fn pairing_status(state: &State, kit: &Kit) -> El {
+    let mut body = rune::col()
+        .padding(16.0)
+        .gap(10.0)
+        .key("pairing-status-card")
+        .child(heading("Gateway access", kit));
+    if state.connected() {
+        body = body
+            .child(
+                line("Connected to your gateway", kit)
+                    .key("connection-status")
+                    .role("status"),
+            )
             .child(registration_status(state, kit))
-            .child(crate::readiness_cards::checks(state, kit))));
-    if state.connected() && state.registration.context.is_some() {
+            .child(crate::readiness_cards::checks(state, kit));
+        if state.registration.context.is_some() {
+            body = body.child(
+                Button::new("Done")
+                    .on_press(|state: &mut State| state.setup_gateway = false)
+                    .build(kit)
+                    .key("gateway-setup-done"),
+            );
+        }
+    } else {
+        body = match &state.pairing.stage {
+            PairingStage::Idle => body
+                .child(quiet("Pair this Mac once. Your gateway operator approves access, then Fleetworks saves it in macOS Keychain.", kit))
+                .child(Button::new("Connect")
+                    .disabled(state.connection.status == ConnectionStatus::Connecting || state.connection.origin.text.trim().is_empty())
+                    .on_press(|state: &mut State| state.connect())
+                    .build(kit).key("connect")),
+            PairingStage::Working(message) => body
+                .child(line(message.clone(), kit).key("pairing-progress").role("status")),
+            PairingStage::Waiting(challenge) => body
+                .child(line("Waiting for gateway approval", kit).key("pairing-waiting").role("status"))
+                .child(quiet("Share this approval code with your gateway operator. Keep this window open while they approve this workstation.", kit))
+                .child(quiet("Approval code", kit))
+                .child(line(challenge.approval_code.clone(), kit).key("pairing-approval-code"))
+                .child(quiet("Pairing request", kit))
+                .child(quiet(challenge.pairing_id.clone(), kit).key("pairing-request-id")),
+            PairingStage::Failed(failure) => {
+                let restart = matches!(failure, PairingFailure::Denied | PairingFailure::Expired | PairingFailure::KeychainMissing | PairingFailure::Authentication);
+                body
+                    .child(line(failure.message(), kit).key("pairing-failure").role("alert"))
+                    .child(Button::new(if restart { "Pair again" } else { "Retry" })
+                        .disabled(state.connection.origin.text.trim().is_empty())
+                        .on_press(move |state: &mut State| {
+                            if restart { state.restart_pairing(); } else { state.connect(); }
+                        })
+                        .build(kit).key(if restart { "pairing-restart" } else { "connect" }))
+            }
+            PairingStage::Connected => body
+                .child(line("Verifying gateway access…", kit).key("pairing-progress").role("status")),
+        };
+    }
+    if !matches!(state.pairing.stage, PairingStage::Idle) || state.connected() {
         body = body.child(
-            Button::new("Done")
-                .on_press(|state: &mut State| state.setup_gateway = false)
+            Button::new("Change gateway URL")
+                .variant(ButtonVariant::Ghost)
+                .on_press(|state: &mut State| state.disconnect())
                 .build(kit)
-                .key("gateway-setup-done"),
+                .key("pairing-change-origin"),
         );
     }
-    scroll(body, "gateway-setup-body")
+    crate::material::matte_card(body)
 }
 
 fn registration_status(state: &State, kit: &Kit) -> El {
@@ -421,12 +472,19 @@ fn associations(label: &str, rows: &[Association], kit: &Kit) -> El {
 
 #[cfg(test)]
 mod tests {
+    use fleetworks_contracts::pairing::PairingChallenge;
     use rune::Env;
+    use rune::Key;
+    use rune::KeyEvent;
+    use rune::Mods;
     use rune::Runtime;
 
     use crate::app;
+    use crate::app::Intent;
     use crate::app::Page;
     use crate::app::State;
+    use crate::pairing::PairingFailure;
+    use crate::pairing::PairingStage;
 
     fn runtime(page: Page, setup: bool, size: (f32, f32)) -> Runtime<State> {
         let mut state = State::fixture();
@@ -472,12 +530,13 @@ mod tests {
     }
 
     #[test]
-    fn setup_has_url_and_connectivity_progress_without_credential_picker() {
+    fn setup_has_url_and_pairing_progress_without_credential_picker_or_pre_auth_noise() {
         let runtime = runtime(Page::Workstation, true, (1180.0, 780.0));
         let tree = runtime.accessibility_json().to_string();
         assert!(runtime.find("gateway-origin").is_some());
         assert!(runtime.find("connect").is_some());
-        assert!(tree.contains("Connectivity Check"));
+        assert!(tree.contains("Gateway access"));
+        assert!(!tree.contains("Workstation registration unavailable"));
         for key in [
             "gateway-token-file",
             "disconnect",
@@ -488,6 +547,256 @@ mod tests {
             assert!(runtime.find(key).is_none(), "unlisted setup control {key}");
         }
         assert!(runtime.state.intents.is_empty());
+    }
+
+    fn pairing_runtime(stage: PairingStage, size: (f32, f32)) -> Runtime<State> {
+        let mut state = State::fixture();
+        state.setup_gateway = true;
+        state.pairing.fixture_enabled = true;
+        state.pairing.stage = stage;
+        state.connection.origin = rune::TextEdit::new("https://gateway.example.test");
+        state.connection.token_file = rune::TextEdit::new("/fixture/private-token-reference");
+        state.configuration.account_api_key =
+            rune::TextEdit::new("synthetic-hidden-provider-secret");
+        state.registration.receipt =
+            crate::app::Load::Failed("synthetic pre-auth registration details".into());
+        state.readiness = crate::app::Load::Failed("synthetic pre-auth readiness details".into());
+        let mut runtime = Runtime::new(
+            state,
+            app::view,
+            size,
+            Env {
+                system_dark: true,
+                scale: 1.0,
+            },
+        );
+        runtime.frame(0.0);
+        runtime
+    }
+
+    fn click(runtime: &mut Runtime<State>, key: &str, clock: &mut f64) {
+        runtime.update(|_, tx| tx.scroll_into_view(key));
+        *clock += 1.0 / 60.0;
+        runtime.frame(*clock);
+        let (x, y) = runtime
+            .find(key)
+            .unwrap_or_else(|| panic!("production pairing control {key}"));
+        let ([left, top, width, height], _) = runtime
+            .presented("gateway-setup-body")
+            .expect("actual setup viewport");
+        assert!(
+            x >= left && x <= left + width && y >= top && y <= top + height,
+            "{key} must be inside its actual scroll viewport before pointer input"
+        );
+        runtime.pointer_down(x, y);
+        runtime.pointer_up(x, y);
+        *clock += 1.0 / 60.0;
+        runtime.frame(*clock);
+    }
+
+    fn assert_pre_auth_is_private(runtime: &Runtime<State>) {
+        let tree = runtime.accessibility_json().to_string();
+        for private in [
+            "/fixture/private-token-reference",
+            "synthetic-hidden-provider-secret",
+            "synthetic pre-auth registration details",
+            "synthetic pre-auth readiness details",
+        ] {
+            assert!(!tree.contains(private), "setup must not announce {private}");
+        }
+        for key in [
+            "gateway-token-file",
+            "registration-ensure",
+            "connect-id",
+            "gateway-setup-done",
+        ] {
+            assert!(
+                runtime.find(key).is_none(),
+                "pre-auth control/details {key} cannot appear"
+            );
+        }
+    }
+
+    #[test]
+    fn pairing_connect_uses_real_control_without_network_keychain_or_duplicate_start() {
+        for size in [(1180.0, 780.0), (640.0, 480.0)] {
+            let mut runtime = pairing_runtime(PairingStage::Idle, size);
+            assert_pre_auth_is_private(&runtime);
+            assert!(runtime.state.intents.is_empty());
+            let mut clock = 0.0;
+            click(&mut runtime, "connect", &mut clock);
+            assert!(runtime.state.intents.contains(&Intent::PairingConnect));
+            assert!(
+                !runtime.state.intents.contains(&Intent::Connect),
+                "URL-only setup uses the pairing path"
+            );
+            assert!(matches!(
+                runtime.state.pairing.stage,
+                PairingStage::Working(_)
+            ));
+            assert!(runtime.find("pairing-progress").is_some());
+            assert!(
+                runtime.find("connect").is_none(),
+                "working state cannot submit another start"
+            );
+            assert_pre_auth_is_private(&runtime);
+        }
+    }
+
+    #[test]
+    fn pending_approval_is_selectable_and_change_url_fences_old_progress_before_edit() {
+        let challenge = PairingChallenge {
+            pairing_id: "synthetic-pairing-request-0001".into(),
+            approval_code: "SYNTHETICAPPROVALCODE0001".into(),
+            expires_at_ms: 1_900_000_000_000,
+            poll_after_ms: 1500,
+        };
+        let mut runtime = pairing_runtime(PairingStage::Waiting(challenge.clone()), (640.0, 480.0));
+        assert_pre_auth_is_private(&runtime);
+        let tree = runtime.accessibility_json().to_string();
+        assert!(tree.contains(&challenge.approval_code) && tree.contains(&challenge.pairing_id));
+        let code = runtime
+            .elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some("pairing-approval-code"))
+            .expect("actual approval code");
+        assert_eq!(code.text.as_deref(), Some(challenge.approval_code.as_str()));
+        let mut clock = 0.0;
+        click(&mut runtime, "pairing-approval-code", &mut clock);
+        runtime.key(KeyEvent {
+            key: Key::Command('a'),
+            mods: Mods {
+                cmd: true,
+                ..Mods::default()
+            },
+        });
+        clock += 1.0 / 60.0;
+        runtime.frame(clock);
+        assert!(
+            runtime
+                .selected_text()
+                .is_some_and(|text| text.contains(&challenge.approval_code)),
+            "the actual approval code must be selectable for sharing"
+        );
+        let epoch = runtime.state.connection.epoch;
+        click(&mut runtime, "pairing-change-origin", &mut clock);
+        assert_eq!(runtime.state.pairing.stage, PairingStage::Idle);
+        assert!(
+            runtime.state.connection.epoch > epoch,
+            "changing destination fences old callbacks"
+        );
+        assert!(runtime.find("pairing-approval-code").is_none());
+        click(&mut runtime, "gateway-origin", &mut clock);
+        runtime.key(KeyEvent {
+            key: Key::Command('a'),
+            mods: Mods {
+                cmd: true,
+                ..Mods::default()
+            },
+        });
+        runtime.paste("https://another-gateway.example.test");
+        clock += 1.0 / 60.0;
+        runtime.frame(clock);
+        assert_eq!(
+            runtime.state.connection.origin.text,
+            "https://another-gateway.example.test"
+        );
+        assert_eq!(runtime.state.pairing.stage, PairingStage::Idle);
+        assert!(
+            !runtime
+                .state
+                .intents
+                .iter()
+                .any(|intent| matches!(intent, Intent::PairingConnect | Intent::PairingRestart)),
+            "editing URL alone cannot send a pairing request"
+        );
+    }
+
+    #[test]
+    fn actionable_pairing_failures_retry_or_request_new_approval_through_real_controls() {
+        for failure in [
+            PairingFailure::InvalidOrigin,
+            PairingFailure::KeychainMissing,
+            PairingFailure::KeychainDenied,
+            PairingFailure::KeychainUnavailable,
+            PairingFailure::CatalogUnavailable,
+            PairingFailure::Network,
+            PairingFailure::Authentication,
+            PairingFailure::Unsupported,
+            PairingFailure::Denied,
+            PairingFailure::Expired,
+        ] {
+            let mut runtime = pairing_runtime(PairingStage::Failed(failure), (1180.0, 780.0));
+            assert_pre_auth_is_private(&runtime);
+            assert!(runtime
+                .accessibility_json()
+                .to_string()
+                .contains(failure.message()));
+            let restart = matches!(
+                failure,
+                PairingFailure::KeychainMissing
+                    | PairingFailure::Authentication
+                    | PairingFailure::Denied
+                    | PairingFailure::Expired
+            );
+            let mut clock = 0.0;
+            click(
+                &mut runtime,
+                if restart {
+                    "pairing-restart"
+                } else {
+                    "connect"
+                },
+                &mut clock,
+            );
+            assert!(runtime.state.intents.contains(if restart {
+                &Intent::PairingRestart
+            } else {
+                &Intent::PairingConnect
+            }));
+            assert!(matches!(
+                runtime.state.pairing.stage,
+                PairingStage::Working(_)
+            ));
+            assert_pre_auth_is_private(&runtime);
+        }
+    }
+
+    #[test]
+    fn authenticated_pair_shows_registration_and_done_without_restarting_pairing() {
+        let mut runtime = pairing_runtime(PairingStage::Connected, (1180.0, 780.0));
+        runtime.update(|state, _| {
+            state.connection.status = crate::connection::ConnectionStatus::Connected;
+            let receipt = fleetworks_contracts::connect::RegistrationReceipt::new(
+                "synthetic-deployment".into(),
+                "synthetic-workstation".into(),
+                "synthetic-registration".into(),
+                None,
+                1,
+            );
+            state.registration.context = Some(
+                fleetworks_contracts::context::RegisteredContext::new(
+                    receipt.clone(),
+                    1,
+                    1,
+                    "synthetic-config".into(),
+                    "synthetic-access".into(),
+                )
+                .expect("authenticated synthetic context"),
+            );
+            state.registration.receipt = crate::app::Load::Ready(receipt);
+            state.readiness = crate::app::Load::Idle;
+        });
+        runtime.frame(1.0 / 60.0);
+        assert!(runtime.find("connect-id").is_some());
+        assert!(runtime.find("connect").is_none());
+        let mut clock = 1.0 / 60.0;
+        click(&mut runtime, "gateway-setup-done", &mut clock);
+        assert!(!runtime.state.setup_gateway);
+        assert!(
+            runtime.state.intents.is_empty(),
+            "Done only changes the displayed destination"
+        );
     }
 
     #[test]

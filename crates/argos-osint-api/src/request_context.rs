@@ -165,6 +165,27 @@ impl ResolvedRequest {
 
     /// Bound revocation/expiry checks for long-lived reads and subscriptions.
     pub(crate) async fn revalidate(&self, repo: &Repository) -> Result<(), ContextFailure> {
+        if matches!(
+            self.authority.purpose,
+            CredentialPurpose::Native | CredentialPurpose::WebRelay
+        ) {
+            argos_osint_core::storage::configuration_reset::authorize_delegated_access(
+                repo,
+                &self.authority.scope_id,
+                &self.authority.access_epoch,
+            )
+            .await
+            .map_err(|_| ContextFailure::forbidden())?;
+        }
+        argos_osint_core::storage::native_pairing::validate_authority(
+            repo,
+            &self.authority.scope_id,
+            &self.authority.credential_id,
+            &self.authority.access_epoch,
+            &self.authority.permissions,
+        )
+        .await
+        .map_err(|_| ContextFailure::forbidden())?;
         let current = resolve_proof(repo, &self.registry, &self.proof).await?;
         match (&self.context, current) {
             (None, None) => Ok(()),
@@ -423,6 +444,15 @@ async fn resolve_authority(
     if !authority.permissions.contains(&permission) {
         return Err(ContextFailure::forbidden());
     }
+    argos_osint_core::storage::native_pairing::validate_authority(
+        repo,
+        &authority.scope_id,
+        &authority.credential_id,
+        &authority.access_epoch,
+        &authority.permissions,
+    )
+    .await
+    .map_err(|_| ContextFailure::forbidden())?;
     if requirement == ContextRequirement::Registered && proof == AdmissionProof::None {
         return Err(ContextFailure::registration_required());
     }

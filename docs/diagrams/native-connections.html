@@ -1,66 +1,67 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Native gateway setup: current and agreed target</title>
-<style>body{margin:0;padding:32px;color:#242424;background:#fff;font:16px/1.6 Geist,Arial,sans-serif}main{max-width:1200px;margin:auto}h1{font:36px/1.2 "Instrument Serif",Georgia,serif;margin:0 0 16px}p{max-width:88ch}svg{display:block;width:100%;height:auto;margin:24px 0}a{color:#a14b24}</style></head><body><main><h1>Native gateway setup: current and agreed target</h1><p>Current native setup uses a protected token-file reference. The agreed replacement is gateway URL, one-time pairing approval and macOS Keychain storage, followed by authenticated registration and reconnect. Pairing and Keychain are not implemented yet; browser session authority remains separate.</p>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Native pairing, Keychain and gateway approval</title>
+<style>body{margin:0;padding:32px;color:#242424;background:#fff;font:16px/1.6 Geist,Arial,sans-serif}main{max-width:1200px;margin:auto}h1{font:36px/1.2 "Instrument Serif",Georgia,serif;margin:0 0 16px}p{max-width:88ch}svg{display:block;width:100%;height:auto;margin:24px 0}a{color:#a14b24}</style></head><body><main><h1>Native pairing, Keychain and gateway approval</h1><p>Enter the gateway URL, approve the displayed request with a separately authenticated Operator, save the scoped Native credential in macOS Keychain, then authenticate and register. The gateway persists hashes and revalidates revocation and policy; operator file tooling and browser sessions remain separate.</p>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 784" role="img" aria-labelledby="native-connections-title native-connections-desc">
-<title id="native-connections-title">Native gateway setup: current and agreed target</title>
-<desc id="native-connections-desc">Current native setup uses a protected token-file reference. The agreed replacement is gateway URL, one-time pairing approval and macOS Keychain storage, followed by authenticated registration and reconnect. Pairing and Keychain are not implemented yet; browser session authority remains separate.</desc>
+<title id="native-connections-title">Native pairing, Keychain and gateway approval</title>
+<desc id="native-connections-desc">Enter the gateway URL, approve the displayed request with a separately authenticated Operator, save the scoped Native credential in macOS Keychain, then authenticate and register. The gateway persists hashes and revalidates revocation and policy; operator file tooling and browser sessions remain separate.</desc>
 <style>text{font-family:Geist,Arial,sans-serif;fill:#242424}.zone{font-size:14px;letter-spacing:1.4px;fill:#666}.label{font-size:20px;font-weight:600}.note{font-size:16px;fill:#555}.small{font-size:14px;fill:#666}.node{fill:#fff;stroke:#aaa;stroke-width:1}.focus{fill:#fff4ee;stroke:#eb6c36;stroke-width:2}.wire{fill:none;stroke:#555;stroke-width:2;marker-end:url(#arrow)}.lane{fill:#fafafa;stroke:#ddd;stroke-width:1}</style>
 <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#555"/></marker></defs>
 <rect width="1200" height="784" fill="#fff"/>
-<text x="40" y="48" class="zone">IMPLEMENTED TODAY · TRANSITIONAL TOKEN-FILE SETUP</text>
-<g data-card="true"><rect x="40" y="88" width="332" height="148" rx="6" class="node"/>
-<text x="56" y="120" class="label">Private-file provisioning</text>
-<text x="56" y="152" class="note">Origin-bound file reference</text>
-<text x="56" y="178" class="note">Existing protected Native token</text>
-<text x="56" y="204" class="note">Explicit provisioning command</text>
+<text x="40" y="48" class="zone">NATIVE · URL, ONE-TIME APPROVAL AND SAVED ACCESS</text>
+<g data-card="true"><rect x="40" y="96" width="248" height="160" rx="6" class="node"/>
+<text x="56" y="128" class="label" style="font-size:18px">1 · Gateway URL</text>
+<text x="56" y="160" class="note">Pin the exact origin</text>
+<text x="56" y="186" class="note">HTTPS or local loopback</text>
+<text x="56" y="212" class="note">No file selection</text>
 </g>
-<g data-card="true"><rect x="432" y="88" width="332" height="148" rx="6" class="node"/>
-<text x="448" y="120" class="label">URL + credential check</text>
-<text x="448" y="152" class="note">Enter the same gateway origin</text>
-<text x="448" y="178" class="note">Missing/changed/unsafe file</text>
-<text x="448" y="204" class="note">fails before network checking</text>
+<g data-card="true"><rect x="328" y="96" width="248" height="160" rx="6" class="node"/>
+<text x="344" y="128" class="label" style="font-size:18px">2 · Pairing approval</text>
+<text x="344" y="160" class="note">Show request + code</text>
+<text x="344" y="186" class="note">Wait for your operator</text>
+<text x="344" y="212" class="note">Pause reads when hidden</text>
 </g>
-<g data-card="true"><rect x="824" y="88" width="336" height="148" rx="6" class="node"/>
-<text x="840" y="120" class="label">Authenticate + register</text>
-<text x="840" y="152" class="note">Native authority is still required</text>
-<text x="840" y="178" class="note">Stable workstation identity</text>
-<text x="840" y="204" class="note">Browser has its own session</text>
+<g data-card="true"><rect x="616" y="96" width="248" height="160" rx="6" class="focus"/>
+<text x="632" y="128" class="label" style="font-size:18px">3 · macOS Keychain</text>
+<text x="632" y="160" class="note">Native + polling secrets</text>
+<text x="632" y="186" class="note">Bind origin + installation</text>
+<text x="632" y="212" class="note">Private settings: references</text>
 </g>
-<path d="M 372 160 H 432" class="wire"/>
-<path d="M 764 160 H 824" class="wire"/>
-<path d="M 40 276 H 1160" stroke="#bbb"/>
-<text x="40" y="324" class="zone">AGREED TARGET · NOT IMPLEMENTED YET</text>
-<g data-card="true"><rect x="40" y="364" width="248" height="176" rx="6" class="node"/>
-<text x="56" y="396" class="label" style="font-size:18px">1 · Gateway URL</text>
-<text x="56" y="428" class="note">Pin the exact origin</text>
-<text x="56" y="454" class="note">HTTPS for remote gateways</text>
-<text x="56" y="480" class="note">Retain loopback exception</text>
+<g data-card="true"><rect x="904" y="96" width="256" height="160" rx="6" class="node"/>
+<text x="920" y="128" class="label" style="font-size:18px">4 · Connect</text>
+<text x="920" y="160" class="note">Authenticate + check API</text>
+<text x="920" y="186" class="note">Register the workstation</text>
+<text x="920" y="212" class="note">Reuse access on return</text>
 </g>
-<g data-card="true"><rect x="328" y="364" width="248" height="176" rx="6" class="focus"/>
-<text x="344" y="396" class="label" style="font-size:18px">2 · Approve pairing</text>
-<text x="344" y="428" class="note">Operator authorizes once</text>
-<text x="344" y="454" class="note">Short-lived, single-use</text>
-<text x="344" y="480" class="note">Scoped Native credential</text>
+<path d="M 288 176 H 328" class="wire"/>
+<path d="M 576 176 H 616" class="wire"/>
+<path d="M 864 176 H 904" class="wire"/>
+<path d="M 40 300 H 1160" stroke="#bbb"/>
+<text x="40" y="340" class="zone">GATEWAY OPERATOR · SEPARATE AUTHENTICATED AUTHORITY</text>
+<g data-card="true"><rect x="40" y="376" width="332" height="160" rx="6" class="node"/>
+<text x="56" y="408" class="label">Independent Operator access</text>
+<text x="56" y="440" class="note">Private operator-token file</text>
+<text x="56" y="466" class="note">Approval CLI in separate terminal</text>
+<text x="56" y="492" class="note">Never copied into native settings</text>
 </g>
-<g data-card="true"><rect x="616" y="364" width="248" height="176" rx="6" class="focus"/>
-<text x="632" y="396" class="label" style="font-size:18px">3 · macOS Keychain</text>
-<text x="632" y="428" class="note">Secret stays in Keychain</text>
-<text x="632" y="454" class="note">Bind to gateway origin</text>
-<text x="632" y="480" class="note">No token-file workflow</text>
+<g data-card="true"><rect x="432" y="376" width="332" height="160" rx="6" class="focus"/>
+<text x="448" y="408" class="label">Approve / deny / revoke</text>
+<text x="448" y="440" class="note">Match displayed request + code</text>
+<text x="448" y="466" class="note">Scope and grants come from policy</text>
+<text x="448" y="492" class="note">Existing Native/Web tokens differ</text>
 </g>
-<g data-card="true"><rect x="904" y="364" width="256" height="176" rx="6" class="node"/>
-<text x="920" y="396" class="label" style="font-size:18px">4 · Connect</text>
-<text x="920" y="428" class="note">Authenticate and register</text>
-<text x="920" y="454" class="note">Existing workstation ID</text>
-<text x="920" y="480" class="note">Reuse stored access</text>
+<g data-card="true"><rect x="824" y="376" width="336" height="160" rx="6" class="node"/>
+<text x="840" y="408" class="label">Durable gateway authority</text>
+<text x="840" y="440" class="note">Store hashes, not bearer secrets</text>
+<text x="840" y="466" class="note">Installation and epoch fences</text>
+<text x="840" y="492" class="note">Recover exact issued access</text>
 </g>
-<path d="M 288 452 H 328" class="wire"/>
-<path d="M 576 452 H 616" class="wire"/>
-<path d="M 864 452 H 904" class="wire"/>
-<text x="40" y="596" class="label">Reconnect → read Keychain → authenticate.</text>
-<text x="40" y="632" class="note">Access missing, denied or revoked: explain the recovery step and re-pair explicitly.</text>
-<text x="40" y="668" class="note">Keychain unavailable: keep setup pending; no plaintext or unauthenticated fallback.</text>
-<text x="40" y="716" class="note">Browser Connect stays separately authenticated; a Connect ID is not a secret.</text>
-<text x="40" y="756" class="small">Design decision only: this documentation change ships no pairing service or Keychain adapter.</text>
+<path d="M 372 456 H 432" class="wire"/>
+<path d="M 764 456 H 824" class="wire"/>
+<path d="M 598 376 V 288 H 452 V 256" class="wire"/>
+<text x="40" y="592" class="label">Reconnect reads Keychain; denied, expired or revoked access has explicit recovery.</text>
+<text x="40" y="630" class="note">Revocation and current issuer policy are rechecked at authority and mutation boundaries.</text>
+<text x="40" y="668" class="note">Operator/headless token-file mode remains separate from the ordinary native setup flow.</text>
+<text x="40" y="716" class="note">Browser WebRelay sessions remain independent; a Connect ID is not a credential.</text>
+<text x="40" y="756" class="small">Source implemented; runtime, real Keychain and platform evidence are recorded separately.</text>
 </svg>
 <p><a href="../wiki/code/native-workspaces.md">Workstation identity contract</a> · <a href="../wiki/code/native-connections.md">Connections and activity</a> · <a href="../diagrams.md">Diagram catalog</a></p></main></body></html>

@@ -8,17 +8,23 @@ The native installation owns protected settings under `~/.fleetworks` in the ope
 
 ## Protected settings boundary
 
-Normal startup opens settings without creating a `default` child. The manager holds directory descriptors, verifies object identity and private permissions, and serializes revisioned atomic catalog writes with its existing private lock. Unknown catalogs, symlink substitution, external paths and conflicting installation markers fail closed. The current connection catalog stores exact-origin protected credential-file references, never token bytes.
+Normal startup opens settings without creating a `default` child. The manager verifies directory/file object identity and private permissions; revisioned atomic writes use its existing lock. Unknown catalogs, symlinks, external paths and conflicting installation markers fail closed.
 
-**Current transitional setup:** `--provision-gateway-credential --api-origin <origin> --api-token-file <private-file>` binds an existing protected token file to one normalized origin, exits without a GUI/network/service startup, and preserves other origins. Token rotation requires explicit provisioning again. The URL-only wizard cannot forward another origin's credential.
+| Location | Owns |
+| --- | --- |
+| `.native-pairing.json` | Installation/origin/deployment/credential references, selected origin and exact pending/issuance recovery; no polling/access secrets |
+| macOS Keychain | Installation- and origin-bound polling/access secrets through the blocking `KeychainStore` adapter; denied access never falls back |
+| Retained file catalog | Explicit operator/headless credential references; no automatic adoption, migration or deletion |
 
-**Agreed target, not implemented:** [pair once and store access in macOS Keychain](native-connections.md#pairing-and-keychain-agreed-target). Protected settings keep installation identity, non-secret references and journals; Keychain owns the origin-bound native secret. Existing token files are not silently adopted, migrated or deleted. Server revocation and explicit re-pairing remain distinct from local credential storage.
+[Pairing](native-connections.md#pairing-and-keychain-agreed-target) records exact intent before HTTP and issuance before Keychain promotion. Restart/retry recovers only that reference. An approved credential becomes connected only after authenticated compatibility checks and successful storage. Server revocation is independent of local cancellation/deletion.
+
+Explicit `--api-origin` + `--api-token-file` retains file-based launch mode. Optional `--provision-gateway-credential` saves its binding and exits without GUI/network/service startup; normal GUI pairing does not require it.
 
 ## Scope and history
 
 New registrations, request contexts and activity queries contain workstation identity without workspace IDs, names or markers. Backend models, keys, actor corpus and search remain shared within authorized deployment scope. Membership is resolved before counts, pagination, details, logs, results, streams and mutations. Unknown/system jobs are never assigned to a workstation as a fallback.
 
-The versioned registry migration preserves workstation IDs and `(scope_id, installation_hash)`, retains old registration mappings and immutable origins for historical readers, fences incompatible admission and requires a fresh browser Connect. Accepted causal children retain the correct workstation lifecycle fence. Legacy child registrations cannot admit new work.
+Schema 10 adds pairing records without replacing installation/scope identity or accepted origins. The versioned registry migration preserves workstation IDs and `(scope_id, installation_hash)`, retains old registration mappings and immutable origins for historical readers, fences incompatible admission and requires a fresh browser Connect. Accepted causal children retain the correct workstation lifecycle fence. Legacy child registrations cannot admit new work.
 
 [![Backend resources and workstation origin](../../diagrams/workspace-scope.svg)](../../diagrams/workspace-scope.html)
 
@@ -32,4 +38,4 @@ Existing default/named child folders, markers, pending operation journals and un
 
 ## Verification
 
-Manager fixtures cover settings-only initialization, installation identity, credential-origin/file binding and retained catalogs. Registry/API tests cover forward migration, IP-independent identity, session invalidation and historical request recovery. Actual Rune fixtures exercise the same production views/handlers. See the [acceptance tracker](../../../.planning/2026-11-12-native-workstation-redesign/acceptance.md) for executed results; unit fixtures do not establish installed-app or both-architecture approval.
+Manager fixtures cover settings-only initialization, installation identity, injected Keychain access/promotion/recovery, credential-origin/file binding and retained catalogs. Registry/API tests cover forward migration, IP-independent identity, session invalidation and historical request recovery. Actual Rune fixtures exercise the same production views/handlers. See the [acceptance tracker](../../../.planning/2026-11-12-native-pairing-implementation/acceptance.md) for executed results; unit fixtures do not establish installed-app or both-architecture approval.

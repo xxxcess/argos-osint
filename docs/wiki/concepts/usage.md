@@ -4,9 +4,9 @@
 
 [![Provision, connect and register a workstation](../../diagrams/native-connections.svg)](../../diagrams/native-connections.html)
 
-**Agreed target, not implemented:** enter Gateway URL → approve pairing once → macOS Keychain → authenticated reconnect, without managing files. [Pairing/Keychain target](../code/native-connections.md#pairing-and-keychain-agreed-target)
+**Native setup:** Gateway URL → operator approval once → macOS Keychain → authenticated reconnect. Enter the independent gateway URL in Setup Gateway and share its request ID/code with the operator. The app saves approved access and registers this installation; no file management is needed. Explicit operator/headless clients retain token-file mode. [Pairing/recovery](../code/native-connections.md#pairing-and-keychain-agreed-target) · [Verification](../../../.planning/2026-11-12-native-pairing-implementation/acceptance.md)
 
-**Current transitional setup:** provision the independent Linux backend and an exact-origin Native credential-file binding, then enter its URL in Setup Gateway. Authenticated checks register the installation. Token files remain supported for operators and automated tooling. The opaque workstation Connect ID also selects the browser's separately authorized session. IP is optional metadata. Native launch starts no services or child folders.
+The opaque workstation Connect ID also selects the browser’s separately authorized session. IP is optional metadata. Native launch starts no services or child folders.
 
 ## Intel
 

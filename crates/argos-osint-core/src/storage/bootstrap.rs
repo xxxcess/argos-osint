@@ -34,7 +34,8 @@ use super::tx::{run_tx, RetryPolicy, TxError};
 /// runtime readers reject incomplete earlier metadata until explicit bootstrap.
 /// v9 migrates active workspace registrations to workstation-only identity atomically,
 /// preserving immutable origins and fencing incompatible writers.
-pub const SCHEMA_VERSION: i64 = 9;
+/// v10 adds durable native pairing, scoped installation credentials and revocation.
+pub const SCHEMA_VERSION: i64 = 10;
 
 /// Module schemas in apply order: counters before the outbox; the graph
 /// before lifecycle (which indexes `brain_graph_node`); Atlas before its
@@ -42,9 +43,10 @@ pub const SCHEMA_VERSION: i64 = 9;
 /// before refresh. The event logs (`argos_event`, `investigation_event`)
 /// stand alone; telemetry writes use `profile_view`'s tables, with
 /// `telemetry_meta` after them.
-pub fn schemas() -> [(&'static str, &'static str); 56] {
+pub fn schemas() -> [(&'static str, &'static str); 57] {
     [
         ("counters", super::counters::SCHEMA),
+        ("native_pairing", super::native_pairing::SCHEMA),
         ("outbox", super::outbox::SCHEMA),
         ("memory", super::memory::SCHEMA),
         ("graph", super::graph::SCHEMA),

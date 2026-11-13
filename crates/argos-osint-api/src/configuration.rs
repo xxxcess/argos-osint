@@ -155,6 +155,15 @@ async fn write_lock(
         Ok((root, lock))
     })
     .await?;
+    // Lock order is configuration owner first, then registry transactions. Pairing
+    // revocation uses the same order, so a completed revoke cannot race the
+    // subsequent file commit while this lock remains held.
+    context.revalidate(&state.repo).await.map_err(|_| {
+        ApiError(
+            StatusCode::UNAUTHORIZED,
+            "Current configuration authority required",
+        )
+    })?;
     configuration_reset::configuration_write_allowed(&state.repo, context.scope_id(), &lock)
         .await
         .map_err(|error| {

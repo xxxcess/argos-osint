@@ -22,11 +22,11 @@ python3 scripts/fleetworks_candidate.py build-native --target host --profile deb
 
 The helper prints the app and manifest paths. Add `--open` to launch it. The app opens offline setup and connects to an existing gateway; backend and Intel Web startup are separate operator actions.
 
-**Agreed target, not implemented:** Gateway URL → approve pairing once → macOS Keychain → authenticated reconnect, without user-managed token files. **Current transitional setup** uses the protected file binding below. Token files remain supported for operators and automated tooling. [Pairing and Keychain target](docs/wiki/code/native-connections.md#pairing-and-keychain-agreed-target)
+**Native setup:** Gateway URL → operator approval once → macOS Keychain → authenticated reconnect. No user-managed token file is needed. [Pairing and recovery](docs/wiki/code/native-connections.md#pairing-and-keychain-agreed-target) · [Verification status](.planning/2026-11-12-native-pairing-implementation/acceptance.md)
 
 1. Start the backend with the [Docker Compose quick start below](#backend-for-the-native-app). Backend deployment requires Docker and Docker Compose **v2.20 or newer**.
-2. Run the provisioning command printed by `deploy/native_review.py` using the app executable's `--provision-gateway-credential --api-origin <origin> --api-token-file <private-file>` mode. It stores an exact-origin protected file reference, never token bytes, and exits without network or GUI startup.
-3. Open **Setup Gateway**, enter that URL and continue through connectivity checking. The gateway registers the protected installation and returns its stable opaque workstation Connect ID. Activity and mutations use that context and explicit permissions.
+2. Open **Setup Gateway**, enter the gateway URL and choose **Connect**. Give its pairing request ID and approval code to the gateway operator for [approval](docs/wiki/code/native-connections.md#operator-approval-and-revocation).
+3. The app authenticates the approved access, saves it in macOS Keychain and registers the installation. Workstation Status shows its stable opaque Connect ID; later connections reuse saved access.
 
 Normal startup initializes protected settings in `~/.fleetworks` without creating a default child. IP is optional metadata; folders do not select identity or partition shared actors, model defaults and provider accounts. Existing folders and historical receipts remain preserved. See [workstation identity](docs/wiki/code/native-workspaces.md).
 
@@ -56,7 +56,7 @@ docker compose --env-file compose.env \
   up --no-build --pull never --detach --wait
 ```
 
-For the current transitional native setup, provision the credential binding for `http://127.0.0.1:18091` using the existing private `.agent-scratch/native-review/native-local/secrets/native-token` file and the command printed by initialization. Then enter the URL in **Setup Gateway**. This backend runs independently of the app. Atlas collection uses the [additional overlay below](#collect-articles-with-atlas); Intel Web is an optional separate deployment.
+Enter `http://127.0.0.1:18091` in **Setup Gateway** and have the operator approve the displayed pairing request. Existing stacks need an independently provisioned Operator credential; see [operator setup](deploy/README.md#credentials). This backend runs independently of the app. Atlas collection uses the [additional overlay below](#collect-articles-with-atlas); Intel Web is an optional separate deployment.
 
 Rerun the start command to apply edited Compose settings. To inspect or stop the backend, use the same command prefix with `ps`, `logs --follow` or `down` in place of `up --no-build --pull never --detach --wait`. Stop preserves backend data. For concurrent deployments, omit `--root-env`, choose a different name and API port, and use that deployment's matching env file and project. [Full deployment guide](deploy/README.md#isolated-native-backend-review)
 
@@ -73,7 +73,7 @@ Provision provider credentials, the Atlas worker, private NLP and a Rust-BERT mo
 | DB Seed & Train | Trigger configured actor seed, search-index build and Natural candidate training; acceptance is distinct from completion. |
 | News Cycles and Brain Search | Queue cycles, inspect workstation cycle history, discover actors and read dossiers. |
 | OSINT Tools and Model Assignments | Read service/provider cards, provision keys and edit supported model routing with confirmed revisions. |
-| Workstation Status and Setup Gateway | Inspect identity/readiness/API-host resources and complete URL-only setup with protected provisioned credentials. |
+| Workstation Status and Setup Gateway | Inspect identity/readiness/API-host resources; pair this Mac and reconnect with saved Keychain access. |
 | Jobs & Logs | Read the bounded workstation queue and selected-job safe operational summaries. |
 | Intel Web | Browse the Bulletin, Focus Briefs, Related articles, actor dossiers and topology behind the Connect/session gate. |
 

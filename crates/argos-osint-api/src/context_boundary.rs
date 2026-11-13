@@ -23,6 +23,14 @@ use crate::AuthenticatedPrincipal;
 fn requirement(request: &Request) -> Option<(Permission, ContextRequirement)> {
     let path = request.uri().path();
     if matches!(path, "/api/v1/health/ready" | "/api/v1/capabilities")
+        || matches!(
+            path,
+            fleetworks_contracts::pairing::PAIRING_START_PATH
+                | fleetworks_contracts::pairing::PAIRING_POLL_PATH
+                | fleetworks_contracts::pairing::PAIRING_APPROVE_PATH
+                | fleetworks_contracts::pairing::PAIRING_DENY_PATH
+                | fleetworks_contracts::pairing::PAIRING_REVOKE_PATH
+        )
         || path.starts_with("/api/v1/connect/")
         || path.starts_with("/api/v1/admin/configuration-reset/")
         || path.starts_with("/api/v1/internal/configuration-reset/")

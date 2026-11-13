@@ -1,44 +1,65 @@
 # Native connections and registered context
 
-[Client](../../../apps/fleetworks-desktop/README.md) · [Protected identity](native-workspaces.md) · [Control/design guide](native-design-system.md) · [Verification](../../../.planning/2026-11-12-native-workstation-redesign/acceptance.md)
+[Client](../../../apps/fleetworks-desktop/README.md) · [Protected identity](native-workspaces.md) · [Control/design guide](native-design-system.md) · [Verification](../../../.planning/2026-11-12-native-pairing-implementation/acceptance.md)
 
-[![Current provisioning and agreed pairing flow](../../diagrams/native-connections.svg)](../../diagrams/native-connections.html)
+[![Native pairing and authenticated reconnect](../../diagrams/native-connections.svg)](../../diagrams/native-connections.html)
 
-## Pairing and Keychain (agreed target)
+<a id="pairing-and-keychain-agreed-target"></a>
 
-**Approved design; not implemented yet.** Native setup should be:
+## Pairing and Keychain
 
-**Gateway URL → approve pairing once → macOS Keychain → connect.**
+**Implemented flow:** Gateway URL → operator approval once → macOS Keychain → authenticated reconnect. [Verification status](../../../.planning/2026-11-12-native-pairing-implementation/acceptance.md) records actual checks; implementation does not establish a live Keychain or installed-app pass.
 
-| Step | Target behavior |
+| Step | Behavior |
 | --- | --- |
-| Enter URL | Validate and pin the exact gateway origin. Remote gateways require HTTPS; retain the existing loopback exception. |
-| Approve pairing | A separately authenticated gateway operator approves a short-lived, single-use pairing request. A URL, installation marker or Connect ID alone grants no access. |
-| Save access | Issue a revocable, scoped Native credential for this installation; store its secret only in macOS Keychain, bound to that origin. Settings retain non-secret references and recovery state. |
-| Connect again | Read Keychain, authenticate, check compatibility and register/reuse the workstation. Routine reconnect needs no token entry or file selection. |
-| Recover | Distinguish missing access, pairing denied/expired, Keychain locked/denied and gateway unreachable. Retry or re-pair explicitly; never downgrade to unauthenticated access or plaintext storage. |
+| Enter URL | Pin one validated origin: remote HTTPS or loopback HTTP. A new installation waits for Connect. A known selected pairing/access reference may reconnect on startup; an explicit URL restores only its own known reference. |
+| Start / approve | Persist the exact request ID and Keychain polling secret before HTTP. The app displays request ID/code; an independently authenticated Operator approves it within the ten-minute challenge window. IDs/codes/installation markers alone grant no API access. |
+| Save / connect | Authenticate the issued scoped Native credential, check compatibility, then save its secret in Keychain before reporting connected. Register/reuse the protected installation. Settings retain only origin/deployment/credential references and recovery state. |
+| Reconnect | Read the exact installation/origin Keychain item, authenticate and verify the saved deployment. Never scan other items or fall back to token files, another origin or unauthenticated access. |
+| Recover | Lost HTTP outcomes and failed Keychain promotion retain the exact ID/secret/issuance intent. Retry replays that request; denied/expired/revoked access requires explicit Pair again. Keychain locked/denied/unavailable and network failures remain separate actionable states. |
+| Stop / resume | Change gateway URL or leave setup to cancel/fence client callbacks. Focus loss pauses pending transport; focus return in setup resumes the retained request. Local cancellation does not revoke server access or cancel accepted jobs. |
 
-Token files remain an operator/headless mechanism. Browser WebRelay credentials and HttpOnly sessions keep their independent boundary. Pairing must not reuse a browser Connect ID as a secret or forward an operator token into native settings.
+### Pairing API
 
-Show one actionable setup state at a time. Before authentication succeeds, omit registration/readiness noise. Use plain messages such as **“Gateway access isn’t configured”** or **“Unlock Keychain to continue”**; keep provisioning flags out of the normal target flow.
+All routes are POST. `PairingClient` exposes only start/poll; protected APIs retain authenticated `Client` behavior. Both transports disable redirects/proxies and bound bodies/timeouts. Polling/access secrets never enter URLs, UI state, Debug or diagnostics.
 
-**Implementation still required:** gateway pairing/credential issuance and revocation, a Keychain adapter, native progression/recovery and scoped integration tests. Exact endpoints, approval surface and lifetimes are not specified here. No pairing or Keychain runtime pass is implied.
+| Route | Authority / result |
+| --- | --- |
+| `/api/v1/pairing/start` | Public bounded challenge request: request ID, installation marker, 256-bit polling secret; returns pairing ID/code/expiry/poll interval |
+| `/api/v1/pairing/poll` | Exact pairing ID + polling secret; returns pending, denied, expired or approved. Approved contains scoped access; replay returns the same issuance, not a new credential |
+| `/api/v1/admin/pairing/approve`, `/deny` | Operator-purpose credential with ReadBackend, RegisterWorkstation and ManageConfiguration; exact pairing ID/code. The server derives Native scope/epoch/grants |
+| `/api/v1/admin/pairing/revoke` | Current Operator authority and credential ID; fences paired authority/admission and related registered/browser proof without rewriting accepted origins |
 
-## Current setup (transitional)
+### Operator approval and revocation
 
-The current app still requires `--provision-gateway-credential --api-origin <origin> --api-token-file <private-file>` before its URL/check wizard. A missing/changed/unsafe binding fails before HTTP. Use the actual deployment origin: the documented local-review example uses `http://127.0.0.1:18091`; `8080` is a different binding. [Working provisioning instructions](../../../apps/fleetworks-desktop/README.md#build-and-provision)
+Use the app's displayed request ID/code and a separately provisioned private **Operator** token file:
+
+```sh
+python3 scripts/fleetworks_pairing.py \
+  --origin https://gateway.example.test \
+  --operator-token-file /absolute/private/operator-token \
+  approve --pairing-id "<displayed-id>" --approval-code "<displayed-code>"
+```
+
+Use `deny` with the same ID/code, or `revoke --credential-id <paired-id>`. The helper pins the origin, refuses redirects/proxies, bounds input/output and never prints bearer bytes. Native/WebRelay credentials cannot approve pairing. [Deployment credentials](../../../deploy/README.md#credentials)
+
+Revocation, changed issuer policy/scope/access epoch and reset invalidate paired authority. Local Keychain deletion alone is not server revocation. Existing static Native, WebRelay and headless credentials remain supported independently.
+
+## Explicit operator/headless file mode
+
+Normal GUI setup needs no token file. Explicit `--api-origin <origin> --api-token-file <private-file>` preserves the file-based launch override; it does not populate Keychain. Optional `--provision-gateway-credential` stores only the protected file-catalog binding and exits without GUI/network startup; it is not a prerequisite for normal pairing. Existing files are never silently adopted, migrated or deleted. [Commands](../../../apps/fleetworks-desktop/README.md#build-and-provision)
 
 ## Authority and registration
 
 | Boundary | Contract |
 | --- | --- |
 | Credentials | Native, WebRelay, InternalService and Operator purposes have explicit permissions. Connect IDs and caller-supplied headers grant no authority. |
-| Current local setup | Exact-origin private-file reference, then URL/check; revalidate file identity/permissions. The agreed replacement above uses pairing and Keychain. Neither flow forwards another origin’s credential. |
+| Local access | Operator-approved origin-bound Keychain access for normal GUI; explicit file-based launch mode remains separate. Neither forwards another origin’s credential. |
 | Identity | Connect/activity contract 2: opaque workstation ID = Connect ID; authenticated scope + protected installation marker determine identity. Optional IP never merges installations. New requests contain no workspace fields. |
 | Transport | Pin origin; disable environment proxy/redirect forwarding; bound responses. Gateway admission/read boundaries revalidate current proof, permissions and revisions. |
 | Invalidation | Gateway/access changes fence old clients, reads, caches and confirmations. Missing registration or optional services disables only dependent actions; permitted shared reads remain usable. |
 
-Coordinate incompatible deployment: stop/fence old writers, run current operator bootstrap against retained data, then start compatible gateway/workers/clients. The atomic migration checkpoints contract/schema state, preserves workstation IDs and old registration mappings, marks legacy registrations read-only and revokes old browser sessions. Require fresh native/browser registration proof; preserve immutable origins and unresolved requests. [Registry migration](../../diagrams/connect-registry.html)
+Schema 10 adds pairing and credential records. Coordinate bootstrap and compatible readers/writers using the existing deployment selection; preserve scope, installation/workstation identity, registration mappings, unresolved requests and immutable origins. The earlier workstation-v2 migration fences legacy registrations/sessions and requires fresh proof for those migrated entries; pairing does not replace retained static/headless credentials. [Registry migration](../../diagrams/connect-registry.html)
 
 ## Browser handoff
 
@@ -86,4 +107,4 @@ Cycles use bounded workstation summaries and revision/idempotency-bound associat
 
 [Contracts/SDK](../../../crates/fleetworks-contracts/src/) · [Native effects](../../../apps/fleetworks-desktop/src/) · [Protected settings](../../../crates/fleetworks-workstation/src/native/) · [Registry](../../../crates/argos-osint-core/src/storage/connect_registry.rs) · [Job context](../../../crates/argos-osint-core/src/storage/job_context.rs) · [Gateway boundary](../../../crates/argos-osint-api/src/context_boundary.rs)
 
-The [acceptance tracker](../../../.planning/2026-11-12-native-workstation-redesign/acceptance.md) separates implementation, actual focused/gate results, inspected Runtime evidence, hosted platforms and installed-app checks. A source audit or generated image is not runtime approval.
+The [acceptance tracker](../../../.planning/2026-11-12-native-pairing-implementation/acceptance.md) separates implementation, actual focused/gate results, inspected Runtime evidence, hosted platforms and installed-app checks. A source audit or generated image is not runtime approval.

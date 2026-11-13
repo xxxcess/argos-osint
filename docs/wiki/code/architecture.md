@@ -8,7 +8,7 @@
 
 | Component | Owns |
 | --- | --- |
-| [Rune macOS desktop](../../../apps/fleetworks-desktop) | Native pages, input and accessibility; protected installation identity and exact-origin provisioned credential references through the [workstation library](../../../crates/fleetworks-workstation); bounded gateway requests through shared [contracts](../../../crates/fleetworks-contracts). Connects to independently running services. |
+| [Rune macOS desktop](../../../apps/fleetworks-desktop) | Native pages, input and accessibility; protected installation identity and origin-bound Keychain references through the [workstation library](../../../crates/fleetworks-workstation); bounded gateway requests through shared [contracts](../../../crates/fleetworks-contracts). Connects to independently running services. |
 | [Intel Web](../../../apps/web-desktop) | React Native Web presentation, topology and its accessible list, Connect/session gate, and a same-origin server relay using its separately provisioned gateway credential. |
 | Linux backend: [API](../../../crates/argos-osint-api), [service host](../../../services/api-host) and [Core](../../../crates/argos-osint-core) | Authenticated gateway/live streams, private services, durable workers, shared configuration and domain storage. Linux owns [classifier/NLP execution](classifier.md), [Tantivy discovery](actor-search.md), SurrealDB and [Jobs persistence](../../../crates/fleetworks-jobs). |
 
@@ -16,7 +16,7 @@ External operator tooling owns deployment origins, service processes, images and
 
 Direct [Docker Compose](../../../deploy/README.md) operates backend services and optional Intel Web. Venture, the six terminal clients and legacy `argos` are retired. The Rune app connects to the gateway and never starts a backend, web server or container. [Service startup and roles](fleetworks.md)
 
-Native credential storage is planned to move from file references to [approved pairing and Keychain](native-connections.md#pairing-and-keychain-agreed-target). That replacement is not implemented.
+Native [pairing and Keychain](native-connections.md#pairing-and-keychain-agreed-target) separates public challenge start/poll from Operator approval and authenticated APIs. Settings contain non-secret recovery references; macOS Keychain holds polling/access secrets. Explicit operator/headless token-file mode is independent. [Verification](../../../.planning/2026-11-12-native-pairing-implementation/acceptance.md) remains separately recorded.
 
 The brief worker runs stages and publication. Atlas uses a Jobs-owned embedded delivery queue with a collection worker and private NLP and classifier services. SurrealDB owns job execution state and domain records. Jobs exclusively owns disk-backed SQLite operational logs; scheduler cutover is pending the domain handoff and fencing migration.
 
@@ -42,7 +42,7 @@ The native Models page reads and saves the selected backend's configured role de
 | Native controls | Model Assignments edits configured keys/routes; Tools is cards/key modal; no Profile, manual execution or portable configuration screen. [Control allowlist](native-design-system.md) |
 | Workstation identity | Contract 2 uses authenticated scope + installation marker; opaque workstation ID is Connect ID, IP is optional metadata. New requests have no workspace narrowing. [Registry](../../diagrams/connect-registry.html) |
 | Historical authority | Atomic migration keeps IDs/mappings/origins, fences legacy admission and revokes old sessions. Original request/context is recovered read-only; no replacement submission. [Connections](native-connections.md) |
-| Local settings | Exact-origin private file references, not token bytes. URL-only setup creates no default child; preserved folders/journals are historical. [Identity](native-workspaces.md) |
+| Local settings | Origin-bound Keychain references and durable pairing recovery, not token bytes. URL-only setup creates no default child; preserved folders/journals are historical. [Identity](native-workspaces.md) |
 | Backend activity | Membership/private eligibility before projections; accepted creators remain immutable. Missing context never falls back globally. [Origin and activity](../../diagrams/brief-job-context.html) |
 
 [![Backend scope and immutable workstation origin](../../diagrams/workspace-scope.svg)](../../diagrams/workspace-scope.html)

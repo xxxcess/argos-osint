@@ -280,7 +280,9 @@ impl State {
                 self.workspaces.message = Some(error);
             }
         }
-        if matches!(self.connection_profiles.catalog, Load::Idle)
+        if self.uses_native_pairing() {
+            self.initialize_pairing_connection();
+        } else if matches!(self.connection_profiles.catalog, Load::Idle)
             && self.workspaces.container.is_some()
         {
             self.initialize_connection_profiles();

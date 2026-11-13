@@ -13,10 +13,12 @@
 
 mod connections;
 mod fs;
+pub mod keychain;
 pub mod legacy_connect;
 mod lifecycle_catalog;
 #[cfg(test)]
 mod lifecycle_tests;
+mod pairing;
 mod rebind;
 mod state;
 #[cfg(test)]
@@ -29,6 +31,11 @@ pub use connections::CredentialReference;
 pub use connections::GatewayProfile;
 pub use connections::GatewayProfileInput;
 pub use connections::CONNECTIONS_FILE;
+pub use pairing::PairedGateway;
+pub use pairing::PairingCatalogSnapshot;
+pub use pairing::PairingError;
+pub use pairing::PendingPairing;
+pub use pairing::PAIRING_FILE;
 pub use rebind::RebindAttempt;
 pub use state::BackendBinding;
 pub use state::OperationPhase;

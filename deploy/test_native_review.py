@@ -1,13 +1,19 @@
 """Offline credential/provisioning contracts; no Docker or real workspace."""
 
+import io
 import json
 import os
+import re
+import shlex
 import stat
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
-from native_review import TOKEN_NAMES, expose_root_environment, provision, review_path
+import native_review
+from native_review import NATIVE_PERMISSIONS, TOKEN_NAMES, expose_root_environment, provision, review_path
 
 
 class NativeReviewTests(unittest.TestCase):
@@ -64,10 +70,16 @@ class NativeReviewTests(unittest.TestCase):
             root = Path(receipt["workspace"])
             manifest = json.loads((root / "secrets/gateway-credentials.json").read_text())
             self.assertEqual(manifest["version"], 1)
-            self.assertEqual([entry["purpose"] for entry in manifest["credentials"]], ["native", "web_relay", "internal_service"])
+            self.assertEqual([entry["purpose"] for entry in manifest["credentials"]], ["native", "web_relay", "internal_service", "operator"])
             self.assertTrue(all("token" not in entry and entry["token_file"].startswith("/run/secrets/") for entry in manifest["credentials"]))
             web = manifest["credentials"][1]
             self.assertFalse(set(web["permissions"]) & {"register_workstation", "maintain_backend", "manage_configuration", "rebind_workstation"})
+            operator = next(entry for entry in manifest["credentials"] if entry["purpose"] == "operator")
+            self.assertEqual(operator["id"], "operator-review")
+            self.assertEqual(operator["token_file"], "/run/secrets/gateway_operator_token")
+            self.assertEqual(set(operator["permissions"]), set(NATIVE_PERMISSIONS))
+            self.assertTrue({"read_backend", "register_workstation", "manage_configuration"}.issubset(operator["permissions"]))
+            self.assertNotIn("resolve_web_session", operator["permissions"])
             tokens = {(root / "secrets" / name).read_text().strip() for name in TOKEN_NAMES}
             self.assertEqual(len(tokens), len(TOKEN_NAMES))
             env = receipt["environment"]
@@ -83,6 +95,43 @@ class NativeReviewTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 provision(Path(directory), "fixture", 18091, "linux/arm64", "b" * 40)
             self.assertEqual(json.loads((root / "review.json").read_text()), receipt)
+            self.assertEqual({(root / "secrets" / name).read_text().strip() for name in TOKEN_NAMES}, tokens)
+
+    def test_operator_secret_is_mounted_only_into_gateway(self):
+        template = (Path(__file__).parent / "compose.native-review.yml").read_text()
+        inherited = template.split("x-runtime: &runtime\n", 1)[1].split("\nx-health:", 1)[0]
+        inherited_secrets = re.search(r"(?m)^  secrets: \[([^\]]+)\]$", inherited).group(1).split(", ")
+        services = template.split("\nservices:\n", 1)[1].split("\nsecrets:\n", 1)[0]
+        blocks = re.split(r"(?m)^  ([a-z][a-z0-9-]*):\n", services)
+        recipients = []
+        for name, body in zip(blocks[1::2], blocks[2::2]):
+            own = re.search(r"(?m)^    secrets: \[([^\]]+)\]$", body)
+            secrets_for_service = own.group(1).split(", ") if own else inherited_secrets
+            if "gateway_operator_token" in secrets_for_service:
+                recipients.append(name)
+        self.assertEqual(recipients, ["api"])
+        self.assertIn("  gateway_operator_token:\n    file: ${FLEETWORKS_HOST_WORKSPACE}/secrets/operator-token\n", template)
+
+    def test_init_prints_pairing_approval_command_without_secret_bytes(self):
+        with tempfile.TemporaryDirectory(prefix="native review ") as directory:
+            root = Path(directory)
+            output = io.StringIO()
+            with mock.patch.object(native_review, "ROOT", root), \
+                 mock.patch("sys.argv", ["native_review.py", "init", "--name", "pairing", "--api-port", "18091", "--platform", "linux/amd64"]), \
+                 mock.patch.object(native_review.subprocess, "check_output", return_value="a" * 40), \
+                 redirect_stdout(output):
+                self.assertEqual(native_review.main(), 0)
+            text = output.getvalue()
+            command = next(line for line in text.splitlines() if line.startswith("python3 "))
+            self.assertEqual(shlex.split(command), [
+                "python3", "scripts/fleetworks_pairing.py", "--origin", "http://127.0.0.1:18091",
+                "--operator-token-file", str(review_path(root, "pairing") / "secrets/operator-token"),
+                "approve", "--pairing-id", "<pairing-id>", "--approval-code", "<approval-code>",
+            ])
+            self.assertIn("Setup Gateway", text)
+            self.assertNotIn("--provision-gateway-credential", text)
+            for name in TOKEN_NAMES:
+                self.assertNotIn((review_path(root, "pairing") / "secrets" / name).read_text().strip(), text)
 
     def test_rejects_escaping_symlink_and_invalid_platform_without_overwrite(self):
         with tempfile.TemporaryDirectory() as directory:

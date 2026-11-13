@@ -90,6 +90,7 @@ pub fn run() -> anyhow::Result<()> {
     let app = App::new(app::spec())
         .init(move || {
             let mut state = State::with_services(init_services.clone());
+            state.connection_profiles.operator_token_override = options.api_token_file.is_some();
             state.connection_profiles.launch_override =
                 options.api_origin.is_some() || options.api_token_file.is_some();
             if let Some(origin) = &options.api_origin {
@@ -108,6 +109,7 @@ pub fn run() -> anyhow::Result<()> {
             drag_regions: true,
         })
         .on_focus(|state, focused, _| {
+            state.pairing_focus(focused);
             if focused {
                 state.accessibility.invalidate();
             }

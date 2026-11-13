@@ -14,6 +14,8 @@ use argos_osint_core::storage::configuration_reset::OwnerObservation;
 use argos_osint_core::storage::configuration_reset::ResetAuthority;
 use argos_osint_core::storage::configuration_reset::ResetError;
 use argos_osint_core::storage::configuration_reset::RuntimeObservation;
+use argos_osint_core::storage::native_pairing;
+use argos_osint_core::storage::repo::Repository;
 use axum::extract::{Request, State};
 use axum::http::header;
 use axum::http::uri::Authority;
@@ -161,6 +163,10 @@ impl ScopedCredential {
         token: &str,
     ) -> anyhow::Result<Self> {
         ensure!(valid_token(token.as_bytes()), "invalid scoped API bearer");
+        ensure!(
+            !credential_id.starts_with(native_pairing::CREDENTIAL_PREFIX),
+            "reserved native pairing credential identity"
+        );
         for identity in [&credential_id, &scope_id, &access_epoch] {
             ensure!(
                 (1..=128).contains(&identity.len())
@@ -390,6 +396,70 @@ impl NetworkPolicy {
         Ok(Self { hosts, credentials })
     }
 
+    pub(crate) fn allows_paired(&self, native: &native_pairing::NativeAuthority) -> bool {
+        self.credentials
+            .iter()
+            .filter_map(|credential| credential.principal.as_ref())
+            .any(|issuer| {
+                issuer.credential_id == native.issuer_id
+                    && issuer.purpose == CredentialPurpose::Operator
+                    && issuer.scope_id == native.scope_id
+                    && issuer.access_epoch == native.access_epoch
+                    && issuer
+                        .permissions
+                        .contains(&Permission::ManageConfiguration)
+                    && issuer
+                        .permissions
+                        .contains(&Permission::RegisterWorkstation)
+                    && native.permissions.is_subset(&issuer.permissions)
+                    && !native.permissions.contains(&Permission::ResolveWebSession)
+            })
+    }
+
+    pub(crate) async fn authorizes_paired(
+        &self,
+        repo: &Repository,
+        native: &native_pairing::NativeAuthority,
+    ) -> bool {
+        if !self.allows_paired(native) {
+            return false;
+        }
+        let Some(issuer) = self.credentials.iter().find(|credential| {
+            credential
+                .principal
+                .as_ref()
+                .is_some_and(|p| p.credential_id == native.issuer_id)
+        }) else {
+            return false;
+        };
+        argos_osint_core::storage::configuration_reset::authorize_independent_access(
+            repo,
+            &CredentialFingerprint::from_validated_policy_digest(issuer.token_digest),
+        )
+        .await
+        .is_ok()
+    }
+
+    pub(crate) async fn native_principal(
+        &self,
+        repo: &Repository,
+        token: &str,
+    ) -> Result<Option<AuthenticatedPrincipal>, argos_osint_core::storage::tx::TxError> {
+        let Some(native) = native_pairing::authenticate(repo, token).await? else {
+            return Ok(None);
+        };
+        if !self.authorizes_paired(repo, &native).await {
+            return Ok(None);
+        }
+        Ok(Some(AuthenticatedPrincipal {
+            credential_id: native.credential_id,
+            scope_id: native.scope_id,
+            access_epoch: native.access_epoch,
+            purpose: CredentialPurpose::Native,
+            permissions: native.permissions,
+        }))
+    }
+
     fn allows_host(&self, host: &str) -> bool {
         self.hosts
             .iter()
@@ -469,6 +539,8 @@ pub(crate) struct AccessPolicy {
     pub(crate) port: u16,
     pub(crate) origins: Arc<Vec<String>>,
     pub(crate) network: Option<NetworkPolicy>,
+    /// Only the public gateway issues/accepts dynamic Native credentials.
+    pub(crate) pairing_repo: Option<Repository>,
 }
 
 pub(crate) async fn protect(
@@ -514,15 +586,64 @@ pub(crate) async fn protect(
         return refused(StatusCode::FORBIDDEN, "Origin required");
     }
 
+    let public_pairing = policy.pairing_repo.is_some()
+        && request.method() == Method::POST
+        && request.uri().query().is_none()
+        && matches!(
+            request.uri().path(),
+            fleetworks_contracts::pairing::PAIRING_START_PATH
+                | fleetworks_contracts::pairing::PAIRING_POLL_PATH
+        );
     let credential = policy
         .network
         .as_ref()
         .and_then(|network| network.credential(headers));
-    let authenticated = policy.network.is_none() || credential.is_some();
-    let principal = credential.and_then(|credential| credential.principal.clone());
-    let fingerprint = credential.map(|credential| {
+    let mut principal = credential.and_then(|credential| credential.principal.clone());
+    let mut fingerprint = credential.map(|credential| {
         CredentialFingerprint::from_validated_policy_digest(credential.token_digest)
     });
+    let mut static_authenticated = credential.is_some();
+    if let (Some(repo), Some(token)) = (&policy.pairing_repo, bearer_token(headers)) {
+        if static_authenticated {
+            match native_pairing::is_issued_token(repo, token).await {
+                Ok(true) => {
+                    static_authenticated = false;
+                    principal = None;
+                    fingerprint = None;
+                }
+                Ok(false) => {}
+                Err(_) => {
+                    return refused(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Native access authority unavailable",
+                    )
+                }
+            }
+        }
+    }
+    if !static_authenticated && !public_pairing {
+        if let (Some(repo), Some(network), Some(token)) =
+            (&policy.pairing_repo, &policy.network, bearer_token(headers))
+        {
+            match network.native_principal(repo, token).await {
+                Ok(Some(native)) => {
+                    principal = Some(native);
+                    fingerprint = Some(CredentialFingerprint::from_validated_policy_digest(
+                        Sha256::digest(token.as_bytes()).into(),
+                    ));
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    return refused(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Native access authority unavailable",
+                    )
+                }
+            }
+        }
+    }
+    let authenticated =
+        policy.network.is_none() || principal.is_some() || static_authenticated || public_pairing;
     let mut response = if request.method() == Method::OPTIONS {
         StatusCode::NO_CONTENT.into_response()
     } else if !authenticated {
@@ -532,6 +653,9 @@ pub(crate) async fn protect(
             .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
         response
     } else {
+        if let Some(network) = &policy.network {
+            request.extensions_mut().insert(network.clone());
+        }
         if let Some(principal) = principal {
             request.extensions_mut().insert(principal);
         }
@@ -567,6 +691,15 @@ pub(crate) async fn protect(
         );
     }
     response
+}
+
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    if headers.get_all(header::AUTHORIZATION).iter().count() != 1 {
+        return None;
+    }
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let (scheme, token) = value.split_once(' ')?;
+    (scheme.eq_ignore_ascii_case("Bearer") && valid_token(token.as_bytes())).then_some(token)
 }
 
 fn refused(status: StatusCode, reason: &'static str) -> Response {
@@ -840,6 +973,7 @@ mod tests {
         ];
         for (network, expected) in policies {
             let access = AccessPolicy {
+                pairing_repo: None,
                 port: 8080,
                 origins: Arc::new(Vec::new()),
                 network: Some(network),
@@ -885,6 +1019,7 @@ mod tests {
     #[tokio::test]
     async fn ingress_rejects_wrong_hosts_origins_and_bearers_before_dispatch() {
         let access = AccessPolicy {
+            pairing_repo: None,
             port: 8080,
             origins: Arc::new(vec!["http://localhost:3000".into()]),
             network: Some(NetworkPolicy::new(&["api:8080".into()], TOKEN).unwrap()),

@@ -273,7 +273,7 @@ services:
       FLEETWORKS_CONTROL_TOKEN_FILE: /run/secrets/control_token
       FLEETWORKS_SEARCH_ORIGIN: http://search-index:8087
       FLEETWORKS_SEARCH_TOKEN_FILE: /run/secrets/search_read_token
-    secrets: [storage_password, jobs_token, gateway_credentials, gateway_native_token, gateway_web_token, gateway_health_token, brain_token, tools_token, control_token, search_read_token]
+    secrets: [storage_password, jobs_token, gateway_credentials, gateway_native_token, gateway_operator_token, gateway_web_token, gateway_health_token, brain_token, tools_token, control_token, search_read_token]
     depends_on:
       brain:
         condition: service_healthy
@@ -332,6 +332,8 @@ secrets:
     file: ${FLEETWORKS_HOST_WORKSPACE}/secrets/gateway-credentials.json
   gateway_native_token:
     file: ${FLEETWORKS_HOST_WORKSPACE}/secrets/native-token
+  gateway_operator_token:
+    file: ${FLEETWORKS_HOST_WORKSPACE}/secrets/operator-token
   gateway_web_token:
     file: ${FLEETWORKS_HOST_WORKSPACE}/secrets/web-relay-token
   gateway_health_token:

@@ -6,6 +6,7 @@ use fleetworks_contracts::context::RegisteredContext;
 use fleetworks_contracts::cycle_history::CycleHistory;
 use fleetworks_contracts::cycle_history::CycleSummary;
 use fleetworks_contracts::operational_logs::LogPage;
+use fleetworks_contracts::pairing::PairingChallenge;
 use fleetworks_contracts::readiness::DatasetKind;
 use fleetworks_contracts::readiness::DatasetRef;
 use fleetworks_contracts::readiness::MaintenanceOperation;
@@ -20,6 +21,8 @@ use fleetworks_desktop::backend::ActivityJob;
 use fleetworks_desktop::backend::JobDetail;
 use fleetworks_desktop::logs::LogReply;
 use fleetworks_desktop::logs::LogTarget;
+use fleetworks_desktop::pairing::PairingFailure;
+use fleetworks_desktop::pairing::PairingStage;
 use fleetworks_desktop::workstation_dashboard::HostMetrics;
 use fleetworks_desktop::Page;
 use fleetworks_desktop::State;
@@ -254,4 +257,44 @@ pub fn setup(state: &mut State) {
     state.connection.status = fleetworks_desktop::connection::ConnectionStatus::Disconnected;
     state.registration.context = None;
     state.readiness = Load::Idle;
+}
+
+pub fn pairing_idle(state: &mut State) {
+    setup(state);
+    state.pairing.fixture_enabled = true;
+    state.pairing.stage = PairingStage::Idle;
+    state.fixture_effect = None;
+}
+
+pub fn pairing_waiting(state: &mut State) {
+    pairing_idle(state);
+    state.pairing.stage = PairingStage::Waiting(PairingChallenge {
+        pairing_id: "synthetic-pairing-request-0001".into(),
+        approval_code: "SYNTHETICAPPROVALCODE0001".into(),
+        expires_at_ms: 1_900_000_000_000,
+        poll_after_ms: 1500,
+    });
+}
+
+pub fn pairing_keychain_denied(state: &mut State) {
+    pairing_idle(state);
+    state.pairing.stage = PairingStage::Failed(PairingFailure::KeychainDenied);
+}
+
+pub fn pairing_denied(state: &mut State) {
+    pairing_idle(state);
+    state.pairing.stage = PairingStage::Failed(PairingFailure::Denied);
+}
+
+pub fn pairing_expired(state: &mut State) {
+    pairing_idle(state);
+    state.pairing.stage = PairingStage::Failed(PairingFailure::Expired);
+}
+
+pub fn pairing_connected(state: &mut State) {
+    base(state);
+    state.setup_gateway = true;
+    state.pairing.fixture_enabled = true;
+    state.pairing.stage = PairingStage::Connected;
+    state.fixture_effect = None;
 }

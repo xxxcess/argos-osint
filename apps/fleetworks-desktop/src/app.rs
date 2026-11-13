@@ -132,6 +132,8 @@ pub enum Load<T> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Intent {
     Connect,
+    PairingConnect,
+    PairingRestart,
     Readiness,
     Search { query: String },
     Dossier { actor_id: String },
@@ -178,6 +180,7 @@ pub struct State {
     pub(crate) host_metrics_request: Option<RequestTask>,
     pub sidebar: PaneState,
     pub connection: Connection,
+    pub pairing: crate::pairing::Pairing,
     pub connection_profiles: ConnectionProfiles,
     pub brain: Brain,
     pub backend: Backend,
@@ -224,6 +227,7 @@ impl Default for State {
             host_metrics_request: None,
             sidebar: PaneState::new(220.0).range(180.0, 340.0),
             connection: Connection::default(),
+            pairing: crate::pairing::Pairing::default(),
             connection_profiles: ConnectionProfiles::initial(),
             brain: Brain::default(),
             backend: Backend::default(),
@@ -288,6 +292,9 @@ impl State {
     }
 
     pub fn navigate(&mut self, page: Page) {
+        if self.setup_gateway && self.pairing.busy() {
+            self.disconnect();
+        }
         self.setup_gateway = false;
         self.page = page;
         self.sync_jobs_binding();
@@ -299,6 +306,7 @@ impl State {
 
     /// Drop ephemeral reads only. Accepted backend work has an independent lifetime.
     pub fn cancel_requests(&mut self) {
+        self.pairing.cancel();
         self.connection_request = None;
         self.host_metrics_request = None;
         self.cycles.invalidate();
@@ -353,6 +361,10 @@ impl State {
     }
 
     pub fn connect(&mut self) {
+        if self.uses_native_pairing() {
+            self.connect_pairing(false);
+            return;
+        }
         self.connection_profiles.initial_selection_applied = true;
         self.disconnect();
         self.connection.status = ConnectionStatus::Connecting;
@@ -635,25 +647,25 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     } else {
         "Workstation activity: registration required".to_owned()
     };
-    let toolbar =
-        Toolbar::new()
-            .title(state.page.title())
-            .trailing(crate::material::compact_toolbar(
-                Button::new("Setup Gateway")
-                    .variant(ButtonVariant::Neutral)
-                    .on_press(|state: &mut State| {
-                        state.setup_gateway = true;
-                    })
-                    .build(&kit)
-                    .key("connection-editor"),
-                preferences,
-            ));
-    let main = rune::col()
-        .key("page-content")
-        .w_full()
-        .h_full()
-        .min_h(0.0)
-        .child(
+    let toolbar = Toolbar::new()
+        .title(if state.setup_gateway {
+            "Setup Gateway"
+        } else {
+            state.page.title()
+        })
+        .trailing(crate::material::compact_toolbar(
+            Button::new("Setup Gateway")
+                .variant(ButtonVariant::Neutral)
+                .on_press(|state: &mut State| {
+                    state.setup_gateway = true;
+                })
+                .build(&kit)
+                .key("connection-editor"),
+            preferences,
+        ));
+    let mut main = rune::col().key("page-content").w_full().h_full().min_h(0.0);
+    if !state.setup_gateway {
+        main = main.child(
             rune::col()
                 .w_full()
                 .padding(20.0)
@@ -672,8 +684,9 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
                         .color(kit.c.text_muted)
                         .wrap(),
                 ),
-        )
-        .child(views::page(state, cx, &kit, &mut layers));
+        );
+    }
+    let main = main.child(views::page(state, cx, &kit, &mut layers));
     let base = SplitView::new(main)
         .sidebar(
             &state.sidebar,

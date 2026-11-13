@@ -129,6 +129,7 @@ async fn assert_configuration_guard_held(root: &Path) {
 #[tokio::test]
 async fn captured_configuration_stays_locked_through_acceptance_then_save_fences_fresh_nonce_and_preserves_replay(
 ) {
+    let _environment_guard = crate::CONFIGURATION_TEST_ENVIRONMENT.lock().await;
     let temporary = tempfile::tempdir().expect("isolated configuration root");
     let root = temporary
         .path()

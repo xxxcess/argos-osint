@@ -9,6 +9,7 @@ pub mod connect;
 pub mod context;
 pub mod cycle_history;
 pub mod operational_logs;
+pub mod pairing;
 pub mod readiness;
 pub mod search;
 
@@ -17,6 +18,7 @@ pub use client::ClientError;
 pub use client::ConfigurationTransferReceipt;
 pub use client::DatasetUpload;
 pub use client::LogExportPage;
+pub use client::PairingClient;
 
 use serde::{Deserialize, Serialize};
 

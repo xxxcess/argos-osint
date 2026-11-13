@@ -12,13 +12,13 @@ Venture, the six Fleetworks terminal clients and the legacy `argos` executable a
 
 ## Build and connect the native app
 
-Pairing/Keychain is [approved but pending](native-connections.md#pairing-and-keychain-agreed-target). The commands below use current transitional file references.
+Normal setup uses [operator-approved pairing and macOS Keychain](native-connections.md#pairing-and-keychain-agreed-target). [Verification status](../../../.planning/2026-11-12-native-pairing-implementation/acceptance.md) distinguishes implemented behavior from pending runtime/platform evidence.
 
 ```sh
 python3 scripts/fleetworks_candidate.py build-native --target host --profile debug
 ```
 
-The helper prints the complete `.app` and manifest paths. Add `--open` only for an intended GUI launch. Provision an exact-origin protected Native token-file binding using the app executable's `--provision-gateway-credential --api-origin <origin> --api-token-file <private-file>` mode. In Setup Gateway enter that URL, check authentication/compatibility and register the installation. The mode exits without GUI/network/service startup. [Connection flow](native-connections.md)
+The helper prints the complete `.app` and manifest paths. Add `--open` only for an intended GUI launch. In Setup Gateway enter the gateway URL and choose Connect; the operator approves its displayed request/code. The app authenticates, saves access in Keychain and registers the installation. Saved access reconnects to that exact origin/deployment. Explicit `--api-origin` + `--api-token-file` retains operator/headless file mode. [Connection flow](native-connections.md)
 
 Protected settings initialize without creating a default child. The opaque backend workstation ID is the Connect ID; optional mutable IP metadata does not define identity. New contexts and activity queries contain no workspace narrowing. Existing folders and immutable historical origins remain preserved. [Identity ownership](native-workspaces.md)
 
@@ -64,7 +64,7 @@ With the Atlas overlay, `atlas-worker` consumes Jobs-owned embedded queue delive
 
 | Area | Implemented behavior |
 | --- | --- |
-| Native app and workstation identity | URL-only setup, provisioned exact-origin credentials, stable workstation Connect ID and scoped request context |
+| Native app and workstation identity | URL-only pairing, origin-bound Keychain access, stable workstation Connect ID and scoped request context |
 | Direct Docker backend | Independently provisioned purpose credentials, private services, workers and persistent stores |
 | Atlas | Durable dispatch and replay, separate NLP/Rust-BERT services, shared daily NewsAPI quota in SurrealDB |
 | Brain and Intel | Canonical actor discovery, dossiers, retained briefs and publication recovery; explicit seed maintenance |

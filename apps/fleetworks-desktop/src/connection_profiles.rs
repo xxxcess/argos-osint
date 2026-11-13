@@ -46,6 +46,7 @@ pub struct ConnectionProfiles {
     pub confirmation: Option<ProfileAction>,
     pub message: Option<String>,
     pub(crate) launch_override: bool,
+    pub(crate) operator_token_override: bool,
     pub(crate) initial_selection_applied: bool,
     pub(crate) draft_revision: u64,
     revision: u64,
@@ -193,6 +194,7 @@ impl State {
         self.connection_profiles.draft_revision =
             self.connection_profiles.draft_revision.wrapping_add(1);
         if origin_changed {
+            self.connection_profiles.operator_token_override = false;
             self.connection.token_file = TextEdit::new("");
             self.connection_profiles.credential = None;
         }
@@ -252,6 +254,9 @@ impl State {
     }
 
     pub(crate) fn editor_credential(&self) -> ConnectionCredential {
+        if self.connection_profiles.operator_token_override {
+            return ConnectionCredential::Explicit(PathBuf::from(&self.connection.token_file.text));
+        }
         match &self.workspaces.container {
             Some(container) if !self.fixture => {
                 ConnectionCredential::Provisioned(container.clone())

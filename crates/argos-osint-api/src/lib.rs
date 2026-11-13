@@ -21,10 +21,11 @@ mod maintenance;
 mod network;
 mod operational_logs;
 mod operations;
+mod pairing;
 mod private_relay;
 mod request_context;
 mod request_reconciliation;
-#[cfg(all(test, not(feature = "embedded")))]
+#[cfg(test)]
 #[path = "../../argos-osint-core/tests/support/mod.rs"]
 mod storage_test_support;
 mod tools;
@@ -59,6 +60,11 @@ pub use network::{network_origin, NetworkPolicy};
 pub use tools::ToolsClient;
 
 const MAX_REQUEST_BYTES: usize = 16 * 1024;
+
+// The only library fixtures that provision process-global configuration roots
+// share this guard. Separate integration binaries own independent environments.
+#[cfg(test)]
+static CONFIGURATION_TEST_ENVIRONMENT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 use network::{AccessMode, AccessPolicy};
 
@@ -247,6 +253,7 @@ pub fn guard_network(
             port,
             origins,
             network: Some(policy),
+            pairing_repo: None,
         },
         network::protect,
     ))
@@ -266,6 +273,7 @@ fn router_with_access(
         port: state.port,
         origins: state.origins.clone(),
         network,
+        pairing_repo: Some(state.repo.clone()),
     };
     let sampler = Arc::new(std::sync::Mutex::new(host_metrics::HostSampler::default()));
     let feed = Arc::new(host_metrics::HostFeed::new(sampler.clone()));
@@ -309,6 +317,7 @@ fn router_with_access(
             jobs_routes
         };
         router
+            .merge(pairing::routes())
             .merge(configuration_reset::routes())
             .merge(classifier_activation::routes())
             .route(

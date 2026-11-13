@@ -20,7 +20,7 @@ Understand the product, then follow its implementation. This is the maintained e
 | [docs/wiki/](wiki/index.md) | Two routes, searchable tags and wiki maintenance |
 | [docs/diagrams/](diagrams.md) | Diagram catalog; HTML pages and matching SVG figures |
 | [Core crate](../crates/argos-osint-core) | Domain pipelines and storage; [module map](wiki/code/core.md) |
-| [Native app](../apps/fleetworks-desktop) | [Visual control guide](wiki/code/native-design-system.md) · [Current setup](diagrams/native-connections.html) · [Pairing/Keychain (planned)](wiki/code/native-connections.md#pairing-and-keychain-agreed-target) · [Identity](wiki/code/native-workspaces.md) |
+| [Native app](../apps/fleetworks-desktop) | [Visual control guide](wiki/code/native-design-system.md) · [Pairing setup](diagrams/native-connections.html) · [Keychain/recovery](wiki/code/native-connections.md#pairing-and-keychain-agreed-target) · [Verification](../.planning/2026-11-12-native-pairing-implementation/acceptance.md) · [Identity](wiki/code/native-workspaces.md) |
 | [Native workstation redesign](design/native-workstation-handoff/README.md) | Supplied references, [design system](wiki/code/native-design-system.md) and [execution tracking](../.planning/2026-11-12-native-workstation-redesign/handoff.md); verification status is tracked separately |
 | [Direct Docker backend](../deploy/README.md) | Independent Linux services, purpose credentials and persistent backend data; [retired terminal disposition](archive/cli-retirement.md) |
 | [Actor search](wiki/code/actor-search.md) | Private Tantivy projection, canonical discovery, visible acknowledgements and verification boundaries |

@@ -23,6 +23,7 @@ pub mod logs;
 pub mod maintenance;
 pub mod maintenance_result;
 mod material;
+pub mod pairing;
 mod platform;
 mod platform_trash;
 mod readiness_cards;

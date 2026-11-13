@@ -75,33 +75,64 @@ def request(port, path, token=None, payload=None, *, headers=None):
     return status, value
 
 
+def expect_status(response, expected, operation):
+    """Report bounded status evidence without credentials, headers or bodies."""
+    status, value = response
+    accepted = (expected,) if isinstance(expected, int) else expected
+    assert status in accepted, f"{operation}: expected HTTP {'/'.join(map(str, accepted))}, received {status}"
+    return value
+
+
 def native_fixture(directory):
-    """An actual isolated contained test child; not installed-native FS evidence."""
+    """Protected synthetic installation identity; not installed-native evidence."""
     home = directory / "synthetic-native-home"
     container = home / ".fleetworks"
-    child = container / "compose-review"
-    for path in (home, container, container / "default", child):
+    for path in (home, container):
         path.mkdir(mode=0o700)
-    assert child.resolve().parent == container.resolve() and not child.is_symlink()
-    identity = {"installation_marker": secrets.token_hex(32), "workspace_marker": secrets.token_hex(32)}
-    marker = child / "fixture-identity.json"
-    descriptor = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(descriptor, "w") as output:
-        json.dump(identity, output)
-    return {"request_id": "compose-register", "workstation_ip": "192.0.2.61", "workspace_name": child.name, **identity}
+    assert container.resolve().parent == home.resolve() and not container.is_symlink()
+    identity = {"installation_marker": secrets.token_hex(32)}
+    marker = container / "fixture-installation.json"
+    native_review.private_file(marker, json.dumps(identity))
+    assert json.loads(native_review.read_private(marker, 4096)) == identity
+    return {"request_id": "compose-register", "workstation_ip": "192.0.2.61", **identity}
 
 
 def register_native(port, token, registration):
-    status, receipt = request(port, "/api/v1/connect/registrations/ensure", token, registration)
-    assert status in (200, 201), "native ensure did not establish registration"
-    assert request(port, "/api/v1/connect/registrations/ensure", token, registration) == (200, receipt), "ensure replay changed identity"
-    status, value = request(port, "/api/v1/connect/registrations/context", token, {
+    receipt = expect_status(request(port, "/api/v1/connect/registrations/ensure", token, registration),
+                            (200, 201), "native ensure")
+    fields = {"deployment_id", "workstation_id", "registration_id", "connect_id", "status", "revision"}
+    assert isinstance(receipt, dict) and fields <= receipt.keys() <= fields | {"workstation_ip"}, "native receipt fields inconsistent"
+    assert (isinstance(receipt["workstation_id"], str)
+            and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", receipt["workstation_id"])
+            and receipt["connect_id"] == receipt["workstation_id"]), "native Connect ID inconsistent"
+    assert (all(isinstance(receipt[key], str) and receipt[key] for key in ("deployment_id", "registration_id"))
+            and type(receipt["revision"]) is int and receipt["revision"] > 0
+            and receipt["status"] == "active"), "native receipt identity/revision inconsistent"
+    replay = expect_status(request(port, "/api/v1/connect/registrations/ensure", token, registration), 200, "native ensure replay")
+    assert replay == receipt, "ensure replay changed identity"
+    value = expect_status(request(port, "/api/v1/connect/registrations/context", token, {
         "registration_id": receipt["registration_id"], "expected_revision": receipt["revision"],
-    })
-    assert status == 200, "current native context unavailable"
-    context = value["context"]
-    assert context["registration_id"] == receipt["registration_id"] and context["workspace_name"] == registration["workspace_name"]
+    }), 200, "native context")
+    context = value.get("context") if isinstance(value, dict) else None
+    fields = {"deployment_id", "workstation_id", "registration_id", "connect_id", "registration_revision",
+              "context_revision", "scope_revision", "configuration_epoch", "access_epoch"}
+    assert isinstance(context, dict) and fields <= context.keys() <= fields | {"workstation_ip"}, "native context fields inconsistent"
+    assert (all(context[key] == receipt[key] for key in ("deployment_id", "workstation_id", "registration_id", "connect_id"))
+            and context.get("workstation_ip") == receipt.get("workstation_ip")
+            and type(context["registration_revision"]) is int and context["registration_revision"] == receipt["revision"]), "native context differs from receipt"
+    assert (all(type(context[key]) is int and context[key] > 0 for key in ("context_revision", "scope_revision"))
+            and all(isinstance(context[key], str) and context[key] for key in ("configuration_epoch", "access_epoch"))), "native context revisions/epochs inconsistent"
     return context
+
+
+def check_purpose_isolation(port, token, relay, health, registration):
+    assert len({token, relay, health}) == 3, "purpose credentials were reused"
+    expect_status(request(port, "/api/v1/health/ready"), 401, "unauthenticated readiness")
+    expect_status(request(port, "/api/v1/connect/registrations/ensure", relay, registration), 403, "WebRelay registration denial")
+    # A well-formed body isolates permission denial from JSON extraction errors.
+    tool = {"request_id": "denied-health", "tool_id": "dork_generate", "inputs": {"objective": "Synthetic fixture"}}
+    expect_status(request(port, "/api/v1/tools/run", health, tool), 403, "health-only Tools denial")
+    expect_status(request(port, "/api/v1/jobs", token), 401, "contextless activity denial")
 
 
 def native_headers(context):
@@ -166,11 +197,11 @@ def exercise_atlas(port, token, proof):
     assert request(port, path, token, payload, headers=proof) == (status, receipt)
     deadline = time.monotonic() + 45
     while time.monotonic() < deadline:
-        status, value = request(port, f"/api/v1/jobs/detail?id={receipt['job_id']}", token, headers=proof)
-        assert status == 200, (status, value)
+        value = expect_status(request(port, f"/api/v1/jobs/detail?id={receipt['job_id']}", token, headers=proof),
+                              200, "Atlas job detail")
         if value["job"]["state"] == "failed":
-            assert value["job"]["error_summary"] == "atlas_classifier_model_not_configured", value
-            assert value["job"]["attempts_used"] == 1, value
+            assert value["job"]["error_summary"] == "atlas_classifier_model_not_configured", "Atlas fixture failed for an unexpected reason"
+            assert value["job"]["attempts_used"] == 1, "Atlas fixture retry count changed"
             return
         time.sleep(0.25)
     raise RuntimeError("Packaged Atlas worker did not settle the fixture delivery")
@@ -182,16 +213,15 @@ def exercise_tools(port, token, proof, request_id):
         "inputs": {"objective": "Find public annual reports"},
         "context": submission_context(port, token, proof),
     }
-    status, receipt = request(port, "/api/v1/tools/run", token, payload, headers=proof)
-    assert status == 202 and receipt["job_id"] == receipt["call_id"], "durable attributed tool admission failed"
+    receipt = expect_status(request(port, "/api/v1/tools/run", token, payload, headers=proof), 202, "Tools admission")
+    assert receipt["job_id"] == receipt["call_id"], "durable attributed tool admission failed"
     assert request(port, "/api/v1/tools/run", token, payload, headers=proof) == (202, receipt), "tool replay changed receipt"
     result = "/api/v1/tools/result?id=" + receipt["call_id"]
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
-        status, value = request(port, result, token, headers=proof)
-        assert status == 200, (status, value)
+        value = expect_status(request(port, result, token, headers=proof), 200, "Tools result")
         if value["status"] not in {"queued", "running", "waiting"}:
-            assert value["status"] == "completed", value
+            assert value["status"] == "completed", "Tools fixture reached an unexpected terminal state"
             assert value["result"]["observations"] and value["result"]["credits_charged"] == 0
             wait_job(port, token, proof, receipt["job_id"], 15)
             return result, value
@@ -202,8 +232,8 @@ def exercise_tools(port, token, proof, request_id):
 def wait_job(port, token, proof, job_id, timeout):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        status, detail = request(port, "/api/v1/jobs/detail?id=" + job_id, token, headers=proof)
-        assert status == 200 and detail["private_details_available"], "requester membership did not authorize job detail"
+        detail = expect_status(request(port, "/api/v1/jobs/detail?id=" + job_id, token, headers=proof), 200, "registered job detail")
+        assert detail["private_details_available"], "requester membership did not authorize job detail"
         job = detail["job"]
         if job["state"] in {"completed", "failed", "cancelled"}:
             assert job["state"] == "completed", "registered fixture job failed"
@@ -220,7 +250,7 @@ def exercise_activity(api_port, web_port, token, context, browser, job_id):
         assert page["activity_scope"]["workstation_id"] == context["workstation_id"], "activity selected another workstation"
         status, logs = request(port, "/api/v1/logs?job_id=" + job_id, credential, headers=headers)
         assert status == 200 and isinstance(logs["rows"], list), "selected attributed logs unavailable"
-    assert request(web_port, "/api/v1/jobs?workspace_id=not-a-child", headers=browser)[0] == 404, "browser selected another child"
+    expect_status(request(web_port, "/api/v1/jobs?workspace_id=not-a-child", headers=browser), 400, "legacy workspace query denial")
 
 
 def isolated_environment(environment):
@@ -311,11 +341,7 @@ def verify(name, platform, *, web=False, dev=False, atlas=False, no_build=False,
         token = (workspace / "secrets/native-token").read_text().strip()
         relay = (workspace / "secrets/web-relay-token").read_text().strip()
         health = (workspace / "secrets/gateway-health-token").read_text().strip()
-        assert len({token, relay, health}) == 3, "purpose credentials were reused"
-        assert request(api_port, ready)[0] == 401, "API accepted a request without a bearer"
-        assert request(api_port, "/api/v1/connect/registrations/ensure", relay, registration)[0] == 403
-        assert request(api_port, "/api/v1/tools/run", health, {"request_id": "denied-health"})[0] == 403
-        assert request(api_port, "/api/v1/jobs", token)[0] == 401, "contextless activity was accepted"
+        check_purpose_isolation(api_port, token, relay, health, registration)
         context = register_native(api_port, token, registration)
         status, direct = request(api_port, ready, health)
         assert status == 200 and direct.get("ready") and direct.get("storage")

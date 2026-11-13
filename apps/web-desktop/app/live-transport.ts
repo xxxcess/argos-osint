@@ -77,7 +77,7 @@ export function createLiveTransport(
         attempts = 0;
         if (event) publish(event);
       } catch {
-        current.close(1007, "Invalid live message");
+        current.close(4007, "Invalid live message");
       }
     };
     current.onerror = () => {

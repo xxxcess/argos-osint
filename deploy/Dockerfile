@@ -61,9 +61,9 @@ ARG TARGETARCH
 ARG CARGO_BUILD_JOBS=1
 ARG FLEETWORKS_CORE_CODEGEN_UNITS=256
 ARG FLEETWORKS_CORE_OPT_LEVEL=3
-ENV CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+ENV CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS} CARGO_NET_GIT_FETCH_WITH_CLI=true
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libclang-dev \
+    && apt-get install -y --no-install-recommends libclang-dev git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
@@ -98,7 +98,10 @@ ENTRYPOINT ["/usr/local/bin/argos-api-host"]
 FROM rust:1.95.0-bookworm AS search_build
 ARG TARGETARCH
 ARG CARGO_BUILD_JOBS=1
-ENV CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+ENV CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS} CARGO_NET_GIT_FETCH_WITH_CLI=true
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates/argos-osint-core/Cargo.toml ./crates/argos-osint-core/Cargo.toml

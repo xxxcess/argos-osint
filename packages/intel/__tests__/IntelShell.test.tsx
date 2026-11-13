@@ -190,7 +190,7 @@ describe("background job indicator", () => {
     "failed",
     "stale",
   ] as const)(
-    "shows %s status and only glows for unfinished or failed work",
+    "shows %s status with matte paint and keyboard-accessible details",
     async (state) => {
       render(
         <JobDropUp
@@ -204,12 +204,9 @@ describe("background job indicator", () => {
       expect(paint(dot, "backgroundColor")).toBe(
         intelStatus[state].color.toLowerCase(),
       );
-      const glow = getComputedStyle(dot).boxShadow;
-      if (["queued", "running", "failed", "stale"].includes(state))
-        expect(glow).toContain("9px");
-      else expect(glow).toBe("none");
+      expect(getComputedStyle(dot).boxShadow).toBe("none");
       const user = userEvent.setup();
-      trigger.focus();
+      act(() => trigger.focus());
       await user.keyboard("{Enter}");
       expect(trigger).toHaveAttribute("aria-expanded", "true");
       expect(screen.getByRole("menu")).toHaveTextContent("Inferences");
@@ -219,7 +216,7 @@ describe("background job indicator", () => {
       expect(screen.queryByRole("menu")).toBeNull();
     },
   );
-  it("keeps a background failure visible when another job succeeds, then clears its glow on recovery", () => {
+  it("keeps a background failure visible when another job succeeds, then updates its tone on recovery", () => {
     const { rerender } = render(
       <JobDropUp
         jobs={[
@@ -239,6 +236,9 @@ describe("background job indicator", () => {
       <JobDropUp
         jobs={[{ id: "ready", label: "All stages", state: "succeeded" }]}
       />,
+    );
+    expect(paint(dot(), "backgroundColor")).toBe(
+      intelStatus.succeeded.color.toLowerCase(),
     );
     expect(getComputedStyle(dot()).boxShadow).toBe("none");
   });

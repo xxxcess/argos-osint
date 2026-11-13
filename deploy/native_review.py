@@ -9,6 +9,7 @@ import re
 import secrets
 import stat
 import subprocess
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -234,14 +235,16 @@ class ReviewConfigurationError(ValueError):
     """A controlled, non-secret operator action message."""
 
 
-def run_review(root, name):
+def run_review(root, name, *, backend_only=False):
     """Build before stopping anything; execute only the selected review's recipe."""
     root = root.resolve(strict=True)
     prepared = prepare(root, name)
+    open_native = sys.platform == "darwin" and not backend_only
+    stages = 6 if open_native else 5
     stage = "Docker preflight"
     with preparation_lock(prepared["workspace"], ".up.lock", wait=False):
         try:
-            print(f"[1/5] Checking local Docker for {name}…", flush=True)
+            print(f"[1/{stages}] Checking local Docker for {name}…", flush=True)
             if os.environ.get("DOCKER_HOST") and not os.environ.get("DOCKER_CONTEXT"):
                 raise ReviewConfigurationError("Select a named local Docker context instead of a DOCKER_HOST override")
             context = subprocess.check_output(["docker", "context", "show"], cwd=root, text=True).strip()
@@ -270,21 +273,30 @@ def run_review(root, name):
             build[position:position] = ["--builder", context]
             subprocess.run(compose + ["config", "--quiet"], cwd=root, check=True)
             stage = "image build"
-            print("[2/5] Building backend images; Cargo/BuildKit output follows…", flush=True)
+            print(f"[2/{stages}] Building backend images; Cargo/BuildKit output follows…", flush=True)
             subprocess.run(build, cwd=root, check=True)
             _, current = current_environment(root, prepared["workspace"])
             if current != prepared["environment"]:
                 raise ReviewConfigurationError("Review settings changed during the build; rerun before restarting")
             stage = "stop"
-            print("[3/5] Stopping the selected review after its successful build…", flush=True)
+            print(f"[3/{stages}] Stopping the selected review after its successful build…", flush=True)
             subprocess.run(compose + ["stop"], cwd=root, check=True)
             stage = "startup/bootstrap"
-            print("[4/5] Recreating services and waiting for bootstrap/health…", flush=True)
+            print(f"[4/{stages}] Recreating services and waiting for bootstrap/health…", flush=True)
             subprocess.run(compose + ["up", "--no-build", "--pull", "never", "--force-recreate",
                                       "--detach", "--wait"], cwd=root, check=True)
             stage = "status"
-            print("[5/5] Review status:", flush=True)
+            print(f"[5/{stages}] Review status:", flush=True)
             subprocess.run(compose + ["ps"], cwd=root, check=True)
+            if open_native:
+                stage = "native build/open"
+                print("[6/6] Backend ready. Building and opening the native app; Cargo output follows…", flush=True)
+                subprocess.run([
+                    sys.executable, str(root / "scripts/fleetworks_candidate.py"),
+                    "build-native", "--target", "host", "--profile", "debug", "--open",
+                ], cwd=root, check=True)
+            elif not backend_only:
+                print("Backend ready. Native build/open requires macOS; skipped.", flush=True)
             print_approval(root, prepared)
         except subprocess.CalledProcessError as error:
             raise ReviewActionError(stage, error.returncode) from None
@@ -395,8 +407,9 @@ def main():
     value.add_argument("--field", choices=("workspace", "image_tag", "project"), required=True)
     existing = subcommands.add_parser("prepare", help="prepare existing credentials and print complete build/start/approval commands")
     existing.add_argument("--name", required=True)
-    update = subcommands.add_parser("up", help="prepare, build, then restart the existing review after a successful build")
+    update = subcommands.add_parser("up", help="build/restart the review, then build/open the native app on macOS")
     update.add_argument("--name", required=True)
+    update.add_argument("--backend-only", action="store_true", help="skip building/opening the native app")
     args = parser.parse_args()
     try:
         if args.command == "init":
@@ -420,12 +433,13 @@ def main():
         elif args.command == "prepare":
             print_prepared(ROOT, prepare(ROOT, args.name))
         elif args.command == "up":
-            run_review(ROOT, args.name)
+            run_review(ROOT, args.name, backend_only=args.backend_only)
         else:
             receipt = json.loads((review_path(ROOT, args.name) / "review.json").read_text(encoding="utf-8"))
             print(receipt["environment"]["COMPOSE_PROJECT_NAME"] if args.field == "project" else receipt[args.field])
     except ReviewActionError as error:
-        parser.exit(error.code, f"Review {error.stage} failed (exit {error.code}). No later stage ran; data and credentials were retained.\n")
+        backend = " Backend services remain running." if error.stage == "native build/open" else ""
+        parser.exit(error.code, f"Review {error.stage} failed (exit {error.code}). No later stage ran; data and credentials were retained.{backend}\n")
     except ReviewConfigurationError as error:
         parser.exit(2, f"Update stopped before service restart: {error}.\n")
     except KeyboardInterrupt:

@@ -345,6 +345,7 @@ class PrepareReviewTests(unittest.TestCase):
             workspace = self.fixture(root, legacy=True)
             output = io.StringIO()
             with mock.patch.object(native_review, "ROOT", root), \
+                 mock.patch.object(native_review.sys, "platform", "darwin"), \
                  mock.patch("sys.argv", ["native_review.py", "up", "--name", "local"]), \
                  mock.patch.dict(os.environ, {"DOCKER_CONTEXT": "desktop-linux"}), \
                  mock.patch.object(native_review.subprocess, "check_output", side_effect=[
@@ -352,7 +353,7 @@ class PrepareReviewTests(unittest.TestCase):
                  mock.patch.object(native_review.subprocess, "run") as docker, redirect_stdout(output):
                 self.assertEqual(native_review.main(), 0)
             commands = [call.args[0] for call in docker.call_args_list]
-            self.assertEqual(len(commands), 5)
+            self.assertEqual(len(commands), 6)
             self.assertEqual(commands[0][-2:], ["config", "--quiet"])
             self.assertIn("bake", commands[1])
             self.assertIn(["--builder", "desktop-linux"],
@@ -360,15 +361,18 @@ class PrepareReviewTests(unittest.TestCase):
             self.assertEqual(commands[2][-1], "stop")
             self.assertEqual(commands[3][-7:], ["up", "--no-build", "--pull", "never", "--force-recreate", "--detach", "--wait"])
             self.assertEqual(commands[4][-1], "ps")
-            for command in (commands[0], *commands[2:]):
+            self.assertEqual(commands[5], [native_review.sys.executable,
+                str(root.resolve() / "scripts/fleetworks_candidate.py"),
+                "build-native", "--target", "host", "--profile", "debug", "--open"])
+            for command in (commands[0], *commands[2:5]):
                 self.assertIn(str(workspace / "compose.env"), command)
                 self.assertIn("fleetworks-native-review-local", command)
                 self.assertIn(["--context", "desktop-linux"],
                               [command[i:i+2] for i in range(len(command)-1)])
             for call in docker.call_args_list:
                 self.assertEqual(call.kwargs, {"cwd": root.resolve(), "check": True})
-            self.assertIn("[2/5]", output.getvalue())
-            self.assertIn("[5/5]", output.getvalue())
+            self.assertIn("[2/6]", output.getvalue())
+            self.assertIn("[6/6]", output.getvalue())
             self.assertIn("http://127.0.0.1:18091", output.getvalue())
             self.assertNotIn("No images built", output.getvalue())
             for name in TOKEN_NAMES:
@@ -377,7 +381,7 @@ class PrepareReviewTests(unittest.TestCase):
                 self.assertNotIn(secret, repr(commands))
 
     def test_up_stops_after_each_failed_stage_and_retains_data(self):
-        for index, label in enumerate(("config", "build", "stop", "startup", "status")):
+        for index, label in enumerate(("config", "build", "stop", "startup", "status", "native")):
             with self.subTest(stage=label), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 workspace = self.fixture(root)
@@ -391,6 +395,7 @@ class PrepareReviewTests(unittest.TestCase):
                         raise native_review.subprocess.CalledProcessError(17, command)
                 error = io.StringIO()
                 with mock.patch.object(native_review, "ROOT", root), \
+                     mock.patch.object(native_review.sys, "platform", "darwin"), \
                      mock.patch("sys.argv", ["native_review.py", "up", "--name", "local"]), \
                      mock.patch.dict(os.environ, {"DOCKER_CONTEXT": "desktop-linux"}), \
                      mock.patch.object(native_review.subprocess, "check_output", side_effect=[
@@ -402,6 +407,8 @@ class PrepareReviewTests(unittest.TestCase):
                 self.assertEqual(stopped.exception.code, 17)
                 self.assertEqual(len(calls), index + 1)
                 self.assertIn("No later stage ran", error.getvalue())
+                if label == "native":
+                    self.assertIn("Backend services remain running", error.getvalue())
                 self.assertEqual(sentinel.read_text(), "retained")
                 self.assertEqual({p.name: p.read_bytes() for p in (workspace / "secrets").iterdir()}, credentials)
 
@@ -441,6 +448,27 @@ class PrepareReviewTests(unittest.TestCase):
             self.assertEqual(len(calls), 2)
             self.assertFalse(any(command[-1] == "stop" for command in calls))
 
+
+    def test_up_backend_only_and_non_macos_do_not_build_or_open_native(self):
+        for platform, flags in (("darwin", ["--backend-only"]), ("linux", [])):
+            with self.subTest(platform=platform, flags=flags), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.fixture(root)
+                output = io.StringIO()
+                with mock.patch.object(native_review, "ROOT", root), \
+                     mock.patch.object(native_review.sys, "platform", platform), \
+                     mock.patch("sys.argv", ["native_review.py", "up", "--name", "local"] + flags), \
+                     mock.patch.dict(os.environ, {"DOCKER_CONTEXT": "desktop-linux"}), \
+                     mock.patch.object(native_review.subprocess, "check_output", side_effect=[
+                         "desktop-linux\n", '"unix:///var/run/docker.sock"\n', "linux/x86_64\n"]), \
+                     mock.patch.object(native_review.subprocess, "run") as processes, redirect_stdout(output):
+                    self.assertEqual(native_review.main(), 0)
+                self.assertEqual(processes.call_count, 5)
+                self.assertEqual(processes.call_args.args[0][-1], "ps")
+                self.assertFalse(any("build-native" in call.args[0] for call in processes.call_args_list))
+                self.assertIn("http://127.0.0.1:18091", output.getvalue())
+                if platform == "linux":
+                    self.assertIn("requires macOS; skipped", output.getvalue())
 
     def test_up_cancelled_build_never_stops_running_services(self):
         with tempfile.TemporaryDirectory() as directory:

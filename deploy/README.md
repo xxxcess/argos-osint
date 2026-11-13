@@ -19,7 +19,7 @@ Use the standalone [native review recipe](compose.native-review.yml) for the Run
 | Deployment | Helper |
 | --- | --- |
 | Fresh review | `init` creates a new isolated deployment; an existing name fails without replacing files |
-| Existing review | `up --name <name>` prepares missing Operator provisioning, builds images and restarts that review |
+| Existing review | `up --name <name>` prepares missing Operator provisioning, builds/restarts that review, then builds/opens the native app on macOS |
 
 ### Prepare an existing review
 
@@ -27,9 +27,9 @@ Use the standalone [native review recipe](compose.native-review.yml) for the Run
 python3 deploy/native_review.py up --name native-local
 ```
 
-`up` reads the active Compose settings, including the review's root `compose.env` alias, and adds only missing Operator provisioning. It preserves existing credentials, scope/epochs and data. After checking local Docker, native platform and configuration, it builds the configured images with live output. Only a successful build proceeds to stop/recreate the selected review, wait for readiness and show service status. It then prints the actual gateway URL and pairing-approval command. No shell exports, `source` or `eval` are needed.
+`up` reads the active Compose settings, including the review's root `compose.env` alias, and adds only missing Operator provisioning. It preserves existing credentials, scope/epochs and data. After checking local Docker, native platform and configuration, it builds the configured images with live output. Only a successful build proceeds to stop/recreate the selected review, wait for readiness and show service status. On macOS it then runs `fleetworks_candidate.py build-native --target host --profile debug --open`; a native build failure leaves the healthy backend running. It prints the actual gateway URL and pairing-approval command. No shell exports, `source` or `eval` are needed.
 
-**Flow:** `up` → build → restart/wait → Setup Gateway → approve the displayed request. This command operates Docker and interrupts that review during restart. For an offline preview that changes only missing Operator provisioning and prints commands without executing Docker, use `python3 deploy/native_review.py prepare --name native-local`.
+**Flow:** `up` → backend build → restart/wait → native build/open → Setup Gateway → approve the displayed request. This command operates Docker and interrupts that review during restart. Add `--backend-only` to skip the native step; non-macOS hosts skip it automatically and report that choice. For an offline preview that changes only missing Operator provisioning and prints commands without executing Docker, use `python3 deploy/native_review.py prepare --name native-local`.
 
 ### Initialize a fresh review
 

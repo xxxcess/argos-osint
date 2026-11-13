@@ -36,19 +36,19 @@ Enter the selectable Connect ID from **Workstation Status** into Intel Web's exi
 
 Start Docker Desktop or your local Docker engine, then run these commands from the repository root. The backend includes the gateway, private services, workers, SurrealDB, Jobs storage and actor search.
 
-**First-time setup:** create the `native-local` deployment and build its three backend images. Run initialization once; later starts reuse its credentials and data.
+**First-time setup & build/redeploy:** initialize `native-local` once for your Docker platform, then run `native_review.py up` to build backend service images, redeploy Docker containers, and build/open the native app for the detected supported macOS platform (`x86_64-apple-darwin` or `aarch64-apple-darwin`):
 
 ```sh
 export PLATFORM="$(python3 scripts/fleetworks_verify.py platform --format docker)"
 python3 deploy/native_review.py init --name native-local --api-port 18091 --platform "$PLATFORM" --root-env
-export IMAGE_TAG="$(python3 deploy/native_review.py value --name native-local --field image_tag)"
-export VERSION="$(tr -d '[:space:]' < version.txt)"
-docker buildx bake -f deploy/docker-bake.hcl --load backend
+python3 deploy/native_review.py up --name native-local
 ```
+
+`native_review.py up --name native-local` checks the active local Docker context/architecture against `PLATFORM`, builds the `backend` Bake group (`runtime`, `surrealdb`, `search-index`), stops and recreates the Compose containers with `--force-recreate --detach --wait`, and—on supported macOS hosts—runs `python3 scripts/fleetworks_candidate.py build-native --target host --profile debug --open` (pass `--backend-only` to skip the native step; non-macOS hosts skip it automatically). Existing credentials, scope/epochs and data remain preserved across reruns.
 
 Edit `compose.env` at the repository root to update local Compose settings. It is private and ignored by Git. The deployment's generated env path points to this same file, so both locations use the same settings. Keep its generated access scope, epochs and storage path with the existing credentials and data.
 
-**Start the backend:** use this command after setup and whenever you want to start it again. It also works from a fresh terminal at the repository root.
+**Restart existing images without rebuilding:** use this command when you only edited `compose.env` or want to restart already-built images from a fresh terminal at the repository root:
 
 ```sh
 docker compose --env-file compose.env \
@@ -100,7 +100,7 @@ Choose the shortest loop for the changed surface. The native app/fixture graph i
 | Change | Loop |
 | --- | --- |
 | Rune app, client contracts or workstation manager | Scoped host debug tests, selected same-view Runtime/PNG/tree fixtures, then `python3 scripts/fleetworks_candidate.py build-native --target host --profile debug`. |
-| Service roles (`argos-api-host`) | Rebuild the `runtime` image; the native-review `backend` Bake group builds backend-only images. BuildKit caches dependencies. |
+| Service roles (`argos-api-host`) | `python3 deploy/native_review.py up --name native-local` rebuilds the `backend` Bake images, recreates Docker containers, and builds/opens the native app on supported macOS (`--backend-only` skips native). BuildKit caches dependencies. |
 | Web app and `packages/*/src` | Run the separately configured Next development server; use isolated repository Playwright output for browser checks. |
 | Dependencies, Dockerfile, Compose or private search | Build the affected image with `docker buildx bake -f deploy/docker-bake.hcl <target>`, then use its isolated deployment checks. |
 | Packaging or release | Push and read the hosted CI results for that revision. |

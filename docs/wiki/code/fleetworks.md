@@ -24,7 +24,13 @@ Protected settings initialize without creating a default child. The opaque backe
 
 ## Launch the Compose stack
 
-Use the [standalone backend recipe](../../../deploy/README.md#isolated-native-backend-review): provision with `deploy/native_review.py init --root-env`, build the `backend` Bake group, then start `compose.native-review.yml` directly with `--env-file compose.env` and its unique project. The editable env file is private and Git-ignored at the repository root. This creates separate deployment data and purpose-scoped credentials without mounting a native child. Reuse that exact Compose selection for status, logs, restart and stop. Stop preserves data; no startup resets configuration or rotates credentials.
+Use the [standalone backend recipe](../../../deploy/README.md#isolated-native-backend-review): provision once with `deploy/native_review.py init --root-env`, then build backend service images, redeploy the Docker Compose containers, and trigger the native app build on supported macOS (`x86_64-apple-darwin` or `aarch64-apple-darwin`) in one command:
+
+```sh
+python3 deploy/native_review.py up --name native-local
+```
+
+`native_review.py up` preserves existing credentials/data, checks the Docker context and daemon architecture against `PLATFORM`, builds the `backend` Bake group (`runtime`, `surrealdb`, `search-index`), stops and recreates the Compose containers with `--force-recreate --detach --wait`, and runs `python3 scripts/fleetworks_candidate.py build-native --target host --profile debug --open` on supported macOS hosts (pass `--backend-only` to skip the native step; non-macOS hosts skip it cleanly). Edit the private, Git-ignored root `compose.env` for local settings and keep the same Compose project for `ps`, `logs` and `down`. Stop preserves data; no startup resets configuration or rotates credentials.
 
 Optional Intel Web and Atlas services require explicit deployment configuration. The browser authenticates its Connect form with an already registered Connect ID; the ID alone grants no authority. Use native News Cycles to submit collection work when a real worker is advertised. [Deployment](../../../deploy/README.md) · [Atlas](../../../deploy/atlas-dispatch.md)
 

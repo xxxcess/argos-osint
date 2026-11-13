@@ -18,7 +18,7 @@ Implementation baseline: `b8da29f`. Dependency/lockfile checkpoint: `6eef4cc`. T
 | Docs/diagram checks | Original 16 Markdown files/420 links/5 figures; workflow updates cover 8 reviewed guides/entrypoints with 175 local path/anchor checks and 2 exact XML-valid rendered/inspected diagram pairs | PASS; workflow links, bounds and whitespace checked; later bounded audit: 11 relevant docs/plans, 203 local links/anchors, two unchanged diagram pairs valid |
 | Formatting | Full `cargo fmt --all -- --check` after authorized formatting repair; assertions unchanged, original formatting retained in scratch | PASS on the current test-fixture repair checkpoint |
 | Workspace all-target Clippy | Whole workspace/all targets with `-D warnings`; fixture compiler/lint repairs below | PASS after all six case repairs; final all-target rerun 3m33s |
-| Full local embedded gate | Formatting and Clippy passed; collected unfiltered workspace run exited 101 with six failing cases across four targets | FAIL; repairs in verification, host help and required storage phase not reached |
+| Full local embedded gate | Prior collection failed six cases across four targets; all six repaired cases pass in focused required-mode execution | RUNNING at `712ed06`; formatting, Clippy and full workspace pass (3511s including 11m11s compilation/linking); host help in progress, broad required storage pending |
 
 ## Implemented boundaries
 
@@ -71,7 +71,7 @@ Local logs: `.agent-scratch/native-pairing-rerun-units.log` and `.agent-scratch/
 | Pitfall | Resolution / current evidence |
 | --- | --- |
 | Dirty formatting blocks the full gate | Backed up the existing edit, ran the package formatter under the user's repair instruction, preserved assertions; full formatter now passes. |
-| Disk reserve exhausted | Validated exact obsolete artifact provenance, ownership, inode/hardlinks and open-file status. Removed retired compiled artifacts (~11.75 GiB) and bounded subsets totaling 147 obsolete core storage-test executables (~40.16 GiB). All current graphs and their dependencies, metadata and incrementals, plus user `target/debug`, data and QA evidence retained. Free space rose to about 39 GiB before continued compilation. |
+| Disk reserve exhausted | Validated exact obsolete artifact provenance, ownership, inode/hardlinks and open-file status. Removed retired compiled artifacts (~11.75 GiB) and bounded subsets totaling 178 obsolete core storage-test executables (~48.19 GiB). All current graphs and their dependencies, metadata and incrementals, plus user `target/debug`, data and QA evidence retained. Free space rose to about 39 GiB before continued compilation. A later exact 31-file subset recovered ~8.03 GiB when the repaired Rust graph reduced the reserve to ~5.6 GiB; fresh provenance/identity and global open-file checks passed, leaving ~13.4 GiB. |
 | API-only selection unexpectedly recompiles dependencies | Matching core features alone lost `log`/`tracing` and host/proc-macro unification. Interrupted that build before assertions, retained its exit-130 log, and switched once to the workspace graph with a test-name filter. |
 | Cold build is slow | Observed roughly 20 minutes in RocksDB C++ compilation on this Intel host; CPU speed limit was 43%. Full Rust debug info and the embedded/NLP/classifier/fixture graph add work. These are observations, not a benchmark. Current engine compilation completed. |
 | Workflow guidance is hard to discover | Updated contributor loop/cache decisions, build artifact guide, agent workflow, relevant READMEs and two rendered diagram pairs. Permanent guidance describes reusable choices; this tracker retains incident history. |
@@ -108,3 +108,14 @@ Log: `.agent-scratch/native-pairing-check-repairs/full-matrix-collect.log`. Form
 The old linked summary-worker chain had about 1.43 MB across four nested first-party frames. This diagnoses allocation pressure; only the rebuilt real public path can establish the repair. No stack-size or timing-limit increase is used. `--no-fail-fast` collects independent workspace failures without changing the final failing exit status. Ordinary absent-harness returns remain **SKIPPED**, never required-storage evidence.
 
 Post-repair preflight: full workspace/all-target Clippy with `-D warnings` passed (3m33s). Its initial attempt found one cloned-reference lint in the new live fixture; fixed with `std::slice::from_ref`, without suppression. Required-mode focused library/live/stress/paging verification is now running on the workspace graph.
+
+
+### Verified repairs (712ed06)
+
+Focused command retained the workspace graph and selected libraries plus live/stress/paging targets, with `ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1`, `ARGOS_SURREAL_BIN`, `ARGOS_EMBED` and `RUST_MIN_STACK` unset. Exit **0**; compilation **5m03s**. API **57/57**, live WebSocket **1/1**, core **961 passed / 6 ignored**, worker stress **8/8**, paging **2/2**; remaining selected workspace libraries also passed: **1,184 passed / 0 failed / 6 ignored** across 11 harnesses. Log: `.agent-scratch/native-pairing-check-repairs/repaired-targets.log`. No actual Keychain or GUI was used.
+
+The normal-stack public shutdown regression passed all five subprocess rounds with the original 500 ms limit, and drop/queued-summary checks passed. Bounded fresh-binary inspection reduced the runtime blocking/callback/worker callback frames from 199,328/403,664/400,688 bytes to 2,880/7,744/2,704 bytes. Combined named reservations fell from ~1.43 MB to ~636 KB. This supports the observed runtime repair without changing stack sizes.
+
+The complete canonical embedded gate is rerunning at `712ed06`; no overall gate pass is claimed yet. All source is frozen. API fixture checkpoint: `0e5a3a8`; workflow/docs checkpoint: `ed0b0fd`.
+
+Full workspace stage at `712ed06` exited0: **3511 seconds** including **11m11s** compilation/linking. All148 reported harness summaries completed without failures; ordinary mode-selected storage skips are not required-storage evidence. Stress8/8 passed again14.84s, core961/0fail/6ignored, API57/57 and APIcontracts9/9. Long groups: classifier admission7/7 in627.69s and indexed links1/1 in128.65s. Host CLI help now running; dedicated required embedded contracts remain pending.

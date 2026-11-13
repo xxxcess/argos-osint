@@ -1,14 +1,14 @@
 # Native workstation design
 
-[Native client](../../../apps/fleetworks-desktop/README.md) · [Connections](native-connections.md) · [Identity](native-workspaces.md) · [Verification status](../../../.planning/2026-11-12-native-pairing-implementation/acceptance.md)
+[Native client](../../../apps/fleetworks-desktop/README.md) · [Connections](native-connections.md) · [Identity](native-workspaces.md) · [UX verification status](../../../.planning/2026-11-13-native-immersive-ux/acceptance.md) · [Pairing verification](../../../.planning/2026-11-12-native-pairing-implementation/acceptance.md)
 
-Rune macOS API client. One selected destination; the backend owns data and execution. Intel Web shares paint/branding and workstation Connect while keeping its layout, typography, navigation and topology/list behavior.
+Rune macOS API client (`apps/fleetworks-desktop`). One selected destination; the backend owns data and execution. Intel Web shares paint/branding (`@tag:look-and-feel`) and workstation Connect while keeping its layout, typography, navigation and topology/list behavior.
 
 [![Native shell and selected destination](../../diagrams/native-workstation-layout.svg)](../../diagrams/native-workstation-layout.html)
 
 ## Authority and references
 
-Explicit user decisions govern. This page is the maintained control/design contract; [migration/authority](native-connections.md) owns active wire semantics. The unchanged [supplied handoff](../../design/native-workstation-handoff/argos_workstation_identity_implementation_spec.md) and [detailed design rationale](../../design/native-workstation-handoff/argos_native_design_system_guide.md) preserve source requirements and mockups. Their November 2026 baseline descriptions are historical, not current verification. The original structural reference's Tauri/Linux-client, workspace identity, glossy surfaces, sample hardware and Rust-BERT-training assumptions are superseded.
+Explicit user decisions govern. This page is the maintained control/design contract; [migration/authority](native-connections.md) owns active wire semantics. The unchanged [supplied handoff](../../design/native-workstation-handoff/argos_workstation_identity_implementation_spec.md) and [detailed design rationale](../../design/native-workstation-handoff/argos_native_design_system_guide.md) preserve source requirements and mockups. Their November 2026 baseline descriptions are historical, not current verification. The original structural reference's Tauri/Linux-client, workspace identity, sample hardware and Rust-BERT-training assumptions are superseded; the flat matte-only surface restriction is superseded by the adaptive liquid-metal and pointer-lighting system below with strict `matte()` parity.
 
 Normal setup implements [pairing and macOS Keychain](native-connections.md#pairing-and-keychain-agreed-target). Explicit operator/headless file mode stays independent. Runtime/backend/live Keychain evidence remains separately tracked.
 
@@ -18,19 +18,19 @@ Ordinary selection, progression, dismissal, confirmation and recovery belong to 
 
 | Surface | Allowed controls and content |
 | --- | --- |
-| Shell | Actual native window controls; Setup Gateway; sidebar collapse; clickable gateway/status header; six sidebar destinations below |
-| Setup | Gateway URL → operator pairing approval → Keychain → authenticated checks/registration. Waiting request/code, Retry/Pair again and Change gateway URL reflect the current stage; no user-managed token file. |
-| Workstation Status, via header | Read-only Native Client, Gateway Backend and Host Resources cards; selectable Connect ID; optional authoritative API-host percentages/platform/chipset |
-| DB Seed & Train | Actor/training CSV selection, validated upload and confirmed seed/Natural candidate jobs; index build only after completed seeding with actors present; refresh checks and read-only dataset/model/status metadata |
-| News Cycles | New Cycle; workstation cycle cards; selected-cycle history Delete with in-place confirmation |
-| Brain Search | One search field; bounded results; selected authoritative dossier, no native graph |
-| OSINT Tools | Provider/service cards; key-provisioning modal only for actual provisionable credentials |
-| Model Assignments | Configured provider table with inline keys; canonical role provider/model, supported effort/variant and ordered fallback controls |
-| Jobs & Logs | Bounded workstation queue; selecting a job supplies authorized safe operational summaries |
+| Shell | Actual native window controls; `Setup Gateway` (`ActionButton`, `connection-editor`); sidebar collapse; clickable `gateway-status-header` (opens `Workstation Status` when connected or `Setup Gateway` when disconnected); `Workstation Status` (`nav-workstation`) always visible; when disconnected (`!state.connected()`), sidebar shows ONLY `Workstation Status` and `Setup Gateway` (`nav-setup`), `views::page`/`toolbar`/`screen_key` guard `Page::ALL` and `⌘1–6` to `Workstation Status`, and `scope_bar` shows `Local Client` (`local-client-scope`) + status pill; when connected, sidebar reveals all six `Page::ALL` destinations with live busy status and count badges (no bottom sidebar footer card) and `scope_bar` shows resource scope + deployment + syncing/online pill |
+| Setup | 3-stage `stage_stepper` (`Origin URL` → `Workstation Pair` → `Gateway Ready`); Gateway URL → operator pairing approval → Keychain → authenticated checks/registration. Waiting request/code, Retry/Pair again, Change gateway URL and `setup-advanced-toggle` (`Switch` to reveal `readiness_cards::checks`) reflect the current stage; no user-managed token file. |
+| Workstation Status, via header / default landing | Default home page (`Page::Workstation`, `setup_gateway: false`). When disconnected, renders only `Native Client` (`"Connect to a gateway to register this workstation."`) and `Gateway Backend` (with `workstation-setup-gateway` CTA, hiding `Host Resources` and `readiness_cards::checks`). When connected, renders read-only `Host Resources` (clickable CPU/Memory/Disk `metric_ring_tile` controls opening a `Dialog` `modal_prompt` via `WorkstationInspector`), `Native Client` and `Gateway Backend` (with expandable `readiness_cards::checks` tiles), selectable Connect ID, and optional authoritative API-host percentages/platform/chipset |
+| DB Seed & Train | 3-stage `stage_stepper` + `SeedStage` (`Seed`, `Classifier`, `Maintenance`) `SegmentedControl`; `Pre-flight Checklist` (`Checkbox` status rows for gateway, datastore and validated CSV); actor/training CSV selection, validated upload and confirmed seed/Natural candidate jobs; index build only after completed seeding with actors present; refresh checks and read-only dataset/model/status metadata |
+| News Cycles | `New Cycle`; cycle count badge and interactive cycle tiles expanding inline metadata; `Inspect summary` opening `Dialog` (`modal_prompt`); selected-cycle history Delete with in-place confirmation |
+| Brain Search | One search field; bounded interactive actor tiles; selected authoritative dossier with `DossierFacet` (`Overview`, `Associations`) `SegmentedControl` and `Collapsible` alias/attribute sections; no native graph |
+| OSINT Tools | Provider/service cards; interactive credential rows opening `Dialog` (`tool-api-key`) with masked primary/fallback inputs and explicit `Switch` toggles (`inline_toggle_row`) to clear primary or fallback slots |
+| Model Assignments | `ModelsTab` (`Roles`, `Providers`) `SegmentedControl`; configured provider cards with inline masked keys and `Switch` preserve-if-blank toggle; canonical role cards expanding `role_row_editor` (`Select` pickers for provider, model, reasoning variant and ordered fallback Move up/Move down/Remove actions) |
+| Jobs & Logs | Bounded workstation queue with `RollingText` count; interactive job tiles; `ProgressCircle` + determinate `Progress` bar; `Pop out summary` opening `Dialog` (`modal_prompt`); selecting a job supplies authorized safe operational summaries in `safe_log_table` |
 
-Sidebar order is exactly DB Seed & Train, News Cycles, Brain Search, OSINT Tools, Model Assignments, Jobs & Logs. Status is not a seventh item. Render only the selected destination.
+Sidebar order when connected is `Workstation Status` followed by `DB Seed & Train`, `News Cycles`, `Brain Search`, `OSINT Tools`, `Model Assignments`, `Jobs & Logs`; when disconnected (`!state.connected()`), only `Workstation Status` and `Setup Gateway` appear (`Page::ALL` is hidden and `navigate()`/`⌘1–6` clamp to `Workstation Status`). Render only the selected destination.
 
-Excluded: separate Test/Disconnect, saved-profile CRUD, workspace/folder/Trash controls, classifier activation, account creation/deletion/base-URL forms, configuration import/export, native article filters, manual tool Run/input/results, tabs and job/log retry/cancel/filter/follow/copy/export toolbars. Backend APIs may retain these independent capabilities for authorized callers.
+Excluded: separate Test/Disconnect, saved-profile CRUD, workspace/folder/Trash controls, classifier activation, account creation/deletion/base-URL forms, configuration import/export, native article filters, manual tool Run/input/results, and job/log retry/cancel/filter/follow/copy/export toolbars. Backend APIs may retain these independent capabilities for authorized callers.
 
 ## Identity, setup and actions
 
@@ -56,38 +56,55 @@ Setup shows one actionable state: pairing approval, Keychain access or network p
 | Seed/index/train | Server-configured validated inputs and exact configuration revision. Missing/stale inputs disable only their operation. Natural training produces a candidate; activation and Rust-BERT inference are separate facts. |
 | Cycles | Bounded `GET /api/v1/atlas/cycles`; `POST /api/v1/atlas/cycles/delete` tombstones this workstation association, preserving shared evidence and durable audit. Deletion is not cancellation. Current summaries supply time/state and optional `article_count`; unreported pipeline counts stay unavailable. |
 | Dossier | Canonical actor lookup, debounce/latest-response fences, identity/summary first, then supported claims/links. Missing confidence or summaries stay unavailable; long content scrolls in the inspector. |
-| Tool keys | Independent slot patches: omitted/null preserves, explicit empty clears, nonempty replaces. Blank native fields preserve; Clear actions are explicit. Saved bytes are never returned. |
+| Tool keys | Independent slot patches: omitted/null preserves, explicit empty clears, nonempty replaces. Blank native fields preserve; Clear actions are explicit (`Switch` toggles in `tool-api-key`). Saved bytes are never returned. |
 | Models | Server-advertised `configured_routes` catalog, not exhaustive live provider discovery. Provider selection resolves its account/model tuple. Effort and variant address the same supported `provider::model` setting. Preserve hidden fields, unchanged secrets and pending edits on conflict. |
 | Activity | Server membership precedes rows, counts, paging, logs/results/streams/actions. Shared status does not imply private access. Never fall back globally when unregistered; summaries are not provider stdout. |
 
-## Matte materials and brand
+## Brand palette, liquid-metal surfaces and matte parity
 
-| Token/recipe | Target |
+Implemented in [`theme.rs`](../../../apps/fleetworks-desktop/src/theme.rs), [`icons.rs`](../../../apps/fleetworks-desktop/src/icons.rs), [`material.rs`](../../../apps/fleetworks-desktop/src/material.rs) and [`ui_components.rs`](../../../apps/fleetworks-desktop/src/ui_components.rs) using the `--locked` `rune` + `rune-kit` + `rune-motion` GPU gradient and shadow pipeline (retaining `Cargo.lock` without adding unlocked `rune-fx`/`rune-light` crates).
+
+### Palette and semantic tokens (`theme.rs`)
+
+| Token / role | Hex / value | Purpose |
+| --- | --- | --- |
+| `BACKGROUND` / `SURFACE_INSET` | `#060709` | Window obsidian canvas and inset wells |
+| `SURFACE` / `SURFACE_RAISED` / `SURFACE_ELEVATED` | `#0B0D11` / `#12151C` / `#181C26` | Card base, raised interactive tiles and elevated hover/dialog layers |
+| `TEXT_PRIMARY` / `TEXT_SECONDARY` / `TEXT_MUTED` | `#F7F3EA` / `#DCD6C8` / `#A8A296` | High-contrast ivory primary ink, supporting copy and quiet captions |
+| `ACCENT` / `ACCENT_PRESSED` / `ACCENT_HOVER` / `ACCENT_HIGHLIGHT` / `ACCENT_DEEP` | `#C6A56E` / `#C4A265` / `#E5C993` / `#F2DFB6` / `#8E6E3B` | Brand gold metallic ramp, focus ring (`ACCENT_HIGHLIGHT`) and `ON_ACCENT` (`#060709`) ink |
+| `SELECTION_SURFACE` | `#322C22` | Selected nav/pill fill |
+| `BORDER_CONTROL` / `BORDER_SUBTLE` | `#948B7B` / `#3A3833` | Essential control boundary vs decorative card framing |
+| Gunmetal & lighting stops | `METAL_DARK_TOP` `#222631`, `METAL_DARK_MID` `#14171F`, `METAL_DARK_BOTTOM` `#0D0F14`, `METAL_EDGE_TOP` `#5A5448`, `METAL_EDGE_BOTTOM` `#24211C`, `LIGHT_SURFACE_GLOW` `#F7E8C9`, `GOLD_GLOW` `#D8BD8C`, `CAST_SHADOW` `#020304` | Multi-stop metallic gradients, ambient luminous rim/glow and directional cast shadows |
+| Semantic `StatusTone` (`Ok`, `Warn`, `Err`, `Info`) | `#5FD39A` (`#10241B` / `#2B6E4E`), `#E5B45B` (`#282010` / `#7A5D28`), `#F06A8A` (`#291219` / `#7D2B3F`), `#5AB8F0` (`#10202D` / `#2B5E80`) | Aligned with web semantic tokens (`StatusTone::{fg, bg, border}`) |
+| Entity `StatusTone` (`Violet`, `Cyan`) & entity constants | `ENTITY_GRAPH` `#B48EFF` (`Violet`), `ENTITY_TECH` `#21D9EE` (`Cyan`) at 14% fill / 45% border; plus `ENTITY_PERSON` `#C08CF5`, `ENTITY_ORG` `#5AB8F0`, `ENTITY_COMPUTE` `#FFB347`, `ENTITY_CLUSTER` `#CAD9F0` | Dossier subtypes, OSINT tool categories and telemetry categorization |
+| Decorative edge alpha | `CARD_EDGE_ALPHA` `0.04` / `SATIN_CONTROL_EDGE_ALPHA` `0.07` | Subtle inset rim; never substitutes for `BORDER_CONTROL` or focus rings |
+
+### Vector icons (`icons.rs`)
+
+All shell destinations, telemetry tiles and action buttons use custom 16×16 (`view: 16.0`) `rune::Icon` SVG glyphs: `BRAND_MARK`, `WORKSTATION`, `SEED`, `ATLAS`, `BRAIN`, `TOOLS`, `MODELS`, `JOBS`, `CPU`, `MEMORY`, `DISK`, `KEY`, `SHIELD_CHECK`, `ALERT`, `SERVER`, `REFRESH`, `TRASH`, `CHEVRON_RIGHT` and `PLUS`.
+
+### Liquid-metal buttons, luminous surfaces and `matte()` parity (`material.rs`, `app.rs`)
+
+| Primitive / mechanism | Active behavior (`!preferences.matte()`) | Accessible fallback (`preferences.matte()`) |
+| --- | --- | --- |
+| `ActionButton` + `MetalFinish` (`GoldCta`, `Gunmetal`, `CrimsonDanger`, `ObsidianPill`) | Brushed low-sheen 4-stop `linear_gradient(PI * 0.92, ...)`, softened `border_gradient`, `continuous_corners()`, dual `box_shadow` (drop shadow + dim ambient glow), `a11y_hidden` `liquid-specular` (`group_opacity(0.02, 0.55)` + 140px radial gradient with `live_offset(pointer_offset)`) and dim `liquid-pointer-light` (150px radial falloff illuminated by cursor), `press_scale(0.965)` and `hover_motion(Spring::new(0.18, 0.12), Spring::new(0.28, 0.18))`. Busy state renders an inline `Spinner` and disables clicks. | Solid opaque fills (`ACCENT`, `SURFACE_RAISED`, `STATUS_ERR_BG`), 1px solid borders, no specular/pointer-light overlay, no `press_scale` or spring hover motion. |
+| `luminous_card` & `interactive_tile` | `SURFACE` (`#0B0D11`) / `SURFACE_RAISED` (`#12151C`) fill, softened `border_gradient`, `radius(10.0).continuous_corners()`, drop shadow + dim `LIGHT_SURFACE_GLOW` / tone halo, clipped `a11y_hidden` `pointer-glow` (210px dim radial falloff, `live_offset(&state.pointer_offset)`) and opposing `cast-shadow` (190px, `0.22` alpha, `live_offset(&state.shadow_offset)`). `interactive_tile` adds `press_scale(0.985)`, spring `hover_motion` and low-sheen `hover-metal-sheen` (`group_opacity(0.0, 0.42)`). | Flat opaque fill (`SURFACE` / `SURFACE_RAISED`), 1px solid border (`BORDER_SUBTLE` or `tone.border()`), zero shadow/glow layers, identical outer bounds and `accessibility_json()`. |
+| Pointer tracking (`app.rs`) | `rune_kit::root(...).on_pointer_move_local(...)` normalizes pointer coordinates against `1180×780`, updating `State::pointer_offset` (`[-28..28, -19..19]`) and opposing `State::shadow_offset` (`[-8..8, -7..7]`) with `tx.live_only()` so the dim cursor light glides across liquid-metal surfaces without rebuilding the view tree. | `pointer_ref` and `shadow_ref` are `None`. |
+| `compact_toolbar` & `configure_kit` | `configure_kit` sets button/raised/overlay elevation and sheen tokens; `compact_toolbar` passes toolbar buttons through without adding reflection wrappers. | `configure_kit` clears `submit_highlight`, `depth_top`, `depth_bottom` and glow/drop shadows, keeping 1px functional inset edges. |
+| Brand mark & reduced preferences | Canonical `BRAND_MARK` / [`fleetworks-mark.svg`](../../../assets/brand/fleetworks-mark.svg) geometry preserved; `reduced_transparency || matte_fallback` triggers `matte()`; `reduced_motion` propagates via `cx.reduced_motion(true)`. | Identical layout hit-bounds (`presented(key)`) and `accessibility_json()` verified across `Page::ALL` in [`appearance_tests.rs`](../../../apps/fleetworks-desktop/src/appearance_tests.rs). |
+
+## Layout, transitions and progressive disclosure
+
+| Concern | Implemented behavior |
 | --- | --- |
-| Canvas | `#060709` |
-| Card / raised control | `#0B0C0F` / `#111317`, opaque |
-| Primary / supporting / quiet text | `#F3EEE4` / `#D6D2C4` / `#B8B4A8` |
-| Gold / pressed gold | `#C6A56E` / `#C4A265`; dark text on gold |
-| Functional boundary | Contrast-checked token such as `#898274`; focus remains independently visible |
-| Decorative satin edge | Static 1–2% ivory on cards, 2–3% on controls; never substitutes for a functional boundary |
-| Primary action | At most one compact flat gold primary per native surface; other actions use graphite |
-| Interaction | Small fill/border changes, no layout movement; read-only cards never acquire hover/focus/cursor behavior |
-| Brand | Canonical five outlined rays, ivory disc, gold crescent; preserve geometry/accessibility/aspect ratio and base-path-safe assets; transparent knockout, obsidian only for intentionally opaque icons |
-
-Reuse shared theme/material primitives. No broad gradients, gloss, chrome rims, reflective sweeps, backdrop blur, decorative surface animation or noisy textures. Reduced transparency/motion keeps static opaque surfaces. Preserve web semantic colors and geometry; decorative 1–3% edges require real numeric contrast checks for essential controls and focus.
-
-## Layout and state
-
-| Concern | Rule |
-| --- | --- |
-| Window | Initial 1180×780; minimum 640×480; existing 220-point sidebar defaults |
-| Compact | Single column and ordinary list/detail navigation; no horizontal page overflow for normal text |
-| Scroll | One owner per pane; stable heading/action region; wrapped long text and bounded lists/logs |
-| Keyboard | Top-left → bottom-right traversal; visible independent focus, selection and collapsed-nav labels/tooltips |
-| Type/space | Existing Kit body/small/medium, monospace for logs/IDs; shared spacing, no new face |
-| Reads | Start only affected stale/initial reads on view entry/focus; reuse fresh observations; cancel/fence obsolete reads. Logs/metrics update finitely only while visible/focused. |
-| States | Distinguish loading, verified empty, unsupported, denied, stale, failed and uncertain locally. Unknown metrics/counts are unavailable, never invented zero. |
+| Window & chrome | Initial `1180×780`; minimum `640×480`; `Sidebar` `PaneState::new(220.0).range(180.0, 340.0)`; full-size content chrome with macOS traffic lights (`launch.rs`). |
+| Compact layout | `Brain Search` switches from a `340px` results split + detail pane to single-column list/detail navigation below `720px` content width; `safe_log_table` adapts columns below `320px` and `500px`; single scroll owner per pane. |
+| Transitions | Destination container (`screen-setup` or `screen-<key>`) animates with `Transition::offset(0.0, 12.0).combined(Transition::opacity())`; wide `Brain Search` `dossier-pane-*` animates with `Transition::offset(8.0, 0.0).combined(Transition::opacity())`. Both are omitted when `preferences.reduced_motion` is true. |
+| Async & live telemetry | `async_status_strip` pairs a `Spinner` + indeterminate `Progress::new(None)` bar during active requests with a static `status_dot` when settled. `metric_ring_tile` pairs `ProgressCircle` (34px) + `RollingText` for valid `0.0..=100.0` host percentages (`N/A` icon fallback when unavailable). `Jobs & Logs` pairs `RollingText` total count with `ProgressCircle` + determinate `Progress::new(Some(frac)).show_value()`. |
+| Sidebar indicators & navigation gating | Always shows `Workstation Status` (`nav-workstation`); when `!state.connected()`, shows only `Workstation Status` + `Setup Gateway` (`nav-setup`) and guards `navigate()` / `⌘1–6` against hidden destinations; when connected, reveals `Page::ALL` with `sidebar_row_status` (`RowStatus::Busy`) and `sidebar_row_badge` live counts on `News Cycles` and `Jobs & Logs` (no bottom footer card). |
+| Progressive disclosure & modals | `stage_stepper` + `SegmentedControl` (`SeedStage`, `ModelsTab`, `DossierFacet`); `checklist_row` (`Checkbox`) preflight card on `DB Seed & Train`; `inline_toggle_row` (`Switch`) on `Setup Gateway`, `OSINT Tools` and `Model Assignments`; `Collapsible` alias/attribute blocks on `Brain Search`; `Dialog` (`modal_prompt`) inspectors for `WorkstationInspector` (`workstation-telemetry`), `selected_cycle_id` (`cycle-inspector`), `selected_job_id` (`job-operational-summary`) and `tool-api-key`. |
+| Keyboard & states | Top-left → bottom-right traversal with `⌘1–6` page shortcuts when connected (`app.rs`), `2px` `ACCENT_HIGHLIGHT` focus rings, independent selection states, and distinct local loading/empty/unsupported/denied/stale/failed/uncertain representations. Unknown metrics stay `N/A` / unavailable, never invented zero. |
 
 ## Required evidence
 
-Inspect actual production Rune Runtime PNG/tree/input evidence for all seven surfaces plus setup and relevant failure states at both sizes, keyboard/scroll/selection, reduced preferences and 1×/2× logo fit. Supplied mockups are synthetic composition references. Generated-but-uninspected images, unit tests, installed GUI/accessibility, backend integration and hosted dual-Mac evidence are separate claims. [Verification workflow](native-verification.md) · [Executed results and open obligations](../../../.planning/2026-11-12-native-pairing-implementation/acceptance.md)
+Inspect actual production Rune Runtime PNG/tree/input evidence for all seven surfaces plus setup and relevant failure states at both sizes (`1180×780` / `1280×800` and `640×480`), keyboard/scroll/selection, reduced preferences and `matte()` visual parity. Supplied mockups are synthetic composition references. Generated-but-uninspected images, unit tests, installed GUI/accessibility, backend integration and hosted dual-Mac evidence are separate claims. [Verification workflow](native-verification.md) · [UX overhaul verification](../../../.planning/2026-11-13-native-immersive-ux/acceptance.md) · [Pairing acceptance baseline](../../../.planning/2026-11-12-native-pairing-implementation/acceptance.md)

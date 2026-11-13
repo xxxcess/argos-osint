@@ -91,14 +91,22 @@ a filesystem/network sandbox or live backend integration proof.
 | Unit tests | `not_run_by_this_command`; retain scoped test results separately |
 | Backend/inference | Not exercised; source-to-visible search and real model/checkpoint gates remain separate |
 
-The [dual-Mac workflow](../../../.github/workflows/fleetworks-native.yml) invokes
-this same helper for explicit baseline/script selections, after scoped desktop
-unit tests. Its manifest remains honest about pending visual/GUI evidence. An
-uploaded artifact or successful renderer exit does not supply either result.
+The [dual-Mac workflow](../../../.github/workflows/fleetworks-native.yml) (`package`
+and `verify` jobs on `macos-15-intel` and `macos-15`) runs `cargo fmt --check`,
+scoped `fleetworks-desktop`, `fleetworks-workstation` and `fleetworks-contracts`
+unit tests, and then invokes this same `native-ui --agent --require-clean`
+helper across its explicit `--scene` and `--script` selections (`1280x800` and
+`640x480` at `1×` and `2×`) before building the debug `.app` (or packaging and
+verifying the release ZIP on trusted channel runs). Its manifest remains honest
+about pending visual/GUI evidence: an uploaded artifact or successful renderer
+exit does not supply either result. Adding or renaming native scenes or
+interaction scripts requires coordinating `.github/workflows/fleetworks-native.yml`
+updates with Code Architect.
 
 The [offline Python fixtures](../../../scripts/test_fleetworks_native_verify.py)
 cover selection/artifact-path fences, implicit debug cache reuse, bounded profiles,
 runtime inventory, missing/corrupt PNG/tree, dimensions, failed renderer exits,
 script final keys, stale output protection and physical target mismatches. Actual
 helper tests/rendering must be executed by the integration owner and recorded in
-the [acceptance tracker](../../../.planning/2026-11-11-rune-macos-cutover/acceptance.md).
+the active acceptance tracker (for the cutover baseline, see
+[cutover acceptance](../../../.planning/2026-11-11-rune-macos-cutover/acceptance.md)).

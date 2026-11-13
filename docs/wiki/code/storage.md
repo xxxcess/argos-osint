@@ -27,6 +27,18 @@ Run storage contracts through the harness; a skipped test is not a pass. Agents 
 
 Bootstrap authenticates as the database root, applies the schema and provisions a database-scoped Editor account for API and worker processes. Runtime processes verify the exact schema version. Disk modes retain the database identity across restarts. A fresh memory store has a new identity, so Atlas rejects deliveries tied to a previous store. The outbox is transactional with job submission, while the Jobs-owned embedded queue transports wake-up messages. See the [network startup instructions](fleetworks.md#run-the-network-api-and-workers) and the [Atlas deployment guide](../../../deploy/atlas-dispatch.md).
 
+## Dataset upload ownership
+
+| State | Owner and replication requirement |
+| --- | --- |
+| Upload ticket | [SurrealDB metadata](../../../crates/argos-osint-core/src/storage/upload_ticket.rs): five-minute authority-bound tickets, atomic single-use claims and per-issuer quotas; gateway restart or replica routing preserves the ticket |
+| CSV bytes | Shared persistent backend staging volume, accessible to every gateway and consuming worker; shared database metadata alone does not share files across hosts |
+| Validated dataset and job | Existing staged-dataset references and durable maintenance jobs; a used/expired ticket needs a new upload URL, while accepted work retains its own identity |
+
+Actor imports use a bounded path: `full CSV hash + validation → private unlinked spool → claimed transaction batches`. The worker retains IDs and one parsed actor, not the corpus; batches cap at 128 actors, 2 MiB retained payload and 16 MiB expanded transaction rows. CSV-selected stable IDs update or add actors; absent actors and existing aliases remain. The catalog fingerprint identifies the latest import. See [streamed import contracts](../../../crates/argos-osint-core/tests/storage_actor_seed_execution.rs).
+
+Ticket expiry cleanup is bounded and retains no bearer secrets. Bootstrap adds the ticket tables without rewriting existing records. See the [ticket contracts](../../../crates/argos-osint-core/tests/storage_upload_tickets.rs) and [native maintenance flow](../../../apps/fleetworks-desktop/README.md).
+
 ## Recall and source lifecycle
 
 [Brain recall](../../diagrams/brain-recall.html) shows DISKANN candidates followed by lexical top-up. Vector hits must match the current model, generation and memory revision and remain active with an allowed kind. Missing vectors or vector-search failure use lexical recall; vector hits rank first. Results are capped at five memories and 1,500 estimated tokens. See [recall.rs](../../../crates/argos-osint-core/src/storage/recall.rs) and [recall contracts](../../../crates/argos-osint-core/tests/storage_recall_turn.rs).
@@ -35,7 +47,7 @@ Bootstrap authenticates as the database root, applies the schema and provisions 
 
 ## Schema and runtime authority
 
-[Bootstrap](../../../crates/argos-osint-core/src/storage/bootstrap.rs) first applies module `ANALYZER` constants as an idempotent `IF NOT EXISTS` batch outside the retryable transaction (resolving FULLTEXT analyzers against committed catalog state — SurrealDB 3.3.4), then applies all tables/fields/indexes plus schema version read/refusal/write within one retryable transaction. It records `storage_meta:schema.version` and refuses a database newer than the build. The current constant is `storage::bootstrap::SCHEMA_VERSION` (currently 5, additive upgrades), independent of the old `store::SCHEMA_VERSION` (43). The SurrealDB bootstrap does not import a legacy SQLite/LanceDB database or run its numbered migration ladder. See [bootstrap contracts](../../../crates/argos-osint-core/tests/storage_bootstrap.rs).
+[Bootstrap](../../../crates/argos-osint-core/src/storage/bootstrap.rs) first applies module `ANALYZER` constants as an idempotent `IF NOT EXISTS` batch outside the retryable transaction (resolving FULLTEXT analyzers against committed catalog state — SurrealDB 3.3.4), then applies all tables/fields/indexes plus schema version read/refusal/write within one retryable transaction. It records `storage_meta:schema.version` and refuses a database newer than the build. The current constant is `storage::bootstrap::SCHEMA_VERSION` (currently 11, additive upgrades), independent of the old `store::SCHEMA_VERSION` (43). Runtime services must use the matching version after explicit bootstrap. The SurrealDB bootstrap does not import a legacy SQLite/LanceDB database or run its numbered migration ladder. See [bootstrap contracts](../../../crates/argos-osint-core/tests/storage_bootstrap.rs).
 
 Schema v2 (SCHEMA_VERSION 1→2, additive, no wipe) added these SurrealDB tables/indices:
 - `atlas_admission` — bounded private staging (state pending|evaluating|admitted|discarded|failed, terminal rows pruned)

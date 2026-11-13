@@ -171,21 +171,32 @@ A live Atlas deployment requires separately staged, hash-verified architecture-m
 
 [![Choose CSV inputs, confirm jobs and observe completion](../docs/diagrams/workstation-readiness.svg)](../docs/diagrams/workstation-readiness.html)
 
-Rebuild both backend and native app for this workflow. Close an already running Fleetworks app first: the build helper preserves a running instance when opening a new build.
+Rebuild both backend and native app for this workflow; schema **11** requires coordinated bootstrap and compatible services. The `up` helper performs the rollout without wiping data or replacing keys. Close an already running Fleetworks app first: the build helper preserves a running instance when opening a new build.
 
 ```sh
 python3 deploy/native_review.py up --name native-local
 ```
 
-In **DB Seed & Train**, each dataset button opens its own CSV picker. Selection validates/hashes the file and uploads its bytes through the registered connection; only the later confirmation submits a durable job at the actual configuration revision (fresh **0** is valid).
+In **DB Seed & Train**, each dataset button opens its own CSV picker. A bounded local header check runs **before any request or backend worker**. Actors require `actor_id`, `actor_name`, `actor_type`, `aliases` and `name_normalized`; extra columns are allowed, duplicate columns are rejected. Natural training requires the exact unique [18-column header set](../docs/wiki/concepts/strategic-domains-taxonomy.md#synthetic-dataset-boundary), in any order. Validation/upload progress and errors remain visible; an invalid header stops locally.
+
+**Upload flow:** local check → authenticated request for an upload URL → stream bytes with PUT to that exact gateway URL → backend upload worker rechecks schema/hash/size → immutable staging → explicit job confirmation. Authentication-bound, single-use tickets persist in the shared database and survive gateway restarts until their **five-minute expiry**. Existing seed/training workers read the staged `DatasetRef` from shared backend storage, never a Mac path or an external fetch. Accepted jobs remain durable across restart. This uses the existing services and credentials.
+
+| Resource | Bound / deployment requirement |
+| --- | --- |
+| Ticket admission | Indexed per-issuer quota of 64; atomic per-ticket claims across gateway replicas, without a global claim hotspot |
+| Upload capacity | Acquire one of two stream/validation slots before claiming a ticket. HTTP 429 leaves its URL unused. |
+| Validation / writes | Native hashing uses one 64 KiB lane with cancellation per chunk. Actor validation uses a private unlinked spool capped at 512 MiB, one producer and a capacity-one channel. Batches hold ≤128 actors, ≤2 MiB retained writer plans and ≤16 MiB expanded transaction payload. Lazy 256 KiB alias INSERT chunks remain inside the same batch transaction. Validation capacity stays held until the parser exits after cancellation. |
+| Staged bytes | Replicas must share the existing durable staging volume. Database tickets do not share file bytes; object storage is not implemented. |
 
 | Action | Flow |
 | --- | --- |
-| **Seed Actors** | Choose `datasets/argos_actors.csv` → validated byte upload → confirm → wait for completed seeding and actors in the database |
+| **Seed Actors** | Choose `datasets/argos_actors.csv` → local check/upload/staging → confirm → wait for completed seeding and actors in the database |
 | **Build Search Index** | Enabled only after completed, nonempty seeding with no queued/active reseed → confirm → wait for reader readiness |
-| **Train Classifier — Natural** | Choose a separate training CSV → validated byte upload → confirm → candidate only, without activation. `datasets/argos_atlas_strategic_domains_v2.csv` is synthetic. |
+| **Train Classifier — Natural** | Choose a separate training CSV → local check/upload/staging → confirm → candidate only, without activation. `datasets/argos_atlas_strategic_domains_v2.csv` is synthetic. |
 
-The focused maintenance page refreshes bounded readiness checks automatically; **Refresh checks** requests an immediate read. Neither submits jobs. A queued receipt is not completion.
+Actor imports **merge by stable actor ID**: add actors, update selected fields on matching actors and preserve actors absent from the CSV. Existing/manual aliases remain; new aliases are upserted without deletions. Full source metadata is retained. Every job stays pinned to its exact dataset/hash/configuration revision; choosing a new CSV does not replace or wipe the catalog.
+
+Only confirmation submits a seed/training job, pinned to the actual configuration revision (fresh **0** is valid). The focused maintenance page refreshes bounded readiness checks automatically; **Refresh checks** requests an immediate read. Neither submits jobs. A queued receipt is not completion.
 
 Optional operator metadata remains supported through startup-loaded `FLEETWORKS_MAINTENANCE_INPUTS_FILE`; it is not required for the native CSV flow. Its bounded JSON array holds at most three unique entries, pinning `operation`, `dataset` and the actual current `configuration_revision`. Supported operations are `seed_actors`, `train_classifier` and `reindex_actors`; seed/train reference staged, validated datasets, while reindex uses `dataset: null`. For a fresh revision 0:
 

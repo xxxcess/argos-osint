@@ -224,7 +224,7 @@ impl GatewayEffects {
                 tokio::task::spawn_blocking(move || -> Result<WorkspaceUpdate> {
                     container.complete_rebind_attempt(&attempt.request.request_id, &receipt)?;
                     Ok(WorkspaceUpdate { snapshot: workspaces::snapshot(&container)?, container, selected: None,
-                        message: Some(format!("IP changed. New Connect ID: {}. Refresh other workspace registrations before using them; register this workspace to resume requests.", receipt.connect_id)) })
+                        message: Some("IP changed. Refresh other workspace registrations before using them; register this workspace to resume requests.".to_owned()) })
                 }).await.map_err(|_| "IP change journal worker stopped".to_owned())?
                     .map_err(|error| error.to_string())
             }.await;

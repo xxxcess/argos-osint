@@ -366,17 +366,17 @@ fn pairing_status(
 }
 
 fn registration_status(state: &State, kit: &Kit) -> El {
-    if let Some(context) = &state.registration.context {
+    if !state.connected() {
+        return quiet("Connect to a gateway to register this workstation.", kit);
+    }
+    if state.registration.context.is_some() {
         return ui_components::status_pill(
-            format!("Connect ID: {}", context.connect_id),
-            Some(&icons::KEY),
+            "Workstation registered",
+            Some(&icons::SHIELD_CHECK),
             StatusTone::Ok,
             kit,
         )
-        .key("connect-id");
-    }
-    if !state.connected() {
-        return quiet("Connect to a gateway to register this workstation.", kit);
+        .key("workstation-registered");
     }
     match &state.registration.receipt {
         Load::Pending | Load::Loading => quiet("Registering this workstation…", kit).role("status"),
@@ -1379,7 +1379,10 @@ mod tests {
             state.readiness = crate::app::Load::Idle;
         });
         runtime.frame(1.0 / 60.0);
-        assert!(runtime.find("connect-id").is_some());
+        assert!(runtime.find("workstation-registered").is_some());
+        assert!(runtime.find("connect-id").is_none());
+        let tree = runtime.accessibility_json().to_string();
+        assert!(!tree.contains("Connect ID"));
         assert!(runtime.find("connect").is_none());
         let mut clock = 1.0 / 60.0;
         click(&mut runtime, "gateway-setup-done", &mut clock);

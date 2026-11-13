@@ -161,17 +161,6 @@ impl State {
         }
     }
 
-    pub fn copy_connect_id(&mut self, tx: &mut Tx) {
-        let Some(context) = &self.registration.context else {
-            return;
-        };
-        if self.fixture {
-            self.record(Intent::CopyConnectId);
-        } else {
-            tx.copy(context.connect_id.to_string());
-        }
-    }
-
     pub fn open_intel_web(&mut self, tx: &mut Tx) {
         if self.registration.context.is_none() {
             return;

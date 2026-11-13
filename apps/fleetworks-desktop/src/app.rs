@@ -221,7 +221,6 @@ pub enum Intent {
     Configuration { action: ConfigurationAction },
     PrepareProfileImport,
     ProfileTransfer { action: TransferAction },
-    CopyConnectId,
     CopyWorkspacePath { name: String },
     SubmitInteractive { kind: SubmissionKind },
     PostInteractive { kind: SubmissionKind },
@@ -830,11 +829,8 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
 
     let scope = if state.page.is_backend() {
         "Backend-wide".to_owned()
-    } else if let Some(context) = &state.registration.context {
-        format!(
-            "Workstation {} · Connect ID {}",
-            context.workstation_id, context.connect_id
-        )
+    } else if state.registration.context.is_some() {
+        "Workstation activity".to_owned()
     } else {
         "Workstation activity: registration required".to_owned()
     };

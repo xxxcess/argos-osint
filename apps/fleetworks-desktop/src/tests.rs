@@ -98,6 +98,19 @@ fn real_shell_navigation_works_offline_without_boundary_effects() {
     );
     connected.frame(0.0);
     assert!(connected.find("sidebar-context-footer").is_none());
+    assert!(connected.find("connect-id").is_none());
+    assert!(connected.find("workstation-registered").is_some());
+    let connected_tree = connected.accessibility_json().to_string();
+    assert!(!connected_tree.contains("Connect ID"));
+    let hidden_connect_id = connected
+        .state
+        .registration
+        .context
+        .as_ref()
+        .expect("registered fixture context")
+        .connect_id
+        .to_string();
+    assert!(!connected_tree.contains(&hidden_connect_id));
     assert!(connected.find("nav-workstation").is_some());
     assert!(connected.find("nav-setup").is_none());
     for page in Page::ALL {

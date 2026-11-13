@@ -64,7 +64,7 @@ pub fn run() -> anyhow::Result<()> {
         Err(error) => error.exit(),
     };
     if options.provision_gateway_credential {
-        let container = fleetworks_workspace::native::NativeContainer::open_settings(
+        let container = fleetworks_workstation::native::NativeContainer::open_settings(
             &crate::platform::home()?,
         )?;
         container.provision_credential_binding(

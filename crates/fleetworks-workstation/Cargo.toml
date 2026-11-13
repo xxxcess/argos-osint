@@ -1,11 +1,11 @@
 [package]
-name = "fleetworks-workspace"
+name = "fleetworks-workstation"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
-description = "Fleetworks workspace paths and local configuration"
+description = "Fleetworks workstation identity, protected settings and local recovery"
 
 [dependencies]
 anyhow.workspace = true

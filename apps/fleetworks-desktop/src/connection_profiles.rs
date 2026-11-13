@@ -4,11 +4,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use fleetworks_workspace::native::ConnectionProfilesSnapshot;
-use fleetworks_workspace::native::CredentialReference;
-use fleetworks_workspace::native::GatewayProfile;
-use fleetworks_workspace::native::GatewayProfileInput;
-use fleetworks_workspace::native::NativeContainer;
+use fleetworks_workstation::native::ConnectionProfilesSnapshot;
+use fleetworks_workstation::native::CredentialReference;
+use fleetworks_workstation::native::GatewayProfile;
+use fleetworks_workstation::native::GatewayProfileInput;
+use fleetworks_workstation::native::NativeContainer;
 use rune::FileDialogOptions;
 use rune::TextEdit;
 use rune::Tx;

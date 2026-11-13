@@ -103,13 +103,13 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates/argos-osint-core/Cargo.toml ./crates/argos-osint-core/Cargo.toml
 COPY crates/argos-osint-api/Cargo.toml ./crates/argos-osint-api/Cargo.toml
-COPY crates/fleetworks-workspace/Cargo.toml ./crates/fleetworks-workspace/Cargo.toml
+COPY crates/fleetworks-workstation/Cargo.toml ./crates/fleetworks-workstation/Cargo.toml
 COPY crates/fleetworks-broker/Cargo.toml ./crates/fleetworks-broker/Cargo.toml
 COPY crates/fleetworks-jobs/Cargo.toml ./crates/fleetworks-jobs/Cargo.toml
 COPY apps/fleetworks-desktop/Cargo.toml ./apps/fleetworks-desktop/Cargo.toml
 COPY services/api-host/Cargo.toml ./services/api-host/Cargo.toml
 RUN for member in crates/argos-osint-core crates/argos-osint-api \
-        crates/fleetworks-workspace crates/fleetworks-broker crates/fleetworks-jobs \
+        crates/fleetworks-workstation crates/fleetworks-broker crates/fleetworks-jobs \
         apps/fleetworks-desktop services/api-host; do \
       mkdir -p "${member}/src"; \
       printf '\n' > "${member}/src/lib.rs"; \

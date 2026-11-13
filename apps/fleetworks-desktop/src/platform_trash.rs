@@ -5,9 +5,9 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use anyhow::Result;
-use fleetworks_workspace::native::TrashAdapter;
-use fleetworks_workspace::native::TrashReference;
-use fleetworks_workspace::native::TrashTarget;
+use fleetworks_workstation::native::TrashAdapter;
+use fleetworks_workstation::native::TrashReference;
+use fleetworks_workstation::native::TrashTarget;
 use objc2_foundation::NSFileManager;
 use objc2_foundation::NSSearchPathDirectory;
 use objc2_foundation::NSSearchPathDomainMask;

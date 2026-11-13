@@ -103,9 +103,9 @@ jobs:
           set -euo pipefail
           evidence="$RUNNER_TEMP/fleetworks-native-evidence"
           mkdir -p "$evidence"
-          cargo fmt -p fleetworks-desktop -p fleetworks-workspace -p fleetworks-contracts -- --check
+          cargo fmt -p fleetworks-desktop -p fleetworks-workstation -p fleetworks-contracts -- --check
           python3 scripts/agent_cargo.py test --locked -p fleetworks-desktop \
-            -p fleetworks-workspace -p fleetworks-contracts -- --test-threads=1 \
+            -p fleetworks-workstation -p fleetworks-contracts -- --test-threads=1 \
             | tee "$evidence/unit-tests.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$evidence/unit-tests.log"
       - name: Generate selected actual shared-view fixture evidence

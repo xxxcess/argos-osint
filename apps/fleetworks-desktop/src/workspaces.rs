@@ -4,14 +4,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use fleetworks_workspace::native::BackendBinding;
-use fleetworks_workspace::native::NativeContainer;
-use fleetworks_workspace::native::NativeWorkspace;
-use fleetworks_workspace::native::RebindAttempt;
-use fleetworks_workspace::native::RegistrationAttempt;
-use fleetworks_workspace::native::RemovalKind;
-use fleetworks_workspace::native::WorkspaceOperation;
-use fleetworks_workspace::native::WorkspaceState;
+use fleetworks_workstation::native::BackendBinding;
+use fleetworks_workstation::native::NativeContainer;
+use fleetworks_workstation::native::NativeWorkspace;
+use fleetworks_workstation::native::RebindAttempt;
+use fleetworks_workstation::native::RegistrationAttempt;
+use fleetworks_workstation::native::RemovalKind;
+use fleetworks_workstation::native::WorkspaceOperation;
+use fleetworks_workstation::native::WorkspaceState;
 use rune::TextEdit;
 use rune::Tx;
 

@@ -5,14 +5,14 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 
-use fleetworks_workspace::native::legacy_connect::RegistrationReceipt;
-use fleetworks_workspace::native::NativeContainer;
-use fleetworks_workspace::native::NativeWorkspace;
-use fleetworks_workspace::native::OperationPhase;
-use fleetworks_workspace::native::RemovalKind;
-use fleetworks_workspace::native::RemovalOutcome;
-use fleetworks_workspace::native::RetirementReceipt;
-use fleetworks_workspace::native::WorkspaceState;
+use fleetworks_workstation::native::legacy_connect::RegistrationReceipt;
+use fleetworks_workstation::native::NativeContainer;
+use fleetworks_workstation::native::NativeWorkspace;
+use fleetworks_workstation::native::OperationPhase;
+use fleetworks_workstation::native::RemovalKind;
+use fleetworks_workstation::native::RemovalOutcome;
+use fleetworks_workstation::native::RetirementReceipt;
+use fleetworks_workstation::native::WorkspaceState;
 
 fn home() -> (tempfile::TempDir, PathBuf) {
     let temporary = tempfile::tempdir().expect("owned temporary fixture home");

@@ -1,8 +1,8 @@
 use fleetworks_contracts::capabilities::Capabilities;
 use fleetworks_contracts::context::Permission;
-use fleetworks_workspace::native::legacy_connect::RegistrationReceipt;
-use fleetworks_workspace::native::BackendBinding;
-use fleetworks_workspace::native::WorkspaceState;
+use fleetworks_workstation::native::legacy_connect::RegistrationReceipt;
+use fleetworks_workstation::native::BackendBinding;
+use fleetworks_workstation::native::WorkspaceState;
 use rune::Env;
 use rune::Runtime;
 

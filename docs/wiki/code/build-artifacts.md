@@ -27,7 +27,7 @@ Within a selected graph:
 | --- | --- |
 | `deps/<test-name>-<hash>` | Unit/integration test executable; the suffix distinguishes compilation inputs, not service instances |
 | `deps/*.rlib`, `deps/*.rmeta` | Compiled Rust libraries / compiler metadata; not standalone programs |
-| `deps/libfleetworks_workspace-*.rlib` | Native settings/identity, credential-file references, durable recovery and legacy-folder compatibility; linked into the app, no separate service |
+| `deps/libfleetworks_workstation-*.rlib` | Native settings/identity, credential-file references, durable recovery and legacy-folder compatibility; linked into the app, no separate service |
 | `*.d` | Source-dependency information used for rebuild decisions |
 | `.fingerprint/`, `incremental/` | Cargo freshness and incremental compiler state; preserve active/reusable graphs |
 | `build/*/out/` | Build-script outputs, generated bindings and native/static libraries such as `.a` archives, including C/C++ engine artifacts where features require them |

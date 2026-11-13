@@ -35,7 +35,11 @@ BERT_SHARED_PREFIXES = (
     "crates/argos-osint-core/tests/storage_classifier_",
 )
 SHARED_PRIMARY_PATHS = {"Cargo.lock", "Cargo.toml", "rust-toolchain.toml", "scripts/agent_cargo.py"}
-SHARED_PRIMARY_PREFIXES = (".cargo/", "crates/fleetworks-contracts/", "crates/fleetworks-workspace/")
+SHARED_PRIMARY_PREFIXES = (
+    ".cargo/", "crates/fleetworks-contracts/", "crates/fleetworks-workstation/",
+    # Git comparisons include deleted paths when this crate is renamed.
+    "crates/fleetworks-workspace/",
+)
 WEB_BUILD_PATHS = {
     ".github/workflows/intel-web.yml", ".node-version", ".nvmrc", "package.json", "pnpm-lock.yaml",
     "pnpm-workspace.yaml", "tsconfig.json", "playwright.config.ts", "scripts/check_web_build.mjs",
@@ -55,7 +59,7 @@ SERVER_STORAGE_PATHS = {
     "services/api-host/src/actor_seed.rs",
     "services/api-host/src/atlas_worker.rs",
 }
-DESKTOP_PACKAGES = ("-p", "fleetworks-desktop", "-p", "fleetworks-workspace", "-p", "fleetworks-contracts")
+DESKTOP_PACKAGES = ("-p", "fleetworks-desktop", "-p", "fleetworks-workstation", "-p", "fleetworks-contracts")
 EVENTS = ("push", "pull_request", "workflow_dispatch", "schedule")
 COMPONENTS = ("auto", "native", "backend", "all")
 

@@ -2558,7 +2558,7 @@ dependencies = [
  "chrono",
  "clap",
  "fleetworks-contracts",
- "fleetworks-workspace",
+ "fleetworks-workstation",
  "getrandom 0.4.3",
  "libc",
  "objc2-app-kit 0.3.2",
@@ -2610,7 +2610,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "fleetworks-workspace"
+name = "fleetworks-workstation"
 version = "0.2.1"
 dependencies = [
  "anyhow",

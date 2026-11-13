@@ -6,10 +6,10 @@ use anyhow::Context;
 use anyhow::Result;
 use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::Client;
-use fleetworks_workspace::native::legacy_connect::RegistrationEnsureRequest;
-use fleetworks_workspace::native::legacy_connect::RegistrationReceipt;
-use fleetworks_workspace::native::NativeContainer;
-use fleetworks_workspace::native::RebindAttempt;
+use fleetworks_workstation::native::legacy_connect::RegistrationEnsureRequest;
+use fleetworks_workstation::native::legacy_connect::RegistrationReceipt;
+use fleetworks_workstation::native::NativeContainer;
+use fleetworks_workstation::native::RebindAttempt;
 use serde::Serialize;
 
 use crate::app::Intent;

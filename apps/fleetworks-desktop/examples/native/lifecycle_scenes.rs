@@ -4,12 +4,12 @@ use fleetworks_desktop::registration::NativeInterface;
 use fleetworks_desktop::workspaces::WorkspaceCommand;
 use fleetworks_desktop::Page;
 use fleetworks_desktop::State;
-use fleetworks_workspace::native::legacy_connect::RegistrationEnsureRequest;
-use fleetworks_workspace::native::legacy_connect::RegistrationReceipt;
-use fleetworks_workspace::native::BackendBinding;
-use fleetworks_workspace::native::RemovalKind;
-use fleetworks_workspace::native::WorkspaceOperation;
-use fleetworks_workspace::native::WorkspaceState;
+use fleetworks_workstation::native::legacy_connect::RegistrationEnsureRequest;
+use fleetworks_workstation::native::legacy_connect::RegistrationReceipt;
+use fleetworks_workstation::native::BackendBinding;
+use fleetworks_workstation::native::RemovalKind;
+use fleetworks_workstation::native::WorkspaceOperation;
+use fleetworks_workstation::native::WorkspaceState;
 
 fn receipt() -> RegistrationReceipt {
     RegistrationReceipt::new(

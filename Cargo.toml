@@ -6,7 +6,7 @@ members = [
     "services/api-host",
     "services/search-index",
     "crates/fleetworks-contracts",
-    "crates/fleetworks-workspace",
+    "crates/fleetworks-workstation",
     "crates/fleetworks-broker",
     "crates/fleetworks-jobs",
     "apps/fleetworks-desktop",

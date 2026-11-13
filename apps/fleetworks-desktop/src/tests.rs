@@ -17,7 +17,7 @@ use fleetworks_contracts::capabilities::Capabilities;
 use fleetworks_contracts::connect::RegistrationReceipt;
 use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::context::RegisteredContext;
-use fleetworks_workspace::native::WorkspaceState;
+use fleetworks_workstation::native::WorkspaceState;
 
 #[test]
 fn real_shell_navigation_works_offline_without_boundary_effects() {

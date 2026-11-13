@@ -8,7 +8,7 @@
 
 | Component | Owns |
 | --- | --- |
-| [Rune macOS desktop](../../../apps/fleetworks-desktop) | Native pages, input and accessibility; protected installation identity and exact-origin provisioned credential references through the [workspace library](../../../crates/fleetworks-workspace); bounded gateway requests through shared [contracts](../../../crates/fleetworks-contracts). Connects to independently running services. |
+| [Rune macOS desktop](../../../apps/fleetworks-desktop) | Native pages, input and accessibility; protected installation identity and exact-origin provisioned credential references through the [workstation library](../../../crates/fleetworks-workstation); bounded gateway requests through shared [contracts](../../../crates/fleetworks-contracts). Connects to independently running services. |
 | [Intel Web](../../../apps/web-desktop) | React Native Web presentation, topology and its accessible list, Connect/session gate, and a same-origin server relay using its separately provisioned gateway credential. |
 | Linux backend: [API](../../../crates/argos-osint-api), [service host](../../../services/api-host) and [Core](../../../crates/argos-osint-core) | Authenticated gateway/live streams, private services, durable workers, shared configuration and domain storage. Linux owns [classifier/NLP execution](classifier.md), [Tantivy discovery](actor-search.md), SurrealDB and [Jobs persistence](../../../crates/fleetworks-jobs). |
 

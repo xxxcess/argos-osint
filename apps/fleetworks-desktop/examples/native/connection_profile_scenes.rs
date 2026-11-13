@@ -8,9 +8,9 @@ use fleetworks_desktop::connection::ConnectionTestSummary;
 use fleetworks_desktop::connection_profiles::ProfileAction;
 use fleetworks_desktop::Page;
 use fleetworks_desktop::State;
-use fleetworks_workspace::native::ConnectionProfilesSnapshot;
-use fleetworks_workspace::native::CredentialReference;
-use fleetworks_workspace::native::GatewayProfile;
+use fleetworks_workstation::native::ConnectionProfilesSnapshot;
+use fleetworks_workstation::native::CredentialReference;
+use fleetworks_workstation::native::GatewayProfile;
 use rune::TextEdit;
 
 fn reference(origin: &str) -> CredentialReference {

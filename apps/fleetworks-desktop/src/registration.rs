@@ -9,7 +9,7 @@ use fleetworks_contracts::connect::REGISTRATION_ENSURE_PATH;
 use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::context::RegisteredContext;
 use fleetworks_contracts::Client;
-use fleetworks_workspace::native::NativeContainer;
+use fleetworks_workstation::native::NativeContainer;
 use rune::Tx;
 use serde::Deserialize;
 use serde::Serialize;

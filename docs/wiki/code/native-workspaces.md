@@ -1,6 +1,6 @@
 # Native workstation identity
 
-[Fleetworks](fleetworks.md) · [Connections](native-connections.md) · [Protected manager](../../../crates/fleetworks-workspace/src/native/)
+[Fleetworks](fleetworks.md) · [Connections](native-connections.md) · [Protected manager](../../../crates/fleetworks-workstation/src/native/)
 
 The native installation owns protected settings under `~/.fleetworks` in the operating system account home. Workstation registration uses that installation marker and authenticated backend scope. The gateway-issued opaque `workstation_id` is the Connect ID. IP is optional mutable metadata; changing or omitting it does not create a new identity, and two installations sharing an IP remain distinct.
 

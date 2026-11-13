@@ -59,7 +59,7 @@ mod native {
     use fleetworks_desktop::workspaces::WorkspaceSnapshot;
     use fleetworks_desktop::Page;
     use fleetworks_desktop::State;
-    use fleetworks_workspace::native::WorkspaceState;
+    use fleetworks_workstation::native::WorkspaceState;
     use rune::AppSpec;
     use rune::TextEdit;
 

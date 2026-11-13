@@ -1,4 +1,4 @@
-//! Host workspace paths, configuration and credentials for Fleetworks clients.
+//! Workstation identity, protected settings and local recovery for Fleetworks clients.
 
 mod import;
 

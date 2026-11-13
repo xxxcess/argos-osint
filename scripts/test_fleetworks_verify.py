@@ -63,6 +63,8 @@ class PathScopesTests(unittest.TestCase):
             "Cargo.lock": {"desktop", "server", "storage", "compose", "queue", "images"},
             "pnpm-lock.yaml": {"web", "web_dev", "server", "compose", "images"},
             "crates/fleetworks-contracts/src/lib.rs": {"desktop", "server", "storage", "compose", "queue", "images"},
+            "crates/fleetworks-workstation/src/native/mod.rs": {"desktop", "server", "storage", "compose", "queue", "images"},
+            "crates/fleetworks-workspace/src/native/mod.rs": {"desktop", "server", "storage", "compose", "queue", "images"},
             "packages/api-client/src/index.ts": {"web", "server", "compose", "images"},
             "scripts/surrealdb-release.json": {"server", "storage", "queue"},
             ".github/workflows/fleetworks.yml": set(),
@@ -94,6 +96,8 @@ class PathScopesTests(unittest.TestCase):
         self.assertEqual(path_images("deploy/start-surreal.sh"), {"surrealdb"})
         self.assertEqual(path_images("Cargo.lock"), set(RUST_IMAGES))
         self.assertEqual(path_images("crates/fleetworks-contracts/src/actor_index.rs"), set(RUST_IMAGES))
+        for crate in ("fleetworks-workstation", "fleetworks-workspace"):
+            self.assertEqual(path_images(f"crates/{crate}/src/native/mod.rs"), set(RUST_IMAGES))
         self.assertEqual(path_images("deploy/Dockerfile.dockerignore"), ALL_IMAGES)
         self.assertEqual(component_plan("backend", set(), set())[1], {"runtime", "surrealdb", "search-index"})
 

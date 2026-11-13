@@ -45,7 +45,7 @@ Fleetworks has a Rune macOS client, an independently operated Linux backend and 
 
 ```sh
 python3 scripts/fleetworks_verify.py platform --format json
-python3 scripts/agent_cargo.py test --locked -p fleetworks-desktop -p fleetworks-workspace -p fleetworks-contracts
+python3 scripts/agent_cargo.py test --locked -p fleetworks-desktop -p fleetworks-workstation -p fleetworks-contracts
 python3 scripts/fleetworks_candidate.py build-native --agent --target host --profile debug
 ```
 

@@ -1,5 +1,5 @@
 use fleetworks_contracts::capabilities::Capabilities;
-use fleetworks_workspace::native::WorkspaceState;
+use fleetworks_workstation::native::WorkspaceState;
 use rune::Env;
 use rune::Runtime;
 

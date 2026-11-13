@@ -6,11 +6,11 @@ use std::sync::Arc;
 use anyhow::Context;
 use anyhow::Result;
 use fleetworks_contracts::Client;
-use fleetworks_workspace::native::BackendBinding;
-use fleetworks_workspace::native::NativeContainer;
-use fleetworks_workspace::native::RemovalOutcome;
-use fleetworks_workspace::native::RetirementReceipt;
-use fleetworks_workspace::native::WorkspaceOperation;
+use fleetworks_workstation::native::BackendBinding;
+use fleetworks_workstation::native::NativeContainer;
+use fleetworks_workstation::native::RemovalOutcome;
+use fleetworks_workstation::native::RetirementReceipt;
+use fleetworks_workstation::native::WorkspaceOperation;
 use serde::Deserialize;
 use serde::Serialize;
 

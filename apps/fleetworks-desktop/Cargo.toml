@@ -13,7 +13,7 @@ chrono.workspace = true
 sha2.workspace = true
 clap.workspace = true
 fleetworks-contracts = { path = "../../crates/fleetworks-contracts" }
-fleetworks-workspace = { path = "../../crates/fleetworks-workspace" }
+fleetworks-workstation = { path = "../../crates/fleetworks-workstation" }
 serde.workspace = true
 serde_json.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "fs", "io-util"] }

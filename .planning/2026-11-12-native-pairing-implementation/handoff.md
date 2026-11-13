@@ -1,13 +1,23 @@
-# Native pairing implementation — handoff
+# Native pairing — saved checkpoint
 
-[Actual verification](acceptance.md) · [Connection contract](../../docs/wiki/code/native-connections.md#pairing-and-keychain-agreed-target)
+[Evidence](acceptance.md) · [Connection contract](../../docs/wiki/code/native-connections.md)
 
-Implemented: public bounded pairing start/poll; separate Operator approve/deny/revoke; durable scope/installation/epoch/grant fences; Keychain-backed native setup/reconnect/recovery; exact-retry journals; explicit operator file mode; fresh review Operator provisioning. Root owns integration/Cargo and commits. Dependency foundation committed `6eef4cc`; feature source is frozen for checks except demonstrated blockers.
+Pairing/Keychain, workstation naming, build progress, workflow docs and diagrams are committed. No user Keychain, app packaging/open, deployment or user-data migration was performed.
 
-Use `python3 scripts/fleetworks_pairing.py --origin <gateway> --operator-token-file <private-operator-file> approve --pairing-id <displayed-id> --approval-code <displayed-code>` from a separately trusted operator terminal. Native users enter a URL and wait for approval. Existing reviews require explicit independent Operator provisioning; initialization never edits retained deployments.
+Completed: full workspace run, service-host CLI help, required embedded collection and affected retries. The latest affected batch reported1222 passed/1 failed/6 ignored; both stack-overflow targets, bootstrap, log cap and activity ordering passed. Its remaining failure exposed v2 retirement using legacy-folder lookup.
 
-Schema 10 requires coordinated compatible bootstrap/gateway/workers. No automatic bootstrap, container replacement, user-Keychain write or data migration was performed.
+The retirement fix now handles workstation owners, guarded drain/session/admission fences, legacy protection, migrated retiring owners and replay. Formatting and all-target Clippy pass (5m37s). **Runtime remains unverified:** stopped during compilation at the user's request, exit130. Step4 is not declared ready; no final green driver run is claimed.
 
-Completed: 146 Rust unit/native/SDK/catalog tests; 15 Python operator/provisioning cases; backend server-feature production check; locked Linux runtime/search dependency resolution; selected 12 native PNG/tree inspections and 5 document figures.
+Resume only the affected required-mode command; retain passing independent evidence:
 
-Current verification: formatter, all-target Clippy and full workspace passed; actual service-host CLI help passed. Required collection exposed seven targets; affected retries cleared six, including both production stack-overflow paths. Latest affected batch:1222 passed/1 failed/6 ignored. The sole remaining failure is public v2 retirement returning NotFound through legacy-folder lookup; a bounded production repair plus migrated-retiring compatibility regression are under review. No overall gate pass is claimed. Read acceptance for commands, counts and retained evidence. Native app packaging/open, real Keychain and hosted platforms remain separate; no user data or running stack was changed.
+```sh
+CARGO_BUILD_JOBS=2 env -u ARGOS_SURREAL_BIN -u ARGOS_EMBED -u RUST_MIN_STACK \
+  ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1 \
+  python3 scripts/agent_cargo.py test --workspace --lib --bins --locked \
+  --test storage_connect_registry --test storage_classifier_activation \
+  --test storage_setup_jobs --test storage_job_actions \
+  --test storage_configuration_reset_barrier --test api_contract \
+  --no-fail-fast -- --nocapture
+```
+
+Library/binary selectors retain the validated workspace feature graph. Preserve current caches, running services and unrelated dist/. Actual GUI/Keychain and hosted platform/mutation evidence remain separate. Schema10 deployment requires compatible bootstrap/gateway/workers; retained deployments were not changed.

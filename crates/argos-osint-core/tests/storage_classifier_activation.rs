@@ -300,6 +300,11 @@ async fn actual_training_candidate_requires_scoped_private_source_and_explicit_g
     // Controlled durable-state fault after a genuine admitted/claimed effect:
     // generic job/task are terminal, but unresolved operation state still pins
     // exactly its associated workstation until a proven terminal state returns.
+    let relay = RegistryAuthority::new("activation-scope", "fixture-relay", "activation-access")
+        .expect("separate synthetic relay authority");
+    let session = connect_registry::create_session(&repo, &relay, &creator.connect_id)
+        .await
+        .expect("actual session before retirement");
     let pending = connect_registry::begin_retirement(
         &repo,
         &authority(),
@@ -308,6 +313,35 @@ async fn actual_training_candidate_requires_scoped_private_source_and_explicit_g
     )
     .await
     .expect("retirement fence after real activation");
+    assert!(
+        connect_registry::registration_context(
+            &repo,
+            &authority(),
+            &creator.registration_id,
+            creator.registration_revision,
+        )
+        .await
+        .is_err(),
+        "retirement fences current registration authority"
+    );
+    assert!(
+        connect_registry::validate_session(&repo, &relay, session.token.expose_secret(), None)
+            .await
+            .is_err(),
+        "retirement revokes existing browser authority"
+    );
+    let mut after_retirement = request.clone();
+    after_retirement.request_id = "after-retirement".into();
+    assert!(
+        classifier_activation::admit(
+            &repo,
+            &admission(&creator, "after-retirement"),
+            &after_retirement,
+        )
+        .await
+        .is_err(),
+        "retirement fences new activation admission"
+    );
     for state in ["running", "effect_uncertain"] {
         repo.db()
             .query("UPDATE $record SET state=$state RETURN NONE")
@@ -373,15 +407,35 @@ async fn actual_training_candidate_requires_scoped_private_source_and_explicit_g
         .expect("restore genuinely completed operation state")
         .check()
         .expect("restored state statement");
+    let completed = connect_registry::finish_retirement(
+        &repo,
+        &authority(),
+        &creator.registration_id,
+        pending.revision,
+    )
+    .await
+    .expect("settled owned activation drain");
     assert!(matches!(
+        &completed,
+        connect_registry::RetirementResult::Complete(_)
+    ));
+    let replay = connect_registry::begin_retirement(
+        &repo,
+        &authority(),
+        &creator.registration_id,
+        creator.registration_revision,
+    )
+    .await
+    .expect("idempotent terminal retirement fence");
+    assert_eq!(
         connect_registry::finish_retirement(
             &repo,
             &authority(),
             &creator.registration_id,
-            pending.revision
+            replay.revision,
         )
         .await
-        .expect("settled owned activation drain"),
-        connect_registry::RetirementResult::Complete(_)
-    ));
+        .expect("idempotent terminal retirement receipt"),
+        completed
+    );
 }

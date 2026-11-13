@@ -18,6 +18,7 @@ use sha2::Digest;
 use sha2::Sha256;
 use surrealdb::engine::any::Any;
 use surrealdb::types::Duration as DbDuration;
+use surrealdb::types::RecordId;
 use surrealdb::types::SurrealValue;
 use surrealdb::Surreal;
 
@@ -644,6 +645,29 @@ pub struct RetirementPending {
     pub revision: u64,
 }
 
+// Retirement follows the registration contract: v2 owns a workstation,
+// while retained v1 registrations still own their protected legacy folder.
+async fn retirement_owner_in(
+    tx: &Tx,
+    row: &RegistrationRow,
+) -> Result<(RecordId, String), TxError> {
+    if row.contract_version == 2 {
+        let node = workstation_in(tx, &row.workstation_id).await?;
+        if node.scope_id != row.scope_id {
+            return Err(abort("missing"));
+        }
+        return Ok((rid("connect_workstation", &row.workstation_id), node.state));
+    }
+    if row.contract_version != 1 {
+        return Err(abort("invalid"));
+    }
+    let folder = workspace_in(tx, &row.workspace_id).await?;
+    if folder.protected_default || folder.workspace_name == "default" {
+        return Err(abort("protected"));
+    }
+    Ok((rid("connect_workspace", &row.workspace_id), folder.state))
+}
+
 /// Fence new admission and revoke sessions. Final deletion readiness intentionally
 /// stays pending until the owning Jobs transaction proves all active associations drained.
 pub async fn begin_retirement(
@@ -661,18 +685,25 @@ pub async fn begin_retirement(
         async move {
             guard_in(&tx).await?;
             let row = read_registration_in(&tx, &id, &authority).await?;
-            let folder = workspace_in(&tx, &row.workspace_id).await?;
-            if folder.protected_default || folder.workspace_name == "default" { return Err(abort("protected")); }
-            if row.state == "retired" && expected_revision >= (row.revision as u64).saturating_sub(2) && expected_revision <= row.revision as u64 {
+            let (owner, owner_state) = retirement_owner_in(&tx, &row).await?;
+            if row.state == "retired" && (row.contract_version != 2 || owner_state == "retired") && expected_revision >= (row.revision as u64).saturating_sub(2) && expected_revision <= row.revision as u64 {
                 return Ok(RetirementPending { registration_id:id, workspace_id:row.workspace_id, revision:row.revision as u64 });
             }
             if row.state == "retiring" && (row.revision as u64 == expected_revision.saturating_add(1) || row.revision as u64 == expected_revision) {
+                if row.contract_version == 2 && owner_state != "retiring" {
+                    // Migration retains the active workstation for already
+                    // accepted causal work. Resume its retirement only under
+                    // this same guard and the accepted registration revision.
+                    if owner_state != "active" { return Err(abort("revoked")); }
+                    run(&tx, tx.query("UPDATE $owner SET state='retiring', revision+=1 RETURN NONE; UPDATE connect_session SET revoked=true WHERE registration_id=$id RETURN NONE;")
+                        .bind(("owner", owner)).bind(("id", id.clone()))).await?;
+                }
                 return Ok(RetirementPending { registration_id:id, workspace_id:row.workspace_id, revision:row.revision as u64 });
             }
-            if row.state != "active" || folder.state != "active" { return Err(abort("revoked")); }
+            if row.state != "active" || owner_state != "active" { return Err(abort("revoked")); }
             if row.revision as u64 != expected_revision { return Err(abort("revision")); }
-            run(&tx, tx.query("UPDATE $registration SET state='retiring', revision+=1 RETURN NONE; UPDATE $workspace SET state='retiring', revision+=1 RETURN NONE; UPDATE connect_session SET revoked=true WHERE registration_id=$id RETURN NONE;")
-                .bind(("registration", rid("connect_registration", &id))).bind(("workspace", rid("connect_workspace", &row.workspace_id))).bind(("id", id.clone()))).await?;
+            run(&tx, tx.query("UPDATE $registration SET state='retiring', revision+=1 RETURN NONE; UPDATE $owner SET state='retiring', revision+=1 RETURN NONE; UPDATE connect_session SET revoked=true WHERE registration_id=$id RETURN NONE;")
+                .bind(("registration", rid("connect_registration", &id))).bind(("owner", owner)).bind(("id", id.clone()))).await?;
             Ok(RetirementPending { registration_id:id, workspace_id:row.workspace_id, revision:row.revision as u64 + 1 })
         }
     }).await?;
@@ -723,8 +754,9 @@ fn retirement_receipt(row: &RegistrationRow, deployment: &DeploymentState) -> Re
 }
 
 /// Finish under the same registry guard that admission/session checks write.
-/// Tombstones/history remain; a later same-name creation needs a new marker
-/// and identity rather than reviving the retired workspace or registration.
+/// Tombstones/history remain. Version two retires the installation's workstation;
+/// retained version one retires its protected-folder binding. Retired identities
+/// cannot be revived by a later ensure or same-name legacy folder creation.
 pub async fn finish_retirement(
     repo: &Repository,
     authority: &RegistryAuthority,
@@ -738,12 +770,9 @@ pub async fn finish_retirement(
         guard_in(&tx).await?;
         let deployment = deployment_in(&tx).await?;
         let row = read_registration_in(&tx, registration_id, authority).await?;
-        let folder = workspace_in(&tx, &row.workspace_id).await?;
-        if folder.protected_default || folder.workspace_name == "default" {
-            return Err(abort("protected"));
-        }
+        let (owner, owner_state) = retirement_owner_in(&tx, &row).await?;
         if row.state == "retired"
-            && folder.state == "retired"
+            && owner_state == "retired"
             && row.revision as u64 == expected_revision
         {
             return Ok(RetirementResult::Complete(retirement_receipt(
@@ -751,7 +780,7 @@ pub async fn finish_retirement(
                 &deployment,
             )));
         }
-        if row.state != "retiring" || folder.state != "retiring" {
+        if row.state != "retiring" || owner_state != "retiring" {
             return Err(abort("revoked"));
         }
         if row.revision as u64 != expected_revision {
@@ -765,14 +794,24 @@ pub async fn finish_retirement(
             .bind(("id", registration_id.to_owned())),
         )
         .await?;
-        if super::job_context::has_active_workspace_work_in(
-            &tx,
-            authority.scope_id(),
-            &deployment.deployment_id,
-            &row.workspace_id,
-        )
-        .await?
-        {
+        let active = if row.contract_version == 2 {
+            super::job_context::has_active_workstation_work_in(
+                &tx,
+                authority.scope_id(),
+                &deployment.deployment_id,
+                &row.workstation_id,
+            )
+            .await?
+        } else {
+            super::job_context::has_active_workspace_work_in(
+                &tx,
+                authority.scope_id(),
+                &deployment.deployment_id,
+                &row.workspace_id,
+            )
+            .await?
+        };
+        if active {
             return Ok(RetirementResult::Pending(RetirementPending {
                 registration_id: row.registration_id,
                 workspace_id: row.workspace_id,
@@ -783,24 +822,30 @@ pub async fn finish_retirement(
             &tx,
             tx.query(
                 "UPDATE $registration SET state='retired',revision+=1 RETURN NONE;
-            UPDATE $workspace SET state='retired',revision+=1 RETURN NONE;
-            DELETE $binding WHERE registration_id=$id RETURN NONE;
-            DELETE $name WHERE workspace_id=$workspace_id RETURN NONE;",
+            UPDATE $owner SET state='retired',revision+=1 RETURN NONE;
+            DELETE $binding WHERE registration_id=$id RETURN NONE;",
             )
             .bind(("registration", rid("connect_registration", registration_id)))
-            .bind(("workspace", rid("connect_workspace", &row.workspace_id)))
+            .bind(("owner", owner))
             .bind(("binding", rid("connect_binding", &hash(&[&row.connect_id]))))
-            .bind(("id", registration_id.to_owned()))
-            .bind((
-                "name",
-                rid(
-                    "connect_name_claim",
-                    &hash(&[&row.workstation_id, &row.workspace_name]),
-                ),
-            ))
-            .bind(("workspace_id", row.workspace_id.clone())),
+            .bind(("id", registration_id.to_owned())),
         )
         .await?;
+        if row.contract_version == 1 {
+            run(
+                &tx,
+                tx.query("DELETE $name WHERE workspace_id=$workspace_id RETURN NONE")
+                    .bind((
+                        "name",
+                        rid(
+                            "connect_name_claim",
+                            &hash(&[&row.workstation_id, &row.workspace_name]),
+                        ),
+                    ))
+                    .bind(("workspace_id", row.workspace_id.clone())),
+            )
+            .await?;
+        }
         let retired = read_registration_in(&tx, registration_id, authority).await?;
         Ok(RetirementResult::Complete(retirement_receipt(
             &retired,

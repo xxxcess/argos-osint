@@ -1,3 +1,5 @@
+> **Current checkpoint:** stopped at user wrap-up. Final v2 retirement formatting and all-target Clippy pass (5m37s); runtime verification was interrupted during core compilation (exit130), before assertions. No overall gate pass or Step4 readiness is claimed.
+
 # Native pairing and Keychain — verification
 
 [Connections](../../docs/wiki/code/native-connections.md#pairing-and-keychain-agreed-target) · [Native design](../../docs/wiki/code/native-design-system.md) · [Handoff](handoff.md)
@@ -18,7 +20,7 @@ Implementation baseline: `b8da29f`. Dependency/lockfile checkpoint: `6eef4cc`. T
 | Docs/diagram checks | Original 16 Markdown files/420 links/5 figures; workflow updates cover 8 reviewed guides/entrypoints with 175 local path/anchor checks and 2 exact XML-valid rendered/inspected diagram pairs | PASS; workflow links, bounds and whitespace checked; later bounded audit: 11 relevant docs/plans, 203 local links/anchors, two unchanged diagram pairs valid |
 | Formatting | Full `cargo fmt --all -- --check` after authorized formatting repair; assertions unchanged, original formatting retained in scratch | PASS on the current test-fixture repair checkpoint |
 | Workspace all-target Clippy | Whole workspace/all targets with `-D warnings`; fixture compiler/lint repairs below | PASS after all six case repairs; final all-target rerun 3m33s |
-| Full local embedded gate | Prior collection failed six cases across four targets; all six repaired cases pass in focused required-mode execution | RUNNING at `712ed06`; formatting, Clippy and full workspace pass (3511s including 11m11s compilation/linking); host help PASS (928s); broad required storage restarting after runner graph repair |
+| Full local embedded acceptance | Completed full workspace/CLI, required collection and affected repairs retained below | INTERRUPTED at user wrap-up; final v2 retirement runtime remains unverified |
 
 ## Implemented boundaries
 
@@ -166,3 +168,16 @@ Post-collection repairs: full formatter and all-target Clippy passed again (**5m
 `final-affected-required.log`: exit101 with **1222 passed / 1 failed / 6 ignored** across20 harnesses after6m44s compilation. Core961, API57 and APIcontracts9 pass. Bootstrap2/2, intelligence4/4, queued summary1/1, worker stress8/8, operational-log cap1/1 (260.20s), activity2/2 and adjacent intel5/5 all pass on normal stacks; no tolerance or stack enlargement. The clock allocation repair resolves both formerly aborted targets.
 
 The activation fixture now passes genuine distinct-owner source isolation and reaches a real implementation gap: public begin/finish retirement always looked up a retained workspace, so valid v2 registration retirement returns NotFound. A scratch repair adds version-aware workstation ownership/drain while retaining legacy protection and the existing public API, installation/scope/revision/session/admission fences. Independent review also requires synchronizing a legitimately migrated retiring-v2 row whose workstation remains active. That fix and a focused legacy-migration regression are under review; source is unchanged while reviewed. This is the only remaining runtime target failure, not an overall pass.
+
+
+### Retirement repair applied for final scoped checks
+
+Public begin/finish retirement now select the current workstation owner for v2 and retain protected legacy-folder handling for v1. Same registry, scope, paired-installation and revision checks remain; sessions are revoked; active associated jobs/tasks and running/effect_uncertain activation keep the owner pending; domain/shared data is retained. A legitimately migrated already-retiring registration synchronizes only an active workstation under the accepted revision guard; finish still requires the owner retiring. Independent review found and corrected that migration edge before runtime verification.
+
+The existing genuine-v1 migration regression now checks stale revision causes no owner mutation, accepted same-owner causal work continues after synchronization, active work keeps retirement pending, public stop drains the actual root/child, and terminal receipts replay exactly. Activation regression checks session/new-admission fences, uncertain effects, unrelated ownership and final replay. Two reviewed patches are applied (registry, job context and two existing tests), with no schema/DTO/API/UI change. Final format/Clippy and required registry/setup/action/activation/API checks are next; no overall pass claimed yet.
+
+Fresh linked allocation comparison supports the prior runtime passes: generate poll488000→100448B; with_clock389072→1440B; observed callback792384→21456B; drain199280→13328B; drain_inner423504→40176B. These are static named prologue reservations, not peak live stack measurements. Root's actual normal-stack intelligence4/4 and queued-summary1/1 passes remain separate evidence.
+
+### User wrap-up
+
+Stopped only task-owned Cargo/rustc group68257; session5062 exited130. No further implementation or checks after the wrap-up request. Saved the retirement fix and exact resume command in handoff. Native app packaging/open, actual user Keychain, deployments and hosted matrices remain unexecuted.

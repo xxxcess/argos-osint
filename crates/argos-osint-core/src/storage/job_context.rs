@@ -617,35 +617,76 @@ pub(crate) async fn has_active_workspace_work_in(
     deployment_id: &str,
     workspace_id: &str,
 ) -> Result<bool, TxError> {
+    has_active_owner_work_in(
+        tx,
+        scope_id,
+        deployment_id,
+        WorkOwner::LegacyWorkspace(workspace_id),
+    )
+    .await
+}
+
+/// Workstation v2 retirement includes all accepted associations and uncertain
+/// activation effects for that exact installation, never a legacy child filter.
+pub(crate) async fn has_active_workstation_work_in(
+    tx: &Tx,
+    scope_id: &str,
+    deployment_id: &str,
+    workstation_id: &str,
+) -> Result<bool, TxError> {
+    has_active_owner_work_in(
+        tx,
+        scope_id,
+        deployment_id,
+        WorkOwner::Workstation(workstation_id),
+    )
+    .await
+}
+
+enum WorkOwner<'a> {
+    LegacyWorkspace(&'a str),
+    Workstation(&'a str),
+}
+
+async fn has_active_owner_work_in(
+    tx: &Tx,
+    scope_id: &str,
+    deployment_id: &str,
+    owner: WorkOwner<'_>,
+) -> Result<bool, TxError> {
+    let (predicate, owner_id) = match owner {
+        WorkOwner::LegacyWorkspace(id) => ("workspace_id=$owner", id),
+        WorkOwner::Workstation(id) => ("workstation_id=$owner", id),
+    };
     // A partially installed/missing attribution schema is not evidence that a
-    // workspace has no work. INFO fails before a missing table can look empty.
+    // registered owner has no work. INFO fails before a missing table can look empty.
     jobs::run(
         tx,
         tx.query("INFO FOR TABLE job_request; INFO FOR TABLE job_origin; INFO FOR TABLE classifier_activation_operation;"),
     )
     .await?;
-    let mut response = jobs::run(tx, tx.query(
+    let mut response = jobs::run(tx, tx.query(format!(
         "SELECT VALUE job_id FROM job_request WHERE scope_id=$scope AND deployment_id=$deployment \
-         AND workspace_id=$workspace AND count(SELECT VALUE id FROM job \
+         AND {predicate} AND count(SELECT VALUE id FROM job \
            WHERE (record::id(id)=$parent.job_id OR record::id(root)=$parent.job_id) \
            AND (state NOT IN ['completed','succeeded','failed','partial','cancelled','superseded','stopped'] \
              OR count(SELECT VALUE id FROM task WHERE job=$parent.id \
                AND state NOT IN ['completed','succeeded','failed','cancelled','superseded','skipped','stopped'] LIMIT 1)>0) LIMIT 1)>0 LIMIT 1",
-    ).bind(("scope", scope_id.to_owned()))
+    )).bind(("scope", scope_id.to_owned()))
         .bind(("deployment", deployment_id.to_owned()))
-        .bind(("workspace", workspace_id.to_owned()))).await?;
+        .bind(("owner", owner_id.to_owned()))).await?;
     let active: Vec<String> = jobs::take(&mut response, 0)?;
     if !active.is_empty() {
         return Ok(true);
     }
     // Activation creates its own attributed root. Its generic job may have
     // failed before an old worker's filesystem effect became provably settled.
-    // Only the existing durable requester association can pin this workspace.
-    let mut uncertain = jobs::run(tx, tx.query(
+    // Only the existing durable requester association can pin this registered owner.
+    let mut uncertain = jobs::run(tx, tx.query(format!(
         "SELECT VALUE job_id FROM job_request WHERE scope_id=$scope AND deployment_id=$deployment \
-         AND workspace_id=$workspace \
+         AND {predicate} \
          AND type::record('classifier_activation_operation',job_id).scope_id=$scope \
          AND type::record('classifier_activation_operation',job_id).state IN ['running','effect_uncertain'] LIMIT 1",
-    ).bind(("scope",scope_id.to_owned())).bind(("deployment",deployment_id.to_owned())).bind(("workspace",workspace_id.to_owned()))).await?;
+    )).bind(("scope",scope_id.to_owned())).bind(("deployment",deployment_id.to_owned())).bind(("owner",owner_id.to_owned()))).await?;
     Ok(!jobs::take::<Vec<String>>(&mut uncertain, 0)?.is_empty())
 }

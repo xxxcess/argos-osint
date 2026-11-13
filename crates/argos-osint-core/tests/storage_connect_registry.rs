@@ -431,6 +431,30 @@ async fn migration_preserves_inactive_admission_without_revoking_accepted_causal
     repo.db().query("CREATE $record SET job_id='inactive-accepted-root',root_id='inactive-accepted-root',scope_id='scope-a',deployment_id='inactive-migration-deployment',workstation_id='revoked_node',workspace_id='old-child',origin_json=$origin RETURN NONE")
         .bind(("record",surrealdb::types::RecordId::new("job_origin","inactive-accepted-root"))).bind(("origin",old_json.clone()))
         .await.expect("immutable accepted origin").check().expect("origin statement");
+    // A second genuinely accepted historical tree belongs to the retiring
+    // installation, with durable requester membership used by retirement drain.
+    argos_osint_core::storage::jobs::create_job(
+        repo.db(),
+        &argos_osint_core::storage::jobs::NewJob {
+            id: "retiring-accepted-root",
+            kind: "task",
+            operation: "fixture_operation",
+            parent: None,
+            created_at: chrono::Utc::now(),
+        },
+        &[],
+    )
+    .await
+    .expect("retiring installation's historical root");
+    let mut retiring_origin = old_origin.clone();
+    retiring_origin["registration_id"] = "old-retiring_node".into();
+    retiring_origin["workstation_id"] = "retiring_node".into();
+    retiring_origin["request_id"] = "retiring-accepted-request".into();
+    repo.db().query("CREATE $record SET job_id='retiring-accepted-root',root_id='retiring-accepted-root',scope_id='scope-a',deployment_id='inactive-migration-deployment',workstation_id='retiring_node',workspace_id='old-child',origin_json=$origin RETURN NONE;
+        CREATE job_request:retiring_accepted SET request_key='retiring-accepted-request',operation='fixture_operation',job_id='retiring-accepted-root',scope_id='scope-a',deployment_id='inactive-migration-deployment',registration_id='old-retiring_node',workstation_id='retiring_node',workspace_id='old-child',requested_at='2026-11-01T00:00:00Z',origin_json=$origin RETURN NONE;")
+        .bind(("record",surrealdb::types::RecordId::new("job_origin","retiring-accepted-root")))
+        .bind(("origin",serde_json::to_string(&retiring_origin).expect("historical retiring origin")))
+        .await.expect("retiring origin and requester association").check().expect("retiring attribution statements");
     argos_osint_core::storage::bootstrap::ensure_schema(repo.db())
         .await
         .expect("migration");
@@ -532,5 +556,103 @@ async fn migration_preserves_inactive_admission_without_revoking_accepted_causal
     assert_eq!(
         unchanged.take::<Option<String>>(0).expect("old bytes"),
         Some(old_json)
+    );
+
+    // A genuine v1 retirement migrates to an inactive v2 registration while
+    // its workstation stays active for accepted causal work. Resume that fence
+    // through public retirement operations rather than editing v2 state.
+    let registration = "workstation-retiring_node";
+    let native = authority("scope-a", "native-a");
+    assert!(
+        connect_registry::begin_retirement(&repo, &native, registration, 2)
+            .await
+            .is_err(),
+        "stale registration revision cannot fence the migrated owner"
+    );
+    let mut owner = repo
+        .db()
+        .query("SELECT VALUE state FROM ONLY connect_workstation:retiring_node; SELECT VALUE revision FROM ONLY connect_workstation:retiring_node;")
+        .await
+        .expect("owner after rejected stale revision")
+        .check()
+        .expect("owner snapshot statements");
+    assert_eq!(
+        owner.take::<Option<String>>(0).expect("state").as_deref(),
+        Some("active")
+    );
+    assert_eq!(owner.take::<Option<i64>>(1).expect("revision"), Some(3));
+
+    let pending = connect_registry::begin_retirement(&repo, &native, registration, 1)
+        .await
+        .expect("resume migrated retirement with its actual revision");
+    assert_eq!(pending.revision, 1);
+    let mut owner = repo
+        .db()
+        .query("SELECT VALUE state FROM ONLY connect_workstation:retiring_node; SELECT VALUE revision FROM ONLY connect_workstation:retiring_node;")
+        .await
+        .expect("synchronized workstation fence")
+        .check()
+        .expect("workstation fence statements");
+    assert_eq!(
+        owner.take::<Option<String>>(0).expect("state").as_deref(),
+        Some("retiring")
+    );
+    assert_eq!(owner.take::<Option<i64>>(1).expect("revision"), Some(4));
+    argos_osint_core::storage::jobs::create_job(
+        repo.db(),
+        &argos_osint_core::storage::jobs::NewJob {
+            id: "retiring-accepted-child",
+            kind: "task",
+            operation: "fixture_child",
+            parent: Some("retiring-accepted-root"),
+            created_at: chrono::Utc::now(),
+        },
+        &[],
+    )
+    .await
+    .expect("same installation's accepted causal work continues after retirement begins");
+    let child =
+        argos_osint_core::storage::job_context::origin_for_job(&repo, "retiring-accepted-child")
+            .await
+            .expect("retiring child origin read")
+            .expect("retiring child retains its accepted context");
+    assert_eq!(
+        serde_json::to_value(child).expect("retiring child snapshot"),
+        retiring_origin
+    );
+    assert!(matches!(
+        connect_registry::finish_retirement(&repo, &native, registration, pending.revision)
+            .await
+            .expect("same installation's accepted work keeps retirement pending"),
+        connect_registry::RetirementResult::Pending(_)
+    ));
+    assert!(
+        argos_osint_core::storage::jobs::stop_job(
+            repo.db(),
+            "retiring-accepted-root",
+            chrono::Utc::now(),
+            argos_osint_core::storage::jobs::STOP_BATCH,
+            None,
+        )
+        .await
+        .expect("settle the actual accepted root and causal child")
+        .done
+    );
+    let completed =
+        connect_registry::finish_retirement(&repo, &native, registration, pending.revision)
+            .await
+            .expect("migrated retirement completes with no associated active work");
+    assert!(matches!(
+        &completed,
+        connect_registry::RetirementResult::Complete(_)
+    ));
+    let replay = connect_registry::begin_retirement(&repo, &native, registration, 1)
+        .await
+        .expect("terminal migrated retirement replay");
+    assert_eq!(
+        connect_registry::finish_retirement(&repo, &native, registration, replay.revision)
+            .await
+            .expect("same terminal retirement receipt"),
+        completed
     );
 }

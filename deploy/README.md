@@ -89,6 +89,18 @@ Existing deployment directories are never backfilled or overwritten. Their opera
 
 Normal native clients pair into Keychain. `secrets/native-token` remains for explicit file-based tooling; Next uses `secrets/web-relay-token` independently. WebRelay cannot register/approve; health and old shared bearers grant no mutation rights. Private-service/storage/search credentials retain their separate owners. Schema 10 requires coordinated bootstrap and compatible readers; preserve existing identity/origins and static/headless credentials.
 
+## Troubleshooting
+
+| Symptom | First action |
+| --- | --- |
+| Cargo exits 101 during an image build | Read the first Cargo error; 101 is not a diagnosis. If `--locked` reports a stale lock, synchronize changed manifests and `Cargo.lock` together. Retain `--locked`; do not discard the lock to force a build. |
+| Host/backend check rebuilds large dependencies | Selected test targets can enable extra dependency features. Use the [graph/resource policy](../docs/wiki/code/contributing.md#verification-ownership-and-host-resources) before changing the build selection; the [artifact map](../docs/wiki/code/build-artifacts.md) identifies reusable outputs. |
+| Rebuilt image, old behavior | A successful build does not replace running consumers. Recreate only the intended services with their existing env file/Compose project; preserve data and credentials. |
+| Pairing unavailable on an existing review | Schema 10 needs compatible bootstrap/readers. Existing reviews are not backfilled: explicitly provision independent Operator authority and restart the matching gateway. Native GUI setup needs no token file. [Credentials](#credentials) |
+| SDK WebSocket `SendError` / closed response channel | This can follow request cancellation or timeout. Correlate request timing, surrounding client/server logs and service health first; it alone does not establish corruption. Preserve evidence; do not delete stores or blindly suppress/vendor-patch the diagnostic. |
+
+Native app/fixture checks do not build backend engines; backend storage test executables may embed engines as QA harnesses. Record actual build, service-health and integration evidence in the task's acceptance tracker. Installed native/Keychain checks remain separate from these diagnostics.
+
 ## Operational storage
 
 Jobs alone opens `storage/jobs/`: SQLite operational logs and its embedded RocksDB dispatch queue. Other services use authenticated private Jobs HTTP. Preserve the entire directory across restarts. SurrealDB retains domain records and current scheduler state; the separate [SQLite scheduler cutover](../docs/wiki/code/jobs-persistence.md) remains incomplete. Search has its own owned index directory and database/source identity.

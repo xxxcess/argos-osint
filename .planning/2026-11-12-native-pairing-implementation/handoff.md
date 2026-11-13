@@ -10,4 +10,4 @@ Schema 10 requires coordinated compatible bootstrap/gateway/workers. No automati
 
 Completed: 146 Rust unit/native/SDK/catalog tests; 15 Python operator/provisioning cases; backend server-feature production check; locked Linux runtime/search dependency resolution; selected 12 native PNG/tree inspections and 5 document figures.
 
-Remaining verification: workspace all-target Clippy and embedded repository/API/restart assertions are capacity-blocked. Installed GUI/real Keychain and hosted platforms remain separate. A preserved unrelated native/tests.rs formatting edit also affects the full working-tree formatter, while 31 affected Rust files pass. Read acceptance before treating this source as complete runtime approval.
+Current verification: formatting and capacity blockers are repaired. Required-mode pairing tests are building on the exact workspace graph; assertions and the full gate remain pending. Installed GUI/real Keychain and hosted platforms remain separate. Read acceptance for actual completed results and the resource-recovery record. Native app build/open remains reserved for the user.

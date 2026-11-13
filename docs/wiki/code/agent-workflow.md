@@ -26,19 +26,19 @@ Wake completed workers explicitly, integrate results promptly, and reuse their v
 
 ## Keep one reusable build graph
 
-Before compiling, inspect the existing cache and select the matching shared debug graph. Record and reuse host, storage mode, features, target/profile and concurrency through the [build recipes](contributing.md#targeted-local-rust-builds-and-tests-fast-iteration). Prefer scoped debug checks/tests for iteration; release and cross-target builds serve specifically required evidence. Dependency feature unification matters: workspace bin tests enable core fixtures; an isolated package can trigger another large build. Zero-match companion targets are not test passes.
+Before compiling, inspect the existing cache and select the matching shared debug graph. Record host, storage mode, features, target/profile, exact activating package/target set and concurrency. Prefer scoped debug checks/tests for iteration; matching a gate may require its full workspace graph even for one test filter. Make a new smaller graph deliberate rather than guessing flags repeatedly. Follow the [canonical graph choices](contributing.md#verification-ownership-and-host-resources) and [build recipes](contributing.md#targeted-local-rust-builds-and-tests-fast-iteration). Zero-match companion targets are not test passes.
 
 Choose build/test concurrency from memory and observed pressure; two build jobs are a starting point on this 16 GiB host. Serialize shared-state or timing-sensitive fixtures. For slow active builds, inspect CPU time, memory and host throttling once before changing course; do not repeatedly poll diagnostics or restart useful compilation. Follow [cache hygiene](contributing.md#build-cache-hygiene); preserve `target/debug` and the reusable agent cache.
 
 ## Diagnose before repeating
 
-Preserve the original error and bounded relevant state, diagnose it, then rerun the repaired contract. Reuse checks whose relevant inputs did not change. An unchanged failure needs new evidence or an honest blocker, not identical retries or an unrelated repair campaign. Stop irrecoverably failed task-owned checks when useful; never stop unrelated processes.
+Start with the [formatting gate](contributing.md#build-and-test). Preserve the original error and bounded relevant state, diagnose it, then rerun the repaired contract. Reuse checks whose relevant inputs did not change. An unchanged failure needs new evidence or an honest blocker, not identical retries or an unrelated repair campaign. Stop irrecoverably failed task-owned checks when useful; never stop unrelated processes.
 
 Terminal checks must reconstruct current cells/state, not concatenate ANSI history. Use deliberate input and wait for its transition; repeated keys can cross child-process boundaries.
 
 ## Separate evidence by what it proves
 
-Record actual commands, exits, executed/skipped counts and limitations. Queued/interrupted runs, zero matches and generated-but-uninspected screenshots are not passes. Keep implementation and verification status separate.
+Record actual commands, exits, executed/skipped counts and limitations. Queued, interrupted, skipped or unreached phases, zero matches and generated-but-uninspected screenshots are not passes. Keep implementation and verification status separate; link final outcomes to the task's acceptance record.
 
 Bind performance evidence to the relevant corpus/model, workload, binary and environment. Do not repeat measurements or hash large unrelated artifacts merely because prose or another independent file changed. Capture affected UI states early; reuse inspected evidence only when relevant inputs match.
 

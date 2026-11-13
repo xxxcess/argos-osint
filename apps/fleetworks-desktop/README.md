@@ -42,6 +42,8 @@ Durable acceptance is queued, not completed. Uncertain requests retain the exact
 
 ## Verification
 
+Use the engine-free app/contracts/workstation loop for native changes; storage compatibility tests belong to the heavier backend loop. Choose commands and preflight from [contributing](../../docs/wiki/code/contributing.md#development-loops-local-cli-and-docker); the [artifact/path map](../../docs/wiki/code/build-artifacts.md) distinguishes app output, QA harnesses and persistent data.
+
 Production and fixtures share State, Rune views and handlers. Fixtures inject synthetic effects and do not access user homes, gateways, browser or clipboard. Use selected actual Runtime scenes, wide/compact sizes, PNG/tree/script inspection and separate installed-app evidence:
 
 ```sh
@@ -52,3 +54,5 @@ python3 scripts/fleetworks_verify.py native-ui --agent \
 ```
 
 Discover scene names from the current executable; generation alone is not visual approval. [Native verification](../../docs/wiki/code/native-verification.md) records build/cache isolation and inspection requirements. Hosted evidence retains both Mac architectures; minimum OS, installed GUI/input/accessibility, signing/notarization and real backend integration remain separate. Read the acceptance tracker for actual pass/fail/skip results rather than treating these command examples as executed checks.
+
+Pairing tests use injected Keychain stores. Installed-app launch, real Keychain approval/reconnect and backend integration need separate evidence within the current task's authorized scope. Record actual results and remaining gaps in its acceptance tracker.

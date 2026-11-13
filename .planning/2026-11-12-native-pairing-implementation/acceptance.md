@@ -13,11 +13,11 @@ Implementation baseline: `b8da29f`. Dependency/lockfile checkpoint: `6eef4cc`. T
 | Locked host resolution | Full host-filtered Cargo metadata with `--locked --offline` | PASS; no dependency upgrades |
 | Linux image dependency resolution | Isolated manifest/stub-only BuildKit metadata for runtime/search graphs | PASS for both Linux graphs with --locked; no release image or stack changes |
 | Backend production compiler | Exact runtime server/nlp/classifier features through shared host debug cache, 4m40s | PASS |
-| Backend storage/security assertions | New actual repository/API pairing, revoke/config-lock, reset/issuer-policy and reopen cases | BLOCKED by capacity; not executed or claimed as a pass |
+| Backend storage/security assertions | New repository/API pairing, revoke/config-lock, reset/issuer-policy and reopen cases | PENDING: required embedded workspace build running; assertions not yet executed |
 | Native captures | 24 actual Rune captures; 12 selected PNG/tree pairs inspected (six scenes at 1180×780/1× and 640×480/2×) | PASS for selected synthetic views; real Keychain/installed GUI separate |
-| Docs/diagram checks | 16 Markdown files, 420 local links/anchors, 5 exact XML-valid HTML/SVG pairs; all 5 figures rendered/opened and bounds checked | PASS |
-| Formatting | 31 affected Rust files pass; full working-tree fmt found an unrelated pre-existing formatting edit in `crates/fleetworks-workstation/src/native/tests.rs`, preserved outside this task | PASS affected source; full working-tree check FAIL on preserved unrelated edit |
-| Workspace all-target Clippy | Interrupted at <1 GiB free reserve, exit 130, before final backend test compilation | BLOCKED by capacity; not a pass |
+| Docs/diagram checks | Original 16 Markdown files/420 links/5 figures; workflow updates cover 8 reviewed guides/entrypoints with 172 local path/anchor checks and 2 exact XML-valid rendered/inspected diagram pairs | PASS; workflow links, bounds and whitespace checked |
+| Formatting | Full `cargo fmt --all -- --check` after authorized formatting repair; assertions unchanged, original formatting retained in scratch | PASS; tracked Rust source matches the feature commit |
+| Workspace all-target Clippy | Earlier attempt interrupted at <1 GiB reserve, exit 130; resource blocker now repaired | PENDING rerun after focused required-mode tests |
 
 ## Implemented boundaries
 
@@ -42,7 +42,7 @@ Implementation baseline: `b8da29f`. Dependency/lockfile checkpoint: `6eef4cc`. T
 
 Actual user Keychain access, installed GUI/OS dialogs, signing, both Mac/Linux architectures, real provider calls, deployment/bootstrap against retained user data and hosted CI are not executed by these synthetic/unit checks. No user home, credentials, running stack, images or unrelated `dist/` were modified.
 
-The required embedded gate was capacity-blocked in the preceding task; available disk remains below its earlier requested reserve. This attempt also stopped workspace Clippy safely at <1 GiB free reserve (exit 130). No broader embedded test build was started at that capacity. Source/tests or compiler success alone do not prove stored authorization behavior.
+Earlier attempts were capacity-blocked, including workspace Clippy interrupted at <1 GiB free reserve (exit 130). The repairs below now provide room for the remaining checks. Source/tests or compiler success alone do not prove stored authorization behavior.
 
 ## Reproduce remaining checks after capacity is available
 
@@ -64,3 +64,24 @@ At source revision `5fec2a9`, reran the three client/native/workstation library 
 The full `local_matrix.sh --storage embedded` invocation exited **1** at its first formatting step, solely on the preserved unstaged formatting changes in `crates/fleetworks-workstation/src/native/tests.rs`. Consequently, this invocation did not reach Clippy, workspace tests or the required storage phase. The focused backend pairing command was not started: free disk was about 2.8 GiB before the rerun and 2.2 GiB afterward, below the established build reserve. Those backend checks remain **BLOCKED**, rather than passed or skipped as successful.
 
 Local logs: `.agent-scratch/native-pairing-rerun-units.log` and `.agent-scratch/native-pairing-rerun-matrix.log`. Resolve the unrelated formatting diff and provide sufficient capacity before rerunning the remaining commands above. The native build/open step is reserved for the user.
+
+## Blocker repairs and workflow guidance
+
+| Pitfall | Resolution / current evidence |
+| --- | --- |
+| Dirty formatting blocks the full gate | Backed up the existing edit, ran the package formatter under the user's repair instruction, preserved assertions; full formatter now passes. |
+| Disk reserve exhausted | Validated exact obsolete artifact provenance, ownership, inode/hardlinks and open-file status. Removed retired compiled artifacts (~11.75 GiB) and a bounded 108 obsolete core storage-test executables (~30.02 GiB). All current graphs and their dependencies, metadata and incrementals, plus user `target/debug`, data and QA evidence retained. Free space rose to about 39 GiB before continued compilation. |
+| API-only selection unexpectedly recompiles dependencies | Matching core features alone lost `log`/`tracing` and host/proc-macro unification. Interrupted that build before assertions, retained its exit-130 log, and switched once to the workspace graph with a test-name filter. |
+| Cold build is slow | Observed roughly 20 minutes in RocksDB C++ compilation on this Intel host; CPU speed limit was 43%. Full Rust debug info and the embedded/NLP/classifier/fixture graph add work. These are observations, not a benchmark. Current engine compilation completed. |
+| Workflow guidance is hard to discover | Updated contributor loop/cache decisions, build artifact guide, agent workflow, relevant READMEs and two rendered diagram pairs. Permanent guidance describes reusable choices; this tracker retains incident history. |
+
+Required-mode command currently running (workspace targets compile; only matching tests execute):
+
+```sh
+CARGO_BUILD_JOBS=2 env -u ARGOS_SURREAL_BIN \
+  ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1 \
+  python3 scripts/agent_cargo.py test --workspace --locked \
+  pairing::tests:: -- --nocapture --test-threads=1
+```
+
+The backend assertions and full gate remain pending until their processes actually complete. Native app build/open and real Keychain checks remain reserved for the user.

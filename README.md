@@ -93,13 +93,13 @@ python3 scripts/fleetworks_verify.py plan --base "$(git rev-parse HEAD^)" --head
 
 ### Iteration loops
 
-Choose the shortest loop for the changed surface. Native app builds connect to the separately operated backend; service edits require the affected Linux image.
+Choose the shortest loop for the changed surface. The native app/fixture graph is engine-free; backend storage tests can link embedded SurrealDB/RocksDB as QA harnesses. Service edits require the affected Linux image. [Visual artifact/path map](docs/wiki/code/build-artifacts.md)
 
 [![Fleetworks development loops](docs/diagrams/dev-loops.svg)](docs/diagrams/dev-loops.html)
 
 | Change | Loop |
 | --- | --- |
-| Rune app, client contracts or workspace manager | Scoped host debug tests, selected same-view Runtime/PNG/tree fixtures, then `python3 scripts/fleetworks_candidate.py build-native --target host --profile debug`. |
+| Rune app, client contracts or workstation manager | Scoped host debug tests, selected same-view Runtime/PNG/tree fixtures, then `python3 scripts/fleetworks_candidate.py build-native --target host --profile debug`. |
 | Service roles (`argos-api-host`) | Rebuild the `runtime` image; the native-review `backend` Bake group builds backend-only images. BuildKit caches dependencies. |
 | Web app and `packages/*/src` | Run the separately configured Next development server; use isolated repository Playwright output for browser checks. |
 | Dependencies, Dockerfile, Compose or private search | Build the affected image with `docker buildx bake -f deploy/docker-bake.hcl <target>`, then use its isolated deployment checks. |
@@ -107,7 +107,7 @@ Choose the shortest loop for the changed surface. Native app builds connect to t
 
 Run host checks first, then the affected container loop, then hosted CI. [Full loop guide](docs/wiki/code/contributing.md#development-loops-local-cli-and-docker)
 
-Agents use `python3 scripts/agent_cargo.py … --locked` and the shared `target/agents` debug cache; add `--agent` to native build/fixture helpers. Reuse the matching host/feature graph and preserve the user's `target/debug`. [Cache hygiene](docs/wiki/code/contributing.md#build-cache-hygiene)
+Agents use `python3 scripts/agent_cargo.py … --locked` and shared `target/agents/debug`; add `--agent` to native build/fixture helpers. Selected test targets can enable extra dependency features, so a smaller `-p` selection may rebuild large dependencies. Choose the loop and resource preflight from [contributing](docs/wiki/code/contributing.md#verification-ownership-and-host-resources); preserve reusable outputs using [cache hygiene](docs/wiki/code/contributing.md#build-cache-hygiene).
 
 Web contributors can find setup and verification in the [Intel web guide](docs/wiki/code/intel-web.md) and the [React test guide](docs/wiki/code/react-ui-testing.md). The [CI guide](docs/wiki/code/ci.md) covers hosted platform and package verification. Agents start at [AGENTS.md](AGENTS.md).
 

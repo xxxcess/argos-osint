@@ -36,6 +36,17 @@ Within a selected graph:
 
 Embedded compatibility tests deliberately exercise the library engine rather than the independently deployed database. The network backend still uses its configured SurrealDB service; Jobs owns its embedded RocksDB delivery queue. Native-only builds need neither backend engines nor Docker. [Storage boundaries](jobs-persistence.md)
 
+### Build cost signals
+
+| What you see | Why it takes space/time | Development response |
+| --- | --- | --- |
+| Cold RocksDB/C++ compilation | Native engine objects compile before Rust test linking; cold builds can dominate elapsed time. | Retain reusable engine outputs and inspect host pressure before restarting. |
+| Many large Rust objects/test executables | Most dev/test Rust units retain full debug information; a new dependency ABI can rebuild first-party libraries and their tests. Existing Rune/C++ profile exceptions remain separate. | Budget graph growth, linking and a reserve before starting. |
+| Recompilation after changing package selectors | Cargo unifies dependency features across the selected package/target set; matching core feature names alone may leave different inputs. | Follow the [exact-graph choices](contributing.md#verification-ownership-and-host-resources). |
+| Fast native iteration | The native API-only graph reuses its warm cache without backend engines. | Start with the [native loop](../../diagrams/dev-loop-native.html); widen only for affected backend contracts. |
+
+Capacity recovery follows [proof-based cache hygiene](contributing.md#build-cache-hygiene); profile or test-lane changes require [separate validation](contributing.md#targeted-local-rust-builds-and-tests-fast-iteration). Record actual passes, interruptions and remaining checks in the task's acceptance tracker.
+
 ## Native app and Rune evidence
 
 | Tool | Output |

@@ -12,7 +12,6 @@ use rune::Live;
 use rune::Shadow;
 use rune::TextStyle;
 use rune::Tx;
-use rune_kit::Checkbox;
 use rune_kit::Dialog;
 use rune_kit::Kit;
 use rune_kit::Progress;
@@ -29,14 +28,16 @@ use crate::theme::StatusTone;
 
 type ActionHandler = Box<dyn FnOnce(El) -> El>;
 
-/// Liquid-metal workstation action button with busy spinner, hover motion and matte parity.
+/// Liquid-metal workstation action button with inline preflight relay, shimmer trigger, and matte parity.
 pub(crate) struct ActionButton {
     key: Option<String>,
     label: String,
     icon_glyph: Option<&'static Icon>,
     finish: MetalFinish,
     busy: bool,
+    shimmer: bool,
     disabled: bool,
+    status: Option<(String, StatusTone)>,
     handler: Option<ActionHandler>,
 }
 
@@ -48,7 +49,9 @@ impl ActionButton {
             icon_glyph: None,
             finish: MetalFinish::Gunmetal,
             busy: false,
+            shimmer: false,
             disabled: false,
+            status: None,
             handler: None,
         }
     }
@@ -78,6 +81,11 @@ impl ActionButton {
         self
     }
 
+    pub(crate) fn status(mut self, label: impl Into<String>, tone: StatusTone) -> Self {
+        self.status = Some((label.into(), tone));
+        self
+    }
+
     pub(crate) fn on_press<S: 'static>(mut self, f: impl Fn(&mut S) + 'static) -> Self {
         self.handler = Some(Box::new(move |e: El| e.on_press(f)));
         self
@@ -95,6 +103,7 @@ impl ActionButton {
         pointer_offset: Option<&Live<[f32; 2]>>,
     ) -> El {
         let ink = material::finish_ink(self.finish);
+        let active_shimmer = self.shimmer || self.busy;
         let disabled = self.disabled || self.busy;
         let height = match self.finish {
             MetalFinish::ObsidianPill => 28.0,
@@ -104,10 +113,14 @@ impl ActionButton {
             MetalFinish::ObsidianPill => 11.0,
             _ => 14.0,
         };
+        let a11y_label = match &self.status {
+            Some((status_label, _)) => format!("{} ({status_label})", self.label),
+            None => self.label.clone(),
+        };
 
         let mut content = row()
             .role("button")
-            .label(self.label.clone())
+            .label(a11y_label)
             .h(height)
             .px(px)
             .gap(7.0)
@@ -135,10 +148,35 @@ impl ActionButton {
                 .a11y_hidden(),
         );
 
+        if let Some((status_label, tone)) = self.status {
+            content = content.child(
+                row()
+                    .center_y()
+                    .gap(5.0)
+                    .h(20.0)
+                    .px(7.0)
+                    .radius(999.0)
+                    .fill(tone.bg())
+                    .border(1.0, tone.border())
+                    .child(status_dot(tone, preferences))
+                    .child(
+                        text(status_label)
+                            .font(TextStyle {
+                                line_height: 12.0,
+                                ..kit.ty.small_medium
+                            })
+                            .color(tone.fg())
+                            .a11y_hidden(),
+                    )
+                    .a11y_hidden(),
+            );
+        }
+
         let mut styled = material::apply_liquid_metal(
             content,
             self.finish,
             disabled,
+            active_shimmer,
             preferences,
             pointer_offset,
         );
@@ -331,43 +369,6 @@ pub(crate) fn metric_ring_tile(
     .label(format!("{label}: {value_text}"))
     .focusable(true)
     .focus_ring(2.0, 0.0, theme::hex(theme::ACCENT_HIGHLIGHT))
-}
-
-/// Interactive checklist row backed by `rune_kit::Checkbox`.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn checklist_row<S: 'static>(
-    key: impl Into<String>,
-    checked: bool,
-    indeterminate: bool,
-    label: impl Into<String>,
-    description: impl Into<String>,
-    disabled: bool,
-    tone: StatusTone,
-    kit: &Kit,
-    on_toggle: impl Fn(&mut S) + 'static,
-) -> El {
-    let box_builder = Checkbox::new(checked)
-        .label(label)
-        .description(description)
-        .indeterminate(indeterminate)
-        .disabled(disabled)
-        .on_toggle(on_toggle);
-    row()
-        .key(key)
-        .w_full()
-        .padding(10.0)
-        .radius(8.0)
-        .fill(theme::hex(theme::SURFACE_RAISED))
-        .border(
-            1.0,
-            if checked {
-                tone.border()
-            } else {
-                theme::hex(theme::BORDER_SUBTLE)
-            },
-        )
-        .center_y()
-        .child(box_builder.build(kit))
 }
 
 /// Inline configuration toggle row backed by `rune_kit::Switch`.

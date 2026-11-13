@@ -191,10 +191,9 @@ fn material_and_matte_preserve_interactive_hit_bounds_and_a11y_on_status_and_see
             Page::Seed,
             vec![
                 "maintenance-refresh",
-                "preflight-gateway",
-                "preflight-datastore",
-                "preflight-dataset",
                 "maintenance-seed",
+                "maintenance-reindex",
+                "maintenance-train",
             ],
         ),
     ] {

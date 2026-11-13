@@ -6,8 +6,10 @@ use std::f32::consts::PI;
 
 use rune::el;
 use rune::Color;
+use rune::Easing;
 use rune::El;
 use rune::Live;
+use rune::LoopSpec;
 use rune::Shadow;
 use rune::Spring;
 use rune_kit::Elevation;
@@ -252,11 +254,12 @@ pub(crate) fn interactive_tile(
     tile.child(hover_halo)
 }
 
-/// Apply brushed liquid-metal fill, bevel edge, hover specular sweep and tactile press physics.
+/// Apply brushed liquid-metal fill, bevel edge, hover/async shimmer sweep and tactile press physics.
 pub(crate) fn apply_liquid_metal(
     mut button: El,
     finish: MetalFinish,
     disabled: bool,
+    shimmer: bool,
     preferences: ViewPreferences,
     pointer_offset: Option<&Live<[f32; 2]>>,
 ) -> El {
@@ -284,15 +287,25 @@ pub(crate) fn apply_liquid_metal(
                 theme::hex(theme::STATUS_ERR_BG),
             ),
         };
-        let mut styled = button.fill(fill).border(1.0, border).radius(radius);
-        if !disabled {
+        let active_border = if shimmer {
+            theme::hex(theme::ACCENT)
+        } else {
+            border
+        };
+        let mut styled = button.fill(fill).border(1.0, active_border).radius(radius);
+        if !disabled && !shimmer {
             styled = styled.hover(hover_fill);
         }
-        return if disabled { styled.dim(0.55) } else { styled };
+        return if disabled && !shimmer {
+            styled.dim(0.55)
+        } else {
+            styled
+        };
     }
 
-    let (stops, top_edge, bottom_edge, glow, sheen_color): (
+    let (stops, top_edge, bottom_edge, glow, sheen_color, shimmer_tint): (
         [(f32, Color); 4],
+        Color,
         Color,
         Color,
         Color,
@@ -309,6 +322,7 @@ pub(crate) fn apply_liquid_metal(
             theme::hex("#5E451E").alpha(0.80),
             theme::hex(theme::GOLD_GLOW).alpha(0.16),
             theme::hex("#FFF9EB").alpha(0.10),
+            theme::hex("#FFF9EB").alpha(0.32),
         ),
         MetalFinish::Gunmetal => (
             [
@@ -321,6 +335,7 @@ pub(crate) fn apply_liquid_metal(
             theme::hex(theme::METAL_EDGE_BOTTOM).alpha(0.80),
             theme::hex(theme::LIGHT_SURFACE_GLOW).alpha(0.05),
             theme::hex(theme::LIGHT_SURFACE_GLOW).alpha(0.08),
+            theme::hex(theme::ACCENT_HIGHLIGHT).alpha(0.24),
         ),
         MetalFinish::CrimsonDanger => (
             [
@@ -333,6 +348,7 @@ pub(crate) fn apply_liquid_metal(
             theme::hex(theme::STATUS_ERR_BORDER).alpha(0.75),
             theme::hex(theme::STATUS_ERR).alpha(0.10),
             theme::hex(theme::STATUS_ERR).alpha(0.10),
+            theme::hex(theme::STATUS_ERR).alpha(0.28),
         ),
         MetalFinish::ObsidianPill => (
             [
@@ -345,6 +361,7 @@ pub(crate) fn apply_liquid_metal(
             theme::hex(theme::BORDER_SUBTLE).alpha(0.75),
             theme::hex(theme::GOLD_GLOW).alpha(0.06),
             theme::hex(theme::LIGHT_SURFACE_GLOW).alpha(0.07),
+            theme::hex(theme::LIGHT_SURFACE_GLOW).alpha(0.22),
         ),
     };
 
@@ -366,6 +383,35 @@ pub(crate) fn apply_liquid_metal(
             color: glow,
             ..Shadow::default()
         });
+
+    if shimmer {
+        if preferences.reduced_motion {
+            return button;
+        }
+        let sweep = el()
+            .key("liquid-shimmer-band")
+            .absolute(0.0, 0.0)
+            .w_frac(0.42)
+            .h_full()
+            .linear_gradient(
+                PI * 0.42,
+                [
+                    (0.0, Color::TRANSPARENT),
+                    (0.5, shimmer_tint),
+                    (1.0, Color::TRANSPARENT),
+                ],
+            )
+            .looping(LoopSpec::slide(1.3, [-1.2, 0.0], [3.2, 0.0]).easing(Easing::LINEAR));
+        let shimmer_layer = el()
+            .key("liquid-shimmer")
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h_full()
+            .a11y_hidden()
+            .clip_rounded(radius)
+            .child(sweep);
+        return button.child(shimmer_layer);
+    }
 
     if disabled {
         return button.dim(0.48);

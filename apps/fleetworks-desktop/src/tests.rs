@@ -596,9 +596,11 @@ fn workstation_metric_tile_opens_and_closes_telemetry_modal() {
 }
 
 #[test]
-fn seed_preflight_checklist_and_progressive_disclosure_reflect_state() {
+fn seed_button_preflight_status_shimmer_and_progressive_disclosure_reflect_state() {
     use crate::app::ModelsTab;
     use crate::app::SeedStage;
+    use fleetworks_contracts::readiness::ReadinessAction;
+    use fleetworks_contracts::readiness::ReadinessActionId;
     use fleetworks_contracts::readiness::ReadinessCheck;
     use fleetworks_contracts::readiness::ReadinessCheckId;
     use fleetworks_contracts::readiness::ReadinessState;
@@ -606,17 +608,24 @@ fn seed_preflight_checklist_and_progressive_disclosure_reflect_state() {
 
     let mut state = registered_fixture();
     state.page = Page::Seed;
-    state.readiness = Load::Ready(WorkstationReadiness::new(
+    let mut gateway = ReadinessCheck::new(
+        ReadinessCheckId::Gateway,
+        ReadinessState::Ready,
+        "ok".into(),
+        "Gateway ok".into(),
+        "2026-01-01T00:00:00Z".into(),
+    );
+    gateway.fresh_for_ms = 5000;
+    gateway.actions = vec![ReadinessAction::new(
+        ReadinessActionId::SeedActors,
+        Permission::MaintainBackend,
+        true,
+    )];
+    let mut readiness = WorkstationReadiness::new(
         "synthetic-deployment".into(),
         "2026-01-01T00:00:00Z".into(),
         vec![
-            ReadinessCheck::new(
-                ReadinessCheckId::Gateway,
-                ReadinessState::Ready,
-                "ok".into(),
-                "Gateway ok".into(),
-                "2026-01-01T00:00:00Z".into(),
-            ),
+            gateway,
             ReadinessCheck::new(
                 ReadinessCheckId::Datastore,
                 ReadinessState::Unknown,
@@ -625,7 +634,24 @@ fn seed_preflight_checklist_and_progressive_disclosure_reflect_state() {
                 "2026-01-01T00:00:00Z".into(),
             ),
         ],
+    );
+    readiness.registration = Some(RegistrationReceipt::new(
+        "synthetic-deployment".into(),
+        "synthetic-node".into(),
+        "synthetic-registration".into(),
+        Some("192.0.2.42".parse().expect("fixture IP")),
+        1,
     ));
+    state.readiness = Load::Ready(readiness);
+    state.readiness_received_at = Some(0.0);
+    state.backend.profile = Load::Ready(crate::backend::ProfileSnapshot {
+        configuration_revision: 0,
+        configuration_format: 1,
+        accounts: vec![],
+        tool_credentials: vec![],
+        setup_required: false,
+        portable_schema_version: 4,
+    });
     let mut runtime = Runtime::new(
         state,
         app::view,
@@ -636,15 +662,36 @@ fn seed_preflight_checklist_and_progressive_disclosure_reflect_state() {
         },
     );
     runtime.frame(0.0);
-    assert!(runtime.find("preflight-gateway").is_some());
-    assert!(runtime.find("preflight-datastore").is_some());
-    assert!(runtime.find("preflight-dataset").is_some());
+    assert!(runtime.find("preflight-gateway").is_none());
+    assert!(runtime.find("preflight-datastore").is_none());
+    assert!(runtime.find("preflight-dataset").is_none());
     assert!(runtime.find("maintenance-seed").is_some());
     assert!(runtime.find("maintenance-train").is_some());
     assert!(runtime.find("maintenance-reindex").is_some());
     let seed_tree = runtime.accessibility_json().to_string();
+    assert!(!seed_tree.contains("Pre-flight Checklist"));
+    assert!(seed_tree.contains("Seed Actors (Ready)"));
+    assert!(seed_tree.contains("Build Search Index (Unavailable)"));
+    assert!(seed_tree.contains("Train Classifier — Natural (Unavailable)"));
     assert!(seed_tree.contains("Choose a CSV to add or update actors."));
     assert!(!seed_tree.contains("Choose a training CSV for a Natural candidate."));
+    assert!(runtime.find("liquid-shimmer").is_none());
+
+    runtime.update(|state, _| state.maintenance.upload = Load::Loading);
+    runtime.update(|state, _| {
+        state.maintenance.local_dataset = Some(crate::maintenance::LocalDataset {
+            path: "/fixture/actors.csv".into(),
+            kind: fleetworks_contracts::readiness::DatasetKind::ActorCatalog,
+        });
+    });
+    runtime.frame(0.5 / 60.0);
+    let uploading_tree = runtime.accessibility_json().to_string();
+    assert!(uploading_tree.contains("Seed Actors (Uploading…)"));
+    assert!(runtime.find("liquid-shimmer").is_some());
+    runtime.update(|state, _| {
+        state.maintenance.upload = Load::Idle;
+        state.maintenance.local_dataset = None;
+    });
 
     runtime.update(|state, _| state.seed_stage = SeedStage::Classifier);
     runtime.frame(1.0 / 60.0);

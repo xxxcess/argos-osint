@@ -3,8 +3,6 @@
 use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::readiness::DatasetKind;
 use fleetworks_contracts::readiness::MaintenanceOperation;
-use fleetworks_contracts::readiness::ReadinessCheckId;
-use fleetworks_contracts::readiness::ReadinessState;
 use rune::Cx;
 use rune::El;
 use rune::ScrollSpec;
@@ -1379,6 +1377,88 @@ fn safe_log_table(state: &State, kit: &Kit, available_width: f32) -> El {
     body
 }
 
+fn maintenance_preflight_status(
+    state: &State,
+    operation: MaintenanceOperation,
+    reason: Option<&str>,
+) -> (&'static str, StatusTone, bool) {
+    if matches!(state.maintenance.upload, Load::Loading) {
+        let uploading_op = state
+            .maintenance
+            .local_dataset
+            .as_ref()
+            .and_then(|dataset| match dataset.kind {
+                DatasetKind::ActorCatalog => Some(MaintenanceOperation::SeedActors),
+                DatasetKind::ClassifierTraining => Some(MaintenanceOperation::TrainClassifier),
+                _ => None,
+            })
+            .or(state.maintenance.pending_preview)
+            .unwrap_or(match state.seed_stage {
+                SeedStage::Classifier => MaintenanceOperation::TrainClassifier,
+                SeedStage::Seed | SeedStage::Maintenance => MaintenanceOperation::SeedActors,
+            });
+        if uploading_op == operation {
+            return ("Uploading…", StatusTone::Accent, true);
+        }
+    }
+    let queuing_for_op = (matches!(state.maintenance.receipt, Load::Loading)
+        || state.maintenance.busy())
+        && (state
+            .maintenance
+            .last_request
+            .as_ref()
+            .is_some_and(|r| match operation {
+                MaintenanceOperation::SeedActors => r
+                    .dataset
+                    .as_ref()
+                    .is_some_and(|d| d.kind == DatasetKind::ActorCatalog),
+                MaintenanceOperation::TrainClassifier => r
+                    .dataset
+                    .as_ref()
+                    .is_some_and(|d| d.kind == DatasetKind::ClassifierTraining),
+                MaintenanceOperation::ReindexActors => r.dataset.is_none() && r.engine.is_none(),
+                _ => false,
+            })
+            || state.maintenance.pending_preview == Some(operation)
+            || state
+                .maintenance
+                .confirmation
+                .as_ref()
+                .is_some_and(|c| c.operation == operation));
+    if queuing_for_op {
+        return ("Queuing…", StatusTone::Accent, true);
+    }
+    if matches!(state.readiness, Load::Pending | Load::Loading) {
+        return ("Checking…", StatusTone::Info, true);
+    }
+    match reason {
+        None => ("Ready", StatusTone::Ok, false),
+        Some(text) if text.contains("Uploading") || text.contains("uploading") => {
+            ("Upload active", StatusTone::Info, false)
+        }
+        Some(text) if text.contains("acceptance receipt") => {
+            ("Request active", StatusTone::Info, false)
+        }
+        Some(text) if text.contains("permission") => ("No permission", StatusTone::Err, false),
+        Some(text) if text.contains("Register") => ("Register first", StatusTone::Warn, false),
+        Some(text) if text.contains("Refresh backend checks") => {
+            ("Refresh checks", StatusTone::Warn, false)
+        }
+        Some(text) if text.contains("current registered context") => {
+            ("Refresh checks", StatusTone::Warn, false)
+        }
+        Some(text) if text.contains("stale") => ("Checks stale", StatusTone::Warn, false),
+        Some(text) if text.contains("configuration revision") => {
+            ("Sync config", StatusTone::Warn, false)
+        }
+        Some(text) if text.contains("Complete actor seeding") => {
+            ("Seed actors first", StatusTone::Warn, false)
+        }
+        Some(text) if text.contains("durable consumer") => ("Unavailable", StatusTone::Err, false),
+        Some(_) => ("Preflight blocked", StatusTone::Err, false),
+    }
+}
+
 pub(crate) fn maintenance(
     state: &State,
     preferences: ViewPreferences,
@@ -1393,11 +1473,24 @@ pub(crate) fn maintenance(
         SeedStage::Classifier => 1,
         SeedStage::Maintenance => 2,
     };
+    let checking_readiness = matches!(state.readiness, Load::Pending | Load::Loading);
     let refresh_btn = ActionButton::new("Refresh checks")
         .key("maintenance-refresh")
         .icon(&icons::REFRESH)
         .finish(MetalFinish::Gunmetal)
-        .busy(matches!(state.readiness, Load::Pending | Load::Loading))
+        .status(
+            if checking_readiness {
+                "Checking…"
+            } else {
+                "Preflight"
+            },
+            if checking_readiness {
+                StatusTone::Info
+            } else {
+                StatusTone::Neutral
+            },
+        )
+        .busy(checking_readiness)
         .disabled(!state.connected())
         .on_press(|state: &mut State| state.refresh_page())
         .build(kit, preferences, pointer_ref);
@@ -1417,79 +1510,12 @@ pub(crate) fn maintenance(
     })
     .build(kit);
 
-    let (gateway_ready, datastore_ready) = match &state.readiness {
-        Load::Ready(readiness) => (
-            readiness
-                .checks
-                .iter()
-                .any(|c| c.id == ReadinessCheckId::Gateway && c.state == ReadinessState::Ready),
-            readiness
-                .checks
-                .iter()
-                .any(|c| c.id == ReadinessCheckId::Datastore && c.state == ReadinessState::Ready),
-        ),
-        _ => (false, false),
-    };
-    let dataset_uploaded = matches!(state.maintenance.upload, Load::Ready(_));
-
-    let checklist = card(
-        state,
-        preferences,
-        if gateway_ready && datastore_ready {
-            StatusTone::Ok
-        } else {
-            StatusTone::Accent
-        },
-        rune::col()
-            .child(ui_components::section_header(
-                &icons::SHIELD_CHECK,
-                "Pre-flight Checklist",
-                Some("Live readiness requirements before backend mutations"),
-                None,
-                None,
-                kit,
-            ))
-            .child(ui_components::checklist_row(
-                "preflight-gateway",
-                gateway_ready,
-                matches!(state.readiness, Load::Pending | Load::Loading),
-                "Gateway health verified",
-                "Required before streaming actor or training CSV datasets",
-                true,
-                StatusTone::Ok,
-                kit,
-                |_: &mut State| {},
-            ))
-            .child(ui_components::checklist_row(
-                "preflight-datastore",
-                datastore_ready,
-                false,
-                "Datastore online",
-                "Backing actor catalog & index storage healthy",
-                true,
-                StatusTone::Info,
-                kit,
-                |_: &mut State| {},
-            ))
-            .child(ui_components::checklist_row(
-                "preflight-dataset",
-                dataset_uploaded,
-                matches!(state.maintenance.upload, Load::Loading),
-                "CSV dataset validated locally",
-                "Selected CSV passed header and size checks",
-                true,
-                StatusTone::Accent,
-                kit,
-                |_: &mut State| {},
-            )),
-    );
-
     let mut body = rune::col()
         .gap(12.0)
         .child(ui_components::section_header(
             &icons::SEED,
             "DB Seed & Train",
-            Some("Choose stage or invoke directly below"),
+            Some("Preflight status is relayed on each action button below"),
             None,
             Some(refresh_btn),
             kit,
@@ -1501,8 +1527,7 @@ pub(crate) fn maintenance(
             preferences,
             kit,
         ))
-        .child(stage_picker)
-        .child(checklist);
+        .child(stage_picker);
 
     match &state.maintenance.upload {
         Load::Loading => {
@@ -1565,6 +1590,8 @@ pub(crate) fn maintenance(
         ),
     ] {
         let reason = state.maintenance_disabled_reason(operation);
+        let (preflight_label, preflight_tone, button_busy) =
+            maintenance_preflight_status(state, operation, reason.as_deref());
         let focused = state.seed_stage == stage_match;
         let mut operation_card = rune::col().padding(14.0).gap(8.0).child(
             rune::row()
@@ -1587,6 +1614,8 @@ pub(crate) fn maintenance(
                         .key(key)
                         .icon(glyph)
                         .finish(finish)
+                        .status(preflight_label, preflight_tone)
+                        .busy(button_busy)
                         .disabled(reason.is_some())
                         .on_press_tx(move |state: &mut State, tx| {
                             state.seed_stage = stage_match;
@@ -1661,6 +1690,26 @@ pub(crate) fn maintenance(
                                 .key("maintenance-confirm")
                                 .icon(&icons::SHIELD_CHECK)
                                 .finish(MetalFinish::GoldCta)
+                                .status(
+                                    if state.maintenance.busy()
+                                        || matches!(state.maintenance.receipt, Load::Loading)
+                                    {
+                                        "Queuing…"
+                                    } else {
+                                        "Ready"
+                                    },
+                                    if state.maintenance.busy()
+                                        || matches!(state.maintenance.receipt, Load::Loading)
+                                    {
+                                        StatusTone::Accent
+                                    } else {
+                                        StatusTone::Ok
+                                    },
+                                )
+                                .busy(
+                                    state.maintenance.busy()
+                                        || matches!(state.maintenance.receipt, Load::Loading),
+                                )
                                 .on_press(|state: &mut State| state.confirm_maintenance())
                                 .build(kit, preferences, pointer_ref),
                         )

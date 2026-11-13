@@ -6,17 +6,20 @@ initialize user workspaces, reset configuration or publish an artifact.
 """
 
 import argparse
+import codecs
 import hashlib
 import json
 import os
 import plistlib
 import re
 import shutil
+import shlex
 import stat
 import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 import zipfile
@@ -52,6 +55,61 @@ def _run(command, *, runner=None, root=ROOT, environment=None, timeout=60):
         diagnostic = (result.stderr or result.stdout or f"exit {result.returncode}").strip()
         raise ValueError(f"{command[0]} failed: {diagnostic[-4000:]}")
     return result.stdout.strip()
+
+
+def _progress(message):
+    print(f"fleetworks-candidate: {message}", file=sys.stderr, flush=True)
+
+
+def _run_cargo(command, *, root=ROOT, environment=None, timeout=3600):
+    """Tee Cargo progress immediately while retaining its exact JSON artifact stream.
+
+    Cargo writes human progress/rendered compiler diagnostics to stderr. Drain
+    that pipe independently so neither a quiet stdout nor a large diagnostic
+    blocks progress. Keep only the diagnostic tail; stdout retains the existing
+    successful-artifact validation contract.
+    """
+    diagnostic = [""]
+    display_errors = []
+    stream = sys.stderr
+    with tempfile.TemporaryFile() as output:
+        with subprocess.Popen(command, cwd=root, env=environment,
+                              stdout=output, stderr=subprocess.PIPE) as process:
+            def forward_stderr():
+                decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+                while True:
+                    chunk = process.stderr.read1(4096)
+                    rendered = decoder.decode(chunk, final=not chunk)
+                    diagnostic[0] = (diagnostic[0] + rendered)[-4000:]
+                    if rendered:
+                        try:
+                            stream.write(rendered)
+                            stream.flush()
+                        except (OSError, ValueError) as error:
+                            if not display_errors:
+                                display_errors.append(error)
+                    if not chunk:
+                        break
+
+            progress = threading.Thread(target=forward_stderr, daemon=True)
+            progress.start()
+            try:
+                process.wait(timeout=timeout)
+            except (subprocess.TimeoutExpired, KeyboardInterrupt):
+                process.kill()
+                process.wait()
+                raise
+            finally:
+                progress.join()
+                process.stderr.close()
+            output.seek(0)
+            stdout = output.read().decode("utf-8", errors="replace").strip()
+            if process.returncode:
+                detail = (diagnostic[0] or stdout or f"exit {process.returncode}").strip()
+                raise ValueError(f"{command[0]} failed: {detail[-4000:]}")
+            if display_errors:
+                raise OSError("Could not display Cargo progress") from display_errors[0]
+            return stdout
 
 
 def native_archive_name(version, target, revision, run_id, attempt):
@@ -374,9 +432,11 @@ def package_native(destination, binary, resources, *, version, target, revision,
 def open_native(app, info, target, *, runner=None):
     if info.system != "Darwin" or target != info.native_target:
         raise ValueError("--open requires an artifact matching this physical Mac architecture")
+    _progress("Checking whether Fleetworks is already running")
     commands = _run(["ps", "-axo", "comm="], runner=runner)
     if any(Path(line.strip()).name == NATIVE_BINARY for line in commands.splitlines()):
         return "Fleetworks is already running; close it normally, then open the new printed app path. No process was stopped."
+    _progress(f"Opening {app} through Launch Services")
     _run(["open", str(app)], runner=runner)
     return "Requested Launch Services opening; actual GUI readiness and authenticated operations remain unverified."
 
@@ -484,6 +544,8 @@ def extract_native(archive, destination, *, expected_digest, version, target, re
 def native_main(args):
     if sys.version_info < (3, 9):
         raise ValueError("Native helper requires Python 3.9 or newer")
+    if not args.dry_run:
+        _progress("Inspecting host, toolchain and native target")
     info = detect()
     target = resolve_native_target(info, args.target)
     if args.open and target != info.native_target:
@@ -497,6 +559,7 @@ def native_main(args):
                           "archive_requested": args.archive, "open_requested": args.open,
                           "prerequisites": "SDK/package inputs checked during build/package, not this dry run"}, indent=2))
         return 0
+    _progress("Checking source identity and pinned Rune dependencies")
     version = (ROOT / "version.txt").read_text(encoding="utf-8").strip()
     revision, dirty = repository_identity(revision=args.revision)
     if (args.require_clean or os.environ.get("CI") == "true") and dirty:
@@ -504,24 +567,28 @@ def native_main(args):
     rune_revision = locked_rune_revision()
     resources = args.resources or ROOT / "apps/fleetworks-desktop/resources"
     if command:
+        _progress("Checking Xcode command-line tools and the macOS SDK")
         _run(["xcode-select", "-p"])
         _run(["xcrun", "--sdk", "macosx", "--show-sdk-path"])
         environment = dict(os.environ)
         environment.pop("ARGOS_EMBED", None)
         environment["RUSTUP_AUTO_INSTALL"] = "0"
-        binary = cargo_executable(_run(command, environment=environment, timeout=3600))
+        _progress(f"Building {NATIVE_BINARY} ({target}, {args.profile})")
+        _progress(shlex.join(command))
+        binary = cargo_executable(_run_cargo(command, environment=environment, timeout=3600))
     else:
         binary = args.binary
+    _progress("Packaging and validating the native app bundle")
     result = package_native(destination, binary, resources, version=version, target=target,
                             revision=revision, profile=args.profile, rune_revision=rune_revision,
                             toolchain=toolchain, dirty=dirty, minimum_os=args.minimum_macos,
                             bundle_version=args.bundle_version, run_id=args.run_id,
                             attempt=args.run_attempt, workflow=args.workflow, archive=args.archive,
                             cargo_lock_sha256=sha256(ROOT / "Cargo.lock"))
-    print(result["app"])
-    print(json.dumps({key: value for key, value in result.items() if key != "identity"}, indent=2))
+    print(result["app"], flush=True)
+    print(json.dumps({key: value for key, value in result.items() if key != "identity"}, indent=2), flush=True)
     if args.open:
-        print(open_native(Path(result["app"]), info, target))
+        print(open_native(Path(result["app"]), info, target), flush=True)
     return 0
 
 

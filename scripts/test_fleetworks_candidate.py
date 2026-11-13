@@ -1,5 +1,6 @@
 """Offline contracts for the native Mac candidate package."""
 
+import io
 import json
 import os
 import plistlib
@@ -7,13 +8,15 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from fleetworks_candidate import NATIVE_APP, NATIVE_BINARY, NATIVE_MANIFEST
-from fleetworks_candidate import main, apple_versions, cargo_executable, cargo_native_command
+from fleetworks_candidate import main, native_main, open_native, _run_cargo, apple_versions, cargo_executable, cargo_native_command
 from fleetworks_candidate import checksum_line, extract_native, native_output, package_native, sha256
 
 
@@ -246,6 +249,151 @@ class NativeAppTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "file digest mismatch"):
             self.verify(result)
         self.assertFalse((self.root / "download check").exists())
+
+
+class NativeBuildProgressTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.binary = self.root / NATIVE_BINARY
+        self.messages = "\n".join(json.dumps(message) for message in [
+            {"reason": "compiler-artifact", "target": {"name": NATIVE_BINARY, "kind": ["bin"]},
+             "package_id": "path+file:///fixture/apps/fleetworks-desktop#0.2.1", "executable": str(self.binary)},
+            {"reason": "build-finished", "success": True},
+        ])
+
+    def test_cargo_progress_is_flushed_before_fake_compiler_exits_and_json_stays_exact(self):
+        released = self.root / "release-fake-compiler"
+        visible = threading.Event()
+        output = io.StringIO()
+
+        class ProgressStream:
+            def write(self, value):
+                output.write(value)
+
+            def flush(self):
+                if "Compiling fake native unit" in output.getvalue():
+                    visible.set()
+
+        # Deliberately omit a newline: progress must not wait for a line or EOF.
+        script = """import pathlib, sys, time
+sys.stderr.write('Compiling fake native unit'); sys.stderr.flush()
+release = pathlib.Path(sys.argv[1])
+deadline = time.monotonic() + 5
+while not release.exists():
+    if time.monotonic() > deadline: sys.exit(9)
+    time.sleep(0.01)
+sys.stdout.write(sys.argv[2]); sys.stdout.flush()
+"""
+        results = []
+        errors = []
+
+        def build():
+            try:
+                results.append(_run_cargo([sys.executable, "-u", "-c", script, str(released), self.messages], root=self.root, timeout=8))
+            except BaseException as error:
+                errors.append(error)
+
+        with mock.patch("sys.stderr", ProgressStream()):
+            worker = threading.Thread(target=build)
+            worker.start()
+            try:
+                self.assertTrue(visible.wait(4), "compiler progress must be flushed before it is released to exit")
+                self.assertTrue(worker.is_alive(), "visibility must precede child completion")
+                self.assertEqual(results, [])
+            finally:
+                released.touch()
+                worker.join(8)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(results, [self.messages])
+        self.assertEqual(cargo_executable(results[0]), self.binary)
+
+    def test_failed_fake_compiler_preserves_live_diagnostics_and_bounded_error(self):
+        diagnostic = "x" * 6000 + "fixture compiler error"
+        script = "import sys; sys.stderr.write(sys.argv[1]); sys.stderr.flush(); sys.exit(7)"
+        stream = io.StringIO()
+        with mock.patch("sys.stderr", stream), self.assertRaises(ValueError) as failed:
+            _run_cargo([sys.executable, "-u", "-c", script, diagnostic], root=self.root, timeout=5)
+        self.assertEqual(stream.getvalue(), diagnostic)
+        self.assertTrue(str(failed.exception).endswith("fixture compiler error"))
+        self.assertLessEqual(len(str(failed.exception)), len(sys.executable) + len(" failed: ") + 4000)
+
+    def test_fake_compiler_timeout_still_terminates_and_reports_timeout(self):
+        script = "import sys, time; sys.stderr.write('building'); sys.stderr.flush(); time.sleep(10)"
+        with mock.patch("sys.stderr", io.StringIO()), self.assertRaises(subprocess.TimeoutExpired):
+            _run_cargo([sys.executable, "-u", "-c", script], root=self.root, timeout=0.1)
+
+    def test_build_stages_are_visible_before_operations_and_stdout_keeps_artifact_interface(self):
+        (self.root / "version.txt").write_text("0.2.1\n")
+        (self.root / "Cargo.lock").write_text("synthetic lockfile\n")
+        args = SimpleNamespace(command="build-native", target="host", profile="debug", open=True,
+                               agent=False, output=None, dry_run=False, revision=None, require_clean=False,
+                               resources=self.root / "resources", minimum_macos=None, bundle_version=None,
+                               run_id=None, run_attempt="1", workflow="fixture", archive=False)
+        target = "x86_64-apple-darwin"
+        info = SimpleNamespace(system="Darwin", native_target=target)
+        stderr, stdout = io.StringIO(), io.StringIO()
+        result = {"app": str(self.root / NATIVE_APP), "manifest": str(self.root / NATIVE_MANIFEST), "identity": {}}
+        commands = []
+
+        def detect():
+            self.assertIn("Inspecting host", stderr.getvalue())
+            return info
+
+        def run(command, **_kwargs):
+            self.assertIn("Checking Xcode", stderr.getvalue())
+            commands.append(command)
+            return "/fixture-sdk"
+
+        def cargo(command, **kwargs):
+            self.assertIn("Building fleetworks-desktop", stderr.getvalue())
+            self.assertIn("--message-format=json-render-diagnostics", stderr.getvalue())
+            self.assertNotIn("--target", command, "implicit host keeps its existing cache graph")
+            self.assertNotIn("ARGOS_EMBED", kwargs["environment"])
+            return self.messages
+
+        def package(*_args, **_kwargs):
+            self.assertIn("Packaging and validating", stderr.getvalue())
+            return result
+
+        def launch(*_args):
+            self.assertTrue(stdout.getvalue().startswith(result["app"] + "\n"))
+            return "fixture launch requested"
+
+        with mock.patch("sys.stderr", stderr), mock.patch("sys.stdout", stdout), \
+             mock.patch.multiple("fleetworks_candidate", ROOT=self.root, detect=detect,
+                                 resolve_native_target=lambda *_: target, validate_toolchain=lambda *_: "1.95.0",
+                                 native_output=lambda *_: self.root, repository_identity=lambda **_: ("1" * 40, False),
+                                 locked_rune_revision=lambda: "2" * 40, _run=run, _run_cargo=cargo,
+                                 package_native=package, open_native=launch):
+            self.assertEqual(native_main(args), 0)
+        self.assertEqual(commands, [["xcode-select", "-p"], ["xcrun", "--sdk", "macosx", "--show-sdk-path"]])
+        artifact_output = stdout.getvalue().removeprefix(result["app"] + "\n").removesuffix("fixture launch requested\n")
+        self.assertEqual(json.loads(artifact_output), {key: value for key, value in result.items() if key != "identity"})
+
+    def test_launch_stages_precede_fake_open_and_running_app_is_preserved(self):
+        target = "x86_64-apple-darwin"
+        info = SimpleNamespace(system="Darwin", native_target=target)
+        stream = io.StringIO()
+        commands = []
+
+        def runner(command, **_kwargs):
+            commands.append(command)
+            if command[0] == "ps":
+                self.assertIn("Checking whether Fleetworks", stream.getvalue())
+            else:
+                self.assertEqual(command[0], "open")
+                self.assertIn("through Launch Services", stream.getvalue())
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with mock.patch("sys.stderr", stream):
+            self.assertIn("Requested Launch Services", open_native(self.root / NATIVE_APP, info, target, runner=runner))
+        self.assertEqual(commands, [["ps", "-axo", "comm="], ["open", str(self.root / NATIVE_APP)]])
+        with mock.patch("sys.stderr", io.StringIO()):
+            response = open_native(self.root / NATIVE_APP, info, target, runner=lambda command, **_: subprocess.CompletedProcess(command, 0, "/fixture/fleetworks-desktop\n", ""))
+        self.assertIn("already running", response)
 
 
 if __name__ == "__main__":

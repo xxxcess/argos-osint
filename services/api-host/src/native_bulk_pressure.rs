@@ -3,10 +3,10 @@
 
 #[cfg(unix)]
 use std::ffi::CString;
-#[cfg(target_os = "linux")]
 use std::fs::File;
-#[cfg(target_os = "linux")]
 use std::io::Read;
+use std::io::Seek;
+use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -193,28 +193,215 @@ async fn wait_pause(cancel: &AtomicBool, retry_after: Duration) -> Result<()> {
     }
 }
 
-/// The complete validated Vec is returned only after bounded incremental parse,
-/// exact admitted-byte verification and a final resource check. Any failure
-/// drops retained input here, before a source lease/transaction can be acquired.
-pub(super) fn read_actors_checked(
+const MAX_ACTOR_FRAME_BYTES: usize = 1024 * 1024;
+const MAX_ACTOR_SPOOL_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Private validated records: no original CSV is read after source writes begin.
+pub(super) struct ValidatedActors {
+    pub(super) total: usize,
+    spool: File,
+}
+
+struct ActorFrame(Vec<u8>);
+impl Write for ActorFrame {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.0.len().saturating_add(bytes.len()) > MAX_ACTOR_FRAME_BYTES {
+            return Err(std::io::Error::other("actor_spool_frame_budget"));
+        }
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn private_actor_spool(path: &Path) -> Result<File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("actor_spool_parent"))?;
+        ensure!(parent.canonicalize()? == parent, "actor_spool_parent");
+        let name = parent.join(format!(
+            ".actor-spool-{}",
+            argos_osint_core::storage::home::random_secret()?
+        ));
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&name)?;
+        // Linux/macOS keep only the owned descriptor, including every error exit.
+        std::fs::remove_file(&name)?;
+        Ok(file)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        anyhow::bail!("actor_spool_platform_unavailable")
+    }
+}
+
+/// Verify every original CSV byte/record before acquiring a source lease.
+/// Only bounded IDs/one actor live in RAM; the private spool retains all metadata.
+pub(super) fn scan_actors_checked(
     path: &Path,
     dataset: &DatasetRef,
     workspace: &Path,
     budget: &ParserBudget,
     cancel: &AtomicBool,
-) -> Result<Vec<Actor>> {
-    budget.check_sample(measure(workspace))?;
+) -> Result<ValidatedActors> {
+    scan_actors_with_probe(path, dataset, budget, cancel, || {
+        budget.check_sample(measure(workspace))
+    })
+}
+
+fn scan_actors_with_probe(
+    path: &Path,
+    dataset: &DatasetRef,
+    budget: &ParserBudget,
+    cancel: &AtomicBool,
+    mut probe: impl FnMut() -> Result<()>,
+) -> Result<ValidatedActors> {
+    probe()?;
     let mut reader = super::verified_reader(path, dataset)?;
-    let actors = argos_osint_core::actor_catalog::read_bounded(
+    let mut spool = private_actor_spool(path)?;
+    let mut spool_bytes = 0_u64;
+    let summary = argos_osint_core::actor_catalog::scan_bounded(
         &mut reader,
         &budget.actor_limits(),
         cancel,
-        |_| budget.check_sample(measure(workspace)),
+        |_| probe(),
+        |actor| {
+            ensure!(!cancel.load(Ordering::Acquire), "worker_bulk_cancelled");
+            let mut frame = ActorFrame(Vec::new());
+            serde_json::to_writer(&mut frame, &actor)?;
+            spool_bytes = spool_bytes
+                .checked_add(frame.0.len() as u64 + 4)
+                .ok_or_else(|| anyhow::anyhow!("actor_spool_byte_budget"))?;
+            ensure!(
+                spool_bytes <= MAX_ACTOR_SPOOL_BYTES,
+                "actor_spool_byte_budget"
+            );
+            // Verify the later writer can represent this whole actor before any writes.
+            ensure!(
+                argos_osint_core::actor_catalog::actor_seed_payload_bytes(&actor)?
+                    <= argos_osint_core::storage::actor_catalog::MAX_SEED_BATCH_BYTES,
+                "actor_seed_batch_budget"
+            );
+            ensure!(
+                argos_osint_core::storage::actor_catalog::seed_actor_transaction_bytes(&actor)?
+                    <= argos_osint_core::storage::actor_catalog::MAX_SEED_TRANSACTION_BYTES,
+                "actor_seed_batch_budget"
+            );
+            spool.write_all(&(frame.0.len() as u32).to_le_bytes())?;
+            spool.write_all(&frame.0)?;
+            Ok(())
+        },
     )?;
     super::verify_complete(reader, dataset)?;
     ensure!(!cancel.load(Ordering::Acquire), "worker_bulk_cancelled");
-    budget.check_sample(measure(workspace))?;
-    Ok(actors)
+    probe()?;
+    spool.flush()?;
+    spool.sync_data()?;
+    spool.rewind()?;
+    Ok(ValidatedActors {
+        total: summary.rows,
+        spool,
+    })
+}
+
+/// One blocking producer, one buffered batch. Caller closes the receiver and
+/// joins this worker on every completion/error/cancellation path.
+pub(super) fn produce_actor_batches(
+    validated: ValidatedActors,
+    workspace: &Path,
+    budget: &ParserBudget,
+    cancel: &AtomicBool,
+    sender: tokio::sync::mpsc::Sender<Result<Vec<Actor>>>,
+) -> Result<()> {
+    produce_actor_batches_with_probe(validated, cancel, sender, || {
+        budget.check_sample(measure(workspace))
+    })
+}
+
+fn produce_actor_batches_with_probe(
+    mut validated: ValidatedActors,
+    cancel: &AtomicBool,
+    sender: tokio::sync::mpsc::Sender<Result<Vec<Actor>>>,
+    mut probe: impl FnMut() -> Result<()>,
+) -> Result<()> {
+    let result: Result<()> = (|| {
+        let mut count = 0;
+        let mut batch = Vec::new();
+        let mut bytes = 0_u64;
+        let mut expanded_bytes = 0_u64;
+        loop {
+            ensure!(!cancel.load(Ordering::Acquire), "worker_bulk_cancelled");
+            let mut length = [0_u8; 4];
+            if validated.spool.read(&mut length[..1])? == 0 {
+                break;
+            }
+            validated.spool.read_exact(&mut length[1..])?;
+            let length = u32::from_le_bytes(length) as usize;
+            ensure!(
+                (1..=MAX_ACTOR_FRAME_BYTES).contains(&length),
+                "actor_spool_frame_budget"
+            );
+            let mut frame = vec![0; length];
+            validated.spool.read_exact(&mut frame)?;
+            let actor: Actor = serde_json::from_slice(&frame)?;
+            let charge = argos_osint_core::actor_catalog::actor_seed_payload_bytes(&actor)?;
+            ensure!(
+                charge <= argos_osint_core::storage::actor_catalog::MAX_SEED_BATCH_BYTES,
+                "actor_seed_batch_budget"
+            );
+            let expanded =
+                argos_osint_core::storage::actor_catalog::seed_actor_transaction_bytes(&actor)?;
+            ensure!(
+                expanded <= argos_osint_core::storage::actor_catalog::MAX_SEED_TRANSACTION_BYTES,
+                "actor_seed_batch_budget"
+            );
+            if !batch.is_empty()
+                && (batch.len() == 128
+                    || bytes + charge
+                        > argos_osint_core::storage::actor_catalog::MAX_SEED_BATCH_BYTES
+                    || expanded_bytes + expanded
+                        > argos_osint_core::storage::actor_catalog::MAX_SEED_TRANSACTION_BYTES)
+            {
+                probe()?;
+                sender
+                    .blocking_send(Ok(std::mem::take(&mut batch)))
+                    .map_err(|_| anyhow::anyhow!("worker_bulk_cancelled"))?;
+                bytes = 0;
+                expanded_bytes = 0;
+            }
+            count += 1;
+            ensure!(count <= validated.total, "actor_seed_count_changed");
+            bytes += charge;
+            expanded_bytes += expanded;
+            batch.push(actor);
+        }
+        ensure!(count == validated.total, "actor_seed_count_changed");
+        ensure!(!cancel.load(Ordering::Acquire), "worker_bulk_cancelled");
+        probe()?;
+        if !batch.is_empty() {
+            sender
+                .blocking_send(Ok(batch))
+                .map_err(|_| anyhow::anyhow!("worker_bulk_cancelled"))?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let message = error.root_cause().to_string();
+        let _ = sender.blocking_send(Err(error));
+        return Err(anyhow::anyhow!(message));
+    }
+    Ok(())
 }
 
 fn measure(workspace: &Path) -> Measurement {
@@ -288,6 +475,121 @@ mod tests {
             resident_bytes: Some(64 * 1024 * 1024),
             workspace_free_bytes: Some(2 * 1024 * 1024 * 1024),
         }
+    }
+
+    fn fixture_budget() -> ParserBudget {
+        ParserBudget {
+            limits: ActorIndexLimits::default(),
+            retained_bytes: 32 * 1024 * 1024,
+        }
+    }
+
+    fn spool_fixture(rows: usize) -> (tempfile::TempDir, std::path::PathBuf, DatasetRef) {
+        use fleetworks_contracts::readiness::DatasetKind;
+        use sha2::Digest;
+        let root = tempfile::tempdir().expect("private fixture");
+        let path = root
+            .path()
+            .canonicalize()
+            .expect("canonical parent")
+            .join("actors.csv");
+        let mut bytes = String::from("actor_id,actor_name,actor_type,aliases,name_normalized\n");
+        for index in 0..rows {
+            bytes.push_str(&format!(
+                "synthetic-{index},Harbor Union {index},organization,[],harbor union {index}\n"
+            ));
+        }
+        std::fs::write(&path, bytes.as_bytes()).expect("fixture CSV");
+        let dataset = DatasetRef::new(
+            "dataset-spool-fixture".into(),
+            DatasetKind::ActorCatalog,
+            format!("{:x}", sha2::Sha256::digest(bytes.as_bytes())),
+            bytes.len() as u64,
+        )
+        .expect("reference");
+        (root, path, dataset)
+    }
+
+    #[tokio::test]
+    async fn validated_private_spool_preserves_exact_records_after_original_changes() {
+        let (root, path, dataset) = spool_fixture(1);
+        let cancel = AtomicBool::new(false);
+        let validated =
+            scan_actors_with_probe(&path, &dataset, &fixture_budget(), &cancel, || Ok(()))
+                .expect("complete original validated");
+        assert_eq!(validated.total, 1);
+        assert_eq!(
+            std::fs::read_dir(root.path())
+                .expect("private directory")
+                .count(),
+            1,
+            "spool has no reachable pathname"
+        );
+        std::fs::write(&path, b"changed after full validation").expect("replace original");
+        let (send, mut receive) = tokio::sync::mpsc::channel(1);
+        let producer = tokio::task::spawn_blocking(move || {
+            produce_actor_batches_with_probe(validated, &AtomicBool::new(false), send, || Ok(()))
+        });
+        let batch = receive
+            .recv()
+            .await
+            .expect("bounded batch")
+            .expect("validated records");
+        assert_eq!(batch[0].name, "Harbor Union 0");
+        assert!(receive.recv().await.is_none());
+        producer
+            .await
+            .expect("owned producer joined")
+            .expect("complete spool");
+        assert!(
+            scan_actors_with_probe(&path, &dataset, &fixture_budget(), &cancel, || Ok(())).is_err(),
+            "changed original cannot produce a newly validated spool"
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_consumer_joins_blocked_producer_and_corrupt_frame_never_allocates_past_bound() {
+        let (_root, path, dataset) = spool_fixture(260);
+        let validated = scan_actors_with_probe(
+            &path,
+            &dataset,
+            &fixture_budget(),
+            &AtomicBool::new(false),
+            || Ok(()),
+        )
+        .expect("validated spool");
+        let (send, mut receive) = tokio::sync::mpsc::channel(1);
+        let producer = tokio::task::spawn_blocking(move || {
+            produce_actor_batches_with_probe(validated, &AtomicBool::new(false), send, || Ok(()))
+        });
+        let first = receive
+            .recv()
+            .await
+            .expect("first batch")
+            .expect("bounded records");
+        assert!(first.len() <= 128);
+        drop(receive);
+        assert!(tokio::time::timeout(Duration::from_secs(2), producer)
+            .await
+            .expect("closed receiver wakes producer")
+            .expect("joined producer")
+            .is_err());
+        let mut spool = private_actor_spool(&path).expect("unlinked spool");
+        spool
+            .write_all(&u32::MAX.to_le_bytes())
+            .expect("malformed frame");
+        spool.rewind().expect("rewind");
+        let (send, mut receive) = tokio::sync::mpsc::channel(1);
+        let producer = tokio::task::spawn_blocking(move || {
+            produce_actor_batches_with_probe(
+                ValidatedActors { total: 1, spool },
+                &AtomicBool::new(false),
+                send,
+                || Ok(()),
+            )
+        });
+        assert!(receive.recv().await.expect("controlled error").is_err());
+        assert!(producer.await.expect("joined malformed producer").is_err());
     }
 
     #[test]

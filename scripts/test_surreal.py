@@ -57,6 +57,7 @@ CUTOVER_CONTRACTS = (
     "storage_workstation_paging",
     "storage_job_actions",
     "storage_setup_jobs",
+    "storage_upload_tickets",
     "storage_configuration_reset_barrier",
     "storage_actor_search_outbox",
     "storage_actor_search_rebuild",

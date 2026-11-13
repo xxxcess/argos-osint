@@ -117,4 +117,5 @@ pub mod thread_history;
 pub mod tool_state;
 pub mod topology;
 pub mod tx;
+pub mod upload_ticket;
 pub mod vectors;

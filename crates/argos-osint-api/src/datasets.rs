@@ -3,15 +3,19 @@
 //! Public inputs are a dataset kind/hash and raw bytes, never a server/Mac path.
 //! A returned reference exists only after CSV validation and durable metadata.
 
-use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use argos_osint_core::storage::connect_registry::RegistryAuthority;
 use argos_osint_core::storage::repo::Repository;
 use argos_osint_core::storage::setup_jobs;
+use argos_osint_core::storage::upload_ticket;
+use argos_osint_core::storage::upload_ticket::UploadTicketBinding;
 use axum::body::Bytes;
+use axum::extract::Path as AxumPath;
 use axum::extract::Query;
 use axum::extract::Request;
 use axum::extract::State;
@@ -23,6 +27,7 @@ use axum::Extension;
 use axum::Json;
 use fleetworks_contracts::context::CredentialPurpose;
 use fleetworks_contracts::context::Permission;
+use fleetworks_contracts::dataset_upload::DatasetUploadRequest;
 use fleetworks_contracts::readiness::DatasetKind;
 use fleetworks_contracts::readiness::DatasetRef;
 use futures_util::Stream;
@@ -33,10 +38,44 @@ use sha2::Digest;
 use sha2::Sha256;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
 
+use crate::request_context::ResolvedRequest;
 use crate::ApiState;
 use crate::AuthenticatedPrincipal;
+
+fn upload_binding(context: &ResolvedRequest) -> Option<UploadTicketBinding> {
+    if !matches!(
+        context.purpose(),
+        CredentialPurpose::Native | CredentialPurpose::Operator
+    ) || !context.permits(Permission::MaintainBackend)
+    {
+        return None;
+    }
+    UploadTicketBinding::new(
+        context.scope_id(),
+        context.credential_id(),
+        context.access_epoch(),
+        context.purpose(),
+        context.registered().ok()?,
+    )
+    .ok()
+}
+
+#[derive(Default)]
+struct StageExpectation<'a> {
+    size: Option<u64>,
+    context: Option<&'a ResolvedRequest>,
+    permit: Option<OwnedSemaphorePermit>,
+}
+
+struct CancelValidation(Arc<AtomicBool>);
+impl Drop for CancelValidation {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
 
 /// A server-provisioned staging directory; never constructed from HTTP data.
 #[derive(Clone)]
@@ -186,16 +225,50 @@ impl DatasetStore {
         S: Stream<Item = Result<Bytes, E>> + Send,
         E: Send,
     {
+        self.stage_checked(
+            repo,
+            authority,
+            kind,
+            expected_sha256,
+            StageExpectation::default(),
+            stream,
+        )
+        .await
+    }
+
+    async fn stage_checked<S, E>(
+        &self,
+        repo: &Repository,
+        authority: &RegistryAuthority,
+        kind: DatasetKind,
+        expected_sha256: String,
+        expectation: StageExpectation<'_>,
+        stream: S,
+    ) -> anyhow::Result<DatasetRef>
+    where
+        S: Stream<Item = Result<Bytes, E>> + Send,
+        E: Send,
+    {
+        let expected_size = expectation.size;
+        let context = expectation.context;
         anyhow::ensure!(
             expected_sha256.len() == 64
                 && expected_sha256.bytes().all(|byte| byte.is_ascii_hexdigit()),
             "dataset SHA-256 required"
         );
-        let _permit = self
-            .uploads
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| anyhow::anyhow!("dataset upload capacity busy"))?;
+        let permit = if let Some(permit) = expectation.permit {
+            permit
+        } else {
+            self.uploads
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| anyhow::anyhow!("dataset upload capacity busy"))?
+        };
+        // Both the stream and the CPU worker own this slot. Dropping an HTTP
+        // future cannot release capacity while its blocking parser still runs.
+        let permit = Arc::new(permit);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let _cancel_validation = CancelValidation(Arc::clone(&cancelled));
         self.verify_root().await?;
         let limit = setup_jobs::dataset_limit(kind);
         anyhow::ensure!(limit > 0, "unsupported dataset kind");
@@ -221,10 +294,18 @@ impl DatasetStore {
                     .checked_add(chunk.len() as u64)
                     .ok_or_else(|| anyhow::anyhow!("dataset size exceeded"))?;
                 anyhow::ensure!(size <= limit, "dataset byte limit exceeded");
+                anyhow::ensure!(
+                    expected_size.is_none_or(|expected| size <= expected),
+                    "dataset declared size exceeded"
+                );
                 sha.update(&chunk);
                 file.write_all(&chunk).await?;
             }
             anyhow::ensure!(size > 0, "dataset bytes are empty");
+            anyhow::ensure!(
+                expected_size.is_none_or(|expected| size == expected),
+                "dataset declared size mismatch"
+            );
             let actual = format!("{:x}", sha.finalize());
             anyhow::ensure!(
                 actual == expected_sha256.to_ascii_lowercase(),
@@ -233,8 +314,18 @@ impl DatasetStore {
             file.flush().await?;
             file.sync_data().await?;
             let validation_path = part.clone();
-            tokio::task::spawn_blocking(move || validate_csv(&validation_path, kind)).await??;
+            let cpu_cancel = Arc::clone(&cancelled);
+            spawn_validation(Arc::clone(&permit), move || {
+                validate_csv(&validation_path, kind, &cpu_cancel)
+            })
+            .await??;
             self.verify_root().await?;
+            if let Some(context) = context {
+                context
+                    .revalidate(repo)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("dataset upload authority changed"))?;
+            }
             // hard_link refuses an existing destination; an ordinary rename would overwrite it.
             tokio::fs::hard_link(&part, &final_path).await?;
             tokio::fs::remove_file(&part).await?;
@@ -261,6 +352,9 @@ impl DatasetStore {
 
     /// Explicit worker/operator housekeeping, never called by a readiness GET.
     pub async fn expire_abandoned(&self, repo: &Repository) -> anyhow::Result<usize> {
+        // Ticket cleanup is metadata-only and bounded independently from the
+        // existing partial-file/pinned-dataset expiry owner.
+        upload_ticket::expire(repo).await?;
         let expired = setup_jobs::claim_expired_uploads(repo).await?;
         let mut removed = 0;
         for item in expired {
@@ -286,11 +380,33 @@ impl DatasetStore {
     }
 }
 
-fn validate_csv(path: &Path, kind: DatasetKind) -> anyhow::Result<()> {
+fn spawn_validation(
+    work_slot: Arc<OwnedSemaphorePermit>,
+    work: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
+) -> tokio::task::JoinHandle<anyhow::Result<()>> {
+    tokio::task::spawn_blocking(move || {
+        let _work_slot = work_slot;
+        work()
+    })
+}
+
+fn validate_csv(path: &Path, kind: DatasetKind, cancelled: &AtomicBool) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !cancelled.load(Ordering::Acquire),
+        "dataset validation cancelled"
+    );
+    let mut header = std::fs::File::open(path)?;
+    fleetworks_contracts::dataset_upload::validate_csv_header(&mut header, kind)?;
     match kind {
         DatasetKind::ActorCatalog => {
             let file = std::fs::File::open(path)?;
-            argos_osint_core::actor_catalog::read(file.take(setup_jobs::ACTOR_DATASET_LIMIT + 1))?;
+            argos_osint_core::actor_catalog::scan_bounded(
+                file,
+                &argos_osint_core::actor_catalog::ActorReadLimits::default(),
+                cancelled,
+                |_| Ok(()),
+                |_| Ok(()),
+            )?;
         }
         DatasetKind::ClassifierTraining => {
             let mut request = argos_osint_core::classifier::dataset::DatasetRequest::default();
@@ -306,6 +422,10 @@ fn validate_csv(path: &Path, kind: DatasetKind) -> anyhow::Result<()> {
         }
         _ => anyhow::bail!("unsupported dataset kind"),
     }
+    anyhow::ensure!(
+        !cancelled.load(Ordering::Acquire),
+        "dataset validation cancelled"
+    );
     Ok(())
 }
 
@@ -448,6 +568,195 @@ pub(crate) async fn upload(
     }
 }
 
+/// Issue an authenticated, short-lived destination for exact selected bytes.
+pub(crate) async fn create_upload(
+    State(state): State<ApiState>,
+    Extension(context): Extension<ResolvedRequest>,
+    store: Option<Extension<DatasetStore>>,
+    Json(input): Json<DatasetUploadRequest>,
+) -> Response {
+    if input.validate().is_err() {
+        return response(
+            StatusCode::BAD_REQUEST,
+            json!({"error":"Invalid dataset upload metadata"}),
+        );
+    }
+    let Some(binding) = upload_binding(&context) else {
+        return response(
+            StatusCode::FORBIDDEN,
+            json!({"error":"Registered native maintenance authority required"}),
+        );
+    };
+    if context.revalidate(&state.repo).await.is_err() {
+        return response(
+            StatusCode::UNAUTHORIZED,
+            json!({"error":"Current upload authority unavailable"}),
+        );
+    }
+    let Some(Extension(store)) = store else {
+        return response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"error":"Dataset staging unavailable"}),
+        );
+    };
+    if store.verify_root().await.is_err() {
+        return response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"error":"Dataset staging unavailable"}),
+        );
+    }
+    match upload_ticket::issue(&state.repo, &binding, &input).await {
+        Ok(ticket) => response(StatusCode::CREATED, json!(ticket)),
+        Err(error) => ticket_failure(error, StatusCode::SERVICE_UNAVAILABLE),
+    }
+}
+
+/// Claim a destination once, then hand the body stream to the existing bounded
+/// upload worker. A failed/expired/used URL requires a newly issued destination;
+/// completed DatasetRefs and accepted jobs are independent durable artifacts.
+pub(crate) async fn put_upload(
+    State(state): State<ApiState>,
+    AxumPath(id): AxumPath<String>,
+    Extension(context): Extension<ResolvedRequest>,
+    store: Option<Extension<DatasetStore>>,
+    request: Request,
+) -> Response {
+    let Some(binding) = upload_binding(&context) else {
+        return response(
+            StatusCode::FORBIDDEN,
+            json!({"error":"Registered native maintenance authority required"}),
+        );
+    };
+    if context.revalidate(&state.repo).await.is_err() {
+        return response(
+            StatusCode::UNAUTHORIZED,
+            json!({"error":"Current upload authority unavailable"}),
+        );
+    }
+    let Some(Extension(store)) = store else {
+        return response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"error":"Dataset staging unavailable"}),
+        );
+    };
+    if request.uri().query().is_some()
+        || request.uri().path()
+            != format!(
+                "{}/{}",
+                fleetworks_contracts::dataset_upload::DATASET_UPLOADS_PATH,
+                id
+            )
+        || id.len() != 64
+        || !id.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return response(
+            StatusCode::NOT_FOUND,
+            json!({"error":"Upload URL unavailable; request a new destination"}),
+        );
+    }
+    let permit = match store.uploads.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return response(
+                StatusCode::TOO_MANY_REQUESTS,
+                json!({"error":"Upload capacity is busy; retry this destination later"}),
+            )
+        }
+    };
+    let lease = match upload_ticket::claim(&state.repo, &binding, &id).await {
+        Ok(lease) => lease,
+        Err(error) => return ticket_failure(error, StatusCode::GONE),
+    };
+    if !matches!(
+        request
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("text/csv" | "application/octet-stream")
+    ) {
+        return response(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            json!({"error":"Upload raw CSV bytes to a new destination"}),
+        );
+    }
+    if request
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .is_some_and(|value| {
+            value.to_str().ok().and_then(|v| v.parse::<u64>().ok()) != Some(lease.size_bytes)
+        })
+    {
+        return response(
+            StatusCode::BAD_REQUEST,
+            json!({"error":"Declared upload size changed; request a new destination"}),
+        );
+    }
+    let result = store
+        .stage_checked(
+            &state.repo,
+            context.authority(),
+            lease.kind,
+            lease.sha256,
+            StageExpectation {
+                size: Some(lease.size_bytes),
+                context: Some(&context),
+                permit: Some(permit),
+            },
+            request.into_body().into_data_stream(),
+        )
+        .await;
+    match result {
+        Ok(reference) => {
+            if context.revalidate(&state.repo).await.is_err() {
+                return response(
+                    StatusCode::UNAUTHORIZED,
+                    json!({"error":"Upload authority changed; recover staged metadata after reconnecting"}),
+                );
+            }
+            response(
+                StatusCode::CREATED,
+                json!({"dataset":reference,"expires_in_seconds":setup_jobs::DATASET_TTL.as_secs()}),
+            )
+        }
+        Err(_) => response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            json!({"error":"Upload validation failed or staging capacity is unavailable; request a new destination"}),
+        ),
+    }
+}
+
+fn ticket_failure(
+    error: argos_osint_core::storage::tx::TxError,
+    unavailable: StatusCode,
+) -> Response {
+    let status = match &error {
+        argos_osint_core::storage::tx::TxError::Abort(code) if code == "upload_ticket:capacity" => {
+            StatusCode::TOO_MANY_REQUESTS
+        }
+        argos_osint_core::storage::tx::TxError::Abort(code)
+            if code == "upload_ticket:forbidden" =>
+        {
+            StatusCode::FORBIDDEN
+        }
+        argos_osint_core::storage::tx::TxError::Abort(code)
+            if code == "upload_ticket:unavailable" =>
+        {
+            unavailable
+        }
+        argos_osint_core::storage::tx::TxError::Abort(code) if code == "upload_ticket:invalid" => {
+            StatusCode::BAD_REQUEST
+        }
+        _ => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    let message = match status {
+        StatusCode::FORBIDDEN => "Upload URL belongs to another authenticated registration",
+        StatusCode::TOO_MANY_REQUESTS => "Upload URL capacity is busy; retry later",
+        StatusCode::GONE => "Upload URL expired or used; request a new destination",
+        _ => "Upload destination authority is unavailable",
+    };
+    response(status, json!({"error":message}))
+}
+
 fn response(status: StatusCode, value: serde_json::Value) -> Response {
     let mut response = (status, Json(value)).into_response();
     response.headers_mut().insert(
@@ -466,8 +775,13 @@ mod tests {
         let root = tempfile::tempdir().expect("temporary staging parent");
         let csv = root.path().join("actors.csv");
         std::fs::write(&csv,b"actor_id,actor_name,actor_type,aliases,name_normalized\nsynthetic-1,Harbor Union,organization,[],harbor union\n").expect("synthetic actor CSV");
-        assert!(validate_csv(&csv, DatasetKind::ActorCatalog).is_ok());
-        assert!(validate_csv(&csv, DatasetKind::ClassifierTraining).is_err());
+        assert!(validate_csv(&csv, DatasetKind::ActorCatalog, &AtomicBool::new(false)).is_ok());
+        assert!(validate_csv(
+            &csv,
+            DatasetKind::ClassifierTraining,
+            &AtomicBool::new(false)
+        )
+        .is_err());
         assert_eq!(
             setup_jobs::dataset_limit(DatasetKind::ClassifierTraining),
             128 * 1024 * 1024
@@ -497,3 +811,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod upload_tests;

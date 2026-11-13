@@ -767,7 +767,7 @@ pub(crate) fn maintenance(state: &State, kit: &Kit) -> El {
             "Seed Actors",
             MaintenanceOperation::SeedActors,
             "maintenance-seed",
-            "Choose an actor CSV to validate and seed into the shared backend.",
+            "Choose a CSV to add or update actors. Existing actors outside this CSV are kept.",
         ),
         (
             "Build Search Index",

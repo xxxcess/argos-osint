@@ -35,7 +35,8 @@ use super::tx::{run_tx, RetryPolicy, TxError};
 /// v9 migrates active workspace registrations to workstation-only identity atomically,
 /// preserving immutable origins and fencing incompatible writers.
 /// v10 adds durable native pairing, scoped installation credentials and revocation.
-pub const SCHEMA_VERSION: i64 = 10;
+/// v11 adds authenticated dataset upload tickets shared across gateway replicas.
+pub const SCHEMA_VERSION: i64 = 11;
 
 /// Module schemas in apply order: counters before the outbox; the graph
 /// before lifecycle (which indexes `brain_graph_node`); Atlas before its
@@ -43,7 +44,7 @@ pub const SCHEMA_VERSION: i64 = 10;
 /// before refresh. The event logs (`argos_event`, `investigation_event`)
 /// stand alone; telemetry writes use `profile_view`'s tables, with
 /// `telemetry_meta` after them.
-pub fn schemas() -> [(&'static str, &'static str); 57] {
+pub fn schemas() -> [(&'static str, &'static str); 58] {
     [
         ("counters", super::counters::SCHEMA),
         ("native_pairing", super::native_pairing::SCHEMA),
@@ -112,6 +113,7 @@ pub fn schemas() -> [(&'static str, &'static str); 57] {
         ("job_actions", super::job_actions::SCHEMA),
         ("job_dispatch", super::job_dispatch::SCHEMA),
         ("setup_jobs", super::setup_jobs::SCHEMA),
+        ("upload_ticket", super::upload_ticket::SCHEMA),
         (
             "classifier_activation",
             super::classifier_activation::SCHEMA,

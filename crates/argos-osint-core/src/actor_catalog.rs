@@ -12,8 +12,11 @@ use crate::store::AtlasArticleRow;
 
 #[path = "actor_catalog_bounded.rs"]
 mod bounded;
+pub use bounded::actor_seed_payload_bytes;
 pub use bounded::read_bounded;
+pub use bounded::scan_bounded;
 pub use bounded::ActorReadLimits;
+pub use bounded::ActorScan;
 
 pub const SCOPE: &str = "dataset:argos_actors";
 pub const VERSION: &str = "argos-actors-catalog-v1";

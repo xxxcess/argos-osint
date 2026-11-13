@@ -57,7 +57,11 @@ pub(crate) fn safe_failure_reason(error: &anyhow::Error) -> &'static str {
             | "actor_parse_memory_budget"
             | "actor_parse_raw_record_budget"
             | "actor_parse_row_budget"
-            | "actor_parse_identity_expansion_budget" => return "setup_dataset_resource_budget",
+            | "actor_parse_identity_expansion_budget"
+            | "actor_spool_frame_budget"
+            | "actor_spool_byte_budget"
+            | "actor_seed_batch_budget"
+            | "actor_seed_count_changed" => return "setup_dataset_resource_budget",
             _ => (),
         }
     }
@@ -178,47 +182,71 @@ async fn seed(
 ) -> anyhow::Result<SetupOutcome> {
     let execution = actor_catalog::SeedExecution::from_claimed(repo, task, &cancel).await?;
     let selected = dataset.clone();
-    let actors = tokio::task::spawn_blocking({
+    let validated = tokio::task::spawn_blocking({
         let cancel = Arc::clone(&cancel);
         let workspace = workspace.clone();
         let budget = budget.clone();
-        move || bulk_pressure::read_actors_checked(&path, &selected, &workspace, &budget, &cancel)
+        move || bulk_pressure::scan_actors_checked(&path, &selected, &workspace, &budget, &cancel)
     })
     .await??;
     if cancel.load(Ordering::Acquire) {
         return Ok(SetupOutcome::Interrupted);
     }
+    let total = validated.total;
+    let (send_batch, batches) = mpsc::channel(1);
+    let producer = tokio::task::spawn_blocking({
+        let cancel = Arc::clone(&cancel);
+        let workspace = workspace.clone();
+        let budget = budget.clone();
+        move || {
+            bulk_pressure::produce_actor_batches(
+                validated, &workspace, &budget, &cancel, send_batch,
+            )
+        }
+    });
+    let batches = futures_util::stream::unfold(batches, |mut receiver| async move {
+        receiver.recv().await.map(|batch| (batch, receiver))
+    });
     let (report, mut receive) = mpsc::channel(1);
-    let operation = actor_catalog::seed_actors_pinned_claimed(
+    let mut operation = Box::pin(actor_catalog::seed_actors_stream_claimed(
         repo,
-        actors,
+        total,
+        batches,
         &execution,
         &cancel,
         move |progress| {
             let _ = report.try_send(progress);
         },
-    );
-    tokio::pin!(operation);
+    ));
     let complete = loop {
         tokio::select! {
-            result=&mut operation=>break result?,
+            result=&mut operation=>break result,
             Some(progress)=receive.recv()=>{
                 let observation=tokio::task::spawn_blocking({let workspace=workspace.clone();let budget=budget.clone();move||budget.check_running(&workspace)}).await;
                 if !matches!(observation,Ok(Ok(()))) {
                     argos_osint_core::cancellation::cancel_with_notify(&cancel);
                     let _=operation.as_mut().await;
-                    anyhow::bail!("worker_seed_resource_budget");
+                    break Err(anyhow::anyhow!("worker_seed_resource_budget"));
                 }
                 if let Err(error)=setup_jobs::record_progress(repo,task,"Seeding actors",progress.processed as u64,progress.total as u64).await {
                     argos_osint_core::cancellation::cancel_with_notify(&cancel);
                     // Retain the source future so owner-conditional partial
                     // cleanup closes only its already committed causal range.
                     let _=operation.as_mut().await;
-                    return Err(error.into());
+                    break Err(error.into());
                 }
             }
         }
     };
+    if complete.is_err() {
+        argos_osint_core::cancellation::cancel_with_notify(&cancel);
+    }
+    // Dropping the completed source future closes its bounded receiver before
+    // joining, so a blocked producer always wakes on failure/cancellation.
+    drop(operation);
+    let produced = producer.await;
+    let complete = complete?;
+    produced.context("actor batch producer stopped")??;
     let phase = if complete.complete {
         "Database seeded"
     } else {

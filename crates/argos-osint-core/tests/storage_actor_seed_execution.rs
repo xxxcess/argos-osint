@@ -30,6 +30,14 @@ use fleetworks_contracts::readiness::MaintenanceRequest;
 use surrealdb::types::RecordId;
 
 async fn claim_seed(repo: &Repository) -> ClaimedTask {
+    claim_seed_dataset(repo, "fixture", 'b').await.task
+}
+
+async fn claim_seed_dataset(
+    repo: &Repository,
+    label: &str,
+    hash: char,
+) -> job_dispatch::DeliveryLease {
     argos_osint_core::storage::bootstrap::ensure_network_identity(repo.db())
         .await
         .expect("actual deployment bootstrap");
@@ -69,9 +77,9 @@ async fn claim_seed(repo: &Repository) -> ClaimedTask {
     .await
     .expect("current proof");
     let dataset = DatasetRef::new(
-        "dataset-seed-execution".into(),
+        format!("dataset-seed-execution-{label}"),
         DatasetKind::ActorCatalog,
-        "b".repeat(64),
+        hash.to_string().repeat(64),
         128,
     )
     .expect("synthetic previously validated reference");
@@ -79,7 +87,7 @@ async fn claim_seed(repo: &Repository) -> ClaimedTask {
         .await
         .expect("actual trusted dataset registration");
     let request = MaintenanceRequest::for_seed(
-        "seed-execution-fixture".into(),
+        format!("seed-execution-{label}"),
         MutationContext::new(&context),
         dataset,
     )
@@ -87,12 +95,12 @@ async fn claim_seed(repo: &Repository) -> ClaimedTask {
     let origin = JobOrigin::new(
         &context,
         OriginSource::Native,
-        "seed-execution-fixture".into(),
+        format!("seed-execution-{label}"),
         Utc::now().to_rfc3339(),
         1,
         Vec::new(),
     );
-    tx::run_tx(repo.db(), tx::RetryPolicy::default(), |transaction| {
+    let admitted = tx::run_tx(repo.db(), tx::RetryPolicy::default(), |transaction| {
         let (authority, context, origin, request) = (&authority, &context, &origin, &request);
         async move {
             setup_jobs::admit_in(
@@ -107,7 +115,33 @@ async fn claim_seed(repo: &Repository) -> ClaimedTask {
         }
     })
     .await
-    .expect("actual provenance-bearing admission");
+    .expect("actual provenance-bearing admission")
+    .value;
+    let replay = tx::run_tx(repo.db(), tx::RetryPolicy::default(), |transaction| {
+        let (authority, context, origin, request) = (&authority, &context, &origin, &request);
+        async move {
+            setup_jobs::admit_in(
+                &transaction,
+                authority,
+                context,
+                origin,
+                MaintenanceOperation::SeedActors,
+                request,
+            )
+            .await
+        }
+    })
+    .await
+    .expect("exact admitted request replay")
+    .value;
+    assert_eq!(
+        replay.job_id, admitted.job_id,
+        "same request never creates another job"
+    );
+    assert_eq!(
+        replay, admitted,
+        "exact replay retains the original receipt"
+    );
     let relay = job_dispatch::claim_ready(
         repo.db(),
         setup_jobs::SEED_POOL,
@@ -126,12 +160,12 @@ async fn claim_seed(repo: &Repository) -> ClaimedTask {
         "fixture-consumer",
         300,
         Utc::now(),
-        "fixture-claim",
+        &format!("fixture-claim-{label}"),
     )
     .await
     .expect("real task lease")
     {
-        job_dispatch::DeliveryClaim::Claimed(lease) => lease.task,
+        job_dispatch::DeliveryClaim::Claimed(lease) => *lease,
         other => panic!("expected actual claim, got {other:?}"),
     };
     claimed
@@ -284,4 +318,179 @@ async fn database_cancellation_and_expired_claim_cannot_publish_even_with_unset_
         assert_eq!(support::count(repo.db(), "brain_actor").await, 0);
         assert_eq!(support::count(repo.db(), "actor_search_event").await, 0);
     }
+}
+
+#[tokio::test]
+async fn streamed_claimed_imports_merge_selected_identities_and_keep_other_actors() {
+    let Some(server) = support::Server::start() else {
+        return;
+    };
+    let repo = server.repo("seed_execution", "stream_merge").await;
+    let cancel = AtomicBool::new(false);
+    let first = claim_seed_dataset(&repo, "first", 'a').await;
+    let execution = actor_catalog::SeedExecution::from_claimed(&repo, &first.task, &cancel)
+        .await
+        .expect("first actual execution");
+    let mut initial = actors(2);
+    initial[0].aliases = (0..258)
+        .map(|index| format!("Historical Harbor Alias {index}"))
+        .collect();
+    initial[0].metadata = (0..40)
+        .map(|index| (format!("field-{index}"), "retained source value".repeat(4)))
+        .collect();
+    let original = initial[0].clone();
+    let first_progress = actor_catalog::seed_actors_stream_claimed(
+        &repo,
+        2,
+        futures_util::stream::iter([Ok(initial)]),
+        &execution,
+        &cancel,
+        |_| {},
+    )
+    .await
+    .expect("first streamed import");
+    assert!(first_progress.complete);
+    assert_eq!(
+        support::count(repo.db(), "brain_actor_alias").await,
+        260,
+        "all 258 explicit aliases and both canonical names persist"
+    );
+    assert!(matches!(
+        job_dispatch::finish_delivery(
+            repo.db(),
+            &first,
+            job_dispatch::DeliveryOutcome::Complete {
+                result_ref: "synthetic-first-seed"
+            },
+            Utc::now()
+        )
+        .await
+        .expect("first task completes"),
+        job_dispatch::DeliveryFinish::Completed
+    ));
+    let second = claim_seed_dataset(&repo, "second", 'c').await;
+    let second_execution = actor_catalog::SeedExecution::from_claimed(&repo, &second.task, &cancel)
+        .await
+        .expect("new exact claimed dataset");
+    let mut selected = actors(3);
+    selected[0].name = "Updated Harbor Union".into();
+    selected[0]
+        .metadata
+        .insert("updated".into(), "new selected source".into());
+    let updated = selected[0].clone();
+    let added = selected.pop().expect("third actor");
+    actor_catalog::seed_actors_stream_claimed(
+        &repo,
+        2,
+        futures_util::stream::iter([Ok(vec![updated.clone(), added.clone()])]),
+        &second_execution,
+        &cancel,
+        |_| {},
+    )
+    .await
+    .expect("new CSV merges selected IDs");
+    assert_eq!(
+        support::count(repo.db(), "brain_actor").await,
+        3,
+        "absent identities are retained"
+    );
+    let mut rows = repo.db().query("SELECT VALUE catalog_json FROM brain_actor ORDER BY id; RETURN (SELECT VALUE fingerprint FROM ONLY brain_actor_seed:catalog);")
+        .await.expect("merged catalog").check().expect("catalog statements");
+    let catalog: Vec<String> = rows.take(0).expect("catalog JSON");
+    let catalog: Vec<Actor> = catalog
+        .iter()
+        .map(|value| serde_json::from_str(value).expect("typed actor"))
+        .collect();
+    assert_eq!(
+        catalog.iter().find(|actor| actor.id == updated.id),
+        Some(&updated)
+    );
+    assert_eq!(
+        catalog.iter().find(|actor| actor.id == added.id),
+        Some(&added)
+    );
+    assert_eq!(
+        catalog.iter().find(|actor| actor.id == "seed-fence-0001"),
+        Some(&actors(2)[1])
+    );
+    assert_eq!(
+        rows.take::<Option<String>>(1)
+            .expect("latest import fingerprint"),
+        Some("c".repeat(64))
+    );
+    assert_eq!(original.aliases.len(), 258);
+    assert_eq!(
+        support::count(repo.db(), "brain_actor_alias").await,
+        262,
+        "additive import preserves existing aliases and adds current names"
+    );
+    job_dispatch::finish_delivery(
+        repo.db(),
+        &second,
+        job_dispatch::DeliveryOutcome::Complete {
+            result_ref: "synthetic-second-seed",
+        },
+        Utc::now(),
+    )
+    .await
+    .expect("second task completes");
+    let events = support::count(repo.db(), "actor_search_event").await;
+    assert!(
+        actor_catalog::seed_actors_stream_claimed(
+            &repo,
+            1,
+            futures_util::stream::iter([Ok(vec![updated])]),
+            &second_execution,
+            &cancel,
+            |_| {}
+        )
+        .await
+        .is_err(),
+        "completed task cannot replay source writes"
+    );
+    assert_eq!(
+        support::count(repo.db(), "actor_search_event").await,
+        events
+    );
+}
+
+#[tokio::test]
+async fn streamed_source_error_preserves_only_committed_batches_and_refuses_completion() {
+    let Some(server) = support::Server::start() else {
+        return;
+    };
+    let repo = server.repo("seed_execution", "stream_error").await;
+    let task = claim_seed(&repo).await;
+    let cancel = AtomicBool::new(false);
+    let execution = actor_catalog::SeedExecution::from_claimed(&repo, &task, &cancel)
+        .await
+        .expect("actual execution");
+    let batches = futures_util::stream::iter([
+        Ok(actors(1)),
+        Err(anyhow::anyhow!("synthetic producer failure")),
+    ]);
+    assert!(actor_catalog::seed_actors_stream_claimed(
+        &repo,
+        2,
+        batches,
+        &execution,
+        &cancel,
+        |_| {}
+    )
+    .await
+    .is_err());
+    assert_eq!(support::count(repo.db(), "brain_actor").await, 1);
+    let mut response = repo
+        .db()
+        .query("SELECT status,processed,total FROM ONLY brain_actor_seed:catalog")
+        .await
+        .expect("source observation")
+        .check()
+        .expect("source query");
+    let source: Option<setup_jobs::SeedObservation> = response.take(0).expect("typed receipt");
+    let source = source.expect("source exists");
+    assert_eq!(
+        (source.status.as_str(), source.processed, source.total),
+        ("failed", 1, 2)
+    );
 }

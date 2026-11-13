@@ -100,6 +100,8 @@ async fn ensure_schema_defines_everything_once_and_refuses_newer_databases() {
         "setup_request",
         "setup_resource",
         "setup_dispatch",
+        "upload_ticket",
+        "upload_ticket_issuer",
         "classifier_activation_operation",
         "classifier_activation_reconciliation",
         "actor_search_control",
@@ -114,8 +116,8 @@ async fn ensure_schema_defines_everything_once_and_refuses_newer_databases() {
     let again = ensure_schema(&db).await.unwrap();
     assert_eq!(again.previous, SCHEMA_VERSION);
     // The 48 v6 modules plus pairing, registry, cycle history, reset, origin,
-    // actions, setup, classifier activation and actor search.
-    assert_eq!(bootstrap::schemas().len(), 57);
+    // actions, setup, classifier activation, actor search and upload tickets.
+    assert_eq!(bootstrap::schemas().len(), 58);
     for (table, index) in [
         ("native_pairing", "native_pairing_token"),
         ("native_pairing", "native_pairing_credential"),
@@ -151,6 +153,8 @@ async fn ensure_schema_defines_everything_once_and_refuses_newer_databases() {
         ("setup_dataset_pin", "setup_dataset_pin_unique"),
         ("setup_dataset_pin", "setup_dataset_pin_job"),
         ("setup_upload", "setup_upload_expiry"),
+        ("upload_ticket", "upload_ticket_issuer_expiry"),
+        ("upload_ticket", "upload_ticket_expiry"),
         ("actor_search_event", "actor_search_event_sequence"),
         ("actor_search_event", "actor_search_event_cause"),
         ("brain_actor_alias", "actor_search_alias_owner"),

@@ -372,6 +372,7 @@ dependencies = [
  "clap",
  "fleetworks-contracts",
  "fleetworks-jobs",
+ "futures-util",
  "httpdate",
  "libc",
  "reqwest 0.12.28",

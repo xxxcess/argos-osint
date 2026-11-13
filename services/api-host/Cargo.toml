@@ -15,6 +15,7 @@ classifier = ["argos-osint-core/classifier", "argos-osint-api/classifier"]
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
+futures-util.workspace = true
 httpdate = "1"
 libc = "0.2"
 fleetworks-jobs = { path = "../../crates/fleetworks-jobs" }

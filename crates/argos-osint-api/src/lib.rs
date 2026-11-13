@@ -335,6 +335,14 @@ fn router_with_access(
             )
             .route("/api/v1/workstation/datasets", get(datasets::list))
             .route(
+                fleetworks_contracts::dataset_upload::DATASET_UPLOADS_PATH,
+                post(datasets::create_upload),
+            )
+            .route(
+                "/api/v1/workstation/datasets/uploads/{id}",
+                axum::routing::put(datasets::put_upload).layer(DefaultBodyLimit::disable()),
+            )
+            .route(
                 "/api/v1/workstation/datasets/upload",
                 post(datasets::upload).layer(DefaultBodyLimit::disable()),
             )
@@ -422,7 +430,13 @@ async fn request_timeout(request: Request, next: Next) -> Response {
     // A read queued behind a running brief still has to return. 45s covers
     // that wait; the web client waits longer so it receives this JSON timeout
     // instead of aborting with "signal timed out".
-    let timeout = if request.uri().path() == "/api/v1/workstation/datasets/upload" {
+    let timeout = if request.uri().path() == "/api/v1/workstation/datasets/upload"
+        || (request.method() == axum::http::Method::PUT
+            && request
+                .uri()
+                .path()
+                .starts_with("/api/v1/workstation/datasets/uploads/"))
+    {
         Duration::from_secs(600)
     } else {
         Duration::from_secs(45)

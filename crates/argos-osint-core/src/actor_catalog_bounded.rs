@@ -1,5 +1,5 @@
 //! Incrementally bounded actor CSV parsing before any canonical source write.
-//! Included as a child of actor_catalog after its source checkpoint is released.
+//! Collection and streaming share the same row validation and resource policy.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -197,6 +197,40 @@ impl<R: Read> Read for BoundedInput<'_, R> {
     }
 }
 
+/// Full-scan observations without retaining the decoded catalog.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct ActorScan {
+    pub rows: usize,
+    pub peak_retained_bytes: u64,
+}
+
+/// Validate every actor while retaining only unique IDs and one decoded record.
+///
+/// Visitors must independently bound any output they retain. An error or
+/// cancellation stops scanning immediately and is never converted to success.
+pub fn scan_bounded(
+    reader: impl Read,
+    limits: &ActorReadLimits,
+    cancel: &AtomicBool,
+    mut resource_probe: impl FnMut(u64) -> Result<()>,
+    mut visit: impl FnMut(Actor) -> Result<()>,
+) -> Result<ActorScan> {
+    limits.validate()?;
+    resource_probe(0)?;
+    let mut rows = 0_usize;
+    let summary = decode_bounded(reader, limits, cancel, |actor, retained| {
+        rows += 1;
+        if rows.is_multiple_of(128) {
+            resource_probe(retained)?;
+        }
+        visit(actor)
+    })?;
+    resource_probe(summary.peak_retained_bytes)?;
+    Ok(summary)
+}
+
+/// Collect validated actors under the existing aggregate retained-Vec budget.
 pub fn read_bounded(
     reader: impl Read,
     limits: &ActorReadLimits,
@@ -205,6 +239,57 @@ pub fn read_bounded(
 ) -> Result<Vec<Actor>> {
     limits.validate()?;
     resource_probe(0)?;
+    let mut actors = Vec::new();
+    let mut retained_bytes = 0_u64;
+    decode_bounded(reader, limits, cancel, |actor, _| {
+        retained_bytes = retained_bytes
+            .checked_add(actor_bytes(&actor)?)
+            .context("actor_parse_memory_budget")?;
+        ensure!(
+            retained_bytes <= limits.max_retained_bytes,
+            "actor_parse_memory_budget"
+        );
+        if actors.len() == actors.capacity() {
+            let requested = (limits.max_rows - actors.len()).min(128);
+            let before = actors.capacity();
+            let reserve = (requested as u64)
+                .checked_mul(std::mem::size_of::<Actor>() as u64)
+                .context("actor_parse_memory_budget")?;
+            ensure!(
+                retained_bytes
+                    .checked_add(reserve)
+                    .is_some_and(|next| next <= limits.max_retained_bytes),
+                "actor_parse_memory_budget"
+            );
+            actors
+                .try_reserve_exact(requested)
+                .context("actor_parse_allocation_failed")?;
+            let allocated =
+                (actors.capacity() - before) as u64 * std::mem::size_of::<Actor>() as u64;
+            retained_bytes = retained_bytes
+                .checked_add(allocated)
+                .context("actor_parse_memory_budget")?;
+            ensure!(
+                retained_bytes <= limits.max_retained_bytes,
+                "actor_parse_memory_budget"
+            );
+        }
+        actors.push(actor);
+        if actors.len() % 128 == 0 {
+            resource_probe(retained_bytes)?;
+        }
+        Ok(())
+    })?;
+    resource_probe(retained_bytes)?;
+    Ok(actors)
+}
+
+fn decode_bounded(
+    reader: impl Read,
+    limits: &ActorReadLimits,
+    cancel: &AtomicBool,
+    mut visit: impl FnMut(Actor, u64) -> Result<()>,
+) -> Result<ActorScan> {
     let mut csv = csv::Reader::from_reader(BoundedInput::new(reader, limits, cancel));
     let headers = csv.headers()?.clone();
     ensure!(
@@ -225,8 +310,8 @@ pub fn read_bounded(
         }
     }
     let mut ids = BTreeSet::new();
-    let mut actors = Vec::new();
-    let mut retained_bytes = 0_u64;
+    let mut id_bytes = 0_u64;
+    let mut summary = ActorScan::default();
     for (index, record) in csv.records().enumerate() {
         ensure!(!cancel.load(Ordering::Acquire), "actor_parse_cancelled");
         ensure!(index < limits.max_rows, "actor_parse_row_budget");
@@ -251,15 +336,33 @@ pub fn read_bounded(
         aliases.retain(|a| !brain_actors::normalize_alias(a).is_empty());
         aliases.sort();
         aliases.dedup();
-        // Bound the seed writer's later transaction/alias expansion as well.
-        // Oversize identity remains an explicit failure, never truncated data.
+        let normalized: BTreeSet<_> = aliases
+            .iter()
+            .map(|alias| brain_actors::normalize_alias(alias))
+            .collect();
+        let alias_bytes = aliases
+            .iter()
+            .chain(normalized.iter())
+            .try_fold(0_usize, |bytes, value| bytes.checked_add(value.len()))
+            .context("actor_parse_identity_expansion_budget")?;
+        // Preserve the real catalog's richer alias sets. Bound normalized
+        // writer plans and aggregate text rather than truncating source data.
         ensure!(
             source_id.len() <= 256
                 && name.len() <= 1024
-                && aliases.len() <= 32
-                && aliases.iter().all(|value| value.len() <= 256),
+                && normalized.len() <= 512
+                && aliases.iter().all(|value| value.len() <= 1024)
+                && normalized.iter().all(|value| value.len() <= 1024)
+                && alias_bytes <= 128 * 1024,
             "actor_parse_identity_expansion_budget"
         );
+        let normalization_bytes = normalized
+            .iter()
+            .try_fold(0_u64, |bytes, value| {
+                bytes.checked_add(128 + value.capacity() as u64)
+            })
+            .context("actor_parse_memory_budget")?;
+        drop(normalized);
         let subtype = match metadata["actor_type"].as_str() {
             "state" | "territory" | "country" => "place",
             "person" | "individual" => "person",
@@ -284,52 +387,60 @@ pub fn read_bounded(
             aliases,
             metadata,
         };
-        let charge = actor_bytes(&actor)?;
-        retained_bytes = retained_bytes
-            .checked_add(charge)
+        let current = id_bytes
+            .checked_add(actor_bytes(&actor)?)
+            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Actor>() as u64))
+            .and_then(|bytes| bytes.checked_add(normalization_bytes))
             .context("actor_parse_memory_budget")?;
         ensure!(
-            retained_bytes <= limits.max_retained_bytes,
+            current <= limits.max_retained_bytes,
             "actor_parse_memory_budget"
         );
-        if actors.len() == actors.capacity() {
-            let requested = (limits.max_rows - index).min(128);
-            let before = actors.capacity();
-            let reserve = (requested as u64)
-                .checked_mul(std::mem::size_of::<Actor>() as u64)
-                .context("actor_parse_memory_budget")?;
-            ensure!(
-                retained_bytes
-                    .checked_add(reserve)
-                    .is_some_and(|next| next <= limits.max_retained_bytes),
-                "actor_parse_memory_budget"
-            );
-            actors
-                .try_reserve_exact(requested)
-                .context("actor_parse_allocation_failed")?;
-            let allocated =
-                (actors.capacity() - before) as u64 * std::mem::size_of::<Actor>() as u64;
-            retained_bytes = retained_bytes
-                .checked_add(allocated)
-                .context("actor_parse_memory_budget")?;
-            ensure!(
-                retained_bytes <= limits.max_retained_bytes,
-                "actor_parse_memory_budget"
-            );
-        }
+        id_bytes = id_bytes
+            .checked_add(128 + actor.source_id.len() as u64)
+            .context("actor_parse_memory_budget")?;
         ids.insert(actor.source_id.clone());
-        actors.push(actor);
-        if (index + 1) % 128 == 0 {
-            resource_probe(retained_bytes)?;
-        }
+        summary.rows += 1;
+        summary.peak_retained_bytes = summary.peak_retained_bytes.max(current);
+        visit(actor, current)?;
     }
-    if actors.is_empty() {
-        bail!("actor CSV contains no records");
-    }
-    // Check after parsing too: no caller receives an oversized retained Vec.
+    ensure!(summary.rows > 0, "actor CSV contains no records");
     ensure!(!cancel.load(Ordering::Acquire), "actor_parse_cancelled");
-    resource_probe(retained_bytes)?;
-    Ok(actors)
+    Ok(summary)
+}
+
+/// Conservative transaction payload estimate for an already validated actor.
+///
+/// The seed writer keeps one provenance allocation and lightweight alias plans,
+/// materializing alias INSERT packets under a separate bounded chunk policy.
+/// Include those plans and binding copies before selecting a row batch.
+pub fn actor_seed_payload_bytes(actor: &Actor) -> Result<u64> {
+    let provenance = serde_json::to_vec(&actor.metadata)?.len() as u64;
+    let catalog = serde_json::to_vec(actor)?.len() as u64;
+    let mut keys = BTreeSet::new();
+    let mut alias_bytes = 0_u64;
+    for alias in std::iter::once(&actor.name).chain(&actor.aliases) {
+        let normalized = brain_actors::normalize_alias(alias);
+        if normalized.chars().count() < 3 || !keys.insert(normalized.clone()) {
+            continue;
+        }
+        let text = (actor.id.len() as u64)
+            .checked_mul(2)
+            .and_then(|bytes| bytes.checked_add(alias.len() as u64))
+            .and_then(|bytes| bytes.checked_add(normalized.len() as u64))
+            .and_then(|bytes| bytes.checked_add(512))
+            .context("actor_seed_payload_budget")?;
+        alias_bytes = alias_bytes
+            .checked_add(text)
+            .context("actor_seed_payload_budget")?;
+    }
+    catalog
+        .checked_mul(3)
+        .and_then(|catalog| provenance.checked_add(catalog))
+        .and_then(|bytes| bytes.checked_add(alias_bytes))
+        .and_then(|bytes| bytes.checked_add(2048))
+        .and_then(|bytes| bytes.checked_mul(4))
+        .context("actor_seed_payload_budget")
 }
 
 #[cfg(test)]
@@ -395,5 +506,170 @@ mod tests {
         assert!(read_bounded(many.as_slice(), &limits, &cancel, |_| Ok(())).is_err());
         cancel.store(true, Ordering::Release);
         assert!(read_bounded(CSV, &ActorReadLimits::default(), &cancel, |_| Ok(())).is_err());
+    }
+
+    #[test]
+    fn streaming_scan_preserves_rows_without_collecting_their_metadata() {
+        let description = "x".repeat(2048);
+        let mut csv =
+            String::from("actor_id,actor_name,actor_type,aliases,name_normalized,description\n");
+        for index in 0..1000 {
+            csv.push_str(&format!(
+                "id-{index},Harbor {index},organization,[],harbor {index},{description}\n"
+            ));
+        }
+        let limits = ActorReadLimits {
+            max_retained_bytes: 1024 * 1024,
+            ..Default::default()
+        };
+        let cancel = AtomicBool::new(false);
+        assert!(read_bounded(csv.as_bytes(), &limits, &cancel, |_| Ok(())).is_err());
+        let mut visited = 0;
+        let summary = scan_bounded(
+            csv.as_bytes(),
+            &limits,
+            &cancel,
+            |_| Ok(()),
+            |actor| {
+                assert_eq!(actor.source_id, format!("id-{visited}"));
+                assert_eq!(actor.metadata["description"], description);
+                visited += 1;
+                Ok(())
+            },
+        )
+        .expect("whole CSV fits the streaming ID/one-record budget");
+        assert_eq!(visited, 1000);
+        assert_eq!(summary.rows, visited);
+        assert!(summary.peak_retained_bytes < limits.max_retained_bytes);
+    }
+
+    #[test]
+    fn scanner_propagates_visitor_failure_and_cancellation_before_more_visits() {
+        let limits = ActorReadLimits::default();
+        let cancel = AtomicBool::new(false);
+        let failed = scan_bounded(
+            CSV,
+            &limits,
+            &cancel,
+            |_| Ok(()),
+            |_| bail!("synthetic_visitor_failure"),
+        );
+        assert_eq!(
+            failed
+                .expect_err("visitor failure is not swallowed")
+                .to_string(),
+            "synthetic_visitor_failure"
+        );
+        let mut visited = 0;
+        let cancelled = scan_bounded(
+            CSV,
+            &limits,
+            &cancel,
+            |_| Ok(()),
+            |_| {
+                visited += 1;
+                cancel.store(true, Ordering::Release);
+                Ok(())
+            },
+        );
+        assert!(cancelled.is_err());
+        assert_eq!(visited, 1);
+    }
+
+    #[test]
+    fn scanner_keeps_identity_and_record_validation_and_accounts_alias_expansion() {
+        let cancel = AtomicBool::new(false);
+        let mut duplicate = b"actor_id,actor_name,actor_type,aliases,name_normalized\n".to_vec();
+        duplicate.extend_from_slice(
+            b"same,Harbor One,organization,[],harbor one\nsame,Harbor Two,organization,[],harbor two\n",
+        );
+        assert!(scan_bounded(
+            duplicate.as_slice(),
+            &ActorReadLimits::default(),
+            &cancel,
+            |_| Ok(()),
+            |_| Ok(())
+        )
+        .is_err());
+        let actor = read_bounded(CSV, &ActorReadLimits::default(), &cancel, |_| Ok(()))
+            .expect("validated fixture")
+            .pop()
+            .expect("one fixture actor");
+        let baseline = actor_seed_payload_bytes(&actor).expect("payload estimate");
+        let mut expanded = actor.clone();
+        expanded.aliases.push("A separate normalized alias".into());
+        assert!(actor_seed_payload_bytes(&expanded).expect("expanded payload") > baseline);
+        let mut repeated = actor.clone();
+        repeated.aliases.push(actor.name.clone());
+        // Duplicate aliases do not create another provenance-bearing writer row.
+        // Their catalog bytes remain charged, so the total may grow slightly.
+        let repeated = actor_seed_payload_bytes(&repeated).expect("duplicate payload");
+        assert!(repeated >= baseline);
+        assert!(repeated < actor_seed_payload_bytes(&expanded).unwrap());
+    }
+
+    #[test]
+    fn richer_alias_sets_are_preserved_under_normalized_count_and_text_bounds() {
+        let encode = |aliases: &[String]| {
+            let mut csv = csv::Writer::from_writer(Vec::new());
+            csv.write_record([
+                "actor_id",
+                "actor_name",
+                "actor_type",
+                "aliases",
+                "name_normalized",
+                "description",
+            ])
+            .unwrap();
+            csv.write_record([
+                "synthetic-rich",
+                &"n".repeat(380),
+                "organization",
+                &serde_json::to_string(aliases).unwrap(),
+                "normalized rich actor",
+                "all source metadata survives",
+            ])
+            .unwrap();
+            csv.into_inner().unwrap()
+        };
+        let mut aliases: Vec<_> = (0..258)
+            .map(|index| format!("distinct catalog alias {index}"))
+            .collect();
+        aliases.push("x".repeat(700));
+        let csv = encode(&aliases);
+        let cancel = AtomicBool::new(false);
+        let actors = read_bounded(csv.as_slice(), &ActorReadLimits::default(), &cancel, |_| {
+            Ok(())
+        })
+        .expect("real catalog-sized alias sets fit the bounded policy");
+        assert_eq!(actors.len(), 1);
+        let actor = &actors[0];
+        assert_eq!(actor.name.len(), 380);
+        for alias in &aliases {
+            assert!(actor.aliases.contains(alias));
+        }
+        assert_eq!(
+            actor.metadata["description"],
+            "all source metadata survives"
+        );
+        assert!(actor_seed_payload_bytes(actor).unwrap() < 2 * 1024 * 1024);
+
+        for aliases in [
+            (0..513)
+                .map(|index| format!("distinct catalog alias {index}"))
+                .collect::<Vec<_>>(),
+            vec!["x".repeat(1025)],
+        ] {
+            let csv = encode(&aliases);
+            let error = scan_bounded(
+                csv.as_slice(),
+                &ActorReadLimits::default(),
+                &cancel,
+                |_| Ok(()),
+                |_| Ok(()),
+            )
+            .expect_err("identity expansion remains bounded");
+            assert_eq!(error.to_string(), "actor_parse_identity_expansion_budget");
+        }
     }
 }

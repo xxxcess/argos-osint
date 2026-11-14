@@ -103,6 +103,13 @@ exit does not supply either result. Adding or renaming native scenes or
 interaction scripts requires coordinating `.github/workflows/fleetworks-native.yml`
 updates with Code Architect.
 
+When the user is available for interactive review, a passing app artifact for the
+local Mac architecture starts native review before the remaining hosted matrix
+finishes. Record the artifact's exact revision, close the running app, rebuild the
+isolated backend and native app locally, and open the app. Track unfinished Linux,
+storage and installed-app checks separately; artifact creation alone is not a
+local behavior pass.
+
 The [offline Python fixtures](../../../scripts/test_fleetworks_native_verify.py)
 cover selection/artifact-path fences, implicit debug cache reuse, bounded profiles,
 runtime inventory, missing/corrupt PNG/tree, dimensions, failed renderer exits,

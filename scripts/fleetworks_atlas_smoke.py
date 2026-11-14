@@ -8,12 +8,23 @@ import subprocess
 import tempfile
 import time
 
-from fleetworks_network_smoke import binaries, free_ports, process, request, safe_env, wait_for
+from fleetworks_network_smoke import (
+    binaries,
+    create_native_credentials,
+    free_ports,
+    process,
+    register_workstation,
+    request,
+    safe_env,
+    submission_context,
+    wait_for,
+)
 
 
 def exercise(tmp, binary, surreal):
     database_port, api_port, jobs_port = free_ports(3)
-    root_key, runtime_key, token, jobs_token = (secrets.token_hex(32) for _ in range(4))
+    root_key, runtime_key, token, jobs_token, marker = (secrets.token_hex(32) for _ in range(5))
+    manifest_file = create_native_credentials(tmp, token)
     db_env = {**safe_env, "SURREAL_USER": "root", "SURREAL_PASS": root_key}
     env = {
         **safe_env,
@@ -21,7 +32,9 @@ def exercise(tmp, binary, surreal):
         "FLEETWORKS_WORKSPACE": str(tmp),
         "FLEETWORKS_STORAGE_URL": f"ws://127.0.0.1:{database_port}",
         "FLEETWORKS_STORAGE_PASSWORD": runtime_key,
-        "FLEETWORKS_API_TOKEN": token,
+        "FLEETWORKS_ACCESS_SCOPE_ID": "smoke-scope",
+        "FLEETWORKS_ACCESS_EPOCH": "smoke-epoch",
+        "FLEETWORKS_API_CREDENTIALS_FILE": str(manifest_file),
         "FLEETWORKS_API_ALLOWED_HOSTS": f"127.0.0.1:{api_port}",
     }
     jobs_env = {
@@ -52,11 +65,13 @@ def exercise(tmp, binary, surreal):
     }
     atlas_path = "/api/v1/atlas/cycles"
 
+    proof_headers = {}
+
     def post(path, payload, headers=auth):
         return request(api_port, path, headers, json.dumps(payload))
 
     def state(job_id):
-        status, response = request(api_port, f"/api/v1/jobs/detail?id={job_id}", auth)
+        status, response = request(api_port, f"/api/v1/jobs/detail?id={job_id}", proof_headers)
         assert status == 200, (status, response)
         return response["job"]
 
@@ -91,19 +106,38 @@ def exercise(tmp, binary, surreal):
             invalid = request(jobs_port, "/internal/jobs/queue", jobs_auth, "{}")
             assert invalid == (400, {"error": "jobs_invalid_request"}), invalid
             wait_for(api, api_port, "/api/v1/health/ready", auth)
+            _, registration_headers = register_workstation(
+                api_port, {"Authorization": "Bearer " + token}, marker
+            )
+            proof_headers = {**registration_headers, "Content-Type": "application/json"}
+            ctx = submission_context(api_port, registration_headers)
             assert post(atlas_path, {"request_id": "fixture"}, {"Content-Type": "application/json"})[0] == 401
-            assert post(atlas_path, {"request_id": "bad/id"})[0] == 400
-            status, receipt = post(atlas_path, {"request_id": "fixture"})
-            assert status == 202 and receipt["run_id"] == "fleet-atlas-run-fixture", (status, receipt)
-            assert post(atlas_path, {"request_id": "fixture"}) == (status, receipt)
+            assert post(atlas_path, {"request_id": "bad/id", "context": ctx}, proof_headers)[0] == 400
+            fixture_request = {"request_id": "fixture", "context": ctx}
+            status, receipt = post(atlas_path, fixture_request, proof_headers)
+            assert (
+                status == 202
+                and receipt["job_id"].startswith("fleet-atlas-")
+                and receipt["run_id"].startswith("fleet-atlas-run-")
+            ), (status, receipt)
+            assert post(atlas_path, fixture_request, proof_headers) == (status, receipt)
             job_id = receipt["job_id"]
             assert state(job_id)["state"] == "queued"
-            status, cancelled = post(atlas_path, {"request_id": "cancel-fixture"})
+            status, cancelled = post(
+                atlas_path, {"request_id": "cancel-fixture", "context": ctx}, proof_headers
+            )
             assert status == 202
             cancel_id = cancelled["job_id"]
-            assert post("/api/v1/jobs/cancel", {"id": cancel_id})[0] == 200
+            status, cancelled_action = post(
+                "/api/v1/jobs/cancel",
+                {"id": cancel_id, "request_id": "cancel-job-fixture"},
+                proof_headers,
+            )
+            assert status == 200 and cancelled_action["done"] is True, (status, cancelled_action)
 
-            status, replay = post(atlas_path, {"request_id": "commit-before-ack"})
+            status, replay = post(
+                atlas_path, {"request_id": "commit-before-ack", "context": ctx}, proof_headers
+            )
             assert status == 202
             replay_job = replay["job_id"]
             replay_run = replay["run_id"]
@@ -114,7 +148,14 @@ def exercise(tmp, binary, surreal):
 
             for attempt in (1, 2):
                 if attempt == 2:
-                    assert post("/api/v1/jobs/retry", {"id": job_id}) == (200, {"requeued": 1})
+                    status, retried = post(
+                        "/api/v1/jobs/retry",
+                        {"id": job_id, "request_id": "retry-fixture"},
+                        proof_headers,
+                    )
+                    assert status == 200 and retried["done"] is False and retried["requeued"] == 1, (
+                        status, retried
+                    )
                     assert state(job_id)["state"] == "queued"
                 with process([binary, "--role", "atlas-worker"], worker_env, tmp / f"worker-{attempt}.log") as worker:
                     failed = wait_for_state(worker, job_id, "failed")
@@ -125,7 +166,7 @@ def exercise(tmp, binary, surreal):
 
             assert state(cancel_id)["state"] == "cancelled", state(cancel_id)
             assert state(cancel_id)["attempt_rows"] == 0
-            assert post(atlas_path, {"request_id": "fixture"}) == (202, receipt)
+            assert post(atlas_path, fixture_request, proof_headers) == (202, receipt)
             # Exact attempt identity and durable publish count stay stable across a
             # worker restart and explicit retry. The fixture has no classifier,
             # so no news provider is contacted and no article is persisted.

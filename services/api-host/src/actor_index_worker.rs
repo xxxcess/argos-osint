@@ -151,6 +151,7 @@ impl ActorIndexWorker {
             Ok(Some(action)) => return self.rebuild_tick(repo, action).await,
             Ok(None) => (),
             Err(TxError::Abort(reason)) => {
+                tracing::warn!(stage="rebuild_prepare",code=%safe_code(&reason).unwrap_or("actor_index_abort"),"Actor index rebuild preparation failed");
                 let permanent = reason != "actor_index_service_unavailable";
                 self.status = None;
                 actor_search_outbox::defer(repo, &claim, None, permanent, Utc::now()).await?;
@@ -252,6 +253,8 @@ fn bearer(token: &str) -> anyhow::Result<HeaderValue> {
 struct DeliveryFailure {
     permanent: bool,
     retry_after: Option<Duration>,
+    status: Option<StatusCode>,
+    code: Option<String>,
 }
 
 impl DeliveryFailure {
@@ -259,14 +262,48 @@ impl DeliveryFailure {
         Self {
             permanent: false,
             retry_after: None,
+            status: None,
+            code: None,
         }
     }
     fn permanent() -> Self {
         Self {
             permanent: true,
             retry_after: None,
+            status: None,
+            code: None,
         }
     }
+}
+
+fn safe_code(code: &str) -> Option<&str> {
+    (1..=64)
+        .contains(&code.len())
+        .then_some(code)
+        .filter(|code| {
+            code.bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        })
+}
+
+fn safe_service_code(body: &[u8]) -> Option<String> {
+    let body: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let code = body.get("error")?.get("code")?.as_str()?;
+    safe_code(code).map(str::to_owned)
+}
+
+fn tx_error_code(error: &TxError) -> String {
+    match error {
+        TxError::Abort(reason) => safe_code(reason).unwrap_or("actor_index_abort").to_owned(),
+        TxError::Contention { .. } => "storage_contention".into(),
+        TxError::Db(_) => "storage_error".into(),
+        TxError::PublisherStopped => "publisher_stopped".into(),
+        TxError::PublisherDropped => "publisher_dropped".into(),
+    }
+}
+
+fn rebuild_ack_requires_correction(error: &TxError) -> bool {
+    matches!(error, TxError::Abort(reason) if reason != "actor_index_lease_lost")
 }
 
 async fn decode<T: DeserializeOwned + Send + 'static>(
@@ -284,9 +321,18 @@ async fn decode<T: DeserializeOwned + Send + 'static>(
                 status,
                 StatusCode::TOO_MANY_REQUESTS | StatusCode::REQUEST_TIMEOUT
             ));
+        let mut body = Vec::new();
+        while let Ok(Some(chunk)) = response.chunk().await {
+            if chunk.len() > 1024 - body.len() {
+                break;
+            }
+            body.extend_from_slice(&chunk);
+        }
         return Err(DeliveryFailure {
             permanent,
             retry_after,
+            status: Some(status),
+            code: safe_service_code(&body),
         });
     }
     let mut bytes = Vec::new();
@@ -318,6 +364,34 @@ fn retry_after(value: &str, now: SystemTime) -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rebuild_ack_retries_lost_lease_but_blocks_invalid_receipt() {
+        let lost_lease = TxError::Abort("actor_index_lease_lost".into());
+        let bad_receipt = TxError::Abort("actor_index_rebuild_receipt_mismatch".into());
+        assert!(!rebuild_ack_requires_correction(&lost_lease));
+        assert!(!rebuild_ack_requires_correction(&TxError::Contention {
+            attempts: 6
+        }));
+        assert!(rebuild_ack_requires_correction(&bad_receipt));
+        assert_eq!(tx_error_code(&lost_lease), "actor_index_lease_lost");
+    }
+
+    #[test]
+    fn coordinator_log_codes_are_bounded_and_do_not_echo_untrusted_values() {
+        assert_eq!(
+            safe_service_code(br#"{"error":{"code":"checkpoint_gap_or_expired_receipt"}}"#),
+            Some("checkpoint_gap_or_expired_receipt".into())
+        );
+        assert_eq!(
+            safe_service_code(br#"{"error":{"code":"Bearer secret"}}"#),
+            None
+        );
+        assert_eq!(
+            tx_error_code(&TxError::Abort("secret\nvalue".into())),
+            "actor_index_abort"
+        );
+    }
 
     #[test]
     fn retry_after_preserves_long_valid_delay_and_http_dates() {

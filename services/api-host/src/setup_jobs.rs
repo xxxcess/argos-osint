@@ -23,7 +23,11 @@ use argos_osint_core::classifier::readiness::ManualTrainRequest;
 use argos_osint_core::classifier::readiness::TrainingJobState;
 use argos_osint_core::classifier::training::SyntheticActivation;
 use argos_osint_core::classifier::Provenance;
+use argos_osint_core::events::NewEvent;
+use argos_osint_core::events::Severity;
 use argos_osint_core::storage::actor_catalog;
+use argos_osint_core::storage::event_log;
+use argos_osint_core::storage::jobs;
 use argos_osint_core::storage::jobs::ClaimedTask;
 use argos_osint_core::storage::repo::Repository;
 use argos_osint_core::storage::setup_jobs;
@@ -66,6 +70,33 @@ pub(crate) fn safe_failure_reason(error: &anyhow::Error) -> &'static str {
         }
     }
     "native_domain_operation_failed"
+}
+
+/// Best-effort operational summary write so worker milestones appear in Logs.
+pub(crate) async fn record_job_event(
+    repo: &Repository,
+    task: &ClaimedTask,
+    severity: Severity,
+    event_type: &str,
+    message: impl Into<String>,
+) {
+    let event = NewEvent {
+        severity: Some(severity),
+        app: jobs::job_app(&task.operation).to_owned(),
+        event_type: event_type.to_owned(),
+        message: message.into(),
+        job_id: task.job_id.clone(),
+        task_id: task.id.clone(),
+        ..NewEvent::default()
+    };
+    if let Err(error) = event_log::record_event(repo.db(), &event).await {
+        tracing::warn!(
+            code = "worker_event_log_unavailable",
+            job_id = %task.job_id,
+            error = %error,
+            "Operational event summary could not be recorded"
+        );
+    }
 }
 
 pub(crate) async fn execute(
@@ -193,6 +224,14 @@ async fn seed(
         return Ok(SetupOutcome::Interrupted);
     }
     let total = validated.total;
+    record_job_event(
+        repo,
+        task,
+        Severity::Info,
+        "worker.progress",
+        format!("Validated actor catalog dataset ({total} records)"),
+    )
+    .await;
     let (send_batch, batches) = mpsc::channel(1);
     let producer = tokio::task::spawn_blocking({
         let cancel = Arc::clone(&cancel);
@@ -218,6 +257,9 @@ async fn seed(
             let _ = report.try_send(progress);
         },
     ));
+    let mut last_logged_bucket: i64 = -1;
+    let mut last_logged_at: Option<std::time::Instant> = None;
+    let mut last_processed: usize = 0;
     let complete = loop {
         tokio::select! {
             result=&mut operation=>break result,
@@ -235,11 +277,56 @@ async fn seed(
                     let _=operation.as_mut().await;
                     break Err(error.into());
                 }
+                last_processed = progress.processed;
+                let pct = if progress.total > 0 {
+                    ((progress.processed as u64 * 100) / progress.total as u64).min(100) as i64
+                } else {
+                    0
+                };
+                let bucket = pct / 10;
+                if last_logged_bucket < 0 {
+                    last_logged_bucket = bucket;
+                    last_logged_at = Some(std::time::Instant::now());
+                    record_job_event(
+                        repo,
+                        task,
+                        Severity::Info,
+                        "worker.progress",
+                        format!("Seeding actors started (0 / {})", progress.total),
+                    )
+                    .await;
+                } else if bucket > last_logged_bucket
+                    || last_logged_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(10))
+                {
+                    last_logged_bucket = bucket;
+                    last_logged_at = Some(std::time::Instant::now());
+                    record_job_event(
+                        repo,
+                        task,
+                        Severity::Info,
+                        "worker.progress",
+                        format!("Seeding actors: {} / {} ({}%)", progress.processed, progress.total, pct),
+                    )
+                    .await;
+                }
             }
         }
     };
-    if complete.is_err() {
+    if let Err(error) = &complete {
         argos_osint_core::cancellation::cancel_with_notify(&cancel);
+        record_job_event(
+            repo,
+            task,
+            Severity::Error,
+            "worker.error",
+            format!(
+                "Actor seed failed at {} / {}: {}",
+                last_processed,
+                total,
+                safe_failure_reason(error)
+            ),
+        )
+        .await;
     }
     // Dropping the completed source future closes its bounded receiver before
     // joining, so a blocked producer always wakes on failure/cancellation.
@@ -261,6 +348,21 @@ async fn seed(
     )
     .await?;
     setup_jobs::record_result(repo,task,&json!({"operation":"actor_seed","dataset_sha256":dataset.sha256,"processed":complete.processed,"total":complete.total,"aliases":complete.aliases,"database_seeded":complete.complete,"actor_search_state":"not_observed"})).await?;
+    record_job_event(
+        repo,
+        task,
+        if complete.complete {
+            Severity::Info
+        } else {
+            Severity::Warn
+        },
+        "worker.progress",
+        format!(
+            "{phase}: {} / {} actors ({} aliases)",
+            complete.processed, complete.total, complete.aliases
+        ),
+    )
+    .await;
     Ok(if complete.complete {
         SetupOutcome::Complete
     } else {
@@ -309,11 +411,21 @@ async fn train(
             SyntheticActivation::RetainPrior,
         ))
         .await?;
+    record_job_event(
+        repo,
+        task,
+        Severity::Info,
+        "worker.progress",
+        "Classifier training started",
+    )
+    .await;
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut cancelled = false;
     let mut pressure_failed = false;
     let mut last_pressure = std::time::Instant::now();
+    let mut last_stage = String::new();
+    let mut last_stage_log: Option<std::time::Instant> = None;
     let result = async {loop {
         tick.tick().await;
         if last_pressure.elapsed()>=Duration::from_secs(1) {
@@ -330,14 +442,32 @@ async fn train(
         }
         let detail = home.job_detail(&accepted.job_id).await?;
         if let Some(progress) = detail.progress {
+            let stage = progress.stage.as_str();
             setup_jobs::record_progress(
                 repo,
                 task,
-                progress.stage.as_str(),
+                stage,
                 progress.rows_seen,
                 progress.rows_total,
             )
             .await?;
+            if stage != last_stage
+                || last_stage_log.is_none_or(|at| at.elapsed() >= Duration::from_secs(10))
+            {
+                last_stage = stage.to_owned();
+                last_stage_log = Some(std::time::Instant::now());
+                record_job_event(
+                    repo,
+                    task,
+                    Severity::Info,
+                    "worker.progress",
+                    format!(
+                        "Classifier training ({stage}): {} / {}",
+                        progress.rows_seen, progress.rows_total
+                    ),
+                )
+                .await;
+            }
         }
         match detail.state {
             TrainingJobState::Completed => {

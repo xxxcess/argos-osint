@@ -46,6 +46,7 @@ use crate::ApiError;
 use crate::ApiState;
 
 const FOLLOW_LIMIT: Duration = Duration::from_secs(5);
+const AUTHORITY_CHECK_LIMIT: Duration = Duration::from_secs(4);
 const TICK: Duration = Duration::from_secs(1);
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -494,7 +495,7 @@ async fn follow_inner(
     let deadline = Instant::now() + wait;
     loop {
         let (page, shared) = tokio::time::timeout(
-            TICK,
+            AUTHORITY_CHECK_LIMIT,
             read(
                 &state,
                 &context,

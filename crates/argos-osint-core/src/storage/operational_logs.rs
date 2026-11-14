@@ -108,25 +108,26 @@ pub async fn plan(
     selection: &LogSelection,
 ) -> Result<CohortPlan, CohortError> {
     jobs_view::validate_activity_scope(authority_scope, scope).map_err(|_| CohortError::Invalid)?;
-    jobs_view::require_activity_schema(repo.db())
+    let schema_check = if selection.descendants && selection.job_id.is_some() {
+        "INFO FOR TABLE job_request; INFO FOR TABLE job_origin; INFO FOR TABLE job_ancestor;"
+    } else {
+        "INFO FOR TABLE job_request; INFO FOR TABLE job_origin;"
+    };
+    repo.db()
+        .query(schema_check)
         .await
+        .map_err(|_| CohortError::Unavailable)?
+        .check()
         .map_err(|_| CohortError::Unavailable)?;
     if let Some(selected) = &selection.job_id {
-        let root = jobs_view::get_activity_job(repo.db(), authority_scope, scope, selected)
-            .await
-            .map_err(|_| CohortError::Unavailable)?
-            .ok_or(CohortError::Missing)?;
+        let root =
+            jobs_view::get_activity_job_checked_schema(repo.db(), authority_scope, scope, selected)
+                .await
+                .map_err(|_| CohortError::Unavailable)?
+                .ok_or(CohortError::Missing)?;
         if !root.private_details_available {
             return Ok(CohortPlan::SharedPrivateUnavailable);
         }
-    }
-    if selection.descendants && selection.job_id.is_some() {
-        repo.db()
-            .query("INFO FOR TABLE job_ancestor;")
-            .await
-            .map_err(|_| CohortError::Unavailable)?
-            .check()
-            .map_err(|_| CohortError::Unavailable)?;
     }
     let mut where_sql = format!(
         "kind!='service' AND {} AND ({})",

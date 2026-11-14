@@ -53,10 +53,48 @@ pub(super) async fn prepare(
         return Err(invalid("actor_index_rebuild_requires_coordinated_scan"));
     }
     let owner = owner.to_owned();
+    let limits_json = serde_json::to_string(&status.limits)
+        .map_err(|_| invalid("actor_index_limits_encoding"))?;
+    let current = super::control_read(repo).await?;
+    if !current.deployment_id.is_empty()
+        && current.deployment_id == status.deployment_id
+        && current.source_epoch == status.source_epoch
+        && current.index_generation == active.generation
+        && active.visible_checkpoint >= current.acknowledged_sequence as u64
+        && current.pending_json.is_empty()
+        && current.backfill_complete
+        && current.acknowledged_sequence == current.next_sequence
+        && current.effective_limits_json == limits_json
+        && current.lease_owner == owner
+        && instant(&current.lease_until)? > now + Duration::seconds(super::LEASE_RENEW_WINDOW_SECS)
+    {
+        let mut check = repo
+            .db()
+            .query(
+                "SELECT VALUE instance_id FROM ONLY storage_meta:identity;
+                 RETURN (SELECT VALUE status FROM ONLY brain_actor_seed:catalog) = 'complete';
+                 RETURN array::len((SELECT VALUE id FROM actor_search_cause WHERE done = false AND closed = true AND required_sequence <= $ack LIMIT 1)) > 0;
+                 RETURN array::len((SELECT VALUE id FROM actor_search_event WHERE sequence <= $ack LIMIT 1)) > 0;",
+            )
+            .bind(("ack", current.acknowledged_sequence))
+            .await?
+            .check()?;
+        let instance: Option<String> = check.take(0)?;
+        let seed_complete: Option<bool> = check.take(1)?;
+        let has_causes: Option<bool> = check.take(2)?;
+        let has_prunable: Option<bool> = check.take(3)?;
+        if instance.as_deref() == Some(status.deployment_id.as_str())
+            && !has_causes.unwrap_or(true)
+            && !has_prunable.unwrap_or(true)
+            && (!seed_complete.unwrap_or(false) || active.source_complete)
+        {
+            return Ok(Preparation::Waiting);
+        }
+    }
     // Bound decoded alias provenance separately from serialized batch bytes.
     // Never fetch a speculative second source page while preparing this one.
     let page = usize::from(status.limits.batch_documents).min(super::BACKFILL_PAGE);
-    Ok(run_tx(repo.db(),RetryPolicy::default(),|tx| {let owner=owner.clone();let active=active.clone();async move {
+    Ok(run_tx(repo.db(),RetryPolicy::default(),|tx| {let owner=owner.clone();let active=active.clone();let limits_json=limits_json.clone();async move {
         guard(&tx).await?;
         let mut response=jobs::run(&tx,tx.query("SELECT VALUE instance_id FROM ONLY storage_meta:identity")).await?;
         if jobs::take::<Option<String>>(&mut response,0)?.as_deref()!=Some(status.deployment_id.as_str()) {return Err(invalid("actor_index_deployment_mismatch"));}
@@ -77,7 +115,7 @@ pub(super) async fn prepare(
             else {control.lease_epoch.max(remote).checked_add(1).ok_or_else(||invalid("actor_index_epoch_exhausted"))?};
         jobs::run(&tx,tx.query("UPDATE actor_search_control:catalog SET lease_owner=$owner,lease_epoch=$epoch,lease_until=<datetime>$until,effective_limits_json=$limits RETURN NONE")
             .bind(("owner",owner.clone())).bind(("epoch",epoch)).bind(("until",(now+Duration::seconds(45)).to_rfc3339()))
-            .bind(("limits",serde_json::to_string(&status.limits).map_err(|_|invalid("actor_index_limits_encoding"))?))).await?;
+            .bind(("limits",limits_json))).await?;
         let lease=Lease {owner:owner.clone(),epoch:epoch as u64};
         let mut prepared=if !control.pending_json.is_empty() {
             let prepared:PreparedBatch=serde_json::from_str(&control.pending_json).map_err(|_|invalid("actor_index_pending_invalid"))?;

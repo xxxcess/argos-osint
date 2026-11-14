@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use argos_osint_api::datasets::DatasetStore;
+use argos_osint_core::events::Severity;
 use argos_osint_core::osint::manual;
 use argos_osint_core::osint::manual::DurableToolOutcome;
 use argos_osint_core::storage::classifier_activation;
@@ -17,6 +18,7 @@ use argos_osint_core::storage::job_dispatch::DeliveryClaim;
 use argos_osint_core::storage::job_dispatch::DeliveryFinish;
 use argos_osint_core::storage::job_dispatch::DeliveryOutcome;
 use argos_osint_core::storage::job_dispatch::Envelope;
+use argos_osint_core::storage::jobs;
 use argos_osint_core::storage::repo::Repository;
 use argos_osint_core::storage::setup_jobs;
 use chrono::Utc;
@@ -168,6 +170,7 @@ async fn relay(
 ) -> Result<()> {
     let owner = format!("native-worker-{}", argos_osint_core::store::new_id());
     let mut turn = 0;
+    let mut last_recovery = Option::<std::time::Instant>::None;
     let mut poll = tokio::time::interval(Duration::from_millis(500));
     poll.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut housekeeping = tokio::time::interval(Duration::from_secs(60));
@@ -178,18 +181,24 @@ async fn relay(
             _=stop.changed()=>return Ok(()),
             _=housekeeping.tick()=>{if store.expire_abandoned(repo).await.is_err(){tracing::warn!(code="dataset_expiry_pending","Dataset expiry cleanup remains pending");}},
             _=poll.tick()=>{
+                let run_recovery = last_recovery.is_none_or(|at| at.elapsed() >= Duration::from_secs(5));
                 let result=async {
                     // Publishing and routing remain independent of every long
                     // operation. Rotate the first pool; one source item per pool.
                     for offset in 0..pools.len() {
                         let pool=pools[(turn+offset)%pools.len()];
-                        job_dispatch::recover_expired(repo.db(),pool,Utc::now()).await?;
+                        if run_recovery {
+                            job_dispatch::recover_expired(repo.db(),pool,Utc::now()).await?;
+                        }
                         if let Some(claim)=job_dispatch::claim_ready(repo.db(),pool,&owner,Utc::now()).await? {
                             let envelope=&claim.envelope;
                             let identity=serde_json::to_vec(&(&envelope.workspace_generation,&envelope.task_id,envelope.revision))?;
                             broker.publish(format!("{:x}",Sha256::digest(identity)),serde_json::to_vec(envelope)?).await?;
                             job_dispatch::mark_published(repo.db(),&claim,Utc::now()).await?;
                         }
+                    }
+                    if run_recovery {
+                        last_recovery = Some(std::time::Instant::now());
                     }
                     turn=(turn+1)%pools.len();
                     if let Some(received)=broker.claim(&owner).await? {
@@ -303,6 +312,18 @@ async fn handle(
         }
         DeliveryClaim::Claimed(lease) => lease,
     };
+    crate::setup_jobs::record_job_event(
+        repo,
+        &lease.task,
+        Severity::Info,
+        "task.started",
+        format!(
+            "Worker claimed {} (attempt {})",
+            jobs::job_title(&lease.task.operation),
+            lease.task.attempts
+        ),
+    )
+    .await;
     let cancel = Arc::new(AtomicBool::new(false));
     let operation = async {
         if lease.task.pool == manual::TOOLS_POOL {
@@ -350,6 +371,8 @@ async fn handle(
     let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     heartbeat.tick().await;
+    let mut last_renewed = tokio::time::Instant::now();
+    let max_renew_gap = Duration::from_secs((LEASE_SECONDS as u64).saturating_sub(10));
     let outcome = loop {
         tokio::select! {
             biased;
@@ -363,7 +386,11 @@ async fn handle(
             _=heartbeat.tick()=>{
                 let queue_live=received.renew().await;
                 let job_live=job_dispatch::renew_delivery(repo.db(),&lease,LEASE_SECONDS,Utc::now()).await;
-                if !matches!(queue_live,Ok(true))||!matches!(job_live,Ok(true)) {
+                let lost=matches!(queue_live,Ok(false))||matches!(job_live,Ok(false));
+                let renewed=matches!(queue_live,Ok(true))&&matches!(job_live,Ok(true));
+                if renewed {
+                    last_renewed = tokio::time::Instant::now();
+                } else if lost || last_renewed.elapsed() >= max_renew_gap {
                     argos_osint_core::cancellation::cancel_with_notify(&cancel);
                     let _=operation.await;
                     break DurableToolOutcome::Stale;
@@ -377,6 +404,14 @@ async fn handle(
     };
     let finish = match &outcome {
         DurableToolOutcome::Complete { result_ref } => {
+            crate::setup_jobs::record_job_event(
+                repo,
+                &lease.task,
+                Severity::Info,
+                "task.completed",
+                format!("Completed {}", jobs::job_title(&lease.task.operation)),
+            )
+            .await;
             job_dispatch::finish_delivery(
                 repo.db(),
                 &lease,
@@ -386,6 +421,18 @@ async fn handle(
             .await?
         }
         DurableToolOutcome::Failed { reason } => {
+            crate::setup_jobs::record_job_event(
+                repo,
+                &lease.task,
+                Severity::Error,
+                "task.failed",
+                format!(
+                    "Failed {}: {}",
+                    jobs::job_title(&lease.task.operation),
+                    reason
+                ),
+            )
+            .await;
             job_dispatch::finish_delivery(
                 repo.db(),
                 &lease,
@@ -395,6 +442,17 @@ async fn handle(
             .await?
         }
         DurableToolOutcome::Stale => {
+            crate::setup_jobs::record_job_event(
+                repo,
+                &lease.task,
+                Severity::Warn,
+                "task.lease_lost",
+                format!(
+                    "Stopped {}: worker lease expired or job cancelled",
+                    jobs::job_title(&lease.task.operation)
+                ),
+            )
+            .await;
             received.settle(Disposition::Ack).await?;
             return Ok(());
         }

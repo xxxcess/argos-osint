@@ -133,6 +133,11 @@ impl Queue {
             }
             let mut batch = WriteBatch::default();
             let response = execute(&db, &mut batch, &request.command, request.now_ms)?;
+            if matches!(request.command, QueueCommand::Claim { .. })
+                && matches!(response, QueueResponse::Delivery(None))
+            {
+                return Ok(response);
+            }
             let receipt = Receipt {
                 command: serialized,
                 response: response.clone(),

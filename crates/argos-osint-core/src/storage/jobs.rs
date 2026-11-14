@@ -240,12 +240,14 @@ pub(crate) async fn rollup_in(tx: &Tx, job_id: &str) -> Result<(), TxError> {
              LET $first = (SELECT VALUE started_at FROM task WHERE job = $j AND started_at != NONE \
                ORDER BY started_at LIMIT 1)[0];
              LET $failed = SELECT VALUE error_category FROM task WHERE job = $j AND state = 'failed';
+             LET $failed_messages = SELECT VALUE error_message FROM task WHERE job = $j AND state = 'failed' AND error_message != '';
              UPDATE $j SET attempts_used = count($att),
                attempt_cap = math::sum((SELECT VALUE max_attempts FROM task WHERE job = $j)),
                active_ms = IF count($att) > 0 { math::sum($att.map(|$d| $d ?? 0)) } ELSE { active_ms },
                queue_ms = IF $first != NONE { duration::millis($first - created_at) } ELSE { queue_ms },
-               error_summary = IF count($failed) > 0 { <string>count($failed) + ' task(s) failed' }
-                 ELSE { error_summary },
+               error_summary = IF count($failed) > 0 {
+                 IF count($failed_messages) > 0 { $failed_messages[0] } ELSE { <string>count($failed) + ' task(s) failed' }
+               } ELSE { error_summary },
                error_category = IF count($failed) > 0 { $failed.find(|$c| $c != '') ?? 'task_failed' }
                  ELSE { error_category }
              RETURN NONE;",
@@ -840,13 +842,20 @@ pub(crate) async fn interrupt_expired_pool_in(
     interrupt_expired_matching_in(tx, Some(pool), now).await
 }
 
+fn recovery_failure_message(outcome: &str) -> &'static str {
+    match outcome {
+        "lease_expired" => "Task lease expired after maximum worker recoveries",
+        "process_exited" => "Worker process exited before task completed",
+        _ => "Task failed after maximum worker recoveries",
+    }
+}
+
 async fn interrupt_expired_matching_in(
     tx: &Tx,
     pool: Option<&str>,
     now: DateTime<Utc>,
 ) -> Result<usize, TxError> {
     let now_s = ts(now);
-    bump(tx, "lease_sweep_guard", pool.unwrap_or("singleton")).await?;
     let mut res = run(
         tx,
         tx.query(
@@ -859,6 +868,10 @@ async fn interrupt_expired_matching_in(
     )
     .await?;
     let expired: Vec<Expired> = take(&mut res, 0)?;
+    if expired.is_empty() {
+        return Ok(0);
+    }
+    bump(tx, "lease_sweep_guard", pool.unwrap_or("singleton")).await?;
     let mut recovered = 0;
     for e in expired {
         requeue_running_in(
@@ -894,17 +907,22 @@ pub(crate) async fn requeue_running_in(
     only_expired: bool,
 ) -> Result<(), TxError> {
     let failed = recoveries + 1 >= MAX_WORKER_RECOVERIES;
+    let error_msg = recovery_failure_message(outcome);
     run(
         tx,
         tx.query(
             "UPDATE $t SET state = $next, lease_epoch += 1, lease_owner = '', process_owner = '', \
              lease_until = NONE, recoveries += 1, next_eligible_at = <datetime>$now, \
+             error_category = IF $failed THEN $outcome ELSE error_category END, \
+             error_message = IF $failed THEN $error_msg ELSE error_message END, \
              finished_at = IF $failed THEN <datetime>$now ELSE NONE END, updated_at = <datetime>$now \
              WHERE state = 'running' AND lease_epoch = $e \
              AND (!$only_expired OR lease_until <= <datetime>$now) RETURN NONE;
              LET $open = SELECT VALUE id FROM attempt \
              WHERE task = $t AND epoch = $e AND finished_at = NONE;
-             UPDATE $open SET finished_at = <datetime>$now, duration_ms = duration::millis(<datetime>$now - started_at), outcome = $outcome RETURN NONE;",
+             UPDATE $open SET finished_at = <datetime>$now, duration_ms = duration::millis(<datetime>$now - started_at), outcome = $outcome, \
+             error_category = IF $failed THEN $outcome ELSE error_category END, \
+             error_message = IF $failed THEN $error_msg ELSE error_message END RETURN NONE;",
         )
         .bind(("t", rid("task", id)))
         .bind(("next", if failed { "failed" } else { "queued" }))
@@ -912,6 +930,7 @@ pub(crate) async fn requeue_running_in(
         .bind(("now", now_s.to_string()))
         .bind(("e", epoch))
         .bind(("outcome", outcome.to_string()))
+        .bind(("error_msg", error_msg.to_string()))
         .bind(("only_expired", only_expired)),
     )
     .await?;
@@ -1295,7 +1314,9 @@ pub(crate) async fn settle_finished_job_in(tx: &Tx, job_id: &str) -> Result<bool
     run(
         tx,
         tx.query(
-            "UPDATE $j SET state = $state, finished_at = finished_at ?? time::now(), \
+            "UPDATE $j SET state = $state, \
+             phase = IF $state = 'failed' AND !(phase INSIDE ['Failed', 'Cancelled', 'Completed']) THEN 'Failed' ELSE phase END, \
+             finished_at = finished_at ?? time::now(), \
              updated_at = time::now() WHERE state IN ['running', 'active', 'queued'] RETURN NONE;
              UPDATE brief_run SET state = $state, updated_at = time::now() \
              WHERE job = $j AND state = 'active' RETURN NONE;",

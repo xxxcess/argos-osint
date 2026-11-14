@@ -421,12 +421,10 @@ struct Event {
     cause_job: Option<String>,
 }
 
-async fn control_in(tx: &Tx) -> Result<Control, TxError> {
-    let mut response=jobs::run(tx,tx.query("SELECT next_sequence,acknowledged_sequence,deployment_id,source_epoch,index_generation,lease_owner,lease_epoch,
-        <string>lease_until AS lease_until,<string>next_start_at AS next_start_at,<string>retry_at AS retry_at,failures,last_error,blocked,pending_json,backfill_after,backfill_complete,effective_limits_json,pressure_paused,pressure_reason,pressure_observed_at,backlog_paused,tail_since
-        FROM ONLY actor_search_control:catalog")).await?;
-    let control = jobs::take::<Option<Control>>(&mut response, 0)?
-        .ok_or_else(|| invalid("actor_index_control_missing"))?;
+const CONTROL_SELECT_SURQL: &str = "SELECT next_sequence,acknowledged_sequence,deployment_id,source_epoch,index_generation,lease_owner,lease_epoch,<string>lease_until AS lease_until,<string>next_start_at AS next_start_at,<string>retry_at AS retry_at,failures,last_error,blocked,pending_json,backfill_after,backfill_complete,effective_limits_json,pressure_paused,pressure_reason,pressure_observed_at,backlog_paused,tail_since FROM ONLY actor_search_control:catalog";
+const LEASE_RENEW_WINDOW_SECS: i64 = 15;
+
+fn validate_control(control: Control) -> Result<Control, TxError> {
     if control.acknowledged_sequence < 0
         || control.acknowledged_sequence > control.next_sequence
         || control.lease_epoch < 0
@@ -435,6 +433,27 @@ async fn control_in(tx: &Tx) -> Result<Control, TxError> {
         return Err(invalid("actor_index_control_invalid"));
     }
     Ok(control)
+}
+
+async fn control_read_opt(repo: &Repository) -> Result<Option<Control>, TxError> {
+    let mut response = repo.db().query(CONTROL_SELECT_SURQL).await?.check()?;
+    response
+        .take::<Option<Control>>(0)?
+        .map(validate_control)
+        .transpose()
+}
+
+async fn control_read(repo: &Repository) -> Result<Control, TxError> {
+    control_read_opt(repo)
+        .await?
+        .ok_or_else(|| invalid("actor_index_control_missing"))
+}
+
+async fn control_in(tx: &Tx) -> Result<Control, TxError> {
+    let mut response = jobs::run(tx, tx.query(CONTROL_SELECT_SURQL)).await?;
+    let control = jobs::take::<Option<Control>>(&mut response, 0)?
+        .ok_or_else(|| invalid("actor_index_control_missing"))?;
+    validate_control(control)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -466,6 +485,23 @@ pub async fn claim(
 ) -> Result<Option<Lease>, TxError> {
     if !valid(owner) {
         return Err(invalid("actor_index_owner_invalid"));
+    }
+    if let Some(current) = control_read_opt(repo).await? {
+        if current.blocked
+            || instant(&current.retry_at)? > now
+            || (instant(&current.lease_until)? > now && current.lease_owner != owner)
+        {
+            return Ok(None);
+        }
+        // Avoid an empty write transaction every 1s poll while our 45s lease still has margin.
+        if current.lease_owner == owner
+            && instant(&current.lease_until)? > now + Duration::seconds(LEASE_RENEW_WINDOW_SECS)
+        {
+            return Ok(Some(Lease {
+                owner: owner.to_owned(),
+                epoch: current.lease_epoch as u64,
+            }));
+        }
     }
     let owner = owner.to_owned();
     Ok(run_tx(repo.db(),RetryPolicy::default(),|tx| {let owner=owner.clone();async move {

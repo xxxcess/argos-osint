@@ -250,6 +250,15 @@ pub async fn next_rebuild(
     if status.protocol != ACTOR_INDEX_PROTOCOL {
         return Err(invalid("actor_index_protocol_mismatch"));
     }
+    let mut existing = repo
+        .db()
+        .query("SELECT VALUE phase FROM ONLY actor_search_rebuild:catalog")
+        .await?
+        .check()?;
+    let current_phase: Option<String> = existing.take(0)?;
+    if current_phase.is_none() || current_phase.as_deref() == Some("completed") {
+        return Ok(None);
+    }
     let owner = owner.to_owned();
     let status = status.clone();
     Ok(run_tx(repo.db(),RetryPolicy::default(),|tx| {let owner=owner.clone();let status=status.clone();async move {

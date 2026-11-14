@@ -565,11 +565,21 @@ pub async fn get_activity_job(
     id: &str,
 ) -> Result<Option<ActivityJobRow>> {
     validate_activity_scope(authority_scope, scope)?;
+    require_activity_schema(db).await?;
+    get_activity_job_checked_schema(db, authority_scope, scope, id).await
+}
+
+pub(crate) async fn get_activity_job_checked_schema(
+    db: &Surreal<Any>,
+    authority_scope: &str,
+    scope: &ActivityScope,
+    id: &str,
+) -> Result<Option<ActivityJobRow>> {
+    validate_activity_scope(authority_scope, scope)?;
     anyhow::ensure!(
         !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control),
         "bounded job ID required"
     );
-    require_activity_schema(db).await?;
     let query = format!("LET $visible = (SELECT VALUE id FROM job WHERE id = $job AND kind != 'service' AND {ELIGIBLE} AND ({})); \
         SELECT {ROW_FIELDS}, {RANK} AS rank, {ACTIVITY_RELATIONS_UNAVAILABLE} FROM job WHERE id IN $visible; \
         SELECT record::id(id) AS key, (({}) ?? false) AS available FROM job WHERE id IN $visible;", activity_membership(), activity_private());

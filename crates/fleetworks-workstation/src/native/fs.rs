@@ -38,6 +38,8 @@ pub(super) struct ObjectIdentity {
 impl ObjectIdentity {
     pub fn from_stat(stat: &Stat) -> Result<Self> {
         Ok(Self {
+            // st_dev is i32 on macOS libc and u64 on Linux libc.
+            #[allow(clippy::useless_conversion)]
             device: u64::try_from(stat.st_dev).context("invalid filesystem device")?,
             inode: stat.st_ino,
             owner: stat.st_uid,

@@ -340,7 +340,7 @@ async fn picked_datasets_preserve_fences_and_reindex_requires_completed_nonempty
         ),
         "missing completed seed is not indexable"
     );
-    repo.db().query("UPSERT brain_actor_seed:catalog SET status='complete',processed=1,total=1 RETURN NONE;").await.expect("seed receipt fixture").check().expect("receipt");
+    repo.db().query("UPSERT brain_actor_seed:catalog SET status='complete',fingerprint='fixture-fingerprint',processed=1,total=1,owner='fixture',lease_until='fixture',updated_at='fixture' RETURN NONE;").await.expect("seed receipt fixture").check().expect("receipt");
     assert!(
         matches!(
             super::reindex(

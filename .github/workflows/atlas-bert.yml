@@ -180,7 +180,7 @@ jobs:
           import json
           import os
           from pathlib import Path
-          manifests = list(Path("evidence").glob("*/evidence.json"))
+          manifests = sorted(Path("evidence").rglob("evidence.json"))
           found = set()
           for path in manifests:
               value = json.loads(path.read_text())

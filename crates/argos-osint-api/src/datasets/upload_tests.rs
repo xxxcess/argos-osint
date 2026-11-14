@@ -299,14 +299,14 @@ async fn issued_upload_urls_stream_exact_bytes_once_and_preserve_registration_fe
     assert_eq!(list["rows"].as_array().expect("rows").len(), 1);
     let mut jobs = repo
         .db()
-        .query("SELECT VALUE count() FROM job GROUP ALL")
+        .query("RETURN count(SELECT VALUE id FROM job)")
         .await
         .expect("jobs query")
         .check()
         .expect("jobs");
-    let count: Vec<i64> = jobs.take(0).expect("job count");
+    let count: Option<i64> = jobs.take(0).expect("job count");
     assert_eq!(
-        count.first().copied().unwrap_or(0),
+        count.unwrap_or(0),
         0,
         "staging never submits seed/train jobs or activation"
     );

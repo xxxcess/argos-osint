@@ -74,8 +74,8 @@ COPY services ./services
 COPY apps/fleetworks-desktop/Cargo.toml ./apps/fleetworks-desktop/Cargo.toml
 RUN mkdir -p apps/fleetworks-desktop/src \
     && printf 'fn main() {}\n' > apps/fleetworks-desktop/src/main.rs
-RUN --mount=type=cache,id=fleetworks-registry-${TARGETARCH},target=/usr/local/cargo/registry \
-    --mount=type=cache,id=fleetworks-git-${TARGETARCH},target=/usr/local/cargo/git \
+RUN --mount=type=cache,id=fleetworks-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=fleetworks-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=fleetworks-target-${TARGETARCH},target=/src/target,sharing=locked \
     cargo build --release --locked -p argos-api-host --no-default-features --features server,nlp,classifier \
         --config "profile.release.package.argos-osint-core.codegen-units=${FLEETWORKS_CORE_CODEGEN_UNITS}" \
@@ -120,8 +120,8 @@ RUN for member in crates/argos-osint-core crates/argos-osint-api \
     done
 COPY crates/fleetworks-contracts ./crates/fleetworks-contracts
 COPY services/search-index ./services/search-index
-RUN --mount=type=cache,id=fleetworks-registry-${TARGETARCH},target=/usr/local/cargo/registry \
-    --mount=type=cache,id=fleetworks-git-${TARGETARCH},target=/usr/local/cargo/git \
+RUN --mount=type=cache,id=fleetworks-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=fleetworks-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=fleetworks-search-target-${TARGETARCH},target=/src/target,sharing=locked \
     cargo build --release --locked --no-default-features -p fleetworks-search-index \
     && install -D target/release/fleetworks-search-index /out/fleetworks-search-index

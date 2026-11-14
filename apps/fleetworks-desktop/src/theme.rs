@@ -8,19 +8,19 @@ use rune_kit::PaletteSeed;
 use rune_kit::StateColors;
 
 pub const BACKGROUND: &str = "#060709";
-pub const SURFACE: &str = "#0B0D11";
-pub const SURFACE_RAISED: &str = "#12151C";
+pub const SURFACE: &str = "#0B0C0F";
+pub const SURFACE_RAISED: &str = "#111317";
 pub const SURFACE_ELEVATED: &str = "#181C26";
 pub const SURFACE_INSET: &str = "#060709";
 /// Decorative framing; essential controls use BORDER_CONTROL.
 pub const BORDER_SUBTLE: &str = "#3A3833";
-pub const BORDER_CONTROL: &str = "#948B7B";
-pub const TEXT_PRIMARY: &str = "#F7F3EA";
-pub const TEXT_SECONDARY: &str = "#DCD6C8";
-pub const TEXT_MUTED: &str = "#A8A296";
+pub const BORDER_CONTROL: &str = "#898274";
+pub const TEXT_PRIMARY: &str = "#F3EEE4";
+pub const TEXT_SECONDARY: &str = "#D6D2C4";
+pub const TEXT_MUTED: &str = "#B8B4A8";
 pub const ACCENT: &str = "#C6A56E";
 pub const ACCENT_PRESSED: &str = "#C4A265";
-pub const ACCENT_HOVER: &str = "#E5C993";
+pub const ACCENT_HOVER: &str = "#D8BD8C";
 pub const ACCENT_HIGHLIGHT: &str = "#F2DFB6";
 pub const ACCENT_DEEP: &str = "#8E6E3B";
 pub const ON_ACCENT: &str = "#060709";

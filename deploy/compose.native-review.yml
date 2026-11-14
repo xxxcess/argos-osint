@@ -95,8 +95,11 @@ services:
     security_opt: ["no-new-privileges:true"]
     restart: unless-stopped
     stop_grace_period: 45s
-    cpus: 1.0
-    mem_limit: 512m
+    # A full actor rebuild can hold Surreal near 512 MiB while scanning the
+    # catalog; leave room for its query and RocksDB memory without reclaiming
+    # on every coordinator transaction.
+    cpus: 2.0
+    mem_limit: 1g
     pids_limit: 128
 
   bootstrap:

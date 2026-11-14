@@ -434,9 +434,9 @@ fn resident_bytes() -> Option<u64> {
         if page_size <= 0 {
             return None;
         }
-        return pages
+        pages
             .checked_mul(page_size as u64)
-            .filter(|value| *value > 0);
+            .filter(|value| *value > 0)
     }
     #[cfg(not(target_os = "linux"))]
     None

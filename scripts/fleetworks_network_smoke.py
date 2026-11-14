@@ -103,18 +103,100 @@ def instance_identity(port, password):
     return identity
 
 
+def write_private_file(path, text):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, text.encode())
+    finally:
+        os.close(fd)
+
+
+def create_native_credentials(workspace, token, scope="smoke-scope", epoch="smoke-epoch"):
+    directory = workspace / "credentials"
+    directory.mkdir(mode=0o700, exist_ok=True)
+    token_file = directory / "native-token"
+    write_private_file(token_file, token + "\n")
+    manifest = {
+        "version": 1,
+        "scope_id": scope,
+        "access_epoch": epoch,
+        "credentials": [{
+            "id": "smoke-native",
+            "purpose": "native",
+            "permissions": [
+                "read_backend",
+                "register_workstation",
+                "rebind_workstation",
+                "manage_configuration",
+                "maintain_backend",
+                "submit_interactive",
+                "read_workstation_activity",
+                "retry_job",
+                "cancel_job",
+            ],
+            "token_file": token_file.name,
+        }],
+    }
+    manifest_file = directory / "gateway-credentials.json"
+    write_private_file(manifest_file, json.dumps(manifest))
+    return manifest_file
+
+
+def register_workstation(port, headers, marker):
+    status, receipt = request(
+        port,
+        "/api/v1/connect/registrations/ensure",
+        {**headers, "Content-Type": "application/json"},
+        json.dumps({
+            "request_id": "smoke-register",
+            "workstation_ip": "192.0.2.61",
+            "installation_marker": marker,
+        }),
+    )
+    assert status in (200, 201), (status, receipt)
+    proof_headers = {
+        **headers,
+        "x-fleetworks-registration": receipt["registration_id"],
+        "x-fleetworks-registration-revision": str(receipt["revision"]),
+    }
+    return receipt, proof_headers
+
+
+def submission_context(port, headers):
+    status, current_ctx = request(
+        port,
+        "/api/v1/connect/registrations/context",
+        {**headers, "Content-Type": "application/json"},
+        json.dumps({
+            "registration_id": headers["x-fleetworks-registration"],
+            "expected_revision": int(headers["x-fleetworks-registration-revision"]),
+        }),
+    )
+    assert status == 200 and "context" in current_ctx, (status, current_ctx)
+    ctx = current_ctx["context"]
+    status, defaults = request(port, "/api/v1/models/defaults", headers)
+    assert status == 200, (status, defaults)
+    return {
+        "registration_id": ctx["registration_id"],
+        "expected_registration_revision": ctx["registration_revision"],
+        "expected_context_revision": ctx["context_revision"],
+        "expected_configuration_revision": defaults.get("configuration_revision", 0),
+    }
+
+
 def exercise_tools(api, port, headers, request_id="local-dork-fixture"):
     start = "/api/v1/tools/run"
     body = json.dumps({
         "request_id": request_id,
         "tool_id": "dork_generate",
         "inputs": {"objective": "Find public annual reports"},
+        "context": submission_context(port, headers),
     })
     auth = {**headers, "Content-Type": "application/json"}
     assert request(port, start, {"Content-Type": "application/json"}, body)[0] == 401
     assert request(port, start, {**auth, "Origin": "http://other.test:3000"}, body)[0] == 403
     status, accepted = request(port, start, auth, body)
-    assert (status, accepted) == (202, {"call_id": f"fleet-tool-{request_id}"})
+    assert status == 202 and accepted.get("call_id") and accepted.get("job_id") == accepted["call_id"], (status, accepted)
     assert request(port, start, auth, body) == (202, accepted)
     assert request(port, start, auth, body.replace("annual", "quarterly"))[0] == 409
     result = "/api/v1/tools/result?id=" + accepted["call_id"]
@@ -124,7 +206,7 @@ def exercise_tools(api, port, headers, request_id="local-dork-fixture"):
         assert api.poll() is None, "API exited before tool publication"
         status, value = request(port, result, headers)
         assert status == 200, (status, value)
-        if value["status"] != "running":
+        if value["status"] not in {"queued", "running", "waiting"}:
             break
         time.sleep(0.05)
     assert value["status"] == "completed", value
@@ -134,23 +216,38 @@ def exercise_tools(api, port, headers, request_id="local-dork-fixture"):
     return result, value
 
 
-def exercise_control(port, headers, workspace):
+def exercise_control(port, headers):
     auth = {**headers, "Content-Type": "application/json"}
+    status, current = request(port, "/api/v1/models/defaults", headers)
+    assert status == 200 and isinstance(current.get("configuration_revision"), int), (status, current)
+    revision = current["configuration_revision"]
+    upsert_body = json.dumps({
+        "expected_revision": revision,
+        "account_id": "local",
+        "provider": "local",
+        "base_url": "http://127.0.0.1:11434/v1",
+    })
+    assert request(port, "/api/v1/profile/accounts/upsert", {"Content-Type": "application/json"}, upsert_body)[0] == 401
+    status, saved_account = request(port, "/api/v1/profile/accounts/upsert", auth, upsert_body)
+    assert status == 200 and saved_account["saved"] is True, (status, saved_account)
+    revision = saved_account["configuration_revision"]
     path = "/api/v1/models/defaults/set"
-    body = json.dumps({"role": "brain_summary", "primary": {
-        "provider": "openrouter", "model": "example/offline-fixture",
-    }})
+    body = json.dumps({
+        "expected_revision": revision,
+        "role": "brain_summary",
+        "primary": {"provider": "local", "model": "example/offline-fixture"},
+    })
     assert request(port, path, {"Content-Type": "application/json"}, body)[0] == 401
-    assert request(port, path, auth, body) == (200, {"saved": True})
+    status, saved_role = request(port, path, auth, body)
+    assert status == 200 and saved_role["saved"] is True, (status, saved_role)
+    revision = saved_role["configuration_revision"]
     status, value = request(port, "/api/v1/models/defaults", headers)
     assert status == 200 and value["defaults"]["brain_summary"]["model"] == "example/offline-fixture"
     export = "/api/v1/profile/export"
-    body = json.dumps({"name": "offline-fixture"})
-    status, value = request(port, export, auth, body)
-    assert status == 200 and set(value) == {"path", "schema_version"}, (status, value)
-    assert value["path"] == "exports/offline-fixture.json"
-    assert (workspace / value["path"]).stat().st_mode & 0o777 == 0o600
-    assert request(port, export, auth, body)[0] == 409
+    assert request(port, export, auth, json.dumps({"expected_revision": revision, "include_credentials": False}))[0] == 400
+    status, value = request(port, export, auth, json.dumps({"expected_revision": revision, "include_credentials": True}))
+    assert status == 200 and isinstance(value, dict) and "schema_version" in value, (status, value)
+    assert value["roles"]["brain_summary"]["primary"]["model"] == "example/offline-fixture", value
 
 
 def exercise(mode, tmp, binary, surreal):
@@ -159,6 +256,8 @@ def exercise(mode, tmp, binary, surreal):
     (workspace / "exports").mkdir(mode=0o700)
     db_port, api_port, worker_port, brief_port = free_ports(4)
     root_key, runtime_key, token = (secrets.token_hex(32) for _ in range(3))
+    manifest_file = create_native_credentials(workspace, token)
+    marker = secrets.token_hex(32)
     db_env = {**safe_env, "SURREAL_USER": "root", "SURREAL_PASS": root_key}
     db_path = "memory" if mode == "memory" else f'rocksdb://{workspace / "db"}?versioned=false&sync=every'
     db = [surreal, "start", "--no-banner", "--log", "warn", "--bind", f"127.0.0.1:{db_port}", db_path]
@@ -167,13 +266,16 @@ def exercise(mode, tmp, binary, surreal):
         **safe_env, "FLEETWORKS_WORKSPACE": str(workspace), "ARGOS_HOME": str(workspace),
         "FLEETWORKS_STORAGE_URL": f"ws://127.0.0.1:{db_port}",
         "FLEETWORKS_STORAGE_PASSWORD": runtime_key,
-        "FLEETWORKS_API_TOKEN": token,
+        "FLEETWORKS_API_CREDENTIALS_FILE": str(manifest_file),
+        "FLEETWORKS_ACCESS_SCOPE_ID": "smoke-scope",
+        "FLEETWORKS_ACCESS_EPOCH": "smoke-epoch",
         "FLEETWORKS_API_ALLOWED_HOSTS": f"127.0.0.1:{api_port}",
         "FLEETWORKS_API_ALLOWED_ORIGINS": origins,
     }
     headers = {"Authorization": "Bearer " + token}
     generations = []
     saved_tool = None
+    proof_headers = None
     for attempt in (1, 2):
         with process(db, db_env, workspace / f"surreal-{attempt}.log") as database:
             wait_for(database, db_port, "/health")
@@ -191,15 +293,17 @@ def exercise(mode, tmp, binary, surreal):
                 assert request(api_port, "/api/v1/health/ready")[0] == 401
                 assert request(api_port, "/api/v1/health/ready", {**headers, "Host": "example.test:8080"})[0] == 403
                 assert request(api_port, "/api/v1/health/ready", {**headers, "Origin": "http://example.test:3000"})[0] == 403
-                for path, key in (("tools", "tools"), ("models/defaults", "defaults"), ("profile", "workspace"), ("logs", "rows")):
-                    status, value = request(api_port, f"/api/v1/{path}", {**headers, "Origin": origins})
+                assert request(api_port, "/api/v1/jobs", headers)[0] == 401
+                _, proof_headers = register_workstation(api_port, headers, marker)
+                for path, key in (("tools", "tools"), ("models/defaults", "defaults"), ("profile", "accounts"), ("logs", "rows")):
+                    status, value = request(api_port, f"/api/v1/{path}", {**proof_headers, "Origin": origins})
                     assert status == 200 and key in value, (path, status, value)
                 if attempt == 1:
-                    saved_tool = exercise_tools(api, api_port, headers)
-                    exercise_control(api_port, headers, workspace)
+                    saved_tool = exercise_tools(api, api_port, proof_headers)
+                    exercise_control(api_port, proof_headers)
                 elif mode == "disk":
                     path, value = saved_tool
-                    assert request(api_port, path, headers) == (200, value)
+                    assert request(api_port, path, proof_headers) == (200, value)
                 if attempt == 1:
                     with contextlib.ExitStack() as workers:
                         roles = (("worker", worker_port), ("brief-worker", brief_port))
@@ -213,10 +317,10 @@ def exercise(mode, tmp, binary, surreal):
                             with socket.socket() as probe:
                                 assert probe.connect_ex(("127.0.0.1", port)) != 0, f"{role} published an HTTP listener"
             if attempt == 1 and mode == "memory":
-                exercise_brain(workspace, binary, env, api_port, headers)
-                exercise_private_tools(workspace, binary, env, api_port, headers)
-                exercise_control_jobs(workspace, binary, env, api_port, headers)
-                exercise_execution(workspace, binary, env, headers)
+                exercise_brain(workspace, binary, env, api_port, proof_headers)
+                exercise_private_tools(workspace, binary, env, api_port, proof_headers)
+                exercise_control_jobs(workspace, binary, env, api_port, proof_headers)
+                exercise_execution(workspace, binary, env, proof_headers)
     assert (generations[0] == generations[1]) == (mode == "disk")
     print(f"{mode}: privileged bootstrap, scoped API and worker roles, ingress, retained reads, durable tool execution and database generation passed", flush=True)
 
@@ -277,13 +381,11 @@ def exercise_brain(workspace, binary, env, api_port, public_headers):
         with process([binary, "--role", "brain", "--port", str(brain_port)], brain_env, workspace / "brain.log") as brain:
             assert wait_for(brain, brain_port, ready, auth)["service"] == "fleetworks-brain"
             assert request(brain_port, ready, public_headers)[0] == 401
+            assert request(brain_port, detail, auth)[0] == 401
             assert request(brain_port, "/api/v1/jobs", auth)[0] == 404
-            private = request(brain_port, detail, auth)
-            assert private[0] == 404, private
-            assert request(api_port, detail, public_headers) == private
+            assert request(api_port, detail, public_headers)[0] == 404
             path = "/api/v1/actors/search?query=Harbor%20Council"
             status, names = request(api_port, path, public_headers)
-            assert (status, names) == request(brain_port, path, auth)
             assert status == 200 and len(names["rows"]) == 1, names
             actor = names["rows"][0]
             assert actor["catalog_id"] == "fixture:harbor", actor
@@ -317,12 +419,14 @@ def exercise_private_tools(workspace, binary, env, api_port, public_headers):
             health = wait_for(tools, port, ready, auth)
             assert health["service"] == "fleetworks-tools" and health["storage"]
             assert request(port, catalog, public_headers)[0] == 401
+            assert request(port, catalog, auth)[0] == 401
             assert request(api_port, catalog, auth)[0] == 401
             assert request(port, ready, {**auth, "Host": "other.test"})[0] == 403
             assert request(port, "/api/v1/jobs", auth)[0] == 404
-            assert request(api_port, catalog, public_headers) == request(port, catalog, auth)
+            status, listed = request(api_port, catalog, public_headers)
+            assert status == 200 and listed["tools"], (status, listed)
             path, result = exercise_tools(api, api_port, public_headers, "private-dork-fixture")
-            assert request(port, path, auth) == (200, result)
+            assert request(api_port, path, public_headers) == (200, result)
         assert request(api_port, catalog, public_headers)[0] == 502
         assert request(api_port, path, public_headers)[0] == 502
         assert request(api_port, "/api/v1/jobs", public_headers)[0] == 200
@@ -355,7 +459,6 @@ def exercise_control_jobs(workspace, binary, env, api_port, public_headers):
     profile = "/api/v1/profile"
     defaults = "/api/v1/models/defaults"
     jobs_path = "/api/v1/jobs"
-    (workspace / "exports").mkdir(exist_ok=True)
     with process([binary, "--role", "api", "--port", str(api_port)], gateway_env, workspace / "api-control-jobs.log") as api:
         wait_for(api, api_port, ready, public_headers)
         with process([binary, "--role", "jobs", "--port", str(jobs_port)], jobs_env, workspace / "jobs.log") as jobs:
@@ -366,33 +469,38 @@ def exercise_control_jobs(workspace, binary, env, api_port, public_headers):
                 assert request(jobs_port, jobs_path, public_headers)[0] == 401
                 assert request(control_port, profile, jobs_auth)[0] == 401
                 assert request(jobs_port, jobs_path, control_auth)[0] == 401
+                assert request(control_port, profile, control_auth)[0] == 401
+                assert request(jobs_port, jobs_path, jobs_auth)[0] == 401
                 assert request(api_port, profile, control_auth)[0] == 401
                 assert request(api_port, jobs_path, jobs_auth)[0] == 401
                 assert request(control_port, jobs_path, control_auth)[0] == 404
                 assert request(jobs_port, profile, jobs_auth)[0] == 404
                 assert request(jobs_port, "/api/v1/live", jobs_auth)[0] == 404
-                direct_profile = request(control_port, profile, control_auth)
-                assert direct_profile[0] == 200 and direct_profile[1]["access_mode"] == "bearer"
-                assert request(api_port, profile, public_headers) == direct_profile
+                status, relayed_profile = request(api_port, profile, public_headers)
+                assert status == 200 and isinstance(relayed_profile.get("configuration_revision"), int), (status, relayed_profile)
                 for path in (jobs_path, "/api/v1/logs?limit=1"):
-                    direct = request(jobs_port, path, jobs_auth)
-                    assert direct[0] == 200 and isinstance(direct[1]["rows"], list)
-                    assert request(api_port, path, public_headers) == direct
+                    status, rows = request(api_port, path, public_headers)
+                    assert status == 200 and isinstance(rows["rows"], list), (path, status, rows)
                 missing = "/api/v1/jobs/detail?id=missing-control-jobs-fixture"
                 assert request(api_port, missing, public_headers)[0] == 404
                 auth = {**public_headers, "Content-Type": "application/json"}
-                assert request(api_port, "/api/v1/jobs/cancel", auth, '{"id":"missing-control-jobs-fixture"}')[0] == 404
+                assert request(api_port, "/api/v1/jobs/cancel", auth, '{"id":"missing-control-jobs-fixture","request_id":"cancel-missing-fixture"}')[0] == 404
+                status, current = request(api_port, defaults, public_headers)
+                assert status == 200, (status, current)
                 change = json.dumps({
+                    "expected_revision": current["configuration_revision"],
                     "role": "atlas_analyst",
                     "primary": {"provider": "local", "model": "offline-control-fixture"},
                 })
-                assert request(api_port, defaults + "/set", auth, change) == (200, {"saved": True})
-                observed = request(control_port, defaults, control_auth)
+                status, saved = request(api_port, defaults + "/set", auth, change)
+                assert status == 200 and saved["saved"] is True, (status, saved)
+                observed = request(api_port, defaults, public_headers)
                 assert observed[0] == 200 and "offline-control-fixture" in json.dumps(observed[1])
-                assert request(api_port, defaults, public_headers) == observed
-                status, export = request(api_port, profile + "/export", auth, '{"name":"private-control-fixture"}')
-                assert status == 200 and export["path"] == "exports/private-control-fixture.json"
-                assert (workspace / export["path"]).stat().st_mode & 0o777 == 0o600
+                status, export = request(api_port, profile + "/export", auth, json.dumps({
+                    "expected_revision": saved["configuration_revision"],
+                    "include_credentials": True,
+                }))
+                assert status == 200 and export["roles"]["atlas_analyst"]["primary"]["model"] == "offline-control-fixture", (status, export)
             assert request(api_port, profile, public_headers)[0] == 502
             assert request(api_port, defaults, public_headers)[0] == 502
             assert request(api_port, jobs_path, public_headers)[0] == 200

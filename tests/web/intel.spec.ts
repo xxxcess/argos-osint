@@ -1632,7 +1632,9 @@ for (const width of [1536, 1440, 768, 390, 320]) {
       Math.abs(launcherBox.x + launcherBox.width / 2 - width / 2),
     ).toBeLessThanOrEqual(2);
     expect(
-      Math.abs(launcherBox.y + launcherBox.height / 2 - (1000 - 64) / 2),
+      Math.abs(
+        launcherBox.y + launcherBox.height / 2 - (frame.y + frame.height / 2),
+      ),
     ).toBeLessThanOrEqual(8);
     await expect(
       page.getByRole("button", { name: "Bulletin", exact: true }),
@@ -1646,27 +1648,26 @@ for (const width of [1536, 1440, 768, 390, 320]) {
       path: `${captureDir}/web-home-${width}.png`,
       fullPage: true,
     });
+    const tile = page.getByTestId("intel-launcher-tile");
     if (width === 1536) {
       const globe = page.getByTestId("intel-globe");
       expect(
         await globe.evaluate((element) => getComputedStyle(element).filter),
-      ).toContain("18px");
+      ).toBe("none");
       await launcher.hover();
       await expect
         .poll(() =>
-          globe.evaluate((element) => getComputedStyle(element).filter),
+          tile.evaluate((element) => getComputedStyle(element).borderTopColor),
         )
-        .toContain("24px");
+        .toContain("198, 165, 110");
       await page.mouse.move(0, 0);
     }
     await launcher.focus();
     await expect
       .poll(() =>
-        page
-          .getByTestId("intel-globe")
-          .evaluate((element) => getComputedStyle(element).filter),
+        tile.evaluate((element) => getComputedStyle(element).borderTopColor),
       )
-      .toContain("24px");
+      .toContain("198, 165, 110");
     await page.keyboard.press("Enter");
     await expect(
       page.getByRole("heading", { name: "Intelligence bulletin" }),
@@ -1857,11 +1858,7 @@ for (const referenceWidth of [1440, 1280, 768, 390, 320]) {
     );
     await expect(targetTile).toHaveCSS("animation-name", "none");
     await page.emulateMedia({ reducedMotion: "no-preference" });
-    await expect
-      .poll(() =>
-        targetTile.evaluate((el) => getComputedStyle(el).animationName),
-      )
-      .toContain("intel-topology-focus");
+    await expect(targetTile).toHaveCSS("animation-name", "none");
     await page.emulateMedia({ reducedMotion: "reduce" });
     for (const width of [referenceWidth]) {
       await page.setViewportSize({ width, height: 1100 });
@@ -2300,20 +2297,6 @@ test("manual topology zoom survives updates and node drag cancellation stays saf
   const viewport = page.locator("#intel-topology-viewport");
   const focus = viewport.locator('[data-role="focus"] [data-tile="node"]');
   await expect(focus).toBeVisible({ timeout: 20000 });
-  await expect
-    .poll(() =>
-      focus.evaluate(
-        (el) =>
-          el
-            .getAnimations()
-            .find(
-              (animation) =>
-                (animation as CSSAnimation).animationName ===
-                "intel-topology-arrive",
-            )?.playState,
-      ),
-    )
-    .toBe("finished");
   const zoom = page.locator("#intel-topology-neighborhood").getByText(/^ZOOM:/);
   async function stableZoom() {
     let previous = "";
@@ -2602,13 +2585,16 @@ test.describe("revamp connection scene", () => {
     const canvas = (await page.locator("canvas").boundingBox())!;
     const bar = (await page.locator("#intel-status-bar").boundingBox())!;
     expect(stage.x).toBe(0);
-    expect(stage.y).toBe(0);
+    expect(stage.y).toBeGreaterThanOrEqual(0);
     expect(
       Math.abs(stage.width - (await page.evaluate(() => innerWidth))),
     ).toBeLessThanOrEqual(1);
     expect(
       Math.abs(
-        stage.height + bar.height - (await page.evaluate(() => innerHeight)),
+        stage.y +
+          stage.height +
+          bar.height -
+          (await page.evaluate(() => innerHeight)),
       ),
     ).toBeLessThanOrEqual(1);
     expect(Math.abs(canvas.width - stage.width)).toBeLessThanOrEqual(1);

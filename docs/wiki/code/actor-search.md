@@ -51,6 +51,14 @@ including direct typed Actor memory writes. Reconciliation also arranges missing
 work when an existing pinned seed is retried. Discovery projections come from
 bounded canonical database snapshots, never directly from uploaded CSV bytes.
 
+The search projection retains the canonical actor ID and name. Optional aliases
+are selected in stable name order within the index's 256-byte value, 32-alias,
+word and prefix budgets; oversized or excess aliases remain in SurrealDB and
+are available through canonical actor details. Optional descriptions whose
+tokens exceed the search analyzer bound are omitted from the index. These
+projection limits keep one unusual catalog record from blocking later actors
+during a durable rebuild.
+
 Each actor head has a monotonic revision. Events have contiguous source sequence
 numbers; ineligible or missing canonical actors produce revisioned tombstones.
 The service rejects an older projection revision and an equal revision with a
@@ -88,6 +96,11 @@ An authorized registered maintenance request to
 `POST /api/v1/search/actors/reindex` creates or associates with a durable shared
 Reindex Job. Its consumer is enabled only with the configured real index pump.
 Status, query and readiness reads do not start work.
+After a correction to optional projection terms, refresh Workstation Status and
+use **Build actor index** to admit a new reindex request. The failed job's
+**Retry job** control has its own permission, ownership and state checks; a new
+readiness action can resume the retained shadow rebuild without weakening those
+checks.
 
 The coordinator keeps a separate scan cursor, exact pending shadow batch and
 visible delta checkpoint. It scans canonical keys in bounded pages and gives

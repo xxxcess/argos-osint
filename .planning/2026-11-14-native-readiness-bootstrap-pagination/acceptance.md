@@ -10,4 +10,4 @@
 | Native review | Rebuild isolated backend and native app, close old app, open new app, inspect behavior | Pending after CI |
 | Broader gates | Hosted Linux/platform/storage and installed-app evidence as selected | Pending |
 
-The user directed this session to use GitHub CI for builds and tests. No local build or test result is claimed. Cycle history uses bounded offset pages ordered by creation time and ID; a newly inserted cycle can shift later pages during browsing. Jobs and logs use existing cursor contracts.
+The user directed this session to use GitHub CI for builds and tests, with local compilation only when native review is needed. No local build or test result is claimed. Native review mounts the materialized Git LFS actor dataset read-only into bootstrap; the runtime image does not bundle it. Cycle history uses bounded offset pages ordered by creation time and ID; a newly inserted cycle can shift later pages during browsing. Jobs and logs use existing cursor contracts.

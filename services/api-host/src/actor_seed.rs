@@ -15,7 +15,7 @@ use crate::{fleetworks::NetworkStorage, Role};
 
 // Keep the same ceiling as Venture's actor snapshot worker.
 const MAX_ACTOR_CSV_BYTES: u64 = 256 * 1024 * 1024;
-const BOOTSTRAP_ACTORS: &str = "/usr/local/share/fleetworks/argos_actors.csv";
+const BOOTSTRAP_ACTORS: &str = "/bootstrap-actors/argos_actors.csv";
 
 /// Seed the image-pinned catalog only when storage has no complete actor seed.
 pub(crate) async fn seed_bootstrap(repo: &Repository) -> Result<()> {

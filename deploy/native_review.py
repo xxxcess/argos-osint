@@ -192,7 +192,8 @@ def review_commands(root, prepared):
     compose = ["env"]
     for key in sorted(set(environment) | {"FLEETWORKS_UID", "FLEETWORKS_GID", "FLEETWORKS_SEARCH_SOURCE_EPOCH"}):
         compose.extend(["-u", key])
-    compose += ["docker", "compose", "--env-file", str(prepared["env_file"]),
+    compose += ["FLEETWORKS_REPO_ACTOR_CSV=" + str(root / "datasets/argos_actors.csv"),
+               "docker", "compose", "--env-file", str(prepared["env_file"]),
                "-f", str(root / "deploy/compose.native-review.yml"),
                "--project-name", environment["COMPOSE_PROJECT_NAME"]]
     build = ["env", "PLATFORM=" + environment["PLATFORM"], "VERSION=" + prepared["version"],

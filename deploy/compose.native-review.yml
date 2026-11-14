@@ -114,6 +114,12 @@ services:
         read_only: true
       - <<: *identity
         read_only: false
+      - type: bind
+        source: ${FLEETWORKS_REPO_ACTOR_CSV:?Use the repository actor catalog for bootstrap}
+        target: /bootstrap-actors/argos_actors.csv
+        read_only: true
+        bind:
+          create_host_path: false
     secrets: [storage_password, storage_root_password]
     depends_on:
       surrealdb:

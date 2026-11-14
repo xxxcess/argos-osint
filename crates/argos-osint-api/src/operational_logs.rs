@@ -494,24 +494,29 @@ async fn follow_inner(
     }
     let deadline = Instant::now() + wait;
     loop {
-        let (page, shared) = tokio::time::timeout(
-            AUTHORITY_CHECK_LIMIT,
+        let read_state = state.clone();
+        let read_context = context.clone();
+        let snapshot = record.snapshot.clone();
+        let boundary = record.boundary;
+        let result = crate::run_shielded_timeout(AUTHORITY_CHECK_LIMIT, async move {
             read(
-                &state,
-                &context,
-                &record.snapshot,
+                &read_state,
+                &read_context,
+                &snapshot,
                 LogDirection::Newer,
                 None,
-                record.boundary,
-            ),
-        )
+                boundary,
+            )
+            .await
+        })
         .await
-        .map_err(|_| {
+        .ok_or_else(|| {
             ApiError(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Bounded log authority check unavailable",
             )
-        })??;
+        })?;
+        let (page, shared) = result?;
         if !page.rows.is_empty() || Instant::now() >= deadline {
             let boundary = page.next_boundary.or(record.boundary);
             let next = cache

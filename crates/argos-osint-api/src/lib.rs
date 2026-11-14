@@ -226,7 +226,9 @@ pub fn jobs_router(state: ApiState, policy: NetworkPolicy) -> Router {
     private_router(
         state,
         policy,
-        jobs_api::routes().route("/api/v1/health/ready", get(jobs_api::ready)),
+        jobs_api::routes()
+            .route("/api/v1/health/ready", get(jobs_api::ready))
+            .layer(middleware::from_fn(jobs_api::drain_read_on_disconnect)),
     )
 }
 

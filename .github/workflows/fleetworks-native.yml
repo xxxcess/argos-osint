@@ -139,6 +139,14 @@ jobs:
             --size 1440x860 --size 640x480 --scale 1 \
             --script registration-ready=apps/fleetworks-desktop/tests/fixtures/scripts/workstation-settings-open.json \
             --script-expect-key registration-ready=workstation-settings-body
+      - name: Capture synthetic local pairing approval screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/fleetworks_verify.py native-ui --agent --require-clean \
+            --revision "$FLEETWORKS_HEAD" --output "$RUNNER_TEMP/fleetworks-native-evidence/pairing-local-review" \
+            --scene pairing-waiting --local-review-fixture \
+            --size 1440x860 --size 640x480 --scale 1
       - name: Build the debug app for pull-request review
         if: inputs.release-version == ''
         shell: bash

@@ -83,6 +83,11 @@ Rendering uses a temporary fixture home and stripped runtime environment. The
 fixture uses the production view/handler path with synthetic effects; this is not
 a filesystem/network sandbox or live backend integration proof.
 
+The `--local-review-fixture` option is limited to `pairing-waiting` and injects a
+synthetic, nonexistent approval-socket path into that fixture process only. CI
+uses it to capture the local confirmation wording and retry control; it does not
+start a helper, contact a gateway, or approve a pairing request.
+
 | Evidence | What this command records |
 | --- | --- |
 | Runtime generation | Exit status plus validated nonempty PNG/tree and optional script trace |

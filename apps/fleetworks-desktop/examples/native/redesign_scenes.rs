@@ -293,9 +293,10 @@ pub fn pairing_idle(state: &mut State) {
 
 pub fn pairing_waiting(state: &mut State) {
     pairing_idle(state);
+    state.connection.origin = TextEdit::new("http://127.0.0.1:18092/");
     state.pairing.stage = PairingStage::Waiting(PairingChallenge {
         pairing_id: "synthetic-pairing-request-0001".into(),
-        approval_code: "SYNTHETICAPPROVALCODE0001".into(),
+        approval_code: "0123456789abcdef0123456789abcdef".into(),
         expires_at_ms: 1_900_000_000_000,
         poll_after_ms: 1500,
     });

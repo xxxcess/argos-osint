@@ -97,7 +97,10 @@ class ApprovalBroker:
         clock_ms: Callable[[], int] = lambda: int(time.time() * 1000),
         monotonic: Callable[[], float] = time.monotonic,
     ):
-        self.origin = normalize_origin(origin)
+        try:
+            self.origin = normalize_origin(origin)
+        except PairingError as error:
+            raise HandoffError("Local approval requires a loopback HTTP gateway") from error
         parsed = urlsplit(self.origin)
         if parsed.scheme != "http" or parsed.hostname not in ("127.0.0.1", "localhost", "::1"):
             raise HandoffError("Local approval requires a loopback HTTP gateway")

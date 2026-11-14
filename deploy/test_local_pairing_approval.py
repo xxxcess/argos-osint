@@ -126,7 +126,7 @@ class LocalPairingApprovalTests(unittest.TestCase):
                 target=approval.serve,
                 args=(socket_dir, broker),
                 kwargs={"ready": lambda path: (paths.append(path), ready.set()),
-                        "stop": stopped.is_set, "lifetime_seconds": 10},
+                        "stop": stopped.is_set, "lifetime_seconds": 30},
                 daemon=True,
             )
             worker.start()

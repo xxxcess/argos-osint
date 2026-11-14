@@ -321,6 +321,11 @@ impl State {
         self.initialize_connection_profiles();
     }
     fn persist_profile_selection(&mut self, id: String, expected: u64) {
+        if !self.fixture && (self.services.is_none() || self.workspaces.container.is_none()) {
+            self.connection_profiles.message =
+                Some("Protected profile container is unavailable".into());
+            return;
+        }
         self.connection_profiles.busy = true;
         self.connection_profiles.pending_install = true;
         self.connection_profiles.revision = self.connection_profiles.revision.wrapping_add(1);
@@ -346,6 +351,11 @@ impl State {
             return;
         };
         if !self.connection_profiles.editing {
+            return;
+        }
+        if !self.fixture && (self.services.is_none() || self.workspaces.container.is_none()) {
+            self.connection_profiles.message =
+                Some("Protected profile container is unavailable".into());
             return;
         }
         let expected = catalog.revision;

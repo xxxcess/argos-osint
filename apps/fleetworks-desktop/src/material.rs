@@ -482,6 +482,71 @@ pub(crate) fn finish_ink(finish: MetalFinish) -> Color {
     }
 }
 
+/// Shimmering skeleton surface block respecting reduced-motion & matte parity preferences.
+pub(crate) fn skeleton_block(
+    width_frac: Option<f32>,
+    width_px: Option<f32>,
+    height: f32,
+    radius: f32,
+    tone: StatusTone,
+    preferences: ViewPreferences,
+) -> El {
+    let base_fill = if preferences.matte() {
+        theme::hex(theme::SURFACE_RAISED)
+    } else {
+        theme::hex(theme::SURFACE_ELEVATED)
+    };
+    let edge = if tone == StatusTone::Neutral {
+        theme::hex(theme::BORDER_SUBTLE).alpha(0.55)
+    } else {
+        tone.border().alpha(0.45)
+    };
+    let mut block = el()
+        .h(height)
+        .radius(radius)
+        .fill(base_fill)
+        .border(1.0, edge)
+        .a11y_hidden();
+    if let Some(frac) = width_frac {
+        block = block.w_frac(frac);
+    } else if let Some(px) = width_px {
+        block = block.w(px);
+    } else {
+        block = block.w_full();
+    }
+    if preferences.reduced_motion || preferences.matte() {
+        return block;
+    }
+    let shimmer_tint = if tone == StatusTone::Neutral {
+        theme::hex(theme::LIGHT_SURFACE_GLOW).alpha(0.10)
+    } else {
+        tone.fg().alpha(0.14)
+    };
+    let sweep = el()
+        .key("skeleton-shimmer-band")
+        .absolute(0.0, 0.0)
+        .w_frac(0.45)
+        .h_full()
+        .linear_gradient(
+            PI * 0.42,
+            [
+                (0.0, Color::TRANSPARENT),
+                (0.5, shimmer_tint),
+                (1.0, Color::TRANSPARENT),
+            ],
+        )
+        .looping(LoopSpec::slide(1.35, [-1.2, 0.0], [3.2, 0.0]).easing(Easing::LINEAR));
+    block.child(
+        el().key("skeleton-shimmer")
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h_full()
+            .a11y_hidden()
+            .clip_rounded(radius)
+            .child(sweep),
+    )
+}
+
 /// Toolbar controls share the Kit's matte recipe without a reflection overlay.
 /// Do not wrap the control or change accessibility keys, layout or focus rings.
 pub(crate) fn compact_toolbar(control: El, _preferences: ViewPreferences) -> El {

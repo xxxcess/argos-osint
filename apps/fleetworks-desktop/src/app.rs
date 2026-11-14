@@ -297,6 +297,10 @@ pub struct State {
     pub(crate) dossier_request: Option<RequestTask>,
     pub(crate) readiness_revision: u64,
     pub(crate) readiness_refresh_at: f64,
+    pub(crate) jobs_refresh_at: f64,
+    pub(crate) host_metrics_revision: u64,
+    pub(crate) host_metrics_refresh_at: f64,
+    pub(crate) atlas_refresh_at: f64,
 }
 
 impl Default for State {
@@ -358,6 +362,10 @@ impl Default for State {
             dossier_request: None,
             readiness_revision: 0,
             readiness_refresh_at: 0.0,
+            jobs_refresh_at: 0.0,
+            host_metrics_revision: 0,
+            host_metrics_refresh_at: 0.0,
+            atlas_refresh_at: 0.0,
         }
     }
 }
@@ -421,6 +429,7 @@ impl State {
         self.pairing.cancel();
         self.connection_request = None;
         self.host_metrics_request = None;
+        self.host_metrics_revision = self.host_metrics_revision.wrapping_add(1);
         self.cycles.invalidate();
         self.connection_profiles.cancel_tests();
         self.readiness_request = None;
@@ -459,7 +468,11 @@ impl State {
         self.page = Page::Workstation;
         self.readiness = Load::Idle;
         self.readiness_received_at = None;
+        self.readiness_refresh_at = 0.0;
+        self.jobs_refresh_at = 0.0;
         self.host_metrics = Load::Idle;
+        self.host_metrics_refresh_at = 0.0;
+        self.atlas_refresh_at = 0.0;
         self.brain = Brain::default();
         self.backend = Backend::default();
         self.backend.article_day =
@@ -506,6 +519,10 @@ impl State {
                 self.connection.status = ConnectionStatus::Connected;
                 self.ensure_registration();
                 self.refresh_readiness();
+                if self.page == Page::Workstation {
+                    self.host_metrics_refresh_at = self.clock + 5.0;
+                    self.refresh_host_metrics();
+                }
             }
             Err(error) => self.connection.status = ConnectionStatus::Failed(error),
         }
@@ -565,6 +582,78 @@ impl State {
             && now >= self.readiness_refresh_at
     }
 
+    pub(crate) fn job_list_has_active(&self) -> bool {
+        matches!(
+            &self.backend.jobs,
+            Load::Ready(jobs)
+                if jobs
+                    .rows
+                    .iter()
+                    .any(|job| crate::backend::job_is_active(&job.state))
+        )
+    }
+
+    pub(crate) fn selected_job_is_active(&self) -> bool {
+        if let Load::Ready(detail) = &self.backend.detail {
+            if self.backend.selected_job.as_deref() == Some(detail.job.id.as_str()) {
+                return crate::backend::job_is_active(&detail.job.state);
+            }
+        }
+        if let (Some(id), Load::Ready(jobs)) = (&self.backend.selected_job, &self.backend.jobs) {
+            return jobs
+                .rows
+                .iter()
+                .any(|job| job.id == *id && crate::backend::job_is_active(&job.state));
+        }
+        false
+    }
+
+    pub(crate) fn jobs_poll_due(&self, now: f64) -> bool {
+        self.page == Page::Jobs
+            && !self.fixture
+            && self.connected()
+            && self.scoped_logs.window_focused
+            && (self.job_list_has_active()
+                || self.selected_job_is_active()
+                || (self.backend.selected_job.is_some()
+                    && self.scoped_logs.status == crate::logs::LogStatus::Unavailable))
+            && now >= self.jobs_refresh_at
+    }
+
+    pub(crate) fn refresh_active_job_status(&mut self, now: f64) {
+        self.jobs_refresh_at = now + 2.0;
+        if let Some(id) = self.backend.selected_job.clone() {
+            if self.selected_job_is_active()
+                && !self.backend.in_flight(crate::backend::ReadKind::JobDetail)
+            {
+                self.backend_read(crate::backend::ReadRequest::JobDetail { id });
+            }
+        }
+        if !self.scoped_jobs.busy()
+            && (self.job_list_has_active() || self.backend.selected_job.is_none())
+        {
+            self.request_jobs(crate::jobs_query::JobsEvent::Poll);
+        }
+        self.sync_operational_logs_with_selected_job(false);
+    }
+
+    pub(crate) fn atlas_poll_active(&self) -> bool {
+        let lane = self
+            .submissions
+            .lane(crate::submission::SubmissionKind::Atlas);
+        if lane.busy() || lane.receipt.is_some() {
+            return true;
+        }
+        matches!(
+            &self.cycles.history,
+            Load::Ready(history)
+                if history
+                    .rows
+                    .iter()
+                    .any(|row| crate::backend::job_is_active(&row.state))
+        )
+    }
+
     pub fn search_available(&self) -> bool {
         self.connected()
             && self
@@ -607,6 +696,10 @@ impl State {
             }
         };
         self.brain.pending_at = None;
+        if !self.fixture && (self.services.is_none() || self.client.is_none()) {
+            self.brain.results = Load::Failed("Gateway search services are unavailable".into());
+            return;
+        }
         self.brain.results = Load::Loading;
         self.brain.in_flight = true;
         self.record(Intent::Search {
@@ -634,6 +727,10 @@ impl State {
         self.brain.selected_actor = Some(id.clone());
         self.brain.detail_revision = self.brain.detail_revision.wrapping_add(1);
         self.brain.showing_detail = true;
+        if !self.fixture && (self.services.is_none() || self.client.is_none()) {
+            self.brain.dossier = Load::Failed("Gateway dossier services are unavailable".into());
+            return;
+        }
         self.brain.dossier = Load::Loading;
         self.dossier_request = None;
         self.record(Intent::Dossier {
@@ -687,6 +784,48 @@ fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
     {
         if state.maintenance_checks_due(now) {
             state.refresh_readiness();
+            changed = true;
+        }
+        tx.wake_after(Duration::from_secs(1));
+    }
+    if state.page == Page::Jobs
+        && !state.fixture
+        && state.connected()
+        && state.scoped_logs.window_focused
+        && (state.job_list_has_active()
+            || state.selected_job_is_active()
+            || (state.backend.selected_job.is_some()
+                && state.scoped_logs.status == crate::logs::LogStatus::Unavailable))
+    {
+        if state.jobs_poll_due(now) {
+            state.refresh_active_job_status(now);
+            changed = true;
+        }
+        tx.wake_after(Duration::from_secs(1));
+    }
+    if state.page == Page::Workstation
+        && !state.fixture
+        && state.connected()
+        && state.scoped_logs.window_focused
+        && state.permission(fleetworks_contracts::context::Permission::ReadBackend)
+    {
+        if now >= state.host_metrics_refresh_at && state.host_metrics_request.is_none() {
+            state.host_metrics_refresh_at = now + 5.0;
+            state.refresh_host_metrics();
+            changed = true;
+        }
+        tx.wake_after(Duration::from_secs(2));
+    }
+    if state.page == Page::Atlas
+        && !state.fixture
+        && state.connected()
+        && state.scoped_logs.window_focused
+        && state.registration.context.is_some()
+        && state.atlas_poll_active()
+    {
+        if now >= state.atlas_refresh_at && !state.cycles.busy() {
+            state.atlas_refresh_at = now + 3.0;
+            state.refresh_cycles();
             changed = true;
         }
         tx.wake_after(Duration::from_secs(1));

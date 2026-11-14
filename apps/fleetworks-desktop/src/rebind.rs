@@ -44,9 +44,7 @@ struct RebindRequest<'a> {
     registration_id: &'a str,
     expected_revision: u64,
     workstation_ip: std::net::IpAddr,
-    workspace_name: &'a fleetworks_contracts::connect::WorkspaceName,
     installation_marker: &'a str,
-    workspace_marker: &'a str,
 }
 
 impl State {
@@ -217,8 +215,7 @@ impl GatewayEffects {
                 let receipt: RegistrationReceipt = client.post("/api/v1/connect/registrations/rebind", &RebindRequest {
                     request_id: &attempt.request.request_id, registration_id: &attempt.prior.registration_id,
                     expected_revision: attempt.prior.revision, workstation_ip: attempt.request.workstation_ip,
-                    workspace_name: &attempt.request.workspace_name, installation_marker: &attempt.request.installation_marker,
-                    workspace_marker: &attempt.request.workspace_marker,
+                    installation_marker: &attempt.request.installation_marker,
                 }).await.map_err(|error| error.to_string())?;
                 let container = container.clone();
                 tokio::task::spawn_blocking(move || -> Result<WorkspaceUpdate> {
@@ -242,5 +239,29 @@ impl GatewayEffects {
             });
         });
         Some(RequestTask(task.abort_handle()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RebindRequest;
+
+    #[test]
+    fn rebind_request_matches_server_strict_wire_schema() {
+        let request = RebindRequest {
+            request_id: "req-1",
+            registration_id: "reg-1",
+            expected_revision: 3,
+            workstation_ip: "127.0.0.1".parse().expect("ip"),
+            installation_marker: "install-1",
+        };
+        let value = serde_json::to_value(request).expect("serialize rebind");
+        let object = value.as_object().expect("json object");
+        assert_eq!(object.len(), 5);
+        assert!(object.contains_key("request_id"));
+        assert!(object.contains_key("registration_id"));
+        assert!(object.contains_key("expected_revision"));
+        assert!(object.contains_key("workstation_ip"));
+        assert!(object.contains_key("installation_marker"));
     }
 }

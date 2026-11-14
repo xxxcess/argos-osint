@@ -179,12 +179,13 @@ pub enum JobsLoad {
     RestartRequired,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub enum JobsEvent {
     Apply,
     Clear,
     Next,
     Previous,
+    Poll,
 }
 
 /// The adapter clears the selected job/detail/action preview before issuing a
@@ -202,6 +203,7 @@ pub struct JobsTicket {
     generation: u64,
     sequence: u64,
     page_index: usize,
+    is_poll: bool,
 }
 
 #[derive(Default)]
@@ -337,6 +339,45 @@ impl JobsQueryState {
                     clear_selection: true,
                 }
             }
+            JobsEvent::Poll => {
+                if self.page.is_none() {
+                    let query = self.first_query(now);
+                    let read = match query {
+                        Ok(query) => {
+                            self.applied = Some(query.clone());
+                            self.dirty = false;
+                            self.begin_ticket(query, 0, true, false)
+                        }
+                        Err(message) => {
+                            self.status = JobsLoad::Failed;
+                            self.message = Some(message);
+                            None
+                        }
+                    };
+                    JobsEffect {
+                        read,
+                        clear_selection: false,
+                    }
+                } else {
+                    let query = if self.page_index > 0 {
+                        self.history
+                            .get(self.page_index)
+                            .cloned()
+                            .map(|cursor| JobsQuery {
+                                cursor: Some(cursor),
+                                ..Default::default()
+                            })
+                    } else {
+                        self.applied.clone().or_else(|| self.first_query(now).ok())
+                    };
+                    let read =
+                        query.and_then(|q| self.begin_ticket(q, self.page_index, false, true));
+                    JobsEffect {
+                        read,
+                        clear_selection: false,
+                    }
+                }
+            }
             _ => JobsEffect::default(),
         }
     }
@@ -384,6 +425,16 @@ impl JobsQueryState {
     }
 
     fn begin(&mut self, query: JobsQuery, index: usize) -> Option<JobsTicket> {
+        self.begin_ticket(query, index, true, false)
+    }
+
+    fn begin_ticket(
+        &mut self,
+        query: JobsQuery,
+        index: usize,
+        clear_page: bool,
+        is_poll: bool,
+    ) -> Option<JobsTicket> {
         let binding = self.binding.clone()?;
         self.request = None;
         self.sequence = self.sequence.wrapping_add(1);
@@ -393,11 +444,14 @@ impl JobsQueryState {
             generation: self.generation,
             sequence: self.sequence,
             page_index: index,
+            is_poll,
         };
         self.active = Some(ticket.clone());
-        self.page = None;
-        self.message = None;
-        self.status = JobsLoad::Loading;
+        if clear_page {
+            self.page = None;
+            self.message = None;
+            self.status = JobsLoad::Loading;
+        }
         Some(ticket)
     }
 
@@ -425,12 +479,21 @@ impl JobsQueryState {
                 self.page_index = ticket.page_index;
                 self.page = Some(page);
                 self.status = JobsLoad::Ready;
+                self.message = None;
             }
             Ok(_) => {
                 self.reset();
                 self.status = JobsLoad::Failed;
                 self.message =
                     Some("The gateway returned an invalid or different scoped Jobs page.".into());
+            }
+            Err(error)
+                if ticket.is_poll
+                    && self.page.is_some()
+                    && !matches!(error, ClientError::Status(401 | 403 | 409)) =>
+            {
+                self.status = JobsLoad::Ready;
+                self.message = Some(error.to_string());
             }
             Err(error) => {
                 self.reset();

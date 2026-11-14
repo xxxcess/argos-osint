@@ -182,6 +182,9 @@ impl State {
         if let Some(services) = &self.services {
             self.job_actions.request =
                 services.prepare_job_action(confirmation, self.connection.epoch, revision);
+        } else {
+            self.job_actions.response =
+                Load::Failed("Job action preparation service is unavailable".into());
         }
     }
 
@@ -247,6 +250,8 @@ impl State {
             return;
         }
         let (Some(services), Some(client)) = (&self.services, &self.client) else {
+            self.job_actions.response =
+                Load::Failed("Gateway job action services are unavailable".into());
             return;
         };
         let client = match client.with_registered_context(&confirmation.context) {

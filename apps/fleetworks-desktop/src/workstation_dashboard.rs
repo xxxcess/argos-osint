@@ -90,10 +90,16 @@ impl State {
         let container = container.clone();
         let epoch = self.connection.epoch;
         let origin_revision = self.origin_revision;
+        let revision = self.cycles.revision;
         let task = services.runtime.spawn(async move {
             let result = tokio::task::spawn_blocking(move || container.pending_cycle_deletions()).await;
             ui.update(move |state, _| {
-                if state.connection.epoch != epoch || state.origin_revision != origin_revision { return; }
+                if state.connection.epoch != epoch
+                    || state.origin_revision != origin_revision
+                    || state.cycles.revision != revision
+                {
+                    return;
+                }
                 state.cycles.journal_request = None;
                 match result {
                     Ok(Ok(pending)) => {
@@ -130,7 +136,9 @@ impl State {
         let revision = self.cycles.revision;
         let epoch = self.connection.epoch;
         let origin = self.origin_revision;
-        self.cycles.history = Load::Loading;
+        if !matches!(self.cycles.history, Load::Ready(_)) {
+            self.cycles.history = Load::Loading;
+        }
         let task = services.runtime.spawn(async move {
             let result = client
                 .cycle_history(40)
@@ -144,13 +152,28 @@ impl State {
                     return;
                 }
                 state.cycles.read_request = None;
-                state.cycles.history = match result {
-                    Ok(history) if history.rows.len() <= 40 => Load::Ready(history),
-                    Ok(_) => {
-                        Load::Failed("Gateway cycle history exceeded its requested bound".into())
+                match result {
+                    Ok(history) if history.rows.len() <= 40 => {
+                        state.cycles.history = Load::Ready(history);
                     }
-                    Err(error) => Load::Failed(error),
-                };
+                    Ok(_) => {
+                        if !matches!(state.cycles.history, Load::Ready(_)) {
+                            state.cycles.history = Load::Failed(
+                                "Gateway cycle history exceeded its requested bound".into(),
+                            );
+                        } else {
+                            state.cycles.message =
+                                Some("Gateway cycle history exceeded its requested bound".into());
+                        }
+                    }
+                    Err(error) => {
+                        if matches!(state.cycles.history, Load::Ready(_)) {
+                            state.cycles.message = Some(error);
+                        } else {
+                            state.cycles.history = Load::Failed(error);
+                        }
+                    }
+                }
             });
         });
         self.cycles.read_request = Some(RequestTask(task.abort_handle()));
@@ -266,13 +289,14 @@ impl State {
         let Some(ui) = services.ui.get().cloned() else {
             return;
         };
-        let epoch = self.connection.epoch;
-        let origin = self.origin_revision;
-        self.cycles.retained_delete = Some(request.clone());
-        self.cycles.retained_context = Some(context.clone());
         let Some(container) = self.workspaces.container.clone() else {
             return;
         };
+        let epoch = self.connection.epoch;
+        let origin = self.origin_revision;
+        let revision = self.cycles.revision;
+        self.cycles.retained_delete = Some(request.clone());
+        self.cycles.retained_context = Some(context.clone());
         self.cycles.deletion = Load::Loading;
         let task = services.runtime.spawn(async move {
             let prepared = tokio::task::spawn_blocking({
@@ -305,7 +329,10 @@ impl State {
             }
             .await;
             ui.update(move |state, _| {
-                if state.connection.epoch != epoch || state.origin_revision != origin {
+                if state.connection.epoch != epoch
+                    || state.origin_revision != origin
+                    || state.cycles.revision != revision
+                {
                     return;
                 }
                 state.cycles.delete_request = None;
@@ -360,6 +387,7 @@ impl State {
         };
         let epoch = self.connection.epoch;
         let origin_revision = self.origin_revision;
+        let revision = self.cycles.revision;
         self.cycles.deletion = Load::Loading;
         let task = services.runtime.spawn(async move {
             #[derive(serde::Serialize)]
@@ -378,7 +406,12 @@ impl State {
                 let _ = tokio::task::spawn_blocking(move || container.complete_cycle_deletion(&saved_request)).await;
             }
             ui.update(move |state, _| {
-                if state.connection.epoch != epoch || state.origin_revision != origin_revision { return; }
+                if state.connection.epoch != epoch
+                    || state.origin_revision != origin_revision
+                    || state.cycles.revision != revision
+                {
+                    return;
+                }
                 state.cycles.delete_request = None;
                 match result {
                     Ok(association) if association.job_id == request.job_id
@@ -401,7 +434,10 @@ impl State {
     }
 
     pub fn refresh_host_metrics(&mut self) {
-        if !self.connected() || self.host_metrics_request.is_some() {
+        if !self.connected()
+            || !self.permission(fleetworks_contracts::context::Permission::ReadBackend)
+            || self.host_metrics_request.is_some()
+        {
             return;
         }
         let (Some(services), Some(client)) = (&self.services, &self.client) else {
@@ -412,18 +448,26 @@ impl State {
         };
         let client = client.clone();
         let epoch = self.connection.epoch;
-        self.host_metrics = Load::Loading;
+        self.host_metrics_revision = self.host_metrics_revision.wrapping_add(1);
+        let revision = self.host_metrics_revision;
+        if !matches!(self.host_metrics, Load::Ready(_)) {
+            self.host_metrics = Load::Loading;
+        }
         let task = services.runtime.spawn(async move {
             let result: Result<HostMetrics, _> = client.get("/api/v1/host/metrics").await;
             ui.update(move |state, _| {
-                if state.connection.epoch != epoch {
+                if state.connection.epoch != epoch || state.host_metrics_revision != revision {
                     return;
                 }
                 state.host_metrics_request = None;
-                state.host_metrics = match result {
-                    Ok(metrics) => Load::Ready(metrics),
-                    Err(error) => Load::Failed(error.to_string()),
-                };
+                match result {
+                    Ok(metrics) => state.host_metrics = Load::Ready(metrics),
+                    Err(error) => {
+                        if !matches!(state.host_metrics, Load::Ready(_)) {
+                            state.host_metrics = Load::Failed(error.to_string());
+                        }
+                    }
+                }
             });
         });
         self.host_metrics_request = Some(RequestTask(task.abort_handle()));

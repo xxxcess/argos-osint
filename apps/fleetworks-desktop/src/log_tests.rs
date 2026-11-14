@@ -688,3 +688,198 @@ fn compact_log_headers_fit_the_real_viewport_and_selection_reveals_full_summary(
         Some(runtime.state.scoped_logs.rows[0].message.as_str())
     );
 }
+
+#[test]
+fn transient_follow_error_preserves_validated_rows_and_resumes_on_job_sync() {
+    let mut state = shell();
+    let initial = state
+        .scoped_logs
+        .refresh()
+        .expect("initial job operational logs ticket");
+    state.complete_scoped_logs(
+        initial,
+        Ok(LogReply::Page(page(0, 1, 1, None, Some(cursor(1))))),
+    );
+    assert_eq!(state.scoped_logs.rows.len(), 1);
+    assert!(state.scoped_logs.following);
+
+    let follow = state.scoped_logs.follow().expect("follow ticket");
+    state.complete_scoped_logs(follow, Err(fleetworks_contracts::ClientError::Timeout));
+    assert_eq!(state.scoped_logs.rows.len(), 1);
+    assert_eq!(state.scoped_logs.status, LogStatus::Unavailable);
+    assert!(!state.scoped_logs.following);
+
+    // Syncing after job progress should resume following without clearing retained validated rows.
+    state.sync_operational_logs_with_selected_job(true);
+    assert!(state.scoped_logs.following);
+    assert_eq!(state.scoped_logs.rows.len(), 1);
+}
+
+#[test]
+fn job_detail_status_and_progress_updates_synchronize_logs_and_poll_preserves_selection() {
+    let mut state = shell();
+    state.scoped_logs.follow_cursor = Some(cursor(1));
+    state.scoped_logs.following = false;
+    state.scoped_logs.status = LogStatus::Ready;
+    let mut updated_job: crate::backend::ActivityJob = serde_json::from_value(json!({
+        "id": "fixture-job",
+        "app": "tools",
+        "title": "Synthetic selected job",
+        "operation": "tool_run",
+        "state": "running",
+        "phase": "seeding_actors",
+        "progress_done": 250,
+        "progress_total": 1000,
+        "error_summary": "",
+        "private_details_available": true,
+        "activity_actions_available": false,
+        "status_only": false
+    }))
+    .expect("updated job");
+    state.backend_read(crate::backend::ReadRequest::JobDetail {
+        id: "fixture-job".into(),
+    });
+    let revision = state
+        .backend
+        .revisions
+        .get(&crate::backend::ReadKind::JobDetail)
+        .copied()
+        .unwrap_or(0);
+    let detail = crate::backend::JobDetail {
+        job: updated_job.clone(),
+        stages: Vec::new(),
+        private_details_available: true,
+        activity_actions_available: false,
+        maintenance_result: None,
+    };
+    state.complete_backend_read(
+        crate::backend::ReadKind::JobDetail,
+        revision,
+        Ok(crate::backend::ReadResult::JobDetail(Box::new(detail))),
+    );
+    assert!(
+        state.scoped_logs.following || state.scoped_logs.active_ticket().is_some(),
+        "progress transition must synchronize/resume operational log polling"
+    );
+    if let Load::Ready(jobs) = &state.backend.jobs {
+        assert_eq!(jobs.rows[0].progress_done, Some(250));
+        assert_eq!(jobs.rows[0].phase, "seeding_actors");
+    } else {
+        panic!("jobs list should remain ready and reflect detail progress");
+    }
+
+    // Subsequent JobDetail transition into Failed must preserve error_summary cleanly.
+    updated_job.state = "failed".into();
+    updated_job.phase = "Failed".into();
+    updated_job.error_summary = "Actor seed catalog missing column".into();
+    state.backend_read(crate::backend::ReadRequest::JobDetail {
+        id: "fixture-job".into(),
+    });
+    let revision = state
+        .backend
+        .revisions
+        .get(&crate::backend::ReadKind::JobDetail)
+        .copied()
+        .unwrap_or(0);
+    let failed_detail = crate::backend::JobDetail {
+        job: updated_job,
+        stages: Vec::new(),
+        private_details_available: true,
+        activity_actions_available: false,
+        maintenance_result: None,
+    };
+    state.complete_backend_read(
+        crate::backend::ReadKind::JobDetail,
+        revision,
+        Ok(crate::backend::ReadResult::JobDetail(Box::new(
+            failed_detail,
+        ))),
+    );
+    assert_eq!(
+        state.backend.selected_job.as_deref(),
+        Some("fixture-job"),
+        "syncing detail updates must preserve current job selection"
+    );
+    if let Load::Ready(jobs) = &state.backend.jobs {
+        assert_eq!(jobs.rows[0].state, "failed");
+        assert_eq!(
+            jobs.rows[0].error_summary,
+            "Actor seed catalog missing column"
+        );
+    }
+}
+
+#[test]
+fn unavailable_logs_hide_empty_summary_and_render_worker_sync_status() {
+    let mut state = shell();
+    let ticket = state.scoped_logs.refresh().expect("initial log ticket");
+    state.complete_scoped_logs(ticket, Err(fleetworks_contracts::ClientError::Transport));
+    assert_eq!(state.scoped_logs.status, LogStatus::Unavailable);
+    let mut runtime = Runtime::new(
+        state,
+        crate::app::view,
+        (1180.0, 800.0),
+        Env {
+            system_dark: true,
+            scale: 1.0,
+        },
+    );
+    runtime.frame(0.0);
+    let tree = runtime.accessibility_json().to_string();
+    assert!(
+        !tree.contains("No safe operational summaries are available for this job."),
+        "unavailable state must not contradict itself with empty-summary text"
+    );
+    assert!(tree.contains("Refresh logs"));
+    assert!(tree.contains("running"));
+}
+
+#[test]
+fn loading_list_areas_render_shape_accurate_shimmering_skeletons_with_reduced_motion_fallback() {
+    let mut state = shell();
+    state.host_metrics = Load::Loading;
+    state.backend.jobs = Load::Loading;
+    state.backend.detail = Load::Loading;
+    let mut runtime = Runtime::new(
+        state,
+        crate::app::view,
+        (1180.0, 800.0),
+        Env {
+            system_dark: true,
+            scale: 1.0,
+        },
+    );
+    runtime.frame(0.0);
+    assert!(runtime.find("jobs-loading").is_some());
+    assert!(runtime.find("job-detail-loading").is_some());
+    assert!(runtime.find("skeleton-shimmer").is_some());
+
+    runtime.update(|state, _| state.navigate(crate::app::Page::Workstation));
+    runtime.frame(1.0 / 60.0);
+    assert!(runtime.find("host-metrics-loading").is_some());
+
+    runtime.update(|state, _| {
+        state.navigate(crate::app::Page::Brain);
+        state.brain.results = Load::Loading;
+        state.brain.showing_detail = true;
+        state.brain.dossier = Load::Loading;
+    });
+    runtime.frame(2.0 / 60.0);
+    assert!(runtime.find("search-loading").is_some());
+    assert!(runtime.find("dossier-loading").is_some());
+
+    runtime.update(|state, _| {
+        state.navigate(crate::app::Page::Models);
+        state.backend.models = Load::Loading;
+        state.accessibility.fixture_override = Some(crate::accessibility::FixtureAccessibility {
+            reduced_motion: true,
+            ..crate::accessibility::FixtureAccessibility::default()
+        });
+    });
+    runtime.frame(3.0 / 60.0);
+    assert!(runtime.find("models-loading").is_some());
+    assert!(
+        runtime.find("skeleton-shimmer").is_none(),
+        "reduced-motion mode disables shimmering skeleton sweep layers"
+    );
+}

@@ -367,7 +367,7 @@ impl State {
         let context = match self.activation_read_context() {
             Ok(context) => context,
             Err(reason) => {
-                self.classifier_activation.message = Some(reason);
+                self.fail_activation_effect(&effect, reason);
                 return;
             }
         };
@@ -382,25 +382,44 @@ impl State {
         if self.fixture {
             return;
         }
-        let (Some(services), Some(client)) = (&self.services, &self.client) else {
-            self.classifier_activation.busy = false;
-            return;
-        };
-        match client.with_registered_context(&context) {
-            Ok(client) => {
-                self.classifier_activation.request = services.classifier_activation(
-                    client,
-                    context,
-                    effect,
-                    self.connection.epoch,
-                    self.origin_revision,
-                    revision,
-                )
+        if let Some(services) = &self.services {
+            if let Some(client) = &self.client {
+                if let Ok(client) = client.with_registered_context(&context) {
+                    self.classifier_activation.request = services.classifier_activation(
+                        client,
+                        context,
+                        effect,
+                        self.connection.epoch,
+                        self.origin_revision,
+                        revision,
+                    );
+                    return;
+                }
             }
-            Err(error) => {
-                self.classifier_activation.busy = false;
-                self.classifier_activation.message = Some(error.to_string());
+        }
+        self.fail_activation_effect(
+            &effect,
+            "Gateway activation client or registered context is unavailable".into(),
+        );
+    }
+
+    fn fail_activation_effect(&mut self, effect: &ActivationEffect, reason: String) {
+        self.classifier_activation.busy = false;
+        self.classifier_activation.active = None;
+        self.classifier_activation.message = Some(reason.clone());
+        match effect {
+            ActivationEffect::Preview { .. } => {
+                self.classifier_activation.preview = Load::Failed(reason);
             }
+            ActivationEffect::Resolve(_) => {
+                self.classifier_activation.association = Load::Failed(reason);
+            }
+            ActivationEffect::Verify(_) => {
+                self.classifier_activation.job = Load::Failed(reason);
+            }
+            ActivationEffect::Prepare(_)
+            | ActivationEffect::Post(_)
+            | ActivationEffect::Result(_) => {}
         }
     }
 

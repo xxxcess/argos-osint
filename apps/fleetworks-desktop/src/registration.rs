@@ -70,6 +70,7 @@ impl State {
         self.scoped_logs.invalidate_origin();
         self.scoped_jobs.invalidate_origin();
         self.backend.invalidate_activity();
+        self.cycles.invalidate();
         self.maintenance.invalidate_origin();
         self.readiness_revision = self.readiness_revision.wrapping_add(1);
         if let Load::Ready(readiness) = &mut self.readiness {

@@ -113,10 +113,13 @@ impl Brain {
 
     /// Reject a reply superseded by another edit in this same deployment context.
     pub fn complete_search(&mut self, revision: u64, result: Result<ActorSearchResponse, String>) {
-        self.in_flight = false;
         if revision != self.query_revision {
+            if !matches!(self.results, Load::Loading) {
+                self.in_flight = false;
+            }
             return;
         }
+        self.in_flight = false;
         self.results = match result {
             Ok(response) => Load::Ready(response),
             Err(error) => Load::Failed(error),

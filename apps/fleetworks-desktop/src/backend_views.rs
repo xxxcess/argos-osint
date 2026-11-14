@@ -25,6 +25,7 @@ use crate::app::Page;
 use crate::app::SeedStage;
 use crate::app::State;
 use crate::icons;
+use crate::logs::LogStatus;
 use crate::material;
 use crate::material::MetalFinish;
 use crate::submission::AcceptedReceipt;
@@ -77,6 +78,19 @@ fn load_message<T>(
     }
 }
 
+fn list_load_or_skeleton<T>(
+    load: &Load<T>,
+    empty: &str,
+    skeleton: El,
+    preferences: ViewPreferences,
+    kit: &Kit,
+) -> Option<El> {
+    match load {
+        Load::Pending | Load::Loading => Some(skeleton.role("status")),
+        _ => load_message(load, empty, preferences, kit),
+    }
+}
+
 fn state_tone(value: &str) -> StatusTone {
     let lower = value.to_ascii_lowercase();
     if lower.contains("succeed") || lower.contains("ready") || lower.contains("done") {
@@ -88,6 +102,30 @@ fn state_tone(value: &str) -> StatusTone {
     } else {
         StatusTone::Neutral
     }
+}
+
+fn job_worker_sync_summary(job: &crate::backend::ActivityJob) -> String {
+    let mut parts = Vec::new();
+    if !job.state.is_empty() {
+        parts.push(job.state.clone());
+    }
+    if !job.phase.is_empty() && !job.phase.eq_ignore_ascii_case(&job.state) {
+        parts.push(job.phase.clone());
+    }
+    let progress = match (job.progress_done, job.progress_total) {
+        (Some(done), Some(total)) if total > 0 => Some(format!("{done} / {total}")),
+        (Some(done), _) => Some(format!("{done}")),
+        _ => None,
+    };
+    let mut summary = parts.join(" · ");
+    if let Some(progress) = progress {
+        if summary.is_empty() {
+            summary = progress;
+        } else {
+            summary.push_str(&format!(" ({progress})"));
+        }
+    }
+    summary
 }
 
 pub(crate) fn page(
@@ -176,48 +214,50 @@ fn atlas(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
     if let Some(reason) = reason {
         action = action.child(quiet(reason, kit));
     }
-    if let Some(snapshot) = &lane.confirmation {
-        action = action.child(
-            rune::col()
-                .gap(8.0)
-                .padding(12.0)
-                .radius(8.0)
-                .fill(theme::hex(theme::SURFACE_RAISED))
-                .border(1.0, theme::hex(theme::ACCENT_DEEP))
-                .key("atlas-submit-confirmation")
-                .child(heading("Confirm New Cycle", kit))
-                .child(quiet(
-                    format!("Configuration revision {}", snapshot.configuration_revision),
-                    kit,
-                ))
-                .child(quiet(
-                    "Queue one collection cycle. Acceptance means queued; only the gateway can report completion.",
-                    kit,
-                ))
-                .child(
-                    rune::row()
-                        .gap(8.0)
-                        .child(
-                            ActionButton::new("Confirm New Cycle")
-                                .key("atlas-submit-confirm")
-                                .icon(&icons::ATLAS)
-                                .finish(MetalFinish::GoldCta)
-                                .on_press(|state: &mut State| {
-                                    state.confirm_submission(SubmissionKind::Atlas)
-                                })
-                                .build(kit, preferences, pointer_ref),
-                        )
-                        .child(
-                            ActionButton::new("Keep current cycles")
-                                .finish(MetalFinish::Gunmetal)
-                                .on_press(|state: &mut State| {
-                                    state.submissions.lane_mut(SubmissionKind::Atlas).confirmation =
-                                        None
-                                })
-                                .build(kit, preferences, pointer_ref),
-                        ),
-                ),
-        );
+    if !lane.busy() {
+        if let Some(snapshot) = &lane.confirmation {
+            action = action.child(
+                rune::col()
+                    .gap(8.0)
+                    .padding(12.0)
+                    .radius(8.0)
+                    .fill(theme::hex(theme::SURFACE_RAISED))
+                    .border(1.0, theme::hex(theme::ACCENT_DEEP))
+                    .key("atlas-submit-confirmation")
+                    .child(heading("Confirm New Cycle", kit))
+                    .child(quiet(
+                        format!("Configuration revision {}", snapshot.configuration_revision),
+                        kit,
+                    ))
+                    .child(quiet(
+                        "Queue one collection cycle. Acceptance means queued; only the gateway can report completion.",
+                        kit,
+                    ))
+                    .child(
+                        rune::row()
+                            .gap(8.0)
+                            .child(
+                                ActionButton::new("Confirm New Cycle")
+                                    .key("atlas-submit-confirm")
+                                    .icon(&icons::ATLAS)
+                                    .finish(MetalFinish::GoldCta)
+                                    .on_press(|state: &mut State| {
+                                        state.confirm_submission(SubmissionKind::Atlas)
+                                    })
+                                    .build(kit, preferences, pointer_ref),
+                            )
+                            .child(
+                                ActionButton::new("Keep current cycles")
+                                    .finish(MetalFinish::Gunmetal)
+                                    .on_press(|state: &mut State| {
+                                        state.submissions.lane_mut(SubmissionKind::Atlas).confirmation =
+                                            None
+                                    })
+                                    .build(kit, preferences, pointer_ref),
+                            ),
+                    ),
+            );
+        }
     }
     let status = match lane.phase {
         SubmissionPhase::Preparing => Some("Preparing the durable cycle request…"),
@@ -269,9 +309,10 @@ fn atlas(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
         None,
         kit,
     ));
-    if let Some(message) = load_message(
+    if let Some(message) = list_load_or_skeleton(
         &state.cycles.history,
         "Cycle history has not been observed.",
+        ui_components::skeleton_cycle_history(preferences, kit),
         preferences,
         kit,
     ) {
@@ -497,9 +538,10 @@ fn tools(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
         None,
         kit,
     ));
-    if let Some(message) = load_message(
+    if let Some(message) = list_load_or_skeleton(
         &state.backend.tools,
         "Tool availability has not been observed.",
+        ui_components::skeleton_tool_catalog(preferences, kit),
         preferences,
         kit,
     ) {
@@ -544,9 +586,10 @@ fn tools(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
             ));
         }
     }
-    if let Some(message) = load_message(
+    if let Some(message) = list_load_or_skeleton(
         &state.backend.profile,
         "Credential availability has not been observed.",
+        ui_components::skeleton_tool_credentials(preferences, kit),
         preferences,
         kit,
     ) {
@@ -775,9 +818,10 @@ fn models(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut V
     match active_tab {
         ModelsTab::Providers => {
             body = body.child(heading("Providers", kit));
-            if let Some(message) = load_message(
+            if let Some(message) = list_load_or_skeleton(
                 &state.backend.profile,
                 "Provider metadata has not been observed.",
+                ui_components::skeleton_provider_accounts(preferences, kit),
                 preferences,
                 kit,
             ) {
@@ -903,9 +947,10 @@ fn models(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut V
         }
         ModelsTab::Roles => {
             body = body.child(heading("Role assignments", kit));
-            if let Some(message) = load_message(
+            if let Some(message) = list_load_or_skeleton(
                 &state.backend.models,
                 "Role assignments have not been observed.",
+                ui_components::skeleton_model_roles(preferences, kit),
                 preferences,
                 kit,
             ) {
@@ -1098,9 +1143,10 @@ fn jobs(
             "jobs-body",
         );
     }
-    if let Some(message) = load_message(
+    if let Some(message) = list_load_or_skeleton(
         &state.backend.jobs,
         "Workstation activity has not been observed.",
+        ui_components::skeleton_job_list(preferences, kit),
         preferences,
         kit,
     ) {
@@ -1169,9 +1215,10 @@ fn jobs(
             );
         }
     }
-    if let Some(message) = load_message(
+    if let Some(message) = list_load_or_skeleton(
         &state.backend.detail,
         "Select a job to view its safe operational summaries.",
+        ui_components::skeleton_job_detail(preferences, kit),
         preferences,
         kit,
     ) {
@@ -1249,28 +1296,98 @@ fn jobs(
             if let Some(result) = &detail.maintenance_result {
                 details = details.child(result.view(kit));
             }
-            details = details.child(heading("Operational logs", kit));
-            if let Some(message) = &state.scoped_logs.message {
-                details = details.child(line(message.clone(), kit).role("status"));
-            }
+            let worker_summary = job_worker_sync_summary(&detail.job);
+            details = details.child(
+                rune::row()
+                    .w_full()
+                    .center_y()
+                    .gap(8.0)
+                    .child(heading("Operational logs", kit).grow(1.0))
+                    .child(ui_components::status_pill(
+                        if worker_summary.is_empty() {
+                            detail.job.state.clone()
+                        } else {
+                            worker_summary.clone()
+                        },
+                        None,
+                        tone,
+                        kit,
+                    )),
+            );
             if state.scoped_logs.busy() {
+                let (strip_title, strip_detail, strip_tone) = if state.scoped_logs.following {
+                    (
+                        "Live operational stream active",
+                        format!("Synced with worker: {worker_summary}"),
+                        tone,
+                    )
+                } else {
+                    (
+                        "Reading safe operational summaries…",
+                        format!("Worker status: {worker_summary}"),
+                        StatusTone::Info,
+                    )
+                };
                 details = details.child(ui_components::async_status_strip(
                     "logs-loading",
-                    "Reading safe operational summaries…",
-                    "Streaming bounded log slice from gateway",
+                    strip_title,
+                    strip_detail,
+                    true,
+                    strip_tone,
+                    preferences,
+                    kit,
+                ));
+            } else if crate::backend::job_is_active(&detail.job.state)
+                && state.scoped_logs.status != LogStatus::Unavailable
+            {
+                details = details.child(ui_components::async_status_strip(
+                    "logs-synced",
+                    "Worker job active",
+                    format!("Phase: {worker_summary}"),
                     true,
                     StatusTone::Info,
                     preferences,
                     kit,
                 ));
             }
-            if state.scoped_logs.rows.is_empty() && !state.scoped_logs.busy() {
+            if let Some(message) = &state.scoped_logs.message {
+                details = details.child(line(message.clone(), kit).role("status"));
+                if !state.scoped_logs.busy()
+                    && matches!(
+                        state.scoped_logs.status,
+                        LogStatus::Unavailable | LogStatus::RestartRequired
+                    )
+                {
+                    details = details.child(
+                        ActionButton::new("Refresh logs")
+                            .finish(MetalFinish::ObsidianPill)
+                            .on_press(|state: &mut State| state.refresh_operational_logs())
+                            .build(kit, preferences, pointer_ref),
+                    );
+                }
+            }
+            if state.scoped_logs.rows.is_empty()
+                && !state.scoped_logs.busy()
+                && matches!(
+                    state.scoped_logs.status,
+                    LogStatus::Ready | LogStatus::DisplayLimit | LogStatus::Idle
+                )
+            {
                 details = details.child(quiet(
                     "No safe operational summaries are available for this job.",
                     kit,
                 ));
             }
-            details = details.child(safe_log_table(state, kit, log_width));
+            if state.scoped_logs.rows.is_empty() && state.scoped_logs.busy() {
+                details = details.child(ui_components::skeleton_log_table(preferences, kit));
+            } else if !state.scoped_logs.rows.is_empty()
+                || matches!(
+                    state.scoped_logs.status,
+                    LogStatus::Ready | LogStatus::DisplayLimit
+                )
+            {
+                details = details.child(safe_log_table(state, kit, log_width));
+            }
         }
         body = body.child(card(state, preferences, tone, details));
 

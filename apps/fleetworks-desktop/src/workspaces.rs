@@ -123,13 +123,15 @@ impl State {
         if self.fixture || self.workspaces.busy {
             return;
         }
+        let Some(services) = self.services.clone() else {
+            self.workspaces.snapshot = Load::Failed("Workspace services unavailable".into());
+            return;
+        };
         self.workspaces.busy = true;
         self.workspaces.snapshot = Load::Loading;
         self.workspaces.revision = self.workspaces.revision.wrapping_add(1);
-        if let Some(services) = &self.services {
-            self.workspaces.request =
-                services.initialize_workspaces(selection, self.workspaces.revision);
-        }
+        self.workspaces.request =
+            services.initialize_workspaces(selection, self.workspaces.revision);
     }
 
     /// Folder-only changes preserve backend drafts and Brain search/dossier state.

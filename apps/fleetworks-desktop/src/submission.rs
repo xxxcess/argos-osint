@@ -562,6 +562,12 @@ impl State {
             self.submissions.lane_mut(kind).message = Some(reason);
             return;
         }
+        if !self.fixture && self.services.is_none() {
+            let lane = self.submissions.lane_mut(kind);
+            lane.phase = SubmissionPhase::Rejected;
+            lane.message = Some("Submission preparation service is unavailable".into());
+            return;
+        }
         let lane = self.submissions.lane_mut(kind);
         lane.cancel_requests();
         lane.phase = SubmissionPhase::Preparing;
@@ -657,7 +663,12 @@ impl State {
         if self.fixture {
             return;
         }
-        let (Some(services), Some(client)) = (&self.services, &self.client) else {
+        let (Some(services), Some(client)) = (self.services.clone(), self.client.clone()) else {
+            self.complete_submission_resolution(
+                kind,
+                revision,
+                Err("Gateway resolution services are unavailable".into()),
+            );
             return;
         };
         let client = match client.with_registered_context(&context) {
@@ -738,7 +749,14 @@ impl State {
         if self.fixture {
             return;
         }
-        let (Some(services), Some(client)) = (&self.services, &self.client) else {
+        let (Some(services), Some(client)) = (self.services.clone(), self.client.clone()) else {
+            self.complete_submission_post(
+                kind,
+                revision,
+                Err(SubmissionFailure::Rejected(
+                    "Gateway submission services are unavailable".into(),
+                )),
+            );
             return;
         };
         let client = match client.with_registered_context(&attempt.snapshot.context) {
@@ -773,6 +791,9 @@ impl State {
             lane.message = Some(error);
         }
         if self.submissions.lane(kind).receipt.is_some() {
+            if !self.fixture && kind == SubmissionKind::Atlas {
+                self.refresh_cycles();
+            }
             self.verify_submission(kind);
         }
     }
@@ -809,7 +830,12 @@ impl State {
         if self.fixture {
             return;
         }
-        let (Some(services), Some(client)) = (&self.services, &self.client) else {
+        let (Some(services), Some(client)) = (self.services.clone(), self.client.clone()) else {
+            self.complete_submission_verification(
+                kind,
+                revision,
+                Err("Gateway verification services are unavailable".into()),
+            );
             return;
         };
         let client = match client.with_registered_context(&context) {
@@ -880,7 +906,9 @@ impl State {
         if self.fixture {
             return;
         }
-        let (Some(services), Some(client)) = (&self.services, &self.client) else {
+        let (Some(services), Some(client)) = (self.services.clone(), self.client.clone()) else {
+            self.submissions.tools.result =
+                Load::Failed("Gateway tool result services are unavailable".into());
             return;
         };
         let client = match client.with_registered_context(&context) {

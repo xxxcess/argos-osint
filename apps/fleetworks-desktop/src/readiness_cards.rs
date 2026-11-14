@@ -27,8 +27,7 @@ impl State {
     }
 }
 
-pub(crate) fn checks(state: &State, kit: &Kit) -> El {
-    let preferences = ViewPreferences::default();
+pub(crate) fn checks(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
     let mut body = rune::col().key("backend-readiness-checks").gap(8.0);
     match &state.readiness {
         Load::Idle => {
@@ -43,15 +42,7 @@ pub(crate) fn checks(state: &State, kit: &Kit) -> El {
             ));
         }
         Load::Pending | Load::Loading => {
-            return body.child(ui_components::async_status_strip(
-                "readiness-loading",
-                "Refreshing backend checks…",
-                "Polling readiness endpoints across gateway services",
-                true,
-                StatusTone::Accent,
-                preferences,
-                kit,
-            ));
+            return body.child(ui_components::skeleton_readiness_list(preferences, kit));
         }
         Load::Failed(error) => {
             return body.child(

@@ -221,7 +221,9 @@ impl State {
         let (Some(services), Some(client)) = (&self.services, &self.client) else {
             return;
         };
-        self.maintenance.datasets = Load::Loading;
+        if !matches!(self.maintenance.datasets, Load::Ready(_)) {
+            self.maintenance.datasets = Load::Loading;
+        }
         self.maintenance.datasets_revision = self.maintenance.datasets_revision.wrapping_add(1);
         self.maintenance.datasets_request = services.datasets(
             client.clone(),
@@ -480,15 +482,30 @@ impl GatewayEffects {
                     return;
                 }
                 state.maintenance.datasets_request = None;
-                state.maintenance.datasets = match result {
+                match result {
                     Ok(list)
                         if list.rows.len() <= 100
                             && list.rows.iter().all(|dataset| dataset.validate().is_ok()) =>
                     {
-                        Load::Ready(list)
+                        state.maintenance.datasets = Load::Ready(list);
                     }
-                    Ok(_) => Load::Failed("Gateway returned an invalid dataset inventory".into()),
-                    Err(error) => Load::Failed(error.to_string()),
+                    Ok(_) => {
+                        if !matches!(state.maintenance.datasets, Load::Ready(_)) {
+                            state.maintenance.datasets = Load::Failed(
+                                "Gateway returned an invalid dataset inventory".into(),
+                            );
+                        } else {
+                            state.maintenance.message =
+                                Some("Gateway returned an invalid dataset inventory".into());
+                        }
+                    }
+                    Err(error) => {
+                        if !matches!(state.maintenance.datasets, Load::Ready(_)) {
+                            state.maintenance.datasets = Load::Failed(error.to_string());
+                        } else {
+                            state.maintenance.message = Some(error.to_string());
+                        }
+                    }
                 };
             });
         });
@@ -595,7 +612,10 @@ impl GatewayEffects {
                     }
                 }
                 state.maintenance.receipt = match result {
-                    Ok(receipt) => Load::Ready(receipt),
+                    Ok(receipt) => {
+                        state.refresh_readiness();
+                        Load::Ready(receipt)
+                    }
                     Err(error) => Load::Failed(error),
                 };
             });

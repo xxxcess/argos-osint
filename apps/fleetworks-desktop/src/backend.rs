@@ -265,7 +265,7 @@ impl ReadRequest {
     }
 }
 
-enum ReadResult {
+pub(crate) enum ReadResult {
     Articles(ArticlePage),
     Tools(ToolCatalog),
     Models(ModelDefaults),
@@ -290,7 +290,7 @@ pub struct Backend {
     pub logs: Load<JobLogs>,
     pub selected_workspace_only: bool,
     pub message: Option<String>,
-    revisions: BTreeMap<ReadKind, u64>,
+    pub(crate) revisions: BTreeMap<ReadKind, u64>,
     requests: BTreeMap<ReadKind, RequestTask>,
 }
 
@@ -318,9 +318,20 @@ impl Default for Backend {
     }
 }
 
+pub(crate) fn job_is_active(state: &str) -> bool {
+    matches!(
+        state.to_ascii_lowercase().as_str(),
+        "queued" | "pending" | "running" | "active" | "waiting" | "reconciling"
+    )
+}
+
 impl Backend {
     pub(crate) fn busy(&self) -> bool {
         !self.requests.is_empty()
+    }
+
+    pub(crate) fn in_flight(&self, kind: ReadKind) -> bool {
+        self.requests.contains_key(&kind)
     }
 
     pub(crate) fn cancel_reads(&mut self) {
@@ -342,10 +353,19 @@ impl Backend {
     fn loading(&mut self, kind: ReadKind) {
         match kind {
             ReadKind::Articles => self.articles = Load::Loading,
+            ReadKind::Tools if matches!(self.tools, Load::Ready(_)) => {}
             ReadKind::Tools => self.tools = Load::Loading,
+            ReadKind::Models if matches!(self.models, Load::Ready(_)) => {}
             ReadKind::Models => self.models = Load::Loading,
+            ReadKind::Profile if matches!(self.profile, Load::Ready(_)) => {}
             ReadKind::Profile => self.profile = Load::Loading,
+            ReadKind::Jobs if matches!(self.jobs, Load::Ready(_)) => {}
             ReadKind::Jobs => self.jobs = Load::Loading,
+            ReadKind::JobDetail
+                if matches!(
+                    (&self.detail, &self.selected_job),
+                    (Load::Ready(detail), Some(id)) if &detail.job.id == id
+                ) => {}
             ReadKind::JobDetail => self.detail = Load::Loading,
             ReadKind::Logs => self.logs = Load::Loading,
         }
@@ -358,6 +378,14 @@ impl Backend {
             ReadKind::Models => self.models = Load::Failed(error),
             ReadKind::Profile => self.profile = Load::Failed(error),
             ReadKind::Jobs => self.jobs = Load::Failed(error),
+            ReadKind::JobDetail
+                if matches!(
+                    (&self.detail, &self.selected_job),
+                    (Load::Ready(detail), Some(id)) if &detail.job.id == id
+                ) =>
+            {
+                self.message = Some(error);
+            }
             ReadKind::JobDetail => self.detail = Load::Failed(error),
             ReadKind::Logs => self.logs = Load::Failed(error),
         }
@@ -425,7 +453,8 @@ impl State {
 
     pub fn select_job(&mut self, id: &str) {
         self.select_activity_tab(crate::logs::ActivityTab::Jobs);
-        if self.backend.selected_job.as_deref() != Some(id) {
+        let switching = self.backend.selected_job.as_deref() != Some(id);
+        if switching {
             self.job_actions.confirmation = None;
         }
         let Load::Ready(jobs) = &self.backend.jobs else {
@@ -433,6 +462,9 @@ impl State {
         };
         if !jobs.rows.iter().any(|job| job.id == id) {
             return;
+        }
+        if switching {
+            self.backend.detail = Load::Idle;
         }
         self.backend.selected_job = Some(id.to_owned());
         self.selected_log_job_changed(id);
@@ -443,8 +475,10 @@ impl State {
     /// Cross-page links still resolve through the current registered node; the
     /// gateway may deny a job that is outside this workstation's associations.
     pub fn open_job(&mut self, id: &str) {
-        if self.backend.selected_job.as_deref() != Some(id) {
+        let switching = self.backend.selected_job.as_deref() != Some(id);
+        if switching {
             self.job_actions.confirmation = None;
+            self.backend.detail = Load::Idle;
         }
         if self.registration.context.is_none() {
             return;
@@ -534,7 +568,7 @@ impl State {
         }
     }
 
-    fn complete_backend_read(
+    pub(crate) fn complete_backend_read(
         &mut self,
         kind: ReadKind,
         revision: u64,
@@ -562,7 +596,30 @@ impl State {
             }
             Ok(ReadResult::JobDetail(detail)) => {
                 if self.backend.selected_job.as_deref() == Some(&detail.job.id) {
+                    let transitioned = match &self.backend.detail {
+                        Load::Ready(previous) if previous.job.id == detail.job.id => {
+                            previous.job.state != detail.job.state
+                                || previous.job.phase != detail.job.phase
+                                || previous.job.progress_done != detail.job.progress_done
+                                || previous.job.progress_total != detail.job.progress_total
+                                || previous.job.error_summary != detail.job.error_summary
+                        }
+                        _ => false,
+                    };
+                    if let Load::Ready(jobs) = &mut self.backend.jobs {
+                        if let Some(row) = jobs.rows.iter_mut().find(|row| row.id == detail.job.id)
+                        {
+                            *row = detail.job.clone();
+                        }
+                    }
+                    if let Some(page) = &mut self.scoped_jobs.page {
+                        if let Some(row) = page.rows.iter_mut().find(|row| row.id == detail.job.id)
+                        {
+                            *row = detail.job.clone();
+                        }
+                    }
                     self.backend.detail = Load::Ready(*detail);
+                    self.sync_operational_logs_with_selected_job(transitioned);
                 } else {
                     self.backend
                         .failed(kind, "Gateway returned a different job".into());

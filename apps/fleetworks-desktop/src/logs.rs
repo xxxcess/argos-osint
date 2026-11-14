@@ -210,8 +210,12 @@ impl LogState {
             && self.visible
             && !self.busy()
             && self.status != LogStatus::DisplayLimit
+            && self.status != LogStatus::Unavailable
             && self.rows.len() < DISPLAY_LIMIT
             && self.follow_cursor.is_some()
+    }
+    pub fn has_follow_cursor(&self) -> bool {
+        self.follow_cursor.is_some()
     }
     pub fn origin_label(&self) -> Option<String> {
         self.binding
@@ -286,7 +290,8 @@ impl LogState {
     }
 
     pub fn set_following(&mut self, following: bool) {
-        self.following = following && self.visible && self.available;
+        self.following =
+            following && self.visible && self.available && self.status != LogStatus::Unavailable;
         if !self.following
             && self
                 .active
@@ -295,6 +300,24 @@ impl LogState {
         {
             self.cancel_requests();
             self.status = LogStatus::Ready;
+        }
+    }
+
+    /// Re-arm live follow after a transient follow interruption while keeping already validated rows.
+    pub fn resume_follow(&mut self) -> bool {
+        if self.available
+            && self.visible
+            && self.status == LogStatus::Unavailable
+            && !self.busy()
+            && self.rows.len() < DISPLAY_LIMIT
+            && self.follow_cursor.is_some()
+        {
+            self.status = LogStatus::Ready;
+            self.message = None;
+            self.following = true;
+            true
+        } else {
+            false
         }
     }
 
@@ -459,21 +482,36 @@ impl LogState {
             Err(error) => Err(error),
         };
         if let Err(error) = result {
-            let rejected = matches!(error, ClientError::Status(401 | 403));
-            self.reset();
-            if rejected {
-                self.blocked_binding = self.binding.take();
-            }
-            self.status = if matches!(error, ClientError::Status(409)) {
-                LogStatus::RestartRequired
+            let transient_follow = ticket.action == LogAction::Follow
+                && self.available
+                && !matches!(
+                    error,
+                    ClientError::Status(401 | 403 | 409) | ClientError::InvalidResponse
+                );
+            if transient_follow {
+                self.following = false;
+                self.status = LogStatus::Unavailable;
+                self.message = Some(
+                    "Operational log follow was interrupted. Syncing again with worker status…"
+                        .into(),
+                );
             } else {
-                LogStatus::Unavailable
-            };
-            self.message = Some(match error {
-                ClientError::Status(401 | 403) => "Log authority changed. Reconnect and register before continuing.".into(),
-                ClientError::Status(409) => "Log scope or cursor changed. Refresh this scoped view to restart.".into(),
-                _ => "Authorized operational logs are unavailable. Refresh this scope when the gateway is ready.".into(),
-            });
+                let rejected = matches!(error, ClientError::Status(401 | 403));
+                self.reset();
+                if rejected {
+                    self.blocked_binding = self.binding.take();
+                }
+                self.status = if matches!(error, ClientError::Status(409)) {
+                    LogStatus::RestartRequired
+                } else {
+                    LogStatus::Unavailable
+                };
+                self.message = Some(match error {
+                    ClientError::Status(401 | 403) => "Log authority changed. Reconnect and register before continuing.".into(),
+                    ClientError::Status(409) => "Log scope or cursor changed. Refresh this scoped view to restart.".into(),
+                    _ => "Authorized operational logs are unavailable. Refresh this scope when the gateway is ready.".into(),
+                });
+            }
         }
         true
     }

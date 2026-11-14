@@ -1,6 +1,7 @@
 //! Synthetic effects over the production Jobs query controller, adapter and current shell.
 //! No gateway, user home, credential, clipboard or backend job is touched.
 
+use crate::app::Load;
 use fleetworks_contracts::connect::RegistrationReceipt;
 use rune::Env;
 use rune::Runtime;
@@ -461,5 +462,38 @@ fn paged_rows_route_to_exact_details_and_preview_is_invalidated_before_page_or_f
                 kind: ReadKind::JobDetail
             }
         ]
+    );
+}
+
+#[test]
+fn background_poll_preserves_ready_page_and_selected_job_while_updating_progress() {
+    let mut state = registered_app();
+    state.request_jobs(JobsEvent::Apply);
+    let ticket = state
+        .scoped_jobs
+        .active_ticket()
+        .expect("apply ticket")
+        .clone();
+    state.complete_scoped_jobs(ticket, Ok(page(&binding("a"), 1, None)));
+    state.select_job("fixture-job-1");
+    assert_eq!(state.backend.selected_job.as_deref(), Some("fixture-job-1"));
+
+    state.request_jobs(JobsEvent::Poll);
+    assert_eq!(
+        state.backend.selected_job.as_deref(),
+        Some("fixture-job-1"),
+        "periodic background poll must preserve selected job and ready rows"
+    );
+    assert!(matches!(state.backend.jobs, Load::Ready(_)));
+
+    let poll_ticket = state
+        .scoped_jobs
+        .active_ticket()
+        .expect("poll ticket")
+        .clone();
+    state.complete_scoped_jobs(poll_ticket, Err(ClientError::Timeout));
+    assert!(
+        matches!(state.backend.jobs, Load::Ready(_)),
+        "transient poll failure must keep existing validated job rows instead of wiping the list"
     );
 }

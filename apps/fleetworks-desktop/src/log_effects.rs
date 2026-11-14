@@ -45,6 +45,36 @@ impl State {
         }
     }
 
+    pub(crate) fn sync_operational_logs_with_selected_job(&mut self, transition_detected: bool) {
+        self.sync_log_binding();
+        self.sync_log_visibility();
+        if !self.scoped_logs.visible
+            || self.backend.selected_job.is_none()
+            || self.scoped_logs.busy()
+        {
+            return;
+        }
+        if self.scoped_logs.status == logs::LogStatus::Unavailable {
+            if !self.scoped_logs.resume_follow() {
+                self.refresh_operational_logs();
+            }
+            return;
+        }
+        if transition_detected {
+            if !self.scoped_logs.following {
+                self.scoped_logs.set_following(true);
+            }
+            if !self.scoped_logs.following || !self.scoped_logs.has_follow_cursor() {
+                self.refresh_operational_logs();
+            }
+        } else if self.selected_job_is_active() && self.scoped_logs.available() {
+            self.scoped_logs.set_following(true);
+            if !self.scoped_logs.has_follow_cursor() {
+                self.refresh_operational_logs();
+            }
+        }
+    }
+
     pub(crate) fn selected_log_job_changed(&mut self, id: &str) {
         self.sync_log_binding();
         self.scoped_logs.select_target(crate::logs::LogTarget::Job {

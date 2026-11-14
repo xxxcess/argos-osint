@@ -367,13 +367,14 @@ impl State {
             self.configuration.message = Some("Choose a canonical role from this backend".into());
             return;
         }
-        let primary = (!clear).then(|| ModelRoute {
+        let mut primary = (!clear).then(|| ModelRoute {
             provider: self.configuration.model_provider.text.trim().to_owned(),
             model: self.configuration.model.text.trim().to_owned(),
             account: self.configuration.model_account.text.trim().to_owned(),
-            extra: self.configuration.model_extra.clone(),
+            extra: BTreeMap::new(),
         });
-        let fallbacks: Vec<ModelRoute> = if clear {
+        let _ = &primary;
+        let mut fallbacks: Vec<ModelRoute> = if clear {
             Vec::new()
         } else {
             match serde_json::from_str(&self.configuration.fallbacks.text) {
@@ -387,6 +388,12 @@ impl State {
                 }
             }
         };
+        for route in &mut fallbacks {
+            route.extra.clear();
+        }
+        if let Some(route) = &mut primary {
+            route.extra.clear();
+        }
         if fallbacks.len() > 16
             || primary.iter().chain(fallbacks.iter()).any(|route| {
                 route.provider.is_empty()
@@ -457,7 +464,15 @@ impl State {
             return;
         }
         let valid_url = url::Url::parse(editor.account_base_url.text.trim()).is_ok_and(|url| {
-            matches!(url.scheme(), "http" | "https")
+            let loopback_http = url.scheme() == "http"
+                && url.host_str().is_some_and(|host| {
+                    host.eq_ignore_ascii_case("localhost")
+                        || host
+                            .trim_matches(['[', ']'])
+                            .parse::<std::net::IpAddr>()
+                            .is_ok_and(|ip| ip.is_loopback())
+                });
+            (url.scheme() == "https" || loopback_http)
                 && url.host().is_some()
                 && url.username().is_empty()
                 && url.password().is_none()
@@ -465,7 +480,7 @@ impl State {
                 && url.fragment().is_none()
         });
         if !valid_url {
-            self.configuration.message = Some("Enter an HTTP(S) provider base URL without embedded credentials, query or fragment".into());
+            self.configuration.message = Some("Enter an HTTPS provider base URL (or HTTP for localhost/loopback) without embedded credentials, query or fragment".into());
             return;
         }
         let request = UpsertAccount {
@@ -574,6 +589,8 @@ impl State {
             return;
         }
         let (Some(services), Some(client)) = (&self.services, &self.client) else {
+            self.configuration.result =
+                Load::Failed("Gateway configuration services are unavailable".into());
             return;
         };
         self.configuration.revision = self.configuration.revision.wrapping_add(1);
@@ -636,5 +653,45 @@ impl GatewayEffects {
             });
         });
         Some(RequestTask(task.abort_handle()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::SetModelRole;
+    use crate::backend::ModelRoute;
+
+    #[test]
+    fn set_model_role_omits_extra_fields_on_routes_for_strict_server_deserializer() {
+        let request = SetModelRole {
+            expected_revision: 2,
+            role: "extractor".into(),
+            primary: Some(ModelRoute {
+                provider: "openai".into(),
+                account: "acct-1".into(),
+                model: "gpt-4o".into(),
+                extra: BTreeMap::new(),
+            }),
+            fallbacks: vec![ModelRoute {
+                provider: "openai".into(),
+                account: "acct-2".into(),
+                model: "gpt-4o-mini".into(),
+                extra: BTreeMap::new(),
+            }],
+            variant_updates: BTreeMap::new(),
+        };
+        let value = serde_json::to_value(request).expect("serialize model role");
+        let primary = value["primary"].as_object().expect("primary object");
+        assert_eq!(primary.len(), 3);
+        assert!(primary.contains_key("provider"));
+        assert!(primary.contains_key("account"));
+        assert!(primary.contains_key("model"));
+        let fallback = value["fallbacks"][0].as_object().expect("fallback object");
+        assert_eq!(fallback.len(), 3);
+        assert!(fallback.contains_key("provider"));
+        assert!(fallback.contains_key("account"));
+        assert!(fallback.contains_key("model"));
     }
 }

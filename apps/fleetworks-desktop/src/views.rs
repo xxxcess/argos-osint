@@ -226,7 +226,7 @@ fn pairing_status(
                 |state: &mut State| state.setup_advanced_open = !state.setup_advanced_open,
             ));
         if state.setup_advanced_open {
-            body = body.child(crate::readiness_cards::checks(state, kit));
+            body = body.child(crate::readiness_cards::checks(state, preferences, kit));
         }
         if state.registration.context.is_some() {
             body = body.child(
@@ -478,7 +478,7 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
             .children(
                 state
                     .connected()
-                    .then(|| crate::readiness_cards::checks(state, kit)),
+                    .then(|| crate::readiness_cards::checks(state, preferences, kit)),
             ),
         gateway_tone,
         false,
@@ -516,15 +516,7 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
                 ));
             }
             Load::Pending | Load::Loading => {
-                resources = resources.child(ui_components::async_status_strip(
-                    "host-metrics-loading",
-                    "Reading API host resources…",
-                    "Polling CPU, memory and storage utilization",
-                    true,
-                    StatusTone::Info,
-                    preferences,
-                    kit,
-                ));
+                resources = resources.child(ui_components::skeleton_metric_tiles(preferences, kit));
             }
             Load::Failed(error) => {
                 resources = resources.child(line(error.clone(), kit).role("alert"));
@@ -715,15 +707,7 @@ fn brain(state: &State, cx: &mut Cx<State>, kit: &Kit) -> El {
             ));
         }
         Load::Loading => {
-            list = list.child(ui_components::async_status_strip(
-                "search-loading",
-                "Searching catalog",
-                "Querying configured gateway…",
-                true,
-                StatusTone::Accent,
-                preferences,
-                kit,
-            ));
+            list = list.child(ui_components::skeleton_actor_results(preferences, kit));
         }
         Load::Failed(error) => {
             list = list.child(line(error.clone(), kit).key("search-error").role("alert"));
@@ -853,15 +837,7 @@ fn dossier(state: &State, preferences: crate::accessibility::ViewPreferences, ki
             pointer_ref,
             shadow_ref,
         ),
-        Load::Pending | Load::Loading => ui_components::async_status_strip(
-            "dossier-loading",
-            "Loading actor dossier",
-            "Fetching intelligence record & associations…",
-            true,
-            StatusTone::Accent,
-            preferences,
-            kit,
-        ),
+        Load::Pending | Load::Loading => ui_components::skeleton_dossier(preferences, kit),
         Load::Failed(error) => {
             rune::col().child(line(error.clone(), kit).key("dossier-error").role("alert"))
         }

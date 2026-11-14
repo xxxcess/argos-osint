@@ -222,7 +222,9 @@ impl GatewayEffects {
                 .map_err(|error| error.to_string());
             ui.update(move |state, tx| {
                 if state.connection.epoch == epoch && state.readiness_revision == revision {
-                    state.readiness_received_at = Some(tx.clock());
+                    if result.is_ok() {
+                        state.readiness_received_at = Some(tx.clock());
+                    }
                     state.complete_readiness(result);
                 }
             });
@@ -246,7 +248,9 @@ impl GatewayEffects {
             ui.update(move |state, tx| {
                 if state.connection.epoch == epoch {
                     state.brain.complete_search(revision, result);
-                    state.search_request = None;
+                    if state.brain.query_revision == revision {
+                        state.search_request = None;
+                    }
                     if let Some(deadline) = state.brain.pending_at {
                         tx.wake_after(std::time::Duration::from_secs_f64(
                             (deadline - tx.clock()).max(0.0),

@@ -12,6 +12,7 @@ use crate::app::Load;
 use crate::app::State;
 use crate::backend::ActivityJobs;
 use crate::backend::ReadKind;
+use crate::backend::ReadRequest;
 use crate::connection::GatewayEffects;
 use crate::connection::RequestTask;
 use crate::jobs_query;
@@ -80,7 +81,12 @@ impl State {
             self.project_jobs_page();
             return;
         };
-        self.backend.jobs = Load::Loading;
+        let keep_ready_jobs = matches!(event, JobsEvent::Poll)
+            && !effect.clear_selection
+            && matches!(self.backend.jobs, Load::Ready(_));
+        if !keep_ready_jobs {
+            self.backend.jobs = Load::Loading;
+        }
         self.record(Intent::BackendRead {
             kind: ReadKind::Jobs,
         });
@@ -102,6 +108,32 @@ impl State {
         self.sync_jobs_binding();
         if self.scoped_jobs.complete(&ticket, result) {
             self.project_jobs_page();
+            if let (Some(selected_id), Load::Ready(jobs)) =
+                (self.backend.selected_job.clone(), &self.backend.jobs)
+            {
+                if let Some(updated) = jobs.rows.iter().find(|job| job.id == selected_id).cloned() {
+                    let transitioned = match &mut self.backend.detail {
+                        Load::Ready(detail) if detail.job.id == updated.id => {
+                            let changed = detail.job.state != updated.state
+                                || detail.job.phase != updated.phase
+                                || detail.job.progress_done != updated.progress_done
+                                || detail.job.progress_total != updated.progress_total
+                                || detail.job.error_summary != updated.error_summary;
+                            if changed {
+                                detail.job = updated;
+                            }
+                            changed
+                        }
+                        _ => false,
+                    };
+                    if transitioned {
+                        if !self.fixture && !self.backend.in_flight(ReadKind::JobDetail) {
+                            self.backend_read(ReadRequest::JobDetail { id: selected_id });
+                        }
+                        self.sync_operational_logs_with_selected_job(true);
+                    }
+                }
+            }
         }
     }
 

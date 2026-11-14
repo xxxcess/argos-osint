@@ -219,6 +219,7 @@ def review_commands(root, prepared):
     compose += ["FLEETWORKS_REPO_ACTOR_CSV=" + str(root / "datasets/argos_actors.csv"),
                "docker", "compose", "--env-file", str(prepared["env_file"]),
                "-f", str(root / "deploy/compose.native-review.yml"),
+               "-f", str(root / "deploy/compose.actor-bootstrap.yml"),
                "--project-name", environment["COMPOSE_PROJECT_NAME"]]
     build = ["env", "PLATFORM=" + environment["PLATFORM"], "VERSION=" + prepared["version"],
              "docker", "buildx", "bake", "-f", str(root / "deploy/docker-bake.hcl"),

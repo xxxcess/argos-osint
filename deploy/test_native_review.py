@@ -113,6 +113,28 @@ class NativeReviewTests(unittest.TestCase):
         self.assertEqual(recipients, ["api"])
         self.assertIn("  gateway_operator_token:\n    file: ${FLEETWORKS_HOST_WORKSPACE}/secrets/operator-token\n", template)
 
+    def test_actor_seed_mount_is_native_review_only(self):
+        base = (Path(__file__).parent / "compose.native-review.yml").read_text()
+        overlay = (Path(__file__).parent / "compose.actor-bootstrap.yml").read_text()
+        self.assertNotIn("FLEETWORKS_BOOTSTRAP_ACTOR_CSV", base)
+        self.assertNotIn("FLEETWORKS_REPO_ACTOR_CSV", base)
+        self.assertIn("FLEETWORKS_BOOTSTRAP_ACTOR_CSV: /bootstrap-actors/argos_actors.csv", overlay)
+        self.assertIn("FLEETWORKS_REPO_ACTOR_CSV:?Select the materialized actor catalog", overlay)
+        prepared = {
+            "environment": {
+                "COMPOSE_PROJECT_NAME": "fleetworks-native-review-fixture",
+                "PLATFORM": "linux/amd64",
+                "FLEETWORKS_RUNTIME_IMAGE": "fixture-runtime:1",
+                "FLEETWORKS_SURREAL_IMAGE": "fixture-storage:1",
+                "FLEETWORKS_SEARCH_IMAGE": "fixture-search:1",
+            },
+            "env_file": Path("/fixture/compose.env"),
+            "version": "0.0.0",
+        }
+        _, command = native_review.review_commands(Path("/fixture"), prepared)
+        self.assertIn("FLEETWORKS_REPO_ACTOR_CSV=/fixture/datasets/argos_actors.csv", command)
+        self.assertIn("/fixture/deploy/compose.actor-bootstrap.yml", command)
+
     def test_init_prints_pairing_approval_command_without_secret_bytes(self):
         with tempfile.TemporaryDirectory(prefix="native review ") as directory:
             root = Path(directory)

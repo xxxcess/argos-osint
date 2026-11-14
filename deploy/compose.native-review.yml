@@ -109,18 +109,11 @@ services:
       FLEETWORKS_STORAGE_ROOT_USERNAME: root
       FLEETWORKS_STORAGE_ROOT_PASSWORD_FILE: /run/secrets/storage_root_password
       FLEETWORKS_DEPLOYMENT_ID_FILE: /deployment-identity/deployment-id
-      FLEETWORKS_BOOTSTRAP_ACTOR_CSV: /bootstrap-actors/argos_actors.csv
     volumes:
       - <<: *workspace
         read_only: true
       - <<: *identity
         read_only: false
-      - type: bind
-        source: ${FLEETWORKS_REPO_ACTOR_CSV:-/nonexistent/fleetworks-actor-catalog.csv}
-        target: /bootstrap-actors/argos_actors.csv
-        read_only: true
-        bind:
-          create_host_path: false
     secrets: [storage_password, storage_root_password]
     depends_on:
       surrealdb:

@@ -37,7 +37,7 @@ def build(args):
     platform = images.verify_daemon(target)
     web = "web" in selected
     # Compose verifies the complete runtime dependency closure, while only
-    # source-selected images are published. No image tar archive is produced.
+    # source-selected images are published and exported for release assets.
     compose = args.compose or bool(selected - {"web"})
     closure = ({"runtime", "surrealdb", "search-index"} if compose else set()) | ({"web"} if web else set())
     tags = {role: f"{args.registry}/fleetworks-{role}:{args.image_tag}-{args.arch}"
@@ -75,6 +75,7 @@ def build(args):
         # Web-only UI packaging does not compile or launch backend engines.
         run("docker", "run", "--rm", "--entrypoint", "node", tags["web"], "-e", "process.exit(0)")
     published = {}
+    archive_info = None
     if args.push:
         for role in sorted(selected):
             tag = tags[role]
@@ -94,8 +95,18 @@ def build(args):
             if run("docker", "buildx", "imagetools", "inspect", "--raw", f"{repository}@{digest}", capture=True) != raw:
                 raise ValueError("Registry digest verification failed")
             published[role] = {"repository": repository, "digest": digest, "image_id": inspected[role]["id"]}
+        archive = args.directory / f"fleetworks-images-linux-{args.arch}.tar.gz"
+        archive.unlink(missing_ok=True)
+        images.save_images(archive, {role: tags[role] for role in sorted(selected)})
+        archive_digest = images.sha256(archive)
+        archive.with_name(archive.name + ".sha256").write_text(
+            images.checksum_line(archive, archive_digest), encoding="utf-8"
+        )
+        archive_info = {"name": archive.name, "sha256": archive_digest, "bytes": archive.stat().st_size}
     result = {"revision": args.revision, "version": args.version, "image_tag": args.image_tag,
               "arch": args.arch, "selected": sorted(selected), "images": published}
+    if archive_info is not None:
+        result["archive"] = archive_info
     (args.directory / f"release-images-{args.arch}.json").write_text(json.dumps(result, sort_keys=True) + "\n")
 
 

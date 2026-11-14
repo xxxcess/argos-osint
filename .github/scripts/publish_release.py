@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import tempfile
 
-IDENTITY_FIELDS = ("head", "version", "tag", "channel", "prerelease", "native", "backend", "web", "image_tag", "image_targets")
+IDENTITY_FIELDS = ("head", "version", "tag", "channel", "prerelease", "native", "backend", "web", "bert", "image_tag", "image_targets")
 
 
 def run(*command, capture=False):
@@ -38,14 +38,37 @@ def lookup_release(tag):
 def validate_images(plan, directory):
     selected = set(plan["image_targets"])
     paths = list(directory.rglob("release-images-*.json"))
+    archives = list(directory.rglob("fleetworks-images-linux-*.tar.gz"))
+    checksums = list(directory.rglob("fleetworks-images-linux-*.tar.gz.sha256"))
     manifests = [json.loads(path.read_text()) for path in paths]
-    if (selected and (len(manifests) != 2 or {item["arch"] for item in manifests} != {"amd64", "arm64"})) or (not selected and manifests):
+    if (selected and (len(manifests) != 2 or {item["arch"] for item in manifests} != {"amd64", "arm64"})) or (not selected and (manifests or archives or checksums)):
         raise ValueError("Both native Linux manifests required, without duplicates")
+    if selected and (len(archives) != 2 or len(checksums) != 2):
+        raise ValueError("Both native Linux image archives and checksums required")
     by_arch = {item["arch"]: item for item in manifests}
-    for item in manifests:
+    asset_paths = list(paths)
+    for path, item in zip(paths, manifests):
+        arch = item["arch"]
         if (item["revision"] != plan["head"] or item["version"] != plan["version"]
                 or item["image_tag"] != plan["image_tag"] or set(item["images"]) != selected):
             raise ValueError("Image provenance differs from release plan")
+        archive_meta = item.get("archive")
+        expected_name = f"fleetworks-images-linux-{arch}.tar.gz"
+        if (not isinstance(archive_meta, dict)
+                or archive_meta.get("name") != expected_name
+                or not re.fullmatch(r"[0-9a-f]{64}", str(archive_meta.get("sha256", "")))
+                or not isinstance(archive_meta.get("bytes"), int)
+                or archive_meta["bytes"] <= 0):
+            raise ValueError("Image archive metadata missing or invalid")
+        archive_path = path.parent / expected_name
+        checksum_path = path.parent / f"{expected_name}.sha256"
+        if not archive_path.is_file() or not checksum_path.is_file():
+            raise ValueError("Exported Linux image archive or checksum missing")
+        if (archive_path.stat().st_size != archive_meta["bytes"]
+                or sha256(archive_path) != archive_meta["sha256"]
+                or checksum_path.read_text().split()[0] != archive_meta["sha256"]):
+            raise ValueError("Exported Linux image archive checksum mismatch")
+        asset_paths.extend((archive_path, checksum_path))
     for role in sorted(selected):
         pair = [by_arch[arch]["images"][role] for arch in ("amd64", "arm64")]
         repository = pair[0]["repository"]
@@ -53,7 +76,50 @@ def validate_images(plan, directory):
             raise ValueError("Unexpected image repository")
         if any(not re.fullmatch(r"sha256:[0-9a-f]{64}", item["digest"]) for item in pair):
             raise ValueError("Invalid verified digest")
-    return paths, by_arch
+    return asset_paths, by_arch
+
+
+def prepare_bert(plan, directory, assets):
+    evidence_paths = list(directory.rglob("evidence.json"))
+    bundle_paths = list(directory.rglob("atlas-bert-linux-*.tar.gz"))
+    if not plan.get("bert", False):
+        if evidence_paths or bundle_paths:
+            raise ValueError("Unexpected Atlas BERT artifacts for unselected scope")
+        return
+    if len(evidence_paths) != 2 or len(bundle_paths) != 2:
+        raise ValueError("Both native Linux Atlas BERT bundles and evidence required")
+    evidences = [json.loads(path.read_text()) for path in evidence_paths]
+    if {item.get("arch") for item in evidences} != {"amd64", "arm64"}:
+        raise ValueError("Both amd64 and arm64 Atlas BERT architectures required")
+    bundles_by_name = {path.name: path for path in bundle_paths}
+    if len(bundles_by_name) != 2:
+        raise ValueError("Duplicate Atlas BERT bundle names")
+    for evidence_path, evidence in zip(evidence_paths, evidences):
+        arch = evidence["arch"]
+        expected_name = f"atlas-bert-linux-{arch}.tar.gz"
+        archive_meta = evidence.get("archive")
+        if (evidence.get("source_sha") != plan["head"]
+                or evidence.get("status") != "passed"
+                or evidence.get("dirty") is not False
+                or evidence.get("unit_tests_passed", 0) < 1
+                or evidence.get("build_inference", {}).get("status") != "passed"
+                or evidence.get("extracted_inference", {}).get("status") != "passed"
+                or not isinstance(archive_meta, dict)
+                or archive_meta.get("file") != expected_name
+                or not re.fullmatch(r"[0-9a-f]{64}", str(archive_meta.get("sha256", "")))
+                or not isinstance(archive_meta.get("bytes"), int)
+                or archive_meta["bytes"] <= 0):
+            raise ValueError("Atlas BERT evidence provenance or runtime checks invalid")
+        bundle_path = bundles_by_name.get(expected_name)
+        if (bundle_path is None
+                or bundle_path.stat().st_size != archive_meta["bytes"]
+                or sha256(bundle_path) != archive_meta["sha256"]):
+            raise ValueError("Downloaded Atlas BERT bundle checksum mismatch")
+        shutil.copy2(bundle_path, assets / expected_name)
+        (assets / f"{expected_name}.sha256").write_text(
+            f"{archive_meta['sha256']}  {expected_name}\n", encoding="utf-8"
+        )
+        shutil.copy2(evidence_path, assets / f"atlas-bert-evidence-{arch}.json")
 
 
 def prepare_current(plan, directory, assets, image_paths):
@@ -78,6 +144,7 @@ def prepare_current(plan, directory, assets, image_paths):
         raise ValueError("Native artifact selection incomplete or unexpected")
     for path in image_paths:
         shutil.copy2(path, assets / path.name)
+    prepare_bert(plan, directory, assets)
     return {"format": 2, "plan": plan,
             "assets": {path.name: sha256(path) for path in sorted(assets.iterdir())}}
 
@@ -121,7 +188,38 @@ def load_existing(plan, info, assets):
 
 
 def validate_payload_inventory(plan, assets, hashes):
-    known = {f"release-images-{arch}.json" for arch in ("amd64", "arm64")} if plan["image_targets"] else set()
+    known = (
+        {
+            name
+            for arch in ("amd64", "arm64")
+            for name in (
+                f"release-images-{arch}.json",
+                f"fleetworks-images-linux-{arch}.tar.gz",
+                f"fleetworks-images-linux-{arch}.tar.gz.sha256",
+            )
+        }
+        if plan["image_targets"]
+        else set()
+    )
+    if plan.get("bert", False):
+        for arch in ("amd64", "arm64"):
+            evidence_path = assets / f"atlas-bert-evidence-{arch}.json"
+            archive_path = assets / f"atlas-bert-linux-{arch}.tar.gz"
+            checksum_path = assets / f"atlas-bert-linux-{arch}.tar.gz.sha256"
+            if not evidence_path.is_file() or not archive_path.is_file() or not checksum_path.is_file():
+                raise ValueError("Original Atlas BERT inventory bytes are incomplete")
+            evidence = json.loads(evidence_path.read_text())
+            archive_meta = evidence.get("archive", {})
+            if (evidence.get("arch") != arch
+                    or evidence.get("source_sha") != plan["head"]
+                    or evidence.get("status") != "passed"
+                    or evidence.get("dirty") is not False
+                    or archive_meta.get("file") != archive_path.name
+                    or archive_path.stat().st_size != archive_meta.get("bytes")
+                    or sha256(archive_path) != archive_meta.get("sha256")
+                    or checksum_path.read_text().split()[0] != archive_meta.get("sha256")):
+                raise ValueError("Original Atlas BERT inventory provenance differs")
+            known.update((evidence_path.name, archive_path.name, checksum_path.name))
     native = []
     for path in assets.glob("Fleetworks-*.manifest.json"):
         manifest = json.loads(path.read_text())

@@ -173,32 +173,28 @@ def raw_path_scopes(path):
     if path.startswith(SERVER_PREFIXES) or path == "scripts/fleetworks_atlas_smoke.py":
         return scopes | {"server", "queue"}
 
-    # A pull request runs only lanes named by its changed paths. These files are
-    # checked by the scope job, the main-merge embedded workflow, or a dispatch.
+    # A pull request runs only lanes named by its changed paths. Documentation and
+    # standalone policy helpers that do not affect build/test workflows return no
+    # lane scopes; edits to core workflows or the planner/release scripts fall
+    # through to ALL_SCOPES below.
     if path.startswith((
         ".opencode/",
         ".agents/",
         "scripts/fleetworks_candidate",
         "scripts/test_fleetworks_candidate",
     )) or path in {
-        ".github/workflows/fleetworks.yml",
-        ".github/workflows/embedded.yml",
         ".github/workflows/mutation.yml",
         ".github/workflows/datasets.yml",
         ".github/workflows/commit-policy.yml",
-        ".github/workflows/release-please.yml",
-        ".github/workflows/fleetworks-candidate.yml",
-        ".github/workflows/fleetworks-candidate-target.yml",
+        ".github/workflows/ui-visual-review.yml",
+        ".github/scripts/ui_visual_review.py",
+        ".github/scripts/test_ui_visual_review.py",
         ".gitignore",
         "release-please-config.json",
         ".release-please-manifest.json",
-        "scripts/fleetworks_verify.py",
-        "scripts/test_fleetworks_verify.py",
         "scripts/fleetworks_config_reset.py",
         "scripts/test_fleetworks_config_reset.py",
         "scripts/release_check.mjs",
-        "scripts/fleetworks_release.py",
-        "scripts/test_fleetworks_release.py",
     }:
         return set()
 

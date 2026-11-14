@@ -174,7 +174,10 @@ class ReleasePlanTests(unittest.TestCase):
         self.assertFalse(server["publish"])
         web = self.plan(scope=self.scope(scopes=["web", "images"], images=["web"]))
         self.assertTrue(web["publish"] and web["web"])
-        self.assertFalse(web["backend"] or web["native"])
+        self.assertFalse(web["backend"] or web["native"] or web["bert"])
+        bert = self.plan(scope=self.scope(scopes=["bert"], images=[]))
+        self.assertTrue(bert["publish"] and bert["bert"])
+        self.assertFalse(bert["backend"] or bert["native"] or bert["web"])
 
     def test_unreachable_and_other_channel_tags_cannot_inflate_stable(self):
         self.git("checkout", "--quiet", "-b", "unrelated")
@@ -218,7 +221,7 @@ class ReleasePlanTests(unittest.TestCase):
         self.git("tag", "--delete", self.initial_artifact)
         self.commit("ci: enable channel artifacts")
         first = self.plan(scope=self.scope(scopes=[], images=[]))
-        self.assertTrue(first["native"] and first["backend"] and first["web"])
+        self.assertTrue(first["native"] and first["backend"] and first["web"] and first["bert"])
         self.assertEqual(set(first["image_targets"]), {"runtime", "surrealdb", "search-index", "web"})
         self.publish_tag(first)
         before = self.head()

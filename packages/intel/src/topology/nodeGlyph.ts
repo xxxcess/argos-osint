@@ -74,7 +74,7 @@ export function createNodeGlyph(node: GlyphNode): HTMLElement {
   tile.style.height = `${size}px`;
   tile.style.borderRadius = "9px";
   tile.style.border = `${focused ? 3 : 2}px solid ${color}`;
-  tile.style.background = ghost ? "rgba(14,22,34,0.9)" : `${color}18`;
+  tile.style.background = ghost ? topologyColors.ghost : `${color}18`;
   tile.style.display = "flex";
   tile.style.alignItems = "center";
   tile.style.justifyContent = "center";

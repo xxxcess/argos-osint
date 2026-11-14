@@ -27,6 +27,8 @@
 
 use anyhow::{anyhow, Result};
 use serde_json::Value;
+use surrealdb::engine::any::Any;
+use surrealdb::method::Query;
 use surrealdb::types::SurrealValue;
 
 use super::jobs::{rid, run, take};
@@ -214,19 +216,49 @@ pub async fn record_run(
     generation: i64,
     state: &str,
 ) -> Result<()> {
-    repo.db()
-        .query(
-            "UPSERT $r SET article_id = $a, generation = $g, state = $s, updated_at = $now
-               RETURN NONE",
-        )
+    bind_run(
+        repo.db().query(RECORD_RUN),
+        job_id,
+        article_id,
+        generation,
+        state,
+    )
+    .await?
+    .check()?;
+    Ok(())
+}
+
+pub(crate) async fn record_run_in(
+    tx: &Tx,
+    job_id: &str,
+    article_id: &str,
+    generation: i64,
+    state: &str,
+) -> Result<(), TxError> {
+    run(
+        tx,
+        bind_run(tx.query(RECORD_RUN), job_id, article_id, generation, state),
+    )
+    .await?;
+    Ok(())
+}
+
+const RECORD_RUN: &str = "UPSERT $r SET article_id = $a, generation = $g, state = $s, \
+                         updated_at = $now RETURN NONE";
+
+fn bind_run<'a>(
+    query: Query<'a, Any>,
+    job_id: &str,
+    article_id: &str,
+    generation: i64,
+    state: &str,
+) -> Query<'a, Any> {
+    query
         .bind(("r", rid("intel_brief_run", job_id)))
         .bind(("a", article_id.to_string()))
         .bind(("g", generation))
         .bind(("s", state.to_string()))
         .bind(("now", chrono::Utc::now().to_rfc3339()))
-        .await?
-        .check()?;
-    Ok(())
 }
 
 #[derive(SurrealValue)]
@@ -398,6 +430,23 @@ async fn put_state(
         .bind(("now", chrono::Utc::now().to_rfc3339()))
         .await?
         .check()?;
+    Ok(())
+}
+
+pub(super) async fn put_publication_state_in(
+    tx: &Tx,
+    article: &str,
+    job: &str,
+    operation: &str,
+    state: &crate::intel_recon::brief_canonical::IndexState,
+) -> Result<(), TxError> {
+    run(tx, tx.query(
+        "UPSERT type::record('intel_brief_stage_receipt', [$job, $op]) SET state_json = $state, updated_at = $now RETURN NONE;
+         UPSERT type::record('intel_brief_index_state', $article) SET state_json = $state, updated_at = $now RETURN NONE;",
+    ).bind(("job", job.to_owned())).bind(("op", operation.to_owned()))
+        .bind(("article", article.to_owned()))
+        .bind(("state", serde_json::to_string(state).map_err(|error| TxError::Abort(error.to_string()))?))
+        .bind(("now", chrono::Utc::now().to_rfc3339()))).await?;
     Ok(())
 }
 

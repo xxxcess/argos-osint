@@ -7,8 +7,8 @@
 mod support;
 
 use argos_osint_core::brain::MemorySource;
-use argos_osint_core::recon::{Message, Thread};
 use argos_osint_core::storage::recon::{self, Endpoint};
+use argos_osint_core::storage::thread_history::{self, Message, Thread};
 use argos_osint_core::storage::{browse, memories};
 use support::*;
 
@@ -250,7 +250,7 @@ async fn recon_threads_and_messages_match_the_legacy_store() {
         .await
         .unwrap();
     assert_eq!(other.sequence, 1, "sequences are per thread");
-    let listed = rt::list_messages(&repo, &t.id).await.unwrap();
+    let listed = thread_history::list_messages(&repo, &t.id).await.unwrap();
     assert_eq!(
         listed.iter().map(|m| m.sequence).collect::<Vec<_>>(),
         vec![3, 4, 5]
@@ -266,7 +266,10 @@ async fn recon_threads_and_messages_match_the_legacy_store() {
     assert!(!rt::rename_thread(&repo, "nope", "x").await.unwrap());
     rt::save_draft(&repo, &t.id, "draft", 7).await.unwrap();
     assert!(rt::set_recall_insights(&repo, &t.id, true).await.unwrap());
-    let got = recon::get_thread(&repo, &t.id).await.unwrap().unwrap();
+    let got = thread_history::get_thread(&repo, &t.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         (
             got.title.as_str(),
@@ -350,26 +353,30 @@ async fn concurrent_appends_get_distinct_sequences() {
 
 #[tokio::test]
 async fn tool_preferences_default_and_persist() {
-    use argos_osint_core::storage::recon_threads as rt;
+    use argos_osint_core::storage::tool_state;
     let Some(server) = Server::start() else {
         return;
     };
     let repo = server.repo("argos", "recon_tools").await;
-    assert!(rt::tool_enabled(&repo, "hunter_person_enrichment")
+    assert!(tool_state::tool_enabled(&repo, "hunter_person_enrichment")
         .await
         .unwrap());
-    assert!(!rt::tool_enabled(&repo, "firecrawl_crawl").await.unwrap());
-    rt::set_tool_enabled(&repo, "hunter_person_enrichment", false)
-        .await
-        .unwrap();
-    rt::set_tool_enabled(&repo, "firecrawl_crawl", true)
-        .await
-        .unwrap();
-    assert!(!rt::tool_enabled(&repo, "hunter_person_enrichment")
+    assert!(!tool_state::tool_enabled(&repo, "firecrawl_crawl")
         .await
         .unwrap());
-    assert!(rt::tool_enabled(&repo, "firecrawl_crawl").await.unwrap());
-    assert!(rt::set_tool_enabled(&repo, "no_such_tool", true)
+    tool_state::set_tool_enabled(&repo, "hunter_person_enrichment", false)
+        .await
+        .unwrap();
+    tool_state::set_tool_enabled(&repo, "firecrawl_crawl", true)
+        .await
+        .unwrap();
+    assert!(!tool_state::tool_enabled(&repo, "hunter_person_enrichment")
+        .await
+        .unwrap());
+    assert!(tool_state::tool_enabled(&repo, "firecrawl_crawl")
+        .await
+        .unwrap());
+    assert!(tool_state::set_tool_enabled(&repo, "no_such_tool", true)
         .await
         .is_err());
 }

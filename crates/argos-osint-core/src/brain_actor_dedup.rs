@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{json, Value};
 
 use crate::brain_actors as actors;
-use crate::recon::model_exec::DecisionsAdapter;
+use crate::model_exec::DecisionsAdapter;
 
 pub(crate) const VERSION: &str = if cfg!(feature = "nlp") {
     "actor-dedup-v2-nlp"

@@ -8,7 +8,7 @@ import {
   Sprite,
   SpriteMaterial,
 } from "three";
-import { landingColors } from "../shell/intel-theme";
+import { intelColors, landingColors } from "../shell/intel-theme";
 export function coreGlyph(
   core: boolean,
   alternate = false,
@@ -31,7 +31,7 @@ export function coreGlyph(
   const context = canvas.getContext("2d");
   if (context) {
     const gradient = context.createRadialGradient(32, 32, 0, 32, 32, 32);
-    gradient.addColorStop(0, "#FFFFFF");
+    gradient.addColorStop(0, intelColors.text);
     gradient.addColorStop(1, "transparent");
     context.fillStyle = gradient;
     context.fillRect(0, 0, 64, 64);

@@ -43,6 +43,19 @@ pub const PRECISION_TARGET_DENOMINATOR: u64 = 10;
 /// Canonical schema version for isotonic domain calibration.
 pub const CALIBRATION_VERSION: &str = "domain-calibration-family-v2";
 
+/// Unfitted NLI scores gated directly by the operator-selected threshold.
+pub const ZERO_SHOT_GATE_VERSION: &str = "rust-bert-mnli-threshold-v1";
+
+pub(crate) fn gate_version_for_model(model_id: &str) -> &'static str {
+    if model_id.strip_prefix("bert-").is_some_and(|suffix| {
+        suffix.len() == 59 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        ZERO_SHOT_GATE_VERSION
+    } else {
+        CALIBRATION_VERSION
+    }
+}
+
 /// Maximum weak-training families per provider per activation (256).
 pub const MAX_WEAK_FAMILIES_PER_PROVIDER: usize = 256;
 
@@ -83,6 +96,19 @@ pub struct DomainCalibration {
 pub struct GateSet {
     pub version: String,
     pub domains: [DomainCalibration; 6],
+}
+
+pub(super) fn zero_shot_gates(threshold: f64) -> GateSet {
+    GateSet {
+        version: ZERO_SHOT_GATE_VERSION.into(),
+        domains: DomainId::ALL.map(|domain| DomainCalibration {
+            domain,
+            sigmoid: Some([1.0, 0.0]),
+            knots: Vec::new(),
+            threshold,
+            min_informative_features: 0,
+        }),
+    }
 }
 
 impl ReceiptPolicy for GateSet {
@@ -490,14 +516,25 @@ fn validate_domain_calibration(calibration: &DomainCalibration) -> Result<(), Cl
 }
 
 fn validate_gates(gates: &GateSet) -> Result<(), ClassifierError> {
-    if gates.version != CALIBRATION_VERSION {
+    let zero_shot = gates.version == ZERO_SHOT_GATE_VERSION;
+    if !zero_shot && gates.version != CALIBRATION_VERSION {
         return Err(invalid_calibration("unsupported_calibration_version"));
     }
     for (domain, calibration) in DomainId::ALL.iter().zip(&gates.domains) {
         if *domain != calibration.domain {
             return Err(invalid_calibration("noncanonical_gate_domains"));
         }
-        validate_domain_calibration(calibration)?;
+        if zero_shot {
+            if !(0.5..1.0).contains(&calibration.threshold)
+                || calibration.min_informative_features != 0
+                || calibration.sigmoid != Some([1.0, 0.0])
+                || !calibration.knots.is_empty()
+            {
+                return Err(invalid_calibration("invalid_zero_shot_gate"));
+            }
+        } else {
+            validate_domain_calibration(calibration)?;
+        }
     }
     Ok(())
 }
@@ -970,6 +1007,20 @@ fn make_receipt(
     receipt
 }
 
+pub(crate) fn input_rejection(input: &ClassifyInput) -> Option<RejectionReason> {
+    if input.title.trim().is_empty() && input.description.trim().is_empty() {
+        return Some(RejectionReason::Blank);
+    }
+    let language = input
+        .language
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    (!language.is_empty() && language != "en" && !language.starts_with("en-"))
+        .then_some(RejectionReason::UnsupportedLanguage)
+}
+
 /// Applies calibrated gates to live classifier raw scores, enforcing:
 /// 1. Minimum informative feature gates.
 /// 2. Calibrated relevance threshold gates.
@@ -995,8 +1046,15 @@ pub fn apply_gates(
             reason: "input_hash_mismatch".into(),
         });
     }
-    // 1. Check blank input
-    if input.title.trim().is_empty() && input.description.trim().is_empty() {
+    let zero_shot = gates.version == ZERO_SHOT_GATE_VERSION;
+    if gates.version != gate_version_for_model(model_id.as_str()) {
+        return Err(invalid_calibration("model_gate_version_mismatch"));
+    }
+    let rejection = input_rejection(input).or_else(|| {
+        (!zero_shot && raw.iter().all(|score| score.known_feature_count == 0))
+            .then_some(RejectionReason::WhollyOov)
+    });
+    if let Some(reason) = rejection {
         let scores = DomainId::ALL
             .iter()
             .enumerate()
@@ -1017,62 +1075,7 @@ pub fn apply_gates(
             raw,
             scores,
             Vec::new(),
-            Some(RejectionReason::Blank),
-        ));
-    }
-
-    // 2. Check unsupported language if language tag is provided
-    if let Some(lang) = &input.language {
-        let lang_lower = lang.trim().to_ascii_lowercase();
-        if !lang_lower.is_empty() && lang_lower != "en" && !lang_lower.starts_with("en-") {
-            let scores = DomainId::ALL
-                .iter()
-                .enumerate()
-                .map(|(idx, &domain)| DomainScore {
-                    domain,
-                    raw_log_odds: raw[idx].raw_log_odds,
-                    calibrated_score: 0.0,
-                    threshold: gates.domains[idx].threshold,
-                    informative_features: raw[idx].known_feature_count,
-                    oov_features: raw[idx].oov_count,
-                    passes_gate: false,
-                })
-                .collect();
-            return Ok(make_receipt(
-                input,
-                model_id,
-                gates,
-                raw,
-                scores,
-                Vec::new(),
-                Some(RejectionReason::UnsupportedLanguage),
-            ));
-        }
-    }
-
-    // 3. Check wholly OOV (zero known features across all 6 domains)
-    if raw.iter().all(|s| s.known_feature_count == 0) {
-        let scores = DomainId::ALL
-            .iter()
-            .enumerate()
-            .map(|(idx, &domain)| DomainScore {
-                domain,
-                raw_log_odds: raw[idx].raw_log_odds,
-                calibrated_score: 0.0,
-                threshold: gates.domains[idx].threshold,
-                informative_features: raw[idx].known_feature_count,
-                oov_features: raw[idx].oov_count,
-                passes_gate: false,
-            })
-            .collect();
-        return Ok(make_receipt(
-            input,
-            model_id,
-            gates,
-            raw,
-            scores,
-            Vec::new(),
-            Some(RejectionReason::WhollyOov),
+            Some(reason),
         ));
     }
 
@@ -1081,7 +1084,11 @@ pub fn apply_gates(
         .iter()
         .enumerate()
         .map(|(idx, &domain)| {
-            let rel = score(raw[idx].raw_log_odds, &gates.domains[idx])?;
+            let rel = if zero_shot {
+                sigmoid(raw[idx].raw_log_odds)
+            } else {
+                score(raw[idx].raw_log_odds, &gates.domains[idx])?
+            };
             let passes = raw[idx].known_feature_count
                 >= gates.domains[idx].min_informative_features
                 && rel >= gates.domains[idx].threshold;

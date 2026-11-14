@@ -221,10 +221,8 @@ async fn navigation_is_read_only_and_explicit_generation_is_single_flight() {
                 .unwrap()
                 .expect("timed generation uses the actual persisted request/fallback");
         assert!(frozen.deterministic.is_some());
-        let runtime = argos_osint_core::recon::model_exec::RoleRuntime::new(
-            Default::default(),
-            Default::default(),
-        );
+        let runtime =
+            argos_osint_core::model_exec::RoleRuntime::new(Default::default(), Default::default());
         assert!(argos_osint_core::brain_neighborhood_brief_exec::generate(
             &runtime,
             None,

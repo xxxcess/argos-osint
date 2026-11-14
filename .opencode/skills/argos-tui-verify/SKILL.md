@@ -1,7 +1,11 @@
 ---
 name: argos-tui-verify
-description: Implement and verify Argos terminal components, layout, focus and mouse behavior using deterministic TestBackend cell dumps and screenshot review. Use for TUI changes in this repo.
+description: Historical reference for retired terminal components and their recorded TestBackend/PNG evidence. Do not use for current Rune or React work.
 ---
+
+# Historical terminal verification
+
+> Historical only: the terminal executables were retired on 2026-11-12. Do not execute the commands below for new work. Use [Rune verification](../fleetworks-rune-verify/SKILL.md) or the React skills. [Disposition](../../../docs/archive/cli-retirement.md).
 
 Use the canonical [agent workflow](../../../docs/wiki/code/agent-workflow.md) with the active host's roles and existing authorization. OpenCode-only restrictions apply when that profile is explicitly selected.
 

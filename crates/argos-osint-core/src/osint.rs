@@ -14,16 +14,21 @@ use std::{
 use tokio::sync::{Mutex, Semaphore};
 use url::Url;
 
+use crate::storage::repo::Repository;
+
 pub(crate) mod atlas_news;
 pub mod contracts;
 pub mod dataset;
 pub mod dork_generator;
 pub mod holehe;
+pub(crate) mod host_policy;
+pub mod manual;
 mod news_legal;
 mod providers;
 pub mod results;
 pub mod search_engines;
 pub mod source_eval;
+pub mod tool_runner;
 pub mod whatsmyname;
 pub mod whoxy;
 pub mod wikipedia_rsp;
@@ -1617,6 +1622,15 @@ pub(crate) fn no_results(id: &str, value: &Value) -> bool {
         .is_some_and(Vec::is_empty)
 }
 
+/// Reserved provider credits awaiting reconciliation or release.
+#[derive(Clone, Debug)]
+pub struct CreditHold {
+    pub id: String,
+    pub provider: String,
+    pub trial_credits: u32,
+    pub allowance_credits: u32,
+}
+
 // ---------------------------------------------------------------------------
 // Best-effort tool telemetry (spec §10)
 // ---------------------------------------------------------------------------
@@ -1628,7 +1642,7 @@ fn note_telemetry(event: crate::telemetry::TelemetryEvent) {
     let path = crate::paths::db_path();
     // Under SurrealDB `telemetry::record` writes to the repository, so the
     // legacy side-store file is neither needed nor created.
-    if !path.exists() && !crate::recon::backend::surreal_selected() {
+    if !path.exists() && !crate::storage::runtime::configured() {
         return;
     }
     let _ = crate::telemetry::record(&path, &event);
@@ -2287,6 +2301,29 @@ pub struct ProviderKeys {
 }
 
 impl ProviderKeys {
+    /// Current backend configuration only, with no inherited environment keys.
+    pub fn from_saved_settings(settings: &crate::provider::SettingsFile) -> Self {
+        Self {
+            firecrawl: settings.saved_key("firecrawl").to_owned(),
+            firecrawl_fallback: settings.saved_fallback_key("firecrawl").to_owned(),
+            hunter: settings.saved_key("hunter").to_owned(),
+            hunter_fallback: settings.saved_fallback_key("hunter").to_owned(),
+            sociavault: settings.saved_key("sociavault").to_owned(),
+            sociavault_fallback: settings.saved_fallback_key("sociavault").to_owned(),
+            newsapi: settings.saved_key("newsapi").to_owned(),
+            newsapi_fallback: settings.saved_fallback_key("newsapi").to_owned(),
+            courtlistener: settings.saved_key("courtlistener").to_owned(),
+            courtlistener_fallback: settings.saved_fallback_key("courtlistener").to_owned(),
+            gnews: settings.saved_key("gnews").to_owned(),
+            gnews_fallback: settings.saved_fallback_key("gnews").to_owned(),
+            newsdata: settings.saved_key("newsdata").to_owned(),
+            newsdata_fallback: settings.saved_fallback_key("newsdata").to_owned(),
+            currents: settings.saved_key("currents").to_owned(),
+            currents_fallback: settings.saved_fallback_key("currents").to_owned(),
+            whoxy: settings.saved_key("whoxy").to_owned(),
+            whoxy_fallback: settings.saved_fallback_key("whoxy").to_owned(),
+        }
+    }
     /// Keys from the configured provider settings (primary + fallback).
     pub fn from_settings(settings: &crate::provider::SettingsFile) -> Self {
         Self {
@@ -2668,6 +2705,50 @@ fn redact_key(result: &mut ToolResult, credential: &Option<(reqwest::header::Hea
     }
 }
 
+// Manual API results carry structured observations and omit raw provider bytes.
+fn redact_manual_result(result: &mut ToolResult, tool: &str, keys: &ProviderKeys) {
+    fn scrub(value: &mut Value, secret: &str) {
+        match value {
+            Value::String(text) => *text = text.replace(secret, "[redacted]"),
+            Value::Array(values) => values.iter_mut().for_each(|value| scrub(value, secret)),
+            Value::Object(values) => {
+                *values = std::mem::take(values)
+                    .into_iter()
+                    .map(|(name, mut value)| {
+                        scrub(&mut value, secret);
+                        (name.replace(secret, "[redacted]"), value)
+                    })
+                    .collect();
+            }
+            _ => {}
+        }
+    }
+
+    result.raw.clear();
+    if let Some(provider) = keyed_provider(tool) {
+        let (primary, fallback) = keys.pair(provider);
+        for secret in [primary.trim(), fallback.trim()] {
+            if secret.is_empty() {
+                continue;
+            }
+            result.source_url = result.source_url.replace(secret, "[redacted]");
+            if let Some(error) = &mut result.error {
+                *error = error.replace(secret, "[redacted]");
+            }
+            scrub(&mut result.inputs, secret);
+            scrub(&mut result.observations, secret);
+        }
+    }
+    if let Some(error) = &mut result.error {
+        *error = crate::provider_diag::sanitize(error);
+    }
+    // Keep the response comfortably within the 4 MiB client body limit.
+    if result.observations.to_string().len() > 3 * 1024 * 1024 {
+        result.observations = Value::Null;
+        result.truncated = true;
+    }
+}
+
 /// Test-only base URLs for fixed hosts, so executor tests can reach a local server.
 #[cfg(test)]
 pub(crate) static TEST_BASES: std::sync::Mutex<Vec<(String, String)>> =
@@ -2727,11 +2808,79 @@ fn request_headers(
     headers
 }
 
+const NEWSAPI_PRIMARY_BUCKET: &str = "newsapi";
+const NEWSAPI_FALLBACK_BUCKET: &str = "newsapi:fallback";
+
+struct NewsApiQuota<'a> {
+    repository: &'a Repository,
+    day: String,
+}
+
+impl NewsApiQuota<'_> {
+    async fn reserve(&self, bucket: &str) -> Result<bool> {
+        Ok(crate::storage::atlas::quota_reserve(
+            self.repository.db(),
+            bucket,
+            &self.day,
+            crate::atlas::daily_cap(NEWSAPI_PRIMARY_BUCKET),
+            None,
+        )
+        .await?)
+    }
+
+    async fn reserve_initial_key<'a>(
+        &self,
+        id: &str,
+        chosen: &'a str,
+        primary: &str,
+        fallback: &'a str,
+    ) -> Result<Option<&'a str>> {
+        header_for(id, chosen)?;
+        if chosen != primary {
+            return Ok(self
+                .reserve(NEWSAPI_FALLBACK_BUCKET)
+                .await?
+                .then_some(chosen));
+        }
+        if self.reserve(NEWSAPI_PRIMARY_BUCKET).await? {
+            return Ok(Some(chosen));
+        }
+        if fallback.is_empty() || fallback == primary {
+            return Ok(None);
+        }
+        header_for(id, fallback)?;
+        Ok(self
+            .reserve(NEWSAPI_FALLBACK_BUCKET)
+            .await?
+            .then_some(fallback))
+    }
+}
+
+async fn transfer_newsapi_quota(
+    quota: Option<&NewsApiQuota<'_>>,
+    id: &str,
+    fallback: &str,
+) -> Result<bool> {
+    let Some(quota) = quota else {
+        return Ok(true);
+    };
+    header_for(id, fallback)?;
+    Ok(crate::storage::atlas::quota_reserve(
+        quota.repository.db(),
+        NEWSAPI_FALLBACK_BUCKET,
+        &crate::atlas::utc_day(),
+        crate::atlas::daily_cap(NEWSAPI_PRIMARY_BUCKET),
+        Some((NEWSAPI_PRIMARY_BUCKET, &quota.day)),
+    )
+    .await?)
+}
+
 #[derive(Clone)]
 pub struct Executor {
     client: reqwest::Client,
     global: Arc<Semaphore>,
     hosts: HostSchedule,
+    newsapi_quota: Option<Repository>,
 }
 impl Executor {
     pub fn new() -> Result<Self> {
@@ -2752,8 +2901,16 @@ impl Executor {
             client: shared.0.clone(),
             global: shared.1.clone(),
             hosts: shared.2.clone(),
+            newsapi_quota: None,
         })
     }
+
+    /// Share Atlas' daily account buckets with storage-backed NewsAPI calls.
+    pub(crate) fn with_newsapi_quota(mut self, repository: Option<Repository>) -> Self {
+        self.newsapi_quota = repository;
+        self
+    }
+
     async fn pace_host(&self, host: &str, interval: Duration) {
         let delay = {
             let mut hosts = self.hosts.lock().await;
@@ -3047,6 +3204,38 @@ impl Executor {
         };
         self.pace_host(&host, interval).await;
         let chosen = select_key(&primary_key, &fallback_key);
+        let newsapi_quota = self
+            .newsapi_quota
+            .as_ref()
+            .filter(|_| news_legal::provider(id) == Some(NEWSAPI_PRIMARY_BUCKET))
+            .map(|repository| NewsApiQuota {
+                repository,
+                day: crate::atlas::utc_day(),
+            });
+        let chosen = if let Some(quota) = &newsapi_quota {
+            let Some(chosen) = quota
+                .reserve_initial_key(id, chosen, &primary_key, &fallback_key)
+                .await?
+            else {
+                return Ok(ToolResult {
+                    tool_id: id.into(),
+                    inputs,
+                    status: "rate_limited".into(),
+                    source_url: public_source_url(&req.url),
+                    retrieved_at: Utc::now().to_rfc3339(),
+                    observations: Value::Null,
+                    raw: String::new(),
+                    error: Some("NewsAPI local daily quota is exhausted".into()),
+                    cached: false,
+                    truncated: false,
+                    credits_charged: 0,
+                    credits_reported: None,
+                });
+            };
+            chosen
+        } else {
+            chosen
+        };
         let mut using_primary = !primary_key.is_empty() && chosen == primary_key;
         let mut switched = false;
         let (mut url, mut credential, mut send_credential) = if keyed_provider(id).is_some() {
@@ -3268,9 +3457,12 @@ impl Executor {
                     && fallback_key != primary_key
                     && quota_limited(&result.status, result.error.as_deref())
                 {
+                    note_key_exhausted(&primary_key);
+                    if !transfer_newsapi_quota(newsapi_quota.as_ref(), id, &fallback_key).await? {
+                        return Ok(result);
+                    }
                     switched = true;
                     using_primary = false;
-                    note_key_exhausted(&primary_key);
                     (url, credential, send_credential) = bind_request(id, &req.url, &fallback_key)?;
                     attempts = 0;
                     continue;
@@ -3381,9 +3573,14 @@ impl Executor {
                         && fallback_key != primary_key
                         && quota_limited(&result.status, result.error.as_deref())
                     {
+                        note_key_exhausted(&primary_key);
+                        if !transfer_newsapi_quota(newsapi_quota.as_ref(), id, &fallback_key)
+                            .await?
+                        {
+                            return Ok(result);
+                        }
                         switched = true;
                         using_primary = false;
-                        note_key_exhausted(&primary_key);
                         (url, credential, send_credential) =
                             bind_request(id, &req.url, &fallback_key)?;
                         attempts = 0;

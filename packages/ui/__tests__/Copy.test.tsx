@@ -1,7 +1,7 @@
 import React from "react";
 import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
-import { Copy } from "@argos/ui";
+import { colors, Copy } from "@argos/ui";
 import { paint, sheetProp } from "../../../vitest.test-support";
 
 describe("Copy (real @argos/ui component)", () => {
@@ -18,10 +18,10 @@ describe("Copy (real @argos/ui component)", () => {
     const copy = screen.getByText(
       "Connections preserve their recorded meaning.",
     );
-    expect(paint(copy, "color")).toBe("#b5b5b5"); // dim
+    expect(paint(copy, "color")).toBe(colors.dim.toLowerCase());
     // Copy is never accent or muted in this role.
-    expect(paint(copy, "color")).not.toBe("#87bfff");
-    expect(paint(copy, "color")).not.toBe("#919191");
+    expect(paint(copy, "color")).not.toBe(colors.accent.toLowerCase());
+    expect(paint(copy, "color")).not.toBe(colors.muted.toLowerCase());
   });
 
   it("keeps long prose visible without clipping", () => {

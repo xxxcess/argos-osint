@@ -8,11 +8,11 @@ On-demand analytical refresh requires complete retained acquisition coverage, ma
 
 **Intel brief cleanup (Stage 1).** The order is local baseline → NLP annotation (cached by prose hash) → conditional Classifier → local verbatim removals → revalidation, span maps and content hash (`intel_recon::clean_body`). NLP mentions in the body that the title or description also names become **keep-anchors** (`nlp_anchors`), along with title/description proper-noun tokens. A short block naming such an entity (for example "the harbour master said…") is kept without a model decision. Anchors only add keep-confidence; they never make a block removable. Without NLP, title/description tokens remain the anchors and Stage 1 completes with a diagnostic.
 
-Argos embeds pinned Compromise 14.18.0 and dates 3.9.0 through rquickjs 0.14.0. No Node, browser, loader, network or subprocess is used at runtime. Candidate tags rank source passages; existing identifier, ownership, claim and publication gates remain authoritative.
+Fleetworks embeds pinned Compromise 14.18.0 and dates 3.9.0 through rquickjs 0.14.0. No Node, browser, loader, network or subprocess is used at runtime. Candidate tags rank source passages; existing identifier, ownership, claim and publication gates remain authoritative.
 
 Standalone calendar months tagged Person are excluded in temporal contexts (for example “in August” or a matching retained date span). Full names such as August Wilson and May Chen remain eligible. The guard applies to article Actors, ingest Related overlap and investigation entity preparation. Failed article metadata retains bounded parser flags as well as status, so unavailable inventory can be diagnosed without triggering a model fallback. Explicit NLP cache connections use initialized lightweight Stores and never repeat migrations or attach vectors.
 
-[![NLP evidence flow](../../diagrams/nlp-preprocessing.svg)](../../diagrams/nlp-preprocessing.html)
+![NLP evidence flow](../../diagrams/nlp-preprocessing.svg)
 
 ## Actor label maintenance
 
@@ -140,7 +140,7 @@ For the 53,711-byte scripted summary source, serialized request bodies were 12,8
 
 ## Classifier-owned cleanup and mode decisions (2026-10-13)
 
-Article/prompt mode classification and page cleanup run through the complete Classifier chain. With a native Jev route they are bounded decisions (questions keyed by stable mode / block IDs, strict labels); otherwise the first chat-capable fallback receives the equivalent JSON contract. Cleanup answers keep/remove per known block ID and Rust computes the irrelevant ranges, so retained text stays verbatim. Memory predicate/time relevance runs on Evidence Curator; identity checks on Entity Resolver; assessment batches are partitioned by owning role (≤8). Figure: [recon-turn](../../diagrams/recon-turn.html).
+Article/prompt mode classification and page cleanup run through the complete Classifier chain. With a native Jev route they are bounded decisions (questions keyed by stable mode / block IDs, strict labels); otherwise the first chat-capable fallback receives the equivalent JSON contract. Cleanup answers keep/remove per known block ID and Rust computes the irrelevant ranges, so retained text stays verbatim. Memory predicate/time relevance runs on Evidence Curator; identity checks on Entity Resolver; assessment batches are partitioned by owning role (≤8).
 
 ## Claim-specific Intel inference evidence (2026-10-16)
 

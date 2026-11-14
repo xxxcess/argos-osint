@@ -1,0 +1,14 @@
+{
+  "version": "3.3.4",
+  "release_url_template": "https://github.com/surrealdb/surrealdb/releases/download/v{v}/surreal-v{v}.{p}.tgz",
+  "checksum_provenance": {
+    "recorded": "2026-10-22",
+    "method": "SHA-256 computed from official GitHub release archives because the release did not publish checksums"
+  },
+  "archive_sha256": {
+    "linux-amd64": "6593071833ad9c85cf533cf70b1643eb08966c868f8624001e30839ea29a2689",
+    "linux-arm64": "978262fd9d1f3adfc5791031663855baf0a3cf8a89883428109734ba5a065811",
+    "darwin-amd64": "0723b555340da2cee1e0cff6f95552438536eab8d984b91f227b3ce2d52a5006",
+    "darwin-arm64": "d0b0afc47948a46ceac9db178d2a10a7eb21e1c4f219a74b3573c850122ed9fb"
+  }
+}

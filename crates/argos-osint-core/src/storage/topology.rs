@@ -28,7 +28,7 @@ use super::provenance::ACTOR_MENTIONS_SURQL;
 use super::publisher::CHANGED_COUNTER;
 use super::repo::Repository;
 use super::tx::{run_tx, RetryPolicy, Tx, TxError};
-use super::{atlas, recon};
+use super::{atlas, thread_history};
 use crate::brain::{Memory, MemorySource};
 use crate::brain_neighborhood_brief::{self as brief, BriefInput, MAX_PAYLOAD_READS};
 use crate::brain_topology::{
@@ -1215,11 +1215,13 @@ impl Query<'_> {
                 let neighbour = if kind == "article" {
                     self.article_node(scope, id, revision).await?
                 } else if kind == "thread" {
-                    recon::get_thread_on(&*self.tx, id).await?.map(|t| {
-                        let mut s = source_node("thread", id, revision);
-                        s.label = t.title;
-                        s
-                    })
+                    thread_history::get_thread_on(&*self.tx, id)
+                        .await?
+                        .map(|t| {
+                            let mut s = source_node("thread", id, revision);
+                            s.label = t.title;
+                            s
+                        })
                 } else {
                     Some(source_node(kind, id, revision))
                 };
@@ -1432,7 +1434,7 @@ impl Query<'_> {
             let threads: BTreeSet<String> =
                 sources.iter().filter_map(|s| s.thread_id.clone()).collect();
             for thread in self.bound(threads.into_iter().collect()) {
-                if let Some(t) = recon::get_thread_on(&*self.tx, &thread).await? {
+                if let Some(t) = thread_history::get_thread_on(&*self.tx, &thread).await? {
                     let mut s = source_node("thread", &thread, "");
                     s.label = t.title;
                     out.push((
@@ -2129,7 +2131,10 @@ impl Query<'_> {
                     ));
                 }
             }
-        } else if origin == "thread" && recon::get_thread_on(&*self.tx, &source_id).await?.is_some()
+        } else if origin == "thread"
+            && thread_history::get_thread_on(&*self.tx, &source_id)
+                .await?
+                .is_some()
         {
             let mut r = stmt(
                 self.tx

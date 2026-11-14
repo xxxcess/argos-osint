@@ -26,9 +26,11 @@ an agent session does not make it a repository deliverable.
 | Raw simulation JSON, tool output, diagnostic logs, generated cells/PNGs/galleries and duplicate capture runs | Local evidence; ignored in named task directories. Promote only a small, referenced fixture selection to `docs/screenshots/` when it demonstrates a distinct contract. |
 | `.planning/.active_plan`, host handoffs, session IDs, caches and environments | Local runtime state. OpenCode automatic handoffs stay in plugin storage. |
 
+For a cutover, record a reviewed disposition for each shared plan or archive before moving it. Keep revision-bound evidence and open obligations. Link superseded instructions to the maintained contract in the disposition record. The [Fleetworks dispositions](../../../.planning/2026-11-09-fleetworks-overhaul/decisions.md) identify the retained, superseded and pending surfaces. The already-tracked Fleetworks plan remains the shared handoff for this cutover.
+
 When an ad hoc task needs planning artifacts, use `.planning/<YYYY-MM-DD-slug>/`. Git ignores their contents by
-default, with exceptions for the four curated Markdown names above at the task
-directory root. An exception makes a file eligible, not mandatory. Existing
+default, with exceptions for the curated Markdown names above and numbered
+phase designs at the task directory root. An exception makes a file eligible, not mandatory. Existing
 non-dated shared planning records require individual review; inspect their
 contents rather than adding the whole `.planning/` tree. New non-dated task
 folders must follow the same policy even if Git does not ignore them automatically.

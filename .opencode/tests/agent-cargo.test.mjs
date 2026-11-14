@@ -35,14 +35,24 @@ test("agent Cargo isolates inherited targets, forwards arguments and preserves f
   }
 });
 
-test("fixture capture uses the shared isolated Cargo policy", () => {
+test("native fixture capture uses the shared isolated Cargo policy", () => {
   const result = spawnSync("python3", ["-B", "-c", `
+import os
 import sys
 sys.path.insert(0, ${JSON.stringify(join(root, "scripts"))})
-import tui_review
-assert tui_review.cargo_env()["CARGO_TARGET_DIR"] == str(tui_review.TARGET_DIR)
-command = tui_review.cargo_command(["test", "--locked", "--no-default-features"])
-assert command[2:4] == ["--target-dir", str(tui_review.TARGET_DIR)]
+import agent_cargo
+import fleetworks_native_verify as native
+command = native.build_command(agent=True)
+assert command[:2] == [sys.executable, str(agent_cargo.ROOT / "scripts/agent_cargo.py")]
+assert command[2:] == ["build", "--locked", "-p", "fleetworks-desktop", "--example", "native_fixture", "--message-format=json-render-diagnostics"]
+wrapped = agent_cargo.cargo_command(command[2:])
+assert wrapped[:4] == ["cargo", "build", "--target-dir", str(agent_cargo.TARGET_DIR)]
+assert wrapped[4:] == command[3:]
+os.environ["ARGOS_EMBED"] = "1"
+os.environ["CARGO_TARGET_DIR"] = str(agent_cargo.ROOT / "target")
+environment = agent_cargo.cargo_env()
+assert "ARGOS_EMBED" not in environment
+assert environment["CARGO_TARGET_DIR"] == str(agent_cargo.TARGET_DIR)
 `], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
 });

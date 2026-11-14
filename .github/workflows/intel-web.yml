@@ -1,48 +1,41 @@
 name: Intel web
 
 on:
-  push:
-    branches: [main]
-    paths: &web_paths
-      - 'apps/web-desktop/**'
-      - 'packages/**'
-      - 'tests/web/**'
-      - 'crates/argos-osint-bin/src/stack/**'
-      - 'scripts/test_web_stack.py'
-      - 'scripts/serve_web.mjs'
-      - 'scripts/check_web_build.mjs'
-      - 'package.json'
-      - 'pnpm-lock.yaml'
-      - 'pnpm-workspace.yaml'
-      - '.node-version'
-      - '.nvmrc'
-      - 'tsconfig.json'
-      - 'eslint.config.mjs'
-      - 'playwright.config.ts'
-      - 'vitest*.ts'
-      - 'vitest*.tsx'
-      - '.github/workflows/intel-web.yml'
-  pull_request:
-    paths: *web_paths
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      head:
+        description: Exact event commit to check out and verify
+        type: string
+        required: true
+      development:
+        description: Also run the development browser suite
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: intel-web-${{ github.event.pull_request.number || github.ref }}
+  group: intel-web-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   web:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    env:
+      FLEETWORKS_HEAD: ${{ inputs.head || github.event.pull_request.head.sha || github.sha }}
+      ARGOS_WEB_TEST_DEV: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # API fixtures do not need the full actor catalog; datasets.yml checks it once.
+          ref: ${{ env.FLEETWORKS_HEAD }}
           lfs: false
           persist-credentials: false
+      - name: Verify the checked-out commit
+        run: test "$(git rev-parse HEAD)" = "$FLEETWORKS_HEAD"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version-file: .node-version
@@ -58,7 +51,7 @@ jobs:
           pnpm typecheck
           pnpm lint
       - name: Run offline unit and hook contracts
-        run: pnpm test
+        run: env -u ARGOS_WEB_TEST_DEV pnpm test
       - name: Build static export without API
         run: pnpm build
       - name: Verify compiled RN Web export
@@ -66,14 +59,20 @@ jobs:
       - name: Install test browser
         run: pnpm exec playwright install --with-deps chromium
       - name: Verify live relay and runtime lifecycle
+        env:
+          # Generated routes in the isolated output still require app-local pnpm modules.
+          NODE_PATH: ${{ github.workspace }}/apps/web-desktop/node_modules
         run: pnpm test:live
       - name: Run offline browser contracts
         env:
+          NODE_PATH: ${{ github.workspace }}/apps/web-desktop/node_modules
           ARGOS_WEB_CAPTURE_DIR: test-results/export-ui
           PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/export
         run: pnpm test:e2e --reporter=list,html --output=test-results/export
       - name: Run development browser contracts
+        if: inputs.head == '' || inputs.development
         env:
+          NODE_PATH: ${{ github.workspace }}/apps/web-desktop/node_modules
           ARGOS_WEB_PROFILE: dev
           ARGOS_WEB_CAPTURE_DIR: test-results/dev-ui
           PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/dev
@@ -82,7 +81,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: intel-web-verification
+          name: ${{ inputs.head != '' && 'fleetworks-web-verification' || 'intel-web-verification' }}
           path: |
             test-results/
             playwright-report/

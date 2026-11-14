@@ -284,9 +284,9 @@ pub(super) fn consume() -> Result<()> {
 
 /// Status label for one typed model-execution event, or `None` when the event
 /// must not touch durable state (heartbeats, provisional text).
-pub fn activity_label(event: &crate::recon::model_exec::ModelExecEvent) -> Option<String> {
+pub fn activity_label(event: &crate::model_exec::ModelExecEvent) -> Option<String> {
+    use crate::model_exec::ModelExecEvent as E;
     use crate::provider_attempt::AttemptProgress as P;
-    use crate::recon::model_exec::ModelExecEvent as E;
     Some(match event {
         E::AttemptStart { attempt, model, .. } => {
             format!("Waiting for output · attempt {attempt} · {model}")
@@ -343,9 +343,9 @@ pub fn activity_label(event: &crate::recon::model_exec::ModelExecEvent) -> Optio
 
 /// Logs message for activity transitions worth a durable event (attempt
 /// start, first model output, completion, failure, retry). Never per delta.
-pub fn activity_log_message(event: &crate::recon::model_exec::ModelExecEvent) -> Option<String> {
+pub fn activity_log_message(event: &crate::model_exec::ModelExecEvent) -> Option<String> {
+    use crate::model_exec::ModelExecEvent as E;
     use crate::provider_attempt::AttemptProgress as P;
-    use crate::recon::model_exec::ModelExecEvent as E;
     match event {
         E::AttemptStart {
             attempt,

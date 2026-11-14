@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 944" role="img" aria-labelledby="dev-loops-title dev-loops-desc">
+<title id="dev-loops-title">Fleetworks development loops: affected checks and explicit deployment</title>
+<desc id="dev-loops-desc">The external change planner maps changed paths or selected components to verification scopes and affected image targets. Native client work follows host validation, scoped shared debug Cargo, complete app packaging and explicit GUI or fixture review. Web source uses mounted app and package files with HMR and affected browser checks. Shared API and worker code uses the runtime image; the private actor index uses its separate search-index image. Dependency, Dockerfile, relay, configuration and Compose changes select the affected image or deployment loop. Image changes require explicit recreation of only the isolated owned services before affected behavior is verified. Dedicated workspace, project and ports protect the user stack while preserving existing data, useful images and reusable caches. Selected exact-revision hosted gates supply the relevant Mac and Linux platform evidence. Native app packaging and direct Docker operation are separate supported workflows.</desc>
+<defs><marker id="dev-loops-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker></defs>
+<style>text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}.label{font-size:20px;font-weight:600}.note{font-size:16px}.zone{font-size:13px;font-weight:600;letter-spacing:1px}.node{fill:#fff;stroke:#4f5d75}.accent{fill:#fff6ed;stroke:#eb6c36}.edge{fill:none;stroke:#4f5d75;stroke-width:2;marker-end:url(#dev-loops-arrow)}.minor{fill:#4f5d75;font-size:14px}.code{font-family:'Geist Mono',ui-monospace,monospace;font-size:14px}</style>
+<rect width="1320" height="944" fill="#f5f5f5"/>
+<text x="48" y="68" class="zone">EXTERNAL CHANGE PLANNER · CHECK, BUILD AND RECREATE ONLY THE AFFECTED COMPONENTS</text>
+
+<path d="M348 396H384V160H420" class="edge"/>
+<path d="M384 396V320H420" class="edge"/>
+<path d="M384 396V480H420" class="edge"/>
+<path d="M384 480V640H420" class="edge"/>
+<path d="M384 640V800H420" class="edge"/>
+<path d="M864 160H900V352H936" class="edge"/>
+<path d="M864 320H900V396H936" class="edge"/>
+<path d="M864 480H900V620H936" class="edge"/>
+<path d="M864 640H936" class="edge"/>
+<path d="M864 800H900V684H936" class="edge"/>
+<path d="M1104 584V464" class="edge"/>
+<path d="M1104 328V216" class="edge"/>
+
+<rect x="48" y="328" width="300" height="136" rx="6" class="accent"/>
+<text x="64" y="360" class="label">Change planner</text>
+<text x="64" y="390" class="code">fleetworks_verify.py plan</text>
+<text x="64" y="418" class="note">Paths / selected components</text>
+<text x="64" y="446" class="note">Reports scopes + affected images</text>
+
+<rect x="420" y="104" width="444" height="112" rx="6" class="node"/>
+<text x="436" y="136" class="label">Native Mac client loop</text>
+<text x="436" y="166" class="note">Host checks → shared debug → .app / manifest</text>
+<text x="436" y="194" class="note">Explicit open or selected same-view fixture</text>
+
+<rect x="420" y="264" width="444" height="112" rx="6" class="node"/>
+<text x="436" y="296" class="label">Web source: HMR + affected checks</text>
+<text x="436" y="326" class="note">Mounted app / package source; browser live reload</text>
+<text x="436" y="354" class="note">Relay / config / dependency inputs may rebuild</text>
+
+<rect x="420" y="424" width="444" height="112" rx="6" class="node"/>
+<text x="436" y="456" class="label">Shared runtime image</text>
+<text x="436" y="486" class="note">API / private services / durable workers</text>
+<text x="436" y="514" class="note">Focused host checks, then build the changed image</text>
+
+<rect x="420" y="584" width="444" height="112" rx="6" class="node"/>
+<text x="436" y="616" class="label">Dedicated search-index image</text>
+<text x="436" y="646" class="note">Private Linux query / ingestion / recovery</text>
+<text x="436" y="674" class="note">Search source changes rebuild this backend target</text>
+
+<rect x="420" y="744" width="444" height="112" rx="6" class="node"/>
+<text x="436" y="776" class="label">Image and deployment inputs</text>
+<text x="436" y="806" class="note">Locks / Dockerfiles / relay / config / Compose</text>
+<text x="436" y="834" class="note">Build affected runtime / web / datastore targets</text>
+
+<rect x="936" y="104" width="336" height="112" rx="6" class="node"/>
+<text x="952" y="136" class="label">Exact-revision hosted gates</text>
+<text x="952" y="166" class="note">Intel + Apple Silicon app lanes</text>
+<text x="952" y="194" class="note">Linux AMD64 / ARM64 backend lanes</text>
+
+<rect x="936" y="328" width="336" height="136" rx="6" class="accent"/>
+<text x="952" y="360" class="label">Verify affected behavior</text>
+<text x="952" y="390" class="note">Native / web / API / storage evidence</text>
+<text x="952" y="418" class="note">Selected fixtures + inspect images</text>
+<text x="952" y="446" class="note">Widen to required integration gates</text>
+
+<rect x="936" y="584" width="336" height="136" rx="6" class="node"/>
+<text x="952" y="616" class="label">Explicit owned recreation</text>
+<text x="952" y="646" class="note">Dedicated workspace / project / ports</text>
+<text x="952" y="674" class="note">Use the selected image tag / digest</text>
+<text x="952" y="702" class="note">Retain data and unrelated images</text>
+
+<text x="48" y="892" class="minor">Preserve useful debug / BuildKit caches, data and images; isolate review work from the user's running stack.</text>
+<text x="48" y="920" class="minor">Native app startup connects to the gateway; direct Docker commands own backend lifecycle.</text>
+</svg>

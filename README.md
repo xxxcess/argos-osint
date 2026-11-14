@@ -1,211 +1,114 @@
-# Argos OSINT
+# Fleetworks
 
-Argos is a terminal investigation workspace. It gathers public sources, binds evidence, and writes cited answers.
+<p align="center">
+  <img src="assets/brand/fleetworks-logo.jpg" alt="Fleetworks emblem with five gold rays, an ivory disc, and a gold crescent" width="960">
+</p>
 
-Home launches four applications — **Intel**, **Atlas**, **Brain**, **Recon** — and five system surfaces: **Jobs**, **Logs**, **Tools**, **Models**, **Profile**.
+Fleetworks collects public-source intelligence, connects evidence to actors and articles, and prepares cited Focus Briefs. Fleetworks Desktop is a native Rune macOS control hub connected to an independently operated Linux backend. Intel Web provides the browser desktop. Backend services are deployed directly with Docker Compose.
 
-Only Recon has a chat. Everything else is fields, lists, and buttons. Observations are retrieved data with a timestamp. They are not proof of identity or ownership.
-
-[Docs](docs/README.md) · [Usage](docs/wiki/concepts/usage.md) · [Figures](docs/diagrams.md) · [Releases](docs/wiki/code/versioning.md) · [Changelog](CHANGELOG.md)
-
-[![Argos workspace](docs/diagrams/workspace.svg)](docs/diagrams/workspace.html)
-
-## Tech stack
-
-| Layer | Current implementation |
-| --- | --- |
-| CLI and core | Rust 1.95.0, Tokio, Clap; shared core plus CLI/TUI and local API crates |
-| Terminal UI | Ratatui 0.30 and Crossterm 0.28; shared theme, measured keyboard/mouse targets and deterministic terminal fixtures |
-| Persistence | SurrealDB 3.3.4; default in-process RocksDB storage, optional loopback SurrealDB server mode |
-| Local HTTP API | Axum 0.8 with typed `/api/v1` projections and storage-backed readiness; Rust owns data and workers |
-| Web UI | React 19.2.3, React Native 0.86.3 primitives mapped through React Native Web 0.21.4; Next.js 16.4.3 static export and development server |
-| React compilation and state | React Compiler 1.0.0; TanStack Query 5.104.5 for async/cache/cursor state, Context for connection/preferences, app adapters for browser settings |
-| JavaScript toolchain | Node 24.22.1, pnpm 12.15.0, TypeScript 5.9.3; pinned workspace manifests and frozen lockfile |
-| Providers and local NLP | Reqwest/rustls, QuickJS via rquickjs, tokenizers and tract-onnx; live provider/model execution is separate from offline tests |
-| Quality and CI | rustfmt, Clippy, Cargo/storage/process tests; ESLint 9 with Hooks/compiler rules; Playwright 1.64.1 export/dev browser fixtures; GitHub Actions |
-
-Versions and feature ownership are defined in [Cargo.toml](Cargo.toml), the [frontend manifests](package.json) and [web app manifest](apps/web-desktop/package.json). See the [architecture](docs/wiki/code/architecture.md), [React UI contract](docs/wiki/code/react-ui.md) and [CI guide](docs/wiki/code/ci.md). Expo mobile apps, Tauri desktop bundles and native-platform validation remain planned; the current native primitives do not imply shipped native clients.
-
-## Applications
-
-| App | What it does | Read more |
-| --- | --- | --- |
-| Intel | Browse Atlas headlines and prepare a cited Focus Brief with ingest-related articles | [Usage](docs/wiki/concepts/usage.md#intel) · [Brief](docs/diagrams/intel-brief-chain.html) |
-| Atlas | Classifier-only news collection, country heat, local metadata and Related leads | [Usage](docs/wiki/concepts/usage.md#atlas) · [Cycle](docs/diagrams/atlas-pipeline.html) |
-| Brain | Claims, unique Actor names and navigable associations with read-only graphs | [Usage](docs/wiki/concepts/usage.md#brain) · [Browse](docs/diagrams/brain-browse.html) · [Recall](docs/diagrams/brain-recall.html) |
-| Recon | Evidence-driven investigations with a planner, binder, and synthesis | [Usage](docs/wiki/concepts/usage.md#recon) · [Architecture](docs/wiki/code/architecture.md) · [Turn](docs/diagrams/recon-turn.html) |
-| Tools | Manual OSINT catalog (internal id `Osint`) | [Providers](docs/wiki/concepts/providers.md) · [Catalog](docs/diagrams/osint-providers.html) |
-| Models | Role defaults and OpenRouter / Google / Nvidia accounts (`Providers`) | [Providers](docs/wiki/concepts/providers.md) · [Roles](docs/diagrams/model-roles.html) |
-| Jobs / Logs | Background work and durable events | [Usage](docs/wiki/concepts/usage.md#other-apps) · [Jobs](docs/diagrams/jobs-lifecycle.html) |
-| Profile | Host hardware and storage paths (`System`) | [Concepts](docs/wiki/concepts/glossary.md) |
+[Native app](apps/fleetworks-desktop/README.md) · [Connections](docs/wiki/code/native-connections.md) · [Setup and usage](docs/wiki/code/fleetworks.md) · [Deployment](deploy/README.md) · [Wiki](docs/index.md) · [Releases](docs/wiki/code/versioning.md)
 
 ## Quick start
 
-Rust **1.95.0** is pinned. The first build needs a C toolchain (`xcode-select --install` on macOS). Protoc is vendored. Run these commands from the repository root.
+### Native macOS app
 
-### Terminal app
-
-```sh
-cargo run --locked -p argos-osint-bin
-# Or build once and open the service menu:
-cargo build --locked -p argos-osint-bin
-./target/debug/argos
-# Skip the menu and open the TUI:
-./target/debug/argos stack up --tui
-```
-
-Running `argos` without arguments opens a Ratatui service launcher with a centered ARGOS VENTURE banner and the same theme as the main TUI. Use ↑/↓, Tab or the numbered choices, then Enter; mouse clicks also select choices. Settings cover storage mode, API/web ports, the web profile, and starting or connecting to an API. Enter accepts a default, Ctrl+U clears a text field, and Esc returns to the previous question with its saved value (Esc at the service root exits). Ctrl+Q exits the wizard. PgUp/PgDn review the selected settings. The final choice starts the stack with either the normal TUI or server logs visible. When a session launched from Venture ends, its owned services stop and Venture reopens. Explicit `stack up` commands remain one-shot.
-
-Explicit `stack up` commands skip the launcher. The main TUI opens on Home: ↑/↓ and Enter open an app, keys `1`–`9` jump between apps, Esc returns Home, and `?` opens shortcuts. API Server and Web use the build prerequisites below.
-
-A default build uses embedded SurrealDB: RocksDB on disk under `~/.argos/storage/surreal` (`ARGOS_HOME` moves it), in-process. To use a per-home SurrealDB 3.3.4 server on loopback, build with `--no-default-features --features server,nlp` and select `argos storage init --mode server` (or `ARGOS_STORAGE_MODE=server`).
-
-### Intel web development
-
-Use Node **24.22.1** and pnpm **12.15.0**. The repository's `.nvmrc` pins Node for nvm. Web launch, build and doctor commands automatically run `nvm use` and pass the selected environment to Node/pnpm. Install that version once with nvm; for direct `pnpm` commands, select it in your shell:
+Install the pinned Rust **1.95.0** toolchain and Xcode or its Command Line Tools. Run from the repository root to build and package a debug `.app` for the physical Mac:
 
 ```sh
-nvm install
-nvm use
-node --version  # v24.22.1
+python3 scripts/fleetworks_candidate.py build-native --target host --profile debug
 ```
 
-Build `argos`. The launcher starts a child copy of the same binary in its built-in API-host mode; a separate `argos-api-host` binary is optional.
+[![Provision and connect](docs/diagrams/native-connections.svg)](docs/diagrams/native-connections.html)
+
+The helper prints the app and manifest paths. Add `--open` to launch it. The app opens offline setup and connects to an existing gateway; backend and Intel Web startup are separate operator actions.
+
+**Native setup:** Gateway URL → operator approval once → macOS Keychain → authenticated reconnect. No user-managed token file is needed. [Pairing and recovery](docs/wiki/code/native-connections.md#pairing-and-keychain-agreed-target) · [Verification status](.planning/2026-11-12-native-pairing-implementation/acceptance.md)
+
+1. Start the backend with the [Docker Compose quick start below](#backend-for-the-native-app). Backend deployment requires Docker and Docker Compose **v2.20 or newer**.
+2. Open **Setup Gateway**, enter the gateway URL and choose **Connect**. Give its pairing request ID and approval code to the gateway operator for [approval](docs/wiki/code/native-connections.md#operator-approval-and-revocation).
+3. The app authenticates the approved access, saves it in macOS Keychain and registers the installation. Workstation Status shows its stable opaque Connect ID; later connections reuse saved access.
+
+Normal startup initializes protected settings in `~/.fleetworks` without creating a default child. IP is optional metadata; folders do not select identity or partition shared actors, model defaults and provider accounts. Existing folders and historical receipts remain preserved. See [workstation identity](docs/wiki/code/native-workspaces.md).
+
+Enter the selectable Connect ID from **Workstation Status** into Intel Web's existing Connect form. The browser uses its separately provisioned WebRelay credential and session; the Connect ID alone grants no authority. See [connection and browser handoff](docs/wiki/code/native-connections.md#browser-handoff).
+
+### Backend for the native app
+
+Start Docker Desktop or your local Docker engine, then run these commands from the repository root. The backend includes the gateway, private services, workers, SurrealDB, Jobs storage and actor search.
+
+**Single-command build, redeploy, and native launch:** run `native_review.py up` from the repository root. On first run it auto-detects your host Docker platform, initializes `native-local` on port `18091`, and links a private `compose.env` at the repository root (when none exists); on every run it builds the backend service images, redeploys the Docker containers, and builds/opens the native app on supported macOS hosts (`x86_64-apple-darwin` or `aarch64-apple-darwin`):
 
 ```sh
-pnpm install --frozen-lockfile
-cargo build --locked -p argos-osint-bin
-# First use of a new home: choose storage explicitly.
-./target/debug/argos storage init --mode embedded
-./target/debug/argos stack doctor --target web
-./target/debug/argos stack up --web --port 3000 --api-port 8080
+python3 deploy/native_review.py up
 ```
 
-The foreground launcher starts the loopback API, waits for storage-backed readiness, then starts Next development mode. Once the web server responds, it opens the printed URL in your default browser. Use `--no-open` to keep the browser closed. For an existing home, keep its storage mode; owned API launches require `storage/config.json` or an explicit `ARGOS_STORAGE_MODE`.
+Pass `--name <name>` (defaults to `native-local`) or `--api-port <port>` (defaults to `18091`) on a fresh review, or add `--backend-only` to skip the native build/open (non-macOS hosts skip it automatically). `native_review.py up` checks the active local Docker context/architecture against `PLATFORM`, builds the `backend` Bake group (`runtime`, `surrealdb`, `search-index`), stops and recreates the Compose containers with `--force-recreate --detach --wait`, and—on supported macOS hosts—runs `python3 scripts/fleetworks_candidate.py build-native --target host --profile debug --open`. Existing credentials, scope/epochs and data remain preserved across reruns.
 
-### Build and serve the web export
+Edit `compose.env` at the repository root to update local Compose settings. It is private and ignored by Git. The deployment's generated env path points to this same file, so both locations use the same settings. Keep its generated access scope, epochs and storage path with the existing credentials and data.
 
-After installing dependencies and building Argos above:
+**Restart existing images without rebuilding:** use this command when you only edited `compose.env` or want to restart already-built images from a fresh terminal at the repository root:
 
 ```sh
-./target/debug/argos stack build --web
-# Equivalent frontend-only build: pnpm build
-./target/debug/argos stack up --web --profile installed --port 3000
+docker compose --env-file compose.env \
+  -f deploy/compose.native-review.yml --project-name fleetworks-native-review-native-local \
+  up --no-build --pull never --detach --wait
 ```
 
-The build writes `apps/web-desktop/out/` without needing a running API. The installed profile serves that export with Node and starts or adopts the API before serving the UI. It uses the repository's static host. For an optimized Rust binary, build with `cargo build --release --locked -p argos-osint-bin`, then use `./target/release/argos` in the commands above.
+Enter `http://127.0.0.1:18091` in **Setup Gateway** and have the operator approve the displayed pairing request. Existing stacks need an independently provisioned Operator credential; see [operator setup](deploy/README.md#credentials). This backend runs independently of the app. Atlas collection uses the [additional overlay below](#collect-articles-with-atlas); Intel Web is an optional separate deployment.
 
-To keep the normal TUI visible while API/Web services run:
+Rerun the start command to apply edited Compose settings. To inspect or stop the backend, use the same command prefix with `ps`, `logs --follow` or `down` in place of `up --no-build --pull never --detach --wait`. Stop preserves backend data. For concurrent deployments, run `up --name <other> --api-port <port>` (an existing repo-root `compose.env` stays untouched) and use that deployment's matching env file and project. [Full deployment guide](deploy/README.md#isolated-native-backend-review)
+
+Venture, the six terminal clients and the legacy `argos` executable are retired. Their historical evidence remains available in the [retirement disposition](docs/archive/cli-retirement.md). Backend service executables and administrative support tools remain supported.
+
+### Collect articles with Atlas
+
+Provision provider credentials, the Atlas worker, private NLP and a Rust-BERT model for the container architecture. Enable the separately configured [Atlas Compose overlay](deploy/atlas-dispatch.md). Submit through native News Cycles after connecting and registering; submission requires an advertised durable worker and permission. A job receipt confirms acceptance, while Jobs reports progress and completion. The [Atlas deployment guide](deploy/atlas-dispatch.md) lists the files and settings.
+
+## Applications and services
+
+| Area | What you can do |
+| --- | --- |
+| DB Seed & Train | Trigger configured actor seed, search-index build and Natural candidate training; acceptance is distinct from completion. |
+| News Cycles and Brain Search | Queue cycles, inspect workstation cycle history, discover actors and read dossiers. |
+| OSINT Tools and Model Assignments | Read service/provider cards, provision keys and edit supported model routing with confirmed revisions. |
+| Workstation Status and Setup Gateway | Inspect identity/readiness/API-host resources; pair this Mac and reconnect with saved Keychain access. |
+| Jobs & Logs | Read the bounded workstation queue and selected-job safe operational summaries. |
+| Intel Web | Browse the Bulletin, Focus Briefs, Related articles, actor dossiers and topology behind the Connect/session gate. |
+
+[![Fleetworks service boundaries](docs/diagrams/fleetworks.svg)](docs/diagrams/fleetworks.html)
+
+The native app uses shared Rust contracts and an origin-pinned API client. Axum serves the gateway; Next.js runs the React Native Web desktop through a same-origin relay with a separate credential. Linux services own inference, indexing and storage: SurrealDB holds domain records and current scheduling state, Jobs owns SQLite operational logs and its embedded RocksDB delivery queue, and private Tantivy serves actor discovery. The Atlas overlay runs Compromise NLP and Rust-BERT behind private endpoints. [Architecture](docs/wiki/code/architecture.md) · [Persistence rollout](docs/wiki/code/jobs-persistence.md)
+
+Source implementation, fixture checks and packaged builds are separate from installed-app, physical-Mac accessibility, real backend integration and both-architecture verification. Production scheduler migration retains its own acceptance gates. Executable retirement does not establish installed-app or dual-Mac parity. See [rollout status](docs/wiki/code/fleetworks.md#rollout-status), [native verification](docs/wiki/code/native-verification.md) and [CI](docs/wiki/code/ci.md) for the applicable checks.
+
+## Development
+
+Use the [contributor workflow](docs/wiki/code/contributing.md) to select checks for the code you changed. Preview the hosted checks for the current commit with the scope planner.
 
 ```sh
-./target/debug/argos stack up --web --terminal tui
-# Or run the API with the TUI in this terminal:
-./target/debug/argos stack up --server --api-port 8080 --terminal tui
-# Keep API and Next/static-host logs visible instead (the default):
-./target/debug/argos stack up --web --terminal logs
+python3 scripts/fleetworks_verify.py plan --base "$(git rev-parse HEAD^)" --head "$(git rev-parse HEAD)"
 ```
 
-With an owned API and `--terminal tui`, the API and TUI share one repository in the same process, including embedded storage. Open **Jobs**, select **Rust API server**, then **View logs** (`l`) for request method, route, status and duration. Web stacks also have a **Next.js web server** job (or **Static web server** for the built export) with access logs and server output. The frontend also writes redacted output to `ARGOS_HOME/stack-services.log` (by default `~/.argos/stack-services.log`). Quitting the TUI stops the managed stack. An independently adopted API needs this home's server-mode storage to display the TUI concurrently; log mode works with an embedded API.
+### Iteration loops
 
-The Intel web app contains Bulletin, Focus Brief, Related and topology. Jobs and Logs are Rust system apps; React Native clients do not connect to operational Jobs/Logs or job-stage endpoints.
+Choose the shortest loop for the changed surface. The native app/fixture graph is engine-free; backend storage tests can link embedded SurrealDB/RocksDB as QA harnesses. Service edits require the affected Linux image. [Visual artifact/path map](docs/wiki/code/build-artifacts.md)
 
-### Stack lifecycle and API only
+[![Fleetworks development loops](docs/diagrams/dev-loops.svg)](docs/diagrams/dev-loops.html)
 
-`up` stays in the foreground. Use Ctrl-C to stop it, or run these from another terminal with the same `ARGOS_HOME`:
+| Change | Loop |
+| --- | --- |
+| Rune app, client contracts or workstation manager | Scoped host debug tests, selected same-view Runtime/PNG/tree fixtures, then `python3 scripts/fleetworks_candidate.py build-native --target host --profile debug`. |
+| Service roles (`argos-api-host`) | `python3 deploy/native_review.py up` auto-initializes if missing, rebuilds the `backend` Bake images, recreates Docker containers, and builds/opens the native app on supported macOS (`--backend-only` skips native). BuildKit caches dependencies. |
+| Web app and `packages/*/src` | Run the separately configured Next development server; use isolated repository Playwright output for browser checks. |
+| Dependencies, Dockerfile, Compose or private search | Build the affected image with `docker buildx bake -f deploy/docker-bake.hcl <target>`, then use its isolated deployment checks. |
+| Packaging or release | Push and read the hosted CI results for that revision. |
 
-```sh
-./target/debug/argos stack status
-./target/debug/argos stack down --web
-# After stopping the web stack, run only the HTTP API:
-./target/debug/argos stack up --server --api-port 8080
-# Separate terminal:
-./target/debug/argos stack down --server
-```
+PRs targeting `dev`, `nightly` or `main` automatically run scoped checks when opened or updated; pure RN Web UI selects web work only. Trusted pushes publish selected verified unsigned Mac ZIPs and dual-architecture GHCR images: `nightly` → nightly, `dev`/`main` → stable. [Visual checks/publication flow](docs/diagrams/native-release.html) · [Artifact identities and limits](docs/wiki/code/build-artifacts.md#hosted-artifacts-and-publication)
 
-Here `--server` selects the HTTP API; storage mode is configured separately. One managed stack runs per Argos home. Embedded storage has one owner, so stop a separately running TUI before launching an API against the same home.
+Run host checks first, then the affected container loop, then hosted CI. [Full loop guide](docs/wiki/code/contributing.md#development-loops-local-cli-and-docker)
 
-To connect the web app to an independently running API, start the host in one terminal, then launch the web app in another:
+Agents use `python3 scripts/agent_cargo.py … --locked` and shared `target/agents/debug`; add `--agent` to native build/fixture helpers. Selected test targets can enable extra dependency features, so a smaller `-p` selection may rebuild large dependencies. Choose the loop and resource preflight from [contributing](docs/wiki/code/contributing.md#verification-ownership-and-host-resources); preserve reusable outputs using [cache hygiene](docs/wiki/code/contributing.md#build-cache-hygiene).
 
-```sh
-# Optional standalone host (the managed launcher does not need this binary):
-cargo build --locked -p argos-api-host
-./target/debug/argos-api-host --port 8080
-# Separate terminal:
-./target/debug/argos stack up --web --api-url http://127.0.0.1:8080 --port 3000
-```
+Web contributors can find setup and verification in the [Intel web guide](docs/wiki/code/intel-web.md) and the [React test guide](docs/wiki/code/react-ui-testing.md). The [CI guide](docs/wiki/code/ci.md) covers hosted platform and package verification. Agents start at [AGENTS.md](AGENTS.md).
 
-Stopping this web stack leaves the adopted API running. For a different web port, configure the standalone host's `--origins` allowlist accordingly. All API/web hosting is local loopback. macOS, Android, iOS and Windows stack targets remain planned.
-
-See the [web/API guide](docs/wiki/code/intel-web.md) for backend selection, storage ownership and endpoint contracts, and the [living implementation specification](docs/argos-intel-living-spec.md) for verified milestones and the [branch-to-main delivery scope](docs/argos-intel-living-spec.md#branch-to-main-scope-2026-10-26), including the minimalist web UI based on the core TUI.
-
-### Development checks
-
-Shared UI uses React Native primitives mapped to React Native Web. React Compiler is enabled for Next and the shared packages; lint includes Hooks/compiler diagnostics with zero warnings. Keep both integrations enabled. [React UI rules](docs/wiki/code/react-ui.md#react-native-and-compiler-baseline) describe the platform boundary and verification requirements. Visual work follows the [Argos look and feel](docs/wiki/code/react-ui.md#argos-look--feel-reference): the terminal-desk theme, with room to design components creatively inside it. Topology graphs use the force-graph canvas.
-
-```sh
-# Targeted local Rust checks & tests (fast iteration on the host machine; embedded storage mode)
-cargo check --locked -p argos-osint-core                  # or -p argos-osint-bin | -p argos-osint-api | -p argos-api-host
-cargo clippy --locked -p argos-osint-core --all-targets -- -D warnings
-cargo test --locked -p argos-osint-core --lib <filter>    # scoped unit tests
-cargo test --locked -p argos-osint-api --test api_contract
-ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1 \
-  cargo test --locked -p argos-osint-core --test storage_jobs <filter> -- --nocapture
-
-# Full workspace & embedded storage gate (agents use `python3 scripts/agent_cargo.py … --locked`)
-cargo fmt --all --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --locked  # offline; ARGOS_EMBED unset
-ARGOS_EMBED=1 cargo test --locked -p argos-osint-core -- --ignored minilm
-scripts/local_matrix.sh --storage embedded
-
-# Web & E2E checks
-pnpm typecheck
-pnpm lint
-pnpm build
-pnpm check:web-build
-pnpm exec playwright install chromium
-pnpm test:e2e
-ARGOS_WEB_PROFILE=dev pnpm test:e2e  # Also verify Next development compilation
-```
-
-Navigation, CLI, and state directory: [usage guide](docs/wiki/concepts/usage.md). Contributors and agents should follow the [contributor workflow](docs/wiki/code/contributing.md), including the agent Cargo wrapper and CI-only server storage gate. Agent guidance: [AGENTS.md](AGENTS.md).
-
-### Agent & CLI workflows (OpenCode & Google Antigravity CLI)
-
-Contributors working with agentic coding CLIs follow the shared repository standards in [AGENTS.md](AGENTS.md), [contributor workflow](docs/wiki/code/contributing.md), and [planning artifacts](docs/wiki/code/planning-artifacts.md):
-
-- **Workspace & persistence standards:**
-  - **Temporary files & worktrees (`.agent-scratch/`):** Keep all scratch files, patches, diagnostic logs, isolated build caches, and feature worktrees (`.agent-scratch/worktrees/`) inside `.agent-scratch/` (unstaged and never committed).
-  - **Long-term planning (`.planning/`):** Record multi-phase plans, design specs, and decision ledgers in `.planning/<YYYY-MM-DD-slug>/` following the [planning format](docs/wiki/code/planning-artifacts.md#working-format).
-  - **Rust embedded storage, host-native platform & targeted builds (see `.github/workflows/ci.yml`):** Never run the all-platform or `server` storage stack from `.github/workflows/ci.yml` locally. Agents must **get the local host machine build and embedded storage tests to a stable state first** (`uname -ms`, `rustc -vV | grep '^host:'`, `--storage embedded`), preferring targeted crate and test commands (`python3 scripts/agent_cargo.py check|clippy|test --locked -p <crate> [--lib | --bin <bin> | --test <name>]`, and `ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1 python3 scripts/agent_cargo.py test --locked -p argos-osint-core --test storage_<name>`) during scoped iteration before running `scripts/local_matrix.sh --storage embedded`. When git/GitHub CLI access is available, monitor hosted GitHub Actions checks (`gh pr checks`, `gh run list --branch "$(git branch --show-current)"`, `gh run view <run-id> --log-failed`) for issues on other platforms or `server` storage mode. Reference [`.github/workflows/ci.yml`](.github/workflows/ci.yml), [`.github/workflows/intel-web.yml`](.github/workflows/intel-web.yml), [`.github/workflows/commit-policy.yml`](.github/workflows/commit-policy.yml), and the [CI workflow guide](docs/wiki/code/ci.md), keep React Compiler/Hooks lint at zero warnings, and update affected `docs/wiki/` routes, `@tag:<slug>` entries, and diagrams in the same change.
-- **OpenCode setup (`.opencode/`):**
-  - Configured in [.opencode/opencode.json](.opencode/opencode.json) and [.opencode/AGENTS.md](.opencode/AGENTS.md) with the 4-agent team (`architect`, `coder`, `tester`, `scribe`), worker model overrides (`.opencode/architect-worker.json`, `.opencode/coder-worker.json`), and repository skills (`.opencode/skills/`). Rust work loads `argos-rust-style`.
-  - Follow the [OpenCode agent team guide](docs/wiki/code/opencode-v2.md) for role permissions, phase handoff envelopes, disjoint `EDIT_UNIT` worktree integration, and Scribe documentation checkpoints.
-- **Google Antigravity CLI `/teamwork` guidance (`.agy/`):**
-  - Users running the `/teamwork` command in Google Antigravity CLI should reference [.agy/howto.md](.agy/howto.md) to select the right workflow spec for their task scope:
-    - **Lite Team ([.agy/lite-team.md](.agy/lite-team.md)):** Fast-path 2-agent workflow (`coder` + `tester`) for scoped fixes and single-module updates ($\le 3$ files, no breaking contract/schema changes).
-    - **Heavy Team ([.agy/heavy-team.md](.agy/heavy-team.md)):** Full 4-agent orchestration (`architect`, `coder`, `tester`, `scribe`) with Phase 0 `.planning/` bootstrap, parallel `.agent-scratch/worktrees/` execution, and full host-native verification gates.
-    - **Scope-specific React Native UI `tester` (`anthropic/claude-sonnet-5.5#low`):** Both specs dispatch a dedicated `tester` agent on `anthropic/claude-sonnet-5.5#low` for React Native UI scope (`apps/web-desktop`, `packages/{ui,intel,api-client}`) to enforce repository design standards and conventions ([React UI rules](docs/wiki/code/react-ui.md), the [Argos look and feel](docs/wiki/code/react-ui.md#argos-look--feel-reference), [conventions](docs/wiki/code/conventions.md), React Compiler/Hooks lint, and Playwright fixture screenshot review), alongside `google/argon#low` for Rust/system verification.
-
-## Figures
-
-Open in a browser for the HTML page, or view the SVG inline.
-
-[![One Recon turn](docs/diagrams/recon-turn.svg)](docs/diagrams/recon-turn.html)
-
-[![Persistence stack](docs/diagrams/persistence.svg)](docs/diagrams/persistence.html)
-
-[![Intel brief chain](docs/diagrams/intel-brief-chain.svg)](docs/diagrams/intel-brief-chain.html)
-
-The rest of the set: [docs/diagrams.md](docs/diagrams.md).
-
-## Documentation
-
-Start at the [repo wiki](docs/index.md): choose [concepts](docs/wiki/concepts/index.md) to understand Argos or [code](docs/wiki/code/index.md) to explore its implementation. Agent navigation starts at [AGENTS.md](AGENTS.md).
-
-## Limits
-
-- Adapters issue bounded public HTTP. A catalog entry or fixture test does not prove live availability.
-- Shodan InternetDB is noncommercial.
-- Nominatim needs an identifying User-Agent, attribution, caching, and at most one request per second.
-- Model calls use the account and terms you configure.
+For more, browse the [concepts](docs/wiki/concepts/index.md), [code map](docs/wiki/code/index.md), or [diagram catalog](docs/diagrams.md).

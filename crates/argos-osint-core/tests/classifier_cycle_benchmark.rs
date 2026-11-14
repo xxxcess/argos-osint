@@ -1,5 +1,6 @@
 //! Opt-in current whole-cycle replay using the immutable intake provider corpus.
 //! Invoke one fresh process per explicitly designated isolated benchmark home.
+//! Install the actual Atlas zero-shot worker and model in that home before replay.
 #![cfg(all(feature = "embedded", feature = "classifier"))]
 #[path = "support/actor_catalog.rs"]
 mod actors;
@@ -34,20 +35,19 @@ async fn offline_fixed_whole_cycle_benchmark() {
     );
     std::fs::create_dir_all(&home).unwrap();
     let _serial = fixture::serial().await;
-    let installed = tokio::task::spawn_blocking(fixture::install).await.unwrap();
-    let settings = core::provider::SettingsFile {
-        data_paths: core::data_paths::DataPaths {
-            classifier_dir: installed
-                .directory
-                .path()
-                .join("classifier")
-                .display()
-                .to_string(),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    settings.save_to(&home.join("config.toml")).unwrap();
+    let fixture::Installed {
+        directory: _legacy_home_dir,
+        home: legacy_home,
+    } = tokio::task::spawn_blocking(fixture::install).await.unwrap();
+    if mode != "initialize" {
+        assert!(
+            core::classifier::artifact::root_for(&home)
+                .unwrap()
+                .join("zero-shot.json")
+                .is_file(),
+            "configure a real Rust-BERT worker in the isolated benchmark home"
+        );
+    }
     let layout = core::storage::home::Layout::new(&home);
     if mode != "reopen" {
         assert!(
@@ -107,16 +107,12 @@ async fn offline_fixed_whole_cycle_benchmark() {
     let monitoring_job = if contention == "off" {
         None
     } else {
-        Some(prepare_monitoring(&repo, &installed.home).await)
+        Some(prepare_monitoring(&repo, &legacy_home).await)
     };
     let monitoring_worker = if contention == "overlap" {
         Some(
-            start_overlapping_monitor(
-                &repo,
-                installed.home.clone(),
-                monitoring_job.as_ref().unwrap(),
-            )
-            .await,
+            start_overlapping_monitor(&repo, legacy_home.clone(), monitoring_job.as_ref().unwrap())
+                .await,
         )
     } else {
         None
@@ -286,13 +282,13 @@ async fn offline_fixed_whole_cycle_benchmark() {
         .collect();
     println!(
         "ARGOS_CYCLE_RESULT {}",
-        json!({"schema":"argos-fixed-whole-cycle-v1","implementation":"current-local-classifier","condition":mode,"fresh_process":true,"initialized_empty_snapshot_reopened":mode=="reopen","runtime_prewarms":false,"publisher_index_fixture":"fresh retained unmatched publisher, installed identically in both implementations","global_OS_cache_flushed":false,
+        json!({"schema":"argos-fixed-whole-cycle-v1","implementation":"rust-bert-zero-shot","condition":mode,"fresh_process":true,"initialized_empty_snapshot_reopened":mode=="reopen","runtime_prewarms":false,"publisher_index_fixture":"fresh retained unmatched publisher, installed identically in both implementations","global_OS_cache_flushed":false,
         "fixture_sha256":core::nlp::cache::hash(std::str::from_utf8(raw).unwrap()),"frozen_published_at":fixture["frozen_published_at"],"lookback_hours":48,
         "storage_open_us":storage_open_us,"cycle_us":cycle_us,"ordered_storage_drain_us":drain_us,"terminal_state":run.state,"actual_admitted_ids":ids,"actual_pairs":rows.iter().map(|row|(&row.id,&row.categories)).collect::<BTreeMap<_,_>>(),
         "acquisition_calls":acquired,"classification_provider_requests":0,"catalog_fixture":"one unmatched canonical actor; no actor mentions","stats":stats,"actual_stage_events":stages,
         "calibration_condition":contention,"monitoring_before":monitoring_before,"monitoring_after":monitoring_after,"monitoring_activation_rows":monitoring_rows,"rss":null,"rss_reason":"external sampler result is recorded separately","provider_latency_scope":"scripted loopback only; no real-provider latency claim"})
     );
-    installed.home.shutdown().await.unwrap();
+    legacy_home.shutdown().await.unwrap();
 }
 
 /// Prepares identical pending monitoring work in both control and overlap
@@ -337,15 +333,25 @@ async fn prepare_monitoring(
             .unwrap();
     }
     let owner = admission::AdmissionOwner::new(repo.clone());
-    let permit = readiness::preflight_cycle(home, CycleRequirement::FreshAcquisition, None)
-        .await
-        .unwrap();
+    // Keep the comparison's established Natural monitoring workload independent
+    // of the foreground Rust-BERT bundle.
+    let snapshot = home.pin(None).await.unwrap().snapshot;
+    let permit = readiness::preflight_cycle(
+        home,
+        CycleRequirement::AcquisitionAndAdmission,
+        Some(&snapshot),
+    )
+    .await
+    .unwrap();
     let stats = core::atlas::RunStats {
-        classifier_snapshot: permit.pinned().map(|pin| pin.snapshot.clone()),
+        classifier_snapshot: Some(snapshot),
         ..Default::default()
     };
     let cursor = serde_json::to_string(&core::atlas::Cursor::default()).unwrap();
     let stats = serde_json::to_string(&stats).unwrap();
+    core::storage::atlas::insert_run(repo.db(), &ctx.cycle_id, &cursor, &stats)
+        .await
+        .unwrap();
     let run = admission::start_run(
         &owner,
         &permit,
@@ -355,7 +361,8 @@ async fn prepare_monitoring(
             &cursor,
             &stats,
             chrono::Utc::now(),
-        ),
+        )
+        .resume(0, 0),
     )
     .await
     .unwrap();

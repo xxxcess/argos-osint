@@ -1,0 +1,18 @@
+[package]
+name = "fleetworks-jobs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Durable operational job state owned by the Fleetworks Jobs service"
+
+[dependencies]
+anyhow.workspace = true
+rusqlite = { version = "=0.41.1", features = ["bundled", "hooks"] }
+rocksdb = { package = "surrealdb-rocksdb", version = "=0.24.0-surreal.5", default-features = false, features = ["bindgen-runtime"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

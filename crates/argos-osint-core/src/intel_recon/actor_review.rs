@@ -18,11 +18,11 @@ pub fn resolve_actor_reviewer_secret(
 ) -> Option<ProviderSecret> {
     // Legacy actor normalization generates JSON: first non-Jev chat route in
     // the Entity Resolver's complete chain (declared inheritance included).
-    crate::recon::model_exec::select_role_secret(
+    crate::model_exec::select_role_secret(
         auth,
         settings,
         "entity_resolver",
-        crate::recon::model_exec::OperationFormat::GeneratedJson,
+        crate::model_exec::OperationFormat::GeneratedJson,
     )
 }
 

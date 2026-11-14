@@ -175,7 +175,7 @@ pub fn raise_local_cancel(id: &str) -> bool {
     let live = live().lock().unwrap_or_else(|e| e.into_inner());
     match live.get(id) {
         Some(flag) => {
-            crate::recon::cancel_with_notify(flag);
+            crate::cancellation::cancel_with_notify(flag);
             true
         }
         None => false,
@@ -228,7 +228,7 @@ impl JobHandle {
 
     /// [`begin_with`](Self::begin_with) on the repository: the `job` row and
     /// its `job.started` event are written in order on the storage runtime
-    /// (`storage::recon_jobs::begin_app_job`, `storage::event_log`).
+    /// (`storage::app_jobs::begin_app_job`, `storage::event_log`).
     fn begin_surreal(db: &Path, spec: JobSpec, cancel: Arc<AtomicBool>) -> Self {
         let id = if spec.id.is_empty() {
             new_job_id(&spec.operation)
@@ -257,7 +257,7 @@ impl JobHandle {
                 if let Ok(Some(ms)) = surreal_prior_active_ms(&repo, &id).await {
                     prior.store(ms, Ordering::Release);
                 }
-                let job = crate::storage::recon_jobs::AppJob {
+                let job = crate::storage::app_jobs::AppJob {
                     id: &id,
                     operation: &spec.operation,
                     app: &spec.app,
@@ -266,7 +266,7 @@ impl JobHandle {
                     resource_ref: &spec.resource_ref,
                     parent: Some(spec.parent_id.as_str()),
                 };
-                if crate::storage::recon_jobs::begin_app_job(&repo, &job)
+                if crate::storage::app_jobs::begin_app_job(&repo, &job)
                     .await
                     .is_err()
                 {
@@ -343,15 +343,15 @@ impl JobHandle {
                 return;
             };
             if let Ok(true) =
-                crate::storage::recon_jobs::set_job_progress(&repo, &id, &phase, done, total).await
+                crate::storage::app_jobs::set_job_progress(&repo, &id, &phase, done, total).await
             {
-                crate::recon::cancel_with_notify(&cancel);
+                crate::cancellation::cancel_with_notify(&cancel);
             }
         });
     }
 
     /// Link a run reference learned after launch (e.g. a new Atlas run id);
-    /// carried to the row by `finish` (`finish_recon_job` run_ref).
+    /// carried to the row by `finish` (`finish_app_job` run_ref).
     pub fn link_run(&mut self, run_ref: &str) {
         self.run_ref = run_ref.into();
     }
@@ -404,7 +404,7 @@ impl JobHandle {
                 let Ok(repo) = crate::storage::runtime::repository().await else {
                     return;
                 };
-                let _ = crate::storage::recon_jobs::finish_recon_job(
+                let _ = crate::storage::app_jobs::finish_app_job(
                     &repo,
                     &id,
                     state,
@@ -732,8 +732,8 @@ mod tests {
     #[tokio::test]
     async fn traffic_services_recover_dead_owners_without_retiring_other_services() {
         use crate::storage::{
+            app_jobs::{self, AppJob},
             home::{self, Layout, Mode, StorageConfig},
-            recon_jobs::{self, AppJob},
             repo::Repository,
         };
         let dir = tempfile::tempdir().unwrap();
@@ -756,7 +756,7 @@ mod tests {
             ("live", "api_server", "fresh"),
             ("index", "local_index", "gone"),
         ] {
-            recon_jobs::begin_app_job(
+            app_jobs::begin_app_job(
                 &repo,
                 &AppJob {
                     id,

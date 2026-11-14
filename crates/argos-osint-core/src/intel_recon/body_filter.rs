@@ -286,7 +286,7 @@ async fn classify_chunk_batch(
     // skip and the batch keeps its text.
     if provider::is_jev_family(&classifier.model) {
         provider::native_decision_capability(classifier).map_err(|reason| anyhow!(reason))?;
-        use crate::recon::model_exec::DecisionsAdapter;
+        use crate::model_exec::DecisionsAdapter;
         let adapter = BlockDecisions {
             context: &[],
             title,
@@ -599,7 +599,7 @@ impl BlockDecisions<'_> {
     }
 }
 
-impl crate::recon::model_exec::DecisionsAdapter<Vec<IrrelevantRange>> for BlockDecisions<'_> {
+impl crate::model_exec::DecisionsAdapter<Vec<IrrelevantRange>> for BlockDecisions<'_> {
     fn compile_native(&self) -> (Value, Value) {
         crate::investigation::decisions::compile_native(&self.contract(), &self.state().to_value())
     }

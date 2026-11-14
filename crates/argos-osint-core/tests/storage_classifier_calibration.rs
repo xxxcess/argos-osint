@@ -42,35 +42,38 @@ async fn finish(
     repo: &Repository,
     home: &ClassifierHome,
     cycle: &str,
-    fresh: bool,
+    with_legacy_pin: bool,
 ) -> admission::TerminalReceipt {
     let owner = admission::AdmissionOwner::new(repo.clone());
-    let requirement = if fresh {
-        CycleRequirement::FreshAcquisition
+    // Exercise existing Natural monitoring and learning with a saved legacy pin.
+    let selected = if with_legacy_pin {
+        Some(home.pin(None).await.unwrap().snapshot)
+    } else {
+        None
+    };
+    let requirement = if selected.is_some() {
+        CycleRequirement::AcquisitionAndAdmission
     } else {
         CycleRequirement::PostAdmissionOnly
     };
-    let permit = readiness::preflight_cycle(home, requirement, None)
-        .await
-        .unwrap();
-    let stats = RunStats {
-        classifier_snapshot: permit.pinned().map(|pin| pin.snapshot.clone()),
-        ..Default::default()
-    };
-    let stats = serde_json::to_string(&stats).unwrap();
-    let cursor = serde_json::to_string(&Cursor {
-        phase: if fresh { 1 } else { 6 },
+    let stats = serde_json::to_string(&RunStats {
+        classifier_snapshot: selected.clone(),
         ..Default::default()
     })
     .unwrap();
-    if !fresh {
-        argos_osint_core::storage::atlas::insert_run(repo.db(), cycle, &cursor, &stats)
-            .await
-            .unwrap();
-    }
+    let cursor = serde_json::to_string(&Cursor {
+        phase: if with_legacy_pin { 1 } else { 6 },
+        ..Default::default()
+    })
+    .unwrap();
+    argos_osint_core::storage::atlas::insert_run(repo.db(), cycle, &cursor, &stats)
+        .await
+        .unwrap();
+    let permit = readiness::preflight_cycle(home, requirement, selected.as_ref())
+        .await
+        .unwrap();
     let now = chrono::Utc::now();
-    let request = StartRunRequest::fresh(cycle, "cycle-owner", &cursor, &stats, now);
-    let request = if fresh { request } else { request.resume(0, 0) };
+    let request = StartRunRequest::fresh(cycle, "cycle-owner", &cursor, &stats, now).resume(0, 0);
     let claim = admission::start_run(&owner, &permit, &request)
         .await
         .unwrap();

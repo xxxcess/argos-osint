@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 820" role="img" aria-labelledby="native-release-title native-release-desc">
+<title id="native-release-title">PR checks and trusted release artifacts</title>
+<desc id="native-release-desc">Selected PR lanes produce debug apps and real-view evidence without ZIPs. Trusted nightly/dev/main pushes package selected versioned unsigned apps, verify downloaded bytes, then publish only after source and selected Linux image gates succeed. Signing and installed-hardware acceptance remain separate evidence.</desc>
+<defs><marker id="native-release-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker></defs>
+<style>text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}.heading{font-family:'Instrument Serif',Georgia,serif;font-size:28px}.label{font-size:20px;font-weight:600}.note{font-size:16px}.code{font:14px 'Geist Mono',ui-monospace,monospace}.zone{font-size:13px;font-weight:600;letter-spacing:1px}.minor{font-size:14px;fill:#4f5d75}.node,.pending{fill:#fff;stroke:#4f5d75;stroke-width:1.5}.accent{fill:#fff6ed;stroke:#eb6c36;stroke-width:1.5}.pending{stroke-dasharray:6 4}.edge,.later,.flow{fill:none;stroke:#4f5d75;stroke-width:1.5}.later{stroke-dasharray:6 4}.edge,.later{marker-end:url(#native-release-arrow)}</style>
+<rect width="1280" height="820" fill="#f5f5f5"/>
+<text x="32" y="36" class="heading">PR proof and trusted unsigned publication</text>
+<text x="32" y="84" class="zone">PR OPENED / UPDATED → SELECTED CHECKS; NO PUBLICATION</text>
+<path d="M376 174H456" class="edge"/>
+<path d="M824 174H904" class="edge"/>
+<rect x="40" y="104" width="336" height="140" rx="6" class="node"/>
+<text x="56" y="136" class="label">PR → dev / nightly / main</text>
+<text x="56" y="164" class="note">Exact PR head; scoped changes</text>
+<text x="56" y="188" class="note">Pure RN UI selects web only</text>
+<text x="56" y="212" class="note">No publication credentials</text>
+<rect x="456" y="104" width="368" height="140" rx="6" class="node"/>
+<text x="472" y="136" class="label">Selected Mac checks</text>
+<text x="472" y="164" class="note">Intel + Apple Silicon</text>
+<text x="472" y="188" class="note">Debug app + units + Rune evidence</text>
+<text x="472" y="212" class="note">No app ZIP on PR</text>
+<rect x="904" y="104" width="336" height="140" rx="6" class="node"/>
+<text x="920" y="136" class="label">Required source result</text>
+<text x="920" y="164" class="note">Selected Linux / web lanes too</text>
+<text x="920" y="188" class="note">Missing/failed lanes block</text>
+<text x="920" y="212" class="note">Unselected lanes stay skipped</text>
+<text x="32" y="292" class="zone">TRUSTED PUSH → VERSIONED ARTIFACTS → ARTIFACT GATE → PUBLISH → REQUIRED</text>
+<path d="M376 388H456" class="edge"/>
+<path d="M824 388H904" class="edge"/>
+<path d="M1072 460V524" class="edge"/>
+<path d="M904 596H824" class="edge"/>
+<path d="M456 596H376" class="edge"/>
+<rect x="40" y="316" width="336" height="144" rx="6" class="node"/>
+<text x="56" y="348" class="label">Trusted push + source plan</text>
+<text x="56" y="376" class="note">nightly → nightly prerelease</text>
+<text x="56" y="400" class="note">dev / main → stable</text>
+<text x="56" y="424" class="note">Version + full source SHA</text>
+<text x="56" y="448" class="note">Widen from published ancestor</text>
+<rect x="456" y="316" width="368" height="144" rx="6" class="node"/>
+<text x="472" y="348" class="label">Selected release Mac ZIPs</text>
+<text x="472" y="376" class="note">Intel + Apple Silicon</text>
+<text x="472" y="400" class="note">Release-profile unsigned .app</text>
+<text x="472" y="424" class="note">ZIP + manifest + SHA256</text>
+<text x="472" y="448" class="note">Source-derived version</text>
+<rect x="904" y="316" width="336" height="144" rx="6" class="node"/>
+<text x="920" y="348" class="label">Verify downloaded bytes</text>
+<text x="920" y="376" class="note">Immutable artifact ID + digest</text>
+<text x="920" y="400" class="note">ZIP / source / target / version</text>
+<text x="920" y="424" class="note">Bundle identity and libraries</text>
+<text x="920" y="448" class="note">Actions retention: 14 days</text>
+<rect x="904" y="524" width="336" height="144" rx="6" class="node"/>
+<text x="920" y="556" class="label">Source checks → images</text>
+<text x="920" y="584" class="note">Selected native Linux AMD64/ARM64</text>
+<text x="920" y="608" class="note">Build → exact-ID smoke → push</text>
+<text x="920" y="632" class="note">Verify registry digests</text>
+<text x="920" y="656" class="note">Skip when no images selected</text>
+<rect x="456" y="524" width="368" height="144" rx="6" class="accent"/>
+<text x="472" y="556" class="label">Publish → required</text>
+<text x="472" y="584" class="note">Source + selected digests succeed</text>
+<text x="472" y="608" class="note">Required includes publication</text>
+<text x="472" y="632" class="note">Versioned GitHub Release assets</text>
+<text x="472" y="656" class="note">GHCR multiarchitecture indexes</text>
+<rect x="40" y="524" width="336" height="144" rx="6" class="accent"/>
+<text x="56" y="556" class="label">Durable channel releases</text>
+<text x="56" y="584" class="note">Immutable version/full-SHA tags</text>
+<text x="56" y="608" class="note">Git + image refs: nightly / stable</text>
+<text x="56" y="632" class="note">Unsigned native ZIP downloads</text>
+<text x="56" y="656" class="note">No Docker-save tar artifacts</text>
+<text x="40" y="740" class="minor">First publication covers all components. Later docs-only changes skip products; pending changes widen verification too.</text>
+<text x="40" y="768" class="minor">Signing/notarization, minimum-macOS and physical-Mac GUI/Keychain checks remain separate evidence.</text>
+<text x="40" y="796" class="minor">Those separate checks are not implemented blockers for automatic unsigned publication; no executed pass is implied.</text>
+</svg>

@@ -141,7 +141,7 @@ describe("Focus Brief", () => {
     [39, intelColors.danger],
     [40, intelColors.warning],
     [69, intelColors.warning],
-    [70, intelColors.accent],
+    [70, intelColors.success],
   ])("renders real confidence %s with its threshold color", (score, color) => {
     render(
       <View data={{ ...brief, confidence: { ...brief.confidence!, score } }} />,

@@ -1,0 +1,26 @@
+#!/usr/bin/env python3
+"""Offline Atlas worker protocol fixture with deterministic six-score rows."""
+import json
+from pathlib import Path
+import sys
+
+
+def serve(model_dir):
+    with (model_dir / "config.json").open(encoding="utf-8") as config:
+        routes = json.load(config).get("routes", {})
+    print(json.dumps({"protocol": "argos-atlas-bert-v1"}), flush=True)
+    for line in sys.stdin:
+        texts = json.loads(line)["texts"]
+        if not 1 <= len(texts) <= 4:
+            raise ValueError("invalid fixture request batch")
+        scores = [
+            next((row for cue, row in routes.items() if cue in text.casefold()), [0.1] * 6)
+            for text in texts
+        ]
+        print(json.dumps({"scores": scores}), flush=True)
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 3 or sys.argv[1] != "serve":
+        raise SystemExit("usage: atlas_bert serve <fixture-model-dir>")
+    serve(Path(sys.argv[2]))

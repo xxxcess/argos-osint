@@ -19,23 +19,19 @@ html {
   zoom: calc(1 / var(--intel-ui-scale, 0.75));
   overflow: hidden;
 }
-/* Intel-only browser canvas; shared Argos/TUI tokens remain unchanged. */
+/* Matte Fleetworks paint; existing geometry and semantic colors are separate. */
 * {
   box-sizing: border-box;
   scrollbar-width: thin;
-  scrollbar-color: #34343a transparent;
+  scrollbar-color: #898274 transparent;
 }
 html,
 body {
   margin: 0;
   height: 100%;
   min-height: 100%;
-  background-color: #0b0b0c;
-  background-image:
-    radial-gradient(ellipse at 15% 10%, #171719 0%, transparent 45%),
-    radial-gradient(ellipse at 85% 90%, #101012 0%, transparent 50%);
-  background-attachment: fixed;
-  color: #ececee;
+  background-color: #060709;
+  color: #f3eee4;
   font-family:
     var(--intel-body, Inter),
     system-ui,
@@ -66,7 +62,7 @@ body {
 #intel-topology-node-scroll,
 #intel-topology-connection-scroll {
   scrollbar-width: thin;
-  scrollbar-color: #34343a transparent;
+  scrollbar-color: #898274 transparent;
 }
 #intel-topology-node-scroll::-webkit-scrollbar,
 #intel-topology-connection-scroll::-webkit-scrollbar {
@@ -76,7 +72,7 @@ body {
 }
 #intel-topology-node-scroll::-webkit-scrollbar-thumb,
 #intel-topology-connection-scroll::-webkit-scrollbar-thumb {
-  background: #34343a;
+  background: #898274;
 }
 /* Keep list wheel/trackpad scrolling inside its panel at either boundary. */
 #intel-topology-node-scroll,
@@ -157,84 +153,55 @@ select {
   font: inherit;
 }
 a {
-  color: #5fd39a;
+  color: #c6a56e;
   text-decoration: underline;
 }
 input,
 select {
-  background: #111726;
-  border: 1px solid #2e3850;
+  background: #060709;
+  border: 1px solid #898274;
   border-radius: 8px;
-  color: #ececee;
+  color: #f3eee4;
   min-width: 0;
 }
 :focus-visible {
-  outline: 2px solid #7fe0b4;
-  outline-offset: -2px;
-  box-shadow: 0 0 0 1px #7fe0b4;
+  outline: 2px solid #d8bd8c;
+  outline-offset: 2px;
+  /* A dark gap keeps the focus ring distinct even on a gold primary body. */
+  box-shadow: 0 0 0 2px #060709;
 }
 ::selection {
-  background: #2e3850;
-  color: #ececee;
+  background: #322c22;
+  color: #f3eee4;
 }
-/* Intel views only: browser motion/glow stays outside shared RN primitives. */
+/* Existing view geometry stays fixed; surface finishes remain static. */
 #intel-home {
   min-height: max(320px, calc(100vh - 128px));
   min-height: max(320px, calc(100dvh - 128px));
 }
-#intel-bulletin {
-  animation: intel-enter 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
-}
-@keyframes intel-enter {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
 #intel-home [data-testid="intel-launcher-tile"] {
   transition:
-    transform 120ms,
     border-color 120ms,
-    box-shadow 120ms;
+    background-color 120ms;
 }
-#intel-home [data-testid="intel-globe"] {
-  filter: drop-shadow(0 0 18px rgba(95, 211, 154, 0.35));
-  transition: filter 120ms;
+#intel-home [data-testid="intel-globe"],
+#intel-home-launcher:is(:hover, :focus-visible) [data-testid="intel-globe"] {
+  filter: none;
 }
 #intel-home-launcher:is(:hover, :focus-visible)
   [data-testid="intel-launcher-tile"] {
-  box-shadow: 0 0 18px rgba(95, 211, 154, 0.35);
-}
-#intel-home-launcher:is(:hover, :focus-visible) [data-testid="intel-globe"] {
-  filter: drop-shadow(0 0 24px rgba(95, 211, 154, 0.55));
+  box-shadow: none;
+  border-color: #c6a56e;
 }
 [data-testid^="article-card-"] {
   transition: border-color 120ms;
 }
 #intel-bulletin input:focus-visible {
-  border-color: rgba(95, 211, 154, 0.35);
+  border-color: #d8bd8c;
 }
 [data-testid="bulletin-skeleton"] {
-  background-image: linear-gradient(
-    100deg,
-    transparent 25%,
-    rgba(95, 211, 154, 0.06) 50%,
-    transparent 75%
-  );
-  background-size: 200% 100%;
-  animation: intel-skeleton 1.2s linear infinite;
-}
-@keyframes intel-skeleton {
-  from {
-    background-position: 200% 0;
-  }
-  to {
-    background-position: -200% 0;
-  }
+  background-color: #111317;
+  background-image: none;
 }
 @media (prefers-reduced-motion: reduce) {
   [role="progressbar"] svg {
@@ -257,13 +224,11 @@ select {
 /* Topology remains a force-graph canvas; DOM tiles share its camera projection. */
 #intel-topology-grid {
   background-image:
-    linear-gradient(rgba(63, 83, 119, 0.09) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(63, 83, 119, 0.09) 1px, transparent 1px),
-    radial-gradient(ellipse at 50% 45%, rgba(18, 29, 60, 0.35), transparent 70%);
+    linear-gradient(rgba(137, 130, 116, 0.09) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(137, 130, 116, 0.09) 1px, transparent 1px);
   background-size:
     36px 36px,
-    36px 36px,
-    100% 100%;
+    36px 36px;
 }
 .intel-topology-node {
   display: flex !important;
@@ -291,49 +256,6 @@ select {
   }
 }
 
-@keyframes intel-topology-focus {
-  0%,
-  100% {
-    box-shadow:
-      0 0 5px var(--topology-node-color),
-      0 0 18px color-mix(in srgb, var(--topology-node-color) 30%, transparent);
-  }
-  50% {
-    box-shadow:
-      0 0 10px var(--topology-node-color),
-      0 0 36px color-mix(in srgb, var(--topology-node-color) 65%, transparent);
-  }
-}
-.intel-topology-node[data-role="focus"] [data-tile="node"] {
-  animation: intel-topology-focus 2.4s ease-in-out infinite;
-}
-@media (prefers-reduced-motion: reduce) {
-  .intel-topology-node[data-role="focus"] [data-tile="node"] {
-    animation: none;
-  }
-}
-
-@keyframes intel-topology-arrive {
-  from {
-    transform: scale(0.78);
-    opacity: 0.65;
-  }
-  to {
-    transform: scale(1);
-    opacity: 1;
-  }
-}
-.intel-topology-node[data-role="focus"] [data-tile="node"] {
-  animation:
-    intel-topology-arrive 0.7s ease-out both,
-    intel-topology-focus 2.4s ease-in-out infinite;
-}
-@media (prefers-reduced-motion: reduce) {
-  .intel-topology-node[data-role="focus"] [data-tile="node"] {
-    animation: none;
-  }
-}
-
 /* @tag:intel-brief — matte reading/feed desk and preference-aware motion. */
 #intel-context-rail {
   position: sticky;
@@ -345,49 +267,11 @@ select {
   z-index: 2;
   padding-bottom: 12px;
 }
-@keyframes intel-desk-enter {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
 #intel-article-feed [data-testid^="article-card-"] {
   transition:
     background-color 120ms,
     border-color 120ms;
 }
-#intel-feed-cards > :nth-child(-n + 8) {
-  animation: intel-desk-enter 200ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
-}
-#intel-feed-cards > :nth-child(1) {
-  animation-delay: 0ms;
-}
-#intel-feed-cards > :nth-child(2) {
-  animation-delay: 30ms;
-}
-#intel-feed-cards > :nth-child(3) {
-  animation-delay: 60ms;
-}
-#intel-feed-cards > :nth-child(4) {
-  animation-delay: 90ms;
-}
-#intel-feed-cards > :nth-child(5) {
-  animation-delay: 120ms;
-}
-#intel-feed-cards > :nth-child(6) {
-  animation-delay: 150ms;
-}
-#intel-feed-cards > :nth-child(7) {
-  animation-delay: 180ms;
-}
-#intel-feed-cards > :nth-child(8) {
-  animation-delay: 210ms;
-}
-
 .intel-topology-node,
 .intel-topology-node [data-tile="node"] {
   transition:
@@ -411,28 +295,9 @@ select {
   }
 }
 
-@keyframes intel-skeleton-shimmer {
-  from {
-    background-position: 200% 0;
-  }
-  to {
-    background-position: -200% 0;
-  }
-}
 [data-testid="skeleton-line"] {
-  background-image: linear-gradient(
-    100deg,
-    transparent 20%,
-    rgba(255, 255, 255, 0.06) 50%,
-    transparent 80%
-  );
-  background-size: 200% 100%;
-  animation: intel-skeleton-shimmer 1.8s linear infinite;
-}
-@media (prefers-reduced-motion: reduce) {
-  [data-testid="skeleton-line"] {
-    animation: none;
-  }
+  background-color: #111317;
+  background-image: none;
 }
 
 #intel-landing .scene-container,

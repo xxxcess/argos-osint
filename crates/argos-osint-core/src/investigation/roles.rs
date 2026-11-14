@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::provider::{ModelAssignment, RoleDefaults};
 
-/// The 9 logical model roles specified in the unified investigation harness.
+/// The six current pipeline roles and retained legacy serialized variants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum LogicalRole {
     ReconAgent,

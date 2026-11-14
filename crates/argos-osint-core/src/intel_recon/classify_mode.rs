@@ -424,7 +424,7 @@ struct ModeDecision {
     chat: Vec<ChatMessage>,
 }
 
-impl crate::recon::model_exec::DecisionsAdapter<ReportMode> for ModeDecision {
+impl crate::model_exec::DecisionsAdapter<ReportMode> for ModeDecision {
     fn compile_native(&self) -> (Value, Value) {
         (self.state.clone(), self.questions.clone())
     }
@@ -500,8 +500,8 @@ async fn classify_with_role(
     decision: ModeDecision,
 ) -> Option<ReportMode> {
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let scope = crate::recon::model_exec::OperationScope::new(operation, "classifier");
-    crate::recon::model_exec::execute_decisions_or_chat(
+    let scope = crate::model_exec::OperationScope::new(operation, "classifier");
+    crate::model_exec::execute_decisions_or_chat(
         auth, settings, &scope, &decision, &cancel, None, None,
     )
     .await

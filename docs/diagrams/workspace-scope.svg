@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" role="img" aria-labelledby="workspace-scope-title workspace-scope-desc">
+<title id="workspace-scope-title">Backend scope and immutable workstation origin</title>
+<desc id="workspace-scope-desc">Resource authorization and request attribution have different owners. New requests use workstation identity without workspace narrowing; immutable legacy origins stay readable through version-aware history. Membership is applied before every activity projection.</desc>
+<style>text{font-family:Geist,Arial,sans-serif;fill:#242424}.zone{font-size:14px;letter-spacing:1.4px;fill:#666}.label{font-size:20px;font-weight:600}.note{font-size:16px;fill:#555}.small{font-size:14px;fill:#666}.node{fill:#fff;stroke:#aaa;stroke-width:1}.focus{fill:#fff4ee;stroke:#eb6c36;stroke-width:2}.wire{fill:none;stroke:#555;stroke-width:2;marker-end:url(#arrow)}.lane{fill:#fafafa;stroke:#ddd;stroke-width:1}</style>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#555"/></marker></defs>
+<rect width="1200" height="720" fill="#fff"/>
+<text x="40" y="48" class="zone">RESOURCE TARGET</text><path d="M 40 66 H 1160" stroke="#bbb"/>
+<rect x="40" y="92" width="480" height="132" rx="6" class="focus"/>
+<text x="56" y="124" class="label">Authorized deployment</text>
+<text x="56" y="156" class="note">Actor corpus, search, model defaults, tool keys</text>
+<text x="56" y="182" class="note">Backend-global within caller permissions</text>
+<rect x="680" y="92" width="480" height="132" rx="6" class="node"/>
+<text x="696" y="124" class="label">Protected workstation</text>
+<text x="696" y="156" class="note">Stable installation + scope identity</text>
+<text x="696" y="182" class="note">IP and local folder names do not narrow data</text>
+<path d="M 520 156 H 680" class="wire"/>
+<text x="40" y="280" class="zone">REQUEST ORIGIN AND ACTIVITY</text><path d="M 40 298 H 1160" stroke="#bbb"/>
+<rect x="40" y="328" width="336" height="148" rx="6" class="node"/>
+<text x="56" y="360" class="label">Accepted request</text>
+<text x="56" y="392" class="note">Original registration and nonce</text>
+<text x="56" y="418" class="note">Exact body + context retained</text>
+<text x="56" y="444" class="note">Configuration revision captured</text>
+<rect x="432" y="328" width="336" height="148" rx="6" class="focus"/>
+<text x="448" y="360" class="label">Workstation membership</text>
+<text x="448" y="392" class="note">Creator or genuine requester</text>
+<text x="448" y="418" class="note">Causal jobs retain lifecycle fence</text>
+<text x="448" y="444" class="note">Checked before totals and paging</text>
+<rect x="824" y="328" width="336" height="148" rx="6" class="node"/>
+<text x="840" y="360" class="label">Safe activity projection</text>
+<text x="840" y="392" class="note">Status, selected-job logs</text>
+<text x="840" y="418" class="note">Private eligibility rechecked</text>
+<text x="840" y="444" class="note">No all-backend fallback</text>
+<path d="M 376 402 H 432" class="wire"/>
+<path d="M 768 402 H 824" class="wire"/>
+<rect x="432" y="540" width="728" height="100" rx="6" class="node"/>
+<text x="448" y="572" class="label">Cycle-history deletion</text>
+<text x="448" y="604" class="note">Tombstone this workstation association; preserve shared evidence.</text>
+<text x="448" y="630" class="note">Durable job audit remains; deletion never cancels the cycle.</text>
+<path d="M 600 476 V 540" class="wire"/>
+
+<text x="40" y="696" class="small">Gateway or access changes fence client caches and pending confirmations; accepted work continues.</text>
+</svg>

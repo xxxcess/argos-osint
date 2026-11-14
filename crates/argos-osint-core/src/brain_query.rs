@@ -42,6 +42,59 @@ pub struct InsightMetadata {
     pub revision: String,
 }
 
+/// A retained source citation for an insight.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct InsightSource {
+    pub thread_id: Option<String>,
+    pub run_id: Option<String>,
+    pub answer_id: String,
+    pub call_id: String,
+    pub source_url: Option<String>,
+    pub deleted_origin: bool,
+    /// Publisher time of an Atlas article. Empty for recon tool results.
+    #[serde(default)]
+    pub published_at: String,
+}
+/// A retained insight with provenance and related claims.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct InsightView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<InsightMetadata>,
+    pub memory_id: String,
+    pub entity: String,
+    pub predicate: String,
+    pub object_value: String,
+    pub topic: String,
+    pub classification: String,
+    pub confidence: f64,
+    pub sources: Vec<InsightSource>,
+    pub related: Vec<String>,
+}
+impl InsightView {
+    pub fn presentation(&self) -> String {
+        if let Some(metadata) = &self.metadata {
+            format!(
+                "{} · {} → {} · {} · {} · {}",
+                self.entity,
+                self.predicate,
+                self.object_value,
+                metadata.insight_kind,
+                metadata.lifecycle,
+                metadata.assessment.relation
+            )
+        } else {
+            format!(
+                "{} · {} → {} · legacy/{} · unassessed · {:.0}%",
+                self.entity,
+                self.predicate,
+                self.object_value,
+                self.classification,
+                self.confidence * 100.0
+            )
+        }
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MemoryEvidence {
     pub memory_id: String,

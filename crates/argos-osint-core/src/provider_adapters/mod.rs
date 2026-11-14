@@ -34,7 +34,8 @@ use crate::secrets::ProviderSecret;
 pub const OUTPUT_TOOL: &str = "submit_result";
 
 /// What an operation must return, independent of adapter.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResponseContract {
     /// Closed labels/IDs (native decisions or validated chat labels).
     BoundedDecision,

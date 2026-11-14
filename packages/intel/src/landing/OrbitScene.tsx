@@ -118,7 +118,7 @@ export function OrbitScene({
   const coreColor = {
     offline: intelColors.danger,
     checking: landingColors.core,
-    healthy: intelColors.accent,
+    healthy: intelColors.success,
     ready: intelColors.cool,
   }[sequence.phase];
   const message = sequence.active

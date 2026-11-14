@@ -80,6 +80,16 @@ pub struct ProvenanceSummary {
 impl From<&Provenance> for ProvenanceSummary {
     fn from(value: &Provenance) -> Self {
         let (kind, version, hash, review) = match value {
+            Provenance::ZeroShot => {
+                return Self {
+                    kind: "zero_shot".into(),
+                    label: value.label().into(),
+                    dataset_version: String::new(),
+                    dataset_sha256: String::new(),
+                    review_reference: None,
+                    seed_dataset_sha256: None,
+                }
+            }
             Provenance::SyntheticBaseline {
                 dataset_version,
                 dataset_sha256,
@@ -477,6 +487,26 @@ impl ClassifierHome {
         snapshot: &ModelSnapshot,
         expected_manifest_sha256: &str,
     ) -> Result<(), ClassifierError> {
+        if snapshot.algorithm_version == super::ZERO_SHOT_ALGORITHM_VERSION
+            && super::remote::is_configured()
+        {
+            return super::remote::validate_configured(
+                snapshot,
+                expected_manifest_sha256,
+                &self.inner.cancel,
+            )
+            .await;
+        }
+        self.validate_local_saved_pin_integrity(snapshot, expected_manifest_sha256)
+            .await
+    }
+
+    /// Rechecks the exact local artifact without starting a model runtime.
+    pub async fn validate_local_saved_pin_integrity(
+        &self,
+        snapshot: &ModelSnapshot,
+        expected_manifest_sha256: &str,
+    ) -> Result<(), ClassifierError> {
         if !cfg!(feature = "classifier") {
             return Err(ClassifierError::Unavailable);
         }
@@ -493,7 +523,14 @@ impl ClassifierHome {
         let snapshot = snapshot.clone();
         let expected = expected_manifest_sha256.to_owned();
         blocking(move || {
-            let (_, _, _, actual) = load_pin(&root, Some(snapshot))?;
+            #[cfg(feature = "classifier")]
+            let actual = if snapshot.algorithm_version == super::ZERO_SHOT_ALGORITHM_VERSION {
+                super::bert::Bundle::load(&root, Some(snapshot))?.manifest_sha256
+            } else {
+                load_pin(&root, Some(snapshot))?.3
+            };
+            #[cfg(not(feature = "classifier"))]
+            let actual = load_pin(&root, Some(snapshot))?.3;
             if actual != expected {
                 return Err(invalid_artifact("saved_manifest_hash_mismatch"));
             }
@@ -596,6 +633,113 @@ impl ClassifierHome {
     /// Pins the current or exact saved immutable model. No fallback is allowed
     /// when a requested identity is absent or incompatible.
     pub async fn pin(
+        &self,
+        requested: Option<&ModelSnapshot>,
+    ) -> Result<PinnedClassifier, ClassifierError> {
+        if requested.is_some_and(|snapshot| {
+            snapshot.algorithm_version == super::ZERO_SHOT_ALGORITHM_VERSION
+        }) {
+            return self.pin_atlas(requested).await;
+        }
+        self.pin_natural(requested).await
+    }
+
+    /// Pins live Atlas inference, or the exact saved backend for a resumed run.
+    pub async fn pin_atlas(
+        &self,
+        requested: Option<&ModelSnapshot>,
+    ) -> Result<PinnedClassifier, ClassifierError> {
+        if requested.is_some_and(|snapshot| {
+            snapshot.algorithm_version != super::ZERO_SHOT_ALGORITHM_VERSION
+        }) {
+            return self.pin_natural(requested).await;
+        }
+        if super::remote::is_configured() {
+            return super::remote::pin_configured(requested, &self.inner.cancel).await;
+        }
+        self.pin_atlas_local(requested).await
+    }
+
+    /// Pins Rust-BERT from this home even if a private remote is configured.
+    /// The private classifier server must use this entrypoint to own the model.
+    pub async fn pin_atlas_local(
+        &self,
+        requested: Option<&ModelSnapshot>,
+    ) -> Result<PinnedClassifier, ClassifierError> {
+        if requested.is_some_and(|snapshot| {
+            snapshot.algorithm_version != super::ZERO_SHOT_ALGORITHM_VERSION
+        }) {
+            return Err(ClassifierError::Incompatible(
+                "expected a Rust-BERT snapshot".into(),
+            ));
+        }
+        #[cfg(not(feature = "classifier"))]
+        return Err(ClassifierError::Unavailable);
+        #[cfg(feature = "classifier")]
+        {
+            let _serial = self.inner.pin_operation.lock().await;
+            let control = super::WorkControl {
+                cancel: self.inner.cancel.clone(),
+                ..super::WorkControl::new()
+            };
+            control.check_active()?;
+            let home = self.inner.home.clone();
+            let current = requested.is_none();
+            let requested = requested.cloned();
+            let bundle = blocking(move || Ok(super::bert::Bundle::load(&home, requested)?))
+                .await
+                .map_err(classifier_error)?;
+            let snapshot = bundle.snapshot.clone();
+            let manifest_sha256 = bundle.manifest_sha256.clone();
+            let key = format!(
+                "{}:{}:{}",
+                snapshot.model_id, snapshot.artifact_sha256, manifest_sha256
+            );
+            {
+                let mut pins = self.inner.pins.lock().map_err(|_| ClassifierError::Busy)?;
+                if let Some(service) = pins.get(&key).and_then(Weak::upgrade) {
+                    let snapshot = if current {
+                        service
+                            .pinned_model()
+                            .cloned()
+                            .ok_or(ClassifierError::Unavailable)?
+                    } else {
+                        snapshot
+                    };
+                    return Ok(PinnedClassifier {
+                        snapshot,
+                        manifest_sha256,
+                        service,
+                    });
+                }
+                pins.retain(|_, value| value.strong_count() > 0);
+                if pins.len() >= 3 {
+                    return Err(ClassifierError::Busy);
+                }
+            }
+            let runtime = tokio::runtime::Handle::current();
+            let service = blocking(move || Ok(Arc::new(bundle.start(runtime, &control)?)))
+                .await
+                .map_err(classifier_error)?;
+            self.inner
+                .pins
+                .lock()
+                .map_err(|_| ClassifierError::Busy)?
+                .insert(key, Arc::downgrade(&service));
+            *self
+                .inner
+                .active_pin
+                .lock()
+                .map_err(|_| ClassifierError::Busy)? = Some(service.clone());
+            Ok(PinnedClassifier {
+                snapshot,
+                manifest_sha256,
+                service,
+            })
+        }
+    }
+
+    async fn pin_natural(
         &self,
         requested: Option<&ModelSnapshot>,
     ) -> Result<PinnedClassifier, ClassifierError> {
@@ -1868,7 +2012,7 @@ fn lock_held(path: &Path) -> Result<bool, HomeError> {
 fn job_detail_sync(home: &Path, id: &str, settle: bool) -> Result<TrainingJob, HomeError> {
     validate_job_id(id)?;
     let path = artifact::root_for(home)?.join("manual-jobs").join(id);
-    let mut job = read_job(&path, id)?;
+    let job = read_job(&path, id)?;
     if job.state.terminal() {
         return Ok(job);
     }
@@ -1876,9 +2020,22 @@ fn job_detail_sync(home: &Path, id: &str, settle: bool) -> Result<TrainingJob, H
         return Ok(job);
     }
     if settle {
-        let store = ArtifactStore::new(home)?;
-        match store.try_writer() {
-            Ok(_lease) => {
+        settle_unowned_job(home, &path, job)
+    } else {
+        Ok(job)
+    }
+}
+fn settle_unowned_job(
+    home: &Path,
+    path: &Path,
+    mut job: TrainingJob,
+) -> Result<TrainingJob, HomeError> {
+    let store = ArtifactStore::new(home)?;
+    match store.try_writer() {
+        Ok(_lease) => {
+            // The prior writer may have finished after the ownership probe.
+            job = read_job(path, &job.job_id)?;
+            if !job.state.terminal() {
                 job.state = TrainingJobState::Interrupted;
                 job.advance()?;
                 job.diagnostic = Some(diagnostic(
@@ -1886,26 +2043,25 @@ fn job_detail_sync(home: &Path, id: &str, settle: bool) -> Result<TrainingJob, H
                     "Training owner stopped; use a new request ID to rebuild",
                     true,
                 ));
-                write_job(&path, &job)?;
+                write_job(path, &job)?;
             }
-            Err(ClassifierError::Busy) => {
-                job.diagnostic = Some(diagnostic(
-                    "ownership_unverified",
-                    "Training ownership cannot currently be verified",
-                    true,
-                ));
-            }
-            Err(error) => return Err(error.into()),
         }
+        Err(ClassifierError::Busy) => {
+            job.diagnostic = Some(diagnostic(
+                "ownership_unverified",
+                "Training ownership cannot currently be verified",
+                true,
+            ));
+        }
+        Err(error) => return Err(error.into()),
     }
     Ok(job)
 }
 fn read_job(path: &Path, id: &str) -> Result<TrainingJob, HomeError> {
+    // A terminal progress pointer is published after its result.
+    let progress = read_optional_json::<TrainingJob>(&path.join("progress.json"), 64 * 1024)?;
     let job = read_optional_json::<TrainingJob>(&path.join("result.json"), 1024 * 1024)?
-        .or(read_optional_json::<TrainingJob>(
-            &path.join("progress.json"),
-            64 * 1024,
-        )?)
+        .or(progress)
         .ok_or_else(|| HomeError::NotFound { job_id: id.into() })?;
     if job.job_id != id
         || job.schema_version != "classifier-training-job-v1"
@@ -2051,7 +2207,16 @@ pub enum CyclePreflightError {
 impl fmt::Display for CyclePreflightError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Classifier { status, code, source } => write!(f, "Atlas classifier blocked ({}; {code}): {source}. Train or restore a compatible classifier; historical pins require explicit re-evaluation under a new revision.", status.as_str()),
+            Self::Classifier { status, code, source } => {
+                write!(f, "Atlas classifier blocked ({}; {code}): {source}.", status.as_str())?;
+                match (code.as_str(), source) {
+                    ("classifier_unavailable", ClassifierError::MissingZeroShotConfig(_)) => f.write_str(" Set worker_path and model_dir there, then check Atlas classifier in Venture (5)."),
+                    ("classifier_unavailable", ClassifierError::BridgeProtocol { operation, .. }) if operation == super::remote::OPERATION => f.write_str(" Check the Fleetworks classifier service and its model configuration."),
+                    ("classifier_unavailable", _) => f.write_str(" Run argos classifier status to check the local Rust-BERT setup."),
+                    ("pinned_classifier_unavailable", _) => f.write_str(" Restore the saved classifier revision to resume, or explicitly reclassify under a new revision."),
+                    _ => Ok(()),
+                }
+            }
             Self::MissingPinnedRevision => f.write_str("Atlas classifier blocked: resumed acquisition/admission has no saved model revision. Explicitly re-evaluate under a new revision; the current active model cannot replace a missing pin."),
             Self::InvalidRunState { code } => write!(f, "Atlas classifier preflight cannot verify the saved run: {code}"),
         }
@@ -2085,8 +2250,9 @@ pub async fn preflight_cycle(
         }
         CycleRequirement::PostAdmissionOnly => None,
     };
-    let pinned = home.pin(selected).await.map_err(|source| {
+    let pinned = home.pin_atlas(selected).await.map_err(|source| {
         let status = match &source {
+            ClassifierError::MissingZeroShotConfig(_) => ClassifierStatus::Missing,
             ClassifierError::Unavailable if cfg!(feature = "classifier") => {
                 ClassifierStatus::Missing
             }
@@ -2133,6 +2299,53 @@ mod ownership_tests {
             "owned task storage must not retain the home"
         );
         assert!(cancel.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn orphan_settlement_preserves_result_published_after_the_poll() {
+        let root = tempfile::tempdir().expect("isolated classifier home");
+        let store = ArtifactStore::new(root.path()).expect("classifier store");
+        let writer = store.try_writer().expect("original writer");
+        let request_id = "finishes-during-poll";
+        let id = job_id(request_id);
+        let path = store.root().join("manual-jobs").join(&id);
+        fs::create_dir_all(&path).expect("job directory");
+        let mut job = TrainingJob {
+            schema_version: "classifier-training-job-v1".into(),
+            job_id: id.clone(),
+            request_id: request_id.into(),
+            state: TrainingJobState::Running,
+            revision: 1,
+            dataset_path: None,
+            progress: None,
+            active_model: None,
+            candidate_model_id: None,
+            provenance: None,
+            cancel_requested: false,
+            outcome: None,
+            diagnostic: None,
+        };
+        write_job(&path, &job).expect("running progress");
+        let stale = read_job(&path, &id).expect("poll before completion");
+        assert_eq!(stale.state, TrainingJobState::Running);
+        job.state = TrainingJobState::Failed;
+        job.diagnostic = Some(diagnostic(
+            "fixture_parser_failed",
+            "Invalid fixture CSV",
+            false,
+        ));
+        job.advance().expect("terminal revision");
+        write_json(&path.join("result.json"), &job, 1024 * 1024).expect("terminal result");
+        write_job(&path, &job).expect("terminal progress");
+        drop(writer);
+
+        let settled =
+            settle_unowned_job(root.path(), &path, stale).expect("settle after writer release");
+        assert_eq!(settled, job, "the terminal result owns the final state");
+        let progress = read_optional_json::<TrainingJob>(&path.join("progress.json"), 64 * 1024)
+            .expect("terminal progress is readable")
+            .expect("terminal progress still exists");
+        assert_eq!(progress, job, "settlement must not rewrite progress");
     }
 
     #[tokio::test]

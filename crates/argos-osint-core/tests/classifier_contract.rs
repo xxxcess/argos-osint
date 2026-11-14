@@ -30,12 +30,12 @@ fn taxonomy_and_binary_models_are_exact_and_ordered() {
         ]
     );
     let names = [
-        "Governance & Political Stability",
-        "Security & Threat Environment",
-        "Economic & Supply Chain Resilience",
-        "Human Security & Public Welfare",
-        "Environmental & Resource Security",
-        "Scientific & Technological Capability",
+        "Politics & Governance",
+        "Security & Conflict",
+        "Economy & Supply Chains",
+        "Health & Public Welfare",
+        "Environment & Resources",
+        "Science & Technology",
     ];
     let manifest = argos_osint_core::atlas_taxonomy::taxonomy_manifest();
     assert_eq!(manifest["taxonomy_version"], TAXONOMY_VERSION);

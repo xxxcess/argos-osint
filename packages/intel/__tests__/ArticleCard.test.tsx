@@ -106,21 +106,27 @@ describe("authoritative domain labels", () => {
     categories: ["economic", "human"],
     taxonomy_version: "strategic-domains-v1",
     admission_state: "admitted",
-    publication_version: "atlas-admission-publication-v3",
+    publication_version: "atlas-admission-publication-v4",
     image_url: "",
     url: "",
     author: "",
   };
-  it("uses official names only for a current admitted exact pair", () => {
-    expect(articleDomainLabel(article)).toBe(
-      "Economic & Supply Chain Resilience",
+  it("labels current admitted primary and optional secondary domains", () => {
+    expect(articleDomainLabel(article)).toBe("Economy & Supply Chains");
+    expect(articleDomainLabel({ ...article, categories: ["economic"] })).toBe(
+      "Economy & Supply Chains",
     );
+  });
+
+  it("keeps historical and invalid projections explicit", () => {
     for (const changes of [
       { taxonomy_version: undefined },
       { admission_state: "rejected" },
       { admission_state: "pending" },
       { publication_version: undefined },
-      { categories: ["economic"] },
+      { publication_version: "atlas-admission-publication-v3" },
+      { categories: [] },
+      { categories: ["economic", "human", "security"] },
       { categories: ["economic", "economic"] },
       { categories: ["economic", "military"] },
       { categories: ["human", "economic"] },

@@ -9,4 +9,4 @@ Follow the selected tester role and [Argos testing guidelines](../argos-testing/
 
 Use the stable combined integration tree and [contributor workflow](../../../docs/wiki/code/contributing.md) for required gates, Cargo wrapper, embedded-only local storage, hosted mutation execution and cache ownership. Run early contract proof before the frozen final checks. Rerun only evidence invalidated by a demonstrated acceptance blocker; do not repeat unchanged broad gates.
 
-For UI/TUI changes use the corresponding skills and inspect affected screenshots. Report actual commands, exits, executed/skipped counts and unmet acceptance; pending or skipped checks are not passes.
+For Rune/React UI changes use the corresponding skills and inspect affected screenshots. Report actual commands, exits, executed/skipped counts and unmet acceptance; pending or skipped checks are not passes.

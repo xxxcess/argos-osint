@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" role="img" aria-labelledby="connect-registry-title connect-registry-desc">
+<title id="connect-registry-title">Workstation registry v2 and historical recovery</title>
+<desc id="connect-registry-desc">The registry resolves workstation identity from authenticated scope and protected installation identity. Paired Native authority is checked against current issuance, installation, epoch and issuer policy. Schema migration preserves old origins and IDs while fencing incompatible writers.</desc>
+<style>text{font-family:Geist,Arial,sans-serif;fill:#242424}.zone{font-size:14px;letter-spacing:1.4px;fill:#666}.label{font-size:20px;font-weight:600}.note{font-size:16px;fill:#555}.small{font-size:14px;fill:#666}.node{fill:#fff;stroke:#aaa;stroke-width:1}.focus{fill:#fff4ee;stroke:#eb6c36;stroke-width:2}.wire{fill:none;stroke:#555;stroke-width:2;marker-end:url(#arrow)}.lane{fill:#fafafa;stroke:#ddd;stroke-width:1}</style>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#555"/></marker></defs>
+<rect width="1200" height="720" fill="#fff"/>
+<text x="40" y="48" class="zone">IDENTITY · AUTHENTICATED SCOPE AND INSTALLATION</text><rect x="40" y="88" width="480" height="148" rx="6" class="node"/>
+<text x="56" y="120" class="label">Protected local installation</text>
+<text x="56" y="152" class="note">Stable installation marker + private catalogs</text>
+<text x="56" y="178" class="note">Origin-bound Keychain credential references</text>
+<text x="56" y="204" class="note">No hidden default-child dependency</text>
+<rect x="680" y="88" width="480" height="148" rx="6" class="focus"/>
+<text x="696" y="120" class="label">Current registration transaction</text>
+<text x="696" y="152" class="note">Authenticated scope + installation hash</text>
+<text x="696" y="178" class="note">Stable workstation ID = Connect ID</text>
+<text x="696" y="204" class="note">Contract 2; IP is optional metadata</text>
+<path d="M 520 162 H 680" class="wire"/>
+<text x="40" y="300" class="zone">COORDINATED FORWARD MIGRATION</text><rect x="40" y="340" width="332" height="148" rx="6" class="node"/>
+<text x="56" y="372" class="label">Version and writer fence</text>
+<text x="56" y="404" class="note">Operator bootstraps new schema</text>
+<text x="56" y="430" class="note">Compatible rollout before admission</text>
+<text x="56" y="456" class="note">Checkpoint commits atomically</text>
+<rect x="432" y="340" width="332" height="148" rx="6" class="focus"/>
+<text x="448" y="372" class="label">Preserve identity and history</text>
+<text x="448" y="404" class="note">Keep workstation ID + installation</text>
+<text x="448" y="430" class="note">Old registrations become read-only</text>
+<text x="448" y="456" class="note">Existing origins stay immutable</text>
+<rect x="824" y="340" width="336" height="148" rx="6" class="node"/>
+<text x="840" y="372" class="label">Invalidate stale proof</text>
+<text x="840" y="404" class="note">Revoke old browser sessions</text>
+<text x="840" y="430" class="note">Rebuild workstation ID bindings</text>
+<text x="840" y="456" class="note">Old cursors/cache require restart</text>
+<path d="M 372 414 H 432" class="wire"/>
+<path d="M 764 414 H 824" class="wire"/>
+<rect x="432" y="552" width="728" height="100" rx="6" class="node"/>
+<text x="448" y="584" class="label">Historical request recovery</text>
+<text x="448" y="616" class="note">Current proof + original registration resolve accepted receipts read-only.</text>
+<text x="448" y="642" class="note">Unknown outcomes keep the original request; causal jobs retain their lifecycle fence.</text>
+<path d="M 598 488 V 552" class="wire"/>
+
+<text x="40" y="696" class="small">Current paired authority, installation, policy and revocation fences also protect pending mutations.</text>
+</svg>

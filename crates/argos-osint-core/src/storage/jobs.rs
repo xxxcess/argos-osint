@@ -166,6 +166,7 @@ pub(crate) async fn bump(tx: &Tx, table: &str, key: &str) -> Result<(), TxError>
 /// Apply the job-system schema (idempotent).
 pub async fn apply_schema(db: &Surreal<Any>) -> Result<(), TxError> {
     db.query(SCHEMA).await?.check()?;
+    db.query(super::job_context::SCHEMA).await?.check()?;
     Ok(())
 }
 
@@ -239,12 +240,14 @@ pub(crate) async fn rollup_in(tx: &Tx, job_id: &str) -> Result<(), TxError> {
              LET $first = (SELECT VALUE started_at FROM task WHERE job = $j AND started_at != NONE \
                ORDER BY started_at LIMIT 1)[0];
              LET $failed = SELECT VALUE error_category FROM task WHERE job = $j AND state = 'failed';
+             LET $failed_messages = SELECT VALUE error_message FROM task WHERE job = $j AND state = 'failed' AND error_message != '';
              UPDATE $j SET attempts_used = count($att),
                attempt_cap = math::sum((SELECT VALUE max_attempts FROM task WHERE job = $j)),
                active_ms = IF count($att) > 0 { math::sum($att.map(|$d| $d ?? 0)) } ELSE { active_ms },
                queue_ms = IF $first != NONE { duration::millis($first - created_at) } ELSE { queue_ms },
-               error_summary = IF count($failed) > 0 { <string>count($failed) + ' task(s) failed' }
-                 ELSE { error_summary },
+               error_summary = IF count($failed) > 0 {
+                 IF count($failed_messages) > 0 { $failed_messages[0] } ELSE { <string>count($failed) + ' task(s) failed' }
+               } ELSE { error_summary },
                error_category = IF count($failed) > 0 { $failed.find(|$c| $c != '') ?? 'task_failed' }
                  ELSE { error_category }
              RETURN NONE;",
@@ -272,6 +275,9 @@ pub(crate) async fn log_transition_in(
 }
 
 pub(crate) async fn create_job_in(tx: &Tx, job: &NewJob<'_>) -> Result<(), TxError> {
+    if job.kind != "service" {
+        super::configuration_reset::fence_new_work_in(tx).await?;
+    }
     let (root, ancestors) = match job.parent {
         None => (rid("job", job.id), Vec::new()),
         Some(parent) => {
@@ -312,6 +318,9 @@ pub(crate) async fn create_job_in(tx: &Tx, job: &NewJob<'_>) -> Result<(), TxErr
         .bind(("at", ts(job.created_at))),
     )
     .await?;
+    if let Some(parent) = job.parent {
+        super::job_context::record_child_in(tx, parent, job.id).await?;
+    }
     log_transition_in(
         tx,
         job.id,
@@ -833,13 +842,20 @@ pub(crate) async fn interrupt_expired_pool_in(
     interrupt_expired_matching_in(tx, Some(pool), now).await
 }
 
+fn recovery_failure_message(outcome: &str) -> &'static str {
+    match outcome {
+        "lease_expired" => "Task lease expired after maximum worker recoveries",
+        "process_exited" => "Worker process exited before task completed",
+        _ => "Task failed after maximum worker recoveries",
+    }
+}
+
 async fn interrupt_expired_matching_in(
     tx: &Tx,
     pool: Option<&str>,
     now: DateTime<Utc>,
 ) -> Result<usize, TxError> {
     let now_s = ts(now);
-    bump(tx, "lease_sweep_guard", pool.unwrap_or("singleton")).await?;
     let mut res = run(
         tx,
         tx.query(
@@ -852,6 +868,10 @@ async fn interrupt_expired_matching_in(
     )
     .await?;
     let expired: Vec<Expired> = take(&mut res, 0)?;
+    if expired.is_empty() {
+        return Ok(0);
+    }
+    bump(tx, "lease_sweep_guard", pool.unwrap_or("singleton")).await?;
     let mut recovered = 0;
     for e in expired {
         requeue_running_in(
@@ -887,17 +907,22 @@ pub(crate) async fn requeue_running_in(
     only_expired: bool,
 ) -> Result<(), TxError> {
     let failed = recoveries + 1 >= MAX_WORKER_RECOVERIES;
+    let error_msg = recovery_failure_message(outcome);
     run(
         tx,
         tx.query(
             "UPDATE $t SET state = $next, lease_epoch += 1, lease_owner = '', process_owner = '', \
              lease_until = NONE, recoveries += 1, next_eligible_at = <datetime>$now, \
+             error_category = IF $failed THEN $outcome ELSE error_category END, \
+             error_message = IF $failed THEN $error_msg ELSE error_message END, \
              finished_at = IF $failed THEN <datetime>$now ELSE NONE END, updated_at = <datetime>$now \
              WHERE state = 'running' AND lease_epoch = $e \
              AND (!$only_expired OR lease_until <= <datetime>$now) RETURN NONE;
              LET $open = SELECT VALUE id FROM attempt \
              WHERE task = $t AND epoch = $e AND finished_at = NONE;
-             UPDATE $open SET finished_at = <datetime>$now, duration_ms = duration::millis(<datetime>$now - started_at), outcome = $outcome RETURN NONE;",
+             UPDATE $open SET finished_at = <datetime>$now, duration_ms = duration::millis(<datetime>$now - started_at), outcome = $outcome, \
+             error_category = IF $failed THEN $outcome ELSE error_category END, \
+             error_message = IF $failed THEN $error_msg ELSE error_message END RETURN NONE;",
         )
         .bind(("t", rid("task", id)))
         .bind(("next", if failed { "failed" } else { "queued" }))
@@ -905,6 +930,7 @@ pub(crate) async fn requeue_running_in(
         .bind(("now", now_s.to_string()))
         .bind(("e", epoch))
         .bind(("outcome", outcome.to_string()))
+        .bind(("error_msg", error_msg.to_string()))
         .bind(("only_expired", only_expired)),
     )
     .await?;
@@ -1011,59 +1037,70 @@ pub async fn commit_stage(
     now: DateTime<Utc>,
     op_key: &str,
 ) -> Result<Committed<Publish>, TxError> {
-    let now_s = ts(now);
-    run_tx(db, RetryPolicy::default(), |tx| {
-        let now_s = now_s.clone();
-        async move {
-            bump(&tx, "job_guard", &claimed.root_id).await?;
-            if let Some(r) = receipt(&tx, op_key).await? {
-                if r.kind == "stage" && r.task == claimed.id && r.epoch == claimed.lease_epoch {
-                    return Ok(Publish::Committed);
-                }
-                return Err(TxError::Abort(format!("operation key {op_key} reused")));
-            }
-            let Some(f) = fence(&tx, claimed, &now_s).await? else {
-                return Ok(Publish::LeaseLost);
-            };
-            if !holds(&f, claimed) {
-                return Ok(Publish::LeaseLost);
-            }
-            if f.cancelled {
-                return Ok(Publish::Cancelled);
-            }
-            run(
-                &tx,
-                tx.query(
-                    "UPSERT $o SET task = $t, root = $root, stage = $stage, \
-                     output_hash = $hash, output_json = $json, committed_at = <datetime>$now \
-                     RETURN NONE",
-                )
-                .bind(("o", rid("stage_output", &claimed.id)))
-                .bind(("t", rid("task", &claimed.id)))
-                .bind(("root", rid("job", &f.root_id)))
-                .bind(("stage", claimed.operation.clone()))
-                .bind(("hash", output_hash.to_string()))
-                .bind(("json", output_json.to_string()))
-                .bind(("now", now_s.clone())),
-            )
-            .await?;
-            complete_in(&tx, claimed, output_hash, &now_s).await?;
-            write_receipt(
-                &tx,
-                op_key,
-                "stage",
-                &claimed.id,
-                claimed.lease_epoch,
-                &now_s,
-            )
-            .await?;
-            // The job row is created as `running`. Close it once every stage
-            // is terminal so a finished brief is not still "running".
-            settle_finished_job_in(&tx, &claimed.job_id).await?;
-            Ok(Publish::Committed)
-        }
+    run_tx(db, RetryPolicy::default(), |tx| async move {
+        let commit = commit_stage_in(&tx, claimed, output_json, output_hash, now, op_key).await?;
+        Ok(match commit {
+            StageCommit::Applied | StageCommit::Replayed => Publish::Committed,
+            StageCommit::Rejected(outcome) => outcome,
+        })
     })
     .await
+}
+
+pub(super) enum StageCommit {
+    Applied,
+    Replayed,
+    Rejected(Publish),
+}
+
+/// Complete a stage inside the caller's transaction. Only a newly applied
+/// commit may write the stage metadata and retained completion fence.
+pub(super) async fn commit_stage_in(
+    tx: &Tx,
+    claimed: &ClaimedTask,
+    output_json: &str,
+    output_hash: &str,
+    now: DateTime<Utc>,
+    op_key: &str,
+) -> Result<StageCommit, TxError> {
+    let now = ts(now);
+    bump(tx, "job_guard", &claimed.root_id).await?;
+    if let Some(r) = receipt(tx, op_key).await? {
+        if r.kind == "stage" && r.task == claimed.id && r.epoch == claimed.lease_epoch {
+            return Ok(StageCommit::Replayed);
+        }
+        return Err(TxError::Abort(format!("operation key {op_key} reused")));
+    }
+    let Some(f) = fence(tx, claimed, &now).await? else {
+        return Ok(StageCommit::Rejected(Publish::LeaseLost));
+    };
+    if !holds(&f, claimed) {
+        return Ok(StageCommit::Rejected(Publish::LeaseLost));
+    }
+    if f.cancelled {
+        return Ok(StageCommit::Rejected(Publish::Cancelled));
+    }
+    run(
+        tx,
+        tx.query(
+            "UPSERT $o SET task = $t, root = $root, stage = $stage, \
+             output_hash = $hash, output_json = $json, committed_at = <datetime>$now \
+             RETURN NONE",
+        )
+        .bind(("o", rid("stage_output", &claimed.id)))
+        .bind(("t", rid("task", &claimed.id)))
+        .bind(("root", rid("job", &f.root_id)))
+        .bind(("stage", claimed.operation.clone()))
+        .bind(("hash", output_hash.to_string()))
+        .bind(("json", output_json.to_string()))
+        .bind(("now", now.clone())),
+    )
+    .await?;
+    complete_in(tx, claimed, output_hash, &now).await?;
+    write_receipt(tx, op_key, "stage", &claimed.id, claimed.lease_epoch, &now).await?;
+    // The job row is created as `running`. Close it once every stage is terminal.
+    settle_finished_job_in(tx, &claimed.job_id).await?;
+    Ok(StageCommit::Applied)
 }
 
 /// Fenced neighborhood-brief publication: lease check, cache write and task
@@ -1277,7 +1314,9 @@ pub(crate) async fn settle_finished_job_in(tx: &Tx, job_id: &str) -> Result<bool
     run(
         tx,
         tx.query(
-            "UPDATE $j SET state = $state, finished_at = finished_at ?? time::now(), \
+            "UPDATE $j SET state = $state, \
+             phase = IF $state = 'failed' AND !(phase INSIDE ['Failed', 'Cancelled', 'Completed']) THEN 'Failed' ELSE phase END, \
+             finished_at = finished_at ?? time::now(), \
              updated_at = time::now() WHERE state IN ['running', 'active', 'queued'] RETURN NONE;
              UPDATE brief_run SET state = $state, updated_at = time::now() \
              WHERE job = $j AND state = 'active' RETURN NONE;",
@@ -1385,119 +1424,145 @@ pub async fn ensure_chain(
     stages: &[StageSpec<'_>],
     now: DateTime<Utc>,
 ) -> Result<Committed<Chain>, TxError> {
-    let now_s = ts(now);
-    run_tx(db, RetryPolicy::default(), |tx| {
-        let now_s = now_s.clone();
-        async move {
-            let guard = rid("brief_chain_guard", article_id);
-            let mut res = run(
-                &tx,
-                tx.query(
-                    "UPSERT $g SET rev = (rev ?? 0) + 1, generation = generation ?? 0 RETURN NONE;
-                     SELECT VALUE generation FROM ONLY $g;
-                     SELECT record::id(job) AS job_id, input_revision, state, generation \
-                     FROM brief_run WHERE article_id = $a ORDER BY generation DESC LIMIT 1;",
-                )
-                .bind(("g", guard.clone()))
-                .bind(("a", article_id.to_string())),
-            )
-            .await?;
-            #[derive(SurrealValue)]
-            struct Run {
-                job_id: String,
-                input_revision: String,
-                state: String,
-                generation: i64,
-            }
-            let counter: Option<i64> = take(&mut res, 1)?;
-            let latest: Vec<Run> = take(&mut res, 2)?;
-            if let Some(run_row) = latest.first() {
-                if run_row.input_revision == input_revision && run_row.state != "superseded" {
-                    return Ok(Chain {
-                        job_id: run_row.job_id.clone(),
-                        generation: run_row.generation,
-                        created: false,
-                    });
-                }
-                if run_row.state == "active" {
-                    bump(&tx, "job_guard", &run_row.job_id).await?;
-                    run(
-                        &tx,
-                        tx.query(
-                            "UPDATE $j SET cancel_requested = true, state = 'superseded', \
-                             finished_at = <datetime>$now, updated_at = <datetime>$now RETURN NONE;
-                             UPDATE task SET state = 'cancelled', lease_epoch += 1, \
-                             lease_owner = '', process_owner = '', lease_until = NONE, finished_at = <datetime>$now, \
-                             updated_at = <datetime>$now WHERE job = $j \
-                             AND state IN ['queued', 'running'] RETURN NONE;
-                             UPDATE brief_run SET state = 'superseded', updated_at = <datetime>$now \
-                             WHERE job = $j RETURN NONE;",
-                        )
-                        .bind(("j", rid("job", &run_row.job_id)))
-                        .bind(("now", now_s.clone())),
-                    )
-                    .await?;
-                }
-            }
-            let generation = counter.unwrap_or(0) + 1;
-            let gen_s = generation.to_string();
-            let job_id = codec::encode(&["brief", article_id, &gen_s]);
-            create_job_in(
-                &tx,
-                &NewJob {
-                    id: &job_id,
-                    kind: "task",
-                    operation: POOL_INTEL_BRIEF,
-                    parent: None,
-                    created_at: now,
-                },
-            )
-            .await?;
-            let ids: Vec<String> = stages
-                .iter()
-                .map(|s| codec::encode(&[&job_id, s.operation]))
-                .collect();
-            for (i, stage) in stages.iter().enumerate() {
-                create_task_in(
-                    &tx,
-                    &NewTask {
-                        id: &ids[i],
-                        job: &job_id,
-                        pool: POOL_INTEL_BRIEF,
-                        operation: stage.operation,
-                        priority: i as i64,
-                        deps: stage.deps.iter().map(|d| ids[*d].as_str()).collect(),
-                        input_hash: input_revision,
-                        created_at: now,
-                    },
-                )
-                .await?;
-            }
-            run(
-                &tx,
-                tx.query(
-                    "CREATE $r SET article_id = $a, generation = $gen, job = $j, \
-                     input_revision = $rev, state = 'active', updated_at = <datetime>$now \
-                     RETURN NONE;
-                     UPDATE $g SET generation = $gen RETURN NONE;",
-                )
-                .bind(("r", rid("brief_run", &codec::encode(&[article_id, &gen_s]))))
-                .bind(("a", article_id.to_string()))
-                .bind(("gen", generation))
-                .bind(("j", rid("job", &job_id)))
-                .bind(("rev", input_revision.to_string()))
-                .bind(("now", now_s.clone()))
-                .bind(("g", guard)),
-            )
-            .await?;
-            Ok(Chain {
-                job_id,
-                generation,
-                created: true,
-            })
-        }
+    run_tx(db, RetryPolicy::default(), |tx| async move {
+        let admission =
+            ensure_chain_in(&tx, article_id, input_revision, stages, now, str::eq).await?;
+        Ok(admission.chain)
     })
     .await
+}
+
+#[derive(SurrealValue)]
+pub(crate) struct ChainRun {
+    pub job_id: String,
+    pub generation: i64,
+    pub input_revision: String,
+    pub state: String,
+}
+
+pub(crate) struct ChainAdmission {
+    pub chain: Chain,
+    pub superseded: Option<ChainRun>,
+}
+
+/// Admit a chain inside the caller's transaction, so its input snapshots can
+/// commit with the runnable tasks. The caller defines equivalent revisions.
+pub(crate) async fn ensure_chain_in(
+    tx: &Tx,
+    article_id: &str,
+    input_revision: &str,
+    stages: &[StageSpec<'_>],
+    now: DateTime<Utc>,
+    same_revision: impl FnOnce(&str, &str) -> bool,
+) -> Result<ChainAdmission, TxError> {
+    let now_s = ts(now);
+    let guard = rid("brief_chain_guard", article_id);
+    let mut res = run(
+        tx,
+        tx.query(
+            "UPSERT $g SET rev = (rev ?? 0) + 1, generation = generation ?? 0 RETURN NONE;
+             SELECT VALUE generation FROM ONLY $g;
+             SELECT record::id(job) AS job_id, input_revision, state, generation \
+             FROM brief_run WHERE article_id = $a ORDER BY generation DESC LIMIT 1;",
+        )
+        .bind(("g", guard.clone()))
+        .bind(("a", article_id.to_string())),
+    )
+    .await?;
+    let counter: Option<i64> = take(&mut res, 1)?;
+    let latest: Vec<ChainRun> = take(&mut res, 2)?;
+    let latest = latest.into_iter().next();
+    if let Some(run_row) = latest.as_ref().filter(|run| {
+        run.state != "superseded" && same_revision(&run.input_revision, input_revision)
+    }) {
+        return Ok(ChainAdmission {
+            chain: Chain {
+                job_id: run_row.job_id.clone(),
+                generation: run_row.generation,
+                created: false,
+            },
+            superseded: None,
+        });
+    }
+    let superseded = latest.filter(|run| run.state == "active");
+    if let Some(run_row) = &superseded {
+        bump(tx, "job_guard", &run_row.job_id).await?;
+        run(
+            tx,
+            tx.query(
+                "UPDATE $j SET cancel_requested = true, state = 'superseded',
+                 finished_at = <datetime>$now, updated_at = <datetime>$now RETURN NONE;
+                 UPDATE task SET state = 'cancelled', lease_epoch += 1,
+                 lease_owner = '', process_owner = '', lease_until = NONE, finished_at = <datetime>$now,
+                 updated_at = <datetime>$now WHERE job = $j
+                 AND state IN ['queued', 'running'] RETURN NONE;
+                 UPDATE brief_run SET state = 'superseded', updated_at = <datetime>$now
+                 WHERE job = $j RETURN NONE;",
+            )
+            .bind(("j", rid("job", &run_row.job_id)))
+            .bind(("now", now_s.clone())),
+        )
+        .await?;
+    }
+    let generation = counter.unwrap_or(0) + 1;
+    let gen_s = generation.to_string();
+    let job_id = codec::encode(&["brief", article_id, &gen_s]);
+    create_job_in(
+        tx,
+        &NewJob {
+            id: &job_id,
+            kind: "task",
+            operation: POOL_INTEL_BRIEF,
+            parent: None,
+            created_at: now,
+        },
+    )
+    .await?;
+    let ids: Vec<String> = stages
+        .iter()
+        .map(|s| codec::encode(&[&job_id, s.operation]))
+        .collect();
+    for (i, stage) in stages.iter().enumerate() {
+        create_task_in(
+            tx,
+            &NewTask {
+                id: &ids[i],
+                job: &job_id,
+                pool: POOL_INTEL_BRIEF,
+                operation: stage.operation,
+                priority: i as i64,
+                deps: stage.deps.iter().map(|d| ids[*d].as_str()).collect(),
+                input_hash: input_revision,
+                created_at: now,
+            },
+        )
+        .await?;
+    }
+    run(
+        tx,
+        tx.query(
+            "CREATE $r SET article_id = $a, generation = $gen, job = $j, \
+             input_revision = $rev, state = 'active', updated_at = <datetime>$now \
+             RETURN NONE;
+             UPDATE $g SET generation = $gen RETURN NONE;",
+        )
+        .bind(("r", rid("brief_run", &codec::encode(&[article_id, &gen_s]))))
+        .bind(("a", article_id.to_string()))
+        .bind(("gen", generation))
+        .bind(("j", rid("job", &job_id)))
+        .bind(("rev", input_revision.to_string()))
+        .bind(("now", now_s.clone()))
+        .bind(("g", guard)),
+    )
+    .await?;
+    Ok(ChainAdmission {
+        chain: Chain {
+            job_id,
+            generation,
+            created: true,
+        },
+        superseded,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1687,6 +1752,7 @@ async fn purge_tree_in(tx: &Tx, root: &str, reason: &str, now: &str) -> Result<(
              DELETE job_event WHERE job_id IN $jids;
              DELETE attempt WHERE root = $r;
              DELETE stage_output WHERE root = $r;
+             DELETE brief_publication_work WHERE job_id IN $jids;
              DELETE neighborhood_brief WHERE task.root = $r;
              DELETE task WHERE root = $r;
              DELETE brief_run WHERE job.root = $r;

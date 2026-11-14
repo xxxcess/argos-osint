@@ -1,12 +1,12 @@
 import type { IntelNavigation, IntelRoute } from "@argos/intel/src/navigation";
 
 const initial: IntelRoute = { screen: "home" };
-let snapshot: IntelRoute = initial;
-let href = "";
-const listeners = new Set<() => void>();
-
-export function routeFromUrl(url: URL): IntelRoute {
-  const path = url.pathname.replace(/\/$/, "");
+export function routeFromUrl(url: URL, basePath = ""): IntelRoute {
+  const path = (
+    basePath && url.pathname.startsWith(`${basePath}/`)
+      ? url.pathname.slice(basePath.length)
+      : url.pathname
+  ).replace(/\/$/, "");
   const run_id = url.searchParams.get("run") || undefined;
   const article_id = url.searchParams.get("id") || undefined;
   if (path === "/bulletin") return { screen: "bulletin" };
@@ -44,7 +44,7 @@ export function routeFromUrl(url: URL): IntelRoute {
   return initial;
 }
 
-export function routeUrl(route: IntelRoute): string {
+export function routeUrl(route: IntelRoute, basePath = ""): string {
   const params = new URLSearchParams();
   if (route.screen === "brief" && route.run_id && route.article_id) {
     params.set("run", route.run_id);
@@ -63,68 +63,75 @@ export function routeUrl(route: IntelRoute): string {
     if (route.focus) params.set("focus", route.focus);
   }
   const query = params.toString();
-  return `/${route.screen}${query ? `?${query}` : ""}`;
+  return `${basePath}/${route.screen}${query ? `?${query}` : ""}`;
 }
 
-function changed() {
-  href = "";
-  listeners.forEach((listener) => listener());
+export function createWebNavigation(basePath = ""): IntelNavigation {
+  let snapshot: IntelRoute = initial;
+  let href = "";
+  const listeners = new Set<() => void>();
+  function changed() {
+    href = "";
+    listeners.forEach((listener) => listener());
+  }
+  // Next supports native History API updates; the shared workspace stays mounted.
+  return {
+    subscribe(listener) {
+      const current = new URL(location.href);
+      if (current.searchParams.has("api")) {
+        current.searchParams.delete("api");
+        window.history.replaceState(null, "", current);
+        href = "";
+      }
+      listeners.add(listener);
+      if (listeners.size === 1) window.addEventListener("popstate", changed);
+      return () => {
+        listeners.delete(listener);
+        if (!listeners.size) window.removeEventListener("popstate", changed);
+      };
+    },
+    getSnapshot() {
+      if (href !== location.href) {
+        href = location.href;
+        snapshot = routeFromUrl(new URL(href), basePath);
+        const from = history.state?.argosFrom;
+        if (
+          (snapshot.screen === "topology" || snapshot.screen === "actor") &&
+          from &&
+          typeof from.run_id === "string" &&
+          typeof from.article_id === "string"
+        )
+          snapshot = { ...snapshot, from };
+        const actorFrom = history.state?.argosActorFrom;
+        if (
+          snapshot.screen === "topology" &&
+          actorFrom &&
+          (typeof actorFrom.id === "string" ||
+            (actorFrom.id === null && actorFrom.source))
+        )
+          snapshot = { ...snapshot, actorFrom };
+      }
+      return snapshot;
+    },
+    getServerSnapshot: () => initial,
+    navigate(route) {
+      const next = new URL(routeUrl(route, basePath), location.origin);
+      if (next.href !== location.href)
+        window.history.pushState(
+          route.screen === "topology" || route.screen === "actor"
+            ? {
+                argosFrom: route.from,
+                ...(route.screen === "topology"
+                  ? { argosActorFrom: route.actorFrom }
+                  : {}),
+              }
+            : null,
+          "",
+          next,
+        );
+      changed();
+    },
+  };
 }
-// Next supports native History API updates; the shared workspace stays mounted.
-export const webNavigation: IntelNavigation = {
-  subscribe(listener) {
-    const current = new URL(location.href);
-    if (current.searchParams.has("api")) {
-      current.searchParams.delete("api");
-      window.history.replaceState(null, "", current);
-      href = "";
-    }
-    listeners.add(listener);
-    if (listeners.size === 1) window.addEventListener("popstate", changed);
-    return () => {
-      listeners.delete(listener);
-      if (!listeners.size) window.removeEventListener("popstate", changed);
-    };
-  },
-  getSnapshot() {
-    if (href !== location.href) {
-      href = location.href;
-      snapshot = routeFromUrl(new URL(href));
-      const from = history.state?.argosFrom;
-      if (
-        (snapshot.screen === "topology" || snapshot.screen === "actor") &&
-        from &&
-        typeof from.run_id === "string" &&
-        typeof from.article_id === "string"
-      )
-        snapshot = { ...snapshot, from };
-      const actorFrom = history.state?.argosActorFrom;
-      if (
-        snapshot.screen === "topology" &&
-        actorFrom &&
-        (typeof actorFrom.id === "string" ||
-          (actorFrom.id === null && actorFrom.source))
-      )
-        snapshot = { ...snapshot, actorFrom };
-    }
-    return snapshot;
-  },
-  getServerSnapshot: () => initial,
-  navigate(route) {
-    const next = new URL(routeUrl(route), location.origin);
-    if (next.href !== location.href)
-      window.history.pushState(
-        route.screen === "topology" || route.screen === "actor"
-          ? {
-              argosFrom: route.from,
-              ...(route.screen === "topology"
-                ? { argosActorFrom: route.actorFrom }
-                : {}),
-            }
-          : null,
-        "",
-        next,
-      );
-    changed();
-  },
-};
+
+export const webNavigation = createWebNavigation();

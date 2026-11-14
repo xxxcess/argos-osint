@@ -9,8 +9,6 @@ A single `DecisionContract` compiles to:
 
 Application code owns surface restrictions, budgets, credentials, and recovery. Models plan and synthesize.
 
-[![Tool picker transport](../../diagrams/tool-picker.svg)](../../diagrams/tool-picker.html)
-
 ## 12-template registry
 
 | Template | Role | Focus | Allowed outcomes |

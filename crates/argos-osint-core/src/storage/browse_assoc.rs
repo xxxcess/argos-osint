@@ -491,7 +491,7 @@ pub async fn actor_group_associations_scoped(
 pub async fn actor_group_graph(
     repo: &Repository,
     group: &ActorGroup,
-) -> Result<crate::recon::MemoryGraph> {
+) -> Result<crate::brain_graph::MemoryGraph> {
     Ok(crate::store::Store::actor_group_graph_from(
         group,
         actor_group_associations(repo, group).await?,

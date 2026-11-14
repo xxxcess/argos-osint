@@ -12,8 +12,7 @@ use surrealdb::types::SurrealValue;
 use super::jobs::rid;
 use super::memory::memory_revision;
 use super::repo::Repository;
-use crate::brain_query::InsightMetadata;
-use crate::recon::{InsightSource, InsightView};
+use crate::brain_query::{InsightMetadata, InsightSource, InsightView};
 
 #[derive(Debug, Clone, SurrealValue)]
 struct DerivationRow {

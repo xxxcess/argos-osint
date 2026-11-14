@@ -1,4 +1,4 @@
-//! Opt-in immutable offline inference measurements, separate from quality evidence.
+//! Opt-in immutable offline Natural inference measurements for the legacy engine.
 //! Run explicitly with --ignored --nocapture on an otherwise idle host.
 #![cfg(feature = "classifier")]
 
@@ -73,7 +73,7 @@ async fn offline_fixed_current_classifier_benchmark() {
             }
         }
         json!({
-            "schema":"argos-fixed-workload-benchmark-v1","implementation":"current-local-classifier",
+            "schema":"argos-fixed-workload-benchmark-v1","implementation":"legacy-natural-classifier",
             "corpus_sha256":corpus_sha,"admitted_ids":inputs.iter().map(|input|&input.occurrence_id).collect::<Vec<_>>(),
             "actual_returned_pairs":actual_pairs,"actual_model_snapshot":service.pinned_model(),"manifest_sha256":manifest_sha,
             "fixture_fit_us":fixture_fit_us,"pin_startup_us":pin_startup_us,"first_singleton_us":first_singleton_us,"first64_us":first64_us,

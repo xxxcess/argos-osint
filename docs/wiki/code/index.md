@@ -1,49 +1,41 @@
-# Explore Argos code
+# Explore Fleetworks code
 
 [Wiki](../../index.md) · [Explore concepts](../concepts/index.md)
 
-Start with the [workspace manifest](../../../Cargo.toml) and [workspace diagram](../../diagrams/workspace.html). The core crate owns domain behavior; the binary crate exposes it through CLI/TUI, and the API adapter/host serve the local Intel web client. SurrealDB is the current persistence backend.
+Start with the [workspace manifest](../../../Cargo.toml). The native macOS app connects to an independently operated gateway; direct Docker Compose operates the backend. The core crate owns domain workflows and the repository. SurrealDB retains domain persistence; [Jobs persistence](jobs-persistence.md) describes the SQLite/RocksDB target and remaining cutover.
 
 | Branch | What to inspect | Next page |
 | --- | --- | --- |
-| [argos-osint-core](../../../crates/argos-osint-core/src) | Recon, Atlas, Intel, Brain, providers and NLP | [Core map](core.md) |
-| [Intel HTTP API / host](../../../crates/argos-osint-api) | Local web adapter and readiness-gated process lifecycle | [Intel web](intel-web.md) |
-| [storage](../../../crates/argos-osint-core/src/storage) | Open/bootstrap, repositories, publication, jobs and recall | [Storage map](storage.md) |
-| [argos-osint-bin](../../../crates/argos-osint-bin/src) | CLI, state, rendering and shared components | [Interfaces](interfaces.md) |
-| [core tests](../../../crates/argos-osint-core/tests) and [scripts](../../../scripts) | Offline contracts and verification entry points | [Contributor workflow](contributing.md) |
+| [Native app](../../../apps/fleetworks-desktop) · [Client contracts](../../../crates/fleetworks-contracts) | Six sidebar destinations plus Status/setup, origin-pinned SDK and protected workstation identity | [Connections](native-connections.md) · [Identity](native-workspaces.md) · [Design system](native-design-system.md) |
+| [Core](../../../crates/argos-osint-core/src) | Atlas, Intel, Brain, providers and NLP | [Core map](core.md) |
+| [HTTP adapter](../../../crates/argos-osint-api) · [Service host](../../../services/api-host) | Versioned API, authenticated gateway, private Brain, readiness and worker roles | [Intel web](intel-web.md) |
+| [Compose](../../../deploy) · [Jobs stores](../../../crates/fleetworks-jobs) | Local service graph and embedded durable delivery | [Deployment](../../../deploy/README.md) |
+| [Private actor index](../../../services/search-index) · [Source outbox](../../../crates/argos-osint-core/src/storage/actor_search_outbox.rs) | Canonical discovery, transactional intent and reader-visible generations | [Actor search](actor-search.md) |
+| [Storage](../../../crates/argos-osint-core/src/storage) | Open/bootstrap, repositories, publication, jobs and recall | [Storage map](storage.md) |
+| [Intel UI](../../../packages/intel) · [Web server](../../../apps/web-desktop) | Browser navigation, Query client and same-origin relay | [React UI rules](react-ui.md) |
+| [Core tests](../../../crates/argos-osint-core/tests) · [Scripts](../../../scripts) | Offline contracts and verification entry points | [Contributor workflow](contributing.md) |
 
 ## Trace a change
 
-1. Find the concept and its [tag](../tags.md); follow the mapped source and callers.
-2. Follow module links and scoped symbol/caller searches; verify relationships against current source and tests.
-3. Read relevant tests and [conventions](conventions.md); plan exact code, doc and diagram scope using the [planning format](planning-artifacts.md#working-format).
-4. Update affected wiki links/contracts as the implementation changes; [refresh](../maintenance.md#refresh-wiki) before completion.
+1. Find the concept and its [tag](../tags.md), then follow the mapped source and callers.
+2. Verify relationships against current source and tests. The maps use stable module paths.
+3. Read the relevant [conventions](conventions.md) and plan exact code, doc and diagram scope with the [planning format](planning-artifacts.md#working-format).
+4. Update the affected contracts and [refresh](../maintenance.md#refresh-wiki) before completion.
 
-The maps link stable module paths rather than line numbers. Search symbols in those files for finer navigation. Legacy SQL and migration-era comments still exist: confirm the active feature path in the manifests and storage module before treating them as current contracts.
-
-## Implementation contracts
+## Implementation and verification
 
 | Topic | Canonical reference |
 | --- | --- |
-| Local six-domain classifier | [Classifier](classifier.md) |
 | Pipeline boundaries and data flow | [Architecture](architecture.md) |
-| Investigation execution and tool decisions | [Harness](investigation-harness.md), [decision gates](jev-decision-gates.md) |
-| Rust style | [argos-rust-style](../../../.opencode/skills/argos-rust-style/SKILL.md), [conventions](conventions.md#rust-style) |
-| React UI design, components and review | [React UI rules](react-ui.md), [Argos look and feel](react-ui.md#argos-look--feel-reference) |
-| TUI layout and components | [Design contract](tui-design-spec.md), [component catalog](tui-components.md) |
-| Profile presentation and data | [Dashboard geometry](profile-analytics-dashboard.md), [metrics and configuration](profile-dashboard-and-search.md) |
-| Background reads and responsiveness | [Database responsiveness](tui-database-responsiveness.md) |
+| Six-domain classifier | [Classifier](classifier.md) |
+| Model and provider scheduling | [Providers](../concepts/providers.md) |
+| Rust style | [Repository Rust style](../../../.opencode/skills/argos-rust-style/SKILL.md) · [Conventions](conventions.md#rust-style) |
+| React UI and fixture review | [Design rules](react-ui.md) · [Browser checks](react-ui-testing.md) |
+| Build tools, outputs and cache paths | [Visual artifact map](build-artifacts.md) |
+| Native Runtime captures and inspection | [Selected native UI verification](native-verification.md) |
+| Historical terminal evidence | [Retirement disposition](../../archive/cli-retirement.md) |
+| Agent coordination | [Execution policy](agent-workflow.md) · [OpenCode](opencode-v2.md) |
+| Docs and figures | [Wiki maintenance](../maintenance.md) · [Diagram catalog](../../diagrams.md) |
+| Release and CI | [Versioning](versioning.md) · [CI](ci.md) |
 
-## Change and verify the repo
-
-| Task | Canonical procedure |
-| --- | --- |
-| Build and contribute | [Contributor workflow](contributing.md), [code conventions](conventions.md) |
-| Coordinate agents and avoid repeated work | [Efficient agent execution](agent-workflow.md) |
-| Verify TUI behavior | [TUI verification](tui-verification.md) |
-| Plan and track implementation | [Planning format and retention](planning-artifacts.md) |
-| Use OpenCode roles and handoffs | [OpenCode](opencode-v2.md) |
-| Maintain docs | [Wiki setup / refresh](../maintenance.md), [diagram catalog and rules](../../diagrams.md) |
-| Release and CI | [Versioning](versioning.md), [CI](ci.md) |
-
-Historical checklists and test reports live in the [archive](../../archive/index.md). Read them for dated evidence, not as current instructions.
+Dated evidence lives in the [archive](../../archive/index.md).

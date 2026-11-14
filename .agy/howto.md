@@ -12,8 +12,10 @@ Use [lite](lite-team.md) for bounded changes and [heavy](heavy-team.md) for inde
 
 - Start at [the wiki](../docs/index.md), then [contributing](../docs/wiki/code/contributing.md) and [testing](../.opencode/skills/argos-testing/SKILL.md). Preserve unrelated work, locks and services; `.github` changes remain Code Architect-owned.
 - One owner maintains `.planning/<date-slug>/` under the [planning/retention contract](../docs/wiki/code/planning-artifacts.md). Scratch belongs in `.agent-scratch/`; Cargo uses `python3 scripts/agent_cargo.py` and its shared `target/agents` cache. Worktrees are edit-only; the build owner follows [cache hygiene](../docs/wiki/code/contributing.md#build-cache-hygiene).
-- Respect the user's approved verification scope. Rust runs target the native host with embedded storage; the required final embedded gate remains required for applicable Rust changes. Server/all-platform and mutation execution belong to hosted CI, never local agents. Missing evidence stays unverified.
+- Respect the user's approved verification scope. Use scoped Fleetworks checks for its clients and services. Use native embedded storage and its final gate for affected compatibility paths. Hosted CI owns server and platform matrices and mutation execution. Missing evidence stays unverified.
+- Follow the [development loops](../docs/wiki/code/contributing.md#development-loops-local-cli-and-docker). Workers edit only. The build owner runs the host native loop first, then at most one Docker image or web-dev loop for the affected target, using a dedicated workspace, `COMPOSE_PROJECT_NAME` and ports. Never stop or rebuild the user's stack. Docker evidence is unverified until run and authorized.
 - Keep existing source/UI conventions, React Compiler, accessible topology/list twin and offline fixtures. Use canonical instructions for visual previews and final evidence.
+- Rune app work follows [fleetworks-rune-verify](../.opencode/skills/fleetworks-rune-verify/SKILL.md) and [native verification](../docs/wiki/code/native-verification.md): same-view Runtime/input, selected PNG/tree/scripts and actual inspection. Native stays API-only; backend-global resources and registered origin are distinct. Linux engine/integration and physical-Mac GUI evidence keep their own gates; terminal evidence is historical.
 
 ## Handoff
 

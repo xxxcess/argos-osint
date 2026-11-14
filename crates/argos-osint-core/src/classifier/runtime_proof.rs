@@ -27,9 +27,16 @@ pub(crate) fn verify(control: &WorkControl) -> Result<RuntimeLimitProof, Classif
     let control = control.clone();
     thread::Builder::new().name("classifier-limit-proof".into()).spawn(move || {
         let mut reservation=0;
+        // Each array fits alone. Rejecting the second leaves room for QuickJS
+        // to allocate its out-of-memory exception on any supported allocator.
+        let heap_probe = format!(
+            "const held = new Uint8Array({}); new Uint8Array({}); 'unexpected-success'",
+            RUNTIME_MEMORY_LIMIT_BYTES / 8,
+            RUNTIME_MEMORY_LIMIT_BYTES * 15 / 16,
+        );
         for (resource,source) in [
             ("stack", "function recurse(){return 1+recurse()} recurse(); 'unexpected-success'"),
-            ("heap", "const chunks=[]; for(let i=0;i<140;i++) chunks.push(new Uint8Array(1024*1024)); 'unexpected-success'"),
+            ("heap", heap_probe.as_str()),
         ] {
             control.check_active()?;
             let budget=classifier_process_budget();

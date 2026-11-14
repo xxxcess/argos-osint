@@ -5,6 +5,8 @@
 
 mod support;
 
+use argos_osint_core::storage::tool_state;
+
 use argos_osint_core::osint::ToolResult;
 use argos_osint_core::recon::{Plan, RunLimits};
 use argos_osint_core::storage::recon_runs::{self as rr, CallFilter};
@@ -261,33 +263,33 @@ async fn calls_evidence_and_cache_match_the_legacy_store() {
     );
 
     // Cache: expiry and freshness cutoff.
-    rr::cache_put(&repo, "k", &result("completed", "2026-10-20T00:00:00Z"), 60)
+    tool_state::cache_put(&repo, "k", &result("completed", "2026-10-20T00:00:00Z"), 60)
         .await
         .unwrap();
-    rr::cache_put(&repo, "gone", &result("completed", ""), 0)
+    tool_state::cache_put(&repo, "gone", &result("completed", ""), 0)
         .await
         .unwrap();
-    assert!(rr::cache_get_fresh(&repo, "k", None)
+    assert!(tool_state::cache_get_fresh(&repo, "k", None)
         .await
         .unwrap()
         .is_some());
     assert!(
-        rr::cache_get_fresh(&repo, "k", Some("2026-10-19T00:00:00Z"))
+        tool_state::cache_get_fresh(&repo, "k", Some("2026-10-19T00:00:00Z"))
             .await
             .unwrap()
             .is_some()
     );
     assert!(
-        rr::cache_get_fresh(&repo, "k", Some("2026-10-21T00:00:00Z"))
+        tool_state::cache_get_fresh(&repo, "k", Some("2026-10-21T00:00:00Z"))
             .await
             .unwrap()
             .is_none()
     );
-    assert!(rr::cache_get_fresh(&repo, "gone", None)
+    assert!(tool_state::cache_get_fresh(&repo, "gone", None)
         .await
         .unwrap()
         .is_none());
-    assert!(rr::cache_get_fresh(&repo, "missing", None)
+    assert!(tool_state::cache_get_fresh(&repo, "missing", None)
         .await
         .unwrap()
         .is_none());

@@ -27,7 +27,7 @@ it("uses green healthy and ends blue before Home", () => {
     "All connections healthy",
   );
   expect(paint(screen.getByTestId("landing-core"), "backgroundColor")).toBe(
-    intelColors.accent.toLowerCase(),
+    intelColors.success.toLowerCase(),
   );
   act(() => vi.advanceTimersByTime(3000));
   expect(screen.getByRole("status")).toHaveTextContent("Workspace ready");

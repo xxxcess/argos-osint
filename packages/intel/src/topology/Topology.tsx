@@ -683,7 +683,7 @@ const t = StyleSheet.create({
     alignSelf: "stretch",
     borderRadius: 12,
     overflow: "hidden",
-    backgroundColor: "#34343A",
+    backgroundColor: intelColors.panelRaised,
   },
   graphSquarePage: {
     width: "100%",

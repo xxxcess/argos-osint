@@ -9,7 +9,7 @@ class Socket {
   sent: string[] = [];
   onopen?: () => void;
   onmessage?: (event: { data: string }) => void;
-  onclose?: () => void;
+  onclose?: (event: CloseEvent) => void;
   onerror?: () => void;
   constructor(readonly url: URL) {
     Socket.instances.push(this);
@@ -24,9 +24,14 @@ class Socket {
   send(value: string) {
     this.sent.push(value);
   }
-  close() {
+  close(code = 1000, reason = "") {
+    if (code !== 1000 && !(code >= 3000 && code <= 4999))
+      throw new DOMException("Invalid client close code", "InvalidAccessError");
+    this.serverClose(code, reason);
+  }
+  serverClose(code = 1000, reason = "") {
     this.readyState = 3;
-    this.onclose?.();
+    this.onclose?.(new CloseEvent("close", { code, reason }));
   }
 }
 beforeEach(() => {
@@ -107,6 +112,25 @@ it("backs off failed Rust reconnects even when the Next relay handshake opened",
   stop();
 });
 
+it("invalidates a policy-closed session without reconnecting", async () => {
+  const onInvalidated = vi.fn();
+  const events: LiveEvent[] = [];
+  const live = createLiveTransport({ contextRevision: 7, onInvalidated });
+  const stop = live.subscribe({ type: "metrics" }, (event) =>
+    events.push(event),
+  );
+  await Promise.resolve();
+  const socket = Socket.instances[0];
+  expect(socket.url.searchParams.get("context_revision")).toBe("7");
+  socket.open();
+  socket.serverClose(1008, "Session invalidated");
+  expect(events.at(-1)).toEqual({ type: "status", connected: false });
+  expect(onInvalidated).toHaveBeenCalledOnce();
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(Socket.instances).toHaveLength(1);
+  stop();
+});
+
 it("ignores delayed progress from the previous article and rejects malformed metrics", async () => {
   const live = createLiveTransport();
   const metricsStop = live.subscribe({ type: "metrics" }, () => {});
@@ -137,7 +161,9 @@ it("ignores delayed progress from the previous article and rejects malformed met
   expect(events.filter((event) => event.type === "brief")).toHaveLength(0);
   socket.message({ ...event, id: "a2" });
   expect(events.filter((event) => event.type === "brief")).toHaveLength(1);
+  const close = vi.spyOn(socket, "close");
   socket.message({ type: "metrics", data: { cpu_percent: "unavailable" } });
+  expect(close).toHaveBeenCalledWith(4007, "Invalid live message");
   expect(socket.readyState).toBe(3);
   secondStop();
   metricsStop();

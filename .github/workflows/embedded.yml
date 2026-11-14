@@ -1,0 +1,103 @@
+name: Embedded compatibility
+
+# Linux backend compatibility is selected by Fleetworks. Manual dispatch keeps
+# the four-platform compatibility diagnostic available without installing
+# backend engines in the normal Rune macOS client lanes.
+on:
+  workflow_call:
+    inputs:
+      head:
+        description: Exact source revision selected by the scope planner
+        type: string
+        required: true
+  workflow_dispatch:
+
+concurrency:
+  group: embedded-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.ref_name || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
+
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # No debuginfo in CI: smaller target dirs, faster codegen, and cc builds librocksdb without -g.
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+permissions:
+  contents: read
+
+jobs:
+  embedded:
+    name: ${{ matrix.platform.name }} / embedded
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJson(github.event_name == 'workflow_dispatch' && inputs.head == '' && '[{"name":"Linux x86_64","os":"ubuntu-24.04"},{"name":"Linux aarch64","os":"ubuntu-24.04-arm"},{"name":"macOS arm64","os":"macos-15"},{"name":"macOS Intel","os":"macos-15-intel"}]' || '[{"name":"Linux x86_64","os":"ubuntu-24.04"},{"name":"Linux aarch64","os":"ubuntu-24.04-arm"}]') }}
+    runs-on: ${{ matrix.platform.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.head || github.sha }}
+          lfs: false
+          persist-credentials: false
+      - name: Verify selected revision
+        env:
+          EXPECTED_HEAD: ${{ inputs.head || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: clippy, rustfmt
+      - uses: rui314/setup-mold@v1
+        if: runner.os == 'Linux'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: embedded
+          workspaces: . -> target/agents
+          cache-on-failure: true
+      - name: Restrict SQLite to Jobs persistence and forbid LanceDB
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          result = subprocess.run(
+              ["cargo", "metadata", "--all-features", "--locked", "--format-version", "1"],
+              check=True, stdout=subprocess.PIPE,
+          )
+          metadata = json.loads(result.stdout)
+          packages = {package["id"]: package for package in metadata["packages"]}
+          jobs_manifest = Path(metadata["workspace_root"]) / "crates/fleetworks-jobs/Cargo.toml"
+          errors = []
+          for package in packages.values():
+              if package["name"] == "lancedb":
+                  errors.append("lancedb is forbidden in the dependency graph")
+          for node in metadata["resolve"]["nodes"]:
+              owner = packages[node["id"]]
+              for dependency in node["deps"]:
+                  if packages[dependency["pkg"]]["name"] != "rusqlite":
+                      continue
+                  if Path(owner["manifest_path"]) != jobs_manifest:
+                      errors.append(f'{owner["name"]} directly depends on rusqlite; only fleetworks-jobs may do so')
+          for error in errors:
+              print(f"::error::{error}")
+          sys.exit(bool(errors))
+          PY
+      - name: Install libclang (RocksDB bindgen)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
+      - name: Select Xcode libclang for RocksDB bindgen
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang_dir="$(dirname "$(xcrun --find clang)")/../lib"
+          test -f "$clang_dir/libclang.dylib"
+          printf 'LIBCLANG_PATH=%s\n' "$clang_dir" >> "$GITHUB_ENV"
+      - name: Local matrix leg (embedded)
+        run: bash scripts/local_matrix.sh --storage embedded

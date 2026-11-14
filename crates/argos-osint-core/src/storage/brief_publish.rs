@@ -36,18 +36,18 @@ fn leads_key(article_id: &str) -> String {
 }
 
 async fn stage_receipt(
-    repo: &Repository,
+    tx: &Tx,
     job_id: &str,
     operation: &str,
-) -> Result<Option<IndexState>> {
-    let mut r = repo
-        .db()
-        .query("RETURN type::record('intel_brief_stage_receipt', [$j, $op]).state_json;")
-        .bind(("j", job_id.to_string()))
-        .bind(("op", operation.to_string()))
-        .await?
-        .check()?;
-    let raw: Option<String> = r.take(0usize)?;
+) -> Result<Option<IndexState>, TxError> {
+    let mut r = run(
+        tx,
+        tx.query("RETURN type::record('intel_brief_stage_receipt', [$j, $op]).state_json;")
+            .bind(("j", job_id.to_string()))
+            .bind(("op", operation.to_string())),
+    )
+    .await?;
+    let raw: Option<String> = take(&mut r, 0)?;
     Ok(raw.and_then(|s| serde_json::from_str(&s).ok()))
 }
 
@@ -99,14 +99,14 @@ mod publication_retry_tests {
     }
 }
 
-async fn article_state(repo: &Repository, article_id: &str) -> Result<Option<IndexState>> {
-    let mut r = repo
-        .db()
-        .query("RETURN type::record('intel_brief_index_state', $a).state_json;")
-        .bind(("a", article_id.to_string()))
-        .await?
-        .check()?;
-    let raw: Option<String> = r.take(0usize)?;
+async fn article_state(tx: &Tx, article_id: &str) -> Result<Option<IndexState>, TxError> {
+    let mut r = run(
+        tx,
+        tx.query("RETURN type::record('intel_brief_index_state', $a).state_json;")
+            .bind(("a", article_id.to_string())),
+    )
+    .await?;
+    let raw: Option<String> = take(&mut r, 0)?;
     Ok(raw.and_then(|s| serde_json::from_str(&s).ok()))
 }
 
@@ -154,8 +154,21 @@ pub async fn prepare_captured(
     let Some(article) = article else {
         return Ok(Err(CAPTURED_SOURCE_CHANGED.into()));
     };
-    let current = crate::intel_recon::brief_stages::metadata_snapshot(&article);
-    for field in [
+    if !matches_captured(metadata, &article) {
+        return Ok(Err(CAPTURED_SOURCE_CHANGED.into()));
+    }
+    let generation = super::insight_owner::desired_generation(repo, "article", article_id).await?;
+    let input =
+        super::pipeline_inputs::article_input(repo, &article, generation, "intel brief").await?;
+    Ok(brief_canonical::prepare_for_stage(
+        input, &article, body, claims, inferences, operation,
+    ))
+}
+
+/// Compare the captured source with the current occurrence.
+pub(super) fn matches_captured(metadata: &Value, article: &crate::store::AtlasArticleRow) -> bool {
+    let current = crate::intel_recon::brief_stages::metadata_snapshot(article);
+    [
         "title",
         "description",
         "published_at",
@@ -166,17 +179,13 @@ pub async fn prepare_captured(
         "run_id",
         "article_id",
         "source_revision",
-    ] {
-        if metadata.get(field).is_some() && metadata[field] != current[field] {
-            return Ok(Err(CAPTURED_SOURCE_CHANGED.into()));
-        }
-    }
-    let generation = super::insight_owner::desired_generation(repo, "article", article_id).await?;
-    let input =
-        super::pipeline_inputs::article_input(repo, &article, generation, "intel brief").await?;
-    Ok(brief_canonical::prepare_for_stage(
-        input, &article, body, claims, inferences, operation,
-    ))
+    ]
+    .into_iter()
+    .all(|field| {
+        metadata
+            .get(field)
+            .is_none_or(|value| value == &current[field])
+    })
 }
 
 /// Publish one completed kind and return its index state. The caller binds
@@ -189,12 +198,57 @@ pub async fn publish_stage(
     prepared: &std::result::Result<CanonicalBrief, String>,
     snapshot_hash: &str,
 ) -> Result<IndexState> {
-    if let Some(existing) = stage_receipt(repo, job_id, operation).await? {
-        if publication_current(&existing, job_id) {
-            return Ok(existing);
+    let nonce = chrono::Utc::now().timestamp_micros().to_string();
+    let result = run_tx(repo.db(), RetryPolicy::default(), |tx| {
+        let nonce = &nonce;
+        async move {
+            if let Some(existing) = stage_receipt(&tx, job_id, operation).await? {
+                if publication_current(&existing, job_id) {
+                    return Ok(existing);
+                }
+            }
+            publish_stage_in(
+                &tx,
+                article_id,
+                job_id,
+                operation,
+                prepared,
+                snapshot_hash,
+                nonce,
+            )
+            .await
         }
+    })
+    .await;
+    Ok(match result {
+        Ok(committed) => committed.value,
+        Err(TxError::Abort(reason)) => failed_state(job_id, &reason),
+        Err(error) => failed_state(job_id, &error),
+    })
+}
+
+pub(super) fn failed_state(job_id: &str, error: &impl std::fmt::Display) -> IndexState {
+    IndexState {
+        publication_version: PUBLICATION_VERSION,
+        state: "failed".into(),
+        reason: error.to_string(),
+        job_id: job_id.into(),
+        ..Default::default()
     }
-    let previous = article_state(repo, article_id)
+}
+
+/// Publish canonical effects inside the caller's transaction. The queue
+/// caller commits the resulting receipt and acknowledges the same work row.
+pub(super) async fn publish_stage_in(
+    tx: &Tx,
+    article_id: &str,
+    job_id: &str,
+    operation: &str,
+    prepared: &std::result::Result<CanonicalBrief, String>,
+    snapshot_hash: &str,
+    link_revision: &str,
+) -> Result<IndexState, TxError> {
+    let previous = article_state(tx, article_id)
         .await?
         .filter(|s| s.job_id == job_id);
     let mut state = IndexState {
@@ -218,95 +272,91 @@ pub async fn publish_stage(
             state.reason = brief.output.readiness.gaps.join("; ");
             return Ok(state);
         }
-        Ok(brief) => brief.clone(),
+        Ok(brief) => brief,
     };
-    let attempt = if operation == "intel_brief_links" {
-        publish_links(repo, article_id, job_id, brief).await
-    } else {
-        publish_kind(repo, article_id, operation, brief, snapshot_hash).await
-    };
-    match attempt {
-        Ok(Some((id, required))) => {
-            state.state = "indexed".into();
-            state.snapshot_id = id;
-            state.required = required;
-        }
-        Ok(None) => {
-            state.state = "not_indexed".into();
-            state.reason = "stale canonical generation".into();
-        }
-        Err(error) => {
+    let published = if operation == "intel_brief_links" {
+        let inference = stage_receipt(tx, job_id, "intel_brief_inferences")
+            .await?
+            .filter(|state| state.state == "indexed");
+        let Some(inference) = inference else {
             state.state = "failed".into();
-            state.reason = error.to_string();
-        }
+            state.reason = "canonical inference publication unavailable".into();
+            return Ok(state);
+        };
+        publish_links_in(
+            tx,
+            article_id,
+            job_id,
+            brief,
+            &inference.snapshot_id,
+            link_revision,
+        )
+        .await?
+    } else {
+        publish_kind_in(tx, article_id, operation, brief, snapshot_hash).await?
+    };
+    if let Some((id, required)) = published {
+        state.state = "indexed".into();
+        state.snapshot_id = id;
+        state.required = required;
+    } else {
+        state.state = "not_indexed".into();
+        state.reason = "stale canonical generation".into();
     }
     Ok(state)
 }
 
 type Published = Option<(String, Vec<IndexReceipt>)>;
 
-async fn publish_kind(
-    repo: &Repository,
-    article_id: &str,
+async fn publish_kind_in(
+    tx: &Tx,
+    article: &str,
     operation: &str,
-    brief: CanonicalBrief,
-    snapshot_hash: &str,
-) -> Result<Published> {
-    let kind: &'static str = if operation == "intel_brief_claims" {
+    brief: &CanonicalBrief,
+    hash: &str,
+) -> Result<Published, TxError> {
+    let kind = if operation == "intel_brief_claims" {
         "claim"
     } else {
         "inference"
     };
-    let (brief, hash, article) = (
-        Arc::new(brief),
-        snapshot_hash.to_string(),
-        article_id.to_string(),
+    let now = super::jobs::ts(chrono::Utc::now());
+    let mut input = brief.input.clone();
+    let mut output = brief.output.clone();
+    let generation = super::insight::advance_generation(tx, "article", article, &now).await?;
+    input.snapshot.generation = u32::try_from(generation).map_err(abort)?;
+    input.snapshot.key = crate::nlp::cache::key(&serde_json::json!([
+        crate::intel_recon::brief_pipeline::CANONICAL_CONTRACT,
+        PUBLICATION_VERSION,
+        input.snapshot.source_refs,
+        input.snapshot.entities,
+        hash
+    ]));
+    for inference in &mut output.inferences {
+        inference.snapshot_key = input.snapshot.key.clone();
+    }
+    let validate = super::live_evidence::publication_step(input.snapshot.clone());
+    let save = input.save_insights;
+    let key = input.snapshot.key.clone();
+    let snapshot = input.snapshot.clone();
+    let publish = super::derivations::derivation_step(
+        Arc::new(input),
+        Arc::new(output),
+        Some(kind),
+        super::derivations::DerivationContext {
+            save_insights: save,
+            recon_thread: None,
+        },
     );
-    let committed = run_tx(repo.db(), RetryPolicy::default(), |tx| {
-        let (brief, hash, article) = (brief.clone(), hash.clone(), article.clone());
-        async move {
-            let now = super::jobs::ts(chrono::Utc::now());
-            let mut input = brief.input.clone();
-            let mut output = brief.output.clone();
-            let generation =
-                super::insight::advance_generation(&tx, "article", &article, &now).await?;
-            input.snapshot.generation = u32::try_from(generation).map_err(abort)?;
-            input.snapshot.key = crate::nlp::cache::key(&serde_json::json!([
-                crate::intel_recon::brief_pipeline::CANONICAL_CONTRACT,
-                PUBLICATION_VERSION,
-                input.snapshot.source_refs,
-                input.snapshot.entities,
-                hash
-            ]));
-            for inference in &mut output.inferences {
-                inference.snapshot_key = input.snapshot.key.clone();
-            }
-            let validate = super::live_evidence::publication_step(input.snapshot.clone());
-            let save = input.save_insights;
-            let key = input.snapshot.key.clone();
-            let snapshot = input.snapshot.clone();
-            let publish = super::derivations::derivation_step(
-                Arc::new(input),
-                Arc::new(output),
-                Some(kind),
-                super::derivations::DerivationContext {
-                    save_insights: save,
-                    recon_thread: None,
-                },
-            );
-            let Some(id) = super::insight::publish_snapshot_on(
-                &tx, &snapshot, &key, "active", &now, &validate, &publish,
-            )
-            .await?
-            else {
-                return Ok(None);
-            };
-            let required = required_receipts(&tx, &id, &article).await?;
-            Ok(Some((id, required)))
-        }
-    })
-    .await?;
-    Ok(committed.value)
+    let Some(id) = super::insight::publish_snapshot_on(
+        tx, &snapshot, &key, "active", &now, &validate, &publish,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let required = required_receipts(tx, &id, article).await?;
+    Ok(Some((id, required)))
 }
 
 #[derive(SurrealValue)]
@@ -384,173 +434,143 @@ struct LeadRow {
 /// the article's active snapshot; every lead's inference must be a live
 /// canonical memory. Each lead becomes a tentative Related memory; leads the
 /// article no longer has are retired.
-async fn publish_links(
-    repo: &Repository,
-    article_id: &str,
-    job_id: &str,
-    prepared: CanonicalBrief,
-) -> Result<Published> {
-    let inference = stage_receipt(repo, job_id, "intel_brief_inferences")
-        .await?
-        .filter(|s| s.state == "indexed");
-    let Some(inference) = inference else {
-        anyhow::bail!("canonical inference publication unavailable");
-    };
-    let (article, job) = (article_id.to_string(), job_id.to_string());
-    let snapshot = inference.snapshot_id.clone();
-    let prepared = Arc::new(prepared);
-    // Unique per publication, fixed across transaction retries: a later
-    // Links publication of the same job must not reuse an op_key.
-    let nonce = format!(
-        "brief-leads:{job_id}:{}",
-        chrono::Utc::now().timestamp_micros()
-    );
-    let committed = run_tx(repo.db(), RetryPolicy::default(), |tx| {
-        let (article, job, snapshot, nonce, prepared) = (
-            article.clone(),
-            job.clone(),
-            snapshot.clone(),
-            nonce.clone(),
-            prepared.clone(),
-        );
-        async move {
-            // Recheck the retained original source inside the same transaction
-            // as all tentative/confirmed writes and lifecycle/index changes.
-            super::live_evidence::publication_step(prepared.input.snapshot.clone())(
-                tx.clone(),
-                String::new(),
-            )
-            .await?;
-            let now = chrono::Utc::now();
-            let mut r = run(
-                &tx,
-                tx.query(
-                    "SELECT VALUE active_snapshot_id FROM insight_owner_state
-                       WHERE owner_kind = 'article' AND owner_id = $o;
-                     SELECT memory_id, item_json FROM insight_derivation
-                       WHERE snapshot_id = $s AND insight_kind = 'inference'
-                         AND status = 'assessed' AND memory_id != NONE;
-                     SELECT meta::id(id) AS id, inference_id, candidate_article_id,
-                       candidate_run_id, candidate_metadata_revision, interpretation,
-                       verification_needed FROM intel_inference_article_lead
-                       WHERE article_id = $o AND job_id = $j ORDER BY id;",
-                )
-                .bind(("o", article.clone()))
-                .bind(("s", snapshot.clone()))
-                .bind(("j", job.clone())),
-            )
-            .await?;
-            let active: Vec<Option<String>> = take(&mut r, 0)?;
-            if active.into_iter().flatten().next().as_deref() != Some(snapshot.as_str()) {
-                return Err(abort(
-                    "canonical inference snapshot was replaced before Links publication",
-                ));
-            }
-            let derivations: Vec<DerivationRow> = take(&mut r, 1)?;
-            let leads: Vec<LeadRow> = take(&mut r, 2)?;
-            let memory_of = |inference_id: &str| {
-                derivations.iter().find_map(|d| {
-                    let item: Value = serde_json::from_str(&d.item_json).ok()?;
-                    (item["id"] == inference_id)
-                        .then(|| d.memory_id.clone())
-                        .flatten()
-                })
-            };
-            let mut current = Vec::new();
-            for lead in leads {
-                let memory_id = memory_of(&lead.inference_id).ok_or_else(|| {
-                    abort("a Link endpoint lacks its current canonical inference")
-                })?;
-                let mut r = run(
-                    &tx,
-                    tx.query(
-                        "RETURN (SELECT VALUE memory_kind = 'inference' AND lifecycle = 'active'
-                           FROM ONLY $m) ?? false;",
-                    )
-                    .bind(("m", rid("memory", &memory_id))),
-                )
-                .await?;
-                if take::<Option<bool>>(&mut r, 0)? != Some(true) {
-                    return Err(abort(
-                        "a Link endpoint lacks its current canonical inference",
-                    ));
-                }
-                let Some(target) = super::atlas::article_in(
-                    &tx,
-                    &lead.candidate_run_id,
-                    &lead.candidate_article_id,
-                )
-                .await?
-                else {
-                    continue;
-                };
-                if crate::atlas_metadata::input_hash(&target) != lead.candidate_metadata_revision {
-                    continue;
-                }
-                let payload = RelatedPayload {
-                    source: EndpointRef::Memory {
-                        memory_id,
-                        kind: MemoryKind::Inference,
-                    },
-                    target: EndpointRef::Article {
-                        run_id: lead.candidate_run_id,
-                        article_id: lead.candidate_article_id,
-                        revision: lead.candidate_metadata_revision.clone(),
-                    },
-                    shared_actors: vec![],
-                    basis: format!("intel-brief:{article}:metadata-lead"),
-                    interpretation: lead.interpretation,
-                    verification_gap: lead.verification_needed,
-                    source_revisions: vec![
-                        lead.candidate_metadata_revision,
-                        format!("intel-brief-lead:{}", lead.id),
-                    ],
-                };
-                let mut keys = [
-                    crate::brain_actors::endpoint_key(&payload.source),
-                    crate::brain_actors::endpoint_key(&payload.target),
-                ];
-                keys.sort();
-                let id = crate::brain_actors::hid("related", &[&keys[0], &keys[1], &payload.basis]);
-                let payload = MemoryPayload::Related(payload);
-                super::memory::put_typed_in(
-                    &tx,
-                    &super::memory::TypedMemory {
-                        id: id.clone(),
-                        text: crate::brain_actors::text_of(&payload),
-                        kind: MemoryKind::Related,
-                        payload: Some(payload),
-                        lifecycle: "active".into(),
-                    },
-                )
-                .await?;
-                current.push(id);
-            }
-            let confirmed =
-                publish_curated_links_in(&tx, &article, &job, &derivations, &prepared).await?;
-            let previous = lead_ids(&tx, &article).await?;
-            let stale: Vec<String> = previous
-                .into_iter()
-                .filter(|id| !current.contains(id))
-                .collect();
-            let retired = super::memory::set_lifecycle_in(&tx, &stale, "retired").await?;
-            run(
-                &tx,
-                tx.query("UPSERT type::record('app_state', $k) SET value = $v RETURN NONE;")
-                    .bind(("k", leads_key(&article)))
-                    .bind(("v", serde_json::to_string(&current).map_err(abort)?)),
-            )
-            .await?;
-            let mut touched = current.clone();
-            touched.extend(confirmed);
-            touched.extend(retired);
-            enqueue_index(&tx, &touched, &nonce, now).await?;
-            let required = required_receipts(&tx, &snapshot, &article).await?;
-            Ok(Some((snapshot, required)))
-        }
-    })
+async fn publish_links_in(
+    tx: &Tx,
+    article: &str,
+    job: &str,
+    prepared: &CanonicalBrief,
+    snapshot: &str,
+    hash: &str,
+) -> Result<Published, TxError> {
+    let nonce = format!("brief-leads:{job}:{hash}");
+    // Recheck the retained original source inside the same transaction
+    // as all tentative/confirmed writes and lifecycle/index changes.
+    super::live_evidence::publication_step(prepared.input.snapshot.clone())(
+        tx.clone(),
+        String::new(),
+    )
     .await?;
-    Ok(committed.value)
+    let now = chrono::Utc::now();
+    let mut r = run(
+        tx,
+        tx.query(
+            "SELECT VALUE active_snapshot_id FROM insight_owner_state
+               WHERE owner_kind = 'article' AND owner_id = $o;
+             SELECT memory_id, item_json FROM insight_derivation
+               WHERE snapshot_id = $s AND insight_kind = 'inference'
+                 AND status = 'assessed' AND memory_id != NONE;
+             SELECT meta::id(id) AS id, inference_id, candidate_article_id,
+               candidate_run_id, candidate_metadata_revision, interpretation,
+               verification_needed FROM intel_inference_article_lead
+               WHERE article_id = $o AND job_id = $j ORDER BY id;",
+        )
+        .bind(("o", article.to_owned()))
+        .bind(("s", snapshot.to_owned()))
+        .bind(("j", job.to_owned())),
+    )
+    .await?;
+    let active: Vec<Option<String>> = take(&mut r, 0)?;
+    if active.into_iter().flatten().next().as_deref() != Some(snapshot) {
+        return Err(abort(
+            "canonical inference snapshot was replaced before Links publication",
+        ));
+    }
+    let derivations: Vec<DerivationRow> = take(&mut r, 1)?;
+    let leads: Vec<LeadRow> = take(&mut r, 2)?;
+    let memory_of = |inference_id: &str| {
+        derivations.iter().find_map(|d| {
+            let item: Value = serde_json::from_str(&d.item_json).ok()?;
+            (item["id"] == inference_id)
+                .then(|| d.memory_id.clone())
+                .flatten()
+        })
+    };
+    let mut current = Vec::new();
+    for lead in leads {
+        let memory_id = memory_of(&lead.inference_id)
+            .ok_or_else(|| abort("a Link endpoint lacks its current canonical inference"))?;
+        let mut r = run(
+            tx,
+            tx.query(
+                "RETURN (SELECT VALUE memory_kind = 'inference' AND lifecycle = 'active'
+                   FROM ONLY $m) ?? false;",
+            )
+            .bind(("m", rid("memory", &memory_id))),
+        )
+        .await?;
+        if take::<Option<bool>>(&mut r, 0)? != Some(true) {
+            return Err(abort(
+                "a Link endpoint lacks its current canonical inference",
+            ));
+        }
+        let Some(target) =
+            super::atlas::article_in(tx, &lead.candidate_run_id, &lead.candidate_article_id)
+                .await?
+        else {
+            continue;
+        };
+        if crate::atlas_metadata::input_hash(&target) != lead.candidate_metadata_revision {
+            continue;
+        }
+        let payload = RelatedPayload {
+            source: EndpointRef::Memory {
+                memory_id,
+                kind: MemoryKind::Inference,
+            },
+            target: EndpointRef::Article {
+                run_id: lead.candidate_run_id,
+                article_id: lead.candidate_article_id,
+                revision: lead.candidate_metadata_revision.clone(),
+            },
+            shared_actors: vec![],
+            basis: format!("intel-brief:{article}:metadata-lead"),
+            interpretation: lead.interpretation,
+            verification_gap: lead.verification_needed,
+            source_revisions: vec![
+                lead.candidate_metadata_revision,
+                format!("intel-brief-lead:{}", lead.id),
+            ],
+        };
+        let mut keys = [
+            crate::brain_actors::endpoint_key(&payload.source),
+            crate::brain_actors::endpoint_key(&payload.target),
+        ];
+        keys.sort();
+        let id = crate::brain_actors::hid("related", &[&keys[0], &keys[1], &payload.basis]);
+        let payload = MemoryPayload::Related(payload);
+        super::memory::put_typed_in(
+            tx,
+            &super::memory::TypedMemory {
+                id: id.clone(),
+                text: crate::brain_actors::text_of(&payload),
+                kind: MemoryKind::Related,
+                payload: Some(payload),
+                lifecycle: "active".into(),
+            },
+        )
+        .await?;
+        current.push(id);
+    }
+    let confirmed = publish_curated_links_in(tx, article, job, &derivations, prepared).await?;
+    let previous = lead_ids(tx, article).await?;
+    let stale: Vec<String> = previous
+        .into_iter()
+        .filter(|id| !current.contains(id))
+        .collect();
+    let retired = super::memory::set_lifecycle_in(tx, &stale, "retired").await?;
+    run(
+        tx,
+        tx.query("UPSERT type::record('app_state', $k) SET value = $v RETURN NONE;")
+            .bind(("k", leads_key(article)))
+            .bind(("v", serde_json::to_string(&current).map_err(abort)?)),
+    )
+    .await?;
+    let mut touched = current.clone();
+    touched.extend(confirmed);
+    touched.extend(retired);
+    enqueue_index(tx, &touched, &nonce, now).await?;
+    let required = required_receipts(tx, snapshot, article).await?;
+    Ok(Some((snapshot.to_owned(), required)))
 }
 
 fn curated_key(article: &str) -> String {

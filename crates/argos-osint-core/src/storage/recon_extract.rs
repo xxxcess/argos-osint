@@ -32,9 +32,9 @@ use super::publisher::{Write, Wrote};
 use super::recall::{apply_caps, estimate_tokens, RecallHit, RecallSource, DEFAULT_EXCLUDED};
 use super::recon_runs::now;
 use super::repo::Repository;
+use super::thread_history::Message;
 use super::tx::{Tx, TxError};
 use crate::osint::ToolResult;
-use crate::recon::Message;
 
 /// Full-text index for the recall stopgap (idempotent). The analyzer is
 /// defined separately, in [`ANALYZERS`].

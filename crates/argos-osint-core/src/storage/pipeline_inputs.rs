@@ -572,7 +572,7 @@ pub async fn recon_input(
     evidence: Vec<RetainedEvidence>,
     required_tasks_complete: bool,
 ) -> Result<PipelineInput> {
-    let thread = super::recon::get_thread(repo, thread_id).await?;
+    let thread = super::thread_history::get_thread(repo, thread_id).await?;
     let opted_in = thread.is_some_and(|t| t.recall_insights);
     let texts: Vec<String> = evidence.iter().map(|e| e.text.clone()).collect();
     let run = run_id.to_string();

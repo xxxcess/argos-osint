@@ -1063,6 +1063,148 @@ mod tests {
         assert!(!crate::osint::key_exhausted(REJECTED));
     }
 
+    #[cfg(any(feature = "embedded", feature = "server"))]
+    #[tokio::test]
+    async fn newsapi_fallback_shares_atlas_quota_and_honors_full_buckets() {
+        use crate::storage::repo::Repository;
+        use crate::storage::{atlas, codec, jobs};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        async fn set_used(repo: &Repository, bucket: &str, day: &str, used: u32) {
+            repo.db()
+                .query("UPSERT $bucket SET used = $used RETURN NONE")
+                .bind((
+                    "bucket",
+                    jobs::rid("atlas_quota", &codec::encode(&[bucket, day])),
+                ))
+                .bind(("used", i64::from(used)))
+                .await
+                .unwrap()
+                .check()
+                .unwrap();
+        }
+
+        async fn used(repo: &Repository, day: &str) -> [u32; 2] {
+            [
+                atlas::quota_used(repo.db(), "newsapi", day).await.unwrap(),
+                atlas::quota_used(repo.db(), "newsapi:fallback", day)
+                    .await
+                    .unwrap(),
+            ]
+        }
+
+        fn keys(index: u32) -> ProviderKeys {
+            ProviderKeys {
+                newsapi: format!("durable-newsapi-primary-{index}"),
+                newsapi_fallback: format!("durable-newsapi-spare-{index}"),
+                ..ProviderKeys::default()
+            }
+        }
+
+        async fn search(executor: &Executor, index: u32) -> crate::osint::ToolResult {
+            executor
+                .run_configured(
+                    "newsapi_search",
+                    json!({"query": "Elon Musk"}),
+                    None,
+                    &keys(index),
+                )
+                .await
+                .unwrap()
+        }
+
+        #[cfg(feature = "server")]
+        let Some(server) = crate::storage_fixture::Server::start() else {
+            return;
+        };
+        #[cfg(feature = "server")]
+        let repo = server.repo("argos", "news_quota").await;
+        #[cfg(not(feature = "server"))]
+        let temp = tempfile::tempdir().unwrap();
+        #[cfg(not(feature = "server"))]
+        let repo = Repository::connect(
+            &crate::storage::open::Target::Embedded {
+                path: temp.path().join("news-quota"),
+            },
+            "argos",
+            "news_quota",
+        )
+        .await
+        .unwrap();
+        let day = crate::atlas::utc_day();
+        let cap = crate::atlas::daily_cap("newsapi");
+        let hits = AtomicUsize::new(0);
+        let fixture = serve(Arc::new(move |_| {
+            let index = hits.fetch_add(1, Ordering::SeqCst);
+            if matches!(index, 0 | 2 | 4) {
+                let status = if index == 2 { 200 } else { 429 };
+                return (
+                    status,
+                    json!({"status":"error", "code":"rateLimited", "message":"slow down"})
+                        .to_string(),
+                );
+            }
+            (
+                200,
+                articles(&[article(
+                    "Elon Musk at Tesla",
+                    "Elon Musk spoke.",
+                    "https://www.reuters.com/a",
+                )]),
+            )
+        }))
+        .await;
+        let executor = Executor::new()
+            .unwrap()
+            .with_newsapi_quota(Some(repo.clone()));
+
+        assert!(executor
+            .run_configured("newsapi_search", json!({}), None, &keys(0))
+            .await
+            .is_err());
+        assert_eq!(fixture.requests().len(), 0);
+        assert_eq!(used(&repo, &day).await, [0, 0]);
+
+        for index in 1..=2 {
+            let result = search(&executor, index).await;
+            assert_eq!(result.status, "completed", "{:?}", result.error);
+            assert_eq!(used(&repo, &day).await, [0, index]);
+        }
+        assert_eq!(
+            fixture.requests().len(),
+            4,
+            "both quota response shapes switch accounts"
+        );
+
+        set_used(&repo, "newsapi:fallback", &day, cap).await;
+        assert_eq!(search(&executor, 3).await.status, "rate_limited");
+        assert_eq!(fixture.requests().len(), 5, "a full fallback is never sent");
+        assert_eq!(used(&repo, &day).await, [1, cap]);
+
+        set_used(&repo, "newsapi", &day, cap).await;
+        let result = search(&executor, 4).await;
+        assert_eq!(result.status, "rate_limited");
+        assert_eq!(
+            result.error.as_deref(),
+            Some("NewsAPI local daily quota is exhausted")
+        );
+        assert_eq!(
+            fixture.requests().len(),
+            5,
+            "full accounts stop before sending"
+        );
+
+        set_used(&repo, "newsapi:fallback", &day, cap - 1).await;
+        let result = search(&executor, 5).await;
+        assert_eq!(result.status, "completed", "{:?}", result.error);
+        let requests = fixture.requests();
+        assert_eq!(requests.len(), 6);
+        assert!(requests[5]
+            .to_ascii_lowercase()
+            .contains("x-api-key: durable-newsapi-spare-5"));
+        assert_eq!(used(&repo, &day).await, [cap, cap]);
+    }
+
     /// A provider body that echoes the key is stored redacted.
     #[tokio::test]
     async fn an_echoed_key_is_redacted_from_the_stored_body_and_error() {

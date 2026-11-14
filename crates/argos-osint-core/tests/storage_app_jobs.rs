@@ -1,4 +1,4 @@
-//! Contract for `storage::recon_jobs::begin_app_job` / `set_job_progress`
+//! Contract for `storage::app_jobs::begin_app_job` / `set_job_progress`
 //! (the SurrealDB job rows Atlas cycles and their phases write) against a
 //! real SurrealDB 3.3.4 disk server or the embedded RocksDB engine (see
 //! `support`). Not yet listed in `scripts/test_surreal.py`; run with
@@ -7,8 +7,8 @@
 
 mod support;
 
+use argos_osint_core::storage::app_jobs::{begin_app_job, set_job_progress, AppJob};
 use argos_osint_core::storage::bootstrap;
-use argos_osint_core::storage::recon_jobs::{begin_app_job, set_job_progress, AppJob};
 use argos_osint_core::storage::repo::Repository;
 use support::*;
 

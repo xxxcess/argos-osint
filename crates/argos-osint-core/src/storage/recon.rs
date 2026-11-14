@@ -30,9 +30,10 @@ use surrealdb::types::SurrealValue;
 
 use super::jobs::{rid, run};
 use super::repo::Repository;
+pub use super::thread_history::get_thread;
+use super::thread_history::{Message, Thread};
 use super::tx::{run_tx, RetryPolicy, Tx, TxError};
 use crate::brain::{Memory, MemorySource};
-use crate::recon::{Message, Thread};
 
 /// Recon schema (idempotent).
 pub const SCHEMA: &str = "DEFINE TABLE IF NOT EXISTS recon_thread SCHEMAFULL;
@@ -99,17 +100,6 @@ DEFINE EVENT IF NOT EXISTS memory_edge_cascade ON TABLE memory
     DELETE brain_memory_actor_ref WHERE memory_id = record::id($before.id) RETURN NONE;
   };";
 
-#[derive(Debug, Clone, SurrealValue)]
-struct ThreadRow {
-    id: String,
-    title: String,
-    created_at: String,
-    updated_at: String,
-    draft: String,
-    scroll: i64,
-    recall_insights: bool,
-}
-
 /// Create or replace a thread.
 pub async fn put_thread(repo: &Repository, t: &Thread) -> Result<()> {
     repo.db()
@@ -127,33 +117,6 @@ pub async fn put_thread(repo: &Repository, t: &Thread) -> Result<()> {
         .await?
         .check()?;
     Ok(())
-}
-
-/// A live (not deleted) thread.
-pub async fn get_thread(repo: &Repository, id: &str) -> Result<Option<Thread>> {
-    get_thread_on(repo.db(), id).await
-}
-
-/// [`get_thread`] on the client or inside a caller's transaction.
-pub(crate) async fn get_thread_on(db: &impl super::tx::Reads, id: &str) -> Result<Option<Thread>> {
-    let mut r = db
-        .read(
-            "SELECT meta::id(id) AS id, title, created_at, updated_at, draft, scroll, \
-             recall_insights FROM ONLY $t WHERE deleted = false",
-        )
-        .bind(("t", rid("recon_thread", id)))
-        .await?
-        .check()?;
-    let row: Option<ThreadRow> = r.take(0usize)?;
-    Ok(row.map(|t| Thread {
-        id: t.id,
-        title: t.title,
-        created_at: t.created_at,
-        updated_at: t.updated_at,
-        draft: t.draft,
-        scroll: t.scroll,
-        recall_insights: t.recall_insights,
-    }))
 }
 
 /// Append a message (the thread must exist; sequences are unique per thread).

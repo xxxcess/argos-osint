@@ -1,31 +1,25 @@
 # React UI design and implementation
 
-[Code route](index.md) · [Intel web contract](intel-web.md) · [OpenCode](opencode-v2.md)
+[Code route](index.md) · [Intel web contract](intel-web.md) · [Testing](react-ui-testing.md)
 
-Apply to React UI work in `apps/web-desktop`, `packages/ui`, `packages/intel` and UI-facing changes in `packages/api-client`. The web theme is the **Dark Digitized HUD + Glassmorphism** system below; the TUI keeps its own `theme.rs`, and web work preserves layout semantics and product contracts. This is the shared design baseline for creation, updates and reviews; task-specific design direction can change it deliberately. Rust terminal UI follows its own [design contract](tui-design-spec.md).
+Applies to `apps/web-desktop`, `packages/{ui,intel,api-client}`. Shared [matte design](native-design-system.md) changes paint while preserving web structure, typography and product contracts. Rune has a separate native allowlist; retired terminals are [historical](../../archive/cli-retirement.md).
 
-## Argos Look & Feel (reference)
+<a id="argos-look--feel-reference"></a>
 
-Direction is the Argos OSINT terminal desk — professional, sparse, evidence-first — plus the HUD/glass treatment below. Stay inside that theme. Component layout, grouping, and treatment may be original when they use the shared tokens, type, accent, and density. A generic card-on-white layout, a new palette, or a second brand is out of theme. Name the screen type and density (default or compact) before building. Adapted from the [frontend design skill](https://codegen.com/skills/frontend-design/skill.md); this baseline decides the theme, and component design may vary inside it.
+## Fleetworks look and feel
 
-1. **Direction.** Design on the terminal desk. Change the theme only when the user asks.
-2. **Type.** `fonts.mono` for telemetry, nav, and metadata; `fonts.body` for prose. Hold the existing scale. No extra face.
-3. **Space.** One base unit (~8–12px). Derive padding and gaps from it. Default lists and cards keep a visible gap. Compact or zero-gap only for launchers, command palettes, headline lists, and category bullets.
-4. **Color.** Neutral surfaces, one accent for titles, primary actions, active navigation, and focus. Select is a separate token. Semantic colors only for state. No decorative gradient.
-5. **Components.** Accent titles and thin frames are the theme signature. Compose or add components freely inside that signature: new groupings, frames, meters, and stripes are fine when they carry information. Extend a shared primitive first; add one when the screen needs a form the set does not have. Bold key values at normal size.
-6. **States.** Hover, focus, active, selected, disabled, loading, empty, and error are designed with the layout. Contrast and focus order come first. Motion stays light; `prefers-reduced-motion` must still show state. Use real labels and data, not placeholder copy.
+Before building, name the screen type, density and nearest shared primitive.
 
-Scroll long content; do not squeeze charts, tables, or critical rows. Ellipsize labels. React Native topology graphs use [ForceCanvas.tsx](../../../packages/intel/src/topology/ForceCanvas.tsx) (`react-force-graph-3d`) plus the accessible list twin. Do not add another graph library. The TUI keeps its existing topology view and does not gain new chrome, motion, or density modes.
+| Decide | Rule |
+| --- | --- |
+| Type | Existing scale; mono for navigation/metadata, body for prose |
+| Space | Visible record gaps; compact only for launchers, palettes, headlines and category bullets |
+| Color | Obsidian/graphite and sparse gold/ivory; semantic hues retain their meanings |
+| Components | Extend shared primitives; preserve functional boundaries and independent focus/selection |
+| States | Loading, empty, error, unavailable, disabled, hover, press and keyboard focus |
+| Overflow | Wrap prose, scroll long content and retain usable hit targets |
 
-| Principle                   | React Native                                                                | TUI (keep simple)                                 |
-| --------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------- |
-| Accent hierarchy            | Titles, primary buttons, focus rings                                        | ACCENT titles + focus border + `• focused`        |
-| Thin separation             | Subtle border or light elevation, one padding unit                          | Thin borders, 1-cell padding                      |
-| Controlled density          | Spaced by default; compact only for launchers/palettes/headlines            | Same rule; no new modes                           |
-| Focus vs selection          | Distinct states; focus never hides other content                            | ACCENT/bold = activation; SELECT = keyboard focus |
-| Scroll over squeeze         | Min sizes + scroll; ellipsize labels                                        | Charts ≥11 rows, tables ≥9; scroll                |
-| Theme, with room to compose | Tokens for color, type, space, and radius; component layout may be original | `theme.rs` remains authoritative                  |
-| Topology graphs             | `react-force-graph-3d` via `ForceCanvas`                                    | Existing canvas; no force-graph port              |
+No alternate graph library: web topology uses `ForceCanvas` and its accessible list twin.
 
 ## Ownership and stack
 
@@ -38,7 +32,7 @@ Scroll long content; do not squeeze charts, tables, or critical rows. Ellipsize 
 | Browser shell and CSS              | [app](../../../apps/web-desktop/app), especially [style.css](../../../apps/web-desktop/app/style.css)                                                        |
 | Behavior and offline fixtures      | [Intel web contract](intel-web.md), [browser tests](../../../tests/web/intel.spec.ts), [Playwright config](../../../playwright.config.ts)                    |
 
-Use installed manifests and the app's [Next guidance](../../../apps/web-desktop/AGENTS.md) for version-specific APIs. Next runs a server: the React Native UI calls its same-origin API routes, which forward to Rust. Only server configuration knows the Rust origin; Next does not implement storage/domain behavior. React Compiler is enabled for the web app and its shared transpiled packages; keep it enabled. Expo/Tauri/native builds are later milestones, not verified targets. Keep the pinned dependency set; add libraries only when the task needs them and validate compatibility.
+Use installed manifests and the app's [Next guidance](../../../apps/web-desktop/AGENTS.md) for version-specific APIs. Next runs a server: the React Native UI calls its same-origin API routes, which forward to Rust. Only server configuration knows the Rust origin; Next does not implement storage/domain behavior. React Compiler is enabled for the web app and its shared transpiled packages; keep it enabled. The Rune macOS client is a separate Rust app; a web build is not native app verification. Keep the pinned dependency set; add libraries only when the task needs them and validate compatibility.
 
 ## React Native and Compiler baseline
 
@@ -51,131 +45,119 @@ Compiler optimization is not a correctness proof. Typecheck, Hooks/compiler diag
 
 ## Visual language
 
-**TUI palette + HUD/glass treatment** (Dark Digitized HUD + Glassmorphism) for shared `packages/ui` tokens. That palette is the core TUI palette in [theme.rs](../../../crates/argos-osint-bin/src/tui/theme.rs) ([TUI design](tui-design-spec.md#theme-data-and-interaction)). Intel screens add an Intel-scoped matte graphite/mint namespace (`bg #0B0B0C`, `accent #5FD39A`, separate `select #7FE0B4`, and per-kind hues) in [intel-theme.ts](../../../packages/intel/src/shell/intel-theme.ts). Those values do not replace `packages/ui` tokens or the TUI theme. Do not copy terminal cell measurements.
+| Authority | Responsibility |
+| --- | --- |
+| [Shared UI](../../../packages/ui/src/index.tsx) | Palette, fonts, matte recipes and primitives |
+| [Intel theme](../../../packages/intel/src/shell/intel-theme.ts) | Evidence, metric and execution-state hues |
+| [Browser CSS](../../../apps/web-desktop/app/style.css) | Opaque canvas, functional focus ring and scrollbars |
+| [Canonical mark](../../../assets/brand/fleetworks-mark.svg) | Five outlined gold rays, ivory disc, gold crescent; transparent knockout |
 
-Authority: tokens, `glass`, `glow()`, `Tone`/`toneColor`, `StatusTag`, `Frame` and `Panel` in [packages/ui](../../../packages/ui/src/index.tsx); grid backdrop, glow focus ring and thin scrollbars in [style.css](../../../apps/web-desktop/app/style.css). Add or change values there, never as scattered hex in feature components.
-
-| Token                                               | Value                             | Use                                                |
-| --------------------------------------------------- | --------------------------------- | -------------------------------------------------- |
-| bg / panel / raised                                 | `#141414` / `#1e1e1e` / `#303030` | Page, panels, selected/raised rows                 |
-| border                                              | `#535353`                         | Thin rules and borders                             |
-| text / dim / muted                                  | `#e8e8e8` / `#b5b5b5` / `#919191` | Primary, secondary, quiet metadata                 |
-| accent (sky) / accent2 (violet)                     | `#87bfff` / `#c678dd`             | Active/focus/links / secondary emphasis            |
-| success / warning / danger                          | `#98c379` / `#e5c07b` / `#f08a8a` | Severity tones via `Tone`/`toneColor`              |
-| `glass`, `glassStrong`, `glassBorder`, `accentSoft` | derived from TUI surface grays    | Translucent fills, muted borders, soft accent wash |
-| `fonts.mono` / `fonts.body`                         |                                   | Telemetry labels, nav, metadata / prose            |
-
-Values mirror `theme.rs`; recheck it when changing the palette.
+| Token | Value |
+| --- | --- |
+| Canvas / card / raised | `#060709` / `#0B0C0F` / `#111317` |
+| Primary / supporting / muted text | `#F3EEE4` / `#D6D2C4` / `#B8B4A8` |
+| Accent / pressed | `#C6A56E` / `#C4A265` |
+| Functional boundary | `#898274` |
+| Decorative card / satin control edge | 2% / 3% ivory; never a functional boundary substitute |
 
 ### Intel matte desk
 
 @tag:look-and-feel @tag:react-ui @tag:intel-brief
 
-[Intel tokens](../../../packages/intel/src/shell/intel-theme.ts) use matte surfaces (`bg #0B0B0C`, `panel #141416`, `panelRaised #1B1B1E`, `inset #0F0F11`) and neutral text (`text #ECECEE`, `dim #B4B4BA`, `muted #85858E`, `faint #84848D`). Keep mint accent and selection separate; kind colors still identify evidence types. Intel uses a 4px spacing unit, 20px card padding, 12px gutters, body 15/22, 22px titles and 32px display text. Mono remains for metadata and telemetry; body type carries prose. These Intel values do not change the shared or TUI palette above.
+| Surface/state | Recipe |
+| --- | --- |
+| Read-only card | Opaque matte body, faint static edge; no implied hover/focus action |
+| Default control | Graphite body and functional border; hover accent wash, pressed raised fill |
+| Quiet control | Transparent fill, retained functional border and supporting text |
+| Primary | Flat gold with dark text; hover gold and pressed crescent-gold fills |
+| Selected | Stable fill/border plus `aria-pressed`; separate from keyboard focus |
+| Disabled | Readable muted label/boundary and semantic disabled state |
+| Compatibility exports | `glass` now supplies matte-card paint; `glow()` supplies a static inset rim |
 
-[Motion helpers](../../../packages/intel/src/shell/motion.ts) and [ScreenTransition](../../../packages/intel/src/shell/ScreenTransition.tsx) use RN `Animated`, with app CSS for web hover, stagger and shimmer treatments. Motion tokens are 120ms fast, 200ms base, 260ms pages, 220ms inspector, 600ms topology focus and 450ms fit. Page transitions use an 8px directional translation and crossfade; Bulletin → Brief → Topology is forward. Reduced motion makes page/camera movement immediate and removes CSS animation. Do not introduce an animation library.
-
-[JobStatusBeacon](../../../packages/intel/src/shell/JobStatusBeacon.tsx) pairs a glowing dot with a polite live text status. Idle is muted, queued warning, running cool, succeeded mint, failed danger and interrupted/stale violet. Only queued/running dots animate; state remains readable with reduced motion. [jobState.ts](../../../packages/intel/src/shell/jobState.ts) derives these display states from existing action, live-stage, detail and indexing signals. The Brief header and lifecycle rail show the active state. Bulletin, Brief, and Topology also expose a Jobs control in the status bar, between host metrics and the API status. It opens upward and lists that page's background work. Publication, indexing and API connectivity remain distinct facts.
-
-The shared [Skeleton](../../../packages/ui/src/Skeleton.tsx) is decorative and hidden from assistive technology. Its caller owns a labeled status region. Web shimmer and native opacity animation stop under reduced motion. Feed, Brief evidence and lazy canvas loading use geometry placeholders; refresh retains readable content and its separate status. Shape matching is a layout requirement to verify in browser fixtures, not a claim established by a passing unit test.
-
-Principles:
-
-- Translucent slate fills, muted borders and backdrop blur. Blur and other web-only style props are web-only: cast them at the web boundary so native/RN types stay valid, and keep a readable opaque-enough fill when blur is unsupported.
-- Cyber accents with restrained glow: `glow()` on active, focused or critical elements only, never on every surface.
-- Bracketed uppercase mono telemetry labels (e.g. `[ STATUS ]`) for headings/metadata via `StatusTag`/`Frame`/`Panel`; prose stays in body font at a comfortable width.
-- Thin rules and consistent padding. Default list and card spacing stays comfortable; compact or zero-gap only for launchers, command palettes, headline lists, and category bullets. Responsive grid wraps (md:flex-row-like) rather than shrinking text.
-- Contrast meets WCAG AA for text and essential controls against the glass fill over the backdrop. Honor `prefers-reduced-motion`; no motion needed to understand state.
+No backdrop blur, gloss, broad reflections, shimmer or decorative card-entry animation. Opaque preferences retain readable static states. Existing view/camera motion remains preference-aware; it introduces no renderer or animation library. Gold is branding, not severity or confidence.
 
 ## UI/UX guidance
 
-- **State clarity:** active, selected, focus, hover, disabled, loading, empty, error and offline are distinct. **Glow is never the sole state indicator**; pair it with text, fill, border weight, `aria-pressed`/role state or icon.
-- **Density:** default spacing leaves a visible gap between records. Compact spacing is only for launchers, command palettes, headline lists, and category bullets. Keep touch targets usable and body text readable; one hierarchy per screen, panels only for meaningful groups.
-- **Tone usage:** danger = failure/blocking, warning = degraded/partial/stale, accent = active/informational, success = verified/healthy. Use `Tone`/`toneColor`, include a text label, and do not use tone to imply corroboration or confidence the data does not carry.
-- **Do:** reuse `Panel`/`Frame`/`StatusTag`; keep focus-visible glow ring; test 1440/768/390/320px; preserve error recovery actions.
-- **Don't:** stack nested glass cards, blur large scrolling lists needlessly, use glow/purple as decoration, tiny mono for essential actions or long text, or change contracts for style.
-- **Review checklist:** tokens come from `@argos/ui`; AA contrast on glass; non-color state cues; focus ring visible; reduced motion honored; blur cast web-only with fallback; no overflow at four widths; fixture PNGs inspected; contracts in [intel-web.md](intel-web.md) unchanged.
+Use shared `Panel`, `Frame`, `StatusTag`, `Notice`, loading/empty primitives and tokens. Contrast-check text and essential controls after compositing. Pair color with text, icons or semantic state; focus never hides content. Verify default/compact density, recovery actions, long text and no overflow at 1440/768/390/320px. Product semantics stay in [Intel web](intel-web.md).
 
 ## Current web components
 
-The browser shell, Home, Bulletin and Brief render at 75% density through the root CSS zoom, configured by `WEB_UI_SCALE`; Topology restores full-size content with a workspace scale override. Shared/native defaults stay at scale 1. The shell still fills the window, and topology compensates its viewport height and label coordinates for the display scale. The shell uses the Intel status bar (server mark, Bulletin tab, host telemetry with dashes for unavailable samples, API state and clock) over the Intel backdrop. **The app enters the Intel Home launcher, then the Bulletin. Bulletin retains its category/day/search state.** The 220px category rail sits beside the feed at 900px and wider and becomes a horizontal chip scroller below that. The retained-day dropdown overlays from the feed header above its first article for every category, without inserting option rows into the feed layout. The feed header groups the labeled day filter with Latest/Hottest controls and keeps refresh separate. Icon-only controls carry a short visible label: Search, Day, server, and Bulletin. The bulletin header has no Home control. The status-bar server control shows the host platform name from metrics and returns to the launcher. Focus Brief remains one scrolling shell with a full-width header; below it, the reading column and sticky context rail use an 8:4 split and stack below 900px. Topology is its own workspace page from a retained brief or direct topology route; its graph/Neighborhood layout starts without a breadcrumb or duplicate root title. Return to Brief restores the retained article. Its grid canvas uses icon tiles, labeled dashed relationships and a wrapping row of depth and node-type controls below the canvas; the former Pause/Filters/zoom toolbar is removed; at widths of at least 1100px, Neighborhood occupies a 320px left column beside the graph; below that width it follows the graph. Nodes spans the full width below both, with recorded connections inside Nodes. Legend, filters, captions and tiles share distinct amber/cyan/violet/rose kind colors and glyphs. Topic nodes and their relationships are omitted. The selected target pulses and zooms into a frame that fits its first-degree neighborhood on entry, with an instant steady-glow alternative for reduced motion. Fit only on new selection/navigation; preserve manual zoom and pan through routine updates. Screen-space relationship-caption placement prevents overlaps with node captions; X/Y guides are removed. On phones the graph stays above the controls, with small ellipsized labels and relationships in the list twin. Brief actor actions open dossiers, using existing Brain IDs or a retained source preview. Claim/inference actions use their memory graph or extracted brief graph without writing memories. Source images use contain sizing and their intrinsic ratio, capped at 520px tall; bulletin cards expose one whole-card open action. Action failures use a danger-toned `Notice` with an explicit recovery action. Connection failures use the landing status overlay and inline retry.
+[![Web lifecycle and ownership](../../diagrams/intel-web.svg)](../../diagrams/intel-web.html)
 
-- `Button`: `default` is a framed neutral surface — `colors.border` over `colors.glass` — visually distinct from passive `Panel`/card glass; hover (`accentSoft` fill) is distinct from pressed (`glassStrong`) without motion, and `active`/`aria-pressed` uses accent fill with dark text. `quiet` keeps a persistent thin `colors.border` frame over transparent fill with dim text (no longer frameless). `primary` is the single decision action per surface — Connect/retry, Ensure/resume brief, Load more/Retry — with accent border, accent text, `accentSoft` fill and `glow(accent)` on hover. Disabled uses muted text (`colors.muted`), `glassBorder` border and `accessibilityState.disabled` rather than bare opacity. Selection and the focus-visible glow ring stay independent of each other.
-- [Bulletin cards](../../../packages/intel/src/views/bulletin/ArticleCard.tsx) have one whole-card action, a three-line 15/22 summary, mono source/date metadata and an optional 120px square thumbnail that scales the photo to fit. The article `temperature` runs from 0 (cold) to 1 (hot) and shows as Cold, Cool, Warm, or Hot on the bulletin card and the brief header. The Hot tag has a faint slow glow; reduced motion keeps it steady. Hover/focus raises the matte surface and uses an accent border; the first eight cards stagger their entry in 30ms steps. [RelatedBriefCard](../../../packages/intel/src/views/brief/RelatedBriefCard.tsx) keeps related occurrence identity, basis and the “not corroboration” label. Topology node-list rows are pressable at a 40px target with hover (`glassStrong`) and a neutral left tick on press; selection keeps an accent left border plus `accentSoft`.
-- `Panel`: glass container with bracketed uppercase mono heading. `Frame`: bracketed HUD frame for grouped telemetry. `StatusTag`: toned bracketed label (always carries text). `Notice`: alert. `Label`/`Copy`: mono metadata / body prose.
-- Mono is for navigation/telemetry, body font for headlines and descriptions. No theme toggle, animation library or new remote-data ownership was introduced.
-- **Package move (Phase 1 remap):** `IntelStatusBar`, `IntelScrollFab`, `intel-theme` (with `intelMetricColors`), `intel-fonts`, and `IntelShell` have been relocated from `packages/ui/src/` to `packages/intel/src/shell/`. Imports in `packages/intel/src/index.tsx` now resolve from `./shell/IntelShell`. The `intel-theme` now provides `intelMetricColors` (cpu: accent, memory: cool, disk: disk purple, network: network pink) for use in telemetry displays.
-- **Bottom taskbar**: The `IntelStatusBar` shows API connection status, telemetry (CPU/Mem/Disk/Net when wide), clock and an optional brief-job beacon. The `IntelScrollFab` appears at bottom-right when content is scrollable, offering scroll-to-end action. Both are visible in the connected layout alongside the workspace.
+| Surface | Composition |
+| --- | --- |
+| Shell | Full window, 75% web density, bottom API/metrics/clock/job taskbar; Topology restores scale 1 |
+| Home | Initial launcher; server control returns here while retaining feed/filter/article state |
+| Bulletin | Stationary category/day/search/sort chrome; only records scroll; whole-card open action |
+| Brief | Full-width header; 8:4 reading/context split, stacked below 900px; one scrolling shell |
+| Actor | Identity header; 2:1 reading/sidebar at 900px; source previews remain distinct from canonical actors |
+| Topology | Dedicated graph page/list twin; [exact interaction contract](intel-web.md#interactive-topology-graph) |
+
+Shared primitives stay in `@argos/ui`; Intel shell/theme/font modules stay in `packages/intel/src/shell/`. [ArticleCard](../../../packages/intel/src/views/bulletin/ArticleCard.tsx) and [RelatedBriefCard](../../../packages/intel/src/views/brief/RelatedBriefCard.tsx) preserve occurrence identity, imagery and evidence distinctions. No theme toggle or remote-state owner is added.
 
 ### Feature composition
 
-[Bulletin](../../../packages/intel/src/views/bulletin/BulletinView.tsx) composes `CategoryRail`, `FeedHeader`, cards and `BulletinSkeleton`. [Brief](../../../packages/intel/src/views/brief/BriefView.tsx) composes `BriefHeader`, collapsible `BriefSection`, `ActorChips`, `ClaimList`, `InferenceList`, `ContextRail`, `RelatedBriefCard` and `BriefSkeleton`. The original view paths retain compatibility exports. The route controller keeps Query/action ownership and passes existing snapshots and callbacks into these components. The context rail owns lifecycle steps, ensure/reload/refresh controls, source imagery/link and retained links; related reports follow in the rail. The header includes confidence with the existing thresholds, including valid zero and unassessed values.
+[BulletinView](../../../packages/intel/src/views/bulletin/BulletinView.tsx) composes category rail, header/cards and skeleton. [BriefView](../../../packages/intel/src/views/brief/BriefView.tsx) composes header, evidence sections, context rail and Related leads; its controller retains Query/action ownership.
 
-[OrbitScene](../../../packages/intel/src/landing/OrbitScene.tsx) replaces the connection spinner while checking the local API. It lazily loads a non-interactive force-graph scene: an amber core and one mint/cool orbiter per passing readiness check, staggered by 250ms. [Pure seeded orbit math](../../../packages/intel/src/landing/orbit.ts) moves particles from a radius of 600 toward 80–160 rings over four seconds, ramping angular speed from 0.05 to 1.2 rad/s. The core halo pulses over 2.4 seconds and the camera rotates slowly. Reduced motion uses a static settled frame. SSR or missing WebGL uses a radial-glow core with one static orbiter per passing check; status and checks remain readable below the core. This decorative scene carries no evidence data and needs no entity list twin. Frame-rate and visual acceptance require browser verification.
+[OrbitScene](../../../packages/intel/src/landing/OrbitScene.tsx) illustrates initial Home readiness, independently of evidence topology. It uses existing readiness observations, static reduced-motion/non-WebGL fallbacks and inline retry. In-app returns/deep links do not replay startup. [Landing semantics](intel-web.md#verification)
 
 ## Canvas visualizations
 
-Canvas content is invisible to assistive tech and tests. Every canvas needs an **accessible list/text twin** that carries the same entities, relationships, selection and filters, plus a summary label on the canvas. React Native topology graphs use the force-graph canvas (`react-force-graph-3d` in `ForceCanvas`) plus CSS2D kind tiles. Do not replace it with another chart library or a hand-rolled layout. Pass the Intel kind palette into draw code as props; keep kind and state distinguishable beyond color. Load the canvas lazily and client-only, hand it cloned data, and honor reduced motion (no orbit, particles or drag; pre-settled layout). Keep retained neighborhood controls as accessible RN buttons; this screen has no Pause/Filters/zoom toolbar. The loading skeleton appears only on the first neighborhood visit. Each loading section is one empty rectangle: the graph, the controls, and the node list. The lazy canvas fallback is the graph rectangle. The Nodes list scrolls inside its panel so list scrolling does not move the graph. A viewport-pinned browser workspace bounds the topology content above the bottom navigation. The list twin scrolls only its own selected row into view. Keep existing selection, filters and neighborhood framing behavior. See the [topology contract](intel-web.md#interactive-topology-graph).
+Canvas is not the sole content path: expose the same entities, relationships, selection and filters in accessible lists and provide a canvas summary. Use lazy client-only `ForceCanvas`/`react-force-graph-3d`; pass cloned engine data and semantic tokens. Retain retryable errors, reduced motion, selected-row scrolling, bounded overscroll and initial graph/control/list skeletons. [Topology](intel-web.md#interactive-topology-graph) owns exact geometry, camera and filter behavior; no alternate renderer.
 
 ## Layout and interaction
 
-- Use `View`, `Text`, `Pressable`, `Image` and `StyleSheet` for shared UI; browser-only markup/styles belong in the app or an explicit web adapter. Keep strings inside `Text`; conditional children of `View` must not leak `0` or empty strings (`condition ? <Text>…</Text> : null` when needed).
-- Preserve shrink/wrap behavior (`minWidth: 0`, bounded media, flexible text). At 1440, 768, 390 and 320px, inspect long content, navigation and controls for clipping, overlap and horizontal page overflow. Change layout when content stops fitting, not by shrinking all text.
-- The React Native Focus Brief and Actor dossier scroll as one shell with the scrollbar hidden. Inferences stay the last evidence section in the reading column. Preserve errors, retry and brief actions on wide and narrow layouts. Brief source images stay in the context rail; Bulletin cards may carry the bounded thumbnail. Missing, unsafe or failed images collapse cleanly. Exact sizes and behavior live in the [web contract](intel-web.md#feed-imagery).
-- Give every control an accessible name and appropriate role/state through RN accessibility props or semantic HTML at web boundaries. Preserve logical Tab order and visible `:focus-visible`; verify Enter/Space activation, tab selection and focus when content changes. Do not add redundant keyboard handlers to controls that already supply them.
-- Label inputs independently of placeholders; associate errors/help with the field, retain entered values after failures, and offer a concrete recovery action. Keep touch targets usable at narrow widths without overcrowding adjacent controls.
-- Distinguish initial loading, background refresh, empty results, partial data, action pending, action failure and offline/reconnect states. Avoid blanking readable content during ordinary refetch. Disable duplicate pending submissions and expose the result. Gate working UI/mutations on API readiness as required by the client contract.
-- Reserve image dimensions/aspect ratio to avoid layout shifts; use meaningful accessible descriptions for informative images and avoid duplicate announcements for decorative thumbnails. Validate external URLs through existing helpers and preserve failure fallback. Honor reduced motion if adding animation; prefer transform/opacity and avoid motion required to understand state.
+Use RN `View`, `Text`, `Pressable`, `Image` and `StyleSheet`; keep DOM styles/globals, persistence and UUIDs in app adapters. Strings belong in `Text`; zero-valued conditions cannot leak bare `0`. Labels are independent of placeholders. Preserve entered values after errors, native keyboard semantics, logical focus order and usable touch targets. Keep wrapping/`minWidth: 0`, reserve image geometry and retain safe URL/error fallback. Refresh keeps readable data; duplicate pending mutations stay disabled.
 
 ## Async data and pagination
 
-`LoadingState` is an accessible RN indeterminate progress indicator with a label for compact operational refreshes. Initial Bulletin, Brief evidence and lazy canvas loading use labeled skeleton regions; `EmptyState` names a verified empty collection and its context. Pending days/feed/detail/evidence/Related/Topology requests do not render empty data claims. An available snapshot takes precedence over pending flags, including verified empty arrays in a completed brief. `actors_pending` explicitly marks deferred catalog matching: it affects only the actor section, never loaded claims or inferences, and must not produce a false “No actors” state. The first-load Brief skeleton follows the actual header, summary, three evidence boxes and context rail, with the same 900px stacking breakpoint and shared shell/spacing styles. Actor skeletons show numbered rows; claim and inference skeletons include text and navigation-action geometry. Evidence sections use section-sized skeletons only before their first snapshot; do not add a duplicate whole-brief skeleton above article metadata that is already readable. Brief status and independent Related reads use compact local progress, not whole-brief placeholders; links share the initial brief-status indicator. Bulletin renders one initial feed skeleton region even while day and feed requests overlap. Disabled/idle queries do not imply loading. Live claims, inferences and links stages for the displayed generation override retained output: queued/running/retry stages show section skeletons, failed or blocked stages show their diagnostic, and completed stages render content or a verified empty state. Claims and inferences navigate to topology by activating their evidence row. Background refresh keeps readable rows and verified empty sections without view-level spinners; explicit refresh controls remain disabled while requests run. Next-page requests show compact local progress rather than a new full feed skeleton, with their own error/retry state. Confidence zero is valid; unavailable scores remain unassessed. Terminal brief stages remain complete after live disconnection; a missing or `not_indexed` receipt is idle, not running. A disconnected API shows progress only during an active connection attempt, then an error/retry state.
+@tag:abort-signal
 
-Bulletin skeletons and loaded cards share the 154px minimum row height (120px thumbnail plus padding and border), 16px padding and 6px content spacing. Longer retained text can expand the loaded row.
+| Observation | Presentation |
+| --- | --- |
+| Initial fetch | Labeled regional skeleton; idle/disabled query is not loading |
+| Snapshot + refresh | Retain readable data/verified empty result; local refresh status |
+| Generation stage queued/running | That stage's skeleton, even with older retained output |
+| Failed/blocked stage | Diagnostic and recovery; never a false empty claim |
+| Completed stage | Output or verified empty; live disconnect does not undo completion |
+| Pending actors/body | Actor-local skeleton/incomplete-detection state; other evidence remains |
+| Unknown confidence/count | Unavailable/unassessed; numeric zero remains zero |
 
-Bulletin chrome (search, category rail, date filter) stays put; only the article list scrolls. Near the list's end, the client requests the next opaque cursor only when a page exists, no query fetch is running and the last next-page request is not in error. Query uses `cancelRefetch: false` to deduplicate repeated scroll events. Manual Load more/retry stays reachable. Loaded rows are deduplicated by run/article occurrence; category/day/search/backend/instance keys isolate scopes. Empty categories show a verified zero count; no retained days prompt Atlas collection.
+First-load Brief skeleton matches header, summary, three evidence regions and context rail at the same 900px breakpoint. Later reads use section-sized placeholders, never duplicate whole-view skeletons. Bulletin has one initial feed skeleton despite overlapping day/feed reads; loaded/skeleton rows retain 154px minimum height, 16px padding, 6px gaps and a 120px thumbnail. Longer text can expand rows.
 
-REST supplies snapshots, pagination and actions. Volatile host metrics and pending-brief progress use one app-supplied live transport, routed through the stateless Next relay to Rust. Live payloads update TanStack Query; meaningful transitions invalidate only the current detail. General/Related reads do not poll, and inactive Bulletin observers are disabled. The visible feed refreshes once per minute. See [live update contract](intel-web.md#rest-snapshots-and-live-updates).
+Pagination uses opaque cursors, occurrence deduplication and category/day/search/sort/backend/instance keys. Near-end reads require a next page, no active fetch and no unresolved page error; `cancelRefetch: false` deduplicates scroll events. Keep Load more/retry reachable. Empty categories show verified zero; no days prompt collection.
+
+REST owns snapshots/actions. One app-supplied live transport updates Query for metrics/pending brief progress; meaningful changes invalidate only active detail. General/Related reads do not poll; inactive Bulletin observers stop; visible feed refreshes once per minute. [Live contract](intel-web.md#rest-snapshots-and-live-updates)
 
 ## Focus Brief column order
 
-The React Native reading column contains summary, identified actors, retained claims, then analytical inferences. The context rail contains lifecycle/actions, source and related reports, and stacks after the reading column below 900px. Origin, extracted entities and the topology action follow within the same scrolling shell. Inferences stay last among evidence sections on wide and narrow layouts. Preserve their heading and pending, empty and unavailable states. Core TUI still places Inferences after Related in its center column. See [column order](../../diagrams/intel-focus-layout.html).
+[![Reading and context columns](../../diagrams/intel-focus-layout.svg)](../../diagrams/intel-focus-layout.html)
+
+Reading: summary → actors → retained claims → analytical inferences. Context holds lifecycle/actions, source and Related leads, stacking after reading below 900px. Origin, extracted entities and topology navigation stay in the same scroll shell. Inferences remain the last evidence section, including pending/empty/unavailable states.
 
 ## Product meaning
 
-Keep category/day/search, article occurrence identity, source attribution and topology seeds intact. Distinguish claims from inferences, unknown confidence from zero, and publication from indexing. Related leads are not corroboration. Reader currently displays the stored description; retained body availability does not authorize changing that behavior. Operational Jobs/Logs remain in Rust. See the [web contract](intel-web.md) before changing these semantics.
+Keep category/day/search, occurrence identity, source attribution and topology seeds intact. Distinguish claims/inferences, unknown/zero confidence and publication/indexing. Related leads are not corroboration. Reader displays stored description; retained extraction body does not authorize a reader change. Operational Jobs/Logs remain native. [Product contract](intel-web.md)
 
 ## Verification and evidence
 
-Select the pinned Node with `nvm use` (load nvm in the shell if necessary); use the root pinned pnpm. For frontend code changes run `pnpm typecheck`, `pnpm lint` (including Hooks/compiler diagnostics, zero warnings), `pnpm build` (compiler enabled), `pnpm check:web-build`, then relevant offline `pnpm test:e2e` cases against the production Next server. For compiler/dependency/launcher changes, also run `ARGOS_WEB_PROFILE=dev pnpm test:e2e` to force development compilation and check browser console/hydration behavior; production build success alone does not prove dev startup. Launcher changes additionally use the [process smoke](intel-web.md#verification). Respect the configured port/server ownership; preserve an existing user dev server. No Rust gate is needed for guidance-only changes; Rust changes follow the contributor workflow.
+Use pinned Node (`nvm use`) and pnpm. Run authorized typecheck, zero-warning Hooks/compiler lint, focused component tests, production build/check and relevant offline repository Playwright. Compiler/dependency/launcher changes also require the dev browser profile and compiled-transform evidence; launcher work includes [process smoke](intel-web.md#verification).
+
+Set `ARGOS_WEB_TEST_DEV=1` for build/check/browser output under `.agent-scratch/next-web-tests`; preserve user Next processes and `.next` locks. Inspect PNGs at 1440/768/390/320px and check keyboard/focus, outcomes and console/hydration separately. Token tests, generated screenshots and builds do not prove visual approval. Record failures, skips and platform gaps. [Commands](react-ui-testing.md)
 
 ## React component testing (real-component pattern)
 
 @tag:testing
 
-Run `pnpm test` from the workspace root. [Vitest configuration](../../../vitest.config.ts) discovers package and app tests in jsdom and aliases React Native to React Native Web, as the web build does. [Setup](../../../vitest.setup.tsx) supplies the shared test environment. Use React Testing Library to render real components and MSW to intercept the HTTP boundary with offline fixtures.
+[Vitest](../../../vitest.config.ts) renders actual components with RN Web aliasing and [setup](../../../vitest.setup.tsx). Use Testing Library/user-event and offline MSW boundaries; isolate Query/settings/handlers. Await user-event; use React `act` for direct events/imperative updates. Cover observable states, cancellation/stale replies, pagination and non-color cues.
 
-- Assert user-visible loading, success, empty, error/retry and pending states. Isolate Query clients, handlers and settings between cases; preserve real query keys and request serialization.
-- Await Testing Library/user-event helpers, which already wrap React updates. Use React `act` for direct DOM events or imperative updates that those helpers do not wrap.
-- Compare rendered declarations against `@argos/ui` tokens. The [style helpers](../../../vitest.test-support.tsx) read RN Web atomic stylesheet declarations because jsdom cannot fully compute those styles. These assertions do not prove browser contrast, focus rings or visual layout.
-- Check hover, press, focus and selected states against each component's actual contract. Default and compact density remain restricted by the design baseline above; do not invent component variants solely for a test.
-- Use [offline browser tests](../../../tests/web) for real keyboard operation, responsive layout and screenshot comparison. Run `pnpm test:e2e` after the server build; review changed baselines deliberately and inspect affected PNGs at 1440, 768, 390 and 320px. Snapshot generation alone does not establish visual approval.
-
-New or modified test source comments may use `@tag:testing` to connect this contract to executable checks. Keep test outcomes in task evidence, rather than recording volatile pass counts or flaky-test exceptions here.
-
-For visual/interaction changes, use the existing HTTP fixtures and a proportional state/viewport matrix. Capture affected screens with Playwright `page.screenshot({ path: …, fullPage: true })` into the named plan or `.agent-scratch/`, then **open and inspect the PNGs**. A screenshot file or passing E2E assertion is not visual approval. Check keyboard/focus, action outcomes and console/hydration errors separately. Add behavior assertions only for changed behavior or meaningful regressions. Keep fixtures offline; no live-provider data or secrets in evidence.
-
-Report changed paths, checks actually run, inspected states/viewports and remaining gaps. Reviews list actionable `file:line` findings with impact and suggested correction; distinguish existing issues from regressions. If browser/image tooling is unavailable, record visual evidence as pending. OpenCode can run Playwright through its allowed shell without changing browser permissions; do not claim native-device verification from web captures.
+[Style helpers](../../../vitest.test-support.tsx) resolve RN Web declarations jsdom cannot compute; they do not prove contrast/layout. Keep production-component and density contracts instead of adding test-only variants. Browser keyboard/screenshots remain separate. [Verification boundaries](react-ui-testing.md)
 
 ## Sources and adaptation
 
-Inspired by Vercel's [React Native skills](https://github.com/vercel-labs/agent-skills/tree/main/skills/react-native-skills), [React best practices](https://github.com/vercel-labs/agent-skills/tree/main/skills/react-best-practices), [composition patterns](https://github.com/vercel-labs/agent-skills/tree/main/skills/composition-patterns) and [web design guidelines](https://github.com/vercel-labs/agent-skills/tree/main/skills/web-design-guidelines), reviewed 2026-10-26. Compiler setup follows the [official React installation guide](https://react.dev/learn/react-compiler/installation), [Hooks/compiler lint reference](https://react.dev/reference/eslint-plugin-react-hooks) and [Next integration](https://nextjs.org/docs/app/api-reference/config/next-config-js/reactCompiler). These are original repo-specific instructions, not vendored upstream rule files. The [frontend design skill](https://codegen.com/skills/frontend-design/skill.md) (reviewed 2026-10-28) supplies the decision order — direction, type, space, restrained color, a theme signature, designed states — and defers to this baseline. Component composition may vary inside the Argos theme. Retained ideas: accessible interaction, RN-safe rendering, explicit composition, focused state ownership and measured performance. Native-only packages/navigation, server caching/actions, Vercel deployment and wholesale upstream rule installation are outside this guidance. Routine work uses these local rules offline; refresh upstream deliberately when maintaining the skills.
+Inspired by Vercel's [React Native skills](https://github.com/vercel-labs/agent-skills/tree/main/skills/react-native-skills), [React best practices](https://github.com/vercel-labs/agent-skills/tree/main/skills/react-best-practices), [composition patterns](https://github.com/vercel-labs/agent-skills/tree/main/skills/composition-patterns) and [web design guidelines](https://github.com/vercel-labs/agent-skills/tree/main/skills/web-design-guidelines), reviewed 2026-10-26. Compiler setup follows the [official React installation guide](https://react.dev/learn/react-compiler/installation), [Hooks/compiler lint reference](https://react.dev/reference/eslint-plugin-react-hooks) and [Next integration](https://nextjs.org/docs/app/api-reference/config/next-config-js/reactCompiler). These are original repo-specific instructions, not vendored upstream rule files. The [frontend design skill](https://codegen.com/skills/frontend-design/skill.md) (reviewed 2026-10-28) supplies the decision order — direction, type, space, restrained color, a theme signature, designed states — and defers to this baseline. Component composition may vary inside the Fleetworks theme. Retained ideas: accessible interaction, RN-safe rendering, explicit composition, focused state ownership and measured performance. Native-only packages/navigation, server caching/actions, Vercel deployment and wholesale upstream rule installation are outside this guidance. Routine work uses these local rules offline; refresh upstream deliberately when maintaining the skills.
 
-The landing graph plays on the initial Home visit and when Home is refreshed. In-app return to Home and deep links into Bulletin, Brief or Topology skip the orbit and enter the workspace once the API is connected. The landing graph fills the entire shell content width and height above its status bar, with no surrounding connection card, heading or padding. Status messages appear below the central core, each using a three-second cycle (600ms fade in, 1800ms readable, 600ms fade out). The core starts red, returns to amber while check messages play, turns green for the healthy phase, then blue before Home fades in. The separate offline status-bar indicator is hidden during landing. Each verified readiness check (API response, Intel service identity, API compatibility, storage and workspace readiness) admits one orbiter; no orbiters represent fabricated progress. The existing backend readiness response supplies these checks without additional requests. Workspace entry waits for all admitted orbiters to settle and for the green and blue message cycles to finish. Reduced-motion and unavailable-WebGL states are already complete static compositions; readiness still gates entry. A failed connection retains an inline retry below the status messages.
-
-Startup hides the redundant offline status-bar indicator. The central glyph starts red, uses amber while each passed-check message runs a three-second fade cycle, then green for “All connections healthy” and blue for “Workspace ready.” Each cycle is 600ms fade in, 1800ms readable, 600ms fade out. Home fades in after the blue cycle and settled arrivals. Reduced motion or unavailable WebGL uses the completed static composition.
-
-Regression contracts and verification boundaries are mapped in [React Native UI testing](react-ui-testing.md).
+Current landing behavior is linked from [feature composition](#feature-composition); [testing](react-ui-testing.md) owns regression boundaries.
 
 ### Actor dossier composition
 

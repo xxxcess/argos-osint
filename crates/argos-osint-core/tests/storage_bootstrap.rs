@@ -68,13 +68,111 @@ async fn ensure_schema_defines_everything_once_and_refuses_newer_databases() {
         "atlas_reclassification_job",
         "classifier_calibration_job",
         "storage_meta",
+        "model_provider_pacer",
+        "model_account_gate",
+        "model_account_ticket",
+        "brief_publication_work",
+        "native_pairing",
+        "native_pairing_rate",
+        "connect_registry_guard",
+        "connect_control",
+        "connect_workstation",
+        "connect_ip_claim",
+        "connect_workspace",
+        "connect_name_claim",
+        "connect_registration",
+        "connect_binding",
+        "connect_request",
+        "connect_session",
+        "connect_rate_window",
+        "workstation_cycle_tombstone",
+        "workstation_cycle_delete",
+        "configuration_reset",
+        "configuration_reset_scope",
+        "configuration_reset_revoked",
+        "job_origin",
+        "job_request",
+        "job_action",
+        "setup_dataset",
+        "setup_dataset_pin",
+        "setup_upload",
+        "setup_operation",
+        "setup_request",
+        "setup_resource",
+        "setup_dispatch",
+        "upload_ticket",
+        "upload_ticket_issuer",
+        "classifier_activation_operation",
+        "classifier_activation_reconciliation",
+        "actor_search_control",
+        "actor_search_head",
+        "actor_search_event",
+        "actor_search_cause",
+        "actor_search_rebuild",
     ] {
         assert!(info.contains(&format!("\"{table}\"")), "missing {table}");
     }
     // Idempotent re-run.
     let again = ensure_schema(&db).await.unwrap();
     assert_eq!(again.previous, SCHEMA_VERSION);
-    assert_eq!(bootstrap::schemas().len(), 45);
+    // The 48 v6 modules plus pairing, registry, cycle history, reset, origin,
+    // actions, setup, classifier activation, actor search and upload tickets.
+    assert_eq!(bootstrap::schemas().len(), 58);
+    for (table, index) in [
+        ("native_pairing", "native_pairing_token"),
+        ("native_pairing", "native_pairing_credential"),
+        ("native_pairing", "native_pairing_pending"),
+        ("connect_workstation", "connect_installation_unique"),
+        ("connect_ip_claim", "connect_ip_unique"),
+        ("connect_workspace", "connect_workspace_marker_unique"),
+        ("connect_name_claim", "connect_name_unique"),
+        ("connect_registration", "connect_registration_workspace"),
+        ("connect_registration", "connect_registration_workstation"),
+        ("connect_binding", "connect_binding_unique"),
+        ("connect_session", "connect_session_registration"),
+        ("connect_session", "connect_session_expiry"),
+        ("workstation_cycle_tombstone", "workstation_cycle_hidden"),
+        ("configuration_reset", "configuration_reset_identity"),
+        (
+            "configuration_reset_scope",
+            "configuration_reset_scope_identity",
+        ),
+        (
+            "configuration_reset_revoked",
+            "configuration_reset_revoked_fingerprint",
+        ),
+        ("job_origin", "job_origin_job"),
+        ("job_origin", "job_origin_root"),
+        ("job_request", "job_request_identity"),
+        ("job_request", "job_request_node"),
+        ("job_request", "job_request_child"),
+        ("job_request", "job_request_job"),
+        ("job_action", "job_action_identity"),
+        ("setup_dataset", "setup_dataset_scope"),
+        ("setup_dataset", "setup_dataset_expiry"),
+        ("setup_dataset_pin", "setup_dataset_pin_unique"),
+        ("setup_dataset_pin", "setup_dataset_pin_job"),
+        ("setup_upload", "setup_upload_expiry"),
+        ("upload_ticket", "upload_ticket_issuer_expiry"),
+        ("upload_ticket", "upload_ticket_expiry"),
+        ("actor_search_event", "actor_search_event_sequence"),
+        ("actor_search_event", "actor_search_event_cause"),
+        ("brain_actor_alias", "actor_search_alias_owner"),
+        ("actor_search_cause", "actor_search_cause_finish"),
+    ] {
+        let mut result = db
+            .query(format!("INFO FOR TABLE {table}"))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let table_info: Option<surrealdb::types::Value> = result.take(0usize).unwrap();
+        let table_info = table_info.expect("table info").into_json_value();
+        assert!(
+            table_info["indexes"].get(index).is_some(),
+            "missing {table} index {index}"
+        );
+    }
 
     // A newer database is refused and left untouched.
     db.query("UPDATE storage_meta:schema SET version = 99")

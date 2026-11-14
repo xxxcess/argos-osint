@@ -64,7 +64,7 @@ pub fn pending_reset(layout: &Layout) -> Result<Option<ResetPhase>> {
 
 fn require_config(layout: &Layout) -> Result<StorageConfig> {
     home::load_config(layout)?.ok_or_else(|| {
-        anyhow!("storage is not initialized; run `argos storage init --mode server|embedded`")
+        anyhow!("storage is not initialized; run `argos storage init --mode server`")
     })
 }
 
@@ -100,7 +100,7 @@ pub async fn status(layout: &Layout) -> Result<Status> {
         detail: None,
     };
     let Some(cfg) = home::load_config(layout)? else {
-        st.detail = Some("not initialized; run `argos storage init --mode server|embedded`".into());
+        st.detail = Some("not initialized; run `argos storage init --mode server`".into());
         return Ok(st);
     };
     st.mode = Some(cfg.mode);

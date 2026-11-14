@@ -126,7 +126,12 @@ pub async fn export(
             .iter()
             .any(|item| item.observation.observation_id == replay.observation_id)
     });
-    if let (Some(snapshot), Some(manifest)) = (&diagnostics.model, &diagnostics.manifest_sha256) {
+    // Only the legacy engine can add lexical support to the selected replays.
+    let lexical_model = diagnostics
+        .model
+        .as_ref()
+        .filter(|snapshot| snapshot.algorithm_version == crate::classifier::ALGORITHM_VERSION);
+    if let (Some(snapshot), Some(manifest)) = (lexical_model, &diagnostics.manifest_sha256) {
         if let Ok(pin) = home.pin(Some(snapshot)).await {
             if &pin.manifest_sha256 == manifest {
                 let items = review.items.clone();

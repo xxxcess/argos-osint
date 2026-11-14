@@ -6,21 +6,20 @@ Tags connect a documented concern to its implementation across directory boundar
 
 | Token | Documentation | Source anchor |
 | --- | --- | --- |
-| `@tag:recon-flow` | [Recon](code/core.md#recon) | [recon.rs](../../crates/argos-osint-core/src/recon.rs) |
-| `@tag:recon-bindings` | [Bindings](code/core.md#recon) | [tool_io.rs](../../crates/argos-osint-core/src/recon/investigation/tool_io.rs) |
 | `@tag:intel-brief` | [Intel](code/core.md#intel) | [brief_pipeline.rs](../../crates/argos-osint-core/src/intel_recon/brief_pipeline.rs) |
 | `@tag:atlas-collection` | [Atlas](code/core.md#atlas) | [atlas.rs](../../crates/argos-osint-core/src/atlas.rs) |
 | `@tag:discovery-services` | [Discovery services](code/storage.md) | [article_discovery.rs](../../crates/argos-osint-core/src/storage/article_discovery.rs), [actor_catalog.rs](../../crates/argos-osint-core/src/storage/actor_catalog.rs) |
 | `@tag:brain-memory` | [Brain](code/core.md#brain) | [brain.rs](../../crates/argos-osint-core/src/brain.rs) |
 | `@tag:osint-providers` | [Providers](code/core.md#providers-and-tool-adapters) | [providers.rs](../../crates/argos-osint-core/src/osint/providers.rs) |
+| `@tag:jobs-persistence` | [Jobs persistence](code/jobs-persistence.md) · [Scoped operational logs](code/native-connections.md#bounded-operational-logs) | [jobs_client.rs](../../crates/argos-osint-core/src/storage/jobs_client.rs), [scoped owner](../../crates/fleetworks-jobs/src/scoped_logs.rs), [Jobs store](../../crates/fleetworks-jobs) |
 | `@tag:surreal-storage` | [Storage](code/storage.md) | [storage/mod.rs](../../crates/argos-osint-core/src/storage/mod.rs) |
-| `@tag:tui-components` | [Interfaces](code/interfaces.md) | [components.rs](../../crates/argos-osint-bin/src/tui/components.rs) |
+| `@tag:tui-components` | [Historical terminal fixtures](code/tui-verification.md) | Retired source; [disposition](../archive/cli-retirement.md) |
 | `@tag:async-runtime` | [Architecture](code/architecture.md#async-runtime-safety) | [hardware.rs](../../crates/argos-osint-core/src/hardware.rs) |
-| `@tag:process-lifecycle` | [Architecture](code/architecture.md#process-lifecycle-and-signal-handling) | [cli.rs](../../crates/argos-osint-bin/src/cli.rs) |
+| `@tag:process-lifecycle` | [Service lifecycle](code/architecture.md#process-lifecycle-and-signal-handling) | [Service host](../../services/api-host/src/main.rs) · [Standalone Compose](../../deploy/compose.native-review.yml) |
 | `@tag:api-timeouts` | [Intel web](code/intel-web.md#api-contract) | [lib.rs](../../crates/argos-osint-api/src/lib.rs) |
 | `@tag:abort-signal` | [Intel web](code/intel-web.md#async-presentation) | [index.tsx](../../packages/api-client/src/index.tsx) |
 | `@tag:testing` | [Testing](code/react-ui.md#react-component-testing-real-component-pattern) | [UI tests](../../packages/ui/__tests__/) / [Intel tests](../../packages/intel/__tests__/) |
-| `@tag:look-and-feel` | [Look & Feel](code/react-ui.md#argos-look--feel-reference) | [UI primitives](../../packages/ui/src/index.tsx) |
+| `@tag:look-and-feel` | [Fleetworks look and feel](code/react-ui.md#fleetworks-look-and-feel) · [Native matte design](code/native-design-system.md) | [UI primitives](../../packages/ui/src/index.tsx) |
 | `@tag:web-routing` | [Intel web](code/intel-web.md#running-locally) | [navigation.ts](../../packages/intel/src/navigation.ts) / [web adapter](../../apps/web-desktop/app/navigation.ts) |
 | `@tag:api-proxy` | [Intel web](code/intel-web.md#running-locally) | [server-api.ts](../../apps/web-desktop/app/server-api.ts) |
 | `@tag:live-updates` | [Live update contract](code/intel-web.md#rest-snapshots-and-live-updates) | [Rust live.rs](../../crates/argos-osint-api/src/live.rs) / [Next relay](../../apps/web-desktop/live-relay.mjs) / [browser adapter](../../apps/web-desktop/app/live-transport.ts) |
@@ -32,7 +31,7 @@ Tags connect a documented concern to its implementation across directory boundar
 From the repo root:
 
 ```sh
-rg -n '@tag:recon-bindings' docs crates
+rg -n '@tag:intel-brief' docs crates
 rg -n '@tag:[a-z0-9-]+' docs/wiki crates
 ```
 

@@ -9,8 +9,10 @@ mod support;
 use argos_osint_core::brain_topology::{
     CycleScope, TopologyEdgeKind, TopologyNodeKind, TopologyOptions, TopologySeed,
 };
+use argos_osint_core::intel_recon::brief_pipeline::BriefInputs;
+use argos_osint_core::intel_recon::brief_stages::{ExecConfig, StageStore};
 use argos_osint_core::storage::brief::{self, Publication, RetainedKind, Stage};
-use argos_osint_core::storage::{atlas, topology};
+use argos_osint_core::storage::{atlas, brief_stages, topology};
 use argos_osint_core::store::AtlasArticleRow;
 use serde_json::json;
 use support::*;
@@ -28,6 +30,196 @@ fn publication(job: &str, generation: i64, stage: Stage, claim: &str) -> Publica
         leads: json!([]),
         stage,
     }
+}
+
+#[tokio::test]
+async fn brief_admission_commits_snapshots_and_fence_with_tasks() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server.repo("argos", "brief_admission").await;
+    let db = repo.db();
+    atlas::insert_run(db, "r1", "{}", "{}").await.unwrap();
+    atlas::upsert_article(
+        db,
+        &AtlasArticleRow {
+            run_id: "r1".into(),
+            id: "a1".into(),
+            title: "Ferry schedule".into(),
+            url: "https://example.test/a1".into(),
+            seen_at: "2026-10-23T00:00:00Z".into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let inputs = BriefInputs {
+        article_id: "a1".into(),
+        input_revision: "metadata-r1".into(),
+        role_snapshot: r#"{"fixture":"route-r1"}"#.into(),
+        metadata: json!({"title":"Captured ferry schedule"}),
+        stage_revisions: vec!["body-r1".into(), "claims-r1".into()],
+        ..Default::default()
+    };
+    // Force a descendant snapshot write to fail after the roots and the
+    // retained-seed fence have already been written in this attempt.
+    db.query(
+        "DEFINE FIELD OVERWRITE input_json ON brief_stage_input TYPE string ASSERT $value != ''",
+    )
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+    let err = brief_stages::ensure(&repo, &inputs).await.unwrap_err();
+    assert!(err.to_string().contains("input_json"), "{err:#}");
+    let config = ExecConfig::default();
+    assert!(brief_stages::claim(&repo, "brief-worker", &config)
+        .await
+        .unwrap()
+        .is_none());
+    let mut rolled_back = db
+        .query("SELECT VALUE generation FROM brief_run; SELECT VALUE generation FROM intel_brief_run; SELECT VALUE input_json FROM brief_stage_input")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert!(rolled_back.take::<Vec<i64>>(0).unwrap().is_empty());
+    assert!(rolled_back.take::<Vec<i64>>(1).unwrap().is_empty());
+    assert!(rolled_back.take::<Vec<String>>(2).unwrap().is_empty());
+
+    db.query("DEFINE FIELD OVERWRITE input_json ON brief_stage_input TYPE string")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let chain = brief_stages::ensure(&repo, &inputs).await.unwrap();
+    assert!(chain.created);
+    assert_eq!(
+        chain.generation, 1,
+        "a rejected admission spends no generation"
+    );
+    let (leased, body) = brief_stages::claim(&repo, "brief-worker", &config)
+        .await
+        .unwrap()
+        .unwrap();
+    let root: serde_json::Value = serde_json::from_str(&body.input_ref).unwrap();
+    assert_eq!(body.job_id, chain.job_id);
+    assert_eq!(root["node_revision"], "body-r1");
+    assert_eq!(root["force_body"], false);
+    let (context, _) = brief_stages::SurrealStages::new(&repo)
+        .load(&body)
+        .await
+        .unwrap();
+    assert_eq!(context.metadata_snapshot, inputs.metadata);
+    assert_eq!(context.route_snapshot, inputs.role_snapshot);
+
+    let reload = BriefInputs {
+        input_revision: "metadata-r1:reload:explicit".into(),
+        ..inputs.clone()
+    };
+    let next = brief_stages::ensure(&repo, &reload).await.unwrap();
+    assert!(next.created);
+    assert_eq!(next.generation, 2);
+    assert!(!brief_stages::commit(&repo, &leased, &json!({}), 0, "")
+        .await
+        .unwrap());
+    for request in [&inputs, &reload] {
+        let replay = brief_stages::ensure(&repo, request).await.unwrap();
+        assert_eq!(replay.job_id, next.job_id);
+        assert!(!replay.created);
+    }
+    let (_, body) = brief_stages::claim(&repo, "brief-worker", &config)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(body.job_id, next.job_id);
+    let root: serde_json::Value = serde_json::from_str(&body.input_ref).unwrap();
+    assert_eq!(root["force_body"], true);
+}
+
+#[tokio::test]
+async fn brief_completion_rolls_back_with_its_retained_run_fence() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server.repo("argos", "brief_completion").await;
+    let chain = brief_stages::ensure(
+        &repo,
+        &BriefInputs {
+            article_id: "article".into(),
+            input_revision: "source-revision".into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let config = ExecConfig::default();
+    let output = json!({});
+    let final_stage = loop {
+        let (leased, _) = brief_stages::claim(&repo, "brief-worker", &config)
+            .await
+            .unwrap()
+            .unwrap();
+        if leased.operation == "intel_brief_links" {
+            break leased;
+        }
+        assert!(brief_stages::commit(&repo, &leased, &output, 0, "")
+            .await
+            .unwrap());
+    };
+    let db = repo.db();
+    db.query(
+        "DEFINE FIELD OVERWRITE state ON intel_brief_run TYPE string ASSERT $value != 'completed'",
+    )
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+    let error = brief_stages::commit(&repo, &final_stage, &output, 1, "warning: retry item")
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("state"), "{error:#}");
+    assert!(brief_stages::stage_meta(&repo, &final_stage.id)
+        .await
+        .unwrap()
+        .is_none());
+    let outputs = brief_stages::stage_outputs(&repo, &chain.job_id)
+        .await
+        .unwrap();
+    assert!(!outputs.contains_key("intel_brief_links"));
+
+    db.query("DEFINE FIELD OVERWRITE state ON intel_brief_run TYPE string")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert!(
+        brief_stages::commit(&repo, &final_stage, &output, 1, "warning: retry item")
+            .await
+            .unwrap()
+    );
+    assert!(
+        brief_stages::commit(&repo, &final_stage, &output, 0, "different retry metadata")
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        brief_stages::stage_meta(&repo, &final_stage.id)
+            .await
+            .unwrap(),
+        Some((1, "warning: retry item".into())),
+    );
+    let mut state = db
+        .query("SELECT VALUE state FROM ONLY type::record('intel_brief_run', $job)")
+        .bind(("job", chain.job_id))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert_eq!(
+        state.take::<Option<String>>(0).unwrap().as_deref(),
+        Some("completed")
+    );
 }
 
 #[tokio::test]

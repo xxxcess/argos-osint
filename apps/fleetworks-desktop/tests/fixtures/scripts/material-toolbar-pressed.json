@@ -1,0 +1,5 @@
+{
+  "events": [
+    { "t": 0.1, "type": "down", "key": "connection-editor" }
+  ]
+}

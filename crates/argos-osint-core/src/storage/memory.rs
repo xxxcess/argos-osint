@@ -281,7 +281,17 @@ pub async fn put_typed_in(tx: &Tx, m: &TypedMemory) -> Result<(), TxError> {
         .bind(("lc", m.lifecycle.clone())),
     )
     .await?;
-    super::graph::project_memory_in(tx, &m.id, m.kind, m.payload.as_ref(), &m.lifecycle).await
+    super::graph::project_memory_in(tx, &m.id, m.kind, m.payload.as_ref(), &m.lifecycle).await?;
+    if m.kind == crate::memory_metadata::MemoryKind::Actor {
+        super::actor_search_outbox::enqueue_actors_in(
+            tx,
+            std::slice::from_ref(&m.id),
+            None,
+            chrono::Utc::now(),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 #[derive(SurrealValue)]
@@ -317,6 +327,7 @@ pub async fn set_lifecycle_in(
     .await?;
     let rows: Vec<LifecycleRow> = take(&mut r, 0)?;
     let mut changed = Vec::with_capacity(rows.len());
+    let mut actor_changes = Vec::new();
     for row in rows {
         let _ = row.lifecycle;
         let kind = row
@@ -337,7 +348,13 @@ pub async fn set_lifecycle_in(
         )
         .await?;
         super::graph::project_memory_in(tx, &row.id, kind, payload.as_ref(), lifecycle).await?;
+        if kind == crate::memory_metadata::MemoryKind::Actor {
+            actor_changes.push(row.id.clone());
+        }
         changed.push(row.id);
+    }
+    for ids in actor_changes.chunks(500) {
+        super::actor_search_outbox::enqueue_actors_in(tx, ids, None, chrono::Utc::now()).await?;
     }
     Ok(changed)
 }

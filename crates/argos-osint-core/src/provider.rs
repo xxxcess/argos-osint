@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 
 use crate::secrets::{DeviceEndpoints, ProviderSecret};
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
@@ -24,7 +24,7 @@ pub struct ChatMessage {
     pub tool_calls: Vec<ToolCall>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
@@ -661,7 +661,7 @@ pub(crate) const LEGACY_ROLE_KEYS: [&str; 9] = [
 ];
 
 /// A deny-unknown-fields reference to a role's route chain
-/// (`{"route_role":"summarization"}`). It resolves the named role directly
+/// (`{"route_role":"brain_summary"}`). It resolves the named role directly
 /// and so follows that role's future model swaps without copied IDs.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -1669,9 +1669,47 @@ pub fn detect_kind_from_url(url: &str) -> String {
     }
 }
 
-/// Stored key first, then the vendor environment variable. The environment
-/// value is not written back into `auth.json`.
+/// This process sends API-key model calls to the private execution service.
+///
+/// An empty `FLEETWORKS_EXECUTION_ORIGIN` is unset. The execution service does
+/// not set the variable, so it keeps the credentials it resolves.
+pub fn execution_holds_provider_credentials() -> bool {
+    std::env::var("FLEETWORKS_EXECUTION_ORIGIN")
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+/// API-key transports belong to the execution service. A local endpoint and
+/// the ChatGPT subscription stay in the calling process.
+pub fn delegate_to_execution(secret: &ProviderSecret) -> bool {
+    if !execution_holds_provider_credentials() {
+        return false;
+    }
+    let kind = effective_kind(secret);
+    kind != "local" && kind != "openai-chatgpt"
+}
+
+/// A route can be admitted. While this process delegates, the execution
+/// service holds the API key, so an empty local copy is not a missing key.
+pub fn route_can_authenticate(secret: &ProviderSecret) -> bool {
+    if effective_kind(secret) == "local" || execution_holds_provider_credentials() {
+        return true;
+    }
+    secret
+        .api_key
+        .as_deref()
+        .is_some_and(|key| !key.trim().is_empty())
+}
+
+/// Network services use saved credentials only. Retained operator clients may
+/// use vendor environment variables. Delegated processes return no API key.
 pub fn resolved_key(secret: &ProviderSecret) -> Option<String> {
+    if delegate_to_execution(secret) {
+        return None;
+    }
+    if std::env::var_os("FLEETWORKS_WORKSPACE").is_some() {
+        return resolved_key_with(secret, |_| None);
+    }
     resolved_key_with(secret, |name| std::env::var(name).ok())
 }
 
@@ -1782,10 +1820,23 @@ pub async fn complete(
     secret: &ProviderSecret,
     messages: &[ChatMessage],
     tools: &[ToolSpec],
+    on_delta: impl FnMut(&str),
+) -> Result<Completion> {
+    crate::provider_admission::direct(secret, complete_inner(secret, messages, tools, on_delta))
+        .await?
+}
+
+async fn complete_inner(
+    secret: &ProviderSecret,
+    messages: &[ChatMessage],
+    tools: &[ToolSpec],
     mut on_delta: impl FnMut(&str),
 ) -> Result<Completion> {
     if effective_kind(secret) == "openai-chatgpt" {
         return crate::subscription::complete(secret, messages, tools, on_delta).await;
+    }
+    if delegate_to_execution(secret) {
+        anyhow::bail!("provider credentials are held by the execution service");
     }
     let compiled = compile_wrapper(secret, messages, tools, true)?;
     let client = http()?;
@@ -1796,12 +1847,12 @@ pub async fn complete(
         compiled.auth,
     )
     .await?;
-    crate::provider_rate_limit::wait(secret).await;
+    crate::provider_rate_limit::wait(secret).await?;
     let resp = req
         .send()
         .await
         .with_context(|| format!("POST {}", crate::provider_diag::sanitize_endpoint(&url)))?;
-    crate::provider_rate_limit::response(secret, resp.status().as_u16(), resp.headers());
+    crate::provider_rate_limit::response(secret, resp.status().as_u16(), resp.headers()).await;
     if !resp.status().is_success() {
         let status = resp.status();
         let headers = resp.headers().clone();
@@ -1843,7 +1894,7 @@ pub async fn complete(
     if completion.is_empty() {
         let error = completion.empty_error("stream");
         if let Some(failure) = error.downcast_ref::<crate::provider_diag::ProviderFailure>() {
-            crate::provider_rate_limit::failure(secret, failure);
+            crate::provider_rate_limit::failure(secret, failure).await;
         }
         return Err(error);
     }
@@ -1857,7 +1908,7 @@ pub async fn complete_one(
     messages: &[ChatMessage],
     tools: &[ToolSpec],
 ) -> Result<Completion> {
-    complete_once(secret, messages, tools).await
+    crate::provider_admission::direct(secret, complete_once(secret, messages, tools)).await?
 }
 
 /// One Decisions answer. `choice` for choice questions, `score` for score questions,
@@ -1994,6 +2045,16 @@ pub(crate) async fn decide_with_dispatch(
     questions: &Value,
     on_dispatch: impl FnOnce(),
 ) -> Result<DecisionsResponse> {
+    crate::provider_admission::direct(secret, decide_inner(secret, state, questions, on_dispatch))
+        .await?
+}
+
+async fn decide_inner(
+    secret: &ProviderSecret,
+    state: &Value,
+    questions: &Value,
+    on_dispatch: impl FnOnce(),
+) -> Result<DecisionsResponse> {
     let client = crate::http_client::client(
         crate::http_client::ClientKey::new().timeout(Duration::from_secs(45)),
     )
@@ -2002,10 +2063,10 @@ pub(crate) async fn decide_with_dispatch(
     let compiled = crate::provider_adapters::compile_decisions(secret, state, questions, &caps);
     let url = compiled.endpoint.clone();
     let req = authorize(client.post(&url).json(&compiled.body), secret).await?;
-    crate::provider_rate_limit::wait(secret).await;
+    crate::provider_rate_limit::wait(secret).await?;
     on_dispatch();
     let resp = req.send().await.with_context(|| format!("POST {url}"))?;
-    crate::provider_rate_limit::response(secret, resp.status().as_u16(), resp.headers());
+    crate::provider_rate_limit::response(secret, resp.status().as_u16(), resp.headers()).await;
     let status = resp.status();
     let headers = resp.headers().clone();
     let text = resp.text().await.unwrap_or_default();
@@ -2045,13 +2106,13 @@ async fn complete_once(
         compiled.auth,
     )
     .await?;
-    crate::provider_rate_limit::wait(secret).await;
+    crate::provider_rate_limit::wait(secret).await?;
     let resp = req
         .send()
         .await
         .with_context(|| format!("POST {}", crate::provider_diag::sanitize_endpoint(&url)))?;
     let status = resp.status();
-    crate::provider_rate_limit::response(secret, status.as_u16(), resp.headers());
+    crate::provider_rate_limit::response(secret, status.as_u16(), resp.headers()).await;
     let headers = resp.headers().clone();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
@@ -2305,6 +2366,10 @@ pub async fn poll_device(endpoints: &DeviceEndpoints, device_code: &str) -> Resu
 }
 
 pub async fn transcribe(secret: &ProviderSecret, wav: &[u8]) -> Result<String> {
+    crate::provider_admission::direct(secret, transcribe_inner(secret, wav)).await?
+}
+
+async fn transcribe_inner(secret: &ProviderSecret, wav: &[u8]) -> Result<String> {
     let client = http()?;
     let model = secret
         .stt_model
@@ -2319,9 +2384,9 @@ pub async fn transcribe(secret: &ProviderSecret, wav: &[u8]) -> Result<String> {
         .part("file", part);
     let url = format!("{}/audio/transcriptions", normalize_base(&secret.base_url));
     let req = authorize(client.post(&url).multipart(form), secret).await?;
-    crate::provider_rate_limit::wait(secret).await;
+    crate::provider_rate_limit::wait(secret).await?;
     let resp = req.send().await.with_context(|| format!("POST {url}"))?;
-    crate::provider_rate_limit::response(secret, resp.status().as_u16(), resp.headers());
+    crate::provider_rate_limit::response(secret, resp.status().as_u16(), resp.headers()).await;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
@@ -2691,13 +2756,19 @@ impl SettingsFile {
         }
     }
 
-    /// The key a provider's tools use: a non-empty setting, else its environment variable.
+    /// The saved key in network services; retained operator clients may use environment fallback.
     pub fn provider_key(&self, provider: &str) -> String {
+        if std::env::var_os("FLEETWORKS_WORKSPACE").is_some() {
+            return self.saved_key(provider).trim().to_owned();
+        }
         self.provider_key_with(provider, |name| std::env::var(name).ok())
     }
 
     /// The second account for a provider: a non-empty setting, else its fallback environment variable.
     pub fn provider_fallback_key(&self, provider: &str) -> String {
+        if std::env::var_os("FLEETWORKS_WORKSPACE").is_some() {
+            return self.saved_fallback_key(provider).trim().to_owned();
+        }
         self.provider_fallback_key_with(provider, |name| std::env::var(name).ok())
     }
 
@@ -2748,6 +2819,13 @@ impl SettingsFile {
     /// migration ladder over it and rewriting the file (through the commit
     /// store's secure primitive) only when something actually migrated.
     pub fn load_from(path: &std::path::Path) -> Result<Self> {
+        if let Some(root) = crate::current_configuration::network_root()? {
+            anyhow::ensure!(
+                path == root.join("config.toml"),
+                "network settings path mismatch"
+            );
+            return Ok(crate::current_configuration::read(&root)?.settings);
+        }
         let seeded = || {
             let mut settings = Self::default();
             settings.defaults.seed_tool_picker();

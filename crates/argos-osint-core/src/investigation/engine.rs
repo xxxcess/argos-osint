@@ -124,7 +124,7 @@ pub async fn execute_harness_step(
     }
 
     // Execute with executor
-    let executor = Executor::new()?;
+    let executor = Executor::new()?.with_newsapi_quota(store.repository().cloned());
     let call_res = executor
         .run_configured(
             tool_id,

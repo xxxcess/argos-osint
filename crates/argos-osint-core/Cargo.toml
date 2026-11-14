@@ -8,6 +8,7 @@ description = "Brain recall, hardware, and providers for Argos"
 rust-version.workspace = true
 
 [dependencies]
+fleetworks-contracts = { path = "../fleetworks-contracts" }
 tracing = "0.1"
 anyhow.workspace = true
 aho-corasick = "1.1"
@@ -15,12 +16,15 @@ csv = "1.4"
 chrono.workspace = true
 dirs.workspace = true
 futures-util.workspace = true
+fleetworks-jobs = { path = "../fleetworks-jobs" }
 regex.workspace = true
 rquickjs = { workspace = true, optional = true }
 reqwest.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"], optional = true }
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 sha2.workspace = true
+hmac = "0.12"
 strsim.workspace = true
 surrealdb = { workspace = true, optional = true }
 sysinfo.workspace = true
@@ -31,6 +35,7 @@ toml.workspace = true
 tract-onnx.workspace = true
 url.workspace = true
 scraper.workspace = true
+webpki-roots = { version = "1", optional = true }
 
 [features]
 # A local build runs Argos on embedded SurrealDB (RocksDB on disk, no network).
@@ -42,10 +47,9 @@ classifier = ["dep:rquickjs"]
 surreal = ["dep:surrealdb"]
 # Embedded RocksDB engine in-process (single owner per Argos home). Default.
 embedded = ["surreal", "surrealdb/kv-rocksdb"]
-# WebSocket client for the per-home loopback SurrealDB server. Opt-in
-# (`argos storage init --mode server` or ARGOS_STORAGE_MODE=server).
-server = ["surreal", "surrealdb/protocol-ws"]
-# Test/screenshot fixtures used by the binary's tests. Never enabled in release builds.
+# WebSocket client for per-home loopback and authenticated Fleetworks storage.
+server = ["surreal", "surrealdb/protocol-ws", "surrealdb/rustls", "dep:rustls", "dep:webpki-roots"]
+# Shared backend test fixtures. Never enabled in release builds.
 fixtures = []
 # Paused-time Tokio tests (`tokio::time::pause`).
 test-util = ["tokio/test-util"]

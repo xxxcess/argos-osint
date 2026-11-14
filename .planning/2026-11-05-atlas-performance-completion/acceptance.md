@@ -12,7 +12,9 @@ Atlas pins model/manifest identities, admits exactly two qualifying current doma
 
 ## Canonical performance evidence
 
-The [41-case execution record](../../.agent-scratch/atlas-completion/benchmarks/20261106T004042606662Z/execution.json), [metric summary](../../.agent-scratch/atlas-completion/benchmarks/20261106T004042606662Z/metric-summary.md) and [detailed samples](../../.agent-scratch/atlas-completion/benchmarks/20261106T004042606662Z/metric-summary.json) bind measurements to executed binaries and source identities. No agent builds overlapped timing; user services were preserved.
+Scratch paths identify files from the original execution environment. The published record retains the results below.
+
+The 41-case execution record (`../../.agent-scratch/atlas-completion/benchmarks/20261106T004042606662Z/execution.json`), metric summary (`../../.agent-scratch/atlas-completion/benchmarks/20261106T004042606662Z/metric-summary.md`) and detailed samples (`../../.agent-scratch/atlas-completion/benchmarks/20261106T004042606662Z/metric-summary.json`) bind measurements to executed binaries and source identities. No agent builds overlapped timing; user services were preserved.
 
 | Workload | Measured result | Interpretation |
 | --- | --- | --- |
@@ -45,11 +47,11 @@ All storage checks use isolated embedded databases and fixture providers. Earlie
 | Other visuals | 12 changed browser PNGs inspected, five identical reviews carried; six HTML/SVG figure pairs rendered and inspected |
 | Agent guidance/static checks | 64 Markdown documents, 669 local links and 35 frontmatter records PASS; incremental addenda preserve protected role/model metadata and execution restrictions |
 
-Evidence: [final installed classifier proof](../../.agent-scratch/atlas-completion/installed-classifier-evidence.json), [saved actor-path proof](../../.agent-scratch/atlas-completion/saved-actor-path-evidence.json), [closure follow-up](../../.agent-scratch/atlas-completion/closure-followup-result.json), [installed PTY](../../.agent-scratch/atlas-completion/pty-final-result.json), [guidance validation](../../.agent-scratch/atlas-completion/final-guidance-validation.json), [static addendum](../../.agent-scratch/atlas-completion/final-static-addendum.json), and [review binding](../../.agent-scratch/atlas-completion/post-gate-reviewed-preview-binding.md). Installed persistence proof belongs to its recorded binary. The binding checks 17 unchanged direct rendering inputs and all 472 companion source inputs, recording the three allocation-only runtime container deltas and the separate instruction-only Rust-skill delta. It carries existing image reviews to the recovered native-stage evidence without claiming fresh captures.
+Evidence: final installed classifier proof (`../../.agent-scratch/atlas-completion/installed-classifier-evidence.json`), saved actor-path proof (`../../.agent-scratch/atlas-completion/saved-actor-path-evidence.json`), closure follow-up (`../../.agent-scratch/atlas-completion/closure-followup-result.json`), installed PTY (`../../.agent-scratch/atlas-completion/pty-final-result.json`), guidance validation (`../../.agent-scratch/atlas-completion/final-guidance-validation.json`), static addendum (`../../.agent-scratch/atlas-completion/final-static-addendum.json`), and review binding (`../../.agent-scratch/atlas-completion/post-gate-reviewed-preview-binding.md`). Installed persistence proof belongs to its recorded binary. The binding checks 17 unchanged direct rendering inputs and all 472 companion source inputs, recording the three allocation-only runtime container deltas and the separate instruction-only Rust-skill delta. It carries existing image reviews to the recovered native-stage evidence without claiming fresh captures.
 
 ## Native embedded verification
 
-The [recovered stage record](../../.agent-scratch/atlas-completion/native-embedded-gate-recovered-result.json) binds all five successful stages to source freeze `691fadc5135e1d26f6d4e73a02f70b7b99baa5681b7e9d110fdad4d483c3035c`, unchanged after verification, on `x86_64-apple-darwin` with two build jobs and two test threads.
+The recovered stage record (`../../.agent-scratch/atlas-completion/native-embedded-gate-recovered-result.json`) binds all five successful stages to source freeze `691fadc5135e1d26f6d4e73a02f70b7b99baa5681b7e9d110fdad4d483c3035c`, unchanged after verification, on `x86_64-apple-darwin` with two build jobs and two test threads.
 
 | Stage | Executed result |
 | --- | --- |
@@ -59,7 +61,7 @@ The [recovered stage record](../../.agent-scratch/atlas-completion/native-embedd
 | `python3 scripts/agent_cargo.py run -q -p argos-osint-bin --locked -- storage init --help` | Exit 0, recovered original completion marker |
 | `python3 scripts/test_surreal.py --mode embedded --no-fail-fast` | Exit 0 for 71 storage targets; separate required embedded recovery finished at `2026-11-06T02:52:28Z` |
 
-A daemon restart lost the original monitor and its stdout reader after the required-storage header. Its matrix exit is `null`, and **no one-shot matrix pass is claimed**. The assembler's exit 0 means all five scoped stages passed with reused completion evidence; it is not the original matrix exit. The [original gate log](../../.agent-scratch/atlas-completion/native-embedded-gate.log), [required storage result](../../.agent-scratch/atlas-completion/native-storage-recovery-result.json) and [required storage log](../../.agent-scratch/atlas-completion/native-storage-recovery.log) retain the distinction. Native admission, maintenance and monitoring cases ran in both phases as documented by their mode contracts; repeated execution is not additional unique behavioral coverage.
+A daemon restart lost the original monitor and its stdout reader after the required-storage header. Its matrix exit is `null`, and **no one-shot matrix pass is claimed**. The assembler's exit 0 means all five scoped stages passed with reused completion evidence; it is not the original matrix exit. The original gate log (`../../.agent-scratch/atlas-completion/native-embedded-gate.log`), required storage result (`../../.agent-scratch/atlas-completion/native-storage-recovery-result.json`) and required storage log (`../../.agent-scratch/atlas-completion/native-storage-recovery.log`) retain the distinction. Native admission, maintenance and monitoring cases ran in both phases as documented by their mode contracts; repeated execution is not additional unique behavioral coverage.
 
 ## Immutable identities
 

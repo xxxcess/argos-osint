@@ -1,0 +1,7 @@
+{
+  "valid": [
+    {"input": "workstation-a", "canonical": "workstation-a"},
+    {"input": "01hxyz_ABC.42", "canonical": "01hxyz_ABC.42"}
+  ],
+  "invalid": ["", "192.0.2.42:default", "[2001:db8::1]:research", " workspace-a", "workspace-a ", "node/a", "node:a", "é", "node\n"]
+}

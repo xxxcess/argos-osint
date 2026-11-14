@@ -4,7 +4,7 @@
 
 The wiki is curated Markdown checked against current source. Navigation is `AGENTS.md` → `docs/index.md` → concepts or code → reference/source. No generated code graph or external indexing service is required. Source, manifests and executable tests settle implementation facts; docs explain intent and contracts. Record disagreements instead of silently guessing.
 
-The setup/refresh distinction takes inspiration only from [Atomic Claude's onboarding workflow](https://github.com/damusix/atomic-claude#the-workflow) and [repo wiki pipeline](https://github.com/damusix/atomic-claude/blob/main/docs/reference/repo-wiki.md): inventory facts, then write useful navigation. Argos uses canonical wiki pages, source tags, named plans and paired HTML/SVG diagrams, with no Atomic runtime dependency.
+The setup/refresh distinction takes inspiration only from [Atomic Claude's onboarding workflow](https://github.com/damusix/atomic-claude#the-workflow) and [repo wiki pipeline](https://github.com/damusix/atomic-claude/blob/main/docs/reference/repo-wiki.md): inventory facts, then write useful navigation. Fleetworks uses canonical wiki pages, source tags, named plans and paired HTML/SVG diagrams, with no Atomic runtime dependency.
 
 ## Setup wiki
 

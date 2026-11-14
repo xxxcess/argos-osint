@@ -494,12 +494,12 @@ test("browse, search, brief, related, topology and reconnect", async ({
     page.getByRole("button", { name: "Jobs", exact: true }),
   ).toHaveCount(0);
   for (const cat of [
-    "Geopolitical",
-    "Economic",
-    "Military",
-    "Information",
-    "Stability",
-    "Technology",
+    "Politics & Governance",
+    "Security & Conflict",
+    "Economy & Supply Chains",
+    "Health & Public Welfare",
+    "Environment & Resources",
+    "Science & Technology",
   ])
     await expect(
       page.getByRole("button", { name: cat, exact: true }),
@@ -654,12 +654,15 @@ test("selection controls support keyboard activation and visible focus", async (
 }) => {
   await fixtures(page);
   await gotoBulletin(page);
-  const economic = page.getByRole("button", { name: "Economic", exact: true });
+  const economic = page.getByRole("button", {
+    name: "Economy & Supply Chains",
+    exact: true,
+  });
   await economic.focus();
   await economic.press("Enter");
   await expect(economic).toHaveAttribute("aria-pressed", "true");
   await expect(
-    page.getByRole("button", { name: "Geopolitical", exact: true }),
+    page.getByRole("button", { name: "Politics & Governance", exact: true }),
   ).toHaveAttribute("aria-pressed", "false");
   await expect(
     page.getByRole("button", { name: /^Open Focus Brief:/ }),
@@ -670,12 +673,12 @@ test("selection controls support keyboard activation and visible focus", async (
   // Header search precedes the category rail in the reference layout and DOM.
   // Tab visits controls in that order; it must not jump over the rail.
   for (const name of [
-    "Geopolitical",
-    "Economic",
-    "Military",
-    "Information",
-    "Stability",
-    "Technology",
+    "Politics & Governance",
+    "Security & Conflict",
+    "Economy & Supply Chains",
+    "Health & Public Welfare",
+    "Environment & Resources",
+    "Science & Technology",
   ]) {
     const category = page.getByRole("button", { name, exact: true });
     await expect(category).toBeFocused();
@@ -1010,7 +1013,7 @@ for (const changeCategory of [false, true]) {
     });
     await expect
       .poll(
-        () => cursors.filter((c) => c === "geopolitical:opaque-next").length,
+        () => cursors.filter((c) => c === "governance:opaque-next").length,
       )
       .toBe(1);
     await expect(
@@ -1022,14 +1025,16 @@ for (const changeCategory of [false, true]) {
     for (let i = 0; i < 5; i++)
       await scroller.evaluate((el) => el.dispatchEvent(new Event("scroll")));
     expect(
-      cursors.filter((c) => c === "geopolitical:opaque-next"),
+      cursors.filter((c) => c === "governance:opaque-next"),
     ).toHaveLength(1);
     await page.screenshot({
       path: `${captureDir}/next-page-loading-${changeCategory}.png`,
       fullPage: true,
     });
     if (changeCategory) {
-      await page.getByRole("button", { name: "Economic", exact: true }).click();
+      await page
+        .getByRole("button", { name: "Economy & Supply Chains", exact: true })
+        .click();
       await expect(
         page.getByText("Economic signal", { exact: true }),
       ).toBeVisible();
@@ -1463,7 +1468,7 @@ test("global All follows one server cursor stream and retains rows across a fail
     const category = url.searchParams.get("category");
     const next = url.searchParams.get("cursor");
     reads.push({ category, cursor: next });
-    if (category !== "geopolitical") {
+    if (category !== "governance") {
       await route.fulfill({
         json: { rows: [a], next_cursor: null, revision: "specific" },
         headers: fixtureCors,
@@ -1534,13 +1539,13 @@ test("global All follows one server cursor stream and retains rows across a fail
   );
   expect(
     reads.some(
-      (read) => read.category === "geopolitical" && read.cursor === null,
+      (read) => read.category === "governance" && read.cursor === null,
     ),
   ).toBe(true);
   expect(
     reads
       .filter(
-        (read) => read.category === "geopolitical" && read.cursor !== null,
+        (read) => read.category === "governance" && read.cursor !== null,
       )
       .every((read) => read.cursor === cursor),
   ).toBe(true);
@@ -1627,7 +1632,9 @@ for (const width of [1536, 1440, 768, 390, 320]) {
       Math.abs(launcherBox.x + launcherBox.width / 2 - width / 2),
     ).toBeLessThanOrEqual(2);
     expect(
-      Math.abs(launcherBox.y + launcherBox.height / 2 - (1000 - 64) / 2),
+      Math.abs(
+        launcherBox.y + launcherBox.height / 2 - (frame.y + frame.height / 2),
+      ),
     ).toBeLessThanOrEqual(8);
     await expect(
       page.getByRole("button", { name: "Bulletin", exact: true }),
@@ -1641,27 +1648,26 @@ for (const width of [1536, 1440, 768, 390, 320]) {
       path: `${captureDir}/web-home-${width}.png`,
       fullPage: true,
     });
+    const tile = page.getByTestId("intel-launcher-tile");
     if (width === 1536) {
       const globe = page.getByTestId("intel-globe");
       expect(
         await globe.evaluate((element) => getComputedStyle(element).filter),
-      ).toContain("18px");
+      ).toBe("none");
       await launcher.hover();
       await expect
         .poll(() =>
-          globe.evaluate((element) => getComputedStyle(element).filter),
+          tile.evaluate((element) => getComputedStyle(element).borderTopColor),
         )
-        .toContain("24px");
+        .toContain("198, 165, 110");
       await page.mouse.move(0, 0);
     }
     await launcher.focus();
     await expect
       .poll(() =>
-        page
-          .getByTestId("intel-globe")
-          .evaluate((element) => getComputedStyle(element).filter),
+        tile.evaluate((element) => getComputedStyle(element).borderTopColor),
       )
-      .toContain("24px");
+      .toContain("198, 165, 110");
     await page.keyboard.press("Enter");
     await expect(
       page.getByRole("heading", { name: "Intelligence bulletin" }),
@@ -1690,7 +1696,7 @@ for (const width of [1440, 768, 390, 320]) {
     await fixtures(page);
     await page.setViewportSize({ width, height: 1100 });
     await gotoBulletin(page);
-    for (const name of ["Geopolitical", "Economic"]) {
+    for (const name of ["Politics & Governance", "Economy & Supply Chains"]) {
       await page.getByRole("button", { name, exact: true }).click();
       const feed = page.locator("#intel-article-feed");
       const day = feed.getByRole("button", { name: /^Retained day / });
@@ -1718,7 +1724,7 @@ for (const width of [1440, 768, 390, 320]) {
         .toBe("absolute");
       const openBox = (await article.boundingBox())!;
       expect(openBox.y).toBe(closedTop);
-      if (name === "Geopolitical")
+      if (name === "Politics & Governance")
         await page.screenshot({
           path: `${captureDir}/bulletin-day-menu-${width}.png`,
           fullPage: false,
@@ -1852,11 +1858,7 @@ for (const referenceWidth of [1440, 1280, 768, 390, 320]) {
     );
     await expect(targetTile).toHaveCSS("animation-name", "none");
     await page.emulateMedia({ reducedMotion: "no-preference" });
-    await expect
-      .poll(() =>
-        targetTile.evaluate((el) => getComputedStyle(el).animationName),
-      )
-      .toContain("intel-topology-focus");
+    await expect(targetTile).toHaveCSS("animation-name", "none");
     await page.emulateMedia({ reducedMotion: "reduce" });
     for (const width of [referenceWidth]) {
       await page.setViewportSize({ width, height: 1100 });
@@ -2294,21 +2296,8 @@ test("manual topology zoom survives updates and node drag cancellation stays saf
   await page.goto("/topology?seed=actor1");
   const viewport = page.locator("#intel-topology-viewport");
   const focus = viewport.locator('[data-role="focus"] [data-tile="node"]');
+  const canvas = viewport.locator("canvas").first();
   await expect(focus).toBeVisible({ timeout: 20000 });
-  await expect
-    .poll(() =>
-      focus.evaluate(
-        (el) =>
-          el
-            .getAnimations()
-            .find(
-              (animation) =>
-                (animation as CSSAnimation).animationName ===
-                "intel-topology-arrive",
-            )?.playState,
-      ),
-    )
-    .toBe("finished");
   const zoom = page.locator("#intel-topology-neighborhood").getByText(/^ZOOM:/);
   async function stableZoom() {
     let previous = "";
@@ -2334,6 +2323,8 @@ test("manual topology zoom survives updates and node drag cancellation stays saf
     target.x + target.width / 2,
     target.y + target.height / 2,
   );
+  // Wait for Three's animation tick to register the hover before wheeling.
+  await expect(canvas).toHaveClass(/clickable/);
   await page.mouse.wheel(0, -250);
   await expect(zoom).not.toHaveText(initial);
   const manual = await stableZoom();
@@ -2351,7 +2342,6 @@ test("manual topology zoom survives updates and node drag cancellation stays saf
   await focus.scrollIntoViewIfNeeded();
   const tile = (await focus.boundingBox())!;
   const center = { x: tile.x + tile.width / 2, y: tile.y + tile.height / 2 };
-  const canvas = viewport.locator("canvas").first();
   // Reentrant pointer cancellation can occur while the graph library dispatches
   // its synthetic pointerup during drag-end cleanup (for example on pointer leave).
   await canvas.evaluate((element) => {
@@ -2597,13 +2587,16 @@ test.describe("revamp connection scene", () => {
     const canvas = (await page.locator("canvas").boundingBox())!;
     const bar = (await page.locator("#intel-status-bar").boundingBox())!;
     expect(stage.x).toBe(0);
-    expect(stage.y).toBe(0);
+    expect(stage.y).toBeGreaterThanOrEqual(0);
     expect(
       Math.abs(stage.width - (await page.evaluate(() => innerWidth))),
     ).toBeLessThanOrEqual(1);
     expect(
       Math.abs(
-        stage.height + bar.height - (await page.evaluate(() => innerHeight)),
+        stage.y +
+          stage.height +
+          bar.height -
+          (await page.evaluate(() => innerHeight)),
       ),
     ).toBeLessThanOrEqual(1);
     expect(Math.abs(canvas.width - stage.width)).toBeLessThanOrEqual(1);
@@ -2992,7 +2985,7 @@ for (const width of [320, 1440]) {
       category: "economic",
       categories: ["economic", "human"],
       taxonomy_version: "strategic-domains-v1",
-      admission_state: "rejected",
+      admission_state: "admitted",
       publication_version: "atlas-admission-publication-v3",
     });
     await gotoBulletin(page);
@@ -3007,10 +3000,10 @@ for (const width of [320, 1440]) {
     });
     await fixtures(page, true, "", {
       category: "economic",
-      categories: ["economic", "human"],
+      categories: ["economic"],
       taxonomy_version: "strategic-domains-v1",
       admission_state: "admitted",
-      publication_version: "atlas-admission-publication-v3",
+      publication_version: "atlas-admission-publication-v4",
     });
     await page.reload();
     await expect(
@@ -3018,7 +3011,7 @@ for (const width of [320, 1440]) {
     ).toBeVisible();
     const card = page.getByTestId("article-card-a1");
     await expect(
-      card.getByText("Economic & Supply Chain Resilience", { exact: true }),
+      card.getByText("Economy & Supply Chains", { exact: true }),
     ).toBeVisible();
     const overflow = await card.evaluate(
       (el) => el.scrollWidth > el.clientWidth + 1,

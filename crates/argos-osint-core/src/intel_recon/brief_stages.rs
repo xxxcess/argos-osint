@@ -95,8 +95,8 @@ impl StageContext {
     /// Bind a scope to this execution: task, epoch and job generation.
     pub fn scope<'a>(
         &'a self,
-        scope: crate::recon::model_exec::OperationScope<'a>,
-    ) -> crate::recon::model_exec::OperationScope<'a> {
+        scope: crate::model_exec::OperationScope<'a>,
+    ) -> crate::model_exec::OperationScope<'a> {
         scope
             .with_task(&self.task_id)
             .with_task_epoch(self.lease_epoch)
@@ -2659,7 +2659,7 @@ impl RuntimeBackend {
         task_id: &str,
         substep: &str,
         role: &str,
-    ) -> Option<Arc<dyn Fn(crate::recon::model_exec::ModelExecEvent) + Send + Sync>> {
+    ) -> Option<Arc<dyn Fn(crate::model_exec::ModelExecEvent) + Send + Sync>> {
         self.telemetry()
             .map(|db| super::brief_timing::activity_sink(db, task_id, substep, role))
     }
@@ -2807,9 +2807,9 @@ impl StageBackend for RuntimeBackend {
             let settings = ctx.routed(&self.settings);
             let decisions = super::brief_fidelity::FidelityDecisions { items: &items };
             let mode = decisions.mode();
-            let adapter = crate::recon::model_exec::LabeledNativeChoices(decisions);
+            let adapter = crate::model_exec::LabeledNativeChoices(decisions);
             let mut scope = ctx
-                .scope(crate::recon::model_exec::OperationScope::new(
+                .scope(crate::model_exec::OperationScope::new(
                     &operation_id,
                     "atlas_evaluator",
                 ))
@@ -2821,12 +2821,12 @@ impl StageBackend for RuntimeBackend {
                         crate::request_policy::SUPPORT_BUDGET
                     }
                 })
-                .with_format(crate::recon::model_exec::ResponseFormat::BoundedDecision)
+                .with_format(crate::model_exec::ResponseFormat::BoundedDecision)
                 .with_interactive();
             if let Some(key) = mode.operation_key() {
                 scope = scope.with_operation(key);
             }
-            let (labels, _) = crate::recon::model_exec::execute_decisions_or_chat(
+            let (labels, _) = crate::model_exec::execute_decisions_or_chat(
                 &self.auth,
                 &settings,
                 &scope,
@@ -2856,18 +2856,19 @@ impl StageBackend for RuntimeBackend {
         let settings = ctx.routed(&self.settings);
         Box::pin(async move {
             let operation_id = ctx.operation_id("claim-context", &batch.user());
-            let adapter = crate::recon::model_exec::LabeledNativeChoices(
-                super::brief_context::ContextDecisions { batch: &batch },
-            );
+            let adapter =
+                crate::model_exec::LabeledNativeChoices(super::brief_context::ContextDecisions {
+                    batch: &batch,
+                });
             let scope = ctx
-                .scope(crate::recon::model_exec::OperationScope::new(
+                .scope(crate::model_exec::OperationScope::new(
                     &operation_id,
                     "atlas_evaluator",
                 ))
                 .with_budget(super::brief_context::CONTEXT_BUDGET)
-                .with_format(crate::recon::model_exec::ResponseFormat::BoundedDecision)
+                .with_format(crate::model_exec::ResponseFormat::BoundedDecision)
                 .with_interactive();
-            let (labels, _) = crate::recon::model_exec::execute_decisions_or_chat(
+            let (labels, _) = crate::model_exec::execute_decisions_or_chat(
                 &auth,
                 &settings,
                 &scope,
@@ -2924,20 +2925,20 @@ impl StageBackend for RuntimeBackend {
                     questions,
                 );
                 let state = DecisionState::new().with_candidate(input.clone());
-                let adapter = crate::recon::model_exec::TextChoiceAdapter {
+                let adapter = crate::model_exec::TextChoiceAdapter {
                     contract: &contract,
                     state: &state,
                 };
                 let scope = request
                     .ctx
-                    .scope(crate::recon::model_exec::OperationScope::new(
+                    .scope(crate::model_exec::OperationScope::new(
                         &operation_id,
                         "atlas_evaluator",
                     ))
                     .with_operation(request.operation_key)
-                    .with_format(crate::recon::model_exec::ResponseFormat::BoundedDecision)
+                    .with_format(crate::model_exec::ResponseFormat::BoundedDecision)
                     .with_insight_contract();
-                let (result, report) = crate::recon::model_exec::execute_decisions_or_chat(
+                let (result, report) = crate::model_exec::execute_decisions_or_chat(
                     &backend.auth,
                     &settings,
                     &scope,
@@ -2967,7 +2968,7 @@ impl StageBackend for RuntimeBackend {
             }
             let scope = request
                 .ctx
-                .scope(crate::recon::model_exec::OperationScope::new(
+                .scope(crate::model_exec::OperationScope::new(
                     &operation_id,
                     request.role,
                 ))
@@ -3003,7 +3004,7 @@ impl StageBackend for RuntimeBackend {
             let validator = request.validator.clone();
             let raw_attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
             let observed = raw_attempts.clone();
-            let result = crate::recon::model_exec::execute_chat(
+            let result = crate::model_exec::execute_chat(
                 &backend.auth,
                 &settings,
                 &scope,
@@ -3030,7 +3031,7 @@ impl StageBackend for RuntimeBackend {
                 .clone();
             let (text, report) = result.map_err(|error| {
                 let history = error
-                    .downcast_ref::<crate::recon::model_exec::ModelOperationError>()
+                    .downcast_ref::<crate::model_exec::ModelOperationError>()
                     .map(|failure| json!({"attempts":failure.history,"requests":failure.requests}));
                 crate::provider::structured_text::GenerationDiagnostics {
                     snapshot: json!({"raw_attempts":attempts,"execution":history}),
@@ -3056,7 +3057,7 @@ fn short_error(error: &anyhow::Error) -> String {
 pub fn stage_error_category(error: &anyhow::Error) -> tasks::ErrorCategory {
     error
         .chain()
-        .find_map(|e| e.downcast_ref::<crate::recon::model_exec::ModelOperationError>())
+        .find_map(|e| e.downcast_ref::<crate::model_exec::ModelOperationError>())
         .and_then(|e| e.category)
         .map_or(
             tasks::ErrorCategory::InvalidResult,

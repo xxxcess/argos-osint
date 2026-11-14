@@ -317,7 +317,7 @@ impl CycleTelemetry {
         let mut tel = Self::new(db, run_id, mode, started_at);
         tel.repo = store.repository().cloned();
         #[cfg(feature = "surreal")]
-        if crate::recon::backend::legacy_side_store_path(db).is_none() && !run_id.is_empty() {
+        if crate::storage::runtime::legacy_side_store_path(db).is_none() && !run_id.is_empty() {
             let mut seqs = std::collections::HashMap::new();
             if let Some(repo) = tel.repo.as_ref() {
                 tel.candidates = crate::storage::telemetry::count_ids_with_prefix(
@@ -1285,38 +1285,54 @@ fn phase2_call(provider: &str, country: &str, key: &str) -> Result<CallSpec> {
     })
 }
 
-/// Primary account while its local daily cap is open and the key is not exhausted.
-/// Otherwise the fallback account, when that cap is still open.
-async fn open_key<'a>(
-    store: &AtlasStore,
-    provider: &str,
-    primary: &'a str,
-    fallback: &'a str,
-) -> Result<Option<&'a str>> {
-    let primary = primary.trim();
-    let fallback = fallback.trim();
-    if !primary.is_empty()
-        && !crate::osint::key_exhausted(primary)
-        && quota_open(store, provider).await?
-    {
-        return Ok(Some(primary));
-    }
-    if !fallback.is_empty()
-        && fallback != primary
-        && !crate::osint::key_exhausted(fallback)
-        && quota_open(store, &format!("{provider}:fallback")).await?
-    {
-        return Ok(Some(fallback));
-    }
-    Ok(None)
+struct ReservedProvider<'a> {
+    store: &'a AtlasStore,
+    provider: &'a str,
+    key: &'a str,
+    day: String,
+    spare: Option<&'a str>,
 }
 
-fn quota_bucket(provider: &str, active: &str, primary: &str) -> String {
-    if active.trim() == primary.trim() {
-        provider.to_string()
-    } else {
-        format!("{provider}:fallback")
+/// Reserve the primary account or, if it cannot send, the distinct fallback.
+/// One reservation covers transport retries and same-host redirects.
+async fn reserve_provider<'a>(
+    store: &'a AtlasStore,
+    provider: &'a str,
+    primary: &'a str,
+    fallback: &'a str,
+) -> Result<Option<ReservedProvider<'a>>> {
+    let primary = primary.trim();
+    let fallback = fallback.trim();
+    let spare =
+        (!fallback.is_empty() && fallback != primary && !crate::osint::key_exhausted(fallback))
+            .then_some(fallback);
+    let day = utc_day();
+    let cap = daily_cap(provider);
+    if !primary.is_empty()
+        && !crate::osint::key_exhausted(primary)
+        && store.reserve_quota(provider, &day, cap, None).await?
+    {
+        return Ok(Some(ReservedProvider {
+            store,
+            provider,
+            key: primary,
+            day,
+            spare,
+        }));
     }
+    if let Some(key) = spare {
+        let bucket = format!("{provider}:fallback");
+        if store.reserve_quota(&bucket, &day, cap, None).await? {
+            return Ok(Some(ReservedProvider {
+                store,
+                provider,
+                key,
+                day,
+                spare: None,
+            }));
+        }
+    }
+    Ok(None)
 }
 
 fn quota_fault(fault: &ProviderFault) -> bool {
@@ -1326,66 +1342,74 @@ fn quota_fault(fault: &ProviderFault) -> bool {
 struct SpareFetch {
     body: Option<serde_json::Value>,
     fault: Option<ProviderFault>,
-    bucket: String,
     metrics: ProviderCallCounts,
 }
 
-/// One provider call. A rate or quota fault retries once with `spare` when it differs.
+/// One logical provider call. A rate or quota fault can move the reservation
+/// to the fallback before the fallback's first send.
 async fn fetch_with_spare_key<F>(
     fetch: &mut F,
     user_agent: &str,
-    provider: &str,
-    primary: &str,
-    key: &str,
-    spare: &str,
+    reservation: ReservedProvider<'_>,
     mut spec_for: impl FnMut(&str) -> Result<CallSpec>,
-) -> SpareFetch
+) -> Result<SpareFetch>
 where
     F: FnMut(HttpCall) -> FetchFut,
 {
-    let mut active = key.to_string();
-    let mut tried_spare = false;
+    let ReservedProvider {
+        store,
+        provider,
+        key: mut active,
+        day,
+        mut spare,
+    } = reservation;
     let mut metrics = ProviderCallCounts::default();
     loop {
-        let spec = match spec_for(&active) {
+        let spec = match spec_for(active) {
             Ok(spec) => spec,
             Err(_) => {
-                return SpareFetch {
+                return Ok(SpareFetch {
                     body: None,
                     fault: Some(ProviderFault {
                         summary: format!("{provider} request configuration invalid"),
                         body: String::new(),
                     }),
-                    bucket: quota_bucket(provider, &active, primary),
                     metrics,
-                };
+                });
             }
         };
         match dispatch_counted(fetch, spec, user_agent, &mut metrics).await {
             Ok(body) => {
-                return SpareFetch {
+                return Ok(SpareFetch {
                     body: Some(body),
                     fault: None,
-                    bucket: quota_bucket(provider, &active, primary),
                     metrics,
-                };
-            }
-            Err(fault)
-                if !tried_spare && quota_fault(&fault) && !spare.is_empty() && spare != active =>
-            {
-                crate::osint::note_key_exhausted(&active);
-                active = spare.to_string();
-                tried_spare = true;
-                metrics.fallbacks += 1;
-                continue;
+                });
             }
             Err(fault) => {
-                return SpareFetch {
+                if let Some(next) = spare.take().filter(|_| quota_fault(&fault)) {
+                    crate::osint::note_key_exhausted(active);
+                    let bucket = format!("{provider}:fallback");
+                    if !crate::osint::key_exhausted(next)
+                        && store
+                            .reserve_quota(
+                                &bucket,
+                                &utc_day(),
+                                daily_cap(provider),
+                                Some((provider, &day)),
+                            )
+                            .await?
+                    {
+                        active = next;
+                        metrics.fallbacks += 1;
+                        continue;
+                    }
+                }
+                return Ok(SpareFetch {
                     body: None,
                     fault: Some(fault),
-                    bucket: quota_bucket(provider, &active, primary),
                     metrics,
-                };
+                });
             }
         }
     }
@@ -1825,7 +1849,7 @@ impl SurrealCycleJob {
             };
             let title = format!("Atlas news cycle · {run}");
             let resource = format!("atlas:{run}");
-            let spec = crate::storage::recon_jobs::AppJob {
+            let spec = crate::storage::app_jobs::AppJob {
                 id: &job,
                 operation: "atlas_cycle",
                 app: "atlas",
@@ -1834,7 +1858,7 @@ impl SurrealCycleJob {
                 resource_ref: &resource,
                 parent: None,
             };
-            if let Err(e) = crate::storage::recon_jobs::begin_app_job(&repo, &spec).await {
+            if let Err(e) = crate::storage::app_jobs::begin_app_job(&repo, &spec).await {
                 tracing::warn!("atlas job start not recorded: {e:#} (job {job})");
             }
         });
@@ -1855,7 +1879,7 @@ impl SurrealCycleJob {
             };
             let mut stop = false;
             for (job, done, total) in [(id, done, total), (parent, None, None)] {
-                match crate::storage::recon_jobs::set_job_progress(&repo, &job, phase, done, total)
+                match crate::storage::app_jobs::set_job_progress(&repo, &job, phase, done, total)
                     .await
                 {
                     Ok(flag) => stop |= flag,
@@ -1863,7 +1887,7 @@ impl SurrealCycleJob {
                 }
             }
             if stop {
-                crate::recon::cancel_with_notify(&cancel);
+                crate::cancellation::cancel_with_notify(&cancel);
             }
         });
     }
@@ -1876,7 +1900,7 @@ impl SurrealCycleJob {
             let Ok(repo) = crate::storage::runtime::repository().await else {
                 return;
             };
-            let spec = crate::storage::recon_jobs::AppJob {
+            let spec = crate::storage::app_jobs::AppJob {
                 id: &job,
                 operation: match phase {
                     3 => "atlas_classification",
@@ -1890,7 +1914,7 @@ impl SurrealCycleJob {
                 resource_ref: "",
                 parent: Some(&parent),
             };
-            if let Err(e) = crate::storage::recon_jobs::begin_app_job(&repo, &spec).await {
+            if let Err(e) = crate::storage::app_jobs::begin_app_job(&repo, &spec).await {
                 tracing::warn!("atlas phase job not recorded: {e:#} (job {job})");
             }
         });
@@ -1909,7 +1933,7 @@ impl SurrealCycleJob {
             let Ok(repo) = crate::storage::runtime::repository().await else {
                 return;
             };
-            if let Err(e) = crate::storage::recon_jobs::finish_recon_job(
+            if let Err(e) = crate::storage::app_jobs::finish_app_job(
                 &repo,
                 &id,
                 state,
@@ -2081,7 +2105,7 @@ where
         }
         emit(event);
     };
-    let result = run_atlas_inner(input, tracked_emit, fetch, &tracker).await;
+    let result = run_atlas_inner(input, tracked_emit, fetch, &tracker, None).await;
     // Read the run id first: the tracker guard is never held across an await.
     let tracked_run = tracker
         .lock()
@@ -2298,12 +2322,13 @@ async fn run_atlas_inner<F>(
     emit: impl FnMut(AtlasEvent) + Send,
     fetch: F,
     tracker: &std::sync::Mutex<AtlasJob>,
+    dispatch_id: Option<&str>,
 ) -> Result<Stop>
 where
     F: FnMut(HttpCall) -> FetchFut + Send,
 {
     let store = AtlasStore::open(input.db_path).await?;
-    run_atlas_on_store(input, emit, fetch, tracker, store).await
+    run_atlas_on_store(input, emit, fetch, tracker, store, dispatch_id).await
 }
 
 async fn run_atlas_on_store<F>(
@@ -2312,6 +2337,7 @@ async fn run_atlas_on_store<F>(
     mut fetch: F,
     tracker: &std::sync::Mutex<AtlasJob>,
     store: AtlasStore,
+    dispatch_id: Option<&str>,
 ) -> Result<Stop>
 where
     F: FnMut(HttpCall) -> FetchFut + Send,
@@ -2334,7 +2360,45 @@ where
         synthesizer_fallbacks: _,
         run_id: resume_id,
     } = input;
-    let (run_id, mut cursor, mut stats, _resume_note) = if resume {
+    use crate::storage::classifier_admission as admission;
+    let repo = store
+        .repository()
+        .ok_or_else(|| anyhow!("SurrealDB storage is not configured"))?;
+    let mut dispatch_revision = None;
+    let (run_id, mut cursor, mut stats, resume) = if let Some(id) = dispatch_id {
+        // Read the revision before its checkpoint. A concurrent write after
+        // this read invalidates the guarded startup instead of rolling back
+        // the cursor or reopening a completed run.
+        let revision = admission::run_revision(repo, id).await?;
+        let saved = crate::storage::atlas::run_by_id(repo.db(), id).await?;
+        if saved.as_ref().is_some_and(|run| run.state == "completed") {
+            return Ok(Stop::Finished);
+        }
+        if revision.lease_active {
+            return Err(admission::AdmissionError::LeaseLost.into());
+        }
+        dispatch_revision = Some(revision);
+        match saved {
+            Some(run) if run.state == "running" || resumable(&run) => {
+                let (cursor, stats) = decode_resume_state(&run)?;
+                (run.id, cursor, stats, true)
+            }
+            Some(_) => {
+                return Ok(Stop::Failed(
+                    "The dispatched Atlas run is not resumable".into(),
+                ))
+            }
+            None => (
+                id.to_owned(),
+                Cursor {
+                    from: lookback_from(),
+                    ..Cursor::default()
+                },
+                RunStats::default(),
+                false,
+            ),
+        }
+    } else if resume {
         let run = match resume_id {
             Some(id) => store
                 .list_runs()
@@ -2350,13 +2414,13 @@ where
         if !resumable(&run) {
             return Ok(Stop::Failed("The latest Atlas run is not paused".into()));
         }
-        (run.id, cursor, stats, Some(run.note))
+        (run.id, cursor, stats, true)
     } else {
         let cursor = Cursor {
             from: lookback_from(),
             ..Cursor::default()
         };
-        (new_run_id(), cursor, RunStats::default(), None)
+        (new_run_id(), cursor, RunStats::default(), false)
     };
     let home_path = std::path::absolute(db_path)?
         .parent()
@@ -2365,9 +2429,6 @@ where
         })?
         .to_path_buf();
     let classifier_home = ClassifierHome::new(home_path);
-    let repo = store
-        .repository()
-        .ok_or_else(|| anyhow!("SurrealDB storage is not configured"))?;
     let owner_id = format!("atlas-owner-{}", crate::store::new_id());
     let db_owner = crate::storage::classifier_admission::AdmissionOwner::new(repo.clone());
     let intent = crate::storage::classifier_admission::announce_foreground_intent(
@@ -2376,14 +2437,27 @@ where
         chrono::Utc::now(),
     )
     .await?;
-    let deadline = tokio::time::Instant::now()
-        + std::time::Duration::from_secs(
-            crate::storage::classifier_admission::FOREGROUND_HANDOFF_SECS,
-        );
+    let handoff = std::time::Duration::from_secs(
+        crate::storage::classifier_admission::FOREGROUND_HANDOFF_SECS,
+    );
+    // A fresh CPU worker can spend longer loading the checkpoint than the
+    // legacy QuickJS handoff. The foreground intent still renews every second.
+    #[cfg(feature = "classifier")]
+    let handoff = if !resume
+        || stats.classifier_snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot.algorithm_version == crate::classifier::ZERO_SHOT_ALGORITHM_VERSION
+        }) {
+        handoff + crate::classifier::bert::STARTUP_TIMEOUT
+    } else {
+        handoff
+    };
+    let deadline = tokio::time::Instant::now() + handoff;
     let startup: Result<(CyclePermit, crate::storage::classifier_admission::RunClaim)> = async {
         for attempt in 0..3 {
-            let revision =
-                crate::storage::classifier_admission::run_revision(repo, &run_id).await?;
+            let revision = match dispatch_revision.take() {
+                Some(revision) => revision,
+                None => admission::run_revision(repo, &run_id).await?,
+            };
             let permit = foreground_classifier_preflight(
                 &store,
                 &classifier_home,
@@ -2418,7 +2492,11 @@ where
                 Ok(claim) => return Ok((permit, claim)),
                 Err(crate::storage::classifier_admission::AdmissionError::InvalidRunState {
                     code,
-                }) if code == "preflight_stale" && resume && attempt < 2 => {
+                }) if code == "preflight_stale"
+                    && resume
+                    && dispatch_id.is_none()
+                    && attempt < 2 =>
+                {
                     // Re-read and re-preflight the selected run. A stale permit
                     // is never reused against a changed checkpoint/cohort.
                     let selected = crate::storage::atlas::run_by_id(repo.db(), &run_id)
@@ -2485,8 +2563,10 @@ where
     }
     stats.contract_version = crate::atlas_work::COLLECTION_CONTRACT.into();
     save(&store, &run_id, &cursor, &stats).await?;
-    if let Ok(mut job) = tracker.lock() {
-        job.start(&run_id);
+    if dispatch_id.is_none() {
+        if let Ok(mut job) = tracker.lock() {
+            job.start(&run_id);
+        }
     }
     if cursor.from.is_empty() {
         cursor.from = lookback_from();
@@ -2572,15 +2652,6 @@ where
                     continue;
                 }
                 let (primary, fallback) = keys.pair(provider);
-                let Some(key) = open_key(&store, provider, primary, fallback).await? else {
-                    emit(AtlasEvent::Note(format!("{provider} daily quota is spent")));
-                    break;
-                };
-                let spare = if key == primary.trim() {
-                    fallback.trim()
-                } else {
-                    ""
-                };
                 if pace && provider == "gnews" {
                     if let Some(last) = last_gnews {
                         let wait = std::time::Duration::from_secs(1).saturating_sub(last.elapsed());
@@ -2589,6 +2660,10 @@ where
                         }
                     }
                 }
+                let Some(reservation) = reserve_provider(&store, provider, primary, fallback).await? else {
+                    emit(AtlasEvent::Note(format!("{provider} daily quota is spent")));
+                    break;
+                };
                 emit(AtlasEvent::Status(format!(
                     "Latest {provider} page {} · {kept}/{PHASE1_TARGET}",
                     page + 1
@@ -2598,15 +2673,11 @@ where
                 let fetched = fetch_with_spare_key(
                     &mut fetch,
                     &user_agent,
-                    provider,
-                    primary,
-                    key,
-                    spare,
+                    reservation,
                     |active| phase1_call(provider, page, &token, active),
                 )
-                .await;
+                .await?;
                 tel.provider_calls(&fetched.metrics);
-                let bucket = fetched.bucket;
                 match fetched.body {
                     Some(body) => {
                         if provider == "gnews" {
@@ -2674,7 +2745,6 @@ where
                         &serde_json::json!({"kept":kept,"token":token,"stop":stop_provider || kept>=PHASE1_TARGET || page+1>=PHASE1_MAX_PAGES}),
                     ).await?;
                 }
-                let _ = store.quota_bump(&bucket, &utc_day()).await?;
                 page += 1;
                 emit(AtlasEvent::Stats(Box::new(stats.clone())));
                 if stop_provider || kept >= PHASE1_TARGET || page >= PHASE1_MAX_PAGES {
@@ -2814,17 +2884,12 @@ where
                 continue;
             }
             let (primary, fallback) = keys.pair(job.provider);
-            let Some(key) = open_key(&store, job.provider, primary, fallback).await? else {
+            let Some(reservation) = reserve_provider(&store, job.provider, primary, fallback).await? else {
                 emit(AtlasEvent::Note(format!(
                     "{} daily quota is spent",
                     job.provider
                 )));
                 continue;
-            };
-            let spare = if key == primary.trim() {
-                fallback.trim()
-            } else {
-                ""
             };
             emit(AtlasEvent::Status(format!(
                 "Headlines {} · {}",
@@ -2834,15 +2899,11 @@ where
             let fetched = fetch_with_spare_key(
                 &mut fetch,
                 &user_agent,
-                job.provider,
-                primary,
-                key,
-                spare,
+                reservation,
                 |active| phase2_call(job.provider, country, active),
             )
-            .await;
+            .await?;
             tel.provider_calls(&fetched.metrics);
-            let bucket = fetched.bucket;
             match fetched.body {
                 Some(body) => {
                     let observations = capture_provider_observations(&store, &run_id, job.provider, &receipt_key, &body, &mut emit).await;
@@ -2894,7 +2955,6 @@ where
                     }
                 }
             }
-            let _ = store.quota_bump(&bucket, &utc_day()).await?;
             let next = next_after_phase2(job, countries.len());
             save(&store, &run_id, &cursor_at(&next, &cursor.from), &stats).await?;
             emit(AtlasEvent::Stats(Box::new(stats.clone())));
@@ -3420,11 +3480,6 @@ fn published_in_window(published: &str, from: &str) -> bool {
         .unwrap_or(true)
 }
 
-async fn quota_open(store: &AtlasStore, provider: &str) -> Result<bool> {
-    let used = store.quota_used(provider, &utc_day()).await?;
-    Ok(used < daily_cap(provider))
-}
-
 async fn save(store: &AtlasStore, id: &str, cursor: &Cursor, stats: &RunStats) -> Result<()> {
     store
         .save(
@@ -3625,6 +3680,37 @@ pub enum LiveRun {
     Latest,
     /// Resume this run (an older cycle stopped in phase 4/5).
     Run(String),
+    /// Start or resume the exact run assigned by durable Atlas dispatch.
+    /// The dispatcher owns its registry job and delivery cancellation.
+    Dispatch(String),
+}
+
+fn validate_dispatch_id(run_id: &str) -> Result<()> {
+    let valid = run_id
+        .strip_prefix("fleet-atlas-run-")
+        .is_some_and(|request| {
+            (1..=64).contains(&request.len())
+                && request
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        });
+    anyhow::ensure!(valid, "invalid dispatched Atlas run ID");
+    Ok(())
+}
+
+/// Read the exact durable run state assigned to a dispatch.
+pub async fn dispatch_state(
+    repo: &crate::storage::repo::Repository,
+    run_id: &str,
+) -> Result<Option<String>> {
+    validate_dispatch_id(run_id)?;
+    let mut response = repo
+        .db()
+        .query("SELECT VALUE state FROM ONLY type::record('atlas_run', $run)")
+        .bind(("run", run_id.to_owned()))
+        .await?
+        .check()?;
+    Ok(response.take(0)?)
 }
 
 /// Live pipeline. Uses the process HTTP client and paces GNews by one second.
@@ -3640,52 +3726,61 @@ pub async fn run_live(
     synthesizer_fallbacks: &[ProviderSecret],
     emit: impl FnMut(AtlasEvent) + Send,
 ) -> Result<Stop> {
+    let dispatch_id = match &live {
+        LiveRun::Dispatch(id) => {
+            validate_dispatch_id(id)?;
+            Some(id.as_str())
+        }
+        _ => None,
+    };
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(25))
         .build()?;
-    run_atlas(
-        RunInput {
-            db_path,
-            pause,
-            keys,
-            user_agent,
-            pace: true,
-            resume: live != LiveRun::Fresh,
-            feed,
-            classifier,
-            synthesizer,
-            synthesizer_fallbacks,
-            run_id: match &live {
-                LiveRun::Run(id) => Some(id.as_str()),
-                _ => None,
-            },
+    let input = RunInput {
+        db_path,
+        pause,
+        keys,
+        user_agent,
+        pace: true,
+        resume: matches!(&live, LiveRun::Latest | LiveRun::Run(_)),
+        feed,
+        classifier,
+        synthesizer,
+        synthesizer_fallbacks,
+        run_id: match &live {
+            LiveRun::Run(id) => Some(id.as_str()),
+            _ => None,
         },
-        emit,
-        move |call: HttpCall| {
-            let client = client.clone();
-            Box::pin(async move {
-                let mut request = client.get(&call.url);
-                for (name, value) in &call.headers {
-                    request = request.header(name.as_str(), value.as_str());
-                }
-                let response = request.send().await?;
-                let status = response.status().as_u16();
-                let location = response
-                    .headers()
-                    .get(reqwest::header::LOCATION)
-                    .and_then(|value| value.to_str().ok())
-                    .map(str::to_string);
-                let body = response.text().await?;
-                Ok(HttpReply {
-                    status,
-                    body,
-                    location,
-                })
+    };
+    let fetch = move |call: HttpCall| -> FetchFut {
+        let client = client.clone();
+        Box::pin(async move {
+            let mut request = client.get(&call.url);
+            for (name, value) in &call.headers {
+                request = request.header(name.as_str(), value.as_str());
+            }
+            let response = request.send().await?;
+            let status = response.status().as_u16();
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+            let body = response.text().await?;
+            Ok(HttpReply {
+                status,
+                body,
+                location,
             })
-        },
-    )
-    .await
+        })
+    };
+    if let Some(id) = dispatch_id {
+        let tracker = std::sync::Mutex::new(AtlasJob::new(db_path));
+        run_atlas_inner(input, emit, fetch, &tracker, Some(id)).await
+    } else {
+        run_atlas(input, emit, fetch).await
+    }
 }
 
 pub async fn charge_newsapi(store: &AtlasStore) {
@@ -3841,10 +3936,7 @@ mod tests {
         assert_eq!(normalize_category(" Governance "), "governance");
         assert_eq!(normalize_category("science"), "unk");
         assert_eq!(normalize_category("military"), "unk");
-        assert_eq!(
-            category_name("scientific"),
-            "Scientific & Technological Capability"
-        );
+        assert_eq!(category_name("scientific"), "Science & Technology");
     }
 
     #[test]
@@ -4023,7 +4115,7 @@ mod tests {
         assert!(card.contains("Author: Joel Schlesinger; Laurie"));
         assert!(card
             .lines()
-            .any(|line| line == "Category: Economic & Supply Chain Resilience"));
+            .any(|line| line == "Category: Economy & Supply Chains"));
         assert!(card.contains(&format!(
             "Published: {}",
             friendly_date("2026-10-03 07:01:24 +0000")
@@ -4360,6 +4452,99 @@ mod classifier_preflight_tests {
 
     #[cfg(feature = "embedded")]
     #[tokio::test]
+    async fn dispatch_replay_respects_completion_and_the_exact_run_lease() {
+        use crate::storage::classifier_admission::AdmissionError;
+        use crate::storage::open::Target;
+        use crate::storage::repo::Repository;
+
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("argos.db");
+        let repo = Repository::connect(
+            &Target::Embedded {
+                path: temp.path().join("storage"),
+            },
+            "argos",
+            "dispatch_replay",
+        )
+        .await
+        .unwrap();
+        crate::storage::atlas::apply_schema(repo.db())
+            .await
+            .unwrap();
+        let completed = "fleet-atlas-run-completed";
+        let leased = "fleet-atlas-run-leased";
+        let cursor = serde_json::to_string(&Cursor::default()).unwrap();
+        let stats = serde_json::to_string(&RunStats::default()).unwrap();
+        for run in [completed, leased] {
+            crate::storage::atlas::insert_run(repo.db(), run, &cursor, &stats)
+                .await
+                .unwrap();
+        }
+        crate::storage::atlas::set_state(repo.db(), completed, "completed", "", true)
+            .await
+            .unwrap();
+        repo.db()
+            .query("CREATE type::record('atlas_classifier_run', $run) SET owner='fixture', revision=1, lease_until=time::now()+1h, updated_at=time::now() RETURN NONE")
+            .bind(("run", leased))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let pause = AtomicBool::new(false);
+        let keys = ProviderKeys::default();
+        let input = || RunInput {
+            db_path: &db_path,
+            pause: &pause,
+            keys: &keys,
+            user_agent: "offline-fixture",
+            pace: false,
+            resume: false,
+            feed: &[],
+            classifier: None,
+            synthesizer: None,
+            synthesizer_fallbacks: &[],
+            run_id: None,
+        };
+        let tracker = std::sync::Mutex::new(AtlasJob::new(&db_path));
+        let fetch = |_: HttpCall| -> FetchFut { panic!("replayed delivery must not fetch") };
+        let replay = run_atlas_on_store(
+            input(),
+            |_| {},
+            fetch,
+            &tracker,
+            AtlasStore::from_repository(repo.clone()),
+            Some(completed),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(replay, Stop::Finished));
+        let held = run_atlas_on_store(
+            input(),
+            |_| {},
+            fetch,
+            &tracker,
+            AtlasStore::from_repository(repo.clone()),
+            Some(leased),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            held.downcast_ref::<AdmissionError>(),
+            Some(AdmissionError::LeaseLost)
+        ));
+        assert_eq!(
+            dispatch_state(&repo, completed).await.unwrap().as_deref(),
+            Some("completed")
+        );
+        assert_eq!(
+            dispatch_state(&repo, leased).await.unwrap().as_deref(),
+            Some("running")
+        );
+        assert!(tracker.lock().unwrap().run_id.is_empty());
+    }
+
+    #[cfg(feature = "embedded")]
+    #[tokio::test]
     async fn denied_preflight_spends_no_quota_or_fetches_and_preserves_resume_state() {
         use crate::storage::open::Target;
         use crate::storage::repo::Repository;
@@ -4450,12 +4635,24 @@ mod classifier_preflight_tests {
                 },
                 &tracker,
                 AtlasStore::from_repository(repo.clone()),
+                None,
             )
             .await;
-            assert!(result
-                .unwrap_err()
-                .downcast_ref::<CyclePreflightError>()
-                .is_some());
+            let error = result.unwrap_err();
+            let preflight = error.downcast_ref::<CyclePreflightError>().unwrap();
+            if !resume && cfg!(feature = "classifier") {
+                use crate::classifier::{ClassifierError, ClassifierStatus};
+                let expected = temp.path().join("classifier/zero-shot.json");
+                assert!(matches!(
+                    preflight,
+                    CyclePreflightError::Classifier {
+                        status: ClassifierStatus::Missing,
+                        code,
+                        source: ClassifierError::MissingZeroShotConfig(path),
+                    } if code == "classifier_unavailable" && path == &expected
+                ));
+                assert!(preflight.to_string().contains("worker_path and model_dir"));
+            }
             assert_eq!(calls.load(Ordering::SeqCst), 0);
             assert!(tracker.lock().unwrap().run_id.is_empty());
             let after = crate::storage::atlas::list_runs(repo.db()).await.unwrap();

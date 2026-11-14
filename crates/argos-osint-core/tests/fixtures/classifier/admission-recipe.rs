@@ -1,6 +1,8 @@
-//! Real synthetic local admission model; no saved weights or provider calls.
+//! Offline fixtures for legacy Natural training and live zero-shot admission.
 #[path = "support.rs"]
 mod recipes;
+use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use argos_osint_core::atlas_taxonomy::DomainId;
@@ -27,8 +29,7 @@ pub fn install_with_titles(titles: [&str; 3]) -> Installed {
     install_with_disabled_domains(titles, &[])
 }
 
-/// Storage boundary fixture: actual fitted weights with alternate secondary
-/// gates explicitly disabled. This does not claim training-quality acceptance.
+/// Storage boundary fixture with only the primary score over the live gate.
 #[allow(dead_code)] // Shared fixture module; used only by the single-domain contract target.
 pub fn install_primary_only() -> Installed {
     install_with_disabled_domains(
@@ -142,6 +143,48 @@ fn install_with_disabled_domains(titles: [&str; 3], disabled: &[usize]) -> Insta
     drop(candidate.fixture.worker);
     drop(candidate.fixture.lease);
     let directory = candidate.fixture.home;
+    install_zero_shot(directory.path(), titles, disabled);
     let home = Arc::new(ClassifierHome::new(directory.path().to_path_buf()));
     Installed { directory, home }
+}
+
+/// Model files for the offline stdio test worker, using the production home layout.
+fn install_zero_shot(home: &Path, titles: [&str; 3], disabled: &[usize]) {
+    let classifier = home.join("classifier");
+    let model_dir = classifier.join("fixture-bert");
+    std::fs::create_dir_all(&model_dir).unwrap();
+    let worker_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../scripts/fixtures/atlas_bert")
+        .canonicalize()
+        .unwrap();
+    let routes: BTreeMap<_, _> = titles
+        .iter()
+        .enumerate()
+        .map(|(index, title)| {
+            let mut scores = [0.1; 6];
+            for (domain, score) in [(index * 2, 0.99), (index * 2 + 1, 0.94)] {
+                if !disabled.contains(&domain) {
+                    scores[domain] = score;
+                }
+            }
+            (title.to_ascii_lowercase(), scores)
+        })
+        .collect();
+    std::fs::write(
+        model_dir.join("config.json"),
+        serde_json::to_vec(&serde_json::json!({"routes": routes})).unwrap(),
+    )
+    .unwrap();
+    for name in ["vocab.txt", "rust_model.ot"] {
+        std::fs::write(model_dir.join(name), b"offline worker protocol fixture").unwrap();
+    }
+    std::fs::write(
+        classifier.join("zero-shot.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "worker_path": worker_path,
+            "model_dir": model_dir,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
 }

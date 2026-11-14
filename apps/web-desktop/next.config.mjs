@@ -1,10 +1,12 @@
 import { createRequire } from "node:module";
+import { configuredWebBasePath } from "./server-origin.mjs";
 
 const require = createRequire(import.meta.url);
 const nativeWeb = require.resolve("react-native-web");
 
 /** @type {import('next').NextConfig} */
 export default {
+  basePath: configuredWebBasePath(),
   // The dev badge is a nextjs-portal overlay. It is not part of the Intel desk.
   devIndicators: false,
   // Browser verification must never claim the launcher's .next/dev lock/cache.

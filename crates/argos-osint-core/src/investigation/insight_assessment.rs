@@ -14,7 +14,7 @@ use super::decisions::{
     templates::template_insight_batch, ContractAdapter, DecisionPolicy, DecisionState,
 };
 use super::insights::{Assessment, EvidenceLocation, EvidenceRef, PipelineInput, REQUEST_BYTES};
-use crate::recon::model_exec::{DecisionsAdapter, ModelOperationError, OperationScope};
+use crate::model_exec::{DecisionsAdapter, ModelOperationError, OperationScope};
 
 pub(super) const BATCH_LIMIT: usize = 8;
 
@@ -497,7 +497,7 @@ pub(super) async fn assess_with_receipts(
         if input.snapshot.owner_kind == "recon" {
             scope = scope.with_run(&input.snapshot.owner_id);
         }
-        let evaluated = crate::recon::model_exec::evaluate_text_choices(
+        let evaluated = crate::model_exec::evaluate_text_choices(
             auth, settings, &scope, &contract, &state, &policy, cancel, telemetry,
         )
         .await;

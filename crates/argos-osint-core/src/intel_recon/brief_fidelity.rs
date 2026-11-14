@@ -193,7 +193,7 @@ impl FidelityDecisions<'_> {
     }
 }
 
-impl crate::recon::model_exec::DecisionsAdapter<HashMap<String, String>> for FidelityDecisions<'_> {
+impl crate::model_exec::DecisionsAdapter<HashMap<String, String>> for FidelityDecisions<'_> {
     fn compile_native(&self) -> (Value, Value) {
         crate::investigation::decisions::compile_native(&self.contract(), &self.state().to_value())
     }
@@ -274,7 +274,7 @@ impl crate::recon::model_exec::DecisionsAdapter<HashMap<String, String>> for Fid
 #[cfg(test)]
 mod canonical_tests {
     use super::*;
-    use crate::recon::model_exec::DecisionsAdapter;
+    use crate::model_exec::DecisionsAdapter;
 
     #[test]
     fn fidelity_compiles_through_the_canonical_contract() {

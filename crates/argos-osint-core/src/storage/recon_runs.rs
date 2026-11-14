@@ -21,8 +21,9 @@ use serde_json::Value;
 use surrealdb::types::SurrealValue;
 
 use super::jobs::{rid, run};
-use super::recon::get_thread;
 use super::repo::Repository;
+use super::thread_history::get_thread;
+pub use super::tool_state::{cache_get_fresh, cache_put};
 use super::tx::{run_tx, RetryPolicy};
 use crate::osint::{self, ToolResult};
 use crate::recon::{Call, Plan, Run, RunLimits};
@@ -613,46 +614,6 @@ pub async fn answer_evidence(
             Some((e.id, res))
         })
         .collect())
-}
-
-/// `Store::cache_put`: replace the entry, expiring `ttl` seconds from now.
-pub async fn cache_put(repo: &Repository, key: &str, result: &ToolResult, ttl: u64) -> Result<()> {
-    let expires = (Utc::now() + chrono::Duration::seconds(ttl as i64)).to_rfc3339();
-    repo.db()
-        .query("UPSERT $k SET result_json = $res, expires_at = $exp RETURN NONE")
-        .bind(("k", rid("osint_cache", key)))
-        .bind(("res", serde_json::to_string(result)?))
-        .bind(("exp", expires))
-        .await?
-        .check()?;
-    Ok(())
-}
-
-/// `Store::cache_get_fresh`: an unexpired entry, and (with a cutoff) one
-/// retrieved no earlier than the cutoff. `None` cutoff is `cache_get`.
-pub async fn cache_get_fresh(
-    repo: &Repository,
-    key: &str,
-    freshness_cutoff: Option<&str>,
-) -> Result<Option<ToolResult>> {
-    let mut r = repo
-        .db()
-        .query("SELECT VALUE result_json FROM ONLY $k WHERE expires_at > $now")
-        .bind(("k", rid("osint_cache", key)))
-        .bind(("now", now()))
-        .await?
-        .check()?;
-    let raw: Option<String> = r.take(0usize)?;
-    let Some(res): Option<ToolResult> = raw.and_then(|r| serde_json::from_str(&r).ok()) else {
-        return Ok(None);
-    };
-    if let Some(cutoff) = freshness_cutoff {
-        if !cutoff.is_empty() && !res.retrieved_at.is_empty() && res.retrieved_at.as_str() < cutoff
-        {
-            return Ok(None);
-        }
-    }
-    Ok(Some(res))
 }
 
 /// A run's still-open calls (`queued`/`running`) settled as `status`

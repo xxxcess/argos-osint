@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{validate_result, SummarizationMode};
 use crate::provider::ChatMessage;
+use crate::provider_admission;
 use crate::provider_attempt::{self, Deadlines, Transport};
 use crate::provider_diag::{Category, ProviderFailure, Stage};
 use crate::provider_request::TimeoutProfile;
@@ -170,6 +171,8 @@ pub async fn complete_summary_report(
     let cap = MAX_REQUESTS;
     let mut transport = opts.first_transport;
     let mut number = 0u32;
+    let shared = provider_admission::shared();
+    let account = shared.then(|| provider_admission::account_key(secret, ""));
     while number < cap {
         if cancelled(opts) {
             out.failure = Some(ProviderFailure::new(
@@ -181,18 +184,46 @@ pub async fn complete_summary_report(
         }
         // Admission: wait for a slot. Contention is not an attempt.
         let waited = Instant::now();
-        let guard = loop {
-            if let Some(g) = AdmissionGuard::try_enter(&opts.admission_account) {
-                break Some(g);
+        let shared_lease = if let Some(account) = &account {
+            match provider_admission::acquire(
+                account,
+                false,
+                Some(opts.admission_timeout),
+                opts.cancel.as_deref(),
+            )
+            .await
+            {
+                Ok(lease) => Some(lease),
+                Err(failure) => {
+                    out.admission_wait_ms += waited.elapsed().as_millis() as u64;
+                    out.failure = Some(failure.with_context(
+                        &kind,
+                        &secret.model,
+                        &secret.base_url,
+                        transport.as_str(),
+                    ));
+                    break;
+                }
             }
-            if waited.elapsed() >= opts.admission_timeout || cancelled(opts) {
-                break None;
+        } else {
+            None
+        };
+        let guard = if shared {
+            None
+        } else {
+            loop {
+                if let Some(g) = AdmissionGuard::try_enter(&opts.admission_account) {
+                    break Some(g);
+                }
+                if waited.elapsed() >= opts.admission_timeout || cancelled(opts) {
+                    break None;
+                }
+                tokio::time::sleep(opts.admission_poll).await;
             }
-            tokio::time::sleep(opts.admission_poll).await;
         };
         let wait_ms = waited.elapsed().as_millis() as u64;
         out.admission_wait_ms += wait_ms;
-        let Some(guard) = guard else {
+        if !shared && guard.is_none() {
             let category = if cancelled(opts) {
                 Category::Cancelled
             } else {
@@ -210,10 +241,62 @@ pub async fn complete_summary_report(
             f.retryable = category == Category::Timeout;
             out.failure = Some(f);
             break;
-        };
+        }
         number += 1;
         observe(AttemptEvent::Started { number, transport });
-        let report = provider_attempt::attempt(secret, messages, transport, opts.deadlines).await;
+        let started = Instant::now();
+        let policy = crate::request_policy::RequestPolicy::default();
+        let attempt: std::pin::Pin<
+            Box<dyn std::future::Future<Output = provider_attempt::AttemptReport> + Send>,
+        > = if crate::provider::delegate_to_execution(secret) {
+            Box::pin(provider_attempt::remote::delegated_attempt(
+                "brain_summary",
+                None,
+                secret,
+                messages,
+                transport,
+                opts.deadlines,
+                &policy,
+            ))
+        } else {
+            Box::pin(provider_attempt::attempt(
+                secret,
+                messages,
+                transport,
+                opts.deadlines,
+            ))
+        };
+        let report = if let Some(lease) = &shared_lease {
+            match lease.run(attempt, opts.cancel.as_deref()).await {
+                Ok(report) => report,
+                Err(failure) => provider_attempt::AttemptReport {
+                    transport,
+                    endpoint: crate::provider_diag::sanitize_endpoint(&secret.base_url),
+                    elapsed_ms: started.elapsed().as_millis() as u64,
+                    outcome: Err(failure.with_context(
+                        &kind,
+                        &secret.model,
+                        &secret.base_url,
+                        transport.as_str(),
+                    )),
+                    effective: None,
+                    policy_diagnostics: Vec::new(),
+                    recovery: None,
+                },
+            }
+        } else {
+            attempt.await
+        };
+        if let (Some(account), Err(failure)) = (&account, &report.outcome) {
+            if failure.category == Category::RateLimited {
+                let delay = failure
+                    .retry_after_ms
+                    .map(Duration::from_millis)
+                    .unwrap_or(Duration::from_secs(60));
+                provider_admission::defer(account, delay).await;
+            }
+        }
+        drop(shared_lease);
         drop(guard);
         let mut log = AttemptLog {
             number,
@@ -277,7 +360,7 @@ pub async fn complete_summary_report(
             .or_else(|| crate::provider_chain::wait_before_retry(0, number))
             .unwrap_or(Duration::from_secs(10))
             .min(opts.max_backoff);
-        if failure.category == Category::RateLimited {
+        if failure.category == Category::RateLimited && !shared {
             tasks::note_shared_rate_limit(&opts.admission_account, delay);
         }
         if !cfg!(test) {

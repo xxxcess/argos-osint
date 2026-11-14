@@ -1,5 +1,5 @@
 use super::*;
-use crate::recon::model_exec::DecisionsAdapter;
+use crate::model_exec::DecisionsAdapter;
 
 fn actor(id: &str, name: &str, aliases: &[&str]) -> ContextActor {
     ContextActor {

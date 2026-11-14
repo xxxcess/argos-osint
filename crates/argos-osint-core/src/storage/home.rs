@@ -325,9 +325,7 @@ pub struct HomeStore {
 /// uninitialized home is an error; it never falls back to a legacy store.
 pub async fn open_home(layout: &Layout) -> anyhow::Result<HomeStore> {
     let config = load_config(layout)?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "storage is not initialized; run `argos storage init --mode server|embedded`"
-        )
+        anyhow::anyhow!("storage is not initialized; run `argos storage init --mode server`")
     })?;
     match config.mode {
         Mode::Server => {

@@ -39,8 +39,12 @@ pub fn surreal_selected() -> bool {
 /// Returns the optional legacy side-store path (telemetry, model attempts,
 /// job registry, summarization cache): `None` under SurrealDB, so those
 /// writers are skipped rather than using a legacy store.
+#[cfg(feature = "surreal")]
+pub use crate::storage::runtime::legacy_side_store_path;
+
+#[cfg(not(feature = "surreal"))]
 pub fn legacy_side_store_path(db_path: &Path) -> Option<&Path> {
-    (!surreal_selected()).then_some(db_path)
+    Some(db_path)
 }
 
 /// The Recon store a caller uses for one unit of work.

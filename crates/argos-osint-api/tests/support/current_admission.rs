@@ -14,8 +14,8 @@ pub async fn admit(repo: &Repository, articles: &[AtlasArticleRow]) {
     .await;
 }
 
-/// Each API contract selects fictional vocabulary independent of its route
-/// assertions. Shared terms can legitimately cause an ambiguous classifier rank.
+/// The offline worker matches each configured cue as a contiguous substring
+/// of the article title or description.
 pub async fn admit_with_titles(
     repo: &Repository,
     articles: &[AtlasArticleRow],

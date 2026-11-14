@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Native navigation, progressive disclosure and selected-view composition</title>
+<style>body{margin:0;padding:32px;color:#242424;background:#fff;font:16px/1.6 Geist,Arial,sans-serif}main{max-width:1200px;margin:auto}h1{font:36px/1.2 "Instrument Serif",Georgia,serif;margin:0 0 16px}p{max-width:88ch}svg{display:block;width:100%;height:auto;margin:24px 0}a{color:#a14b24}</style></head><body><main><h1>Native navigation, progressive disclosure and selected-view composition</h1><p>Workstation Status is the default home page. When disconnected, the sidebar shows only Workstation Status and Setup Gateway and guards Page::ALL and Command+1-6 shortcuts; when connected, it reveals the six deployment destinations with live busy status and count badges (no bottom sidebar footer card). Progressive disclosure pairs steppers, segmented controls, checklists, switches and modal Dialog inspectors while preserving compact single-column and matte parity. This schematic is not installed-app verification.</p>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" role="img" aria-labelledby="native-workstation-layout-title native-workstation-layout-desc">
+<title id="native-workstation-layout-title">Native navigation, progressive disclosure and selected-view composition</title>
+<desc id="native-workstation-layout-desc">Workstation Status is the default home page. When disconnected, the sidebar shows only Workstation Status and Setup Gateway and guards Page::ALL and Command+1-6 shortcuts; when connected, it reveals the six deployment destinations with live busy status and count badges (no bottom sidebar footer card). Progressive disclosure pairs steppers, segmented controls, checklists, switches and modal Dialog inspectors while preserving compact single-column and matte parity. This schematic is not installed-app verification.</desc>
+<style>text{font-family:Geist,Arial,sans-serif;fill:#242424}.zone{font-size:13px;letter-spacing:1.2px;fill:#666}.label{font-size:20px;font-weight:600}.note{font-size:15px;fill:#444}.small{font-size:13px;fill:#666}.node{fill:#fff;stroke:#aaa;stroke-width:1}.focus{fill:#fff4ee;stroke:#eb6c36;stroke-width:2}.lane{fill:#fafafa;stroke:#ddd;stroke-width:1}.pill{fill:#f4f4f4;stroke:#ccc;stroke-width:1}</style>
+<rect width="1200" height="720" fill="#fff"/>
+<rect x="40" y="48" width="1120" height="604" rx="6" fill="#fff" stroke="#777"/>
+<path d="M 40 112 H 1160" stroke="#bbb"/>
+<path d="M 336 112 V 652" stroke="#bbb"/>
+<text x="60" y="88" class="label">Gateway / status header</text>
+<text x="368" y="88" class="note">Scope bar: resource scope (or Local Client offline) · Syncing / status pill</text>
+<rect x="956" y="64" width="180" height="36" rx="6" class="focus"/>
+<text x="986" y="87" class="note">Setup Gateway</text>
+<text x="60" y="144" class="zone">COLLAPSIBLE SIDEBAR (220PT)</text>
+<rect x="56" y="160" width="260" height="38" rx="6" class="focus"/>
+<text x="72" y="184" class="note">Workstation Status (default)</text>
+<text x="60" y="220" class="zone">WHEN CONNECTED (PAGE::ALL)</text>
+<text x="72" y="248" class="note">DB Seed &amp; Train</text>
+<text x="274" y="248" class="small">Busy</text>
+<text x="72" y="286" class="note">News Cycles</text>
+<rect x="274" y="270" width="32" height="22" rx="6" class="pill"/>
+<text x="286" y="285" class="small">N</text>
+<text x="72" y="324" class="note">Brain Search</text>
+<text x="72" y="362" class="note">OSINT Tools</text>
+<text x="72" y="400" class="note">Model Assignments</text>
+<text x="72" y="438" class="note">Jobs &amp; Logs</text>
+<rect x="274" y="422" width="32" height="22" rx="6" class="pill"/>
+<text x="286" y="437" class="small">N</text>
+<rect x="56" y="468" width="260" height="160" rx="6" class="lane"/>
+<text x="72" y="494" class="zone">WHEN DISCONNECTED</text>
+<text x="72" y="524" class="note">Only Workstation Status &amp;</text>
+<text x="72" y="546" class="note">Setup Gateway appear.</text>
+<text x="72" y="576" class="small">Gateway routes, Host Resources &amp;</text>
+<text x="72" y="598" class="small">readiness checks are hidden.</text>
+<text x="368" y="144" class="zone">ONLY SELECTED DESTINATION (TRANSITION + SCROLL)</text>
+<rect x="368" y="164" width="760" height="204" rx="6" class="node"/>
+<text x="388" y="198" class="label">Workstation Status home, progressive disclosure &amp; modals</text>
+<text x="388" y="232" class="note">• Offline home: Native Client &amp; Gateway Backend (Setup CTA; API widgets hidden)</text>
+<text x="388" y="262" class="note">• Stage stepper, SegmentedControl, Checkbox preflight &amp; Switch inline toggles</text>
+<text x="388" y="292" class="note">• Async status strips (Spinner + Progress) &amp; metric rings (ProgressCircle + RollingText)</text>
+<text x="388" y="322" class="note">• Interactive tiles &amp; actions open Dialog modal inspectors (Telemetry, Cycle, Job, Keys)</text>
+<text x="388" y="352" class="small">Permission, readiness &amp; revision guards remain beside every operation.</text>
+<path d="M 368 396 H 1128" stroke="#bbb"/>
+<text x="368" y="436" class="label">Compact layout, motion &amp; matte parity</text>
+<text x="368" y="472" class="note">• Narrow windows (&lt;720pt content) switch Brain Search to single-column list/detail.</text>
+<text x="368" y="506" class="note">• Pointer-reactive glow &amp; opposing cast shadows update Live&lt;[f32; 2]&gt; uniforms.</text>
+<text x="368" y="540" class="note">• Reduced-transparency / matte() freezes opaque flat surfaces with identical hit-bounds.</text>
+<text x="368" y="574" class="note">• Reduced-motion disables page/pane Transition animations while keeping focus rings.</text>
+<text x="368" y="612" class="small">Setup Gateway opens from toolbar, header (when offline), sidebar nav-setup, or offline card CTA.</text>
+<text x="40" y="694" class="small">Actual Rune Runtime views, PNG/tree inspection, keyboard/input and matte parity require separate evidence.</text>
+</svg>
+<p><a href="../wiki/code/native-design-system.md">Native workstation design</a> · <a href="../wiki/code/native-workspaces.md">Workstation identity contract</a> · <a href="../wiki/code/native-connections.md">Connections and activity</a> · <a href="../diagrams.md">Diagram catalog</a></p></main></body></html>

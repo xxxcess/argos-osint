@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 944" role="img" aria-labelledby="brief-job-context-title brief-job-context-desc">
+<title id="brief-job-context-title">Brief and job context: immutable origin and scoped activity</title>
+<desc id="brief-job-context-desc">A gateway validates native registration or browser session proof, credential purpose, permissions and current context. Durable admission rechecks that proof and retirement, access and configuration fences in the same transaction as job, task, outbox and immutable origin acceptance. A new job receives an original creator. Causal child stages inherit the parent origin. Reusing work records an additional requester association and never overwrites a creator or invents one for legacy work. Activity reads revalidate current authority and restrict membership to the current deployment and workstation, without workspace narrowing; selected-job filters may only reduce current membership. Membership is applied before lists, counts, facets, cursors, exports and live delivery. Private details and actions require additional eligibility; incompatible shared work exposes status only. Unrelated system or legacy work remains stored but excluded.</desc>
+<defs><marker id="brief-job-context-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker></defs>
+<style>text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}.label{font-size:20px;font-weight:600}.note{font-size:16px}.zone{font-size:13px;font-weight:600;letter-spacing:1px}.node{fill:#fff;stroke:#4f5d75}.accent{fill:#fff6ed;stroke:#eb6c36}.edge{fill:none;stroke:#4f5d75;stroke-width:2;marker-end:url(#brief-job-context-arrow)}.retry{fill:none;stroke:#4f5d75;stroke-width:2;stroke-dasharray:5 4;marker-end:url(#brief-job-context-arrow)}.minor{fill:#4f5d75;font-size:14px}</style>
+<rect width="1320" height="944" fill="#f5f5f5"/>
+<rect x="24" y="40" width="1272" height="224" fill="none" stroke="#a0a5b0" stroke-dasharray="6 5"/>
+<text x="48" y="68" class="zone">INTERACTIVE ACCEPTANCE · SERVER-RESOLVED AUTHORITY</text>
+<text x="456" y="300" class="zone">DURABLE PROVENANCE · NO CREATOR REWRITE</text>
+<text x="48" y="524" class="zone">ACTIVITY READ / LIVE / ACTION · CURRENT AUTHORITY CHECKED AGAIN</text>
+
+<path d="M408 172H468" class="edge"/>
+<path d="M648 240V284H228V328" class="edge"/>
+<path d="M1080 240V328" class="edge"/>
+<path d="M408 396H468" class="edge"/>
+<path d="M648 464V552" class="edge"/>
+<path d="M1080 464V508H744V552" class="edge"/>
+<path d="M48 172H24V620H48" class="edge"/>
+<path d="M408 620H468" class="edge"/>
+<path d="M828 620H888" class="edge"/>
+<path d="M1080 688V776" class="edge"/>
+
+<rect x="48" y="104" width="360" height="136" rx="6" class="node"/>
+<text x="64" y="136" class="label">Validated interactive origin</text>
+<text x="64" y="166" class="note">Native registration or web session proof</text>
+<text x="64" y="194" class="note">Purpose + permission + current scope</text>
+<text x="64" y="222" class="note">Server resolves authoritative identity</text>
+
+<rect x="468" y="104" width="804" height="136" rx="6" class="accent"/>
+<text x="484" y="136" class="label">Durable admission transaction</text>
+<text x="484" y="166" class="note">Recheck current proof, access epoch and retirement fence in the job transaction.</text>
+<text x="484" y="194" class="note">Pin request ID + configuration revision; commit job, task, outbox and origin together.</text>
+<text x="484" y="222" class="note">An accepted receipt follows commit. Exact replay keeps its first captured snapshot.</text>
+
+<rect x="48" y="328" width="360" height="136" rx="6" class="node"/>
+<text x="64" y="360" class="label">Immutable original creator</text>
+<text x="64" y="390" class="note">Create only when a new job is accepted</text>
+<text x="64" y="418" class="note">Keep original source and context snapshot</text>
+<text x="64" y="446" class="note">Config revision + non-secret references</text>
+
+<rect x="468" y="328" width="360" height="136" rx="6" class="node"/>
+<text x="484" y="360" class="label">Causal stages and results</text>
+<text x="484" y="390" class="note">Keep root lineage across stages</text>
+<text x="484" y="418" class="note">Inherit parent origin in child transaction</text>
+<text x="484" y="446" class="note">Legacy / system parents stay unattributed</text>
+
+<rect x="888" y="328" width="384" height="136" rx="6" class="node"/>
+<text x="904" y="360" class="label">Reuse: requester association</text>
+<text x="904" y="390" class="note">No creator overwrite; no invented owner</text>
+<text x="904" y="418" class="note">Associate requester with accepted work</text>
+<text x="904" y="446" class="note">Exact replay retains its original request</text>
+
+<rect x="48" y="552" width="360" height="136" rx="6" class="node"/>
+<text x="64" y="584" class="label">Current activity authority</text>
+<text x="64" y="614" class="note">Revalidate current scope and revocation</text>
+<text x="64" y="642" class="note">Native and browser: workstation</text>
+<text x="64" y="670" class="note">Job filters only narrow membership</text>
+
+<rect x="468" y="552" width="360" height="136" rx="6" class="accent"/>
+<text x="484" y="584" class="label">Membership before projection</text>
+<text x="484" y="614" class="note">Authority + deployment + workstation</text>
+<text x="484" y="642" class="note">Creator / requester; causal descendants</text>
+<text x="484" y="670" class="note">Filter before counts / facets / cursors</text>
+
+<rect x="888" y="552" width="384" height="136" rx="6" class="node"/>
+<text x="904" y="584" class="label">Private detail eligibility</text>
+<text x="904" y="614" class="note">Compatible: detail + permitted actions</text>
+<text x="904" y="642" class="note">Mixed shared work: status only</text>
+<text x="904" y="670" class="note">Recheck export / follow / live / actions</text>
+
+<rect x="468" y="776" width="804" height="112" rx="6" class="node"/>
+<text x="484" y="808" class="label">Jobs / Logs · scoped rows, detail and bounded export</text>
+<text x="484" y="838" class="note">Unrelated system / legacy history stays stored and excluded. No unscoped service feed.</text>
+<text x="484" y="866" class="note">Later folder / IP changes keep history intact. Closing the app leaves accepted jobs running.</text>
+<text x="48" y="924" class="minor">Global backend resources are separate from request origin and workstation activity membership.</text>
+</svg>

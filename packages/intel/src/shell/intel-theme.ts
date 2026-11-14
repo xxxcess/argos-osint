@@ -1,31 +1,38 @@
-/** Intel-only Nexus Desk tokens. The shared Argos/TUI palette is unchanged. */
+/** Matte Fleetworks paint; layout, typography and semantic colors stay separate. */
 export const intelColors = {
-  bg: "#0B0B0C",
-  panel: "#141416",
-  panelRaised: "#1B1B1E",
-  inset: "#0F0F11",
-  scrim: "rgba(8,8,9,0.78)",
-  border: "#26262A",
-  borderStrong: "#34343A",
-  divider: "#1E1E21",
-  text: "#ECECEE",
-  dim: "#B4B4BA",
-  muted: "#85858E",
-  faint: "#84848D",
-  accent: "#5FD39A",
-  accentSoft: "rgba(95,211,154,0.10)",
-  accentBorder: "rgba(95,211,154,0.35)",
-  select: "#7FE0B4",
-  textSelection: "#34343A",
+  bg: "#060709",
+  panel: "#0B0C0F",
+  panelRaised: "#111317",
+  inset: "#060709",
+  scrim: "rgba(6,7,9,0.9)",
+  border: "rgba(243,238,228,0.02)",
+  borderDecorative: "#3A3833",
+  satinControlEdge: "rgba(243,238,228,0.03)",
+  borderStrong: "#898274",
+  divider: "#3A3833",
+  text: "#F3EEE4",
+  dim: "#D6D2C4",
+  muted: "#B8B4A8",
+  faint: "#B8B4A8",
+  accent: "#C6A56E",
+  accentPressed: "#C4A265",
+  accentHover: "#D8BD8C",
+  onAccent: "#060709",
+  selectionSurface: "#322C22",
+  accentSoft: "rgba(198,165,110,0.10)",
+  accentBorder: "rgba(198,165,110,0.75)",
+  select: "#D8BD8C",
+  textSelection: "#322C22",
+  success: "#5FD39A",
   danger: "#F06A8A",
   dangerSoft: "rgba(240,106,138,0.12)",
   cool: "#5AB8F0",
   warning: "#E5B45B",
-  fab: "#2A2F3A",
+  fab: "#111317",
 };
 /** Channel identifiers, not severity, confidence or API-health indicators. */
 export const intelMetricColors = {
-  cpu: intelColors.accent,
+  cpu: "#5FD39A",
   memory: intelColors.cool,
   disk: "#C08CF5",
   network: "#E06AA0",
@@ -33,23 +40,23 @@ export const intelMetricColors = {
 export const intelKindColors = {
   actor: "#FFB347",
   claim: "#21D9EE",
-  inference: "#AD83FF",
-  link: "#FF5C8A",
+  inference: "#B48EFF",
+  link: "#FF6A96",
   location: "#598BFF",
-  article: intelColors.accent,
+  article: "#5FD39A",
   source: "#CAD9F0",
   topic: "#F5EB5D",
 };
 export const intelKindFills = {
   actor: "rgba(255,179,71,0.12)",
   claim: "rgba(33,217,238,0.12)",
-  inference: "rgba(173,131,255,0.14)",
-  link: "rgba(255,92,138,0.14)",
-  focus: "#132433",
+  inference: "rgba(180,142,255,0.14)",
+  link: "rgba(255,106,150,0.14)",
+  focus: intelColors.selectionSurface,
 };
 export const intelEffects = {
-  accentGlow: "0 0 18px rgba(95,211,154,0.35)",
-  cardShadow: "0 8px 24px rgba(0,0,0,0.35)",
+  accentGlow: "none",
+  cardShadow: "none",
 };
 export const intelSpace = {
   unit: 4,
@@ -73,13 +80,14 @@ export const intelType = {
 
 /** Graph-only treatments, matching the evidence topology reference. */
 export const topologyColors = {
-  bg: "#050506",
-  panel: "rgba(18,18,20,0.94)",
-  grid: "rgba(63,83,119,0.09)",
-  axis: "rgba(86,107,140,0.18)",
-  accent: "#00DFB1",
-  edge: "#167C72",
-  labelBg: "rgba(3,10,22,0.94)",
+  bg: "#060709",
+  panel: "#0B0C0F",
+  grid: "rgba(137,130,116,0.09)",
+  axis: "rgba(137,130,116,0.18)",
+  accent: "#C6A56E",
+  edge: "#A79B80",
+  labelBg: "#060709",
+  ghost: "#0B0C0F",
 };
 
 export const intelMotion = {
@@ -97,10 +105,10 @@ export const intelStatus = Object.fromEntries(
     idle: intelColors.muted,
     queued: intelColors.warning,
     running: intelColors.cool,
-    succeeded: intelColors.accent,
+    succeeded: intelColors.success,
     failed: intelColors.danger,
     stale: "#C08CF5",
-  }).map(([state, color]) => [state, { color, glow: `0 0 14px ${color}` }]),
+  }).map(([state, color]) => [state, { color, glow: "none" }]),
 ) as Record<
   "idle" | "queued" | "running" | "succeeded" | "failed" | "stale",
   { color: string; glow: string }

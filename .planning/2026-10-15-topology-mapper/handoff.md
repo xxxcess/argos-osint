@@ -5,8 +5,8 @@ neighborhoods, exact Brain claim-path/actor-group and Intel claim/actor entries,
 inspector/relationships, recenter/history, compact pages and requested dense
 lists. Ordinary list spacing and theme conventions remain intact.
 
-Read the [spec](../../docs/topology-mapper.md) and
-[verification](../../docs/tui-verification-topology-2026-10-15.md). Core ownership
+Read the [spec](../../docs/wiki/concepts/topology-mapper.md) and
+[verification](../../docs/archive/tui-verification-topology-2026-10-15.md). Core ownership
 is `brain_topology{,_query}.rs` / `brain_scope.rs`; TUI ownership is
 `topology{,_layout}.rs`, `app.rs`, `ui.rs`, `components.rs`, `graph.rs` and
 `brain_detail.rs`. The existing topology HTML/SVG is updated. Public DTO/seed

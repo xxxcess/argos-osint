@@ -57,8 +57,8 @@ async fn backfill_indexes_unreceipted_occurrences_within_the_budget() {
     };
     let _serial = classifier_fixture::serial().await;
     let model = classifier_fixture::install();
-    let active_path = model.directory.path().join("classifier/active.json");
-    let active_before = std::fs::read(&active_path).unwrap();
+    let config_path = model.directory.path().join("classifier/zero-shot.json");
+    let config_before = std::fs::read(&config_path).unwrap();
     let repo = server.repo("argos", "brain_backfill").await;
     actor_catalog_fixture::seed_actor_catalog(&repo, &["Jane Doe"]).await;
     bootstrap::ensure_schema(repo.db()).await.unwrap();
@@ -145,8 +145,8 @@ async fn backfill_indexes_unreceipted_occurrences_within_the_budget() {
         "historical rejected row remains readable"
     );
     assert_eq!(
-        std::fs::read(&active_path).unwrap(),
-        active_before,
+        std::fs::read(&config_path).unwrap(),
+        config_before,
         "backfill cannot change the active classifier"
     );
     model.home.shutdown().await.unwrap();

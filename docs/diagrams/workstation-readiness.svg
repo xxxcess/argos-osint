@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" role="img" aria-labelledby="workstation-readiness-title workstation-readiness-desc">
+<title id="workstation-readiness-title">Readiness, CSV inputs and durable native maintenance</title>
+<desc id="workstation-readiness-desc">Readiness is a bounded observation through configured owners, never a download, seed, train, indexing or service startup side effect. Native maintenance checks CSV columns locally before any network request, streams bytes to a gateway-issued URL, then confirms a durable job only after backend validation and staging. Shared database tickets survive gateway restart until five-minute expiry; replicas must also share the durable staging volume. Actor imports add/update stable IDs, retain absent actors and preserve existing/manual aliases. Natural training, activation and verified Rust-BERT inference remain separate facts.</desc>
+<style>text{font-family:Geist,Arial,sans-serif;fill:#242424}.zone{font-size:14px;letter-spacing:1.4px;fill:#666}.label{font-size:20px;font-weight:600}.note{font-size:16px;fill:#555}.small{font-size:14px;fill:#666}.node{fill:#fff;stroke:#aaa;stroke-width:1}.focus{fill:#fff4ee;stroke:#eb6c36;stroke-width:2}.wire{fill:none;stroke:#555;stroke-width:2;marker-end:url(#arrow)}.lane{fill:#fafafa;stroke:#ddd;stroke-width:1}</style>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#555"/></marker></defs>
+<rect width="1200" height="720" fill="#fff"/>
+<text x="40" y="48" class="zone">READ-ONLY OBSERVATIONS · PERMISSION AND FRESHNESS ARE SEPARATE</text><rect x="40" y="88" width="332" height="148" rx="6" class="focus"/>
+<text x="56" y="120" class="label">Workstation Status</text>
+<text x="56" y="152" class="note">Gateway, registration, services</text>
+<text x="56" y="178" class="note">Timestamped readiness checks</text>
+<text x="56" y="204" class="note">Optional API-host metrics</text>
+<rect x="432" y="88" width="332" height="148" rx="6" class="node"/>
+<text x="448" y="120" class="label">Backend-owned observations</text>
+<text x="448" y="152" class="note">Catalog and reader-visible index</text>
+<text x="448" y="178" class="note">Natural candidate vs activation</text>
+<text x="448" y="204" class="note">Rust-BERT inference separately</text>
+<rect x="824" y="88" width="336" height="148" rx="6" class="node"/>
+<text x="840" y="120" class="label">Partial and stale states</text>
+<text x="840" y="152" class="note">Unknown is not zero or success</text>
+<text x="840" y="178" class="note">No work is started by a GET</text>
+<text x="840" y="204" class="note">Optional failure is local to action</text>
+<path d="M 372 160 H 432" class="wire"/>
+<path d="M 764 160 H 824" class="wire"/>
+<text x="40" y="300" class="zone">DB SEED &amp; TRAIN · CSV PICKERS AND DURABLE CONFIRMATION</text><rect x="40" y="344" width="332" height="148" rx="6" class="node"/>
+<text x="56" y="376" class="label">Choose + check locally</text>
+<text x="56" y="408" class="note">Actor or training CSV header</text>
+<text x="56" y="434" class="note">Bounded required-column check</text>
+<text x="56" y="460" class="note">Invalid → no request / worker</text>
+<rect x="432" y="344" width="332" height="148" rx="6" class="focus"/>
+<text x="448" y="376" class="label">Gateway upload worker</text>
+<text x="448" y="408" class="note">Durable ticket → PUT gateway</text>
+<text x="448" y="434" class="note">Recheck schema / hash / size</text>
+<text x="448" y="460" class="note">Shared durable staging volume</text>
+<rect x="824" y="344" width="336" height="148" rx="6" class="node"/>
+<text x="840" y="376" class="label">Confirm → seed / train</text>
+<text x="840" y="408" class="note">Merge IDs / keep prior aliases</text>
+<text x="840" y="434" class="note">Exact revision; fresh 0 is valid</text>
+<text x="840" y="460" class="note">Receipt means queued, not done</text>
+<path d="M 372 416 H 432" class="wire"/>
+<path d="M 764 416 H 824" class="wire"/>
+<path d="M 40 552 H 1160" stroke="#bbb"/><text x="40" y="592" class="label">Completed seed + actors in DB → enable index → wait reader ready</text><text x="40" y="626" class="note">Queued/active reseeding disables index builds. Training creates a candidate without activation.</text>
+<text x="40" y="696" class="small">Focused-page auto-refresh and Refresh checks observe only; they never submit work.</text>
+</svg>

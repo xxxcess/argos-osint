@@ -200,13 +200,12 @@ async fn independent_and_synchronous_schedules_converge_after_shared_source_corr
     };
     let _runtime_serial = fixture::serial().await;
     let installed = tokio::task::spawn_blocking(fixture::install).await.unwrap();
+    let model = installed.home.pin_atlas(None).await.unwrap();
+    let model_id = model.snapshot.model_id.clone();
+    let model_sha256 = model.snapshot.artifact_sha256.clone();
+    let model_manifest_sha256 = model.manifest_sha256.clone();
+    drop(model);
     installed.home.shutdown().await.unwrap();
-    let model_manifest =
-        argos_osint_core::classifier::artifact::ArtifactStore::new(installed.directory.path())
-            .unwrap()
-            .read_active_integrity()
-            .unwrap()
-            .unwrap();
     let sync = server.repo("argos", "synchronous_cohort").await;
     tracing::info!(target:"argos::atlas_derivatives",phase="synchronous_prerequisites","benchmark_marker");
     let (mut sync_rows, sync_collection) = prepare(&sync, installed.directory.path()).await;
@@ -325,6 +324,6 @@ async fn independent_and_synchronous_schedules_converge_after_shared_source_corr
     );
     println!(
         "ARGOS_DERIVATIVE_COHORT {}",
-        json!({"schema_version":"atlas-derivative-cohort-v1","cohort_sha256":cohort_sha256,"model_payload_sha256":model_manifest.model_sha256,"model_report_sha256":model_manifest.report_sha256,"source_manifest_sha256":argos_osint_core::classifier::compiled_identity().unwrap().source_manifest_sha256,"occurrences":3,"shared_actor_occurrences":2,"zero_actor_occurrences":1,"baseline":"current synchronous compatibility processors; shared metadata/Related prerequisites","synchronous_collection_handoff_ms":sync_collection,"asynchronous_collection_handoff_ms":async_collection,"synchronous_post_prerequisites_ready_ms":synchronous_publish_reconcile_ms,"asynchronous_post_prerequisites":asynchronous_timing,"correction":correction,"note":"Scheduler eligibility clock advanced equally for deterministic tests; not a production end-to-end speedup or loaded publisher-contention measurement"})
+        json!({"schema_version":"atlas-derivative-cohort-v1","cohort_sha256":cohort_sha256,"model_id":model_id,"model_bundle_sha256":model_sha256,"model_manifest_sha256":model_manifest_sha256,"scorer":"offline_worker_protocol_fixture","occurrences":3,"shared_actor_occurrences":2,"zero_actor_occurrences":1,"baseline":"current synchronous compatibility processors; shared metadata/Related prerequisites","synchronous_collection_handoff_ms":sync_collection,"asynchronous_collection_handoff_ms":async_collection,"synchronous_post_prerequisites_ready_ms":synchronous_publish_reconcile_ms,"asynchronous_post_prerequisites":asynchronous_timing,"correction":correction,"note":"Scheduler eligibility clock advanced equally for deterministic tests; not a production end-to-end speedup or loaded publisher-contention measurement"})
     );
 }

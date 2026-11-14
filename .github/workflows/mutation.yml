@@ -1,9 +1,9 @@
-name: Scoped Rust mutation testing
+name: Mutation diagnostics
 
-# Expensive diagnostic gate: dispatch after the ordinary embedded checks pass.
+# Expensive diagnostic. Dispatch it after the embedded run you want to interpret:
+#   gh workflow run mutation.yml --ref <branch>
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read

@@ -1,4 +1,4 @@
-//! Real local scoring and fenced publication for current-admission fixtures.
+//! Live protocol scoring and fenced publication for current-admission fixtures.
 use std::path::Path;
 use std::sync::Arc;
 
@@ -39,18 +39,28 @@ pub async fn publish(
     let existing = argos_osint_core::storage::atlas::list_runs(repo.db())
         .await
         .unwrap()
-        .iter()
-        .any(|run| run.id == *run_id);
-    let selected = home.pin(None).await.unwrap();
-    let requirement = if existing {
-        CycleRequirement::AcquisitionAndAdmission
-    } else {
-        CycleRequirement::FreshAcquisition
-    };
-    let permit = readiness::preflight_cycle(&home, requirement, Some(&selected.snapshot))
+        .into_iter()
+        .find(|run| &run.id == run_id);
+    let permit = if let Some(existing) = &existing {
+        let saved = serde_json::from_str::<RunStats>(&existing.stats_json)
+            .ok()
+            .and_then(|stats| stats.classifier_snapshot);
+        let snapshot = match saved {
+            Some(snapshot) => snapshot,
+            None => home.pin_atlas(None).await.unwrap().snapshot,
+        };
+        readiness::preflight_cycle(
+            &home,
+            CycleRequirement::AcquisitionAndAdmission,
+            Some(&snapshot),
+        )
         .await
-        .unwrap();
-    drop(selected);
+        .unwrap()
+    } else {
+        readiness::preflight_cycle(&home, CycleRequirement::FreshAcquisition, None)
+            .await
+            .unwrap()
+    };
     let pin = permit.pinned().unwrap().clone();
     let model_home = model_home.to_path_buf();
     let context = tokio::task::spawn_blocking(move || AdmissionContext::load(&model_home, pin))
@@ -66,7 +76,7 @@ pub async fn publish(
     let now = chrono::Utc::now();
     let revision = admission::run_revision(repo, run_id).await.unwrap();
     let request = StartRunRequest::fresh(run_id, "local-fixture", &cursor, &stats, now);
-    let request = if existing {
+    let request = if existing.is_some() {
         request.resume(revision.revision, revision.work_generation)
     } else {
         request

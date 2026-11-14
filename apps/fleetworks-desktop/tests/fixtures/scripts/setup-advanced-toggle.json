@@ -1,0 +1,9 @@
+{
+  "events": [
+    {
+      "t": 0.2,
+      "type": "click",
+      "key": "setup-advanced-toggle"
+    }
+  ]
+}

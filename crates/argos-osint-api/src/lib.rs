@@ -1,9 +1,37 @@
 //! Versioned local Intel HTTP adapter. @tag:intel-brief
+mod activity;
+mod activity_actions;
+mod activity_paging;
 mod actor_dossier;
+mod actor_search;
+mod admission;
+mod brain;
+pub mod classifier_activation;
+mod configuration;
+pub mod configuration_reset;
+mod connect;
+mod context_boundary;
+mod control;
+mod cycle_history;
+pub mod datasets;
 mod host_metrics;
+mod jobs_api;
 mod live;
+mod maintenance;
+mod network;
+mod operational_logs;
+mod operations;
+mod pairing;
+mod private_relay;
+mod request_context;
+mod request_reconciliation;
+#[cfg(test)]
+#[path = "../../argos-osint-core/tests/support/mod.rs"]
+mod storage_test_support;
+mod tools;
 mod topology_summary;
 mod topology_web;
+pub mod workstation;
 
 use argos_osint_core::{
     intel_service as intel,
@@ -11,15 +39,37 @@ use argos_osint_core::{
 };
 use axum::{
     extract::{DefaultBodyLimit, Query, Request, State},
-    http::{HeaderValue, Method, StatusCode},
+    http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
+use fleetworks_contracts::{AtlasCycleReceipt, ATLAS_CYCLES_PATH};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::future::Future;
+use std::sync::OnceLock;
 use std::{sync::Arc, time::Duration};
+use tokio::sync::Semaphore;
+
+pub use actor_search::SearchClient;
+pub use brain::BrainClient;
+pub use control::ControlClient;
+pub use jobs_api::JobsClient;
+pub use network::AuthenticatedPrincipal;
+pub use network::ScopedCredential;
+pub use network::{network_origin, NetworkPolicy};
+pub use tools::ToolsClient;
+
+const MAX_REQUEST_BYTES: usize = 16 * 1024;
+
+// The only library fixtures that provision process-global configuration roots
+// share this guard. Separate integration binaries own independent environments.
+#[cfg(test)]
+static CONFIGURATION_TEST_ENVIRONMENT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+use network::{AccessMode, AccessPolicy};
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -44,39 +94,338 @@ pub fn loopback_url(raw: &str) -> anyhow::Result<url::Url> {
     Ok(u)
 }
 
+/// Serves the existing unauthenticated loopback API.
 pub fn router(state: ApiState) -> Router {
+    router_with_access(state, None, PrivateServices::default())
+}
+
+/// Serves public routes and authenticated job controls with explicit ingress restrictions.
+pub fn network_router(state: ApiState, policy: NetworkPolicy) -> Router {
+    router_with_access(state, Some(policy), PrivateServices::default())
+}
+
+/// Serves the public API and sends Brain and Intel HTTP operations to a private service.
+pub fn network_router_with_brain(
+    state: ApiState,
+    policy: NetworkPolicy,
+    brain: BrainClient,
+) -> Router {
+    network_router_with_services(state, policy, Some(brain), None)
+}
+
+/// Serve public routes and forward configured service operations privately.
+pub fn network_router_with_services(
+    state: ApiState,
+    policy: NetworkPolicy,
+    brain: Option<BrainClient>,
+    tools: Option<ToolsClient>,
+) -> Router {
+    network_router_with_private_services(
+        state,
+        policy,
+        PrivateServices::new(brain, tools, None, None),
+    )
+}
+
+/// Optional private service clients for the authenticated gateway.
+#[derive(Default)]
+pub struct PrivateServices {
+    brain: Option<BrainClient>,
+    tools: Option<ToolsClient>,
+    control: Option<ControlClient>,
+    jobs: Option<JobsClient>,
+    search: Option<SearchClient>,
+    readiness: Option<workstation::ReadinessOwners>,
+    datasets: Option<datasets::DatasetStore>,
+    activation: Option<Arc<classifier_activation::ActivationArtifacts>>,
+}
+
+impl PrivateServices {
+    /// Construct a gateway service map. Absent clients use local route handlers.
+    pub fn new(
+        brain: Option<BrainClient>,
+        tools: Option<ToolsClient>,
+        control: Option<ControlClient>,
+        jobs: Option<JobsClient>,
+    ) -> Self {
+        Self {
+            brain,
+            tools,
+            control,
+            jobs,
+            search: None,
+            readiness: None,
+            datasets: None,
+            activation: None,
+        }
+    }
+
+    pub fn with_search(mut self, search: SearchClient) -> Self {
+        self.search = Some(search);
+        self
+    }
+
+    /// Bind the actual server-owned Natural artifact store at startup.
+    pub fn with_activation_artifacts(
+        mut self,
+        artifacts: classifier_activation::ActivationArtifacts,
+    ) -> Self {
+        self.activation = Some(Arc::new(artifacts));
+        self
+    }
+
+    pub fn with_workstation(
+        mut self,
+        readiness: workstation::ReadinessOwners,
+        datasets: datasets::DatasetStore,
+    ) -> Self {
+        self.readiness = Some(readiness);
+        self.datasets = Some(datasets);
+        self
+    }
+}
+
+/// Serve public REST routes and forward configured private service operations.
+pub fn network_router_with_private_services(
+    state: ApiState,
+    policy: NetworkPolicy,
+    services: PrivateServices,
+) -> Router {
+    router_with_access(state, Some(policy), services)
+}
+
+/// Serves the private Brain and Intel HTTP operations with storage-backed readiness.
+pub fn brain_router(state: ApiState, policy: NetworkPolicy) -> Router {
+    private_router(
+        state,
+        policy,
+        brain::routes().route("/api/v1/health/ready", get(brain::ready)),
+    )
+}
+
+/// Serve private Tools operations with storage-backed readiness.
+pub fn tools_router(state: ApiState, policy: NetworkPolicy) -> Router {
+    private_router(
+        state,
+        policy,
+        tools::routes().route("/api/v1/health/ready", get(tools::ready)),
+    )
+}
+
+/// Serve the private workspace Control operations.
+pub fn control_router(state: ApiState, policy: NetworkPolicy) -> Router {
+    private_router(
+        state,
+        policy,
+        control::routes().route("/api/v1/health/ready", get(control::ready)),
+    )
+}
+
+/// Serve the private Jobs REST operations.
+pub fn jobs_router(state: ApiState, policy: NetworkPolicy) -> Router {
+    private_router(
+        state,
+        policy,
+        jobs_api::routes().route("/api/v1/health/ready", get(jobs_api::ready)),
+    )
+}
+
+fn private_router(state: ApiState, policy: NetworkPolicy, routes: Router<ApiState>) -> Router {
+    let port = state.port;
+    let router = routes
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            context_boundary::private,
+        ))
+        .layer(axum::Extension(AccessMode::Bearer))
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
+        .layer(middleware::from_fn(request_timeout))
+        .with_state(state);
+    guard_network(router, policy, Arc::new(Vec::new()), port)
+}
+
+/// Apply the same host, origin and bearer policy to a private service router.
+pub fn guard_network(
+    router: Router,
+    policy: NetworkPolicy,
+    origins: Arc<Vec<String>>,
+    port: u16,
+) -> Router {
+    router.layer(middleware::from_fn_with_state(
+        AccessPolicy {
+            port,
+            origins,
+            network: Some(policy),
+            pairing_repo: None,
+        },
+        network::protect,
+    ))
+}
+
+fn router_with_access(
+    state: ApiState,
+    network: Option<NetworkPolicy>,
+    services: PrivateServices,
+) -> Router {
+    let mode = if network.is_some() {
+        AccessMode::Bearer
+    } else {
+        AccessMode::Loopback
+    };
+    let access = AccessPolicy {
+        port: state.port,
+        origins: state.origins.clone(),
+        network,
+        pairing_repo: Some(state.repo.clone()),
+    };
     let sampler = Arc::new(std::sync::Mutex::new(host_metrics::HostSampler::default()));
     let feed = Arc::new(host_metrics::HostFeed::new(sampler.clone()));
-    Router::new()
+    let brain_routes = if mode == AccessMode::Bearer {
+        brain::routes()
+    } else {
+        brain::operator_routes()
+    };
+    let brain_routes = if let Some(brain) = services.brain {
+        brain_routes.route_layer(middleware::from_fn_with_state(brain, brain::forward))
+    } else {
+        brain_routes
+    };
+    let router = Router::new()
         .route("/api/v1/health/ready", get(ready))
         .route("/api/v1/capabilities", get(capabilities))
         .route("/api/v1/host/metrics", get(host_metrics::read))
         .route("/api/v1/live", get(live::upgrade))
         .route("/api/v1/days", get(days))
-        .route("/api/v1/actors/detail", get(actor_dossier::read))
         .route("/api/v1/articles", get(articles))
         .route("/api/v1/articles/search", get(article_search))
         .route("/api/v1/articles/counts", get(article_counts))
-        .route("/api/v1/articles/detail", get(detail))
-        .route("/api/v1/articles/related", get(related))
-        .route("/api/v1/brief/ensure", post(ensure))
-        .route("/api/v1/brief/reload", post(reload))
-        .route("/api/v1/brief/stages", get(stages))
-        .route("/api/v1/jobs", get(jobs))
-        .route("/api/v1/jobs/detail", get(job))
-        .route("/api/v1/jobs/retry", post(retry))
-        .route("/api/v1/topology", get(topology_web::read).post(topology))
-        .route("/api/v1/topology/resolve", post(topology_web::resolve))
-        .route("/api/v1/topology/summary", get(topology_summary::read))
-        .route(
-            "/api/v1/topology/summary/generate",
-            post(topology_summary::generate),
-        )
+        .merge(brain_routes);
+    let router = if mode == AccessMode::Bearer {
+        let tools_routes = tools::routes();
+        let tools_routes = if let Some(tools) = services.tools {
+            tools_routes.route_layer(middleware::from_fn_with_state(tools, tools::forward))
+        } else {
+            tools_routes
+        };
+        let control_routes = control::routes();
+        let control_routes = if let Some(control) = services.control {
+            control_routes.route_layer(middleware::from_fn_with_state(control, control::forward))
+        } else {
+            control_routes
+        };
+        let jobs_routes = jobs_api::routes();
+        let jobs_routes = if let Some(jobs) = services.jobs {
+            jobs_routes.route_layer(middleware::from_fn_with_state(jobs, jobs_api::forward))
+        } else {
+            jobs_routes
+        };
+        router
+            .merge(pairing::routes())
+            .merge(configuration_reset::routes())
+            .merge(classifier_activation::routes())
+            .route(
+                ATLAS_CYCLES_PATH,
+                get(cycle_history::list).post(operations::submit_atlas_cycle),
+            )
+            .route(
+                fleetworks_contracts::cycle_history::CYCLE_HISTORY_DELETE_PATH,
+                post(cycle_history::delete),
+            )
+            .route("/api/v1/workstation/readiness", get(workstation::read))
+            .route(
+                "/api/v1/workstation/requests/detail",
+                get(request_reconciliation::read),
+            )
+            .route("/api/v1/workstation/datasets", get(datasets::list))
+            .route(
+                fleetworks_contracts::dataset_upload::DATASET_UPLOADS_PATH,
+                post(datasets::create_upload),
+            )
+            .route(
+                "/api/v1/workstation/datasets/uploads/{id}",
+                axum::routing::put(datasets::put_upload).layer(DefaultBodyLimit::disable()),
+            )
+            .route(
+                "/api/v1/workstation/datasets/upload",
+                post(datasets::upload).layer(DefaultBodyLimit::disable()),
+            )
+            .route(
+                "/api/v1/workstation/maintenance/seed-actors",
+                post(maintenance::seed),
+            )
+            .route(
+                "/api/v1/workstation/maintenance/train-classifier",
+                post(maintenance::train),
+            )
+            .route(
+                fleetworks_contracts::search::ACTOR_REINDEX_PATH,
+                post(maintenance::reindex),
+            )
+            .route(
+                "/api/v1/connect/registrations/ensure",
+                post(connect::ensure),
+            )
+            .route(
+                "/api/v1/connect/registrations/rebind",
+                post(connect::rebind),
+            )
+            .route(
+                "/api/v1/connect/registrations/retire",
+                post(connect::retire),
+            )
+            .route(
+                "/api/v1/connect/registrations/context",
+                post(connect::registration_context),
+            )
+            .route("/api/v1/connect/sessions", post(connect::create_session))
+            .route(
+                "/api/v1/connect/sessions/resolve",
+                post(connect::resolve_session),
+            )
+            .route(
+                "/api/v1/connect/sessions/logout",
+                post(connect::logout_session),
+            )
+            .merge(tools_routes)
+            .merge(control_routes)
+            .merge(jobs_routes)
+    } else {
+        router
+            .route("/api/v1/tools", get(operations::tools))
+            .merge(control::read_routes())
+            .merge(jobs_api::read_and_retry_routes())
+    };
+    let router = if let Some(search) = services.search {
+        router.layer(axum::Extension(search))
+    } else {
+        router
+    };
+    let router = if let Some(readiness) = services.readiness {
+        router.layer(axum::Extension(readiness))
+    } else {
+        router
+    };
+    let router = if let Some(activation) = services.activation {
+        router.layer(axum::Extension(activation))
+    } else {
+        router
+    };
+    let router = if let Some(datasets) = services.datasets {
+        router.layer(axum::Extension(datasets))
+    } else {
+        router
+    };
+    router
         .layer(axum::Extension(sampler))
         .layer(axum::Extension(feed))
-        .layer(DefaultBodyLimit::max(16 * 1024))
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
         .layer(middleware::from_fn(request_timeout))
-        .layer(middleware::from_fn_with_state(state.clone(), protect))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            context_boundary::gateway,
+        ))
+        .layer(axum::Extension(mode))
+        .layer(middleware::from_fn_with_state(access, network::protect))
         .with_state(state)
 }
 
@@ -84,7 +433,18 @@ async fn request_timeout(request: Request, next: Next) -> Response {
     // A read queued behind a running brief still has to return. 45s covers
     // that wait; the web client waits longer so it receives this JSON timeout
     // instead of aborting with "signal timed out".
-    match tokio::time::timeout(Duration::from_secs(45), next.run(request)).await {
+    let timeout = if request.uri().path() == "/api/v1/workstation/datasets/upload"
+        || (request.method() == axum::http::Method::PUT
+            && request
+                .uri()
+                .path()
+                .starts_with("/api/v1/workstation/datasets/uploads/"))
+    {
+        Duration::from_secs(600)
+    } else {
+        Duration::from_secs(45)
+    };
+    match tokio::time::timeout(timeout, next.run(request)).await {
         Ok(response) => response,
         Err(_) => (
             StatusCode::REQUEST_TIMEOUT,
@@ -118,98 +478,259 @@ fn missing() -> ApiError {
     ApiError(StatusCode::NOT_FOUND, "Resource not found")
 }
 
-async fn protect(State(s): State<ApiState>, request: Request, next: Next) -> Response {
-    let host = request
-        .headers()
-        .get("host")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if host != format!("127.0.0.1:{}", s.port)
-        && host != format!("localhost:{}", s.port)
-        && !(s.port == 80 && matches!(host, "127.0.0.1" | "localhost"))
-    {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "Host refused"})),
-        )
-            .into_response();
-    }
-    let origin = request.headers().get("origin").cloned();
-    if let Some(o) = &origin {
-        if !s
-            .origins
-            .iter()
-            .any(|allowed| o.as_bytes() == allowed.as_bytes())
-        {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(json!({"error": "Origin refused"})),
-            )
-                .into_response();
-        }
-    }
-    if request
-        .headers()
-        .get("sec-fetch-site")
-        .is_some_and(|v| v == "cross-site")
-        && origin.is_none()
-    {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "Origin required"})),
-        )
-            .into_response();
-    }
-
-    let mut response = if request.method() == Method::OPTIONS {
-        StatusCode::NO_CONTENT.into_response()
-    } else {
-        next.run(request).await
-    };
-    let h = response.headers_mut();
-    h.insert("cache-control", HeaderValue::from_static("no-store"));
-    h.insert(
-        "x-content-type-options",
-        HeaderValue::from_static("nosniff"),
-    );
-    h.insert("vary", HeaderValue::from_static("Origin"));
-    if let Some(o) = origin {
-        h.insert("access-control-allow-origin", o);
-        h.insert(
-            "access-control-allow-methods",
-            HeaderValue::from_static("GET, POST, OPTIONS"),
-        );
-        h.insert(
-            "access-control-allow-headers",
-            HeaderValue::from_static("content-type"),
-        );
-    }
-    response
-}
-
 async fn ready(State(s): State<ApiState>) -> ApiResult {
-    // Each probe reaches storage, including after startup. TCP alone is insufficient.
-    let mut response = s
-        .repo
-        .db()
-        .query("SELECT VALUE version FROM ONLY storage_meta:schema")
-        .await
-        .map_err(internal)?
-        .check()
-        .map_err(internal)?;
-    let version: Option<i64> = response.take(0).map_err(internal)?;
-    if version != Some(storage::bootstrap::SCHEMA_VERSION) {
-        return Err(internal("schema readiness failed"));
-    }
+    storage_ready(&s.repo).await?;
     Ok(Json(
         json!({"service":"argos-intel","api_version":1,"ready":true,"storage":true,"instance_id":s.instance_id}),
     ))
 }
-async fn capabilities() -> Json<Value> {
-    Json(
-        json!({"api_version":1,"categories":intel::CATEGORIES,"auth":false,"features":["bulletin","brief","related","jobs","topology","live","article-search"],"live":{"path":"/api/v1/live","channels":["metrics","brief"],"version":1}}),
-    )
+
+async fn private_ready(state: ApiState, service: &'static str) -> ApiResult {
+    storage_ready(&state.repo).await?;
+    Ok(Json(json!({
+        "service": service, "api_version": 1, "ready": true,
+        "storage": true, "instance_id": state.instance_id,
+    })))
 }
+
+const MAX_DETACHED_QUERIES: usize = 32;
+
+fn detached_query_semaphore() -> &'static Arc<Semaphore> {
+    static SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    SEMAPHORE.get_or_init(|| Arc::new(Semaphore::new(MAX_DETACHED_QUERIES)))
+}
+
+/// Runs a datastore future on a bounded detached task so outer request cancellation
+/// or disconnect drains the SurrealDB channel instead of dropping it mid-flight.
+pub(crate) async fn run_shielded<F, T>(future: F) -> Result<T, ApiError>
+where
+    F: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let permit = detached_query_semaphore()
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(internal)?;
+    tokio::spawn(async move {
+        let _permit = permit;
+        future.await
+    })
+    .await
+    .map_err(internal)
+}
+
+/// Runs a datastore future with a deadline on a bounded detached task, returning `None`
+/// on timeout while letting the spawned task finish draining the SurrealDB reply.
+pub(crate) async fn run_shielded_timeout<F, T>(deadline: Duration, future: F) -> Option<T>
+where
+    F: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::time::timeout(deadline, async move {
+        let permit = detached_query_semaphore()
+            .clone()
+            .acquire_owned()
+            .await
+            .ok()?;
+        tokio::spawn(async move {
+            let _permit = permit;
+            future.await
+        })
+        .await
+        .ok()
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+async fn storage_ready(repo: &Repository) -> Result<(), ApiError> {
+    let repo = repo.clone();
+    run_shielded(async move {
+        // Each probe reaches storage, including after startup. TCP alone is insufficient.
+        let mut response = repo
+            .db()
+            .query("SELECT VALUE version FROM ONLY storage_meta:schema")
+            .await
+            .map_err(internal)?
+            .check()
+            .map_err(internal)?;
+        let version: Option<i64> = response.take(0).map_err(internal)?;
+        if version != Some(storage::bootstrap::SCHEMA_VERSION) {
+            return Err(internal("schema readiness failed"));
+        }
+        Ok(())
+    })
+    .await?
+}
+async fn capabilities(
+    State(state): State<ApiState>,
+    axum::Extension(mode): axum::Extension<AccessMode>,
+    principal: Option<axum::Extension<AuthenticatedPrincipal>>,
+) -> ApiResult {
+    let mut features = vec![
+        "bulletin",
+        "brief",
+        "related",
+        "jobs",
+        "topology",
+        "live",
+        "article-search",
+        "logs",
+        "tools",
+        "model-defaults",
+        "profile",
+    ];
+    if mode == AccessMode::Bearer {
+        use fleetworks_contracts::capabilities;
+        let Some(axum::Extension(principal)) = principal else {
+            return Err(ApiError(
+                StatusCode::UNAUTHORIZED,
+                "Purpose-scoped credential required",
+            ));
+        };
+        let deployment = storage::connect_registry::deployment_state(&state.repo)
+            .await
+            .map_err(internal)?;
+        features.extend([
+            capabilities::CONNECT_REGISTRY_FEATURE,
+            "workstation-readiness",
+            "dataset-upload",
+            "profile-management",
+            "actor-discovery",
+        ]);
+        for (pool, feature) in [
+            (storage::job_dispatch::ATLAS_POOL, "atlas-cycles"),
+            (
+                argos_osint_core::osint::manual::TOOLS_POOL,
+                "tool-execution",
+            ),
+        ] {
+            let mut result = state
+                .repo
+                .db()
+                .query("SELECT VALUE enabled FROM ONLY type::record('job_dispatch_pool',$pool)")
+                .bind(("pool", pool.to_owned()))
+                .await
+                .map_err(internal)?
+                .check()
+                .map_err(internal)?;
+            if result.take::<Option<bool>>(0).map_err(internal)? == Some(true) {
+                features.push(feature);
+            }
+        }
+        let mut response = capabilities::Capabilities::default();
+        response.categories = intel::CATEGORIES
+            .iter()
+            .map(|category| (*category).to_owned())
+            .collect();
+        response.auth = true;
+        response.features = features.into_iter().map(str::to_owned).collect();
+        response.instance_id = Some(state.instance_id);
+        response.deployment_id = Some(deployment.deployment_id);
+        response.configuration_epoch = Some(deployment.configuration_epoch);
+        response.connect = Some(capabilities::ConnectCapabilities::default());
+        response
+            .features
+            .push("workstation-cycle-history-v1".into());
+        response.workspace_control = Some(capabilities::WorkspaceControlCapabilities::default());
+        response.resource_scopes = Some(capabilities::ResourceScopes::default());
+        response.permissions = principal.permissions().collect();
+        response.live = Some(capabilities::LiveCapabilities::new(
+            "/api/v1/live".into(),
+            vec!["metrics".into(), "brief".into()],
+            1,
+        ));
+        let mut search = capabilities::SearchCapabilities::default();
+        search.actors = Some(capabilities::ActorSearchCapabilities::default());
+        response.search = Some(search);
+        let web_url = std::env::var("FLEETWORKS_INTEL_WEB_URL").ok();
+        response.links.intel_web = public_intel_web_links(web_url.as_deref()).map_err(internal)?;
+        return Ok(Json(serde_json::to_value(response).map_err(internal)?));
+    }
+    Ok(Json(
+        json!({"api_version":1,"categories":intel::CATEGORIES,"auth":mode == AccessMode::Bearer,"features":features,"live":{"path":"/api/v1/live","channels":["metrics","brief"],"version":1}}),
+    ))
+}
+
+fn public_intel_web_links(
+    raw: Option<&str>,
+) -> Result<Option<fleetworks_contracts::capabilities::IntelWebLinks>, &'static str> {
+    let Some(raw) = raw.filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let mut web = url::Url::parse(raw).map_err(|_| "invalid public Intel Web URL")?;
+    let loopback = web.host_str().is_some_and(|host| {
+        host == "localhost"
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    });
+    if web.host().is_none()
+        || !(web.scheme() == "https" || web.scheme() == "http" && loopback)
+        || !web.username().is_empty()
+        || web.password().is_some()
+        || web.query().is_some()
+        || web.fragment().is_some()
+    {
+        return Err("unsafe public Intel Web URL");
+    }
+    let base = web.to_string();
+    let path = format!("{}/connect", web.path().trim_end_matches('/'));
+    web.set_path(&path);
+    Ok(Some(
+        fleetworks_contracts::capabilities::IntelWebLinks::new(base, web.to_string()),
+    ))
+}
+
+#[cfg(test)]
+mod capability_link_tests {
+    use super::public_intel_web_links;
+
+    #[test]
+    fn absent_or_empty_optional_web_url_omits_the_link() {
+        for raw in [None, Some("")] {
+            assert_eq!(public_intel_web_links(raw), Ok(None));
+        }
+    }
+
+    #[test]
+    fn configured_web_url_preserves_base_and_connect_destinations() {
+        for (raw, base, connect) in [
+            (
+                "http://127.0.0.1:3000",
+                "http://127.0.0.1:3000/",
+                "http://127.0.0.1:3000/connect",
+            ),
+            (
+                "https://intel.example.test/app/",
+                "https://intel.example.test/app/",
+                "https://intel.example.test/app/connect",
+            ),
+        ] {
+            let links = public_intel_web_links(Some(raw)).unwrap().unwrap();
+            assert_eq!(links.url, base);
+            assert_eq!(links.connect_url, connect);
+        }
+    }
+
+    #[test]
+    fn nonempty_malformed_or_unsafe_web_url_is_rejected() {
+        for raw in [
+            " ",
+            "not a URL",
+            "http://intel.example.test",
+            "https://user:secret@intel.example.test",
+            "https://intel.example.test?token=secret",
+            "https://intel.example.test#fragment",
+            "file:///tmp/intel",
+        ] {
+            assert!(public_intel_web_links(Some(raw)).is_err(), "accepted {raw}");
+        }
+    }
+}
+
 async fn days(State(s): State<ApiState>) -> ApiResult {
     Ok(Json(
         json!({"days":storage::atlas::run_days(s.repo.db()).await.map_err(internal)?,"categories":intel::CATEGORIES}),
@@ -296,11 +817,50 @@ async fn related(State(s): State<ApiState>, Query(k): Query<RelatedKey>) -> ApiR
             .map_err(internal)?,
     ))
 }
-async fn ensure(State(s): State<ApiState>, Json(k): Json<ArticleKey>) -> ApiResult {
-    let a = load(&s, &k).await?;
-    Ok(Json(
-        json!({"job_id":intel::ensure_brief(&s.repo, &a).await.map_err(internal)?}),
-    ))
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EnsureKey {
+    run: String,
+    id: String,
+    request_id: Option<String>,
+}
+async fn ensure(
+    State(s): State<ApiState>,
+    context: Option<axum::Extension<request_context::ResolvedRequest>>,
+    Json(k): Json<EnsureKey>,
+) -> ApiResult {
+    let a = load(
+        &s,
+        &ArticleKey {
+            run: k.run,
+            id: k.id,
+        },
+    )
+    .await?;
+    let job_id = if let Some(axum::Extension(context)) = context {
+        let request_id = k.request_id.unwrap_or_else(argos_osint_core::store::new_id);
+        let (admission, settings, auth) =
+            admission::capture_with_configuration(&context, &request_id).await?;
+        if let Some(job) = admission
+            .replay_job(&s.repo, "intel_brief")
+            .await
+            .map_err(internal)?
+        {
+            job
+        } else {
+            let inputs =
+                storage::brief_stages::inputs_for_article_with_auth(&s.repo, &a, &settings, &auth)
+                    .await
+                    .map_err(internal)?;
+            storage::brief_stages::ensure_interactive(&s.repo, &inputs, &admission)
+                .await
+                .map_err(internal)?
+                .job_id
+        }
+    } else {
+        intel::ensure_brief(&s.repo, &a).await.map_err(internal)?
+    };
+    Ok(Json(json!({"job_id":job_id})))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -309,7 +869,11 @@ struct ReloadKey {
     id: String,
     request_id: String,
 }
-async fn reload(State(s): State<ApiState>, Json(k): Json<ReloadKey>) -> ApiResult {
+async fn reload(
+    State(s): State<ApiState>,
+    context: Option<axum::Extension<request_context::ResolvedRequest>>,
+    Json(k): Json<ReloadKey>,
+) -> ApiResult {
     if !(8..=128).contains(&k.request_id.len())
         || !k
             .request_id
@@ -326,9 +890,38 @@ async fn reload(State(s): State<ApiState>, Json(k): Json<ReloadKey>) -> ApiResul
         },
     )
     .await?;
-    Ok(Json(
-        json!({"job_id":intel::reload_brief(&s.repo, &a, &k.request_id).await.map_err(internal)?}),
-    ))
+    let job_id = if let Some(axum::Extension(context)) = context {
+        let (admission, settings, auth) =
+            admission::capture_with_configuration(&context, &k.request_id).await?;
+        if let Some(job) = admission
+            .replay_job(&s.repo, "intel_brief")
+            .await
+            .map_err(internal)?
+        {
+            job
+        } else {
+            let mut inputs =
+                storage::brief_stages::inputs_for_article_with_auth(&s.repo, &a, &settings, &auth)
+                    .await
+                    .map_err(internal)?;
+            inputs.input_revision = format!(
+                "{}:reload:{}:{}",
+                inputs.input_revision,
+                admission.context().registration_id,
+                k.request_id
+            );
+            inputs.stage_revisions.clear();
+            storage::brief_stages::ensure_interactive(&s.repo, &inputs, &admission)
+                .await
+                .map_err(internal)?
+                .job_id
+        }
+    } else {
+        intel::reload_brief(&s.repo, &a, &k.request_id)
+            .await
+            .map_err(internal)?
+    };
+    Ok(Json(json!({"job_id":job_id})))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -368,11 +961,39 @@ async fn job(State(s): State<ApiState>, Query(k): Query<JobKey>) -> ApiResult {
         json!({"job":row,"stages":safe_stages(&s.repo, &k.id).await?}),
     ))
 }
-async fn retry(State(s): State<ApiState>, Json(k): Json<JobKey>) -> ApiResult {
+async fn retry(
+    State(s): State<ApiState>,
+    axum::Extension(mode): axum::Extension<AccessMode>,
+    context: Option<axum::Extension<request_context::ResolvedRequest>>,
+    Json(k): Json<JobKey>,
+) -> ApiResult {
     validate_job(&k)?;
-    Ok(Json(
-        json!({"requeued":storage::jobs_view::retry_failed_tasks(s.repo.db(), &k.id).await.map_err(internal)?}),
-    ))
+    if context.is_some() {
+        return Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Durable scoped retry is not enabled",
+        ));
+    }
+    let requeued = if let Some(cycle) = AtlasCycleReceipt::from_job_id(&k.id) {
+        if mode != AccessMode::Bearer {
+            return Err(missing());
+        }
+        usize::from(
+            storage::job_dispatch::retry_failed_atlas(
+                s.repo.db(),
+                &cycle.job_id,
+                &cycle.task_id(),
+                chrono::Utc::now(),
+            )
+            .await
+            .map_err(internal)?,
+        )
+    } else {
+        storage::jobs_view::retry_failed_tasks(s.repo.db(), &k.id)
+            .await
+            .map_err(internal)?
+    };
+    Ok(Json(json!({"requeued":requeued})))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -405,4 +1026,106 @@ async fn safe_stages(
         row.detail = argos_osint_core::provider_diag::sanitize(&row.detail);
     }
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::sync::{oneshot, Mutex, Notify};
+
+    static SHIELD_TEST_LOCK: Mutex<()> = Mutex::const_new(());
+
+    #[tokio::test]
+    async fn run_shielded_drains_and_releases_permit_when_outer_future_drops() {
+        let _guard = SHIELD_TEST_LOCK.lock().await;
+        let baseline = detached_query_semaphore().available_permits();
+        assert_eq!(baseline, MAX_DETACHED_QUERIES);
+
+        let started = Arc::new(Notify::new());
+        let gate = Arc::new(Notify::new());
+        let completed = Arc::new(AtomicBool::new(false));
+        let (done_tx, done_rx) = oneshot::channel::<()>();
+
+        let started_task = started.clone();
+        let gate_task = gate.clone();
+        let completed_task = completed.clone();
+        let timed = tokio::time::timeout(
+            Duration::from_millis(20),
+            run_shielded(async move {
+                started_task.notify_one();
+                gate_task.notified().await;
+                completed_task.store(true, Ordering::SeqCst);
+                let _ = done_tx.send(());
+                7u32
+            }),
+        );
+        tokio::pin!(timed);
+
+        let started_fut = started.notified();
+        tokio::pin!(started_fut);
+        // Wait until the spawned task has started holding the permit, then let timeout expire.
+        let outcome = tokio::select! {
+            res = &mut timed => res,
+            () = &mut started_fut => timed.await,
+        };
+        assert!(outcome.is_err(), "outer future should time out");
+        assert!(
+            !completed.load(Ordering::SeqCst),
+            "detached task should still be awaiting gate"
+        );
+        assert_eq!(detached_query_semaphore().available_permits(), baseline - 1);
+
+        gate.notify_one();
+        done_rx.await.expect("detached task should finish draining");
+        // Yield briefly so the spawned task drops `_permit` after sending on `done_tx`.
+        tokio::task::yield_now().await;
+
+        assert!(completed.load(Ordering::SeqCst));
+        assert_eq!(detached_query_semaphore().available_permits(), baseline);
+    }
+
+    #[tokio::test]
+    async fn run_shielded_timeout_returns_none_and_drains_detached_task() {
+        let _guard = SHIELD_TEST_LOCK.lock().await;
+        let baseline = detached_query_semaphore().available_permits();
+        assert_eq!(baseline, MAX_DETACHED_QUERIES);
+
+        let gate = Arc::new(Notify::new());
+        let completed = Arc::new(AtomicBool::new(false));
+        let (done_tx, done_rx) = oneshot::channel::<()>();
+
+        let gate_task = gate.clone();
+        let completed_task = completed.clone();
+        let result = run_shielded_timeout(Duration::from_millis(20), async move {
+            gate_task.notified().await;
+            completed_task.store(true, Ordering::SeqCst);
+            let _ = done_tx.send(());
+            "ok"
+        })
+        .await;
+
+        assert_eq!(result, None);
+        assert!(!completed.load(Ordering::SeqCst));
+        assert_eq!(detached_query_semaphore().available_permits(), baseline - 1);
+
+        gate.notify_one();
+        done_rx.await.expect("detached task should finish draining");
+        tokio::task::yield_now().await;
+
+        assert!(completed.load(Ordering::SeqCst));
+        assert_eq!(detached_query_semaphore().available_permits(), baseline);
+    }
+
+    #[tokio::test]
+    async fn run_shielded_returns_value_and_releases_permit() {
+        let _guard = SHIELD_TEST_LOCK.lock().await;
+        let baseline = detached_query_semaphore().available_permits();
+        let Ok(value) = run_shielded(async { 42u32 }).await else {
+            panic!("expected shielded call to succeed");
+        };
+        assert_eq!(value, 42);
+        tokio::task::yield_now().await;
+        assert_eq!(detached_query_semaphore().available_permits(), baseline);
+    }
 }

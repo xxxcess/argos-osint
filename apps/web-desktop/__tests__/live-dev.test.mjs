@@ -15,6 +15,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { chromium, expect } from "@playwright/test";
 import { WebSocket, WebSocketServer } from "ws";
+import { CONNECT_COOKIE } from "../connect-session.mjs";
+import { startConnectGateway } from "./connect-gateway-fixture.mjs";
 
 test(
   "custom development runtime preserves HMR alongside the stateless live relay",
@@ -29,6 +31,11 @@ test(
       "server.mjs",
       "server-origin.mjs",
       "live-relay.mjs",
+      "connect-session.mjs",
+      "connect-session.d.mts",
+      "connect-id.mjs",
+      "connect-id.d.mts",
+      "server-origin.d.mts",
       "next.config.mjs",
       "proxy.ts",
       "package.json",
@@ -78,7 +85,8 @@ test(
       `export default function Page() { return <div data-testid="hmr-marker">${text}</div>; }`;
     await writeFile(marker, pageSource("Before HMR"));
 
-    const backend = createServer((_request, response) => response.end("{}"));
+    const gateway = await startConnectGateway();
+    const backend = gateway.server;
     const upstream = new WebSocketServer({ noServer: true });
     backend.on("upgrade", (request, socket, head) =>
       upstream.handleUpgrade(request, socket, head, (client) => {
@@ -97,8 +105,6 @@ test(
         );
       }),
     );
-    backend.listen(0, "127.0.0.1");
-    await once(backend, "listening");
     const reservation = createServer();
     reservation.listen(0, "127.0.0.1");
     await once(reservation, "listening");
@@ -114,7 +120,12 @@ test(
         env: {
           ...process.env,
           NODE_ENV: "development",
-          ARGOS_RUST_API_ORIGIN: `http://127.0.0.1:${backend.address().port}`,
+          // The copied app already owns an isolated cache and lock directory.
+          ARGOS_WEB_TEST_DEV: "0",
+          FLEETWORKS_API_ORIGIN: gateway.origin,
+          FLEETWORKS_API_TOKEN: gateway.apiToken,
+          FLEETWORKS_WEB_ORIGIN: origin,
+          FLEETWORKS_WEB_BASE_PATH: "",
         },
         stdio: ["ignore", "pipe", "pipe"],
       },
@@ -136,7 +147,7 @@ test(
       }
       for (const client of upstream.clients) client.terminate();
       upstream.close();
-      await new Promise((done) => backend.close(done));
+      await gateway.close();
     });
     const deadline = Date.now() + 30_000;
     while (
@@ -149,6 +160,17 @@ test(
     assert.ok(output.includes("Argos Next server ready"), output);
     browser = await chromium.launch({ headless: true });
     const page = await browser.newPage();
+    await page
+      .context()
+      .addCookies([
+        {
+          name: CONNECT_COOKIE,
+          value: gateway.sessionToken,
+          url: origin,
+          httpOnly: true,
+          sameSite: "Strict",
+        },
+      ]);
     const errors = [];
     const sockets = [];
     let documents = 0;
@@ -181,8 +203,11 @@ test(
     });
     assert.equal(documents, 1, "HMR must update without a document reload");
     const socket = new WebSocket(
-      `${origin.replace("http:", "ws:")}/api/v1/live`,
-      { origin },
+      `${origin.replace("http:", "ws:")}/api/v1/live?context_revision=1`,
+      {
+        origin,
+        headers: { cookie: `${CONNECT_COOKIE}=${gateway.sessionToken}` },
+      },
     );
     await once(socket, "open");
     const frame = once(socket, "message");

@@ -116,3 +116,87 @@ async fn concurrent_holds_never_overdraw_and_recovery_releases_held() {
     assert_eq!(release_held_credits(&db).await.unwrap(), 0);
     assert_eq!(credits_available(&db, "hunter", &limits).await.unwrap(), 3);
 }
+
+#[tokio::test]
+async fn interrupted_manual_tool_keeps_its_held_estimate() {
+    use argos_osint_core::osint::manual;
+    use argos_osint_core::storage::recon_exec;
+    use surrealdb::types::RecordId;
+
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server.repo("argos", "manual_credit_recovery").await;
+    let db = repo.db();
+    let limits = ReconLimits {
+        hunter_credits: 3,
+        hunter_trial_credits: 0,
+        credit_reset: "never".into(),
+        ..ReconLimits::default()
+    };
+    let legacy = reserve_credits(db, "hunter", 1, &limits)
+        .await
+        .unwrap()
+        .unwrap();
+    let abandoned = reserve_credits(db, "hunter", 1, &limits)
+        .await
+        .unwrap()
+        .unwrap();
+    // Reproduce a process that disappeared after reserving one paid call.
+    const CALL: &str = "fleet-tool-interrupted-credit";
+    db.query(
+        "CREATE $manual CONTENT (SELECT * OMIT id FROM ONLY $hold) RETURN NONE;
+         DELETE $hold RETURN NONE;
+         CREATE $call SET tool_id='hunter_email_finder', origin='fleetworks-manual',
+           inputs_json='{}', status='running', attempts=1,
+           started_at='2000-01-01T00:00:00+00:00' RETURN NONE;",
+    )
+    .bind((
+        "manual",
+        RecordId::new("credit_reservation", CALL.to_owned()),
+    ))
+    .bind(("hold", RecordId::new("credit_reservation", abandoned.id)))
+    .bind(("call", RecordId::new("osint_call", CALL.to_owned())))
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+
+    recon_exec::recover_runs(&repo).await.unwrap();
+    assert_eq!(credits_available(db, "hunter", &limits).await.unwrap(), 2);
+    let mut reply = db
+        .query("SELECT VALUE status FROM ONLY $call")
+        .bind(("call", RecordId::new("osint_call", CALL.to_owned())))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let status: Option<String> = reply.take(0usize).unwrap();
+    assert_eq!(
+        status.as_deref(),
+        Some("running"),
+        "Recon recovery owns its own calls"
+    );
+
+    for _ in 0..2 {
+        let saved = manual::status(&repo, CALL).await.unwrap().unwrap();
+        assert_eq!(saved.status, "interrupted");
+        assert!(saved.result.is_none());
+        assert_eq!(credits_available(db, "hunter", &limits).await.unwrap(), 2);
+    }
+    let mut reply = db
+        .query("SELECT VALUE state FROM ONLY $legacy; SELECT VALUE state FROM ONLY $manual;")
+        .bind(("legacy", RecordId::new("credit_reservation", legacy.id)))
+        .bind((
+            "manual",
+            RecordId::new("credit_reservation", CALL.to_owned()),
+        ))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let legacy_state: Option<String> = reply.take(0usize).unwrap();
+    let manual_state: Option<String> = reply.take(1usize).unwrap();
+    assert_eq!(legacy_state.as_deref(), Some("released"));
+    assert_eq!(manual_state.as_deref(), Some("spent"));
+}

@@ -120,7 +120,8 @@ mod local {
                 || self.key.taxonomy_version != crate::atlas_taxonomy::TAXONOMY_VERSION
                 || self.key.preprocessing_version != crate::classifier::PREPROCESSING_VERSION
                 || self.key.policy_version != crate::classifier::ADMISSION_POLICY_VERSION
-                || self.key.calibration_version != calibration::CALIBRATION_VERSION
+                || self.key.calibration_version
+                    != calibration::gate_version_for_model(&self.key.model_id)
                 || self.key.receipt_schema_version != crate::classifier::RECEIPT_SCHEMA_VERSION
             {
                 return Err(AdmissionError::UnsupportedVersion {
@@ -139,6 +140,11 @@ mod local {
                 || self.receipt.preprocessing_version != self.key.preprocessing_version
                 || self.receipt.policy_version != self.key.policy_version
                 || self.receipt.receipt_schema_version != self.key.receipt_schema_version
+                || self
+                    .receipt
+                    .raw_diagnostics
+                    .as_ref()
+                    .is_some_and(|raw| raw.calibration_version != self.key.calibration_version)
                 || [
                     self.key.artifact_sha256.as_str(),
                     self.key.manifest_sha256.as_str(),
@@ -368,6 +374,24 @@ mod local {
     impl AdmissionContext {
         /// Loads only this exact immutable model/report. Call off the Tokio worker.
         pub fn load(home: &Path, pin: PinnedClassifier) -> Result<Self, AdmissionError> {
+            if let Some((manifest_sha256, gates)) = &pin.service.zero_shot_policy {
+                if manifest_sha256 != &pin.manifest_sha256
+                    || pin.service.pinned_model().is_none_or(|snapshot| {
+                        let mut saved = pin.snapshot.clone();
+                        saved.activated_at.clone_from(&snapshot.activated_at);
+                        snapshot != &saved
+                    })
+                {
+                    return Err(AdmissionError::InvalidReceipt {
+                        code: "pinned_zero_shot_identity_mismatch".into(),
+                    });
+                }
+                return Ok(Self {
+                    manifest_sha256: manifest_sha256.clone(),
+                    gates: gates.clone(),
+                    pin,
+                });
+            }
             let store = ArtifactStore::new(home)?;
             let id = crate::classifier::artifact::ModelId::parse(&pin.snapshot.model_id)
                 .ok_or_else(|| AdmissionError::InvalidReceipt {
@@ -557,6 +581,8 @@ mod local {
                     // occurrence IDs. Keep the full occurrence on the final
                     // receipt and bind this raw-only request to its computation.
                     let mut wire = classifier.clone();
+                    // Language affects the occurrence decision, not the text computation.
+                    wire.language = None;
                     wire.occurrence_id = format!(
                         "atlas-raw-{}",
                         crate::classifier::artifact::sha256_hex(

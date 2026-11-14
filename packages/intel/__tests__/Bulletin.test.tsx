@@ -139,7 +139,9 @@ describe("Nexus Desk Bulletin", () => {
     await screen.findByRole("button", {
       name: `Open Focus Brief: ${row.title}`,
     });
-    await user.click(screen.getByRole("button", { name: /^Economic$/ }));
+    await user.click(
+      screen.getByRole("button", { name: /^Economy & Supply Chains$/ }),
+    );
     await waitFor(() => expect(requests.at(-1)?.category).toBe("economic"));
     const search = screen.getByRole("textbox", { name: "Search articles" });
     await user.type(search, "missing");
@@ -156,7 +158,7 @@ describe("Nexus Desk Bulletin", () => {
     });
     expect(search).toHaveValue("");
     expect(
-      screen.getByRole("button", { name: /^Governance$/ }),
+      screen.getByRole("button", { name: /^Politics & Governance$/ }),
     ).toHaveAttribute("aria-pressed", "true");
   });
 
@@ -167,17 +169,20 @@ describe("Nexus Desk Bulletin", () => {
     await screen.findByRole("button", {
       name: `Open Focus Brief: ${row.title}`,
     });
-    await user.click(screen.getByRole("button", { name: /^Governance$/ }));
+    await user.click(
+      screen.getByRole("button", { name: /^Politics & Governance$/ }),
+    );
     await user.keyboard("{ArrowDown}");
-    expect(screen.getByRole("button", { name: /^Security$/ })).toHaveFocus();
     expect(
-      screen.getByRole("button", { name: /^Governance$/ }),
+      screen.getByRole("button", { name: /^Security & Conflict$/ }),
+    ).toHaveFocus();
+    expect(
+      screen.getByRole("button", { name: /^Politics & Governance$/ }),
     ).toHaveAttribute("aria-pressed", "true");
     await user.keyboard("{Enter}");
-    expect(screen.getByRole("button", { name: /^Security$/ })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
+    expect(
+      screen.getByRole("button", { name: /^Security & Conflict$/ }),
+    ).toHaveAttribute("aria-pressed", "true");
     expect(
       screen.queryByText(/COOLING DOWN|HEATING UP|TLP:/),
     ).not.toBeInTheDocument();

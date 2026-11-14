@@ -15,7 +15,7 @@ use surrealdb::Surreal;
 
 use super::codec::encode;
 use super::counters;
-use super::jobs::{run, take};
+use super::jobs::{rid, run, take};
 use super::tx::{run_tx, RetryPolicy, Tx, TxError};
 use crate::store::{AtlasArticleRow, AtlasRunRow};
 
@@ -643,6 +643,62 @@ pub async fn quota_used(db: &Surreal<Any>, provider: &str, day: &str) -> Result<
         .await?
         .check()?;
     Ok(r.take::<Option<i64>>(0)?.unwrap_or(0).max(0) as u32)
+}
+
+/// Reserve a logical Atlas fetch against its daily provider-account cap.
+/// When switching to a fallback account, move the previous `(account, day)`
+/// reservation in the same transaction. A full bucket leaves both unchanged.
+pub async fn quota_reserve(
+    db: &Surreal<Any>,
+    provider: &str,
+    day: &str,
+    cap: u32,
+    previous: Option<(&str, &str)>,
+) -> Result<bool, TxError> {
+    let key = encode(&[provider, day]);
+    let previous = previous.map(|(provider, day)| encode(&[provider, day]));
+    if previous.as_ref() == Some(&key) {
+        return Err(TxError::Abort(
+            "cannot transfer a quota reservation to itself".into(),
+        ));
+    }
+    let committed = run_tx(db, counters::HOT_RECORD_POLICY, |tx| {
+        let bucket = rid("atlas_quota", &key);
+        let previous = previous.as_ref().map(|key| rid("atlas_quota", key));
+        async move {
+            let mut response = run(
+                &tx,
+                tx.query("RETURN (SELECT VALUE used FROM ONLY $bucket) ?? 0")
+                    .bind(("bucket", bucket.clone())),
+            )
+            .await?;
+            let used = take::<Option<i64>>(&mut response, 0)?.unwrap_or(0).max(0);
+            if used >= i64::from(cap) {
+                return Ok(false);
+            }
+            if let Some(previous) = previous {
+                let mut response = run(
+                    &tx,
+                    tx.query("UPDATE $bucket SET used -= 1 WHERE used > 0 RETURN VALUE used")
+                        .bind(("bucket", previous)),
+                )
+                .await?;
+                if take::<Vec<i64>>(&mut response, 0)?.len() != 1 {
+                    return Err(TxError::Abort("Atlas quota reservation is missing".into()));
+                }
+            }
+            run(
+                &tx,
+                tx.query("UPSERT $bucket SET used = $used RETURN NONE")
+                    .bind(("bucket", bucket))
+                    .bind(("used", used + 1)),
+            )
+            .await?;
+            Ok(true)
+        }
+    })
+    .await?;
+    Ok(committed.value)
 }
 
 /// `atlas_quota_bump`: one atomic increment, returning the new count.

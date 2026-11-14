@@ -2,7 +2,7 @@
 
 [Concept route](index.md) · [Wiki](../../index.md)
 
-Atlas's `atlas-collection-v3` cycle retains native news discovery, country heat bands, regional coverage and article deduplication. Article admission uses the local six-model classifier; it does not call a remote classifier role. Retained v1/v2 history remains explicitly versioned. Cycles do not extract claims, assess fidelity, generate briefs, publish Brain claim memories or require vector indexing. Intel and Recon retain their independent on-demand investigative workflows and publication services.
+Atlas's `atlas-collection-v3` cycle retains native news discovery, country heat bands, regional coverage and article deduplication. Article admission scores the six strategic domains with a pinned Rust-BERT zero-shot worker. The [Fleetworks Atlas overlay](../../../deploy/atlas-dispatch.md) delivers collection work through the Jobs-owned embedded disk queue and delegates bounded NLP and classification requests to private services. Retained v1/v2 history remains explicitly versioned. Cycles do not extract claims, assess fidelity, generate briefs, publish Brain claim memories or require vector indexing. Intel Focus Brief runs on demand through its separate publication pipeline.
 
 The figure describes the local-admission contract. The [classifier code map](../code/classifier.md) separates model setup, foreground admission, historical work and provider monitoring. Verification and measured throughput are separate evidence.
 
@@ -26,7 +26,7 @@ Related means **shared headline/description entities**. Local posting lists crea
 
 [SurrealDB metadata storage](../../../crates/argos-osint-core/src/storage/atlas_metadata.rs) defines `atlas_article_metadata`, `atlas_article_mention` and `atlas_related_article`. Article/run content remains authoritative; stale revisions hide associations, and deletion removes dependent metadata without deleting independently retained Brain evidence. Related pages are bounded, reciprocal and carry true totals and coverage. Local reason text such as `Shared mentions: Acme, Jane Doe` grants no corroboration, premise or assessed graph edge.
 
-Intel places Related beneath Full Article in the middle column. Brain Actor groups expose Claims, Threads and Articles; Claims expose Actors and Sources. Lineage uses exact derivation evidence and legacy source run/call IDs, with canonical explicit URLs as fallback; prose similarity never supplies lineage. Opening a row selects that exact article's Intel Focus Brief, including `unk`, and preserves the prior view for Back. Loading a list makes zero model calls.
+Intel shows Related leads in Focus Brief. Brain retains direct actor, claim, article and source associations. Lineage uses exact derivation evidence and legacy source run/call IDs, with canonical explicit URLs as fallback; prose similarity never supplies lineage. Opening a row selects that exact article's Intel Focus Brief, including `unk`, and preserves the prior view for Back. Loading a list makes zero model calls.
 
 ## Phase 6 and cross-cycle Related
 
@@ -42,7 +42,7 @@ Live Coverage refreshes from committed run-local receipts after admission and ea
 
 Collection/classification is required. Enabled metadata settles independently; disabled metadata is skipped, parser/lookup failures give warnings and unavailable coverage. Empty entities and unrated publishers remain honest metadata outcomes. Missing/incompatible local classifier state blocks acquisition/admission before quota use; operationally unresolved items remain retryable and can leave a cycle partial or failed. Historical `unk` remains readable without becoming a current domain. Pause preserves receipts and Resume retries unresolved work. Native acquisition receipts commit with their statistics, so a failed acquisition can resume without replaying successful source requests or double counting discovery pages.
 
-Old unfinished extraction/indexing cycles resume through retained classifications and native metadata. Ambiguous historical `unk` is flagged as legacy provenance rather than bulk reclassified. Historical insights and shared indexing services remain readable. Atlas-owned obsolete refresh/repair work is fenced at upgrade; Intel/Recon work continues. Explicit CLI Repair/Verify remains for historical contracts and rejects `atlas-collection-v1` and `atlas-collection-v2`. The Atlas TUI no longer exposes Repair memories or startup reconciliation.
+Old unfinished extraction/indexing cycles resume through retained classifications and native metadata. Ambiguous historical `unk` is flagged as legacy provenance rather than bulk reclassified. Historical insights and shared indexing services remain readable. Atlas-owned obsolete refresh/repair work is fenced at upgrade; Intel/Recon work continues. Retired CLI Repair/Verify and Atlas TUI controls are historical; they are not current repair entry points. Existing domain retirement fences remain authoritative.
 
 Profile retains `atlas.backlog`, `atlas.cycles` and `atlas.temperature`. Current telemetry counts articles and metadata coverage; overlapping stage counts are not summed. Historical memory units are explicitly legacy. Running Atlas publishes no claim memories; phase 6 writes only Brain identity/relationship records (Actors, `mentioned_in` Links, tentative Related).
 
@@ -52,7 +52,7 @@ Local adapter and policy fixtures exercise finite six-domain scores, exact-two-o
 
 Metadata/Related fixtures check concurrent classification writes, source spans, unknown categories, incompatible types, revisions/deletion, reciprocal bounded pages and exact multi-source lineage. Independent Intel/Recon publication and indexing fixtures remain in the workspace gate.
 
-Run the embedded matrix from the [contributor workflow](../code/contributing.md). For fresh TestBackend captures use `scripts/tui_review.py`: `dump_atlas_related_screens` covers Intel Related and explicit empty/loading/error states; `dump_brain_kind_screens` covers Brain Claims/Actors and association tabs; `intel_brief_stacked_left_column_renders_all_sections_and_scrolls` covers publisher/evidence confidence; `analytics_viewports_and_data_states` covers Profile Atlas. Select the affected stems at 160×50, 120×40, 100×32, 80×24 and 60×18. Inspect the emitted PNGs and record visual, interaction and metric results separately under the named local plan, following [TUI verification](../code/tui-verification.md). Live providers, a live terminal, server-mode and MiniLM checks require separate evidence.
+Use the affected embedded/storage contracts from the [contributor workflow](../code/contributing.md), actual native Runtime/PNG/tree fixtures and repository Playwright for the supported surfaces. Earlier TestBackend captures remain [historical evidence](../../archive/cli-retirement.md). Generated frames, live providers, server-mode storage and real Linux inference each require their own recorded evidence.
 
 ## Potential corroboration and validated Links
 
@@ -71,3 +71,5 @@ An admitted occurrence atomically hands off an independent durable derivative jo
 Restaging or rejection cannot discard cleanup already owed by a committed actor publication. A live task can resume that bounded cleanup independently of the old classifier receipt, and replacement actor publication waits until the prior frontier drains. Explicit pause/cancel still controls its own task; later work uses its own lease. Fresh rejected occurrences create no derivative job.
 
 Actor-ready and reconcile-ready use current admitted occurrences as separate denominators. Neither means the index outbox has been delivered. Changed source revisions invalidate current readiness. Scheduler startup resumes pending tasks, with foreground priority and fair service for older derivatives. A two-second dispatch budget bounds new dispatch, not an already-running transaction’s wall time.
+
+[Planned persistence boundaries and migration scopes](../code/jobs-persistence.md) separate SQLite operational state, RocksDB delivery and SurrealDB domain admission/publication.

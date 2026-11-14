@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Native Mac development: shared debug build and explicit review</title>
+<style>body{margin:32px;background:#f5f5f5;color:#2d3142;font-family:Geist,system-ui,sans-serif}main{max-width:1320px;margin:auto}h1{font-family:'Instrument Serif',Georgia,serif;font-size:38px;font-weight:400}svg{width:100%;height:auto}p{max-width:100ch;line-height:1.6}a{color:#394b65}</style></head><body><main>
+<h1>Native edit, complete app, explicit review</h1>
+<p>Keep the native client engine-free. Reuse its exact host/target/profile/features with pinned tools. Package locally and inspect selected synthetic Runtime evidence. Embedded storage QA and backend/web provisioning have separate graphs and ownership.</p>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 736" role="img" aria-labelledby="dev-loop-native-title dev-loop-native-desc">
+<title id="dev-loop-native-title">Native Mac development: shared debug build and explicit review</title>
+<desc id="dev-loop-native-desc">The native API client stays engine-free. Validate physical and process architecture, Rosetta state, Rust host and pinned toolchain. Reuse the exact host/target/profile/features in the shared debug cache. Build a complete app before explicit launch on matching physical hardware. Execute selected Runtime scenes with synthetic effects and inspect PNG/tree output. Compiling a test or generating a capture is separate from executing and inspecting it; real Keychain behavior needs separate evidence. Embedded storage QA has its own heavy cold SurrealDB/RocksDB C++ graph. Backend and web provisioning remain independent operator work.</desc>
+<defs><marker id="dev-loop-native-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker></defs>
+<style>text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}.label{font-size:20px;font-weight:600}.note{font-size:16px}.zone{font-size:13px;font-weight:600;letter-spacing:1px}.node{fill:#fff;stroke:#4f5d75}.accent{fill:#fff6ed;stroke:#eb6c36}.edge{fill:none;stroke:#4f5d75;stroke-width:2;marker-end:url(#dev-loop-native-arrow)}.minor{fill:#4f5d75;font-size:14px}.code{font-family:'Geist Mono',ui-monospace,monospace;font-size:14px}</style>
+<rect width="1320" height="736" fill="#f5f5f5"/>
+<text x="48" y="68" class="zone">ENGINE-FREE NATIVE CLIENT · ONE DEBUG GRAPH AND ONE BUILD OWNER</text>
+
+<path d="M408 172H468" class="edge"/>
+<path d="M828 172H888" class="edge"/>
+<path d="M1080 240V336" class="edge"/>
+<path d="M888 208H852V404H828" class="edge"/>
+<path d="M888 404H864V512H436V404H408" class="edge"/>
+
+<rect x="48" y="104" width="360" height="136" rx="6" class="node"/>
+<text x="64" y="136" class="label">Edit native client sources</text>
+<text x="64" y="166" class="note">App / safe contracts / workstation manager</text>
+<text x="64" y="194" class="note">Select affected checks and fixture scenes</text>
+<text x="64" y="222" class="note">Freeze sources before final evidence</text>
+
+<rect x="468" y="104" width="360" height="136" rx="6" class="node"/>
+<text x="484" y="136" class="label">Validate host and graph</text>
+<text x="484" y="166" class="note">Physical CPU / process CPU / Rust host</text>
+<text x="484" y="194" class="note">Resolve Rosetta or host mismatch first</text>
+<text x="484" y="222" class="note">Match host / target / profile / features</text>
+
+<rect x="888" y="104" width="384" height="136" rx="6" class="accent"/>
+<text x="904" y="136" class="label">Scoped shared debug Cargo</text>
+<text x="904" y="166" class="code">agent_cargo.py … --locked</text>
+<text x="904" y="194" class="note">Warm reuse: the same exact debug graph</text>
+<text x="904" y="222" class="note">Preserve target/debug and active builds</text>
+<text x="1096" y="292" class="minor">Build artifact output</text>
+
+<rect x="888" y="336" width="384" height="136" rx="6" class="accent"/>
+<text x="904" y="368" class="label">Complete Fleetworks.app</text>
+<text x="904" y="398" class="note">Resolve executable; verify architecture</text>
+<text x="904" y="426" class="note">Resources + Info.plist + manifest + hashes</text>
+<text x="904" y="454" class="note">Print the exact app and artifact paths</text>
+
+<rect x="468" y="336" width="360" height="136" rx="6" class="node"/>
+<text x="484" y="368" class="label">Same-view Runtime evidence</text>
+<text x="484" y="398" class="note">Run selected synthetic scenes and input</text>
+<text x="484" y="426" class="note">Generated PNG / tree → inspect</text>
+<text x="484" y="454" class="note">Real Keychain proof is separate</text>
+
+<rect x="48" y="336" width="360" height="136" rx="6" class="node"/>
+<text x="64" y="368" class="label">Explicit app launch</text>
+<text x="64" y="398" class="note">Only --open, on the matching physical Mac</text>
+<text x="64" y="426" class="note">Observe actual window / input / lifecycle</text>
+<text x="64" y="454" class="note">Package ≠ observed GUI / Keychain</text>
+<text x="484" y="500" class="minor">Explicit --open after packaging</text>
+
+<text x="48" y="548" class="minor">Separate embedded QA: heavy cold SurrealDB / RocksDB C++ compilation; reuse its exact graph.</text>
+<rect x="48" y="568" width="1224" height="112" rx="6" class="node"/>
+<text x="64" y="600" class="label">Backend and web provisioning are independent operator work</text>
+<text x="64" y="630" class="note">The app connects to an authorized configured gateway. This host loop starts no Docker, database, index, inference or web relay.</text>
+<text x="64" y="658" class="note">Direct Docker commands own backend lifecycle. Preserve existing stacks, data, images and user configuration.</text>
+<text x="48" y="716" class="minor">Compiled artifact ≠ executed test; generated capture ≠ inspected evidence; real Keychain behavior needs separate proof.</text>
+</svg>
+<p>The candidate helper packages with build-native --agent --profile debug; --open explicitly launches the app. Record compiled, executed and inspected evidence separately.</p>
+<p><a href="../../scripts/fleetworks_candidate.py">Native candidate helper</a> · <a href="../wiki/code/native-verification.md">Native verification</a> · <a href="../diagrams.md">Diagram catalog</a></p>
+</main></body></html>

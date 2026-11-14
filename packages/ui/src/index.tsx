@@ -8,25 +8,33 @@ import {
   ActivityIndicator,
 } from "react-native";
 
-// Dark HUD + glass tokens. Colors are the core TUI palette from
-// crates/argos-osint-bin/src/tui/theme.rs; glass/glow is the web treatment (see docs/wiki/code/react-ui.md).
+// Matte Fleetworks paint. Existing geometry and semantic colors remain separate.
 export const colors = {
-  bg: "#141414",
-  panel: "#1e1e1e",
-  raised: "#303030",
-  border: "#535353",
-  text: "#e8e8e8",
-  dim: "#b5b5b5",
-  muted: "#919191",
-  accent: "#87bfff",
+  bg: "#060709",
+  panel: "#0B0C0F",
+  raised: "#111317",
+  inset: "#060709",
+  border: "#898274",
+  borderSubtle: "#3A3833",
+  text: "#F3EEE4",
+  dim: "#D6D2C4",
+  muted: "#B8B4A8",
+  accent: "#C6A56E",
+  accentPressed: "#C4A265",
+  accentHover: "#D8BD8C",
+  onAccent: "#060709",
+  selectionSurface: "#322C22",
   accent2: "#c678dd",
   success: "#98c379",
   warning: "#e5c07b",
   danger: "#f08a8a",
-  glass: "rgba(30, 30, 30, 0.55)",
-  glassStrong: "rgba(48, 48, 48, 0.72)",
-  glassBorder: "rgba(83, 83, 83, 0.6)",
-  accentSoft: "rgba(135, 191, 255, 0.14)",
+  // Compatibility names retain existing consumers with opaque matte fills.
+  glass: "#0B0C0F",
+  glassStrong: "#111317",
+  glassBorder: "#898274",
+  cardEdge: "rgba(243, 238, 228, 0.02)",
+  satinControlEdge: "rgba(243, 238, 228, 0.03)",
+  accentSoft: "rgba(198, 165, 110, 0.1)",
 };
 export const fonts = {
   mono: 'ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace',
@@ -34,15 +42,24 @@ export const fonts = {
 };
 // Web-only style props (RN Web supports them); typed loosely for RN.
 type WebStyle = Record<string, unknown>;
-export const glass: WebStyle = {
-  backgroundColor: colors.glass,
+export const matteCard: WebStyle = {
+  backgroundColor: colors.panel,
   borderWidth: 1,
-  borderColor: colors.glassBorder,
-  backdropFilter: "blur(12px)",
-  WebkitBackdropFilter: "blur(12px)",
+  borderColor: colors.cardEdge,
 };
+export const matteDarkControl: WebStyle = {
+  backgroundColor: colors.raised,
+  borderWidth: 1,
+  borderColor: colors.border,
+};
+export const mutedGoldPrimary: WebStyle = {
+  backgroundColor: colors.accent,
+  borderColor: colors.accent,
+};
+// Existing consumers retain their API while the visual treatment becomes matte.
+export const glass = matteCard;
 export const glow = (color: string): WebStyle => ({
-  boxShadow: `0 0 12px ${color}55, inset 0 0 0 1px ${color}33`,
+  boxShadow: `inset 0 0 0 1px ${color}`,
 });
 export type Tone = "accent" | "success" | "warning" | "danger" | "purple";
 export const toneColor: Record<Tone, string> = {
@@ -68,7 +85,7 @@ export function StatusTag({
     </Text>
   );
 }
-/** Glass container with corner-accent HUD edge; `tone` tints the top rule. */
+/** Matte container retaining the existing tone-tinted top rule. */
 export function Frame({
   children,
   tone = "accent",
@@ -165,7 +182,11 @@ export function Button({
         s.button,
         variant === "quiet" && s.quiet,
         variant === "primary" && s.primary,
-        !disabled && hovered && !pressed && variant === "primary" && s.primaryHover,
+        !disabled &&
+          hovered &&
+          !pressed &&
+          variant === "primary" &&
+          s.primaryHover,
         !disabled && hovered && !pressed && variant !== "primary" && s.hovered,
         !disabled && pressed && variant === "primary" && s.primaryPressed,
         !disabled && pressed && variant !== "primary" && s.pressed,
@@ -251,7 +272,7 @@ const s = StyleSheet.create({
     paddingHorizontal: 12,
     borderWidth: 1,
     borderRadius: 2,
-    backgroundColor: colors.glass,
+    backgroundColor: colors.raised,
     borderColor: colors.border,
   },
   buttonText: {
@@ -267,33 +288,30 @@ const s = StyleSheet.create({
   quietText: { color: colors.dim },
   primary: {
     borderColor: colors.accent,
-    backgroundColor: colors.accentSoft,
+    backgroundColor: colors.accent,
   },
-  primaryText: { color: colors.accent },
+  primaryText: { color: colors.onAccent },
   hovered: {
     backgroundColor: colors.accentSoft,
     borderColor: colors.accent,
   },
   primaryHover: {
-    backgroundColor: colors.accentSoft,
-    borderColor: colors.accent,
-    ...(glow(colors.accent) as object),
+    backgroundColor: colors.accentHover,
+    borderColor: colors.accentHover,
   },
   pressed: {
     borderColor: colors.accent,
     backgroundColor: colors.glassStrong,
   },
   primaryPressed: {
-    borderColor: colors.accent,
-    backgroundColor: colors.glassStrong,
-    color: colors.accent,
+    borderColor: colors.accentPressed,
+    backgroundColor: colors.accentPressed,
   },
   active: {
     borderColor: colors.accent,
     backgroundColor: colors.accent,
-    ...(glow(colors.accent) as object),
   },
-  activeText: { color: colors.bg, fontWeight: "700" },
+  activeText: { color: colors.onAccent, fontWeight: "700" },
   disabled: {
     backgroundColor: "transparent",
     borderColor: colors.glassBorder,
@@ -337,4 +355,5 @@ const s = StyleSheet.create({
   },
 });
 
+export { FleetworksMark } from "./FleetworksMark";
 export { Skeleton } from "./Skeleton";

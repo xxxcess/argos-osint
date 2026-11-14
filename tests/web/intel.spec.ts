@@ -2296,6 +2296,7 @@ test("manual topology zoom survives updates and node drag cancellation stays saf
   await page.goto("/topology?seed=actor1");
   const viewport = page.locator("#intel-topology-viewport");
   const focus = viewport.locator('[data-role="focus"] [data-tile="node"]');
+  const canvas = viewport.locator("canvas").first();
   await expect(focus).toBeVisible({ timeout: 20000 });
   const zoom = page.locator("#intel-topology-neighborhood").getByText(/^ZOOM:/);
   async function stableZoom() {
@@ -2322,6 +2323,8 @@ test("manual topology zoom survives updates and node drag cancellation stays saf
     target.x + target.width / 2,
     target.y + target.height / 2,
   );
+  // Wait for Three's animation tick to register the hover before wheeling.
+  await expect(canvas).toHaveClass(/clickable/);
   await page.mouse.wheel(0, -250);
   await expect(zoom).not.toHaveText(initial);
   const manual = await stableZoom();
@@ -2339,7 +2342,6 @@ test("manual topology zoom survives updates and node drag cancellation stays saf
   await focus.scrollIntoViewIfNeeded();
   const tile = (await focus.boundingBox())!;
   const center = { x: tile.x + tile.width / 2, y: tile.y + tile.height / 2 };
-  const canvas = viewport.locator("canvas").first();
   // Reentrant pointer cancellation can occur while the graph library dispatches
   // its synthetic pointerup during drag-end cleanup (for example on pointer leave).
   await canvas.evaluate((element) => {

@@ -554,6 +554,8 @@ def exercise_nlp(tmp, binary):
     token = secrets.token_hex(32)
     env = {
         **safe_env,
+        "FLEETWORKS_ACCESS_SCOPE_ID": "smoke-scope",
+        "FLEETWORKS_ACCESS_EPOCH": "smoke-epoch",
         "FLEETWORKS_INTERNAL_TOKEN": token,
         "FLEETWORKS_NLP_ALLOWED_HOSTS": f"127.0.0.1:{port}",
     }
@@ -575,6 +577,8 @@ def exercise_classifier(tmp, binary):
     workspace.mkdir()
     env = {
         **safe_env, "ARGOS_HOME": str(workspace), "FLEETWORKS_WORKSPACE": str(workspace),
+        "FLEETWORKS_ACCESS_SCOPE_ID": "smoke-scope",
+        "FLEETWORKS_ACCESS_EPOCH": "smoke-epoch",
         "FLEETWORKS_INTERNAL_TOKEN": token,
         "FLEETWORKS_CLASSIFIER_ALLOWED_HOSTS": f"127.0.0.1:{port}",
     }

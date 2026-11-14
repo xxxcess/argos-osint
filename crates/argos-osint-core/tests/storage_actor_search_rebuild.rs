@@ -516,15 +516,25 @@ async fn direct_typed_actor_visibility_write_advances_tombstone_fence_in_same_tr
 }
 
 #[tokio::test]
-async fn oversized_alias_identity_stays_unresolved_and_keeps_source_intent() {
+async fn oversized_aliases_and_expansion_keep_canonical_actor_in_rebuild() {
     let Some(server) = support::Server::start() else {
         return;
     };
     let repo = server.repo("search_shadow", "identity_bound").await;
     let mut data = actors(1);
-    data[0].aliases = (0..32)
-        .map(|number| format!("Distinct alias {number}"))
+    data[0].aliases = (0..40)
+        .map(|number| {
+            let terms = (0..10)
+                .map(|part| format!("term{number}x{part}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("Alias {number} {terms}")
+        })
+        .chain(["A".repeat(257), "港".repeat(86)])
         .collect();
+    data[0]
+        .metadata
+        .insert("description".into(), "x".repeat(65));
     actor_catalog::seed_actors_pinned(
         &repo,
         data,
@@ -534,15 +544,69 @@ async fn oversized_alias_identity_stays_unresolved_and_keeps_source_intent() {
     )
     .await
     .expect("canonical source commit");
+    let projection = index::canonical_many(&repo, &["shadow-actor-0000".into()])
+        .await
+        .expect("bounded optional terms keep the actor readable")
+        .pop()
+        .expect("source actor")
+        .projection
+        .expect("canonical actor remains searchable");
+    assert_eq!(projection.display_name, "港 Harbor 0");
+    assert!(projection.aliases.len() < 32, "term budget limits aliases");
+    assert!(projection
+        .aliases
+        .iter()
+        .all(|alias| alias.value.len() <= 256));
     assert!(
-        index::canonical_many(&repo, &["shadow-actor-0000".into()])
-            .await
-            .is_err(),
-        "33 names including canonical name cannot be silently truncated to 32"
+        projection.summary.is_none(),
+        "oversized summary token is omitted"
     );
     assert_eq!(
         support::count(repo.db(), "actor_search_event").await,
         1,
-        "unresolved identity retains durable intent"
+        "canonical source intent remains durable"
+    );
+    let (claimed, mut status) = fixture(&repo).await;
+    index::request_rebuild(&repo, &claimed)
+        .await
+        .expect("rebuild request");
+    let now = Utc::now();
+    let index::RebuildAction::Start { lease, .. } =
+        index::next_rebuild(&repo, "bounded-pump", &status, now)
+            .await
+            .expect("start intent")
+            .expect("rebuild action")
+    else {
+        panic!("expected rebuild start")
+    };
+    let generation = ActorIndexGeneration {
+        generation: "g2".into(),
+        committed_checkpoint: 0,
+        visible_checkpoint: 0,
+        writer_epoch: lease.epoch,
+        source_complete: false,
+    };
+    index::rebuild_started(&repo, &lease, &generation, now)
+        .await
+        .expect("verified start");
+    status.rebuilding = Some(generation);
+    let index::RebuildAction::Deliver { batch, .. } =
+        index::next_rebuild(&repo, "bounded-pump", &status, now + Duration::seconds(1))
+            .await
+            .expect("bounded scan")
+            .expect("scan action")
+    else {
+        panic!("expected rebuild delivery")
+    };
+    batch.validate().expect("bounded transport contract");
+    assert_eq!(batch.mutations.len(), 1);
+    assert_eq!(batch.mutations[0].actor_id, "shadow-actor-0000");
+    assert_eq!(
+        batch.mutations[0]
+            .projection
+            .as_ref()
+            .expect("active actor")
+            .display_name,
+        "港 Harbor 0"
     );
 }

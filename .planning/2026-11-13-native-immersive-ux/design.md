@@ -1,6 +1,6 @@
 # Fleetworks Native Immersive UX — Design Specification
 
-[Task plan](task_plan.md) · [Decisions](decisions.md) · [Findings](findings.md)
+[Decisions](decisions.md) · [Acceptance](acceptance.md)
 
 Grounded in `anomalyco/rune` revision `205b8d4` (`crates/rune`, `crates/rune-kit`, `crates/rune-motion`, `crates/rune-fx`, `crates/rune-light`) and tailored to `apps/fleetworks-desktop`.
 

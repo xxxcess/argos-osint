@@ -1,6 +1,6 @@
 # Native Immersive UX Overhaul — Verification & Acceptance
 
-[Native design](../../docs/wiki/code/native-design-system.md) · [Native verification](../../docs/wiki/code/native-verification.md) · [Task plan](task_plan.md) · [Decisions](decisions.md)
+[Native design](../../docs/wiki/code/native-design-system.md) · [Native verification](../../docs/wiki/code/native-verification.md) · [Design blueprint](design.md) · [Decisions](decisions.md)
 
 This record separates implemented source/documentation from verified Rust tests, inspected Runtime PNG/tree evidence, binary builds, and live GUI/backend readiness. All desktop/workstation/contract, doc-policy, and visual PNG gates passed on the frozen source after `#24`/`#29`/`#34` (the full `argos-osint-api --lib` run has 2 pre-existing unrelated SurrealDB test failures noted below).
 

@@ -1,6 +1,6 @@
 # Native Immersive UX Overhaul — Intake & Architecture Decisions
 
-[Task plan](task_plan.md) · [Design blueprint](design.md) · [Findings](findings.md) · [Acceptance](acceptance.md)
+[Design blueprint](design.md) · [Acceptance](acceptance.md)
 
 1. **Supercede static-matte-only restriction in favor of layered adaptive surfaces**:
    - The November 12 contract in [native design system](../../docs/wiki/code/native-design-system.md) enforced flat opaque matte surfaces (`apps/fleetworks-desktop/src/material.rs`) with zero reflections or elevation.

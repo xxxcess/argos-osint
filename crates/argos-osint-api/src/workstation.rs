@@ -426,6 +426,13 @@ fn search_observation(
                 "index_generation_mismatch",
                 "Actor index generation or checkpoint does not match the authoritative source",
             )
+        } else if source.blocked && source.rebuild_reason_code == "actor_index_correction_required"
+        {
+            (
+                ReadinessState::Degraded,
+                "index_rebuild_correction_required",
+                "Reader-visible index remains available. Review and correct the rebuild failure; scan progress is saved. Then start Build actor index to resume",
+            )
         } else if source.blocked
             || source.pressure_paused
             || status
@@ -463,6 +470,12 @@ fn search_observation(
                 "The actor index owner does not report a ready serving generation",
             )
         }
+    } else if source.blocked && source.rebuild_reason_code == "actor_index_correction_required" {
+        (
+            ReadinessState::NotReady,
+            "index_rebuild_correction_required",
+            "No reader-visible actor index is available. Review and correct the rebuild failure; scan progress is saved. Then start Build actor index to resume",
+        )
     } else if source.rebuild_reason_code == "reindex_job_not_active" {
         (
             ReadinessState::NotReady,
@@ -1003,7 +1016,21 @@ mod tests {
         assert_eq!(observe(&lagged, &source).state, ReadinessState::Running);
         source.blocked = true;
         assert_eq!(observe(&status, &source).state, ReadinessState::Degraded);
+        source.rebuild_reason_code = "actor_index_correction_required".into();
+        let correction_with_reader = observe(&status, &source);
+        assert_eq!(correction_with_reader.state, ReadinessState::Degraded);
+        assert_eq!(
+            correction_with_reader.reason_code,
+            "index_rebuild_correction_required"
+        );
+        assert!(correction_with_reader
+            .explanation
+            .contains("scan progress is saved"));
+        assert!(correction_with_reader
+            .explanation
+            .contains("Review and correct"));
         source.blocked = false;
+        source.rebuild_reason_code.clear();
         let mut recovery = status.clone();
         recovery.recovery_available = true;
         recovery.state = "degraded".into();
@@ -1026,6 +1053,21 @@ mod tests {
         let mut absent = status;
         absent.active = None;
         assert_eq!(observe(&absent, &source).state, ReadinessState::NotReady);
+        source.blocked = true;
+        source.rebuild_reason_code = "actor_index_correction_required".into();
+        let correction_without_reader = observe(&absent, &source);
+        assert_eq!(correction_without_reader.state, ReadinessState::NotReady);
+        assert_eq!(
+            correction_without_reader.reason_code,
+            "index_rebuild_correction_required"
+        );
+        assert!(correction_without_reader
+            .explanation
+            .contains("scan progress is saved"));
+        assert!(correction_without_reader
+            .explanation
+            .contains("Review and correct"));
+        source.blocked = false;
         absent.rebuilding = interrupted.rebuilding;
         source.rebuild_reason_code = "reindex_job_not_active".into();
         let stopped_without_reader = observe(&absent, &source);

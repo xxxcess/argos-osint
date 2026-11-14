@@ -41,11 +41,12 @@ fn main() -> Result<()> {
             .await
             .context("cannot bind private search listener")?;
         let listen = listener.local_addr()?;
+        let index_available = reason.is_empty();
         let router = http::router_with_slot(config, engine.clone(), reason)?;
         tracing::info!(
             role = "search-index",
             %listen,
-            index_available = reason.is_empty(),
+            index_available,
             "Fleetworks startup summary: private search listener ready"
         );
         axum::serve(listener, router)

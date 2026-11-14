@@ -89,6 +89,8 @@ This stack starts no web frontend. WebRelay remains separately configured; remot
 
 Search process health authenticates `/internal/v1/actors/status`; an empty generation can be healthy while discovery remains `not_built`/`indexing`. Seed completion and reader-visible index completion are separate. Search failure does not gate gateway or seed admission startup. Source/generation mismatch, corruption and writer conflicts stay visible and preserve data; there is no automatic delete/rebuild. Explicit maintenance reports rebuild/pressure state; retain the old serving generation and diagnose before changing any directory or source epoch.
 
+First-party services emit one structured `Fleetworks startup summary` after their listener, worker pools, or storage bootstrap is ready. The summary identifies the role and safe availability fields without credentials, token files, or dataset paths. Use the selected Compose project's logs to compare startup milestones before investigating a failed health check.
+
 Atlas/NLP/Rust-BERT and optional web deployment remain separate operator flows; see [Atlas dispatch](atlas-dispatch.md). Stage a hash-verified, architecture-matching **Linux** model/native-library bundle in the backend's `models/atlas-bert/` before explicitly selecting those services; never copy host macOS libraries or treat Natural training as Rust-BERT inference evidence. This core review stack makes no real-checkpoint inference claim.
 
 Rebuilding a tag does not replace a running consumer. Explicitly recreate the selected services after a successful build. Inspect logs and stop this review with the same project; retain credentials, source identity and data:

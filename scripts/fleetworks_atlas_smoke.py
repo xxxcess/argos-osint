@@ -160,12 +160,12 @@ def exercise(tmp, binary, surreal):
                 with process([binary, "--role", "atlas-worker"], worker_env, tmp / f"worker-{attempt}.log") as worker:
                     failed = wait_for_state(worker, job_id, "failed")
                     assert failed["error_summary"] == "atlas_classifier_unavailable", failed
-                    assert failed["attempt_rows"] == attempt, failed
+                    assert failed["attempts_used"] == attempt, failed
                     completed = wait_for_state(worker, replay_job, "completed")
-                    assert completed["result_ref"] == replay_run and completed["attempt_rows"] == 1, completed
+                    assert completed["result_ref"] == replay_run and completed["attempts_used"] == 1, completed
 
             assert state(cancel_id)["state"] == "cancelled", state(cancel_id)
-            assert state(cancel_id)["attempt_rows"] == 0
+            assert state(cancel_id)["attempts_used"] == 0
             assert post(atlas_path, fixture_request, proof_headers) == (202, receipt)
             # Exact attempt identity and durable publish count stay stable across a
             # worker restart and explicit retry. The fixture has no classifier,

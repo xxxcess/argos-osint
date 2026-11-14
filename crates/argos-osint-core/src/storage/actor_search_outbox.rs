@@ -329,7 +329,8 @@ pub async fn canonical_many_in(
                     .ok_or_else(|| invalid("actor_name_bound"))?,
                 1024,
             )?;
-            let aliases = projection::aliases(&display_name, grouped.remove(id).unwrap_or_default())?;
+            let aliases =
+                projection::aliases(&display_name, grouped.remove(id).unwrap_or_default())?;
             Some(ActorProjection {
                 display_name,
                 aliases,

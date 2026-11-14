@@ -189,15 +189,16 @@ fn registered_paging_uses_server_tokens_and_keeps_dashboard_counts_separate() {
         runtime.find("activity-job-fixture-job-1").is_some(),
         "validated current rows reach the production list"
     );
-    for key in [
-        "jobs-query-controls",
-        "jobs-query-apply",
-        "jobs-page-next",
-        "jobs-page-previous",
-    ] {
+    for key in ["jobs-query-controls", "jobs-query-apply"] {
         assert!(
             runtime.find(key).is_none(),
-            "retired query/pager control {key} cannot reappear"
+            "retired query control {key} cannot reappear"
+        );
+    }
+    for key in ["jobs-page-next", "jobs-page-previous"] {
+        assert!(
+            runtime.find(key).is_some(),
+            "the current registered page exposes {key}"
         );
     }
     fn announces_dashboard_bucket(node: &serde_json::Value) -> bool {

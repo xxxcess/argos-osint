@@ -15,25 +15,26 @@ use crate::{fleetworks::NetworkStorage, Role};
 
 // Keep the same ceiling as Venture's actor snapshot worker.
 const MAX_ACTOR_CSV_BYTES: u64 = 256 * 1024 * 1024;
-const BOOTSTRAP_ACTORS: &str = "/bootstrap-actors/argos_actors.csv";
 const BOOTSTRAP_ACTOR_CSV_BYTES: usize = 139_885_998;
 const BOOTSTRAP_ACTOR_CSV_SHA256: &str =
     "c1866dd7b295ef1e62bd0b818d30c6eafd5c3a59f7b2c1417d22653295dbfedd";
 
-/// Seed the pinned repository catalog only when storage has no complete actor seed.
+/// Seed the configured pinned catalog only when storage has no complete actor seed.
 pub(crate) async fn seed_bootstrap(repo: &Repository) -> Result<()> {
+    let Some(source) = std::env::var_os("FLEETWORKS_BOOTSTRAP_ACTOR_CSV").map(PathBuf::from) else {
+        return Ok(());
+    };
+    ensure!(
+        source.is_absolute(),
+        "bootstrap actor catalog path must be absolute"
+    );
     if !argos_osint_core::storage::actor_catalog::status(repo.db())
         .await?
         .needs_seed
     {
         return Ok(());
     }
-    let (actors, fingerprint) = tokio::task::spawn_blocking(|| -> Result<_> {
-        let source = if Path::new(BOOTSTRAP_ACTORS).is_file() {
-            Path::new(BOOTSTRAP_ACTORS)
-        } else {
-            Path::new("datasets/argos_actors.csv")
-        };
+    let (actors, fingerprint) = tokio::task::spawn_blocking(move || -> Result<_> {
         let bytes = fs::read(source).context("read pinned actor catalog")?;
         ensure!(
             bytes.len() == BOOTSTRAP_ACTOR_CSV_BYTES,

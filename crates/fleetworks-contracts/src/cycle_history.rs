@@ -25,7 +25,7 @@ pub struct CycleSummary {
 pub struct CycleHistory {
     pub rows: Vec<CycleSummary>,
     #[serde(default)]
-    pub next_offset: Option<usize>,
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -88,7 +88,7 @@ impl CycleHistory {
     pub fn new(rows: Vec<CycleSummary>) -> Self {
         Self {
             rows,
-            next_offset: None,
+            next_cursor: None,
         }
     }
 }

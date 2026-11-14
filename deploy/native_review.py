@@ -2,6 +2,7 @@
 """Provision, build, and run local Fleetworks backend reviews and supported native builds."""
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import shlex
@@ -17,6 +18,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REVIEW_NAME = "native-local"
 DEFAULT_API_PORT = 18091
+BOOTSTRAP_ACTOR_CSV_BYTES = 139885998
+BOOTSTRAP_ACTOR_CSV_SHA256 = "c1866dd7b295ef1e62bd0b818d30c6eafd5c3a59f7b2c1417d22653295dbfedd"
 TOKEN_NAMES = (
     "native-token", "operator-token", "web-relay-token", "gateway-health-token", "brain-token",
     "tools-token", "control-token", "jobs-token", "execution-token",
@@ -37,6 +40,27 @@ def review_path(root, name):
         if item.is_symlink():
             raise ValueError("Review directories must not be symlinks")
     return path
+
+
+def verify_bootstrap_actor_catalog(root, *, expected_size=None, expected_sha256=None):
+    """Require the exact materialized LFS dataset before changing the review stack."""
+    expected_size = BOOTSTRAP_ACTOR_CSV_BYTES if expected_size is None else expected_size
+    expected_sha256 = BOOTSTRAP_ACTOR_CSV_SHA256 if expected_sha256 is None else expected_sha256
+    source = root / "datasets/argos_actors.csv"
+    try:
+        if source.is_symlink():
+            raise ReviewConfigurationError("Actor catalog must be a regular repository file")
+        info = source.stat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size != expected_size:
+            raise ReviewConfigurationError("Actor catalog is missing, modified, or an unmaterialized Git LFS pointer")
+        digest = hashlib.sha256()
+        with source.open("rb") as catalog:
+            for chunk in iter(lambda: catalog.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != expected_sha256:
+            raise ReviewConfigurationError("Actor catalog SHA-256 differs from the pinned bootstrap dataset")
+    except OSError as error:
+        raise ReviewConfigurationError("Cannot read the pinned actor catalog before native review") from error
 
 
 def private_file(path, value):
@@ -286,6 +310,7 @@ def run_review(root, name, *, backend_only=False, api_port=None, web_port=None, 
     stage = "Docker preflight"
     with preparation_lock(prepared["workspace"], ".up.lock", wait=False):
         try:
+            verify_bootstrap_actor_catalog(root)
             print(f"[1/{stages}] Checking local Docker for {name}…", flush=True)
             if os.environ.get("DOCKER_HOST") and not os.environ.get("DOCKER_CONTEXT"):
                 raise ReviewConfigurationError("Select a named local Docker context instead of a DOCKER_HOST override")

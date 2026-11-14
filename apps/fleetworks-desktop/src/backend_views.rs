@@ -421,19 +421,16 @@ fn atlas(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
                     ActionButton::new("Previous page")
                         .key("cycles-page-previous")
                         .finish(MetalFinish::ObsidianPill)
-                        .disabled(state.cycles.page_offset == 0)
+                        .disabled(state.cycles.page_index == 0 || state.cycles.busy())
                         .on_press(|state: &mut State| state.previous_cycles_page())
                         .build(kit, preferences, pointer_ref),
                 )
-                .child(quiet(
-                    format!("Page {}", state.cycles.page_offset / 40 + 1),
-                    kit,
-                ))
+                .child(quiet(format!("Page {}", state.cycles.page_index + 1), kit))
                 .child(
                     ActionButton::new("Next page")
                         .key("cycles-page-next")
                         .finish(MetalFinish::ObsidianPill)
-                        .disabled(cycles.next_offset.is_none())
+                        .disabled(cycles.next_cursor.is_none() || state.cycles.busy())
                         .on_press(|state: &mut State| state.next_cycles_page())
                         .build(kit, preferences, pointer_ref),
                 ),

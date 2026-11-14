@@ -1,5 +1,6 @@
 """Offline credential/provisioning contracts; no Docker or real workspace."""
 
+import hashlib
 import io
 import json
 import os
@@ -172,6 +173,13 @@ class NativeReviewTests(unittest.TestCase):
 
 
 class PrepareReviewTests(unittest.TestCase):
+    def setUp(self):
+        # Existing lifecycle fixtures focus on Compose stage ordering. The
+        # pinned catalog guard has its own isolated data tests below.
+        patcher = mock.patch.object(native_review, "verify_bootstrap_actor_catalog")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_native_only_recipe_omits_optional_web_url(self):
         root = Path(__file__).parent
         self.assertNotIn("FLEETWORKS_INTEL_WEB_URL:", (root / "compose.native-review.yml").read_text())
@@ -580,6 +588,73 @@ class PrepareReviewTests(unittest.TestCase):
                  redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as mismatch:
                 native_review.main()
             self.assertEqual(mismatch.exception.code, 2)
+
+
+class BootstrapCatalogTests(unittest.TestCase):
+    def test_up_rejects_missing_catalog_before_docker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            provision(root, "local", 18091, "linux/amd64", "a" * 40)
+            (root / "version.txt").write_text("0.2.1\n")
+            with mock.patch.object(native_review.subprocess, "check_output") as docker_read, \
+                 mock.patch.object(native_review.subprocess, "run") as docker_mutate, \
+                 self.assertRaisesRegex(native_review.ReviewConfigurationError, "Cannot read"):
+                native_review.run_review(root, "local")
+            docker_read.assert_not_called()
+            docker_mutate.assert_not_called()
+
+    def test_materialized_pinned_catalog_is_accepted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "datasets/argos_actors.csv"
+            source.parent.mkdir()
+            payload = b"actor_id,actor_name\nfixture,Fixture Actor\n"
+            source.write_bytes(payload)
+            native_review.verify_bootstrap_actor_catalog(
+                root, expected_size=len(payload), expected_sha256=hashlib.sha256(payload).hexdigest()
+            )
+
+    def test_missing_catalog_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(native_review.ReviewConfigurationError, "Cannot read"):
+                native_review.verify_bootstrap_actor_catalog(
+                    Path(directory), expected_size=1, expected_sha256="0" * 64
+                )
+
+    def test_lfs_pointer_is_rejected_by_size(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "datasets/argos_actors.csv"
+            source.parent.mkdir()
+            source.write_bytes(b"version https://git-lfs.github.com/spec/v1\n")
+            with self.assertRaisesRegex(native_review.ReviewConfigurationError, "Git LFS pointer"):
+                native_review.verify_bootstrap_actor_catalog(
+                    root, expected_size=100, expected_sha256="0" * 64
+                )
+
+    def test_same_size_modified_catalog_is_rejected_by_hash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "datasets/argos_actors.csv"
+            source.parent.mkdir()
+            source.write_bytes(b"changed")
+            with self.assertRaisesRegex(native_review.ReviewConfigurationError, "SHA-256"):
+                native_review.verify_bootstrap_actor_catalog(
+                    root, expected_size=7, expected_sha256=hashlib.sha256(b"pristine").hexdigest()
+                )
+
+    def test_symlink_catalog_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "source.csv"
+            target.write_bytes(b"fixture")
+            source = root / "datasets/argos_actors.csv"
+            source.parent.mkdir()
+            source.symlink_to(target)
+            with self.assertRaisesRegex(native_review.ReviewConfigurationError, "regular repository file"):
+                native_review.verify_bootstrap_actor_catalog(
+                    root, expected_size=7, expected_sha256=hashlib.sha256(b"fixture").hexdigest()
+                )
 
 
 if __name__ == "__main__":

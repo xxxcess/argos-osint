@@ -24,7 +24,8 @@ pub struct HostMetrics {
 #[derive(Default)]
 pub struct Cycles {
     pub history: Load<CycleHistory>,
-    pub page_offset: usize,
+    pub page_index: usize,
+    page_cursors: Vec<Option<String>>,
     pub selected: Option<String>,
     pub confirmation: Option<String>,
     confirmation_configuration_revision: Option<u64>,
@@ -53,7 +54,8 @@ impl Cycles {
         self.delete_request = None;
         self.revision = self.revision.wrapping_add(1);
         self.history = Load::Idle;
-        self.page_offset = 0;
+        self.page_index = 0;
+        self.page_cursors.clear();
         self.confirmation = None;
         self.confirmation_configuration_revision = None;
         self.selected = None;
@@ -119,25 +121,28 @@ impl State {
     }
 
     pub fn refresh_cycles(&mut self) {
-        self.load_cycles_page(0);
+        self.load_cycles_page(None, 0);
     }
 
     pub fn next_cycles_page(&mut self) {
         let Load::Ready(history) = &self.cycles.history else {
             return;
         };
-        if let Some(offset) = history.next_offset {
-            self.load_cycles_page(offset);
+        if let Some(cursor) = history.next_cursor.clone() {
+            self.load_cycles_page(Some(cursor), self.cycles.page_index + 1);
         }
     }
 
     pub fn previous_cycles_page(&mut self) {
-        if self.cycles.page_offset > 0 {
-            self.load_cycles_page(self.cycles.page_offset.saturating_sub(40));
+        if self.cycles.page_index > 0 {
+            let previous = self.cycles.page_index - 1;
+            if let Some(cursor) = self.cycles.page_cursors.get(previous).cloned() {
+                self.load_cycles_page(cursor, previous);
+            }
         }
     }
 
-    fn load_cycles_page(&mut self, offset: usize) {
+    fn load_cycles_page(&mut self, cursor: Option<String>, index: usize) {
         let Some(context) = self.registration.context.clone() else {
             return;
         };
@@ -157,10 +162,12 @@ impl State {
         let revision = self.cycles.revision;
         let epoch = self.connection.epoch;
         let origin = self.origin_revision;
-        self.cycles.history = Load::Loading;
+        if !matches!(self.cycles.history, Load::Ready(_)) {
+            self.cycles.history = Load::Loading;
+        }
         let task = services.runtime.spawn(async move {
             let result = client
-                .cycle_history_page(40, offset)
+                .cycle_history_page(40, cursor.as_deref())
                 .await
                 .map_err(|error| error.to_string());
             ui.update(move |state, _| {
@@ -174,9 +181,14 @@ impl State {
                 match result {
                     Ok(history)
                         if history.rows.len() <= 40
-                            && history.next_offset.is_none_or(|next| next == offset + 40) =>
+                            && history
+                                .next_cursor
+                                .as_deref()
+                                .is_none_or(|next| !next.is_empty() && next.len() <= 256) =>
                     {
-                        state.cycles.page_offset = offset;
+                        state.cycles.page_index = index;
+                        state.cycles.page_cursors.truncate(index);
+                        state.cycles.page_cursors.push(cursor);
                         state.cycles.selected = None;
                         state.cycles.history = Load::Ready(history);
                     }

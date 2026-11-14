@@ -42,23 +42,43 @@ pub async fn list(
     scope: &ActivityScope,
     limit: usize,
 ) -> Result<CycleHistory, TxError> {
-    list_page(repo, scope_id, scope, limit, 0).await
+    list_page(repo, scope_id, scope, limit, None).await
 }
 
-/// Authorize membership and return one bounded page with a continuation offset.
+/// Authorize membership and return one bounded page with a stable continuation.
 pub async fn list_page(
     repo: &Repository,
     scope_id: &str,
     scope: &ActivityScope,
     limit: usize,
-    offset: usize,
+    cursor: Option<&str>,
 ) -> Result<CycleHistory, TxError> {
-    if !(1..=100).contains(&limit) || offset > 10_000 {
+    if !(1..=100).contains(&limit) {
         return Err(TxError::Abort("invalid cycle history bound".into()));
     }
+    let (before, before_id) = match cursor {
+        Some(cursor) => {
+            let Some((timestamp, id)) = cursor.rsplit_once('|') else {
+                return Err(TxError::Abort("invalid cycle cursor".into()));
+            };
+            if cursor.len() > 256
+                || chrono::DateTime::parse_from_rfc3339(timestamp).is_err()
+                || fleetworks_contracts::AtlasCycleReceipt::from_job_id(id).is_none()
+            {
+                return Err(TxError::Abort("invalid cycle cursor".into()));
+            }
+            (Some(timestamp.to_owned()), Some(id.to_owned()))
+        }
+        None => (None, None),
+    };
     jobs_view::validate_activity_scope(scope_id, scope)
         .map_err(|_| TxError::Abort("invalid cycle scope".into()))?;
-    let query = format!("SELECT record::id(id) AS job_id,state,<string>created_at AS created_at,IF finished_at != NONE {{ <string>finished_at }} ELSE {{ NONE }} AS finished_at FROM job WHERE operation=$operation AND ({membership}) AND array::len((SELECT VALUE job_id FROM workstation_cycle_tombstone WHERE scope_id=$activity_scope AND deployment_id=$activity_deployment AND workstation_id=$activity_node AND job_id=record::id($parent.id) LIMIT 1))=0 ORDER BY created_at DESC, id DESC LIMIT $limit START $offset",membership=jobs_view::activity_membership());
+    let cursor_filter = if cursor.is_some() {
+        " AND (created_at < <datetime>$before OR (created_at=<datetime>$before AND record::id(id)<$before_id))"
+    } else {
+        ""
+    };
+    let query = format!("SELECT record::id(id) AS job_id,state,<string>created_at AS created_at,IF finished_at != NONE {{ <string>finished_at }} ELSE {{ NONE }} AS finished_at FROM job WHERE operation=$operation AND ({membership}){cursor_filter} AND array::len((SELECT VALUE job_id FROM workstation_cycle_tombstone WHERE scope_id=$activity_scope AND deployment_id=$activity_deployment AND workstation_id=$activity_node AND job_id=record::id($parent.id) LIMIT 1))=0 ORDER BY created_at DESC, id DESC LIMIT $limit",membership=jobs_view::activity_membership());
     let mut response = repo
         .db()
         .query(query)
@@ -67,12 +87,19 @@ pub async fn list_page(
         .bind(("activity_deployment", scope.deployment_id.clone()))
         .bind(("activity_node", scope.workstation_id.clone()))
         .bind(("limit", (limit + 1) as i64))
-        .bind(("offset", offset as i64))
+        .bind(("before", before))
+        .bind(("before_id", before_id))
         .await?
         .check()?;
     let mut rows: Vec<SummaryRow> = response.take(0)?;
     let has_more = rows.len() > limit;
     rows.truncate(limit);
+    let next_cursor = has_more
+        .then(|| {
+            rows.last()
+                .map(|row| format!("{}|{}", row.created_at, row.job_id))
+        })
+        .flatten();
     let mut history = CycleHistory::new(
         rows.into_iter()
             .filter_map(|row| {
@@ -87,7 +114,7 @@ pub async fn list_page(
             })
             .collect(),
     );
-    history.next_offset = has_more.then_some(offset + limit);
+    history.next_cursor = next_cursor;
     Ok(history)
 }
 

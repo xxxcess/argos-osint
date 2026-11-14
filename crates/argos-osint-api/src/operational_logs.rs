@@ -510,12 +510,10 @@ async fn follow_inner(
             .await
         })
         .await
-        .ok_or_else(|| {
-            ApiError(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Bounded log authority check unavailable",
-            )
-        })?;
+        .ok_or(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Bounded log authority check unavailable",
+        ))?;
         let (page, shared) = result?;
         if !page.rows.is_empty() || Instant::now() >= deadline {
             let boundary = page.next_boundary.or(record.boundary);

@@ -134,10 +134,9 @@ pub(super) fn countries(metadata: &serde_json::Value) -> Result<Vec<String>, TxE
             }
         }
     }
-    if countries.len() > 32 {
-        return Err(invalid("actor_country_count_bound"));
-    }
-    Ok(countries.into_iter().collect())
+    // Countries are discovery facets. Keep a stable bounded subset in the
+    // index while the complete source list remains in canonical metadata.
+    Ok(countries.into_iter().take(32).collect())
 }
 
 #[cfg(test)]
@@ -200,5 +199,19 @@ mod tests {
             .collect();
         assert!(words.len() <= 128);
         assert!(prefixes(&words).len() <= 1024);
+    }
+
+    #[test]
+    fn oversized_country_list_keeps_stable_bounded_facets() {
+        let source_countries: Vec<String> = (0..43)
+            .map(|number| format!("Country {number:02}"))
+            .collect();
+        let metadata = serde_json::json!({
+            "countries_operated_in": serde_json::to_string(&source_countries)
+                .expect("source countries")
+        });
+        let projected = countries(&metadata).expect("bounded optional facets");
+        assert_eq!(projected, source_countries[..32].to_vec());
+        assert_eq!(source_countries.len(), 43, "canonical source is unchanged");
     }
 }

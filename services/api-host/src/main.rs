@@ -274,6 +274,9 @@ async fn main() -> Result<()> {
     }
     if role == Role::NativeWorker {
         let workspace = fleetworks::workspace_path()?;
+        // Native setup and reindex tasks stamp this process owner on their
+        // leases, so orphan recovery must see its heartbeat while they run.
+        let _beat = start_process_beat().await?;
         let result = reset_services::run_headless(
             repo.clone(),
             role,

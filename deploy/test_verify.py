@@ -139,10 +139,10 @@ class RegisteredSmokeTests(unittest.TestCase):
 
     def test_cookie_login_keeps_proof_out_of_body_and_uses_confirmed_revision(self):
         context = {"connect_id":"workstation-fixture","registration_id":"registration","context_revision":4}
-        cookie = "fleetworks_connect=" + "a" * 64 + "; Path=/; HttpOnly; SameSite=Strict"
+        cookie = "fleetworks_connect_v2=" + "a" * 64 + "; Path=/; HttpOnly; SameSite=Strict"
         with patch.object(verify,"exchange",side_effect=[(307,None,{}),(200,{"context":context},{"Set-Cookie":cookie})]), patch.object(verify,"request",side_effect=[(401,{}),(200,{})]) as request:
             headers = verify.web_connect(18091,context)
-        self.assertEqual(headers["Cookie"],"fleetworks_connect="+"a"*64)
+        self.assertEqual(headers["Cookie"],"fleetworks_connect_v2="+"a"*64)
         self.assertEqual(headers["x-fleetworks-expected-context-revision"],"4")
         self.assertEqual(request.call_args.kwargs["headers"],headers)
         with patch.object(verify,"exchange",side_effect=[(307,None,{}),(200,{"context":context},{"Set-Cookie":cookie.replace("HttpOnly; ","")})]), patch.object(verify,"request",return_value=(401,{})):

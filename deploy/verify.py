@@ -156,7 +156,7 @@ def web_connect(port, context):
     assert status == 200 and "session_token" not in value, "normal Connect login failed"
     cookie = http.cookies.SimpleCookie()
     cookie.load(next((value for key, value in response_headers.items() if key.lower() == "set-cookie"), ""))
-    item = cookie.get("fleetworks_connect")
+    item = cookie.get("fleetworks_connect_v2")
     assert item and item["httponly"] and item["samesite"] == "Strict", "Connect did not issue a protected cookie"
     assert value["context"]["registration_id"] == context["registration_id"], "browser connected to another registration"
     headers = {"Cookie": item.OutputString().split(";", 1)[0], "Origin": origin,

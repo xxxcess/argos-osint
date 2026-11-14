@@ -132,7 +132,8 @@ class RegisteredSmokeTests(unittest.TestCase):
     def test_activity_keeps_the_legacy_workspace_query_rejection(self):
         _, context = registration_snapshot()
         page = {"rows": [{"id": "job-fixture"}], "activity_scope": {"workstation_id": context["workstation_id"]}}
-        replies = [(200, page), (200, {"rows": []}), (200, page), (200, {"rows": []}), (400, {})]
+        detail = {"private_details_available": True, "job": {"id": "job-fixture"}}
+        replies = [(200, page), (200, {"rows": []}), (200, page), (200, detail), (404, {}), (404, {}), (400, {})]
         with patch.object(verify, "request", side_effect=replies) as request:
             verify.exercise_activity(18091, 18092, "native", context, {}, "job-fixture")
         self.assertIn("workspace_id=", request.call_args.args[1])

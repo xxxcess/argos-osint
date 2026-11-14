@@ -248,8 +248,14 @@ def exercise_activity(api_port, web_port, token, context, browser, job_id):
         status, page = request(port, "/api/v1/jobs?limit=25", credential, headers=headers)
         assert status == 200 and any(row["id"] == job_id for row in page["rows"]), "attributed activity omitted fixture job"
         assert page["activity_scope"]["workstation_id"] == context["workstation_id"], "activity selected another workstation"
-        status, logs = request(port, "/api/v1/logs?job_id=" + job_id, credential, headers=headers)
-        assert status == 200 and isinstance(logs["rows"], list), "selected attributed logs unavailable"
+        if port == api_port:
+            status, logs = request(port, "/api/v1/logs?job_id=" + job_id, credential, headers=headers)
+            assert status == 200 and isinstance(logs["rows"], list), "selected attributed logs unavailable"
+        else:
+            detail = expect_status(request(port, "/api/v1/jobs/detail?id=" + job_id, headers=headers), 200, "web relay job detail")
+            assert detail["private_details_available"] and detail["job"]["id"] == job_id, "web relay job detail omitted fixture job"
+            expect_status(request(port, "/api/v1/logs?job_id=" + job_id, headers=headers), 404, "web operational log denial")
+            expect_status(request(port, "/api/v1/models/defaults", headers=headers), 404, "web configuration route denial")
     expect_status(request(web_port, "/api/v1/jobs?workspace_id=not-a-child", headers=browser), 400, "legacy workspace query denial")
 
 
@@ -358,7 +364,6 @@ def verify(name, platform, *, web=False, dev=False, atlas=False, no_build=False,
         proof = native_headers(context)
         result_path, completed = exercise_tools(api_port, token, proof, "compose-native-dork")
         if web:
-            web_result, _ = exercise_tools(web_port, None, browser, "compose-web-dork")
             exercise_activity(api_port, web_port, token, context, browser, completed["job_id"])
         else:
             status, page = request(api_port, "/api/v1/jobs?limit=25", token, headers=proof)
@@ -367,8 +372,8 @@ def verify(name, platform, *, web=False, dev=False, atlas=False, no_build=False,
         other = register_native(api_port, token, other_registration)
         assert request(api_port, "/api/v1/jobs/detail?id=" + completed["job_id"], token,
                        headers=native_headers(other))[0] == 404
+        assert request(api_port, result_path, token, headers=native_headers(other))[0] == 404
         if web:
-            assert request(api_port, web_result, token, headers=native_headers(other))[0] == 404
             web_logout(web_port, browser)
         if atlas:
             exercise_atlas(api_port, token, proof)

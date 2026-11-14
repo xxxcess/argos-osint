@@ -382,6 +382,7 @@ pub struct Observation {
     pub blocked: bool,
     pub backfill_complete: bool,
     pub seed_complete: bool,
+    pub rebuild_reason_code: String,
     pub pressure_paused: bool,
     pub pressure_reason: String,
     pub backlog_paused: bool,
@@ -390,7 +391,8 @@ pub struct Observation {
 pub async fn observe(repo: &Repository) -> Result<Option<Observation>, TxError> {
     let mut response=repo.db().query("SELECT (SELECT VALUE instance_id FROM ONLY storage_meta:identity) ?? '' AS deployment_id,
         source_epoch,index_generation,next_sequence,acknowledged_sequence,blocked,backfill_complete,pressure_paused,pressure_reason,backlog_paused,
-        ((SELECT VALUE status FROM ONLY brain_actor_seed:catalog)='complete') ?? false AS seed_complete FROM ONLY actor_search_control:catalog").await?.check()?;
+        ((SELECT VALUE status FROM ONLY brain_actor_seed:catalog)='complete') ?? false AS seed_complete,
+        ((SELECT VALUE reason_code FROM ONLY actor_search_rebuild:catalog) ?? '') AS rebuild_reason_code FROM ONLY actor_search_control:catalog").await?.check()?;
     Ok(response.take(0)?)
 }
 

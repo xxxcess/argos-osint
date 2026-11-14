@@ -411,6 +411,12 @@ fn search_observation(
             "Actor index status does not match the current backend source",
         )
     } else if let Some(active) = &status.active {
+        let catching_up = status.rebuilding.is_some()
+            || !active.source_complete
+            || !source.backfill_complete
+            || !source.seed_complete
+            || active.visible_checkpoint < source.next_sequence as u64
+            || source.acknowledged_sequence < source.next_sequence;
         if active.generation != source.index_generation
             || active.visible_checkpoint > active.committed_checkpoint
             || active.visible_checkpoint > source.next_sequence as u64
@@ -434,18 +440,20 @@ fn search_observation(
             )
         } else if status.recovery_available || status.state == "degraded" {
             (ReadinessState::Degraded, "index_recovery_required", "The actor index owner reports a recoverable generation error; existing reader visibility is retained")
-        } else if status.rebuilding.is_some()
-            || !active.source_complete
-            || !source.backfill_complete
-            || !source.seed_complete
-            || active.visible_checkpoint < source.next_sequence as u64
-            || source.acknowledged_sequence < source.next_sequence
-        {
-            (
-                ReadinessState::Running,
-                "index_catching_up",
-                "Actor index work is in progress; current source visibility is not complete",
-            )
+        } else if catching_up {
+            if source.rebuild_reason_code == "reindex_job_not_active" {
+                (
+                    ReadinessState::Degraded,
+                    "index_rebuild_interrupted",
+                    "Actor index rebuild stopped before catching up; build the index again to resume",
+                )
+            } else {
+                (
+                    ReadinessState::Running,
+                    "index_catching_up",
+                    "Actor index work is in progress; current source visibility is not complete",
+                )
+            }
         } else if status.state == "ready" {
             (ReadinessState::Ready, "index_reader_visible", "The current actor generation is reader-visible through the observed source checkpoint")
         } else {
@@ -455,6 +463,12 @@ fn search_observation(
                 "The actor index owner does not report a ready serving generation",
             )
         }
+    } else if source.rebuild_reason_code == "reindex_job_not_active" {
+        (
+            ReadinessState::NotReady,
+            "index_rebuild_interrupted",
+            "Actor index rebuild stopped before a reader became available; build the index again to resume",
+        )
     } else if status.rebuilding.is_some() {
         (
             ReadinessState::Running,
@@ -968,6 +982,7 @@ mod tests {
             blocked: false,
             backfill_complete: true,
             seed_complete: true,
+            rebuild_reason_code: String::new(),
             pressure_paused: false,
             pressure_reason: String::new(),
             backlog_paused: false,
@@ -993,12 +1008,32 @@ mod tests {
         recovery.recovery_available = true;
         recovery.state = "degraded".into();
         assert_eq!(observe(&recovery, &source).state, ReadinessState::Degraded);
+        let mut interrupted = status.clone();
+        interrupted.rebuilding = interrupted.active.clone();
+        source.rebuild_reason_code = "reindex_job_not_active".into();
+        assert_eq!(
+            observe(&status, &source).state,
+            ReadinessState::Ready,
+            "an old failed rebuild does not hide a complete active reader"
+        );
+        let stalled = observe(&interrupted, &source);
+        assert_eq!(stalled.state, ReadinessState::Degraded);
+        assert_eq!(stalled.reason_code, "index_rebuild_interrupted");
+        source.rebuild_reason_code.clear();
         source.source_epoch = "old-source".into();
         assert_eq!(observe(&status, &source).state, ReadinessState::Unavailable);
         source.source_epoch = "fixture-source".into();
         let mut absent = status;
         absent.active = None;
         assert_eq!(observe(&absent, &source).state, ReadinessState::NotReady);
+        absent.rebuilding = interrupted.rebuilding;
+        source.rebuild_reason_code = "reindex_job_not_active".into();
+        let stopped_without_reader = observe(&absent, &source);
+        assert_eq!(stopped_without_reader.state, ReadinessState::NotReady);
+        assert_eq!(
+            stopped_without_reader.reason_code,
+            "index_rebuild_interrupted"
+        );
     }
 
     #[test]

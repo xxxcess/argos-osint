@@ -55,7 +55,9 @@ The search projection retains the canonical actor ID and name. Optional aliases
 are selected in stable name order within the index's 256-byte value, 32-alias,
 word and prefix budgets; oversized or excess aliases remain in SurrealDB and
 are available through canonical actor details. Optional descriptions whose
-tokens exceed the search analyzer bound are omitted from the index. These
+tokens exceed the search analyzer bound are omitted from the index. Optional
+country facets retain the first 32 distinct values in stable sorted order;
+all countries remain in canonical actor metadata. These
 projection limits keep one unusual catalog record from blocking later actors
 during a durable rebuild.
 

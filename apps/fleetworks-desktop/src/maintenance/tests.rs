@@ -285,10 +285,11 @@ async fn delayed_readiness_reply_controls_reindex_confirmation_and_failure() {
         .state
         .maintenance_disabled_reason(MaintenanceOperation::ReindexActors)
         .is_some());
-    assert!(runtime
-        .accessibility_json()
-        .to_string()
-        .contains("Build Search Index (Unavailable)"));
+    click(&mut runtime, "maintenance-reindex", &mut clock);
+    assert!(
+        runtime.state.maintenance.confirmation.is_none(),
+        "the actual disabled control cannot confirm before catalog readiness arrives"
+    );
 
     release
         .send(ready)
@@ -298,9 +299,9 @@ async fn delayed_readiness_reply_controls_reindex_confirmation_and_failure() {
     clock += 1.0 / 60.0;
     runtime.frame(clock);
     assert!(runtime
-        .accessibility_json()
-        .to_string()
-        .contains("Build Search Index (Ready)"));
+        .state
+        .maintenance_disabled_reason(MaintenanceOperation::ReindexActors)
+        .is_none());
     click(&mut runtime, "maintenance-reindex", &mut clock);
     assert_eq!(
         runtime
@@ -344,10 +345,27 @@ async fn delayed_readiness_reply_controls_reindex_confirmation_and_failure() {
         .state
         .maintenance_disabled_reason(MaintenanceOperation::ReindexActors)
         .is_some());
-    assert!(runtime
-        .accessibility_json()
-        .to_string()
-        .contains("synthetic readiness outage"));
+    assert!(matches!(
+        runtime.state.readiness,
+        Load::Failed(ref message) if message == "synthetic readiness outage"
+    ));
+    click(&mut runtime, "maintenance-reindex", &mut clock);
+    assert!(runtime.state.maintenance.confirmation.is_none());
+    assert_eq!(
+        runtime
+            .state
+            .intents
+            .iter()
+            .filter(|intent| matches!(
+                intent,
+                Intent::Maintenance {
+                    operation: MaintenanceOperation::ReindexActors
+                }
+            ))
+            .count(),
+        1,
+        "a failed readiness refresh cannot submit a second rebuild"
+    );
 }
 
 #[test]

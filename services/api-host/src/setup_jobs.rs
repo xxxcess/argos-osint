@@ -391,6 +391,7 @@ async fn train(
     let mut request = DatasetRequest::default();
     request.explicit_file = Some(path);
     request.cwd = workspace.clone();
+    request.executable = std::env::current_exe()?;
     request.home = workspace.clone();
     tokio::task::spawn_blocking({
         let workspace = workspace.clone();

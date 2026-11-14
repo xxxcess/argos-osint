@@ -334,6 +334,16 @@ async fn fetch_once(
     read_limited(response).await
 }
 
+fn cancelled_result(service: &ServiceSpec) -> ServiceResult {
+    ServiceResult {
+        service: service.id.to_string(),
+        signal: CheckSignal::Inconclusive,
+        timestamp: Utc::now().to_rfc3339(),
+        adapter_version: service.adapter_version.to_string(),
+        diagnostic: "cancelled".into(),
+    }
+}
+
 async fn check_implemented(
     client: &reqwest::Client,
     service: &ServiceSpec,
@@ -342,13 +352,7 @@ async fn check_implemented(
     cancel: &AtomicBool,
 ) -> ServiceResult {
     if cancel.load(Ordering::Relaxed) {
-        return ServiceResult {
-            service: service.id.to_string(),
-            signal: CheckSignal::Inconclusive,
-            timestamp: Utc::now().to_rfc3339(),
-            adapter_version: service.adapter_version.to_string(),
-            diagnostic: "cancelled".into(),
-        };
+        return cancelled_result(service);
     }
     if let Some(cached) = cached_result(email, service.id, service.adapter_version) {
         return cached;
@@ -379,13 +383,7 @@ async fn check_implemented(
     let mut last_err = None;
     for attempt in 0..2 {
         if cancel.load(Ordering::Relaxed) {
-            return ServiceResult {
-                service: service.id.to_string(),
-                signal: CheckSignal::Inconclusive,
-                timestamp: Utc::now().to_rfc3339(),
-                adapter_version: service.adapter_version.to_string(),
-                diagnostic: "cancelled".into(),
-            };
+            return cancelled_result(service);
         }
         match fetch_once(client, url.clone(), service.hosts, user_agent).await {
             Ok((status, body)) => {
@@ -467,42 +465,58 @@ pub async fn lookup(
     ensure!(max_sites >= 1, "max_sites must be at least 1");
     let (selected, omitted) = select_services(input.services.as_deref(), max_sites)?;
     let ua = user_agent.unwrap_or(super::DEFAULT_USER_AGENT);
-    let global = Arc::new(Semaphore::new(GLOBAL_CONCURRENCY));
-    let per_host: Arc<Mutex<HashMap<String, Arc<Semaphore>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-    let cancel = Arc::clone(cancel);
+    let mut results: Vec<ServiceResult> = if cancel.load(Ordering::Relaxed) {
+        selected
+            .into_iter()
+            .map(|spec| {
+                if spec.implemented() {
+                    cancelled_result(spec)
+                } else {
+                    ServiceResult::unsupported(spec.id, spec.unsupported_reason)
+                }
+            })
+            .collect()
+    } else {
+        let global = Arc::new(Semaphore::new(GLOBAL_CONCURRENCY));
+        let per_host: Arc<Mutex<HashMap<String, Arc<Semaphore>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let cancel = Arc::clone(cancel);
 
-    let mut jobs = Vec::with_capacity(selected.len());
-    for spec in selected {
-        let spec = *spec;
-        let client = client.clone();
-        let email = email.clone();
-        let ua = ua.to_string();
-        let global = Arc::clone(&global);
-        let per_host = Arc::clone(&per_host);
-        let cancel = Arc::clone(&cancel);
-        jobs.push(async move {
-            if spec.implemented() {
-                let host = spec.hosts.first().copied().unwrap_or(spec.id);
-                let host_sem = {
-                    let mut map = per_host.lock().expect("host semaphore map");
-                    map.entry(host.to_string())
-                        .or_insert_with(|| Arc::new(Semaphore::new(PER_HOST_CONCURRENCY)))
-                        .clone()
-                };
-                let _g = global.acquire().await.ok();
-                let _h = host_sem.acquire().await.ok();
-                check_implemented(&client, &spec, &email, &ua, &cancel).await
-            } else {
-                ServiceResult::unsupported(spec.id, spec.unsupported_reason)
-            }
-        });
-    }
+        let mut jobs = Vec::with_capacity(selected.len());
+        for spec in selected {
+            let spec = *spec;
+            let client = client.clone();
+            let email = email.clone();
+            let ua = ua.to_string();
+            let global = Arc::clone(&global);
+            let per_host = Arc::clone(&per_host);
+            let cancel = Arc::clone(&cancel);
+            jobs.push(async move {
+                if spec.implemented() {
+                    if cancel.load(Ordering::Relaxed) {
+                        return cancelled_result(&spec);
+                    }
+                    let host = spec.hosts.first().copied().unwrap_or(spec.id);
+                    let host_sem = {
+                        let mut map = per_host.lock().expect("host semaphore map");
+                        map.entry(host.to_string())
+                            .or_insert_with(|| Arc::new(Semaphore::new(PER_HOST_CONCURRENCY)))
+                            .clone()
+                    };
+                    let _g = global.acquire().await.ok();
+                    let _h = host_sem.acquire().await.ok();
+                    check_implemented(&client, &spec, &email, &ua, &cancel).await
+                } else {
+                    ServiceResult::unsupported(spec.id, spec.unsupported_reason)
+                }
+            });
+        }
 
-    let mut results: Vec<ServiceResult> = stream::iter(jobs)
-        .buffer_unordered(GLOBAL_CONCURRENCY)
-        .collect()
-        .await;
+        stream::iter(jobs)
+            .buffer_unordered(GLOBAL_CONCURRENCY)
+            .collect()
+            .await
+    };
     results.sort_by(|a, b| a.service.cmp(&b.service));
 
     let mut counts = LookupCounts {

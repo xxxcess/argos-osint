@@ -416,6 +416,7 @@ fn validate_csv(path: &Path, kind: DatasetKind, cancelled: &AtomicBool) -> anyho
                 .parent()
                 .ok_or_else(|| anyhow::anyhow!("staging parent unavailable"))?
                 .to_owned();
+            request.executable = std::env::current_exe()?;
             request.home = request.cwd.clone();
             let resolution = argos_osint_core::classifier::dataset::resolve_dataset(&request)?;
             argos_osint_core::classifier::dataset::parse_csv(&resolution)?;
@@ -790,6 +791,41 @@ mod tests {
             setup_jobs::dataset_limit(DatasetKind::ActorCatalog),
             256 * 1024 * 1024
         );
+
+        let training = root.path().join("training.csv");
+        let mut rows = String::from(
+            "sample_id,title,description,domain_labels,primary_domain,secondary_domain,subcategories,source_kind,difficulty,dataset_version,annotation_notes,split,scenario_group,language,synthetic,labels_complete,expected_admission,rejection_reason\n",
+        );
+        for split in ["train", "calibration"] {
+            for (group, (first, second)) in [
+                ("governance", "security"),
+                ("economic", "human"),
+                ("environmental", "scientific"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                for repeat in 0..2 {
+                    let id = format!("{split}-{group}-{repeat}");
+                    rows.push_str(&format!(
+                        "{id},Synthetic {first} {second} bulletin {repeat},Fictional {first} and {second} report,{first}|{second},{first},{second},,synthetic,cross_domain,synthetic-development-v1,,{split},{id},en,true,true,admit,\n"
+                    ));
+                }
+            }
+        }
+        std::fs::write(&training, rows).expect("synthetic training CSV");
+        assert!(validate_csv(
+            &training,
+            DatasetKind::ClassifierTraining,
+            &AtomicBool::new(false)
+        )
+        .is_ok());
+        assert!(validate_csv(
+            &training,
+            DatasetKind::ActorCatalog,
+            &AtomicBool::new(false)
+        )
+        .is_err());
     }
 
     #[test]

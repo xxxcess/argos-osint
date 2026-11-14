@@ -15,6 +15,7 @@ pub(super) async fn execute(
     cancel: &AtomicBool,
 ) -> anyhow::Result<DurableToolOutcome> {
     actor_search_outbox::request_rebuild(repo, claimed).await?;
+    let mut reported = None;
     loop {
         if cancel.load(Ordering::Acquire) {
             return Ok(DurableToolOutcome::Failed {
@@ -44,8 +45,11 @@ pub(super) async fn execute(
         } else {
             "actor index paused for correction".into()
         };
-        setup_jobs::record_progress_unknown_total(repo, claimed, &phase, progress.scanned as u64)
-            .await?;
+        let current = (phase, progress.scanned as u64);
+        if reported.as_ref() != Some(&current) {
+            setup_jobs::record_progress_unknown_total(repo, claimed, &current.0, current.1).await?;
+            reported = Some(current);
+        }
         // The outer durable delivery owns queue/job renewals and cancellation.
         // No source transaction or independent lease is held during this wait.
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;

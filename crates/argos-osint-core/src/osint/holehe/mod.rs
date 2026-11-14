@@ -205,13 +205,15 @@ pub fn normalize_email(raw: &str) -> Result<(String, String)> {
 }
 
 fn email_hash(email: &str) -> String {
+    use std::fmt::Write as _;
     let mut hasher = Sha256::new();
     hasher.update(email.as_bytes());
-    hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        let _ = write!(hex, "{b:02x}");
+    }
+    hex
 }
 
 pub fn parse_json(body: &str) -> Result<Value, String> {
@@ -334,14 +336,18 @@ async fn fetch_once(
     read_limited(response).await
 }
 
-fn cancelled_result(service: &ServiceSpec) -> ServiceResult {
+fn cancelled_result_at(service: &ServiceSpec, timestamp: String) -> ServiceResult {
     ServiceResult {
         service: service.id.to_string(),
         signal: CheckSignal::Inconclusive,
-        timestamp: Utc::now().to_rfc3339(),
+        timestamp,
         adapter_version: service.adapter_version.to_string(),
         diagnostic: "cancelled".into(),
     }
+}
+
+fn cancelled_result(service: &ServiceSpec) -> ServiceResult {
+    cancelled_result_at(service, Utc::now().to_rfc3339())
 }
 
 async fn check_implemented(
@@ -466,11 +472,12 @@ pub async fn lookup(
     let (selected, omitted) = select_services(input.services.as_deref(), max_sites)?;
     let ua = user_agent.unwrap_or(super::DEFAULT_USER_AGENT);
     let mut results: Vec<ServiceResult> = if cancel.load(Ordering::Relaxed) {
+        let now = Utc::now().to_rfc3339();
         selected
             .into_iter()
             .map(|spec| {
                 if spec.implemented() {
-                    cancelled_result(spec)
+                    cancelled_result_at(spec, now.clone())
                 } else {
                     ServiceResult::unsupported(spec.id, spec.unsupported_reason)
                 }

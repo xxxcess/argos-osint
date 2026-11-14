@@ -16,6 +16,7 @@ use crate::ApiState;
 #[serde(deny_unknown_fields)]
 pub(crate) struct HistoryQuery {
     limit: Option<usize>,
+    offset: Option<usize>,
 }
 
 pub(crate) async fn list(
@@ -25,14 +26,16 @@ pub(crate) async fn list(
 ) -> Result<Json<CycleHistory>, ApiError> {
     let scope = crate::activity::scope_for_request(&state.repo, &context, None).await?;
     let limit = query.limit.unwrap_or(50);
-    if !(1..=100).contains(&limit) {
+    let offset = query.offset.unwrap_or(0);
+    if !(1..=100).contains(&limit) || offset > 10_000 {
         return Err(crate::bad());
     }
-    let history = argos_osint_core::storage::cycle_history::list(
+    let history = argos_osint_core::storage::cycle_history::list_page(
         &state.repo,
         context.scope_id(),
         &scope,
         limit,
+        offset,
     )
     .await
     .map_err(crate::internal)?;

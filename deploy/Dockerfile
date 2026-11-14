@@ -87,6 +87,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl libgcc-s1 libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/argos-api-host /usr/local/bin/argos-api-host
+COPY --chmod=0444 datasets/argos_actors.csv /usr/local/share/fleetworks/argos_actors.csv
 COPY --chmod=0555 deploy/check-api.sh /usr/local/bin/check-fleetworks-api
 WORKDIR /workspace
 USER 65532:65532

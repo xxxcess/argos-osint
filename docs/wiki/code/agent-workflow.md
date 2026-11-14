@@ -16,6 +16,8 @@ Canonical execution policy for repository agents. Host instructions and user aut
 
 ## Establish the critical path
 
+Confirm the intended PR base branch with the user before starting changes. Carry that branch into the named plan and use it as the PR base; a branch stated by the user in the current session is already confirmed.
+
 Read the active plan, dirty-tree baseline and relevant contracts. Reuse existing authorization. Identify dependencies, the earliest decisive check and the remaining required work. Build realistic isolated fixtures through public services; never forge authority or relax guards to make tests pass. Smoke a costly fixture before repetitions.
 
 ## Coordinate work that can actually run in parallel

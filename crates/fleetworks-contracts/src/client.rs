@@ -124,12 +124,24 @@ impl Client {
         &self,
         limit: usize,
     ) -> Result<crate::cycle_history::CycleHistory, ClientError> {
+        self.cycle_history_page(limit, 0).await
+    }
+
+    /// Read a bounded page of this registration's cycle associations.
+    pub async fn cycle_history_page(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<crate::cycle_history::CycleHistory, ClientError> {
         if !(1..=100).contains(&limit) {
+            return Err(ClientError::InvalidRequest);
+        }
+        if offset > 10_000 {
             return Err(ClientError::InvalidRequest);
         }
         self.get_with_query(
             crate::cycle_history::CYCLE_HISTORY_PATH,
-            &[("limit", limit.to_string())],
+            &[("limit", limit.to_string()), ("offset", offset.to_string())],
         )
         .await
     }

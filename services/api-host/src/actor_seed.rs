@@ -15,6 +15,39 @@ use crate::{fleetworks::NetworkStorage, Role};
 
 // Keep the same ceiling as Venture's actor snapshot worker.
 const MAX_ACTOR_CSV_BYTES: u64 = 256 * 1024 * 1024;
+const BOOTSTRAP_ACTORS: &str = "/usr/local/share/fleetworks/argos_actors.csv";
+
+/// Seed the image-pinned catalog only when storage has no complete actor seed.
+pub(crate) async fn seed_bootstrap(repo: &Repository) -> Result<()> {
+    if !argos_osint_core::storage::actor_catalog::status(repo.db())
+        .await?
+        .needs_seed
+    {
+        return Ok(());
+    }
+    let (actors, fingerprint) = tokio::task::spawn_blocking(|| -> Result<_> {
+        let source = if Path::new(BOOTSTRAP_ACTORS).is_file() {
+            Path::new(BOOTSTRAP_ACTORS)
+        } else {
+            Path::new("datasets/argos_actors.csv")
+        };
+        let bytes = fs::read(source).context("read bundled actor catalog")?;
+        ensure!(
+            !bytes.is_empty() && bytes.len() as u64 <= MAX_ACTOR_CSV_BYTES,
+            "bundled actor catalog exceeds the seed limit"
+        );
+        let fingerprint = format!("{:x}", Sha256::digest(&bytes));
+        let actors =
+            actor_catalog::read(bytes.as_slice()).context("validate bundled actor catalog")?;
+        Ok((actors, fingerprint))
+    })
+    .await??;
+    let cancel = AtomicBool::new(false);
+    seed_actors_pinned(repo, actors, &fingerprint, &cancel, |_| {})
+        .await
+        .context("seed bundled actor catalog during storage bootstrap")?;
+    Ok(())
+}
 
 pub(crate) async fn run(
     file: PathBuf,

@@ -42,12 +42,23 @@ pub async fn list(
     scope: &ActivityScope,
     limit: usize,
 ) -> Result<CycleHistory, TxError> {
-    if !(1..=100).contains(&limit) {
+    list_page(repo, scope_id, scope, limit, 0).await
+}
+
+/// Authorize membership and return one bounded page with a continuation offset.
+pub async fn list_page(
+    repo: &Repository,
+    scope_id: &str,
+    scope: &ActivityScope,
+    limit: usize,
+    offset: usize,
+) -> Result<CycleHistory, TxError> {
+    if !(1..=100).contains(&limit) || offset > 10_000 {
         return Err(TxError::Abort("invalid cycle history bound".into()));
     }
     jobs_view::validate_activity_scope(scope_id, scope)
         .map_err(|_| TxError::Abort("invalid cycle scope".into()))?;
-    let query = format!("SELECT record::id(id) AS job_id,state,<string>created_at AS created_at,IF finished_at != NONE {{ <string>finished_at }} ELSE {{ NONE }} AS finished_at FROM job WHERE operation=$operation AND ({membership}) AND array::len((SELECT VALUE job_id FROM workstation_cycle_tombstone WHERE scope_id=$activity_scope AND deployment_id=$activity_deployment AND workstation_id=$activity_node AND job_id=record::id($parent.id) LIMIT 1))=0 ORDER BY created_at DESC LIMIT $limit",membership=jobs_view::activity_membership());
+    let query = format!("SELECT record::id(id) AS job_id,state,<string>created_at AS created_at,IF finished_at != NONE {{ <string>finished_at }} ELSE {{ NONE }} AS finished_at FROM job WHERE operation=$operation AND ({membership}) AND array::len((SELECT VALUE job_id FROM workstation_cycle_tombstone WHERE scope_id=$activity_scope AND deployment_id=$activity_deployment AND workstation_id=$activity_node AND job_id=record::id($parent.id) LIMIT 1))=0 ORDER BY created_at DESC, id DESC LIMIT $limit START $offset",membership=jobs_view::activity_membership());
     let mut response = repo
         .db()
         .query(query)
@@ -55,11 +66,14 @@ pub async fn list(
         .bind(("activity_scope", scope_id.to_owned()))
         .bind(("activity_deployment", scope.deployment_id.clone()))
         .bind(("activity_node", scope.workstation_id.clone()))
-        .bind(("limit", limit as i64))
+        .bind(("limit", (limit + 1) as i64))
+        .bind(("offset", offset as i64))
         .await?
         .check()?;
-    let rows: Vec<SummaryRow> = response.take(0)?;
-    Ok(CycleHistory::new(
+    let mut rows: Vec<SummaryRow> = response.take(0)?;
+    let has_more = rows.len() > limit;
+    rows.truncate(limit);
+    let mut history = CycleHistory::new(
         rows.into_iter()
             .filter_map(|row| {
                 let cycle = fleetworks_contracts::AtlasCycleReceipt::from_job_id(&row.job_id)?;
@@ -72,7 +86,9 @@ pub async fn list(
                 ))
             })
             .collect(),
-    ))
+    );
+    history.next_offset = has_more.then_some(offset + limit);
+    Ok(history)
 }
 
 fn digest(parts: &[&str]) -> String {

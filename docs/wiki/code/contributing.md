@@ -6,7 +6,7 @@ Detailed agent rules, loaded before editing or running checks.
 
 ## Build and test
 
-Before running verification tests, ask the user to confirm the proposed tests and scope unless those tests are already explicitly authorized in the current session. When the user will verify, run only the requested minimal static checks and report tests and gates as not run. The gate commands below describe authorized verification; they do not override this confirmation requirement.
+Before running verification tests, ask the user to choose the scope once unless it is already authorized in the session: (1) verify feature functionality through scoped local tests, then hand off native review on the user's local machine, or (2) run all applicable verification checks until implementation issues are resolved. Scope (1) has three phases: static formatting/contract checks, targeted feature tests through the real affected code path, and a handoff listing exact native review steps plus any unrun Docker, embedded, installed-app or platform gates. Scope (2) continues through all applicable local gates under the resource and platform rules below. The gate commands below describe authorized verification; they do not override this scope choice.
 
 Browser checks use the repository Playwright runner. Its development server sets `ARGOS_WEB_TEST_DEV=1` to isolate Next output and locks under `.agent-scratch/next-web-tests`; custom test configurations must inherit this setting. Different ports alone do not isolate Next’s development lock. Preserve the user’s `.next` cache and frontend process.
 

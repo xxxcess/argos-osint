@@ -24,6 +24,7 @@ pub struct HostMetrics {
 #[derive(Default)]
 pub struct Cycles {
     pub history: Load<CycleHistory>,
+    pub page_offset: usize,
     pub selected: Option<String>,
     pub confirmation: Option<String>,
     confirmation_configuration_revision: Option<u64>,
@@ -52,6 +53,7 @@ impl Cycles {
         self.delete_request = None;
         self.revision = self.revision.wrapping_add(1);
         self.history = Load::Idle;
+        self.page_offset = 0;
         self.confirmation = None;
         self.confirmation_configuration_revision = None;
         self.selected = None;
@@ -117,6 +119,25 @@ impl State {
     }
 
     pub fn refresh_cycles(&mut self) {
+        self.load_cycles_page(0);
+    }
+
+    pub fn next_cycles_page(&mut self) {
+        let Load::Ready(history) = &self.cycles.history else {
+            return;
+        };
+        if let Some(offset) = history.next_offset {
+            self.load_cycles_page(offset);
+        }
+    }
+
+    pub fn previous_cycles_page(&mut self) {
+        if self.cycles.page_offset > 0 {
+            self.load_cycles_page(self.cycles.page_offset.saturating_sub(40));
+        }
+    }
+
+    fn load_cycles_page(&mut self, offset: usize) {
         let Some(context) = self.registration.context.clone() else {
             return;
         };
@@ -136,12 +157,10 @@ impl State {
         let revision = self.cycles.revision;
         let epoch = self.connection.epoch;
         let origin = self.origin_revision;
-        if !matches!(self.cycles.history, Load::Ready(_)) {
-            self.cycles.history = Load::Loading;
-        }
+        self.cycles.history = Load::Loading;
         let task = services.runtime.spawn(async move {
             let result = client
-                .cycle_history(40)
+                .cycle_history_page(40, offset)
                 .await
                 .map_err(|error| error.to_string());
             ui.update(move |state, _| {
@@ -153,7 +172,12 @@ impl State {
                 }
                 state.cycles.read_request = None;
                 match result {
-                    Ok(history) if history.rows.len() <= 40 => {
+                    Ok(history)
+                        if history.rows.len() <= 40
+                            && history.next_offset.is_none_or(|next| next == offset + 40) =>
+                    {
+                        state.cycles.page_offset = offset;
+                        state.cycles.selected = None;
                         state.cycles.history = Load::Ready(history);
                     }
                     Ok(_) => {

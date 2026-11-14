@@ -428,6 +428,7 @@ impl State {
             Page::Jobs => self.backend_read(ReadRequest::Jobs {}),
             Page::Workstation => {
                 self.refresh_readiness();
+                self.backend_read(ReadRequest::Profile);
                 self.refresh_host_metrics();
             }
             _ => {}

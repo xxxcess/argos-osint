@@ -103,6 +103,7 @@ services:
     <<: *runtime
     command: [--role, bootstrap]
     restart: "no"
+    mem_limit: 2g
     environment:
       <<: *environment
       FLEETWORKS_STORAGE_ROOT_USERNAME: root

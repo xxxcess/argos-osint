@@ -4,7 +4,7 @@ Applies to test design, changes, review and execution. Follow root `AGENTS.md`, 
 
 ## Authorization and scope
 
-- Confirm verification tests and scope before execution unless this session already explicitly authorizes them. Authorization persists for affected retries; do not ask repeatedly. If the user will verify, leave runtime tests to them and report not run.
+- Confirm the verification scope before execution unless this session already explicitly authorizes it. Offer scoped static and feature-functionality tests followed by user-run local native review, or all applicable checks through resolution of implementation failures. Authorization persists for affected retries; do not ask repeatedly. In the first path, prove the affected feature behavior with targeted tests, then report native review steps and any remaining Docker, embedded, installed-app or platform gates as pending.
 - Tie each test to requested acceptance or a concrete regression. Prove the critical contract early, freeze final-check inputs, and run agreed required gates. After freeze, fix only demonstrated acceptance blockers and rerun affected evidence; do not start unrelated audits or repeat unchanged broad checks. Honor wrap-up immediately.
 - Reuse existing harnesses/dependencies and the current toolchain. Do not add frameworks, feature flags or infrastructure without an in-scope need. Inspect manifests and actual flags rather than copying stale commands.
 

@@ -203,6 +203,7 @@ async fn main() -> Result<()> {
             runtime_user.expect("bootstrap always supplies a runtime user"),
         )
         .await?;
+        actor_seed::seed_bootstrap(&repo).await?;
         let atlas_dispatch = match std::env::var("FLEETWORKS_ATLAS_DISPATCH").as_deref() {
             Ok("1") => true,
             Ok("0") | Err(std::env::VarError::NotPresent) => false,

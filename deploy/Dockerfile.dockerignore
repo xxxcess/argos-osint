@@ -1,6 +1,8 @@
 **
 !Cargo.toml
 !Cargo.lock
+!datasets/
+!datasets/argos_actors.csv
 !package.json
 !pnpm-lock.yaml
 !pnpm-workspace.yaml

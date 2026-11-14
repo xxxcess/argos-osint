@@ -38,6 +38,7 @@ mod views;
 mod workspace_lifecycle;
 pub mod workspaces;
 pub mod workstation_dashboard;
+mod workstation_settings;
 
 pub use app::Page;
 pub use app::State;

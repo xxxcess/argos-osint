@@ -19,11 +19,13 @@ use rune_kit::shell;
 use rune_kit::shell::PaneState;
 use rune_kit::shell::RowStatus;
 use rune_kit::shell::Sidebar;
+use rune_kit::shell::SidebarHeader;
 use rune_kit::shell::SidebarRow;
 use rune_kit::shell::SplitView;
 use rune_kit::shell::Toolbar;
 use rune_kit::Button;
 use rune_kit::ButtonVariant;
+use rune_kit::Dialog;
 
 use crate::accessibility::Accessibility;
 use crate::backend::Backend;
@@ -131,7 +133,7 @@ impl Page {
         }
     }
 
-    /// Concise contextual helper displayed in the sidebar footer for the active view.
+    /// Concise description for the selected destination's context rail.
     pub fn summary_hint(self) -> &'static str {
         match self {
             Self::Seed => "Stage seeds, classifier runs & maintenance",
@@ -243,6 +245,8 @@ pub struct State {
     pub accessibility: Accessibility,
     pub page: Page,
     pub setup_gateway: bool,
+    pub(crate) settings_open: bool,
+    pub(crate) settings_section: crate::workstation_settings::SettingsSection,
     pub tool_key_dialog: bool,
     pub setup_advanced_open: bool,
     pub workstation_inspector: Option<WorkstationInspector>,
@@ -309,6 +313,8 @@ impl Default for State {
             accessibility: Accessibility::default(),
             page: Page::Workstation,
             setup_gateway: false,
+            settings_open: false,
+            settings_section: Default::default(),
             tool_key_dialog: false,
             setup_advanced_open: false,
             workstation_inspector: None,
@@ -403,6 +409,7 @@ impl State {
             self.disconnect();
         }
         self.setup_gateway = false;
+        self.settings_open = false;
         self.tool_key_dialog = false;
         self.workstation_inspector = None;
         self.models_provider_dialog = false;
@@ -872,7 +879,7 @@ pub fn spec() -> AppSpec<State> {
         min_size: Some((640.0, 480.0)),
         poll: Some(poll),
         on_key: Some(on_key),
-        ..AppSpec::new("Fleetworks", (1180.0, 780.0), State::default, view)
+        ..AppSpec::new("Fleetworks", (1440.0, 860.0), State::default, view)
     }
 }
 
@@ -898,6 +905,8 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
 
     let mut sidebar = Sidebar::new()
         .label("Fleetworks pages")
+        .header_gap(6.0)
+        .header_padding(4.0, 12.0)
         .header(
             rune::row()
                 .w_full()
@@ -937,6 +946,7 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
             .build(&kit)
             .key("gateway-status-header"),
         )
+        .child(SidebarHeader::new("Workstation").build(&kit))
         .child(
             SidebarRow::new(Page::Workstation.title())
                 .icon(Page::Workstation.icon())
@@ -947,6 +957,7 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
         );
 
     if state.connected() {
+        sidebar = sidebar.child(SidebarHeader::new("Operations").build(&kit));
         for page in Page::ALL {
             let mut row_builder = SidebarRow::new(page.title())
                 .icon(page.icon())
@@ -970,6 +981,16 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
                 .key("nav-setup"),
         );
     }
+    sidebar = sidebar.footer(
+        Button::new("Settings")
+            .variant(ButtonVariant::Ghost)
+            .icon(&icons::WORKSTATION)
+            .on_press(|state: &mut State| {
+                state.settings_open = true;
+            })
+            .build(&kit)
+            .key("open-workstation-settings"),
+    );
 
     let scope = if state.page.is_backend() {
         "Backend-wide".to_owned()
@@ -1011,7 +1032,12 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
         || state.configuration.request.is_some()
         || state.backend.busy();
 
-    let mut main = rune::col().key("page-content").w_full().h_full().min_h(0.0);
+    let mut content = rune::col()
+        .key("page-content")
+        .h_full()
+        .grow(1.0)
+        .min_w(0.0)
+        .min_h(0.0);
     if !state.setup_gateway {
         let mut scope_bar = rune::row()
             .w_full()
@@ -1067,7 +1093,7 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
                 &kit,
             ));
         }
-        main = main.child(scope_bar);
+        content = content.child(scope_bar);
     }
 
     let screen_key = if state.setup_gateway {
@@ -1094,7 +1120,36 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
             .transition(Transition::offset(0.0, 12.0).combined(Transition::opacity()))
             .child(page_body)
     };
-    let main = main.child(animated_page);
+    let content = content.child(animated_page);
+    let mut main = rune::row()
+        .key("main-area")
+        .w_full()
+        .h_full()
+        .min_h(0.0)
+        .child(content);
+    if state.connected()
+        && !state.setup_gateway
+        && cx
+            .layout_with("main-area", |rect| rect[2] >= 1120.0)
+            .unwrap_or(false)
+    {
+        main = main.child(context_rail(state, &kit, connection_tone));
+    }
+
+    if state.settings_open {
+        let width = cx
+            .layout_size("main-area")
+            .map(|size| (size[0] - 24.0).clamp(420.0, 940.0))
+            .unwrap_or(760.0);
+        Dialog::new("workstation-settings", "Settings")
+            .open(true)
+            .width(width)
+            .fit()
+            .click_outside(true)
+            .on_close(|state: &mut State| state.settings_open = false)
+            .child(crate::workstation_settings::page(state, cx, &kit))
+            .build(&kit, &mut layers);
+    }
 
     let base = SplitView::new(main)
         .sidebar(
@@ -1134,6 +1189,95 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
                 .set([(0.5 - nx) * 16.0, (0.5 - ny) * 14.0]);
             tx.live_only();
         })
+}
+
+fn context_rail(state: &State, kit: &rune_kit::Kit, connection_tone: StatusTone) -> El {
+    let page = state.page;
+    let scope = if page.is_backend() {
+        "Shared backend resources"
+    } else {
+        "Registered workstation activity"
+    };
+    let working = sidebar_row_status(state, page).is_some();
+    let mut activity = rune::col()
+        .w_full()
+        .gap(8.0)
+        .child(
+            rune::text("ACTIVITY")
+                .font(kit.ty.text_xsmall_medium)
+                .color(kit.c.text_faint),
+        )
+        .child(ui_components::status_pill(
+            if working { "Working" } else { "Ready" },
+            None,
+            if working {
+                StatusTone::Accent
+            } else {
+                connection_tone
+            },
+            kit,
+        ));
+    if let Some(count) = sidebar_row_badge(state, page) {
+        activity = activity.child(
+            rune::text(format!("{count} visible records"))
+                .font(kit.ty.small)
+                .color(kit.c.text_muted),
+        );
+    }
+    rune::col()
+        .key("context-rail")
+        .w(236.0)
+        .h_full()
+        .px(14.0)
+        .py(18.0)
+        .gap(18.0)
+        .fill(theme::hex(theme::SURFACE))
+        .border_sides([1.0, 0.0, 0.0, 0.0], theme::hex(theme::BORDER_SUBTLE))
+        .child(
+            rune::col()
+                .w_full()
+                .gap(9.0)
+                .child(
+                    rune::text("OVERVIEW")
+                        .font(kit.ty.text_xsmall_medium)
+                        .color(kit.c.text_faint),
+                )
+                .child(
+                    rune::text(page.title())
+                        .font(kit.ty.body_medium)
+                        .color(kit.c.text_base)
+                        .wrap(),
+                )
+                .child(
+                    rune::text(page.summary_hint())
+                        .font(kit.ty.small)
+                        .color(kit.c.text_muted)
+                        .wrap(),
+                ),
+        )
+        .child(
+            rune::col()
+                .w_full()
+                .pt(14.0)
+                .gap(8.0)
+                .border_sides([0.0, 1.0, 0.0, 0.0], theme::hex(theme::BORDER_SUBTLE))
+                .child(
+                    rune::text("SCOPE")
+                        .font(kit.ty.text_xsmall_medium)
+                        .color(kit.c.text_faint),
+                )
+                .child(
+                    rune::text(scope)
+                        .font(kit.ty.small)
+                        .color(kit.c.text_muted)
+                        .wrap(),
+                ),
+        )
+        .child(
+            activity
+                .pt(14.0)
+                .border_sides([0.0, 1.0, 0.0, 0.0], theme::hex(theme::BORDER_SUBTLE)),
+        )
 }
 
 fn sidebar_row_status(state: &State, page: Page) -> Option<RowStatus> {

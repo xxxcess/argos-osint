@@ -24,6 +24,8 @@ pub struct CycleSummary {
 #[non_exhaustive]
 pub struct CycleHistory {
     pub rows: Vec<CycleSummary>,
+    #[serde(default)]
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -84,7 +86,10 @@ impl CycleSummary {
 impl CycleHistory {
     #[must_use]
     pub fn new(rows: Vec<CycleSummary>) -> Self {
-        Self { rows }
+        Self {
+            rows,
+            next_cursor: None,
+        }
     }
 }
 impl DeleteCycleReceipt {

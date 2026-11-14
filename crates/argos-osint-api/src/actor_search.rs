@@ -303,6 +303,7 @@ mod tests {
             blocked: false,
             backfill_complete: true,
             seed_complete: true,
+            rebuild_reason_code: String::new(),
             pressure_paused: false,
             pressure_reason: String::new(),
             backlog_paused: false,

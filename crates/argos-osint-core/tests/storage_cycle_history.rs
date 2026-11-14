@@ -11,6 +11,7 @@ use argos_osint_core::storage::job_dispatch;
 use argos_osint_core::storage::jobs::NewJob;
 use argos_osint_core::storage::jobs::NewTask;
 use argos_osint_core::storage::repo::Repository;
+use chrono::Duration;
 use chrono::Utc;
 use fleetworks_contracts::connect::RegistrationEnsureRequest;
 use fleetworks_contracts::context::ActivityScope;
@@ -193,4 +194,129 @@ async fn cycle_history_tombstone_is_private_revisioned_idempotent_and_keeps_audi
         check.take::<Option<bool>>(1).expect("origin remains"),
         Some(true)
     );
+}
+
+#[tokio::test]
+async fn cycle_history_pages_keep_order_when_newer_cycle_arrives() {
+    let Some(server) = support::Server::start() else {
+        return;
+    };
+    let repo = server.repo("argos", "cycle_history_pages").await;
+    bootstrap::ensure_network_identity(repo.db())
+        .await
+        .expect("database identity");
+    connect_registry::initialize_control(repo.db())
+        .await
+        .expect("control");
+    let owner = register(&repo, "page-owner").await;
+    let other = register(&repo, "page-other").await;
+    job_dispatch::enable_pool(repo.db(), job_dispatch::ATLAS_POOL)
+        .await
+        .expect("pool");
+    let base = Utc::now() - Duration::seconds(10);
+    let mut ids = Vec::new();
+    for index in 0..4 {
+        let cycle =
+            AtlasCycleReceipt::from_request_id(&format!("page-{index}")).expect("cycle identity");
+        let task = cycle.task_id();
+        job_dispatch::submit_interactive(
+            repo.db(),
+            &NewJob {
+                id: &cycle.job_id,
+                kind: "task",
+                operation: fleetworks_contracts::ATLAS_CYCLE_OPERATION,
+                parent: None,
+                created_at: base + Duration::seconds(index),
+            },
+            &NewTask {
+                id: &task,
+                job: &cycle.job_id,
+                pool: job_dispatch::ATLAS_POOL,
+                operation: fleetworks_contracts::ATLAS_CYCLE_OPERATION,
+                priority: 100,
+                deps: vec![],
+                input_hash: &cycle.run_id,
+                created_at: base + Duration::seconds(index),
+            },
+            &admission(&owner, &format!("collect-page-{index}")),
+        )
+        .await
+        .expect("durable cycle");
+        ids.push(cycle.job_id);
+    }
+    let scope = ActivityScope::for_workstation(&owner);
+    let first = cycle_history::list_page(&repo, "scope-a", &scope, 2, None)
+        .await
+        .expect("first page");
+    assert_eq!(
+        first
+            .rows
+            .iter()
+            .map(|row| row.job_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![ids[3].as_str(), ids[2].as_str()]
+    );
+    let cursor = first.next_cursor.as_deref().expect("continuation");
+    let second = cycle_history::list_page(&repo, "scope-a", &scope, 2, Some(cursor))
+        .await
+        .expect("second page");
+    assert_eq!(
+        second
+            .rows
+            .iter()
+            .map(|row| row.job_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![ids[1].as_str(), ids[0].as_str()]
+    );
+    assert!(second.next_cursor.is_none());
+    let previous = cycle_history::list_page(&repo, "scope-a", &scope, 2, None)
+        .await
+        .expect("previous page");
+    assert_eq!(previous.rows, first.rows);
+
+    let newer = AtlasCycleReceipt::from_request_id("page-newer").expect("new cycle");
+    let task = newer.task_id();
+    job_dispatch::submit_interactive(
+        repo.db(),
+        &NewJob {
+            id: &newer.job_id,
+            kind: "task",
+            operation: fleetworks_contracts::ATLAS_CYCLE_OPERATION,
+            parent: None,
+            created_at: base + Duration::seconds(4),
+        },
+        &NewTask {
+            id: &task,
+            job: &newer.job_id,
+            pool: job_dispatch::ATLAS_POOL,
+            operation: fleetworks_contracts::ATLAS_CYCLE_OPERATION,
+            priority: 100,
+            deps: vec![],
+            input_hash: &newer.run_id,
+            created_at: base + Duration::seconds(4),
+        },
+        &admission(&owner, "collect-page-newer"),
+    )
+    .await
+    .expect("new durable cycle");
+    let continued = cycle_history::list_page(&repo, "scope-a", &scope, 2, Some(cursor))
+        .await
+        .expect("stable continuation");
+    assert_eq!(continued.rows, second.rows);
+    assert!(
+        cycle_history::list_page(&repo, "scope-a", &scope, 2, Some("bad-cursor"))
+            .await
+            .is_err()
+    );
+    assert!(cycle_history::list_page(
+        &repo,
+        "scope-a",
+        &ActivityScope::for_workstation(&other),
+        2,
+        Some(cursor),
+    )
+    .await
+    .expect("other registration")
+    .rows
+    .is_empty());
 }

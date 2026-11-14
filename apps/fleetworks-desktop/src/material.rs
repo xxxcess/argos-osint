@@ -131,7 +131,7 @@ pub(crate) fn luminous_card(
     let top_rim = if selected {
         tone.fg().alpha(0.36)
     } else {
-        theme::hex(theme::LIGHT_SURFACE_GLOW).alpha(0.07)
+        theme::hex(theme::LIGHT_SURFACE_GLOW).alpha(0.15)
     };
     let bottom_rim = theme::hex(theme::BORDER_SUBTLE).alpha(0.48);
     let glow_color = if selected {
@@ -140,11 +140,39 @@ pub(crate) fn luminous_card(
         theme::hex(theme::LIGHT_SURFACE_GLOW).alpha(0.03)
     };
 
+    let metal_top = if selected {
+        theme::hex(theme::METAL_PANEL_HIGHLIGHT)
+    } else {
+        theme::hex(theme::METAL_PANEL_MID)
+    };
+    let metal_middle = if selected {
+        theme::hex(theme::SURFACE_ELEVATED)
+    } else {
+        base_fill
+    };
     let mut card = content
         .fill(base_fill)
+        .linear_gradient(
+            PI * 0.48,
+            [
+                (0.0, theme::hex(theme::METAL_PANEL_LOW)),
+                (0.06, metal_top),
+                (0.19, metal_middle),
+                (0.48, base_fill),
+                (0.79, metal_middle),
+                (1.0, theme::hex(theme::METAL_PANEL_LOW)),
+            ],
+        )
         .border_gradient(1.0, top_rim, bottom_rim)
         .radius(10.0)
         .continuous_corners()
+        .box_shadow(Shadow {
+            y: 1.0,
+            blur: 2.0,
+            color: theme::hex(theme::LIGHT_SURFACE_GLOW).alpha(0.055),
+            inset: true,
+            ..Shadow::default()
+        })
         .box_shadow(Shadow {
             y: 3.0,
             blur: 18.0,
@@ -304,7 +332,7 @@ pub(crate) fn apply_liquid_metal(
     }
 
     let (stops, top_edge, bottom_edge, glow, sheen_color, shimmer_tint): (
-        [(f32, Color); 4],
+        [(f32, Color); 6],
         Color,
         Color,
         Color,
@@ -313,9 +341,11 @@ pub(crate) fn apply_liquid_metal(
     ) = match finish {
         MetalFinish::GoldCta => (
             [
-                (0.0, theme::hex(theme::ACCENT_HOVER)),
-                (0.30, theme::hex(theme::ACCENT)),
-                (0.72, theme::hex(theme::ACCENT_DEEP)),
+                (0.0, theme::hex(theme::ACCENT_DEEP)),
+                (0.06, theme::hex(theme::ACCENT_HIGHLIGHT)),
+                (0.22, theme::hex(theme::ACCENT_HOVER)),
+                (0.56, theme::hex(theme::ACCENT)),
+                (0.82, theme::hex(theme::ACCENT_DEEP)),
                 (1.0, theme::hex("#5E461F")),
             ],
             theme::hex("#FFF5DF").alpha(0.42),
@@ -326,9 +356,11 @@ pub(crate) fn apply_liquid_metal(
         ),
         MetalFinish::Gunmetal => (
             [
-                (0.0, theme::hex(theme::METAL_DARK_TOP)),
-                (0.38, theme::hex("#1B1F28")),
-                (0.76, theme::hex(theme::METAL_DARK_MID)),
+                (0.0, theme::hex(theme::METAL_DARK_BOTTOM)),
+                (0.07, theme::hex("#414752")),
+                (0.18, theme::hex(theme::METAL_DARK_TOP)),
+                (0.50, theme::hex("#1B1F28")),
+                (0.80, theme::hex(theme::METAL_DARK_MID)),
                 (1.0, theme::hex(theme::METAL_DARK_BOTTOM)),
             ],
             theme::hex(theme::TEXT_PRIMARY).alpha(0.13),
@@ -339,9 +371,11 @@ pub(crate) fn apply_liquid_metal(
         ),
         MetalFinish::CrimsonDanger => (
             [
-                (0.0, theme::hex("#3A1721")),
-                (0.38, theme::hex("#2C1119")),
-                (0.78, theme::hex(theme::STATUS_ERR_BG)),
+                (0.0, theme::hex("#18090D")),
+                (0.07, theme::hex("#5B2534")),
+                (0.20, theme::hex("#3A1721")),
+                (0.55, theme::hex("#2C1119")),
+                (0.82, theme::hex(theme::STATUS_ERR_BG)),
                 (1.0, theme::hex("#14070B")),
             ],
             theme::hex(theme::STATUS_ERR).alpha(0.28),
@@ -352,8 +386,10 @@ pub(crate) fn apply_liquid_metal(
         ),
         MetalFinish::ObsidianPill => (
             [
-                (0.0, theme::hex("#1C2029")),
-                (0.45, theme::hex(theme::SURFACE_RAISED)),
+                (0.0, theme::hex(theme::METAL_PANEL_LOW)),
+                (0.07, theme::hex("#343943")),
+                (0.20, theme::hex("#1C2029")),
+                (0.48, theme::hex(theme::SURFACE_RAISED)),
                 (0.85, theme::hex(theme::METAL_DARK_BOTTOM)),
                 (1.0, theme::hex(theme::BACKGROUND)),
             ],

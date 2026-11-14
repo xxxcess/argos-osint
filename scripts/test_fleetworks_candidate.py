@@ -421,12 +421,45 @@ sys.stdout.write(sys.argv[2]); sys.stdout.flush()
                 self.assertIn("through Launch Services", stream.getvalue())
             return subprocess.CompletedProcess(command, 0, "", "")
 
-        with mock.patch("sys.stderr", stream):
+        with mock.patch("sys.stderr", stream), mock.patch.dict(os.environ, {}, clear=True):
             self.assertIn("Requested Launch Services", open_native(self.root / NATIVE_APP, info, target, runner=runner))
         self.assertEqual(commands, [["ps", "-axo", "comm="], ["open", str(self.root / NATIVE_APP)]])
         with mock.patch("sys.stderr", io.StringIO()):
             response = open_native(self.root / NATIVE_APP, info, target, runner=lambda command, **_: subprocess.CompletedProcess(command, 0, "/fixture/fleetworks-desktop\n", ""))
         self.assertIn("already running", response)
+
+    def test_local_review_open_forwards_only_socket_path(self):
+        target = "x86_64-apple-darwin"
+        info = SimpleNamespace(system="Darwin", native_target=target)
+        commands = []
+
+        def runner(command, **_kwargs):
+            commands.append(command)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with mock.patch("sys.stderr", io.StringIO()), mock.patch.dict(
+            os.environ, {"FLEETWORKS_LOCAL_REVIEW_APPROVAL_SOCKET": "/tmp/fw-review.sock"}
+        ):
+            open_native(self.root / NATIVE_APP, info, target, runner=runner)
+        self.assertEqual(commands, [
+            ["ps", "-axo", "comm="],
+            ["open", "--env", "FLEETWORKS_LOCAL_REVIEW_APPROVAL_SOCKET=/tmp/fw-review.sock", str(self.root / NATIVE_APP)],
+        ])
+
+    def test_local_review_open_rejects_relative_socket(self):
+        target = "x86_64-apple-darwin"
+        info = SimpleNamespace(system="Darwin", native_target=target)
+        commands = []
+
+        def runner(command, **_kwargs):
+            commands.append(command)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with mock.patch("sys.stderr", io.StringIO()), mock.patch.dict(
+            os.environ, {"FLEETWORKS_LOCAL_REVIEW_APPROVAL_SOCKET": "review.sock"}
+        ), self.assertRaisesRegex(ValueError, "absolute macOS UNIX socket"):
+            open_native(self.root / NATIVE_APP, info, target, runner=runner)
+        self.assertEqual(commands, [["ps", "-axo", "comm="]])
 
 
 if __name__ == "__main__":

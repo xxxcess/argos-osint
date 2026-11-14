@@ -1,5 +1,8 @@
-//! Read-only check cards distinguish an observed state from its freshness.
+//! Check cards distinguish observed state from freshness and offer admitted repairs.
 
+use fleetworks_contracts::readiness::DatasetKind;
+use fleetworks_contracts::readiness::MaintenanceOperation;
+use fleetworks_contracts::readiness::ReadinessActionId;
 use fleetworks_contracts::readiness::ReadinessCheck;
 use fleetworks_contracts::readiness::ReadinessCheckId;
 use fleetworks_contracts::readiness::ReadinessState;
@@ -11,8 +14,10 @@ use crate::app::Load;
 use crate::app::State;
 use crate::icons;
 use crate::material;
+use crate::material::MetalFinish;
 use crate::theme::StatusTone;
 use crate::ui_components;
+use crate::ui_components::ActionButton;
 use crate::views::heading;
 use crate::views::line;
 use crate::views::quiet;
@@ -120,6 +125,49 @@ pub(crate) fn checks(state: &State, preferences: ViewPreferences, kit: &Kit) -> 
                         "Refresh checks before relying on this status or starting a maintenance operation.",
                         kit,
                     ));
+                }
+                for action in &check.actions {
+                    let (operation, label) = match action.id {
+                        ReadinessActionId::SeedActors => {
+                            (MaintenanceOperation::SeedActors, "Seed actors…")
+                        }
+                        ReadinessActionId::TrainClassifier => {
+                            (MaintenanceOperation::TrainClassifier, "Train classifier…")
+                        }
+                        ReadinessActionId::RebuildActorIndex => {
+                            (MaintenanceOperation::ReindexActors, "Build actor index")
+                        }
+                        _ => continue,
+                    };
+                    let reason = state.maintenance_disabled_reason(operation);
+                    card_content = card_content.child(
+                        ActionButton::new(label)
+                            .key(format!("readiness-action-{}", check.id.as_str()))
+                            .finish(MetalFinish::Gunmetal)
+                            .disabled(reason.is_some())
+                            .on_press_tx(move |state: &mut State, tx| match operation {
+                                MaintenanceOperation::SeedActors => {
+                                    state.choose_dataset(DatasetKind::ActorCatalog, tx)
+                                }
+                                MaintenanceOperation::TrainClassifier => {
+                                    state.choose_dataset(DatasetKind::ClassifierTraining, tx)
+                                }
+                                MaintenanceOperation::ReindexActors => {
+                                    state.preview_maintenance(operation)
+                                }
+                                _ => {}
+                            })
+                            .build(
+                                kit,
+                                preferences,
+                                (!preferences.matte()).then_some(&state.pointer_offset),
+                            ),
+                    );
+                    if expanded {
+                        if let Some(reason) = reason {
+                            card_content = card_content.child(quiet(reason, kit));
+                        }
+                    }
                 }
                 let card = material::interactive_tile(
                     card_content,

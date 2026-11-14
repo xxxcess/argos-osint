@@ -30,6 +30,9 @@ pub const SELECTION_SURFACE: &str = "#322C22";
 pub const METAL_DARK_TOP: &str = "#222631";
 pub const METAL_DARK_MID: &str = "#14171F";
 pub const METAL_DARK_BOTTOM: &str = "#0D0F14";
+pub const METAL_PANEL_HIGHLIGHT: &str = "#252A32";
+pub const METAL_PANEL_MID: &str = "#151920";
+pub const METAL_PANEL_LOW: &str = "#0A0C10";
 pub const METAL_EDGE_TOP: &str = "#5A5448";
 pub const METAL_EDGE_BOTTOM: &str = "#24211C";
 

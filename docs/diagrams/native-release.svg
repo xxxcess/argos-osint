@@ -64,7 +64,7 @@
 <text x="56" y="584" class="note">Immutable version/full-SHA tags</text>
 <text x="56" y="608" class="note">Git + image refs: nightly / stable</text>
 <text x="56" y="632" class="note">Unsigned native ZIP downloads</text>
-<text x="56" y="656" class="note">No Docker-save tar artifacts</text>
+<text x="56" y="656" class="note">Image + BERT tar.gz archives</text>
 <text x="40" y="740" class="minor">First publication covers all components. Later docs-only changes skip products; pending changes widen verification too.</text>
 <text x="40" y="768" class="minor">Signing/notarization, minimum-macOS and physical-Mac GUI/Keychain checks remain separate evidence.</text>
 <text x="40" y="796" class="minor">Those separate checks are not implemented blockers for automatic unsigned publication; no executed pass is implied.</text>

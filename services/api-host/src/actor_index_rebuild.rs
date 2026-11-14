@@ -3,6 +3,7 @@
 use argos_osint_core::storage::actor_search_outbox;
 use argos_osint_core::storage::actor_search_outbox::RebuildAction;
 use argos_osint_core::storage::repo::Repository;
+use argos_osint_core::storage::tx::TxError;
 use chrono::Utc;
 use fleetworks_contracts::actor_index::ActorIndexGeneration;
 use fleetworks_contracts::actor_index::ActorIndexStatus;
@@ -74,7 +75,12 @@ impl ActorIndexWorker {
             loop {
                 tokio::select! {
                     result=&mut operation=>break result,
-                    _=heartbeat.tick()=>actor_search_outbox::renew(repo,&lease,Utc::now()).await?,
+                    _=heartbeat.tick()=>{
+                        if let Err(error)=actor_search_outbox::renew(repo,&lease,Utc::now()).await {
+                            tracing::warn!(stage="rebuild_lease_renew",code=%super::tx_error_code(&error),"Actor index lease renewal failed");
+                            return Err(error.into());
+                        }
+                    },
                 }
             }
         };
@@ -141,15 +147,41 @@ impl ActorIndexWorker {
                 };
                 if let Err(error) = acknowledgement {
                     self.status = None;
-                    // Retain the durable exact command for recovery; an invalid
-                    // receipt cannot advance source or visible checkpoints.
-                    actor_search_outbox::defer(repo, &lease, None, true, Utc::now()).await?;
+                    tracing::warn!(stage="rebuild_acknowledge",code=%super::tx_error_code(&error),"Actor index receipt acknowledgement failed");
+                    // A lost lease or storage failure leaves the exact body
+                    // pending for a newly fenced attempt. Validation failures
+                    // still require a reviewed correction.
+                    let lease_lost =
+                        matches!(&error,TxError::Abort(reason) if reason=="actor_index_lease_lost");
+                    if !lease_lost {
+                        if let Err(defer_error) = actor_search_outbox::defer(
+                            repo,
+                            &lease,
+                            None,
+                            super::rebuild_ack_requires_correction(&error),
+                            Utc::now(),
+                        )
+                        .await
+                        {
+                            tracing::warn!(stage="rebuild_defer",code=%super::tx_error_code(&defer_error),"Actor index retry scheduling failed");
+                        }
+                    }
                     return Err(error.into());
                 }
                 Ok(TickReport::Waiting)
             }
             Err(error) => {
                 self.status = None;
+                tracing::warn!(
+                    stage = "rebuild_http",
+                    status = error
+                        .status
+                        .map(|status| status.as_u16())
+                        .unwrap_or_default(),
+                    code = error.code.as_deref().unwrap_or("no_service_code"),
+                    correction_required = error.permanent,
+                    "Actor index request failed"
+                );
                 actor_search_outbox::defer(
                     repo,
                     &lease,

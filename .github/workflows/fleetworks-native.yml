@@ -109,6 +109,7 @@ jobs:
           set -euo pipefail
           evidence="$RUNNER_TEMP/fleetworks-native-evidence"
           mkdir -p "$evidence"
+          python3 -B -m unittest discover -s .github/scripts -p 'test_ui_visual_review.py'
           cargo fmt -p fleetworks-desktop -p fleetworks-workstation -p fleetworks-contracts -- --check
           python3 scripts/agent_cargo.py test --locked -p fleetworks-desktop \
             -p fleetworks-workstation -p fleetworks-contracts -- --test-threads=1 \
@@ -127,6 +128,25 @@ jobs:
             --size 1280x800 --size 640x480 --scale 1 --scale 2 \
             --script brain-search-ready=apps/fleetworks-desktop/tests/fixtures/scripts/brain-search-open.json \
             --script-expect-key brain-search-ready=dossier-name
+      - name: Capture wide workstation shell and Settings dialog
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/fleetworks_verify.py native-ui --agent --require-clean \
+            --revision "$FLEETWORKS_HEAD" --output "$RUNNER_TEMP/fleetworks-native-evidence/shell-settings" \
+            --scene registration-ready --scene workstation-partial-seed \
+            --scene atlas-articles-ready --scene jobs-page-two \
+            --size 1440x860 --size 640x480 --scale 1 \
+            --script registration-ready=apps/fleetworks-desktop/tests/fixtures/scripts/workstation-settings-open.json \
+            --script-expect-key registration-ready=workstation-settings-body
+      - name: Capture synthetic local pairing approval screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/fleetworks_verify.py native-ui --agent --require-clean \
+            --revision "$FLEETWORKS_HEAD" --output "$RUNNER_TEMP/fleetworks-native-evidence/pairing-local-review" \
+            --scene pairing-waiting --local-review-fixture \
+            --size 1440x860 --size 640x480 --scale 1
       - name: Build the debug app for pull-request review
         if: inputs.release-version == ''
         shell: bash

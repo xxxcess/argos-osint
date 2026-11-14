@@ -106,23 +106,98 @@ jobs:
             fi
           fi
           python3 -B -m unittest discover -s scripts -p 'test_fleetworks_*.py'
+          rm -f "$RUNNER_TEMP/trusted-planner-ready"
           mode=pr
           event="$GITHUB_EVENT_NAME"
           base="$FLEETWORKS_BASE"
-          if [[ "$event" == schedule || ( "$event" == workflow_dispatch && "$DISPATCH_MODE" != pr ) ]]; then
-            mode=full
-          elif [[ "$event" == workflow_dispatch ]]; then
-            if [[ ! "$DISPATCH_BASE" =~ ^[0-9a-f]{40}$ || "$DISPATCH_BASE" =~ ^0+$ ]]; then
-              echo '::error::Scoped dispatch requires an exact comparison SHA'
+          components="${DISPATCH_COMPONENTS:-auto}"
+          if [[ "$event" == pull_request ]]; then
+            if [[ ! "$base" =~ ^[0-9a-f]{40}$ || "$base" =~ ^0+$ ]]; then
+              echo '::error::Pull request comparison requires a valid base SHA'
               exit 1
             fi
-            event=pull_request
-            base="$DISPATCH_BASE"
+            if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+              git fetch --no-tags origin "$base"
+            fi
+            planner_root="$RUNNER_TEMP/trusted-planner"
+            rm -rf "$planner_root"
+            if git cat-file -e "${base}:scripts/fleetworks_verify.py" 2>/dev/null \
+              && git cat-file -e "${base}:scripts/fleetworks_native_verify.py" 2>/dev/null \
+              && git cat-file -e "${base}:scripts/fleetworks_release.py" 2>/dev/null; then
+              mkdir -p "$planner_root"
+              git archive "$base" scripts | tar -x -C "$planner_root"
+              touch "$RUNNER_TEMP/trusted-planner-ready"
+              if git merge-base "$base" "$FLEETWORKS_HEAD" >/dev/null 2>&1; then
+                changed_files="$(git diff --name-only --no-renames "$base...$FLEETWORKS_HEAD")"
+              else
+                changed_files="$(git diff --name-only --no-renames "$base" "$FLEETWORKS_HEAD")"
+              fi
+              if printf '%s\n' "$changed_files" | grep -Eq '^(\.github/workflows/(fleetworks|embedded)\.yml|\.github/scripts/|scripts/(fleetworks_(verify|native_verify|release)|test_fleetworks_(verify|release))\.py$)'; then
+                mode=full
+                components=all
+              fi
+              PYTHONPATH="$planner_root/scripts" python3 "$planner_root/scripts/fleetworks_verify.py" "$mode" \
+                --event "$event" --base "$base" \
+                --head "$FLEETWORKS_HEAD" --components "$components" \
+                --github-output "$GITHUB_OUTPUT" --json-output "$RUNNER_TEMP/scope.json"
+            else
+              BASE="$base" HEAD_SHA="$FLEETWORKS_HEAD" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          scopes = [
+              "bert",
+              "compose",
+              "desktop",
+              "images",
+              "queue",
+              "server",
+              "storage",
+              "web",
+              "web_dev",
+          ]
+          image_targets = ["runtime", "search-index", "surrealdb", "web"]
+          image_arches = ["amd64", "arm64"]
+          scope = {
+              "base": os.environ["BASE"],
+              "components": "all",
+              "event": "pull_request",
+              "format": 1,
+              "full": True,
+              "head": os.environ["HEAD_SHA"],
+              "image_arches": image_arches,
+              "image_targets": image_targets,
+              "reason": "Trusted base ref does not include fleetworks planner; running full matrix",
+              "scopes": scopes,
+          }
+          Path(os.environ["RUNNER_TEMP"], "scope.json").write_text(
+              json.dumps(scope, indent=2, sort_keys=True) + "\n"
+          )
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              for key in scopes:
+                  print(f"{key}=true", file=output)
+              print("full=true", file=output)
+              print(f"image_targets={','.join(image_targets)}", file=output)
+              print(f"image_arch_json={json.dumps(image_arches)}", file=output)
+          PY
+            fi
+          else
+            if [[ "$event" == schedule || ( "$event" == workflow_dispatch && "$DISPATCH_MODE" != pr ) ]]; then
+              mode=full
+            elif [[ "$event" == workflow_dispatch ]]; then
+              if [[ ! "$DISPATCH_BASE" =~ ^[0-9a-f]{40}$ || "$DISPATCH_BASE" =~ ^0+$ ]]; then
+                echo '::error::Scoped dispatch requires an exact comparison SHA'
+                exit 1
+              fi
+              event=pull_request
+              base="$DISPATCH_BASE"
+            fi
+            python3 scripts/fleetworks_verify.py "$mode" \
+              --event "$event" --base "$base" \
+              --head "$FLEETWORKS_HEAD" --components "$components" \
+              --github-output "$GITHUB_OUTPUT" --json-output "$RUNNER_TEMP/scope.json"
           fi
-          python3 scripts/fleetworks_verify.py "$mode" \
-            --event "$event" --base "$base" \
-            --head "$FLEETWORKS_HEAD" --components "${DISPATCH_COMPONENTS:-auto}" \
-            --github-output "$GITHUB_OUTPUT" --json-output "$RUNNER_TEMP/scope.json"
           printf 'head=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Plan source-scoped branch publication
@@ -135,19 +210,87 @@ jobs:
           from pathlib import Path
           temporary = Path(os.environ["RUNNER_TEMP"])
           scope = json.loads((temporary / "scope.json").read_text())
+          event = os.environ["GITHUB_EVENT_NAME"]
           # A scoped manual dispatch compares like a PR, but cannot publish.
-          scope["event"] = os.environ["GITHUB_EVENT_NAME"]
+          scope["event"] = event
           (temporary / "release-scope.json").write_text(json.dumps(scope))
-          subprocess.run([sys.executable, "scripts/fleetworks_release.py", "plan",
-              "--event", scope["event"], "--ref", os.environ["GITHUB_REF"],
-              "--head", os.environ["FLEETWORKS_HEAD"], "--base", scope["base"] or "",
-              "--scope-plan", str(temporary / "release-scope.json"),
-              "--json-output", str(temporary / "release.json"),
-              "--github-output", os.environ["GITHUB_OUTPUT"]], check=True)
-          plan = json.loads((temporary / "release.json").read_text())
-          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+          trusted_marker = temporary / "trusted-planner-ready"
+          if event == "pull_request" and not trusted_marker.exists():
+              plan = {
+                  "backend": True,
+                  "base": scope["base"] or "",
+                  "bert": True,
+                  "channel": "",
+                  "event": "pull_request",
+                  "format": 1,
+                  "head": os.environ["FLEETWORKS_HEAD"],
+                  "image_tag": "",
+                  "image_targets": scope["image_targets"],
+                  "native": True,
+                  "prerelease": False,
+                  "publish": False,
+                  "ref": os.environ["GITHUB_REF"],
+                  "release_base": "",
+                  "scope": scope,
+                  "tag": "",
+                  "untyped_commits": 0,
+                  "version": "",
+                  "web": True,
+              }
+              (temporary / "release.json").write_text(
+                  json.dumps(plan, indent=2, sort_keys=True) + "\n"
+              )
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+                  print("publish=false", file=output)
+                  print(f"head={plan['head']}", file=output)
+                  print(f"base={plan['base']}", file=output)
+                  print("release_base=", file=output)
+                  print("version=", file=output)
+                  print("tag=", file=output)
+                  print("image_tag=", file=output)
+                  print("channel=", file=output)
+                  print("prerelease=false", file=output)
+                  print("native=true", file=output)
+                  print("backend=true", file=output)
+                  print("untyped_commits=0", file=output)
+                  print("release_web=true", file=output)
+          else:
+              if event == "pull_request":
+                  planner_scripts = str(temporary / "trusted-planner" / "scripts")
+                  env = dict(os.environ, PYTHONPATH=planner_scripts)
+                  args = [
+                      "plan",
+                      "--event", scope["event"], "--ref", os.environ["GITHUB_REF"],
+                      "--head", os.environ["FLEETWORKS_HEAD"], "--base", scope["base"] or "",
+                      "--scope-plan", str(temporary / "release-scope.json"),
+                      "--json-output", str(temporary / "release.json"),
+                      "--github-output", os.environ["GITHUB_OUTPUT"],
+                  ]
+                  subprocess.run([
+                      sys.executable, "-c",
+                      "import sys, pathlib, fleetworks_release; "
+                      "fleetworks_release.ROOT = pathlib.Path.cwd(); "
+                      "sys.argv = ['fleetworks_release.py', *sys.argv[1:]]; "
+                      "raise SystemExit(fleetworks_release.main())",
+                      *args,
+                  ], check=True, env=env)
+              else:
+                  subprocess.run([sys.executable, "scripts/fleetworks_release.py", "plan",
+                      "--event", scope["event"], "--ref", os.environ["GITHUB_REF"],
+                      "--head", os.environ["FLEETWORKS_HEAD"], "--base", scope["base"] or "",
+                      "--scope-plan", str(temporary / "release-scope.json"),
+                      "--json-output", str(temporary / "release.json"),
+                      "--github-output", os.environ["GITHUB_OUTPUT"]], check=True)
+              plan = json.loads((temporary / "release.json").read_text())
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               print("plan=" + json.dumps(plan, separators=(",", ":")), file=output)
           PY
+
+      - name: Clean up trusted planner checkout
+        if: always()
+        shell: bash
+        run: |
+          rm -rf "$RUNNER_TEMP/trusted-planner" "$RUNNER_TEMP/trusted-planner-ready"
 
   desktop:
     name: Mac app / ${{ matrix.target }}
@@ -533,19 +676,72 @@ jobs:
           exit "$failed"
 
   release_images:
-    name: Verified release image staging
+    name: Verified release image staging / Linux ${{ matrix.arch }}
     needs: [scope, source_checks]
-    if: needs.source_checks.result == 'success' && needs.scope.outputs.publish == 'true' && needs.scope.outputs.images == 'true'
+    if: always() && needs.scope.result == 'success' && needs.source_checks.result == 'success' && needs.scope.outputs.publish == 'true' && needs.scope.outputs.images == 'true' && github.event_name == 'push' && contains(fromJson('["refs/heads/dev","refs/heads/nightly","refs/heads/main"]'), github.ref)
     permissions:
       contents: read
       packages: write
-    uses: ./.github/workflows/fleetworks-release-images.yml
-    with:
-      head: ${{ needs.scope.outputs.head }}
-      version: ${{ needs.scope.outputs.release_version }}
-      image-tag: ${{ needs.scope.outputs.release_image_tag }}
-      image-targets: ${{ needs.scope.outputs.image_targets }}
-      compose: ${{ needs.scope.outputs.compose == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: amd64, runner: ubuntu-24.04}
+          - {arch: arm64, runner: ubuntu-24.04-arm}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.scope.outputs.head }}
+          persist-credentials: false
+          lfs: false
+      - name: Test selected private search contracts
+        if: contains(needs.scope.outputs.image_targets, 'search-index')
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal
+          python3 scripts/agent_cargo.py test --locked --no-default-features -p fleetworks-search-index
+      - name: Authenticate trusted image staging
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Build once, smoke exact IDs, stage digests and export archives
+        env:
+          HEAD: ${{ needs.scope.outputs.head }}
+          VERSION: ${{ needs.scope.outputs.release_version }}
+          IMAGE_TAG: ${{ needs.scope.outputs.release_image_tag }}
+          IMAGE_TARGETS: ${{ needs.scope.outputs.image_targets }}
+          IMAGE_ARCH: ${{ matrix.arch }}
+          OWNER: ${{ github.repository_owner }}
+          COMPOSE_SELECTED: ${{ needs.scope.outputs.compose == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          registry="ghcr.io/${OWNER,,}"
+          compose=()
+          if [[ "$COMPOSE_SELECTED" == true ]]; then compose=(--compose); fi
+          python3 .github/scripts/release_images.py --revision "$HEAD" --version "$VERSION" \
+            --image-tag "$IMAGE_TAG" --targets "$IMAGE_TARGETS" --arch "$IMAGE_ARCH" \
+            --registry "$registry" --directory "$RUNNER_TEMP/release-images" --push "${compose[@]}"
+      - name: Retain exact staged digest identities and exported image archives
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: fleetworks-release-images-${{ matrix.arch }}-${{ github.run_id }}.${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/release-images/release-images-*.json
+            ${{ runner.temp }}/release-images/fleetworks-images-linux-*.tar.gz
+            ${{ runner.temp }}/release-images/fleetworks-images-linux-*.tar.gz.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Retain actual image smoke evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: fleetworks-image-smoke-${{ matrix.arch }}-${{ github.run_id }}.${{ github.run_attempt }}
+          path: .agent-scratch/native-review/images-*/public-smoke-*.json
+          if-no-files-found: ignore
+          retention-days: 7
 
   prepublish:
     name: Fleetworks artifact checks
@@ -568,9 +764,9 @@ jobs:
   publish:
     name: Publish verified version and channel
     needs: [scope, prepublish]
-    if: needs.prepublish.result == 'success' && needs.scope.outputs.publish == 'true' && github.event_name == 'push' && contains(fromJson('["refs/heads/dev","refs/heads/nightly","refs/heads/main"]'), github.ref)
+    if: always() && needs.scope.result == 'success' && needs.prepublish.result == 'success' && needs.scope.outputs.publish == 'true' && github.event_name == 'push' && contains(fromJson('["refs/heads/dev","refs/heads/nightly","refs/heads/main"]'), github.ref)
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     permissions:
       contents: write
       packages: write
@@ -587,11 +783,18 @@ jobs:
           pattern: Fleetworks-app-*-${{ github.run_id }}.${{ github.run_attempt }}
           path: ${{ runner.temp }}/release
           digest-mismatch: error
-      - name: Download current-run verified Linux digests
+      - name: Download current-run verified Linux digests and image archives
         if: needs.scope.outputs.images == 'true'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: fleetworks-release-images-*-${{ github.run_id }}.${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release
+          digest-mismatch: error
+      - name: Download current-run verified Atlas BERT Linux worker bundles
+        if: fromJson(needs.scope.outputs.release_plan).bert
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: atlas-bert-*-${{ needs.scope.outputs.head }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/release
           digest-mismatch: error
       - name: Promote only the verified source plan

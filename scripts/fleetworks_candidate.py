@@ -455,7 +455,14 @@ def open_native(app, info, target, *, runner=None):
     if any(Path(line.strip()).name == NATIVE_BINARY for line in commands.splitlines()):
         return "Fleetworks is already running; close it normally, then open the new printed app path. No process was stopped."
     _progress(f"Opening {app} through Launch Services")
-    _run(["open", str(app)], runner=runner)
+    command = ["open"]
+    review_socket = os.environ.get("FLEETWORKS_LOCAL_REVIEW_APPROVAL_SOCKET")
+    if review_socket is not None:
+        if not Path(review_socket).is_absolute() or len(os.fsencode(review_socket)) > 103:
+            raise ValueError("Local review approval socket must be an absolute macOS UNIX socket path")
+        command.extend(["--env", f"FLEETWORKS_LOCAL_REVIEW_APPROVAL_SOCKET={review_socket}"])
+    command.append(str(app))
+    _run(command, runner=runner)
     return "Requested Launch Services opening; actual GUI readiness and authenticated operations remain unverified."
 
 

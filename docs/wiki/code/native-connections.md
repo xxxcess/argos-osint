@@ -43,6 +43,10 @@ python3 scripts/fleetworks_pairing.py \
 
 Use `deny` with the same ID/code, or `revoke --credential-id <paired-id>`. The helper pins the origin, refuses redirects/proxies, bounds input/output and never prints bearer bytes. Native/WebRelay credentials cannot approve pairing. [Deployment credentials](../../../deploy/README.md#credentials)
 
+An isolated macOS native review can use `python3 deploy/native_review.py up --approval-handoff --name <review>` to open a local operator prompt when Setup Gateway starts a pairing request. The prompt shows the origin, pairing ID and code so the operator can compare them with the native screen and explicitly click **Approve**; the native client never receives the Operator credential. The handoff is limited to the selected loopback review and expires within one hour. Existing Keychain access reconnects without a fresh approval. Standard launches and production approval continue through the separate Operator command above. [Review setup](../../../deploy/README.md#isolated-native-backend-review)
+
+The [synthetic local pairing screen](https://github.com/xxxcess/argos-osint/pull/67#issuecomment-6880990486) records the waiting layout and retry control in the PR; the accompanying [CI artifact](https://github.com/xxxcess/argos-osint/actions/runs/43617239215) includes wide and compact PNG/tree evidence. These fixture images use a fake code and do not establish a live Keychain result.
+
 Approval → authenticated readiness/capabilities → Keychain → connection. A gateway failure after approval preserves the pending request: correct backend configuration and choose **Retry**. HTTP 503 means setup is unavailable; it does not mean pairing is unsupported. [Deployment troubleshooting](../../../deploy/README.md#troubleshooting)
 
 Revocation, changed issuer policy/scope/access epoch and reset invalidate paired authority. Local Keychain deletion alone is not server revocation. Existing static Native, WebRelay and headless credentials remain supported independently.

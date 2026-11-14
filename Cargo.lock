@@ -444,6 +444,7 @@ dependencies = [
  "toml",
  "tracing",
  "tract-onnx",
+ "unicode-normalization",
  "url",
  "webpki-roots 1.0.9",
 ]

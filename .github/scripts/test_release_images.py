@@ -50,6 +50,46 @@ class ImageScopeTests(unittest.TestCase):
             self.assertFalse(any(command[:2] == ("docker", "push") for command in calls))
             self.assertFalse(any(command[:3] == ("docker", "image", "save") for command in calls))
 
+    def test_push_exports_selected_images_tarball_and_records_checksum(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            args = self.args(directory, "web")
+            args.push = True
+            image_id = "sha256:" + "c" * 64
+            digest = "sha256:" + "d" * 64
+            raw_manifest = release.json.dumps({"config": {"digest": image_id}}).encode()
+            repo_digests = release.json.dumps([f"ghcr.io/synthetic/fleetworks-web@{digest}"]).encode()
+
+            def run(*command, **_kwargs):
+                if command[:2] == ("git", "rev-parse"):
+                    return ("a" * 40 + "\n").encode()
+                if command[:4] == ("docker", "buildx", "imagetools", "inspect"):
+                    return raw_manifest
+                if command[:3] == ("docker", "image", "inspect"):
+                    return repo_digests
+                return None
+
+            def fake_save(archive, selected_tags):
+                self.assertEqual(list(selected_tags), ["web"])
+                archive.write_bytes(b"synthetic image tarball")
+
+            probe = mock.Mock(returncode=1, stderr=b"manifest unknown")
+            with mock.patch.object(release, "run", side_effect=run), \
+                 mock.patch.object(release.subprocess, "run", return_value=probe), \
+                 mock.patch.object(release.images, "verify_daemon", return_value="linux/amd64"), \
+                 mock.patch.object(release.images, "inspect_images", return_value={"web": {"id": image_id}}), \
+                 mock.patch.object(release.images, "save_images", side_effect=fake_save):
+                release.build(args)
+
+            manifest = release.json.loads((directory / "release-images-amd64.json").read_text())
+            archive = directory / "fleetworks-images-linux-amd64.tar.gz"
+            checksum = directory / "fleetworks-images-linux-amd64.tar.gz.sha256"
+            self.assertTrue(archive.is_file())
+            self.assertTrue(checksum.is_file())
+            self.assertEqual(manifest["archive"]["name"], "fleetworks-images-linux-amd64.tar.gz")
+            self.assertEqual(manifest["archive"]["bytes"], len(b"synthetic image tarball"))
+            self.assertEqual(checksum.read_text().split()[0], manifest["archive"]["sha256"])
+
 
 if __name__ == "__main__":
     unittest.main()

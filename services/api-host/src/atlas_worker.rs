@@ -29,6 +29,11 @@ const PAUSE_LIMIT: Duration = Duration::from_secs(10);
 pub(crate) async fn run(repo: Repository, signal: impl Future<Output = ()>) -> Result<()> {
     job_dispatch::ensure_queue_transport(repo.db(), ATLAS_POOL).await?;
     let broker = tokio::task::spawn_blocking(Client::from_environment).await??;
+    tracing::info!(
+        role = "atlas-worker",
+        storage = "connected",
+        "Fleetworks startup summary: dispatch worker ready"
+    );
     let owner = format!("atlas-worker-{}", argos_osint_core::store::new_id());
     tokio::pin!(signal);
     loop {

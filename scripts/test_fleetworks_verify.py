@@ -71,9 +71,12 @@ class PathScopesTests(unittest.TestCase):
             "crates/fleetworks-workspace/src/native/mod.rs": {"desktop"},
             "packages/api-client/src/index.ts": {"web", "images"},
             "scripts/surrealdb-release.json": {"server", "storage", "queue"},
-            ".github/workflows/fleetworks.yml": set(),
-            ".github/workflows/embedded.yml": set(),
-            "scripts/fleetworks_verify.py": set(),
+            ".github/workflows/fleetworks.yml": set(ALL_SCOPES),
+            ".github/workflows/embedded.yml": set(ALL_SCOPES),
+            "scripts/fleetworks_verify.py": set(ALL_SCOPES),
+            "scripts/test_fleetworks_verify.py": set(ALL_SCOPES),
+            "scripts/fleetworks_release.py": set(ALL_SCOPES),
+            "scripts/test_fleetworks_release.py": set(ALL_SCOPES),
             "scripts/fleetworks_config_reset.py": set(),
             "scripts/test_fleetworks_config_reset.py": set(),
             "new/unknown/build input": set(ALL_SCOPES),
@@ -216,9 +219,15 @@ class GitScopeTests(unittest.TestCase):
         self.assert_scopes(self.plan(self.start, head=head, mode="pr"), {"web", "images"}, images={"web"})
         self.assert_scopes(self.plan(self.start, head=head, mode="full"), ALL_SCOPES, full=True, images=ALL_IMAGES)
 
-    def test_workflow_edit_does_not_select_unrelated_lanes(self):
+    def test_workflow_edit_selects_full_matrix(self):
         head = self.commit(".github/workflows/fleetworks.yml", ".github/workflows/embedded.yml")
-        self.assert_scopes(self.plan(self.start, head=head), set())
+        plan = self.plan(self.start, head=head)
+        self.assert_scopes(plan, set(ALL_SCOPES), images=ALL_IMAGES)
+
+    def test_planner_edit_selects_full_matrix(self):
+        head = self.commit("scripts/fleetworks_verify.py")
+        plan = self.plan(self.start, head=head)
+        self.assert_scopes(plan, set(ALL_SCOPES), images=ALL_IMAGES)
 
     def test_search_schema_selects_its_image_without_native_or_web_actions(self):
         head = self.commit("services/search-index/src/schema.rs", "services/search-index/tests/index_contract.rs")

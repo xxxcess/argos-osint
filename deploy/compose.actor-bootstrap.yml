@@ -1,0 +1,12 @@
+# Native review actor seed overlay. The source must be a materialized LFS CSV.
+services:
+  bootstrap:
+    environment:
+      FLEETWORKS_BOOTSTRAP_ACTOR_CSV: /bootstrap-actors/argos_actors.csv
+    volumes:
+      - type: bind
+        source: ${FLEETWORKS_REPO_ACTOR_CSV:?Select the materialized actor catalog}
+        target: /bootstrap-actors/argos_actors.csv
+        read_only: true
+        bind:
+          create_host_path: false

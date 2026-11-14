@@ -4,7 +4,7 @@ Applies to test design, changes, review and execution. Follow root `AGENTS.md`, 
 
 ## Authorization and scope
 
-- Confirm verification tests and scope before execution unless this session already explicitly authorizes them. Authorization persists for affected retries; do not ask repeatedly. If the user will verify, leave runtime tests to them and report not run.
+- Confirm the verification scope before execution unless this session already explicitly authorizes it. Offer scoped static and feature-functionality checks followed by native review, or all applicable checks through resolution of implementation failures. Confirm whether feature tests run locally or in GitHub CI. Authorization persists for affected retries; do not ask repeatedly. When CI is selected, push a task branch and inspect checks for the exact revision. If a matching local-platform native app artifact passes and the user is in the review loop, run local native review at that point while other hosted gates continue; compile locally only for that review. In the first path, prove the affected feature behavior with targeted checks, then report remaining Docker, embedded, installed-app or platform gates as pending.
 - Tie each test to requested acceptance or a concrete regression. Prove the critical contract early, freeze final-check inputs, and run agreed required gates. After freeze, fix only demonstrated acceptance blockers and rerun affected evidence; do not start unrelated audits or repeat unchanged broad checks. Honor wrap-up immediately.
 - Reuse existing harnesses/dependencies and the current toolchain. Do not add frameworks, feature flags or infrastructure without an in-scope need. Inspect manifests and actual flags rather than copying stale commands.
 
@@ -40,6 +40,7 @@ Exercise opt-in fixtures before using them as evidence. Preserve meaningful asse
 - Cover cancellation, pagination and stale-response races where relevant. Use accessible locators and Playwright auto-waiting; isolate accounts/backend data and preserve the real app path while stubbing external providers.
 - Browser verification uses the repository Playwright runner. Set `ARGOS_WEB_TEST_DEV=1`; Next output/locks belong under `.agent-scratch/next-web-tests`. Never stop the user's frontend or remove its lock. Retain bounded traces/screenshots/errors for failed affected cases.
 - Load applicable React and Rune skills. Use actual production view/state/input fixtures and inspected PNG/tree evidence. Generated images alone are not visual evidence; snapshots alone do not prove interactions. Missing visual evidence remains pending.
+- For native/web UI changes in a PR, dispatch the [visual review workflow](../../../docs/wiki/code/native-verification.md#dispatchable-ui-visual-review) at the exact frozen head with affected scenes/surfaces. Inspect the generated captures, attach selected images inline to the PR and keep their artifact plus durable docs or exact-head release reference. Report dispatch unavailable before default-branch installation or failed capture/comment upload as pending, never as visual approval.
 
 ## Rune client and Linux backend
 

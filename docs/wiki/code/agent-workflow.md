@@ -16,6 +16,8 @@ Canonical execution policy for repository agents. Host instructions and user aut
 
 ## Establish the critical path
 
+Confirm the intended PR base branch with the user before starting changes. Carry that branch into the named plan and use it as the PR base; a branch stated by the user in the current session is already confirmed.
+
 Read the active plan, dirty-tree baseline and relevant contracts. Reuse existing authorization. Identify dependencies, the earliest decisive check and the remaining required work. Build realistic isolated fixtures through public services; never forge authority or relax guards to make tests pass. Smoke a costly fixture before repetitions.
 
 ## Coordinate work that can actually run in parallel
@@ -43,6 +45,10 @@ Record actual commands, exits, executed/skipped counts and limitations. Queued, 
 Bind performance evidence to the relevant corpus/model, workload, binary and environment. Do not repeat measurements or hash large unrelated artifacts merely because prose or another independent file changed. Capture affected UI states early; reuse inspected evidence only when relevant inputs match.
 
 Select Fleetworks checks with the [shared scope planner](ci.md#fleetworksyml--scoped-branch-checks). Run affected local checks in the integration checkout and record selected hosted results separately. Use an isolated pinned domain server or embedded queue fixture for an authorized targeted network contract. Pull requests into `dev`, `nightly` and `main` run selected checks on creation and pushed updates. Linux embedded compatibility is selected for affected storage; direct dispatch retains the four-platform diagnostic. Trusted integration pushes publish only verified, commit-versioned [channel artifacts](versioning.md#release-automation). Dispatch mutation separately; do not run it locally.
+
+For an interactive native review, a passing hosted app build for the user's local Mac platform is enough to start the review phase before broader Linux/storage gates finish. The integration owner records that exact app revision, closes the running app, rebuilds the isolated backend and native app locally, and opens the app for the user. Keep unfinished or failed hosted checks visible in the plan and PR; this early handoff is not a claim that all implementation gates passed.
+
+For native or web UI deltas, dispatch [UI visual review](native-verification.md#dispatchable-ui-visual-review) at the frozen PR head with only affected scenes/surfaces. Inspect PNG/tree or Playwright captures, attach selected images inline to the open PR comment, and keep the full artifact. Record durable image references in affected design docs or use an existing exact-head release. Generated-but-uninspected images remain pending visual evidence. A newly introduced dispatch workflow is available only after it reaches the default branch; until then, use the existing native/web CI captures and attach selected images manually.
 
 For changes to embedded or compatibility behavior, run the applicable [native embedded gate](contributing.md#full-local-embedded-gate--github-ci-monitoring) after the focused check passes. Leave storage-mode variables unset so its required storage phase runs once. Inspect companion target contracts because some native tests also execute in the workspace phase.
 

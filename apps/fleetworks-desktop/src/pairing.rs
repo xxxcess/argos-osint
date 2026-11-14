@@ -2,6 +2,7 @@
 
 use crate::connection::RequestTask;
 use fleetworks_contracts::pairing::PairingChallenge;
+use std::collections::VecDeque;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum PairingStage {
@@ -53,8 +54,24 @@ pub struct Pairing {
     pub(crate) request: Option<RequestTask>,
     pub(crate) startup_loaded: bool,
     pub(crate) paused: bool,
+    local_review_announced: VecDeque<String>,
 }
 impl Pairing {
+    fn record_local_review_announcement(&mut self, pairing_id: &str) -> bool {
+        if self
+            .local_review_announced
+            .iter()
+            .any(|id| id == pairing_id)
+        {
+            return false;
+        }
+        if self.local_review_announced.len() == 32 {
+            self.local_review_announced.pop_front();
+        }
+        self.local_review_announced.push_back(pairing_id.to_owned());
+        true
+    }
+
     pub fn busy(&self) -> bool {
         matches!(
             self.stage,
@@ -68,9 +85,17 @@ impl Pairing {
     }
 }
 
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::FileTypeExt;
+use std::os::unix::fs::MetadataExt;
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
+use tokio::io::AsyncWriteExt;
+use tokio::net::UnixStream;
+use url::Host;
 
 use fleetworks_contracts::pairing::PairingPollRequest;
 use fleetworks_contracts::pairing::PairingStartRequest;
@@ -116,6 +141,68 @@ fn transport_failure(error: ClientError) -> PairingFailure {
     }
 }
 
+/// The review socket is an opt-in local handoff. Only its private same-user
+/// listener receives the approval code; polling secrets and tokens stay out.
+fn local_review_destination(origin: &str, socket: &Path) -> Option<(PathBuf, String)> {
+    if origin.len() > 512 || !socket.is_absolute() || socket.as_os_str().as_bytes().len() > 103 {
+        return None;
+    }
+    let origin = Client::canonical_origin(origin).ok()?;
+    if origin.len() > 512 {
+        return None;
+    }
+    let url = url::Url::parse(&origin).ok()?;
+    if url.scheme() != "http" {
+        return None;
+    }
+    let loopback = match url.host()? {
+        Host::Domain(name) => name.eq_ignore_ascii_case("localhost"),
+        Host::Ipv4(address) => address.is_loopback(),
+        Host::Ipv6(address) => address.is_loopback(),
+    };
+    loopback.then(|| (socket.to_path_buf(), origin))
+}
+
+pub(crate) fn local_review_handoff_configured(origin: &str) -> bool {
+    std::env::var_os("FLEETWORKS_LOCAL_REVIEW_APPROVAL_SOCKET")
+        .is_some_and(|socket| local_review_destination(origin, Path::new(&socket)).is_some())
+}
+
+async fn send_local_review_handoff(
+    socket: PathBuf,
+    origin: String,
+    pairing_id: String,
+    approval_code: String,
+    expires_at_ms: u64,
+) {
+    let Ok(mut line) = serde_json::to_vec(&serde_json::json!({
+        "version": 1,
+        "origin": origin,
+        "pairing_id": pairing_id,
+        "approval_code": approval_code,
+        "expires_at_ms": expires_at_ms,
+    })) else {
+        return;
+    };
+    if line.len() > 768 {
+        return;
+    }
+    line.push(b'\n');
+    let _ = tokio::time::timeout(Duration::from_millis(250), async {
+        let metadata = tokio::fs::symlink_metadata(&socket).await?;
+        if !metadata.file_type().is_socket()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o777 != 0o600
+        {
+            return Ok(());
+        }
+        let mut stream = UnixStream::connect(socket).await?;
+        stream.write_all(&line).await?;
+        stream.shutdown().await
+    })
+    .await;
+}
+
 impl State {
     pub(crate) fn uses_native_pairing(&self) -> bool {
         !self.connection_profiles.operator_token_override
@@ -154,8 +241,29 @@ impl State {
         );
     }
 
-    pub(crate) fn pairing_progress(&mut self, epoch: u64, stage: PairingStage) {
+    pub(crate) fn pairing_progress(&mut self, epoch: u64, origin: &str, stage: PairingStage) {
         if self.connection.epoch == epoch {
+            if !self.fixture {
+                if let PairingStage::Waiting(challenge) = &stage {
+                    let destination = std::env::var_os("FLEETWORKS_LOCAL_REVIEW_APPROVAL_SOCKET")
+                        .and_then(|socket| local_review_destination(origin, Path::new(&socket)));
+                    if let (Some(services), Some((socket, origin))) = (&self.services, destination)
+                    {
+                        if self
+                            .pairing
+                            .record_local_review_announcement(&challenge.pairing_id)
+                        {
+                            services.runtime.spawn(send_local_review_handoff(
+                                socket,
+                                origin,
+                                challenge.pairing_id.clone(),
+                                challenge.approval_code.clone(),
+                                challenge.expires_at_ms,
+                            ));
+                        }
+                    }
+                }
+            }
             self.pairing.stage = stage;
         }
     }
@@ -277,8 +385,10 @@ impl GatewayEffects {
         let keychain = self.keychain.clone();
         let task = self.runtime.spawn(async move {
             let progress_ui = ui.clone();
+            let progress_origin = origin.clone();
             let result = connect_or_pair(container, origin, keychain, restart, move |stage| {
-                progress_ui.update(move |state, _| state.pairing_progress(epoch, stage));
+                let origin = progress_origin.clone();
+                progress_ui.update(move |state, _| state.pairing_progress(epoch, &origin, stage));
             })
             .await;
             ui.update(move |state, _| state.complete_pairing_connection(epoch, result));

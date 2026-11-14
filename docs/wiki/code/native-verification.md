@@ -83,6 +83,19 @@ Rendering uses a temporary fixture home and stripped runtime environment. The
 fixture uses the production view/handler path with synthetic effects; this is not
 a filesystem/network sandbox or live backend integration proof.
 
+The `--local-review-fixture` option is limited to `pairing-waiting` and injects a
+synthetic, nonexistent approval-socket path into that fixture process only. CI
+uses it to capture the local confirmation wording and retry control; it does not
+start a helper, contact a gateway, or approve a pairing request.
+
+For log-consuming, job-streaming, readiness, and backpressure/error recovery paths,
+native unit/Runtime checks may bind an offline loopback `TcpListener` gateway over
+`127.0.0.1:0` to serve scripted [`fleetworks_contracts::operational_logs`](../../../crates/fleetworks-contracts/src/operational_logs.rs)
+responses into live `rune::Runtime` instances (see [log_tests.rs](../../../apps/fleetworks-desktop/src/log_tests.rs)).
+This tests real HTTP wire framing, registered headers, `429`/`503` backpressure
+degradation, error rows, and cursor validation while keeping `apps/fleetworks-desktop`
+free of backend Docker engines.
+
 | Evidence | What this command records |
 | --- | --- |
 | Runtime generation | Exit status plus validated nonempty PNG/tree and optional script trace |
@@ -103,6 +116,13 @@ exit does not supply either result. Adding or renaming native scenes or
 interaction scripts requires coordinating `.github/workflows/fleetworks-native.yml`
 updates with Code Architect.
 
+When the user is available for interactive review, a passing app artifact for the
+local Mac architecture starts native review before the remaining hosted matrix
+finishes. Record the artifact's exact revision, close the running app, rebuild the
+isolated backend and native app locally, and open the app. Track unfinished Linux,
+storage and installed-app checks separately; artifact creation alone is not a
+local behavior pass.
+
 The [offline Python fixtures](../../../scripts/test_fleetworks_native_verify.py)
 cover selection/artifact-path fences, implicit debug cache reuse, bounded profiles,
 runtime inventory, missing/corrupt PNG/tree, dimensions, failed renderer exits,
@@ -110,3 +130,35 @@ script final keys, stale output protection and physical target mismatches. Actua
 helper tests/rendering must be executed by the integration owner and recorded in
 the active acceptance tracker (for the cutover baseline, see
 [cutover acceptance](../../../.planning/2026-11-11-rune-macos-cutover/acceptance.md)).
+
+## Dispatchable UI visual review
+
+After an agent freezes a native or web UI PR revision, dispatch
+[`ui-visual-review.yml`](../../../.github/workflows/ui-visual-review.yml) with the
+open PR number, full head SHA and the smallest affected capture selection. The
+workflow checks out the exact revision, generates Rune/Playwright images, retains
+the full evidence artifact and attaches selected PNGs inline to a PR comment. The
+comment states the source SHA and selected scenes. Inspect the images and record
+that visual review separately from successful generation. Link curated comment
+attachments from the affected design docs, or supply `release_tag` for an existing
+trusted Release whose commit is the same SHA; the workflow can attach its image
+bundle there. A workflow artifact alone expires and is not a GitHub Release asset.
+
+```sh
+UI_PR_NUMBER=67
+UI_HEAD_SHA="$(git rev-parse HEAD)"
+UI_BRANCH="$(git branch --show-current)"
+gh workflow run ui-visual-review.yml -R xxxcess/argos-osint --ref "$UI_BRANCH" \
+  -f pr="$UI_PR_NUMBER" -f head="$UI_HEAD_SHA" -f scope=native \
+  -f native_scenes=registration-ready -f native_script=settings
+```
+
+Use `scope=web -f web_surface=bulletin` for a web-only change, choosing
+`brief`, `topology`, `actors` or `all` only when affected. `scope=both` runs both
+paths. Native scene names are comma-separated; `native_script=none` is the default.
+Keep the PR open through capture/comment publication and inspect the exact run
+before claiming success. New `workflow_dispatch` workflows accept events only
+after their file exists on the repository default branch. For a PR that introduces
+this workflow, use the existing native/web CI evidence artifacts and manually
+attach selected PNGs to its PR comment with `gh pr comment --attach`; report the
+dispatch path as pending until merge.

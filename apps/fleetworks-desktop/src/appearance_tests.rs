@@ -29,6 +29,28 @@ fn runtime(page: Page, preferences: FixtureAccessibility) -> Runtime<State> {
 }
 
 #[test]
+fn wide_shell_shows_context_rail_and_compact_shell_keeps_settings_access() {
+    for (width, rail_visible) in [(1440.0, true), (1180.0, false)] {
+        let mut state = crate::tests::registered_fixture();
+        state.page = Page::Workstation;
+        let mut runtime = Runtime::new(
+            state,
+            app::view,
+            (width, 800.0),
+            Env {
+                system_dark: true,
+                scale: 1.0,
+            },
+        );
+        runtime.frame(0.0);
+        runtime.frame(1.0 / 60.0);
+        assert_eq!(runtime.find("context-rail").is_some(), rail_visible);
+        assert!(runtime.find("open-workstation-settings").is_some());
+        assert!(runtime.find("nav-workstation").is_some());
+    }
+}
+
+#[test]
 fn material_and_matte_keep_actual_toolbar_and_navigation_hit_bounds_on_all_pages() {
     let disconnected_satin = runtime(Page::Workstation, FixtureAccessibility::default());
     let disconnected_matte = runtime(

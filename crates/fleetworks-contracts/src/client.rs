@@ -124,14 +124,29 @@ impl Client {
         &self,
         limit: usize,
     ) -> Result<crate::cycle_history::CycleHistory, ClientError> {
+        self.cycle_history_page(limit, None).await
+    }
+
+    /// Read a bounded page of this registration's cycle associations.
+    pub async fn cycle_history_page(
+        &self,
+        limit: usize,
+        cursor: Option<&str>,
+    ) -> Result<crate::cycle_history::CycleHistory, ClientError> {
         if !(1..=100).contains(&limit) {
             return Err(ClientError::InvalidRequest);
         }
-        self.get_with_query(
-            crate::cycle_history::CYCLE_HISTORY_PATH,
-            &[("limit", limit.to_string())],
-        )
-        .await
+        if cursor.is_some_and(|cursor| {
+            cursor.is_empty() || cursor.len() > 256 || cursor.chars().any(char::is_control)
+        }) {
+            return Err(ClientError::InvalidRequest);
+        }
+        let mut query = vec![("limit", limit.to_string())];
+        if let Some(cursor) = cursor {
+            query.push(("cursor", cursor.to_owned()));
+        }
+        self.get_with_query(crate::cycle_history::CYCLE_HISTORY_PATH, &query)
+            .await
     }
 
     /// Hide a cycle association after an in-place confirmation and revision check.

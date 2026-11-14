@@ -14,20 +14,48 @@ SPEC.loader.exec_module(release)
 class PublicationTests(unittest.TestCase):
     def plan(self):
         return {"publish": True, "head": "a" * 40, "version": "1.2.3", "image_tag": "stable-dev-1.2.3-g" + "a" * 40,
-                "channel": "stable", "native": False, "image_targets": ["runtime", "web"],
+                "channel": "stable", "native": False, "bert": False, "image_targets": ["runtime", "web"],
                 "tag": "fleetworks-dev-v1.2.3", "prerelease": False}
 
     def manifests(self, directory, plan):
         result = {}
         for index, arch in enumerate(("amd64", "arm64")):
+            archive_name = f"fleetworks-images-linux-{arch}.tar.gz"
+            archive_bytes = f"synthetic-images-{arch}".encode()
+            archive_digest = release.hashlib.sha256(archive_bytes).hexdigest()
+            (directory / archive_name).write_bytes(archive_bytes)
+            (directory / f"{archive_name}.sha256").write_text(f"{archive_digest}  {archive_name}\n")
             images = {role: {"repository": "ghcr.io/synthetic/fleetworks-" + role,
                              "digest": "sha256:" + str(index + offset + 1) * 64}
                       for offset, role in enumerate(plan["image_targets"])}
             value = {"revision": plan["head"], "version": plan["version"], "image_tag": plan["image_tag"],
-                     "arch": arch, "selected": plan["image_targets"], "images": images}
+                     "arch": arch, "selected": plan["image_targets"], "images": images,
+                     "archive": {"name": archive_name, "sha256": archive_digest, "bytes": len(archive_bytes)}}
             (directory / f"release-images-{arch}.json").write_text(json.dumps(value))
             result[arch] = value
         return result
+
+    def bert_bundles(self, directory, plan):
+        for arch in ("amd64", "arm64"):
+            bundle_dir = directory / f"atlas-bert-bundle-{arch}"
+            evidence_dir = directory / f"atlas-bert-evidence-{arch}"
+            bundle_dir.mkdir(parents=True, exist_ok=True)
+            evidence_dir.mkdir(parents=True, exist_ok=True)
+            archive_name = f"atlas-bert-linux-{arch}.tar.gz"
+            payload = f"synthetic-bert-{arch}".encode()
+            digest = release.hashlib.sha256(payload).hexdigest()
+            (bundle_dir / archive_name).write_bytes(payload)
+            evidence = {
+                "arch": arch,
+                "source_sha": plan["head"],
+                "status": "passed",
+                "dirty": False,
+                "unit_tests_passed": 3,
+                "build_inference": {"status": "passed"},
+                "extracted_inference": {"status": "passed"},
+                "archive": {"file": archive_name, "bytes": len(payload), "sha256": digest},
+            }
+            (evidence_dir / "evidence.json").write_text(json.dumps(evidence))
 
     def test_failed_or_untrusted_plan_cannot_call_publish_tools(self):
         with tempfile.TemporaryDirectory() as temporary, mock.patch.object(release, "run") as run:
@@ -198,6 +226,35 @@ class PublicationTests(unittest.TestCase):
                 release.advance_channel(self.plan())
             run.assert_not_called()
 
+    def test_bert_bundles_and_image_archives_are_verified_and_published(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            plan = self.plan()
+            plan["bert"] = True
+            manifests = self.manifests(directory, plan)
+            self.bert_bundles(directory, plan)
+            calls = []
+
+            def run(*command, **_kwargs):
+                calls.append(command)
+                if "inspect" in command:
+                    role = "web" if "fleetworks-web:" in command[-1] else "runtime"
+                    return json.dumps({"manifests": [{"platform": {"os": "linux", "architecture": arch},
+                        "digest": manifests[arch]["images"][role]["digest"]} for arch in ("amd64", "arm64")]}).encode()
+                return b""
+
+            with mock.patch.object(release, "run", side_effect=run), \
+                 mock.patch.object(release, "lookup_release", return_value=None), \
+                 mock.patch.object(release, "lookup_channel", return_value=None):
+                release.publish(plan, directory)
+
+            inventory = json.loads((directory / "assets/release.json").read_text())
+            for arch in ("amd64", "arm64"):
+                self.assertIn(f"fleetworks-images-linux-{arch}.tar.gz", inventory["assets"])
+                self.assertIn(f"fleetworks-images-linux-{arch}.tar.gz.sha256", inventory["assets"])
+                self.assertIn(f"atlas-bert-linux-{arch}.tar.gz", inventory["assets"])
+                self.assertIn(f"atlas-bert-linux-{arch}.tar.gz.sha256", inventory["assets"])
+                self.assertIn(f"atlas-bert-evidence-{arch}.json", inventory["assets"])
 
 
 if __name__ == "__main__":

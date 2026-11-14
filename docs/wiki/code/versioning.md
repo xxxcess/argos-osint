@@ -143,14 +143,15 @@ changelog are not rewritten on every build.
 | --- | --- |
 | Immutable GitHub Release tag | `fleetworks-<branch>-v<artifact-version>`; never repointed |
 | Native app | Both supported Mac targets; versioned ZIP, SHA256 and complete source/bundle manifest |
-| Immutable GHCR image | `ghcr.io/<owner>/fleetworks-<role>:<channel>-<branch>-X.Y.Z-g<full-sha>`; verified AMD64/ARM64 index |
+| Immutable GHCR image & archive | `ghcr.io/<owner>/fleetworks-<role>:<channel>-<branch>-X.Y.Z-g<full-sha>` verified AMD64/ARM64 index, plus `fleetworks-images-linux-{amd64,arm64}.tar.gz` and `.sha256` |
+| Atlas BERT worker bundle | `atlas-bert-linux-{amd64,arm64}.tar.gz`, `.sha256` and `atlas-bert-evidence-{amd64,arm64}.json` when selected |
 | Channel aliases | Git refs `nightly` / `stable` and selected image `:nightly` / `:stable`; advance only after artifact verification |
 | Release inventory | `release.json` and per-architecture image identity/digest records; exact source, version and selected components |
 
 Runtime, SurrealDB, private search and Web are the only production image targets.
 API, control, Jobs, tools, NLP/classifier and worker roles share the runtime image.
-No terminal executable, Venture image or automatic Docker-save archive is released.
-Optional Rust-BERT bundles remain separate verified inference/deployment inputs.
+No terminal executable or Venture image is released.
+Verified Rust-BERT Linux worker bundles and exported image archives are attached to the GitHub Release when selected.
 
 ### Scope, publication and retries
 

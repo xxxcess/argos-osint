@@ -44,12 +44,12 @@
 <rect x="944" y="264" width="304" height="128" rx="6" class="node"/>
 <text x="960" y="296" class="label">Trusted image staging</text>
 <text x="960" y="324" class="note">Selected images only</text>
-<text x="960" y="348" class="note">Build → smoke → push digests</text>
+<text x="960" y="348" class="note">Build → smoke → push + tar.gz</text>
 <text x="960" y="372" class="note">Native AMD64 + ARM64</text>
 <rect x="944" y="440" width="304" height="152" rx="6" class="accent"/>
 <text x="960" y="472" class="label">Publish → required</text>
-<text x="960" y="500" class="note">Source + selected digests pass</text>
-<text x="960" y="524" class="note">Required includes publication</text>
+<text x="960" y="500" class="note">Mac ZIPs + image/BERT bundles</text>
+<text x="960" y="524" class="note">GHCR manifests + release.json</text>
 <text x="960" y="548" class="note">nightly / stable channels</text>
 <text x="960" y="572" class="note">PR: required, no publication</text>
 <text x="32" y="640" class="minor">PR opened/synchronize (also reopened/ready): target dev, nightly or main. Dispatch checks never publish.</text>

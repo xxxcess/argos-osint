@@ -78,6 +78,7 @@ class NativeEvidenceTests(unittest.TestCase):
         self.binary.chmod(0o755)
         self.info = PlatformInfo("Darwin", "x86_64", "x86_64", False, "x86_64-apple-darwin", "1.95.0", "x86_64-apple-darwin", "linux/amd64")
         self.commands = []
+        self.runtime_environments = []
         self.fail = ""
         self.environment = mock.patch.dict(os.environ, {"CI": "", "CARGO_BUILD_TARGET": ""})
         self.environment.start()
@@ -99,10 +100,12 @@ class NativeEvidenceTests(unittest.TestCase):
                         {"reason": "build-finished", "success": True}]
             kwargs["stdout"].write("\n".join(map(json.dumps, messages)).encode())
         elif "--list-scenes" in command:
+            self.runtime_environments.append(dict(kwargs["env"]))
             self.assertNotEqual(kwargs["env"]["HOME"], str(Path.home()))
             self.assertNotIn("FLEETWORKS_API_TOKEN_FILE", kwargs["env"])
-            kwargs["stdout"].write(b"page-one\nfuture-scene\n")
+            kwargs["stdout"].write(b"page-one\nfuture-scene\npairing-waiting\n")
         else:
+            self.runtime_environments.append(dict(kwargs["env"]))
             def value(flag):
                 return command[command.index(flag) + 1]
             width, height = map(int, value("--size").split("x"))
@@ -136,6 +139,24 @@ class NativeEvidenceTests(unittest.TestCase):
         self.assertEqual(manifest["real_gui"], "not_run")
         self.assertEqual(manifest["unit_tests"], "not_run_by_this_command")
         self.assertFalse(any("--target" in command for command in self.commands))
+
+    def test_local_review_marker_is_synthetic_and_limited_to_pairing_waiting(self):
+        args = options(
+            "--scene", "pairing-waiting", "--size", "64x64", "--scale", "1",
+            "--agent", "--output", str(self.root / "pairing-evidence"),
+            "--local-review-fixture",
+        )
+        self.assertEqual(self.execute(args), 0)
+        manifest = json.loads((args.output / "manifest.json").read_text())
+        self.assertTrue(manifest["local_review_fixture"])
+        self.assertEqual(len(self.runtime_environments), 2)
+        self.assertTrue(all(environment.get("FLEETWORKS_LOCAL_REVIEW_APPROVAL_SOCKET")
+                            == "/tmp/fleetworks-review-fixture.sock"
+                            for environment in self.runtime_environments))
+        self.commands.clear()
+        with self.assertRaisesRegex(ValueError, "limited to the pairing-waiting"):
+            self.execute(self.arguments("--local-review-fixture"))
+        self.assertFalse(any("--example" in command for command in self.commands))
 
     def test_unknown_selected_scene_fails_before_render_and_retains_failed_evidence(self):
         with self.assertRaisesRegex(ValueError, "absent"):

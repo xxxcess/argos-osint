@@ -41,6 +41,7 @@ def add_parser(commands):
     parser.add_argument("--at", type=float, default=0.0, help="snapshot virtual seconds for baseline cases, 0–30")
     parser.add_argument("--script-at", type=float, default=1.0, help="snapshot virtual seconds for scripted cases, 0–30")
     parser.add_argument("--list-scenes", action="store_true", help="build once and record the actual fixture inventory only")
+    parser.add_argument("--local-review-fixture", action="store_true", help="render only pairing-waiting with a synthetic local approval socket marker")
     parser.add_argument("--target", choices=("host", *NATIVE_TARGETS), default="host")
     parser.add_argument("--agent", action="store_true", help="use agent_cargo.py with the shared target/agents debug graph")
     parser.add_argument("--output", type=Path, help="new/empty review directory; default new directory under .agent-scratch/native-ui")
@@ -283,6 +284,8 @@ def execute(args, *, root=ROOT, runner=None, info=None):
     if os.environ.get("CARGO_BUILD_TARGET") not in (None, "", target):
         raise ValueError("CARGO_BUILD_TARGET differs from the physical fixture target")
     scenes, selected = selections(args, root)
+    if args.local_review_fixture and (args.list_scenes or scenes != ["pairing-waiting"]):
+        raise ValueError("Local approval fixture is limited to the pairing-waiting scene")
     command = build_command(agent=args.agent, target=args.target, root=root)
     if args.dry_run:
         print(json.dumps({"build_command": command, "target": target, "profile": "debug", "requested_scenes": scenes,
@@ -307,6 +310,7 @@ def execute(args, *, root=ROOT, runner=None, info=None):
                 "platform": info.as_dict(), "cargo_lock_sha256": sha256(root / "Cargo.lock"),
                 "renderer": "Rune headless; actual adapter diagnostics retained in per-command logs",
                 "fonts": "repository-pinned Rune embedded-fonts feature", "virtual_clock": True,
+                "local_review_fixture": args.local_review_fixture,
                 "state": "started", "commands": [], "captures": [], "visual_inspection": "not_performed",
                 "real_gui": "not_run", "unit_tests": "not_run_by_this_command"}
     try:
@@ -321,6 +325,9 @@ def execute(args, *, root=ROOT, runner=None, info=None):
         with tempfile.TemporaryDirectory(prefix="fixture-home-", dir=destination) as home:
             environment = {key: value for key, value in os.environ.items() if key in ("PATH", "TMPDIR", "LANG", "LC_ALL", "RUST_BACKTRACE", "DYLD_FRAMEWORK_PATH", "DYLD_LIBRARY_PATH")}
             environment.update({"HOME": home, "ARGOS_HOME": home, "FLEETWORKS_WORKSPACE": home, "XDG_CACHE_HOME": home, "RUSTUP_AUTO_INSTALL": "0"})
+            if args.local_review_fixture:
+                # This marker is never a live socket; fixture state cannot send pairing effects.
+                environment["FLEETWORKS_LOCAL_REVIEW_APPROVAL_SOCKET"] = "/tmp/fleetworks-review-fixture.sock"
             listing = run_logged([str(binary), "--list-scenes"], destination, "runtime-scenes", manifest["commands"], environment=environment, runner=runner, timeout=30, stdout_limit=64 * 1024, root=root)
             available = inventory(bounded_bytes(listing, 64 * 1024).decode("utf-8"))
             manifest["runtime_scenes"] = available

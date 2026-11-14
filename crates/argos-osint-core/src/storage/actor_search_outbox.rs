@@ -282,9 +282,9 @@ pub async fn canonical_many_in(
         type::record('memory',record::id(id)).lifecycle ?? '' AS lifecycle,
         type::record('memory',record::id(id)).memory_kind ?? '' AS memory_kind,
         record::exists(type::record('brain_actor_redirect',record::id(id))) AS redirected FROM $actors;
-        RETURN $ids.map(|$actor| { SELECT actor_id, IF string::len(alias)<=256 {alias} ELSE {NONE} AS alias,
+        RETURN $ids.map(|$actor| { SELECT actor_id, IF bytes::len(type::bytes(alias))<=256 {alias} ELSE {NONE} AS alias,
           IF string::len(provenance_json)<=8192 {provenance_json} ELSE {NONE} AS provenance_json
-          FROM brain_actor_alias WITH INDEX actor_search_alias_owner WHERE actor_id=$actor AND alias_type='name' ORDER BY alias LIMIT 33 });
+          FROM brain_actor_alias WITH INDEX actor_search_alias_owner WHERE actor_id=$actor AND alias_type='name' ORDER BY alias LIMIT 64 });
         SELECT actor_id,revision FROM $heads;")
         .bind(("actors",records)).bind(("heads",heads)).bind(("ids",ids.to_vec()))).await?;
     let actors: Vec<ActorRow> = jobs::take(&mut response, 0)?;
@@ -321,18 +321,22 @@ pub async fn canonical_many_in(
                 .as_deref()
                 .and_then(|value| serde_json::from_str(value).ok())
                 .unwrap_or_default();
+            let display_name = projection::identity(
+                actor
+                    .display_name
+                    .as_deref()
+                    .ok_or_else(|| invalid("actor_name_bound"))?,
+                1024,
+            )?;
+            let aliases =
+                projection::aliases(&display_name, grouped.remove(id).unwrap_or_default())?;
             Some(ActorProjection {
-                display_name: projection::identity(
-                    actor
-                        .display_name
-                        .as_deref()
-                        .ok_or_else(|| invalid("actor_name_bound"))?,
-                    1024,
-                )?,
-                aliases: projection::aliases(grouped.remove(id).unwrap_or_default())?,
+                display_name,
+                aliases,
                 summary: metadata["description"]
                     .as_str()
-                    .and_then(|value| text(value, 2048)),
+                    .and_then(|value| text(value, 2048))
+                    .filter(|value| projection::indexable_text(value)),
                 actor_type: projection::optional_identity(&actor.subtype, 128)?,
                 countries: projection::countries(&metadata)?,
                 source_id: projection::optional_identity(&actor.catalog_id, 256)?,
@@ -377,6 +381,7 @@ pub struct Observation {
     pub blocked: bool,
     pub backfill_complete: bool,
     pub seed_complete: bool,
+    pub rebuild_reason_code: String,
     pub pressure_paused: bool,
     pub pressure_reason: String,
     pub backlog_paused: bool,
@@ -385,7 +390,8 @@ pub struct Observation {
 pub async fn observe(repo: &Repository) -> Result<Option<Observation>, TxError> {
     let mut response=repo.db().query("SELECT (SELECT VALUE instance_id FROM ONLY storage_meta:identity) ?? '' AS deployment_id,
         source_epoch,index_generation,next_sequence,acknowledged_sequence,blocked,backfill_complete,pressure_paused,pressure_reason,backlog_paused,
-        ((SELECT VALUE status FROM ONLY brain_actor_seed:catalog)='complete') ?? false AS seed_complete FROM ONLY actor_search_control:catalog").await?.check()?;
+        ((SELECT VALUE status FROM ONLY brain_actor_seed:catalog)='complete') ?? false AS seed_complete,
+        ((SELECT VALUE reason_code FROM ONLY actor_search_rebuild:catalog) ?? '') AS rebuild_reason_code FROM ONLY actor_search_control:catalog").await?.check()?;
     Ok(response.take(0)?)
 }
 

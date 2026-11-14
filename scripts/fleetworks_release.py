@@ -165,6 +165,7 @@ def validate_scope(scope, event, base, head):
         "native": "desktop" in scopes,
         "backend": bool(set(images) & BACKEND_IMAGES),
         "web": "web" in images,
+        "bert": "bert" in scopes,
         "image_targets": sorted(images),
     }
 
@@ -221,7 +222,7 @@ def plan_release(root, *, event, ref, head, base, scope):
                  image_arches=["amd64", "arm64"], release_base=release_base)
     selected = validate_scope(scope, event, base, head)
     result.update(selected, scope=scope, release_base=release_base)
-    if not any(selected[key] for key in ("native", "backend", "web")):
+    if not any(selected[key] for key in ("native", "backend", "web", "bert")):
         return result
     count = int(git(root, "rev-list", "--count", head))
     exact = [entry for entry in published if entry[1] == head and entry[3] == branch]

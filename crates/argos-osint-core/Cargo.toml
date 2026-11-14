@@ -33,6 +33,7 @@ tempfile.workspace = true
 tokenizers.workspace = true
 toml.workspace = true
 tract-onnx.workspace = true
+unicode-normalization.workspace = true
 url.workspace = true
 scraper.workspace = true
 webpki-roots = { version = "1", optional = true }

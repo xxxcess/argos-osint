@@ -412,6 +412,29 @@ fn atlas(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
                 .key(format!("cycle-{}", cycle.job_id)),
             );
         }
+        history = history.child(
+            rune::row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(
+                    ActionButton::new("Previous page")
+                        .key("cycles-page-previous")
+                        .finish(MetalFinish::ObsidianPill)
+                        .disabled(state.cycles.page_index == 0 || state.cycles.busy())
+                        .on_press(|state: &mut State| state.previous_cycles_page())
+                        .build(kit, preferences, pointer_ref),
+                )
+                .child(quiet(format!("Page {}", state.cycles.page_index + 1), kit))
+                .child(
+                    ActionButton::new("Next page")
+                        .key("cycles-page-next")
+                        .finish(MetalFinish::ObsidianPill)
+                        .disabled(cycles.next_cursor.is_none() || state.cycles.busy())
+                        .on_press(|state: &mut State| state.next_cycles_page())
+                        .build(kit, preferences, pointer_ref),
+                ),
+        );
 
         if let Some(active_id) = &state.selected_cycle_id {
             if let Some(cycle) = cycles.rows.iter().find(|c| c.job_id == *active_id) {
@@ -1178,14 +1201,14 @@ fn jobs(
             );
             let tile_content = rune::row()
                 .w_full()
-                .padding(10.0)
-                .gap(10.0)
+                .padding(7.0)
+                .gap(8.0)
                 .center_y()
                 .child(ui_components::status_dot(tone, preferences))
                 .child(
                     rune::col()
                         .grow(1.0)
-                        .gap(2.0)
+                        .gap(1.0)
                         .child(
                             rune::text(title.clone())
                                 .font(kit.ty.ui_medium)
@@ -1215,6 +1238,36 @@ fn jobs(
                 .on_press(move |state: &mut State| state.select_job(&id)),
             );
         }
+        body = body.child(
+            rune::row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(
+                    ActionButton::new("Previous page")
+                        .key("jobs-page-previous")
+                        .finish(MetalFinish::ObsidianPill)
+                        .disabled(!state.scoped_jobs.can_previous())
+                        .on_press(|state: &mut State| {
+                            state.request_jobs(crate::jobs_query::JobsEvent::Previous)
+                        })
+                        .build(kit, preferences, pointer_ref),
+                )
+                .child(quiet(
+                    format!("Page {}", state.scoped_jobs.page_number()),
+                    kit,
+                ))
+                .child(
+                    ActionButton::new("Next page")
+                        .key("jobs-page-next")
+                        .finish(MetalFinish::ObsidianPill)
+                        .disabled(!state.scoped_jobs.can_next())
+                        .on_press(|state: &mut State| {
+                            state.request_jobs(crate::jobs_query::JobsEvent::Next)
+                        })
+                        .build(kit, preferences, pointer_ref),
+                ),
+        );
     }
     if let Some(message) = list_load_or_skeleton(
         &state.backend.detail,
@@ -1539,6 +1592,17 @@ fn jobs(
                 )
             {
                 details = details.child(safe_log_table(state, kit, log_width));
+                if state.scoped_logs.can_load_older() {
+                    details = details.child(
+                        ActionButton::new("Load older summaries")
+                            .key("logs-load-older")
+                            .finish(MetalFinish::ObsidianPill)
+                            .on_press_tx(|state: &mut State, tx| {
+                                state.log_event(crate::logs::LogEvent::Older, tx)
+                            })
+                            .build(kit, preferences, pointer_ref),
+                    );
+                }
             }
         }
         body = body.child(card(state, preferences, tone, details));

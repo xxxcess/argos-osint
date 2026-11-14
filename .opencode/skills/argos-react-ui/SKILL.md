@@ -14,6 +14,7 @@ Read `docs/wiki/code/react-ui.md` for the design baseline and evidence workflow;
 - Reuse `@argos/ui`; keep feature composition in `@argos/intel` and browser-only behavior in the web app. For component APIs, remote state or render performance also load `argos-react-patterns`.
 - Cover wide/narrow layouts, long content and relevant loading/empty/error/offline states. Preserve source attribution, evidence distinctions, image fallback and ready-gated actions.
 - Verify keyboard/focus and accessible control names/states. Run appropriate frontend checks and fixture E2E; capture affected states at proportional viewports and inspect the PNGs before reporting visual approval.
+- For an open PR with web UI changes, dispatch the [UI visual review workflow](../../../.github/workflows/ui-visual-review.yml) at the frozen exact head with `scope=web` and the affected `web_surface`. Inspect the generated Playwright captures; attach selected images inline to the PR and record a durable reference in affected docs or an exact-head release. Follow the [dispatch recipe](../../../docs/wiki/code/native-verification.md#dispatchable-ui-visual-review).
 - For reviews, inspect the requested scope (or current UI delta if unspecified) and return concrete `file:line` findings with impact/correction. Report checks and unverified visual evidence separately. Do not turn a review request into unrelated edits.
 
 This skill adapts selected Vercel ideas; provenance and exclusions are in the design baseline. No upstream fetch or dependency installation is required to use it.

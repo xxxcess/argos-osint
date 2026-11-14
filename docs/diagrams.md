@@ -10,7 +10,7 @@ Open a file under `docs/diagrams/` in a browser for the HTML page. Matching `.sv
 | --- | --- | --- | --- |
 | Backend NLP preprocessing | Data flow | [nlp-preprocessing.html](diagrams/nlp-preprocessing.html) | [nlp-preprocessing.svg](diagrams/nlp-preprocessing.svg) |
 | Fleetworks service boundaries | Architecture | [fleetworks.html](diagrams/fleetworks.html) | [fleetworks.svg](diagrams/fleetworks.svg) |
-| Native navigation and selected content | Layout | [native-workstation-layout.html](diagrams/native-workstation-layout.html) | [native-workstation-layout.svg](diagrams/native-workstation-layout.svg) |
+| Native shell, context rail and settings | Layout | [native-workstation-layout.html](diagrams/native-workstation-layout.html) | [native-workstation-layout.svg](diagrams/native-workstation-layout.svg) |
 | Native identity and shared backend | Architecture | [workspace.html](diagrams/workspace.html) | [workspace.svg](diagrams/workspace.svg) |
 | Backend resources and workstation origin | Architecture | [workspace-scope.html](diagrams/workspace-scope.html) | [workspace-scope.svg](diagrams/workspace-scope.svg) |
 | Protected workstation setup and recovery | Process | [workspace-lifecycle.html](diagrams/workspace-lifecycle.html) | [workspace-lifecycle.svg](diagrams/workspace-lifecycle.svg) |

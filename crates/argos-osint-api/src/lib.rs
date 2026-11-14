@@ -200,6 +200,7 @@ pub fn brain_router(state: ApiState, policy: NetworkPolicy) -> Router {
         state,
         policy,
         brain::routes().route("/api/v1/health/ready", get(brain::ready)),
+        PrivateBoundary::Standard,
     )
 }
 
@@ -209,6 +210,7 @@ pub fn tools_router(state: ApiState, policy: NetworkPolicy) -> Router {
         state,
         policy,
         tools::routes().route("/api/v1/health/ready", get(tools::ready)),
+        PrivateBoundary::Standard,
     )
 }
 
@@ -218,6 +220,7 @@ pub fn control_router(state: ApiState, policy: NetworkPolicy) -> Router {
         state,
         policy,
         control::routes().route("/api/v1/health/ready", get(control::ready)),
+        PrivateBoundary::Standard,
     )
 }
 
@@ -229,16 +232,33 @@ pub fn jobs_router(state: ApiState, policy: NetworkPolicy) -> Router {
         jobs_api::routes()
             .route("/api/v1/health/ready", get(jobs_api::ready))
             .layer(middleware::from_fn(jobs_api::drain_read_on_disconnect)),
+        PrivateBoundary::Jobs,
     )
 }
 
-fn private_router(state: ApiState, policy: NetworkPolicy, routes: Router<ApiState>) -> Router {
+enum PrivateBoundary {
+    Standard,
+    Jobs,
+}
+
+fn private_router(
+    state: ApiState,
+    policy: NetworkPolicy,
+    routes: Router<ApiState>,
+    boundary: PrivateBoundary,
+) -> Router {
     let port = state.port;
-    let router = routes
-        .layer(middleware::from_fn_with_state(
+    let routes = match boundary {
+        PrivateBoundary::Standard => routes.layer(middleware::from_fn_with_state(
             state.clone(),
             context_boundary::private,
-        ))
+        )),
+        PrivateBoundary::Jobs => routes.layer(middleware::from_fn_with_state(
+            state.clone(),
+            context_boundary::private_jobs,
+        )),
+    };
+    let router = routes
         .layer(axum::Extension(AccessMode::Bearer))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
         .layer(middleware::from_fn(request_timeout))

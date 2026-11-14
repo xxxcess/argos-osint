@@ -208,6 +208,74 @@ pub(crate) async fn private(
     no_store(response)
 }
 
+enum JobsAuthorityFailure {
+    Reset(configuration_reset::ResetError),
+    Context(request_context::ContextFailure),
+}
+
+/// The Jobs bearer guard runs before this boundary. Only its storage-backed
+/// authority reads outlive a disconnected caller; the route and any mutation
+/// remain attached to the original request.
+pub(crate) async fn private_jobs(
+    State(state): State<ApiState>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let Some(fingerprint) = request.extensions().get::<CredentialFingerprint>().cloned() else {
+        return denied();
+    };
+    let required = requirement(&request);
+    let principal = request
+        .extensions()
+        .get::<AuthenticatedPrincipal>()
+        .cloned();
+    if required.is_some() && principal.is_none() {
+        return denied();
+    }
+    let repo = state.repo.clone();
+    let headers = request.headers().clone();
+    let authorized = crate::run_shielded(async move {
+        configuration_reset::authorize_independent_access(&repo, &fingerprint)
+            .await
+            .map_err(JobsAuthorityFailure::Reset)?;
+        let Some((permission, context)) = required else {
+            return Ok(None);
+        };
+        let principal = principal.expect("required Jobs authority checked before task spawn");
+        let resolved =
+            request_context::resolve_private(&repo, &principal, &headers, permission, context)
+                .await
+                .map_err(JobsAuthorityFailure::Context)?;
+        if matches!(
+            resolved.purpose(),
+            CredentialPurpose::Native | CredentialPurpose::WebRelay
+        ) {
+            configuration_reset::authorize_delegated_access(
+                &repo,
+                resolved.scope_id(),
+                resolved.access_epoch(),
+            )
+            .await
+            .map_err(JobsAuthorityFailure::Reset)?;
+        }
+        Ok(Some(resolved))
+    })
+    .await;
+    match authorized {
+        Ok(Ok(Some(resolved))) => {
+            if let Some(context) = resolved.context() {
+                request.extensions_mut().insert(context.clone());
+            }
+            request.extensions_mut().insert(resolved);
+        }
+        Ok(Ok(None)) => {}
+        Ok(Err(JobsAuthorityFailure::Reset(error))) => return reset_denied(error),
+        Ok(Err(JobsAuthorityFailure::Context(error))) => return error.into_response(),
+        Err(error) => return no_store(error.into_response()),
+    }
+    no_store(next.run(request).await)
+}
+
 fn no_store(mut response: Response) -> Response {
     response.headers_mut().insert(
         axum::http::header::CACHE_CONTROL,

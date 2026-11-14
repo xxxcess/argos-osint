@@ -54,7 +54,7 @@ fn local_review_handoff_announces_each_pairing_id_once_with_bounded_history() {
 }
 
 #[tokio::test]
-async fn local_review_handoff_sends_only_bounded_non_secret_fields() {
+async fn local_review_handoff_sends_only_bounded_approval_fields() {
     let temporary = tempfile::tempdir().unwrap();
     let socket = temporary.path().join("review.sock");
     let listener = UnixListener::bind(&socket).unwrap();
@@ -63,6 +63,7 @@ async fn local_review_handoff_sends_only_bounded_non_secret_fields() {
         socket,
         "http://127.0.0.1:18092/".to_owned(),
         "synthetic-pairing-id".to_owned(),
+        "synthetic-approval-code".to_owned(),
         2_000_000_000_000,
     ));
     let (mut stream, _) =
@@ -81,6 +82,7 @@ async fn local_review_handoff_sends_only_bounded_non_secret_fields() {
             "version": 1,
             "origin": "http://127.0.0.1:18092/",
             "pairing_id": "synthetic-pairing-id",
+            "approval_code": "synthetic-approval-code",
             "expires_at_ms": 2_000_000_000_000_u64,
         })
     );
@@ -96,6 +98,7 @@ async fn local_review_handoff_rejects_insecure_socket_mode() {
         socket,
         "http://127.0.0.1:18092/".to_owned(),
         "synthetic-pairing-id".to_owned(),
+        "synthetic-approval-code".to_owned(),
         2_000_000_000_000,
     )
     .await;
@@ -115,6 +118,7 @@ async fn local_review_handoff_missing_socket_finishes_without_pairing_failure() 
             temporary.path().join("missing.sock"),
             "http://127.0.0.1:18092/".to_owned(),
             "synthetic-pairing-id".to_owned(),
+            "synthetic-approval-code".to_owned(),
             2_000_000_000_000,
         ),
     )

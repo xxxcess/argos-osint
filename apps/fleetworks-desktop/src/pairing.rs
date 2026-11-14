@@ -141,8 +141,8 @@ fn transport_failure(error: ClientError) -> PairingFailure {
     }
 }
 
-/// The review socket is an opt-in local handoff. Keep it out of the normal
-/// pairing transport and never include either pairing secret or approval code.
+/// The review socket is an opt-in local handoff. Only its private same-user
+/// listener receives the approval code; polling secrets and tokens stay out.
 fn local_review_destination(origin: &str, socket: &Path) -> Option<(PathBuf, String)> {
     if origin.len() > 512 || !socket.is_absolute() || socket.as_os_str().as_bytes().len() > 103 {
         return None;
@@ -163,16 +163,23 @@ fn local_review_destination(origin: &str, socket: &Path) -> Option<(PathBuf, Str
     loopback.then(|| (socket.to_path_buf(), origin))
 }
 
+pub(crate) fn local_review_handoff_configured(origin: &str) -> bool {
+    std::env::var_os("FLEETWORKS_LOCAL_REVIEW_APPROVAL_SOCKET")
+        .is_some_and(|socket| local_review_destination(origin, Path::new(&socket)).is_some())
+}
+
 async fn send_local_review_handoff(
     socket: PathBuf,
     origin: String,
     pairing_id: String,
+    approval_code: String,
     expires_at_ms: u64,
 ) {
     let Ok(mut line) = serde_json::to_vec(&serde_json::json!({
         "version": 1,
         "origin": origin,
         "pairing_id": pairing_id,
+        "approval_code": approval_code,
         "expires_at_ms": expires_at_ms,
     })) else {
         return;
@@ -250,6 +257,7 @@ impl State {
                                 socket,
                                 origin,
                                 challenge.pairing_id.clone(),
+                                challenge.approval_code.clone(),
                                 challenge.expires_at_ms,
                             ));
                         }

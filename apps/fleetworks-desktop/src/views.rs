@@ -271,7 +271,13 @@ fn pairing_status(
                 .child(ui_components::async_status_strip(
                     "pairing-waiting",
                     "Waiting for gateway approval",
-                    "Share this approval code with your gateway operator.",
+                    if crate::pairing::local_review_handoff_configured(
+                        &state.connection.origin.text,
+                    ) {
+                        "Confirm the matching values in the macOS approval prompt."
+                    } else {
+                        "Share this approval code with your gateway operator."
+                    },
                     true,
                     StatusTone::Warn,
                     preferences,
@@ -294,6 +300,16 @@ fn pairing_status(
                         )
                         .child(quiet("Pairing request", kit))
                         .child(quiet(challenge.pairing_id.clone(), kit).key("pairing-request-id")),
+                )
+                .child(
+                    rune::row().child(
+                        ActionButton::new("Pair again")
+                            .key("pairing-restart-waiting")
+                            .icon(&icons::REFRESH)
+                            .finish(MetalFinish::ObsidianPill)
+                            .on_press(|state: &mut State| state.restart_pairing())
+                            .build(kit, preferences, pointer_ref),
+                    ),
                 ),
             PairingStage::Failed(failure) => {
                 let restart = matches!(
@@ -1276,6 +1292,25 @@ mod tests {
                 .any(|intent| matches!(intent, Intent::PairingConnect | Intent::PairingRestart)),
             "editing URL alone cannot send a pairing request"
         );
+    }
+
+    #[test]
+    fn pending_approval_can_request_a_new_pairing_from_the_waiting_screen() {
+        let challenge = PairingChallenge {
+            pairing_id: "synthetic-pairing-request-0001".into(),
+            approval_code: "SYNTHETICAPPROVALCODE0001".into(),
+            expires_at_ms: 1_900_000_000_000,
+            poll_after_ms: 1500,
+        };
+        let mut runtime = pairing_runtime(PairingStage::Waiting(challenge), (640.0, 480.0));
+        let mut clock = 0.0;
+        click(&mut runtime, "pairing-restart-waiting", &mut clock);
+        assert!(runtime.state.intents.contains(&Intent::PairingRestart));
+        assert!(matches!(
+            runtime.state.pairing.stage,
+            PairingStage::Working(_)
+        ));
+        assert!(runtime.find("pairing-approval-code").is_none());
     }
 
     #[test]

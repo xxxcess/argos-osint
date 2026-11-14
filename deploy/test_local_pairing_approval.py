@@ -22,7 +22,7 @@ class LocalPairingApprovalTests(unittest.TestCase):
         return approval.ApprovalBroker(
             ORIGIN,
             Path("/private/operator-token"),
-            prompt=prompt or (lambda _request, _timeout: CODE),
+            prompt=prompt or (lambda _request, _timeout: True),
             perform=perform or (lambda *_args: {"status": "approved"}),
             clock_ms=lambda: 1_000_000,
             monotonic=lambda: 1_000.0,
@@ -30,7 +30,7 @@ class LocalPairingApprovalTests(unittest.TestCase):
 
     def payload(self, pairing_id=PAIRING_ID, **changes):
         value = {"version": 1, "origin": ORIGIN, "pairing_id": pairing_id,
-                 "expires_at_ms": 1_300_000}
+                 "approval_code": CODE, "expires_at_ms": 1_300_000}
         value.update(changes)
         return value
 
@@ -44,6 +44,8 @@ class LocalPairingApprovalTests(unittest.TestCase):
             {"origin": "https://elsewhere.example"},
             {"origin": "http://127.0.0.1:18093"},
             {"pairing_id": "bad"},
+            {"approval_code": "wrong"},
+            {"approval_code": "A" * 32},
             {"expires_at_ms": 1_000_000},
             {"expires_at_ms": 1_700_000},
             {"version": True},
@@ -52,9 +54,9 @@ class LocalPairingApprovalTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(approval.HandoffError):
                 broker.reserve(self.payload(**change))
         with self.assertRaises(approval.HandoffError):
-            broker.reserve({**self.payload(), "approval_code": CODE})
+            broker.reserve({**self.payload(), "operator_token": "secret"})
         request = broker.reserve(self.payload(origin=ORIGIN + "/"))
-        self.assertEqual(request, approval.ApprovalRequest(ORIGIN, PAIRING_ID, 1_300_000))
+        self.assertEqual(request, approval.ApprovalRequest(ORIGIN, PAIRING_ID, CODE, 1_300_000))
 
     def test_dedup_and_prompt_rate_are_bounded(self):
         tick = [1000.0]
@@ -65,44 +67,41 @@ class LocalPairingApprovalTests(unittest.TestCase):
         broker.reserve(self.payload())
         with self.assertRaises(approval.HandoffError):
             broker.reserve(self.payload())
-        with self.assertRaises(approval.HandoffError):
-            broker.reserve(self.payload("c" * 32))
         for character in "cdefg":
-            tick[0] += 31
             broker.reserve(self.payload(character * 32))
-        tick[0] += 31
         with self.assertRaises(approval.HandoffError):
             broker.reserve(self.payload("h" * 32))
 
-    def test_only_explicit_typed_code_reaches_operator_client(self):
+    def test_only_explicit_approval_reaches_operator_client(self):
         decisions = []
 
         def perform(*arguments):
             decisions.append(arguments)
             return {"status": "approved"}
 
-        broker = self.broker(prompt=lambda _request, _timeout: CODE, perform=perform)
+        broker = self.broker(prompt=lambda _request, _timeout: True, perform=perform)
         request = broker.reserve(self.payload())
         self.assertTrue(broker.decide(request, 120))
         self.assertEqual(decisions, [(ORIGIN, Path("/private/operator-token"),
                                       "approve", PAIRING_ID, CODE)])
-        for typed in (None, "wrong", "Z" * 32):
-            with self.subTest(typed=typed):
-                cancelled = self.broker(prompt=lambda _request, _timeout: typed,
+        for decision in (False, None, "Approve"):
+            with self.subTest(decision=decision):
+                cancelled = self.broker(prompt=lambda _request, _timeout: decision,
                                         perform=perform)
                 self.assertFalse(cancelled.decide(request, 120))
         self.assertEqual(len(decisions), 1)
 
     def test_prompt_passes_no_code_or_bearer_in_process_arguments(self):
-        completed = mock.Mock(returncode=0, stdout=CODE + "\n")
-        request = approval.ApprovalRequest(ORIGIN, PAIRING_ID, 1_300_000)
+        completed = mock.Mock(returncode=0, stdout="Approve\n")
+        request = approval.ApprovalRequest(ORIGIN, PAIRING_ID, CODE, 1_300_000)
         with mock.patch.object(approval.sys, "platform", "darwin"), \
              mock.patch.object(approval.subprocess, "run", return_value=completed) as run:
-            self.assertEqual(approval.operator_prompt(request, 60), CODE)
+            self.assertTrue(approval.operator_prompt(request, 60))
         command = run.call_args.args[0]
         self.assertEqual(command, ["osascript", "-", ORIGIN, PAIRING_ID])
         self.assertNotIn(CODE, " ".join(command))
-        self.assertIn("with hidden answer", run.call_args.kwargs["input"])
+        self.assertIn(CODE, run.call_args.kwargs["input"])
+        self.assertIn('default button "Cancel"', run.call_args.kwargs["input"])
 
     def test_private_socket_acknowledges_before_prompt_and_cleans_up(self):
         prompted = threading.Event()
@@ -113,7 +112,7 @@ class LocalPairingApprovalTests(unittest.TestCase):
 
         def prompt(request, _timeout):
             prompted.set()
-            return CODE
+            return True
 
         def perform(*arguments):
             approvals.append(arguments)

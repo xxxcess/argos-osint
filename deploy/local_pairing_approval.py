@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Bounded local Operator handoff for a native-review pairing challenge.
 
-The native app sends only public challenge metadata through a private Unix
-socket. A separate macOS dialog asks the Operator to type the approval code.
+The native app sends challenge metadata and its approval code through a private
+Unix socket. A separate macOS dialog requires an explicit Operator decision.
 Only this helper reads the Operator token file and submits the decision.
 """
 
@@ -32,7 +32,6 @@ from fleetworks_pairing import PairingError  # noqa: E402
 
 MAX_LINE_BYTES = 2048
 MAX_PROMPTS = 6
-MIN_PROMPT_INTERVAL_SECONDS = 30
 LIFETIME_SECONDS = 3600
 SOCKET_NAME = "approval.sock"
 IDENTITY = re.compile(r"[A-Za-z0-9_-]{16,128}\Z")
@@ -41,18 +40,22 @@ APPROVAL_CODE = re.compile(r"[0-9a-f]{32}\Z")
 APPLE_SCRIPT = '''on run argv
     set gatewayOrigin to item 1 of argv
     set requestID to item 2 of argv
-    set messageText to "Gateway: " & gatewayOrigin & return & "Pairing request: " & requestID & return & return & "Type the approval code shown in Fleetworks to approve this Mac."
+    set approvalCode to "__APPROVAL_CODE__"
+    set messageText to "Gateway: " & gatewayOrigin & return & "Pairing request: " & requestID & return & "Approval code: " & approvalCode & return & return & "Approve this Mac only if these details match Fleetworks."
     try
-        set answerRecord to display dialog messageText default answer "" with hidden answer buttons {"Cancel", "Approve"} default button "Cancel" with title "Fleetworks Operator Approval" giving up after 120
-        if gave up of answerRecord then return ""
-        if button returned of answerRecord is not "Approve" then return ""
-        return text returned of answerRecord
+        set answerRecord to display dialog messageText buttons {"Cancel", "Approve"} default button "Cancel" with title "Fleetworks Operator Approval" giving up after 120
+        if gave up of answerRecord then return "Cancel"
+        return button returned of answerRecord
     on error number -128
-        return ""
+        return "Cancel"
     end try
 end run
 '''
 
+FEEDBACK_SCRIPT = '''try
+    display alert "Fleetworks pairing was not approved" message "The gateway did not accept this pairing request. Check Fleetworks and try again." as warning buttons {"OK"} default button "OK" giving up after 15
+end try
+'''
 
 class HandoffError(Exception):
     """A bounded request or private-socket error safe to report without data."""
@@ -62,28 +65,41 @@ class HandoffError(Exception):
 class ApprovalRequest:
     origin: str
     pairing_id: str
+    approval_code: str
     expires_at_ms: int
 
 
-def operator_prompt(request: ApprovalRequest, timeout: float) -> str | None:
-    """Return an explicitly entered code, or None on cancel/timeout."""
+def operator_prompt(request: ApprovalRequest, timeout: float) -> bool:
+    """Return whether the Operator explicitly clicked Approve."""
     if sys.platform != "darwin":
-        return None
+        return False
     try:
         result = subprocess.run(
             ["osascript", "-", request.origin, request.pairing_id],
-            input=APPLE_SCRIPT,
+            input=APPLE_SCRIPT.replace("__APPROVAL_CODE__", request.approval_code),
             capture_output=True,
             text=True,
             timeout=min(timeout, 130),
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return None
+        return False
     if result.returncode != 0 or len(result.stdout) > 256:
-        return None
-    code = result.stdout.strip()
-    return code if APPROVAL_CODE.fullmatch(code) else None
+        return False
+    return result.stdout.strip() == "Approve"
+
+
+def operator_feedback() -> None:
+    """Show a generic, bounded gateway failure without disclosing credentials."""
+    if sys.platform != "darwin":
+        return
+    try:
+        subprocess.run(
+            ["osascript", "-"], input=FEEDBACK_SCRIPT, capture_output=True,
+            text=True, timeout=20, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 
 class ApprovalBroker:
@@ -92,7 +108,7 @@ class ApprovalBroker:
         origin: str,
         token_file: Path,
         *,
-        prompt: Callable[[ApprovalRequest, float], str | None] = operator_prompt,
+        prompt: Callable[[ApprovalRequest, float], bool] = operator_prompt,
         perform: Callable[..., dict] = perform_decision,
         clock_ms: Callable[[], int] = lambda: int(time.time() * 1000),
         monotonic: Callable[[], float] = time.monotonic,
@@ -114,7 +130,7 @@ class ApprovalBroker:
 
     def reserve(self, payload: object) -> ApprovalRequest:
         if type(payload) is not dict or set(payload) != {
-            "version", "origin", "pairing_id", "expires_at_ms"
+            "version", "origin", "pairing_id", "approval_code", "expires_at_ms"
         }:
             raise HandoffError("Invalid local pairing handoff")
         if type(payload["version"]) is not int or payload["version"] != 1:
@@ -130,6 +146,9 @@ class ApprovalBroker:
         pairing_id = payload["pairing_id"]
         if type(pairing_id) is not str or not IDENTITY.fullmatch(pairing_id):
             raise HandoffError("Invalid local pairing request")
+        approval_code = payload["approval_code"]
+        if type(approval_code) is not str or not APPROVAL_CODE.fullmatch(approval_code):
+            raise HandoffError("Invalid local pairing approval code")
         expiry = payload["expires_at_ms"]
         now_ms = self.clock_ms()
         if (type(expiry) is not int or expiry <= now_ms + 1000
@@ -140,24 +159,23 @@ class ApprovalBroker:
             self.prompt_times.popleft()
         if pairing_id in self.seen:
             raise HandoffError("Local pairing request already prompted")
-        if (len(self.prompt_times) >= MAX_PROMPTS
-                or self.prompt_times and now - self.prompt_times[-1] < MIN_PROMPT_INTERVAL_SECONDS):
+        if len(self.prompt_times) >= MAX_PROMPTS:
             raise HandoffError("Local pairing prompts are temporarily limited")
         self.seen.add(pairing_id)
         self.prompt_times.append(now)
-        return ApprovalRequest(self.origin, pairing_id, expiry)
+        return ApprovalRequest(self.origin, pairing_id, approval_code, expiry)
 
     def decide(self, request: ApprovalRequest, lifetime_remaining: float) -> bool:
         if lifetime_remaining <= 15 or request.expires_at_ms <= self.clock_ms() + 1000:
             return False
         timeout = min(130.0, lifetime_remaining - 15)
-        code = self.prompt(request, timeout)
-        if not isinstance(code, str) or not APPROVAL_CODE.fullmatch(code):
+        if self.prompt(request, timeout) is not True:
             return False
         if request.expires_at_ms <= self.clock_ms():
             return False
         result = self.perform(
-            request.origin, self.token_file, "approve", request.pairing_id, code
+            request.origin, self.token_file, "approve", request.pairing_id,
+            request.approval_code,
         )
         return result == {"status": "approved"}
 
@@ -262,6 +280,7 @@ def serve(
                         print("Local pairing approval was canceled or unavailable", file=sys.stderr)
                 except Exception:
                     print("Local pairing approval was refused by the gateway", file=sys.stderr)
+                    operator_feedback()
     finally:
         listener.close()
         try:

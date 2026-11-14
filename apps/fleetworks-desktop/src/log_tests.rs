@@ -883,3 +883,243 @@ fn loading_list_areas_render_shape_accurate_shimmering_skeletons_with_reduced_mo
         "reduced-motion mode disables shimmering skeleton sweep layers"
     );
 }
+
+fn simulated_log_row(id: &str, severity: &str, event_type: &str, message: &str) -> LogEntry {
+    serde_json::from_value(json!({
+        "id": id,
+        "ts": "2026-11-14T21:35:34Z",
+        "severity": severity,
+        "app": "native-worker",
+        "event_type": event_type,
+        "message": message,
+        "job_id": "fixture-job",
+        "task_id": "",
+        "attempt_id": "",
+        "run_id": ""
+    }))
+    .expect("simulated wire log entry")
+}
+
+async fn spawn_simulated_log_gateway(
+    responses: Vec<(&'static str, serde_json::Value)>,
+) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback simulated log gateway");
+    let origin = format!("http://{}", listener.local_addr().expect("local addr"));
+    let task = tokio::spawn(async move {
+        let mut recorded_requests = Vec::new();
+        for (status, payload) in responses {
+            let (mut socket, _) = listener.accept().await.expect("accept client request");
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0_u8; 1];
+                let read = socket.read(&mut byte).await.expect("read request byte");
+                assert!(
+                    read == 1,
+                    "unexpected EOF reading simulated gateway request"
+                );
+                request.push(byte[0]);
+                assert!(
+                    request.len() <= 16 * 1024,
+                    "bounded simulated request header"
+                );
+            }
+            let text = String::from_utf8(request).expect("utf8 HTTP request");
+            let lower = text.to_ascii_lowercase();
+            assert!(
+                lower.contains("\r\nauthorization: bearer fixture-token\r\n"),
+                "native client must send registered bearer credential"
+            );
+            assert!(
+                lower.contains("\r\nx-fleetworks-registration:"),
+                "native client must bind log reads to registered workstation header"
+            );
+            recorded_requests.push(text.lines().next().unwrap_or_default().to_owned());
+            let body = serde_json::to_vec(&payload).expect("serialize simulated log payload");
+            let header = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            socket
+                .write_all(header.as_bytes())
+                .await
+                .expect("write response headers");
+            socket.write_all(&body).await.expect("write response body");
+        }
+        recorded_requests
+    });
+    (origin, task)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn simulated_backend_log_stream_exercises_follow_warnings_and_error_recovery_in_native_runtime(
+) {
+    let initial_payload = json!({
+        "rows": [
+            simulated_log_row(
+                "sim-warn-paced",
+                "warn",
+                "rebuild_http",
+                "Actor index write paced (429 write_paced); deferred pending batch",
+            ),
+            simulated_log_row(
+                "sim-info-start",
+                "info",
+                "startup",
+                "Worker claimed Actor reindex (attempt 1)",
+            ),
+        ],
+        "counts": {"total": 2, "info": 1, "error": 0, "warn": 1, "debug": 0},
+        "apps": ["native-worker"],
+        "apps_complete": true,
+        "next_cursor": cursor(2),
+        "follow_cursor": cursor(1),
+        "available": true,
+        "private_logs_only": true,
+        "shared_private_logs_available": true,
+        "reason_code": null,
+        "narrowing_hint": null,
+        "has_more": true
+    });
+    let follow_error_payload = json!({
+        "rows": [
+            simulated_log_row(
+                "sim-error-batch",
+                "error",
+                "rebuild_acknowledge",
+                "Actor index batch rejected (correction_required=true)",
+            ),
+        ],
+        "counts": {"total": 3, "info": 1, "error": 1, "warn": 1, "debug": 0},
+        "apps": ["native-worker"],
+        "apps_complete": true,
+        "next_cursor": cursor(2),
+        "follow_cursor": cursor(3),
+        "available": true,
+        "private_logs_only": true,
+        "shared_private_logs_available": true,
+        "reason_code": null,
+        "narrowing_hint": null,
+        "has_more": true
+    });
+    let (origin, gateway) = spawn_simulated_log_gateway(vec![
+        ("200 OK", initial_payload),
+        (
+            "503 Service Unavailable",
+            json!({"error": "temporary_backpressure"}),
+        ),
+        ("200 OK", follow_error_payload),
+    ])
+    .await;
+
+    let mut state = shell();
+    state.reveal_operational_logs();
+    let client = Client::new(&origin, Some("fixture-token")).expect("loopback client");
+    let refresh_ticket = state.scoped_logs.refresh().expect("initial log ticket");
+    let initial_reply = execute(client.clone(), &refresh_ticket).await;
+
+    let mut runtime = Runtime::new(
+        state,
+        crate::app::view,
+        (1180.0, 800.0),
+        Env {
+            system_dark: true,
+            scale: 1.0,
+        },
+    );
+    let mut clock = 0.0;
+    runtime.update(move |state, _| state.complete_scoped_logs(refresh_ticket, initial_reply));
+    runtime.frame(clock);
+    assert_eq!(runtime.state.scoped_logs.rows.len(), 2);
+    assert_eq!(
+        runtime
+            .state
+            .scoped_logs
+            .counts
+            .as_ref()
+            .map(|c| (c.warn, c.info)),
+        Some((1, 1))
+    );
+
+    let follow_ticket = runtime
+        .state
+        .scoped_logs
+        .follow()
+        .expect("follow ticket after initial page");
+    let transient_reply = execute(client.clone(), &follow_ticket).await;
+    assert!(matches!(transient_reply, Err(ClientError::Status(503))));
+    runtime.update(move |state, _| state.complete_scoped_logs(follow_ticket, transient_reply));
+    clock += 1.0 / 60.0;
+    runtime.frame(clock);
+    assert_eq!(runtime.state.scoped_logs.status, LogStatus::Unavailable);
+    assert_eq!(
+        runtime.state.scoped_logs.rows.len(),
+        2,
+        "transient 503 during follow must preserve validated info/warn rows"
+    );
+
+    runtime.update(|state, _| state.sync_operational_logs_with_selected_job(true));
+    let resumed_ticket = runtime
+        .state
+        .scoped_logs
+        .follow()
+        .expect("resumed follow ticket after job progress");
+    let recovered_reply = execute(client, &resumed_ticket).await;
+    runtime.update(move |state, _| state.complete_scoped_logs(resumed_ticket, recovered_reply));
+    clock += 1.0 / 60.0;
+    runtime.frame(clock);
+
+    assert_eq!(runtime.state.scoped_logs.status, LogStatus::Ready);
+    assert_eq!(runtime.state.scoped_logs.rows.len(), 3);
+    assert_eq!(
+        runtime.state.scoped_logs.counts.as_ref().map(|c| c.error),
+        Some(1)
+    );
+    let tree = runtime.accessibility_json().to_string();
+    assert!(tree.contains("429 write_paced"));
+    assert!(tree.contains("correction_required=true"));
+
+    let requests = gateway.await.expect("gateway completed");
+    assert_eq!(requests.len(), 3);
+    assert!(requests[0].starts_with("GET /api/v1/logs?"));
+    assert!(requests[1].starts_with("GET /api/v1/logs/follow?"));
+    assert!(requests[2].starts_with("GET /api/v1/logs/follow?"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn simulated_backend_logs_reject_malformed_cursor_over_wire() {
+    let malformed = json!({
+        "rows": [simulated_log_row("sim-bad-cursor", "error", "fault", "Bad cursor probe")],
+        "counts": {"total": 1, "info": 0, "error": 1, "warn": 0, "debug": 0},
+        "apps": ["native-worker"],
+        "apps_complete": true,
+        "next_cursor": "../not-hex-cursor",
+        "follow_cursor": null,
+        "available": true,
+        "private_logs_only": true,
+        "shared_private_logs_available": true,
+        "reason_code": null,
+        "narrowing_hint": null,
+        "has_more": true
+    });
+    let (origin, gateway) = spawn_simulated_log_gateway(vec![("200 OK", malformed)]).await;
+    let mut state = shell();
+    state.reveal_operational_logs();
+    let client = Client::new(&origin, Some("fixture-token")).expect("loopback client");
+    let ticket = state.scoped_logs.refresh().expect("initial log ticket");
+    let reply = execute(client, &ticket).await;
+    assert!(
+        reply.is_ok(),
+        "mock HTTP payload deserializes at transport layer"
+    );
+    state.complete_scoped_logs(ticket, reply);
+    assert_eq!(
+        state.scoped_logs.status,
+        LogStatus::Unavailable,
+        "LogState::complete must reject non-hex continuation tokens from untrusted wire payloads"
+    );
+    assert!(state.scoped_logs.rows.is_empty() && state.scoped_logs.next_cursor.is_none());
+    gateway.await.expect("gateway completed");
+}

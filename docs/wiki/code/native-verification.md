@@ -88,6 +88,14 @@ synthetic, nonexistent approval-socket path into that fixture process only. CI
 uses it to capture the local confirmation wording and retry control; it does not
 start a helper, contact a gateway, or approve a pairing request.
 
+For log-consuming, job-streaming, readiness, and backpressure/error recovery paths,
+native unit/Runtime checks may bind an offline loopback `TcpListener` gateway over
+`127.0.0.1:0` to serve scripted [`fleetworks_contracts::operational_logs`](../../../crates/fleetworks-contracts/src/operational_logs.rs)
+responses into live `rune::Runtime` instances (see [log_tests.rs](../../../apps/fleetworks-desktop/src/log_tests.rs)).
+This tests real HTTP wire framing, registered headers, `429`/`503` backpressure
+degradation, error rows, and cursor validation while keeping `apps/fleetworks-desktop`
+free of backend Docker engines.
+
 | Evidence | What this command records |
 | --- | --- |
 | Runtime generation | Exit status plus validated nonempty PNG/tree and optional script trace |

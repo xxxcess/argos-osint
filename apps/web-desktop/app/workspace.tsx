@@ -49,7 +49,6 @@ export function WebWorkspace({
     return () => {
       unsubscribe();
       clearTimeout(timer);
-      live.close();
     };
   }, [live, expiresAt]);
 

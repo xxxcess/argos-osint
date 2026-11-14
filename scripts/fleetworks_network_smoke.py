@@ -250,6 +250,42 @@ def exercise_control(port, headers):
     assert value["roles"]["brain_summary"]["primary"]["model"] == "example/offline-fixture", value
 
 
+@contextlib.contextmanager
+def native_runtime(workspace, binary, env, tag):
+    (workspace / "staged-datasets").mkdir(mode=0o700, exist_ok=True)
+    jobs_port, native_port = free_ports(2)
+    jobs_token = secrets.token_hex(32)
+    runtime_env = {
+        **env,
+        "FLEETWORKS_JOBS_TOKEN": jobs_token,
+        "FLEETWORKS_JOBS_ORIGIN": f"http://127.0.0.1:{jobs_port}",
+        "FLEETWORKS_JOBS_ALLOWED_HOSTS": f"127.0.0.1:{jobs_port}",
+    }
+    jobs_auth = {"Authorization": f"Bearer {jobs_token}"}
+    with process(
+        [binary, "--role", "jobs", "--port", str(jobs_port)],
+        runtime_env,
+        workspace / f"jobs-{tag}.log",
+    ) as jobs:
+        assert wait_for(jobs, jobs_port, "/api/v1/health/ready", jobs_auth)["service"] == "fleetworks-jobs"
+        with process(
+            [binary, "--role", "native-worker", "--port", str(native_port)],
+            runtime_env,
+            workspace / f"native-worker-{tag}.log",
+        ):
+            yield runtime_env
+
+
+def wait_tool_pool(api_port, headers):
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        status, value = request(api_port, "/api/v1/capabilities", headers)
+        if status == 200 and "tool-execution" in value.get("features", []):
+            return
+        time.sleep(0.05)
+    raise RuntimeError("manual_tools dispatch pool was not enabled")
+
+
 def exercise(mode, tmp, binary, surreal):
     workspace = tmp / mode
     workspace.mkdir()
@@ -287,35 +323,37 @@ def exercise(mode, tmp, binary, surreal):
                 check=True, timeout=35,
             )
             generations.append(instance_identity(db_port, root_key))
-            with process([binary, "--role", "api", "--port", str(api_port)], env, workspace / f"api-{attempt}.log") as api:
-                ready = wait_for(api, api_port, "/api/v1/health/ready", headers)
-                assert ready["ready"] and ready["storage"] and ready["api_version"] == 1
-                assert request(api_port, "/api/v1/health/ready")[0] == 401
-                assert request(api_port, "/api/v1/health/ready", {**headers, "Host": "example.test:8080"})[0] == 403
-                assert request(api_port, "/api/v1/health/ready", {**headers, "Origin": "http://example.test:3000"})[0] == 403
-                assert request(api_port, "/api/v1/jobs", headers)[0] == 401
-                _, proof_headers = register_workstation(api_port, headers, marker)
-                for path, key in (("tools", "tools"), ("models/defaults", "defaults"), ("profile", "accounts"), ("logs", "rows")):
-                    status, value = request(api_port, f"/api/v1/{path}", {**proof_headers, "Origin": origins})
-                    assert status == 200 and key in value, (path, status, value)
-                if attempt == 1:
-                    saved_tool = exercise_tools(api, api_port, proof_headers)
-                    exercise_control(api_port, proof_headers)
-                elif mode == "disk":
-                    path, value = saved_tool
-                    assert request(api_port, path, proof_headers) == (200, value)
-                if attempt == 1:
-                    with contextlib.ExitStack() as workers:
-                        roles = (("worker", worker_port), ("brief-worker", brief_port))
-                        children = [(role, port, workers.enter_context(process(
-                            [binary, "--role", role, "--port", str(port)], env,
-                            workspace / f"{role}.log",
-                        ))) for role, port in roles]
-                        time.sleep(1)
-                        for role, port, child in children:
-                            assert child.poll() is None, f"{role} did not stay up"
-                            with socket.socket() as probe:
-                                assert probe.connect_ex(("127.0.0.1", port)) != 0, f"{role} published an HTTP listener"
+            with native_runtime(workspace, binary, env, f"attempt-{attempt}") as runtime_env:
+                with process([binary, "--role", "api", "--port", str(api_port)], runtime_env, workspace / f"api-{attempt}.log") as api:
+                    ready = wait_for(api, api_port, "/api/v1/health/ready", headers)
+                    assert ready["ready"] and ready["storage"] and ready["api_version"] == 1
+                    assert request(api_port, "/api/v1/health/ready")[0] == 401
+                    assert request(api_port, "/api/v1/health/ready", {**headers, "Host": "example.test:8080"})[0] == 403
+                    assert request(api_port, "/api/v1/health/ready", {**headers, "Origin": "http://example.test:3000"})[0] == 403
+                    assert request(api_port, "/api/v1/jobs", headers)[0] == 401
+                    _, proof_headers = register_workstation(api_port, headers, marker)
+                    wait_tool_pool(api_port, proof_headers)
+                    for path, key in (("tools", "tools"), ("models/defaults", "defaults"), ("profile", "accounts"), ("logs", "rows")):
+                        status, value = request(api_port, f"/api/v1/{path}", {**proof_headers, "Origin": origins})
+                        assert status == 200 and key in value, (path, status, value)
+                    if attempt == 1:
+                        saved_tool = exercise_tools(api, api_port, proof_headers)
+                        exercise_control(api_port, proof_headers)
+                    elif mode == "disk":
+                        path, value = saved_tool
+                        assert request(api_port, path, proof_headers) == (200, value)
+                    if attempt == 1:
+                        with contextlib.ExitStack() as workers:
+                            roles = (("worker", worker_port), ("brief-worker", brief_port))
+                            children = [(role, port, workers.enter_context(process(
+                                [binary, "--role", role, "--port", str(port)], runtime_env,
+                                workspace / f"{role}.log",
+                            ))) for role, port in roles]
+                            time.sleep(1)
+                            for role, port, child in children:
+                                assert child.poll() is None, f"{role} did not stay up"
+                                with socket.socket() as probe:
+                                    assert probe.connect_ex(("127.0.0.1", port)) != 0, f"{role} published an HTTP listener"
             if attempt == 1 and mode == "memory":
                 exercise_brain(workspace, binary, env, api_port, proof_headers)
                 exercise_private_tools(workspace, binary, env, api_port, proof_headers)
@@ -401,35 +439,37 @@ def exercise_brain(workspace, binary, env, api_port, public_headers):
 def exercise_private_tools(workspace, binary, env, api_port, public_headers):
     port = free_ports(1)[0]
     token = secrets.token_hex(32)
-    private_env = {
-        **env,
-        "FLEETWORKS_TOOLS_TOKEN": token,
-        "FLEETWORKS_TOOLS_ALLOWED_HOSTS": f"127.0.0.1:{port}",
-    }
-    gateway_env = {
-        **private_env,
-        "FLEETWORKS_TOOLS_ORIGIN": f"http://127.0.0.1:{port}",
-    }
     auth = {"Authorization": "Bearer " + token}
     ready = "/api/v1/health/ready"
     catalog = "/api/v1/tools"
-    with process([binary, "--role", "api", "--port", str(api_port)], gateway_env, workspace / "api-tools.log") as api:
-        wait_for(api, api_port, ready, public_headers)
-        with process([binary, "--role", "tools", "--port", str(port)], private_env, workspace / "tools.log") as tools:
-            health = wait_for(tools, port, ready, auth)
-            assert health["service"] == "fleetworks-tools" and health["storage"]
-            assert request(port, catalog, public_headers)[0] == 401
-            assert request(port, catalog, auth)[0] == 401
-            assert request(api_port, catalog, auth)[0] == 401
-            assert request(port, ready, {**auth, "Host": "other.test"})[0] == 403
-            assert request(port, "/api/v1/jobs", auth)[0] == 404
-            status, listed = request(api_port, catalog, public_headers)
-            assert status == 200 and listed["tools"], (status, listed)
-            path, result = exercise_tools(api, api_port, public_headers, "private-dork-fixture")
-            assert request(api_port, path, public_headers) == (200, result)
-        assert request(api_port, catalog, public_headers)[0] == 502
-        assert request(api_port, path, public_headers)[0] == 502
-        assert request(api_port, "/api/v1/jobs", public_headers)[0] == 200
+    with native_runtime(workspace, binary, env, "private-tools") as runtime_env:
+        private_env = {
+            **runtime_env,
+            "FLEETWORKS_TOOLS_TOKEN": token,
+            "FLEETWORKS_TOOLS_ALLOWED_HOSTS": f"127.0.0.1:{port}",
+        }
+        gateway_env = {
+            **private_env,
+            "FLEETWORKS_TOOLS_ORIGIN": f"http://127.0.0.1:{port}",
+        }
+        with process([binary, "--role", "api", "--port", str(api_port)], gateway_env, workspace / "api-tools.log") as api:
+            wait_for(api, api_port, ready, public_headers)
+            wait_tool_pool(api_port, public_headers)
+            with process([binary, "--role", "tools", "--port", str(port)], private_env, workspace / "tools.log") as tools:
+                health = wait_for(tools, port, ready, auth)
+                assert health["service"] == "fleetworks-tools" and health["storage"]
+                assert request(port, catalog, public_headers)[0] == 401
+                assert request(port, catalog, auth)[0] == 401
+                assert request(api_port, catalog, auth)[0] == 401
+                assert request(port, ready, {**auth, "Host": "other.test"})[0] == 403
+                assert request(port, "/api/v1/jobs", auth)[0] == 404
+                status, listed = request(api_port, catalog, public_headers)
+                assert status == 200 and listed["tools"], (status, listed)
+                path, result = exercise_tools(api, api_port, public_headers, "private-dork-fixture")
+                assert request(api_port, path, public_headers) == (200, result)
+            assert request(api_port, catalog, public_headers)[0] == 502
+            assert request(api_port, path, public_headers)[0] == 502
+            assert request(api_port, "/api/v1/jobs", public_headers)[0] == 200
     print("Tools: private readiness, bearer isolation, execution relay and outage isolation passed", flush=True)
 
 

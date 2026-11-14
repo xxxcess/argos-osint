@@ -282,10 +282,9 @@ pub async fn canonical_many_in(
         type::record('memory',record::id(id)).lifecycle ?? '' AS lifecycle,
         type::record('memory',record::id(id)).memory_kind ?? '' AS memory_kind,
         record::exists(type::record('brain_actor_redirect',record::id(id))) AS redirected FROM $actors;
-        RETURN $ids.map(|$actor| { SELECT actor_id, alias,
+        RETURN $ids.map(|$actor| { SELECT actor_id, IF bytes::len(type::bytes(alias))<=256 {alias} ELSE {NONE} AS alias,
           IF string::len(provenance_json)<=8192 {provenance_json} ELSE {NONE} AS provenance_json
-          FROM brain_actor_alias WITH INDEX actor_search_alias_owner WHERE actor_id=$actor AND alias_type='name'
-          AND bytes::len(type::bytes(alias))<=256 ORDER BY alias LIMIT 32 });
+          FROM brain_actor_alias WITH INDEX actor_search_alias_owner WHERE actor_id=$actor AND alias_type='name' ORDER BY alias LIMIT 64 });
         SELECT actor_id,revision FROM $heads;")
         .bind(("actors",records)).bind(("heads",heads)).bind(("ids",ids.to_vec()))).await?;
     let actors: Vec<ActorRow> = jobs::take(&mut response, 0)?;

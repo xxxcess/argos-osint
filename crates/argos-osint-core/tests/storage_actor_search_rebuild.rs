@@ -521,7 +521,7 @@ async fn oversized_aliases_and_expansion_keep_canonical_actor_in_rebuild() {
         return;
     };
     let repo = server.repo("search_shadow", "identity_bound").await;
-    let mut data = actors(1);
+    let mut data = actors(2);
     data[0].aliases = (0..40)
         .map(|number| {
             let terms = (0..10)
@@ -535,6 +535,10 @@ async fn oversized_aliases_and_expansion_keep_canonical_actor_in_rebuild() {
     data[0]
         .metadata
         .insert("description".into(), "x".repeat(65));
+    data[1].aliases = (0..32)
+        .map(|number| format!("Alias {number}"))
+        .chain(["A".repeat(257)])
+        .collect();
     actor_catalog::seed_actors_pinned(
         &repo,
         data,
@@ -561,9 +565,21 @@ async fn oversized_aliases_and_expansion_keep_canonical_actor_in_rebuild() {
         projection.summary.is_none(),
         "oversized summary token is omitted"
     );
+    let after_oversized_alias = index::canonical_many(&repo, &["shadow-actor-0001".into()])
+        .await
+        .expect("index query skips oversized alias before its row limit")
+        .pop()
+        .expect("second source actor")
+        .projection
+        .expect("second actor remains searchable");
+    assert_eq!(
+        after_oversized_alias.aliases.len(),
+        32,
+        "later valid aliases fill the bounded search projection"
+    );
     assert_eq!(
         support::count(repo.db(), "actor_search_event").await,
-        1,
+        2,
         "canonical source intent remains durable"
     );
     let (claimed, mut status) = fixture(&repo).await;
@@ -599,7 +615,7 @@ async fn oversized_aliases_and_expansion_keep_canonical_actor_in_rebuild() {
         panic!("expected rebuild delivery")
     };
     batch.validate().expect("bounded transport contract");
-    assert_eq!(batch.mutations.len(), 1);
+    assert_eq!(batch.mutations.len(), 2);
     assert_eq!(batch.mutations[0].actor_id, "shadow-actor-0000");
     assert_eq!(
         batch.mutations[0]

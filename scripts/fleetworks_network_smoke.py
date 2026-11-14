@@ -514,8 +514,8 @@ def exercise_control_jobs(workspace, binary, env, api_port, public_headers):
                 assert request(api_port, profile, control_auth)[0] == 401
                 assert request(api_port, jobs_path, jobs_auth)[0] == 401
                 assert request(control_port, jobs_path, control_auth)[0] == 401
-                assert request(jobs_port, profile, jobs_auth)[0] == 401
-                assert request(jobs_port, "/api/v1/live", jobs_auth)[0] == 401
+                assert request(jobs_port, profile, jobs_auth)[0] == 404
+                assert request(jobs_port, "/api/v1/live", jobs_auth)[0] == 404
                 status, relayed_profile = request(api_port, profile, public_headers)
                 assert status == 200 and isinstance(relayed_profile.get("configuration_revision"), int), (status, relayed_profile)
                 for path in (jobs_path, "/api/v1/logs?limit=1"):

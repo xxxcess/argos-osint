@@ -1,0 +1,296 @@
+name: UI visual review
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Open same-repository PR number
+        type: string
+        required: true
+      head:
+        description: Exact 40-character PR head SHA
+        type: string
+        required: true
+      scope:
+        description: Changed UI family to capture
+        type: choice
+        required: true
+        options: [native, web, both]
+      native_scenes:
+        description: Comma-separated Rune fixture scenes (1–6)
+        type: string
+        default: registration-ready
+      native_script:
+        description: Optional Settings click in registration-ready
+        type: choice
+        options: [none, settings]
+        default: none
+      web_surface:
+        description: Screenshot-gate surface to capture
+        type: choice
+        options: [bulletin, brief, topology, actors, all]
+        default: all
+      release_tag:
+        description: Optional existing Release tag resolving to this exact head
+        type: string
+        default: ''
+
+# Source builds are read-only. Only the final artifact/comment job can write.
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ui-visual-review-${{ inputs.pr }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Pin open PR and affected UI scope
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          lfs: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.head }}
+          path: source
+          persist-credentials: false
+          lfs: false
+      - name: Verify exact source and dispatch selection
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVIEW_REPO: ${{ github.repository }}
+          REVIEW_PR: ${{ inputs.pr }}
+          REVIEW_HEAD: ${{ inputs.head }}
+          REVIEW_SCOPE: ${{ inputs.scope }}
+          NATIVE_SCENES: ${{ inputs.native_scenes }}
+          NATIVE_SCRIPT: ${{ inputs.native_script }}
+          WEB_SURFACE: ${{ inputs.web_surface }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        working-directory: source
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$REVIEW_HEAD"
+          python3 ../.github/scripts/ui_visual_review.py validate \
+            --repo "$REVIEW_REPO" --pr "$REVIEW_PR" --head "$REVIEW_HEAD" \
+            --scope "$REVIEW_SCOPE" --native-scenes "$NATIVE_SCENES" \
+            --native-script "$NATIVE_SCRIPT" --web-surface "$WEB_SURFACE" \
+            --release-tag "$RELEASE_TAG"
+
+  native:
+    name: Rune actual-view PNGs
+    needs: validate
+    if: inputs.scope == 'native' || inputs.scope == 'both'
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+      CARGO_TERM_COLOR: never
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      RUST_BACKTRACE: 1
+      REVIEW_HEAD: ${{ inputs.head }}
+      NATIVE_SCENES: ${{ inputs.native_scenes }}
+      NATIVE_SCRIPT: ${{ inputs.native_script }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          lfs: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.head }}
+          path: source
+          persist-credentials: false
+          lfs: false
+      - name: Install pinned Rust toolchain and verify host
+        shell: bash
+        working-directory: source
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$REVIEW_HEAD"
+          rustup toolchain install 1.95.0 --profile minimal --target aarch64-apple-darwin
+          test "$(rustc -vV | sed -n 's/^host: //p')" = aarch64-apple-darwin
+          python3 scripts/fleetworks_verify.py platform --format json
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ui-review-aarch64-apple-darwin-${{ hashFiles('source/Cargo.lock', 'source/apps/fleetworks-desktop/Cargo.toml') }}
+          workspaces: source -> target/agents
+          save-if: 'false'
+      - name: Render selected production Rune views and optional input state
+        shell: bash
+        working-directory: source
+        run: |
+          set -euo pipefail
+          python3 ../.github/scripts/ui_visual_review.py capture-native \
+            --head "$REVIEW_HEAD" --native-scenes "$NATIVE_SCENES" \
+            --native-script "$NATIVE_SCRIPT" \
+            --output "$RUNNER_TEMP/ui-review-native/fixtures"
+      - name: Retain Rune PNG, accessibility tree and capture manifest
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: Fleetworks-ui-native-${{ inputs.head }}
+          path: ${{ runner.temp }}/ui-review-native/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  web:
+    name: React Native Web screenshot gate PNGs
+    needs: validate
+    if: inputs.scope == 'web' || inputs.scope == 'both'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      ARGOS_WEB_TEST_DEV: '1'
+      REVIEW_HEAD: ${{ inputs.head }}
+      WEB_SURFACE: ${{ inputs.web_surface }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          lfs: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.head }}
+          path: source
+          persist-credentials: false
+          lfs: false
+      - name: Verify exact source
+        working-directory: source
+        run: test "$(git rev-parse HEAD)" = "$REVIEW_HEAD"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version-file: source/.node-version
+          package-manager-cache: false
+      - name: Install and build isolated web output
+        working-directory: source
+        run: |
+          npm install --global pnpm@12.15.0
+          pnpm install --frozen-lockfile
+          pnpm build
+          pnpm exec playwright install --with-deps chromium
+      - name: Capture selected production-browser fixture surface
+        working-directory: source
+        env:
+          ARGOS_WEB_CAPTURE_DIR: ${{ runner.temp }}/ui-review-web/screenshots
+          NODE_PATH: ${{ github.workspace }}/source/apps/web-desktop/node_modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$WEB_SURFACE" in
+            bulletin) expression='bulletin pressable article card' ;;
+            brief) expression='focus brief: primary ensure' ;;
+            topology) expression='topology empty-selection state' ;;
+            actors) expression='brief evidence and entity affordance' ;;
+            all) expression='' ;;
+            *) exit 2 ;;
+          esac
+          arguments=()
+          if [[ -n "$expression" ]]; then arguments+=(--grep "$expression"); fi
+          pnpm exec playwright test tests/web/screenshot-gate.spec.ts \
+            --reporter=list --output="$RUNNER_TEMP/ui-review-web/test-results" "${arguments[@]}"
+      - name: Retain web PNGs and browser failure evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: Fleetworks-ui-web-${{ inputs.head }}
+          path: ${{ runner.temp }}/ui-review-web/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  review:
+    name: Attach selected images to the open PR
+    needs: [validate, native, web]
+    if: >-
+      always() && needs.validate.result == 'success' &&
+      ((inputs.scope == 'web' && needs.web.result == 'success' && needs.native.result == 'skipped') ||
+       (inputs.scope == 'native' && needs.native.result == 'success' && needs.web.result == 'skipped') ||
+       (inputs.scope == 'both' && needs.native.result == 'success' && needs.web.result == 'success'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REVIEW_REPO: ${{ github.repository }}
+      REVIEW_PR: ${{ inputs.pr }}
+      REVIEW_HEAD: ${{ inputs.head }}
+      REVIEW_SCOPE: ${{ inputs.scope }}
+      NATIVE_SCENES: ${{ inputs.native_scenes }}
+      NATIVE_SCRIPT: ${{ inputs.native_script }}
+      WEB_SURFACE: ${{ inputs.web_surface }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          lfs: false
+      - name: Revalidate PR head and optional existing Release
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/ui_visual_review.py validate \
+            --repo "$REVIEW_REPO" --pr "$REVIEW_PR" --head "$REVIEW_HEAD" \
+            --scope "$REVIEW_SCOPE" --native-scenes "$NATIVE_SCENES" \
+            --native-script "$NATIVE_SCRIPT" --web-surface "$WEB_SURFACE" \
+            --release-tag "$RELEASE_TAG"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: inputs.scope == 'native' || inputs.scope == 'both'
+        with:
+          name: Fleetworks-ui-native-${{ inputs.head }}
+          path: ${{ runner.temp }}/ui-review-download/Fleetworks-ui-native-${{ inputs.head }}
+          digest-mismatch: error
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: inputs.scope == 'web' || inputs.scope == 'both'
+        with:
+          name: Fleetworks-ui-web-${{ inputs.head }}
+          path: ${{ runner.temp }}/ui-review-download/Fleetworks-ui-web-${{ inputs.head }}
+          digest-mismatch: error
+      - name: Validate downloaded PNGs and prepare inline images
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/ui_visual_review.py prepare \
+            --artifact-root "$RUNNER_TEMP/ui-review-download" --head "$REVIEW_HEAD" \
+            --scope "$REVIEW_SCOPE" --native-scenes "$NATIVE_SCENES" \
+            --native-script "$NATIVE_SCRIPT" --web-surface "$WEB_SURFACE" \
+            --run-url "$GITHUB_SERVER_URL/$REVIEW_REPO/actions/runs/$GITHUB_RUN_ID" \
+            --body "$RUNNER_TEMP/ui-review-comment/body.md" \
+            --attachments "$RUNNER_TEMP/ui-review-comment/attachments.json" \
+            --archive "$RUNNER_TEMP/Fleetworks-ui-review-$REVIEW_HEAD.zip"
+      - name: Retain selected visual-reference archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: Fleetworks-ui-review-${{ inputs.head }}
+          path: ${{ runner.temp }}/Fleetworks-ui-review-${{ inputs.head }}.zip
+          if-no-files-found: error
+          retention-days: 14
+      - name: Attach generated images and optional exact-head Release archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh pr comment --help | grep -- --attach >/dev/null
+          mapfile -t images < <(python3 -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))))' \
+            "$RUNNER_TEMP/ui-review-comment/attachments.json")
+          test "${#images[@]}" -gt 0
+          attachments=()
+          for image in "${images[@]}"; do attachments+=(--attach "$image"); done
+          gh pr comment "$REVIEW_PR" -R "$REVIEW_REPO" \
+            --body-file "$RUNNER_TEMP/ui-review-comment/body.md" "${attachments[@]}"
+          if [[ -n "$RELEASE_TAG" ]]; then
+            gh release upload "$RELEASE_TAG" "$RUNNER_TEMP/Fleetworks-ui-review-$REVIEW_HEAD.zip" \
+              -R "$REVIEW_REPO" --clobber
+          fi

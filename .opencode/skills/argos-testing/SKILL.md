@@ -40,6 +40,7 @@ Exercise opt-in fixtures before using them as evidence. Preserve meaningful asse
 - Cover cancellation, pagination and stale-response races where relevant. Use accessible locators and Playwright auto-waiting; isolate accounts/backend data and preserve the real app path while stubbing external providers.
 - Browser verification uses the repository Playwright runner. Set `ARGOS_WEB_TEST_DEV=1`; Next output/locks belong under `.agent-scratch/next-web-tests`. Never stop the user's frontend or remove its lock. Retain bounded traces/screenshots/errors for failed affected cases.
 - Load applicable React and Rune skills. Use actual production view/state/input fixtures and inspected PNG/tree evidence. Generated images alone are not visual evidence; snapshots alone do not prove interactions. Missing visual evidence remains pending.
+- For native/web UI changes in a PR, dispatch the [visual review workflow](../../../docs/wiki/code/native-verification.md#dispatchable-ui-visual-review) at the exact frozen head with affected scenes/surfaces. Inspect the generated captures, attach selected images inline to the PR and keep their artifact plus durable docs or exact-head release reference. Report dispatch unavailable before default-branch installation or failed capture/comment upload as pending, never as visual approval.
 
 ## Rune client and Linux backend
 

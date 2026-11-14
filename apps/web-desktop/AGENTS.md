@@ -22,6 +22,8 @@ Launch Next with this app directory as its working directory; an app path argume
 
 Use [CI workflow contracts](../../docs/wiki/code/ci.md) and `.github/workflows/intel-web.yml` for frontend verification; async UI changes must cover pending, refresh, empty/zero, failure and cursor-page behavior.
 
+For web UI changes, dispatch [UI visual review](../../.github/workflows/ui-visual-review.yml) for the open PR's exact head with `scope=web` and the affected `web_surface`. Inspect the generated Playwright images, retain the artifact, attach selected images inline to the PR and record a durable visual reference in the affected docs or exact-head release. [Dispatch recipe](../../docs/wiki/code/native-verification.md#dispatchable-ui-visual-review). The workflow accepts dispatch only after it exists on the default branch; use existing web CI artifacts and manual PR attachments until then.
+
 Follow [build cache hygiene](../../docs/wiki/code/contributing.md#build-cache-hygiene): check free space before/after builds, remove only verified obsolete inactive artifacts, and preserve the active Next output/cache, running dev server and retained Rust build.
 
 ## Rust mutation execution restriction

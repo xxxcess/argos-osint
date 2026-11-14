@@ -80,6 +80,8 @@ No backdrop blur, gloss, broad reflections, shimmer or decorative card-entry ani
 
 Use shared `Panel`, `Frame`, `StatusTag`, `Notice`, loading/empty primitives and tokens. Contrast-check text and essential controls after compositing. Pair color with text, icons or semantic state; focus never hides content. Verify default/compact density, recovery actions, long text and no overflow at 1440/768/390/320px. Product semantics stay in [Intel web](intel-web.md).
 
+For an open PR with web UI changes, dispatch the [UI visual review](native-verification.md#dispatchable-ui-visual-review) at its exact head with `scope=web` and the affected `web_surface`. Inspect the Playwright images, keep the run artifact, attach selected images inline to the PR comment and link the durable attachment in the affected design docs or an exact-head release. This adds review evidence; it does not replace browser functionality checks.
+
 ## Current web components
 
 [![Web lifecycle and ownership](../../diagrams/intel-web.svg)](../../diagrams/intel-web.html)

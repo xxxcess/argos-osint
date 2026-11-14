@@ -110,3 +110,35 @@ script final keys, stale output protection and physical target mismatches. Actua
 helper tests/rendering must be executed by the integration owner and recorded in
 the active acceptance tracker (for the cutover baseline, see
 [cutover acceptance](../../../.planning/2026-11-11-rune-macos-cutover/acceptance.md)).
+
+## Dispatchable UI visual review
+
+After an agent freezes a native or web UI PR revision, dispatch
+[`ui-visual-review.yml`](../../../.github/workflows/ui-visual-review.yml) with the
+open PR number, full head SHA and the smallest affected capture selection. The
+workflow checks out the exact revision, generates Rune/Playwright images, retains
+the full evidence artifact and attaches selected PNGs inline to a PR comment. The
+comment states the source SHA and selected scenes. Inspect the images and record
+that visual review separately from successful generation. Link curated comment
+attachments from the affected design docs, or supply `release_tag` for an existing
+trusted Release whose commit is the same SHA; the workflow can attach its image
+bundle there. A workflow artifact alone expires and is not a GitHub Release asset.
+
+```sh
+UI_PR_NUMBER=67
+UI_HEAD_SHA="$(git rev-parse HEAD)"
+UI_BRANCH="$(git branch --show-current)"
+gh workflow run ui-visual-review.yml -R xxxcess/argos-osint --ref "$UI_BRANCH" \
+  -f pr="$UI_PR_NUMBER" -f head="$UI_HEAD_SHA" -f scope=native \
+  -f native_scenes=registration-ready -f native_script=settings
+```
+
+Use `scope=web -f web_surface=bulletin` for a web-only change, choosing
+`brief`, `topology`, `actors` or `all` only when affected. `scope=both` runs both
+paths. Native scene names are comma-separated; `native_script=none` is the default.
+Keep the PR open through capture/comment publication and inspect the exact run
+before claiming success. New `workflow_dispatch` workflows accept events only
+after their file exists on the repository default branch. For a PR that introduces
+this workflow, use the existing native/web CI evidence artifacts and manually
+attach selected PNGs to its PR comment with `gh pr comment --attach`; report the
+dispatch path as pending until merge.

@@ -779,15 +779,21 @@ pub async fn retry_failed_atlas(
     .value)
 }
 
-/// Join the existing Atlas retry to an authorized caller-owned transaction.
+/// Join a dispatched job retry to an authorized caller-owned transaction.
 /// Origin/session and action audit are committed by that caller in this TX.
-pub(crate) async fn retry_failed_atlas_in(
+pub(crate) async fn retry_failed_task_in(
     tx: &Tx,
     job_id: &str,
     task_id: &str,
+    pool_name: &str,
+    operation_name: &str,
     now: DateTime<Utc>,
 ) -> Result<bool, TxError> {
-    if !valid_identity(job_id) || !valid_identity(task_id) {
+    if !valid_identity(job_id)
+        || !valid_identity(task_id)
+        || !valid_identity(pool_name)
+        || !valid_identity(operation_name)
+    {
         return Err(invalid("invalid_dispatch_retry"));
     }
     let job = jobs::rid("job", job_id);
@@ -796,7 +802,7 @@ pub(crate) async fn retry_failed_atlas_in(
         tx,
         tx.query(
             "LET $eligible=(SELECT VALUE id FROM ONLY $job
-                    WHERE state='failed' AND operation=$pool_name AND parent=NONE
+                    WHERE state='failed' AND operation=$operation_name AND parent=NONE
                     AND !cancel_requested AND !stopped AND created_at>=<datetime>$fresh_after
                     AND !record::exists($retired));
                  LET $enabled=(SELECT VALUE enabled FROM ONLY $pool);
@@ -805,13 +811,14 @@ pub(crate) async fn retry_failed_atlas_in(
                     finished_at=NONE, updated_at=<datetime>$now, next_eligible_at=<datetime>$now,
                     lease_owner='', process_owner='', lease_until=NONE,
                     error_category='', error_message=''
-                 WHERE job=$job AND pool=$pool_name AND operation=$pool_name AND state='failed'
+                 WHERE job=$job AND pool=$pool_name AND operation=$operation_name AND state='failed'
                     AND $eligible=$job AND $enabled=true RETURN VALUE lease_epoch;",
         )
         .bind(("job", job.clone()))
         .bind(("task", jobs::rid("task", task_id)))
-        .bind(("pool", jobs::rid("job_dispatch_pool", ATLAS_POOL)))
-        .bind(("pool_name", ATLAS_POOL))
+        .bind(("pool", jobs::rid("job_dispatch_pool", pool_name)))
+        .bind(("pool_name", pool_name.to_owned()))
+        .bind(("operation_name", operation_name.to_owned()))
         .bind((
             "fresh_after",
             jobs::ts(now - Duration::hours(jobs::EXECUTION_WINDOW_HOURS)),
@@ -845,6 +852,18 @@ pub(crate) async fn retry_failed_atlas_in(
     )
     .await?;
     Ok(true)
+}
+
+/// Join the existing Atlas retry to an authorized caller-owned transaction.
+/// Origin/session and action audit are committed by that caller in this TX.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn retry_failed_atlas_in(
+    tx: &Tx,
+    job_id: &str,
+    task_id: &str,
+    now: DateTime<Utc>,
+) -> Result<bool, TxError> {
+    retry_failed_task_in(tx, job_id, task_id, ATLAS_POOL, ATLAS_POOL, now).await
 }
 
 /// Recover one bounded page of expired task leases for a pool. The task

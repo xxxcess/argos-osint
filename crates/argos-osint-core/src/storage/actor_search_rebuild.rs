@@ -91,7 +91,13 @@ pub async fn request_rebuild(repo: &Repository, claimed: &ClaimedTask) -> Result
         let fence=jobs::fence(&tx,claimed,&now.to_rfc3339()).await?;
         if !fence.is_some_and(|fence|!fence.cancelled&&jobs::holds(&fence,claimed)) {return Err(invalid("actor_reindex_job_lease_lost"));}
         if let Some(previous)=row(&tx).await? {
-            if previous.job_id==claimed.job_id {return Ok(());}
+            if previous.job_id==claimed.job_id {
+                if previous.phase!="completed" {
+                    jobs::run(&tx,tx.query("UPDATE actor_search_rebuild:catalog SET reason_code='' RETURN NONE; UPDATE actor_search_control:catalog SET blocked=false,failures=0,retry_at=<datetime>$now RETURN NONE")
+                        .bind(("now",now.to_rfc3339()))).await?;
+                }
+                return Ok(());
+            }
             let mut state=jobs::run(&tx,tx.query("RETURN (SELECT VALUE state FROM ONLY $job) IN ['queued','running','reconciling']").bind(("job",jobs::rid("job",&previous.job_id)))).await?;
             if previous.phase!="completed" && jobs::take::<Option<bool>>(&mut state,0)?==Some(true) {return Err(invalid("actor_reindex_resource_busy"));}
             if previous.phase!="completed" {

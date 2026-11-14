@@ -87,6 +87,19 @@ fn resource_name(operation: MaintenanceOperation) -> &'static str {
     }
 }
 
+pub(crate) fn is_setup_operation(operation: &str) -> bool {
+    resource_name_for_pool(operation).is_some()
+}
+
+fn resource_name_for_pool(pool: &str) -> Option<&'static str> {
+    match pool {
+        "actor_seed" => Some("actor_catalog"),
+        "classifier_train" => Some("natural_classifier"),
+        "actor_reindex" => Some("actor_index"),
+        _ => None,
+    }
+}
+
 fn dataset_kind(kind: DatasetKind) -> &'static str {
     match kind {
         DatasetKind::ActorCatalog => "actor_catalog",
@@ -306,6 +319,97 @@ pub async fn enable_operation(
         .await?
         .check()?;
     Ok(())
+}
+
+#[derive(SurrealValue)]
+struct RetryOperationRow {
+    operation: String,
+    payload_hash: String,
+    scope_id: String,
+}
+
+const RETRY_RESOURCE_QUERY: &str = "
+SELECT VALUE enabled FROM ONLY $dispatch;
+SELECT job_id, payload_hash, scope_id,
+  IF job_id != '' {
+    ((type::record('job', job_id).state ?? '') IN ['queued','running','waiting','reconciling']
+     OR array::len((SELECT VALUE id FROM task WHERE job=type::record('job',$parent.job_id) AND state NOT IN ['completed','failed','cancelled','superseded','stopped','skipped'] LIMIT 1))>0)
+  } ELSE { false } AS active
+FROM ONLY $resource;
+SELECT operation, payload_hash, scope_id FROM ONLY $op;";
+
+/// Check whether a failed setup job can safely be retried on its resource.
+pub(crate) async fn retry_ready_db(
+    db: &Surreal<Any>,
+    job_id: &str,
+    operation: &str,
+) -> Result<bool, TxError> {
+    let Some(resource) = resource_name_for_pool(operation) else {
+        return Ok(false);
+    };
+    let mut response = db
+        .query(RETRY_RESOURCE_QUERY)
+        .bind(("dispatch", jobs::rid("setup_dispatch", operation)))
+        .bind(("resource", jobs::rid("setup_resource", resource)))
+        .bind(("op", jobs::rid("setup_operation", job_id)))
+        .await?
+        .check()?;
+    let enabled: Option<bool> = response.take(0)?;
+    let existing: Option<ResourceRow> = response.take(1)?;
+    let stored: Option<RetryOperationRow> = response.take(2)?;
+    Ok(enabled == Some(true)
+        && !existing.is_some_and(|row| row.active && row.job_id != job_id)
+        && stored.is_some_and(|row| row.operation == operation))
+}
+
+/// Serialize and re-bind a retried setup job onto its resource slot inside the caller TX.
+pub(crate) async fn claim_retry_resource_in(
+    tx: &Tx,
+    job_id: &str,
+    operation: &str,
+) -> Result<bool, TxError> {
+    let Some(resource_key) = resource_name_for_pool(operation) else {
+        return Ok(false);
+    };
+    let resource = jobs::rid("setup_resource", resource_key);
+    jobs::run(
+        tx,
+        tx.query("UPSERT $resource SET revision=(revision ?? 0)+1 RETURN NONE")
+            .bind(("resource", resource.clone())),
+    )
+    .await?;
+    if operation == "classifier_train" {
+        super::classifier_activation::require_unambiguous_resource_in(tx).await?;
+    }
+    let mut response = jobs::run(
+        tx,
+        tx.query(RETRY_RESOURCE_QUERY)
+            .bind(("dispatch", jobs::rid("setup_dispatch", operation)))
+            .bind(("resource", resource.clone()))
+            .bind(("op", jobs::rid("setup_operation", job_id))),
+    )
+    .await?;
+    let enabled: Option<bool> = jobs::take(&mut response, 0)?;
+    let existing: Option<ResourceRow> = jobs::take(&mut response, 1)?;
+    let stored: Option<RetryOperationRow> = jobs::take(&mut response, 2)?;
+    if enabled != Some(true) || existing.is_some_and(|row| row.active && row.job_id != job_id) {
+        return Ok(false);
+    }
+    let Some(stored) = stored.filter(|row| row.operation == operation) else {
+        return Ok(false);
+    };
+    jobs::run(
+        tx,
+        tx.query(
+            "UPDATE $resource SET job_id=$job, payload_hash=$hash, scope_id=$scope RETURN NONE",
+        )
+        .bind(("resource", resource))
+        .bind(("job", job_id.to_owned()))
+        .bind(("hash", stored.payload_hash))
+        .bind(("scope", stored.scope_id)),
+    )
+    .await?;
+    Ok(true)
 }
 
 /// Whether the operator enabled a real consumer; missing schema/config is not success.

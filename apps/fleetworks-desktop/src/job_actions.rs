@@ -13,6 +13,7 @@ use crate::app::Load;
 use crate::app::State;
 use crate::connection::GatewayEffects;
 use crate::connection::RequestTask;
+use crate::jobs_query::JobsEvent;
 use crate::platform;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -137,6 +138,7 @@ impl State {
     }
 
     pub fn preview_job_action(&mut self, action: JobAction) {
+        self.job_actions.message = None;
         if let Some(reason) = self.job_action_disabled_reason(action) {
             self.job_actions.message = Some(reason);
             return;
@@ -146,6 +148,8 @@ impl State {
         else {
             return;
         };
+        self.job_actions.response = Load::Idle;
+        self.job_actions.attempt = None;
         self.job_actions.confirmation = Some(JobActionConfirmation {
             action,
             job_id: detail.job.id.clone(),
@@ -297,6 +301,7 @@ impl State {
             && self.backend.selected_job.as_deref() == Some(id.as_str())
         {
             self.select_job(&id);
+            self.request_jobs(JobsEvent::Poll);
         }
     }
 }

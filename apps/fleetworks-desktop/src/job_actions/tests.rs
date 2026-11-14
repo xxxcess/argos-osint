@@ -183,10 +183,73 @@ fn legacy_cancel_handler_requires_confirmation_while_native_jobs_remains_read_on
     ] {
         assert!(
             runtime.find(key).is_none(),
-            "retired native job action {key} is outside the allowlist"
+            "queued job fixture exposes neither retired cancel nor retry controls ({key})"
         );
     }
     assert!(runtime.accessibility_json().to_string().contains("queued"));
+}
+
+fn click(runtime: &mut Runtime<State>, key: &str, clock: &mut f64) {
+    runtime.update(|_, tx| tx.scroll_into_view(key));
+    *clock += 1.0 / 60.0;
+    runtime.frame(*clock);
+    let (x, y) = runtime
+        .find(key)
+        .unwrap_or_else(|| panic!("{key} presented"));
+    runtime.pointer_down(x, y);
+    runtime.pointer_up(x, y);
+    *clock += 1.0 / 60.0;
+    runtime.frame(*clock);
+}
+
+#[test]
+fn failed_retryable_job_exposes_confirmed_native_retry_flow() {
+    let mut state = fixture();
+    if let Load::Ready(detail) = &mut state.backend.detail {
+        detail.job.state = "failed".into();
+        detail.job.phase = "Failed".into();
+        detail.job.can_cancel = false;
+        detail.job.can_retry = true;
+    }
+    let mut runtime = Runtime::new(
+        state,
+        app::view,
+        (1180.0, 780.0),
+        Env {
+            system_dark: true,
+            scale: 1.0,
+        },
+    );
+    let mut clock = 0.0;
+    runtime.frame(clock);
+    assert!(
+        runtime.find("job-cancel-preview").is_none(),
+        "retired native cancel action remains unexposed"
+    );
+    assert!(
+        runtime.find("job-retry-preview").is_some(),
+        "failed retryable job exposes native retry button"
+    );
+
+    click(&mut runtime, "job-retry-preview", &mut clock);
+    assert!(runtime.state.job_actions.confirmation.is_some());
+    assert!(!runtime
+        .state
+        .intents
+        .iter()
+        .any(|intent| matches!(intent, Intent::PostJobAction { .. })));
+    assert!(runtime.find("job-action-confirmation").is_some());
+    assert!(runtime.find("job-action-confirm").is_some());
+
+    click(&mut runtime, "job-action-confirm", &mut clock);
+    assert!(matches!(runtime.state.job_actions.response, Load::Ready(_)));
+    assert!(runtime.find("job-action-receipt").is_some());
+    assert!(runtime.state.intents.iter().any(|intent| matches!(
+        intent,
+        Intent::PostJobAction {
+            action: JobAction::Retry
+        }
+    )));
 }
 
 #[test]

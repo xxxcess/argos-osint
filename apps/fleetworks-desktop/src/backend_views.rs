@@ -25,6 +25,7 @@ use crate::app::Page;
 use crate::app::SeedStage;
 use crate::app::State;
 use crate::icons;
+use crate::job_actions::JobAction;
 use crate::logs::LogStatus;
 use crate::material;
 use crate::material::MetalFinish;
@@ -1292,6 +1293,157 @@ fn jobs(
         } else {
             if !detail.job.error_summary.is_empty() {
                 details = details.child(line(detail.job.error_summary.clone(), kit).role("alert"));
+            }
+            if detail.job.state == "failed" || detail.job.can_retry {
+                let retry_reason = state.job_action_disabled_reason(JobAction::Retry);
+                let retry_busy = matches!(state.job_actions.response, Load::Loading);
+                details = details.child(
+                    rune::row().w_full().center_y().gap(8.0).child(
+                        ActionButton::new("Retry job")
+                            .key("job-retry-preview")
+                            .icon(&icons::REFRESH)
+                            .finish(MetalFinish::GoldCta)
+                            .status(
+                                if retry_busy {
+                                    "Retrying…"
+                                } else if retry_reason.is_none() {
+                                    "Ready"
+                                } else {
+                                    "Unavailable"
+                                },
+                                if retry_busy {
+                                    StatusTone::Accent
+                                } else if retry_reason.is_none() {
+                                    StatusTone::Ok
+                                } else {
+                                    StatusTone::Warn
+                                },
+                            )
+                            .busy(retry_busy)
+                            .disabled(retry_reason.is_some())
+                            .on_press(|state: &mut State| {
+                                state.preview_job_action(JobAction::Retry);
+                            })
+                            .build(kit, preferences, pointer_ref),
+                    ),
+                );
+                if let Some(reason) = retry_reason {
+                    details = details.child(quiet(reason, kit));
+                }
+            }
+            if let Some(confirmation) = state
+                .job_actions
+                .confirmation
+                .as_ref()
+                .filter(|item| item.action == JobAction::Retry && item.job_id == detail.job.id)
+            {
+                let confirming = matches!(state.job_actions.response, Load::Loading);
+                let confirm_button = ActionButton::new("Confirm retry")
+                    .key("job-action-confirm")
+                    .icon(&icons::SHIELD_CHECK)
+                    .finish(MetalFinish::GoldCta)
+                    .status(
+                        if confirming { "Queuing…" } else { "Ready" },
+                        if confirming {
+                            StatusTone::Accent
+                        } else {
+                            StatusTone::Ok
+                        },
+                    )
+                    .busy(confirming)
+                    .disabled(confirming)
+                    .on_press(|state: &mut State| state.confirm_job_action())
+                    .build(kit, preferences, pointer_ref);
+                let cancel_button = ActionButton::new("Keep current job state")
+                    .finish(MetalFinish::Gunmetal)
+                    .on_press(|state: &mut State| {
+                        state.job_actions.confirmation = None;
+                    })
+                    .build(kit, preferences, pointer_ref);
+                let action_buttons = if log_width < 420.0 {
+                    rune::col()
+                        .gap(8.0)
+                        .child(confirm_button)
+                        .child(cancel_button)
+                } else {
+                    rune::row()
+                        .gap(8.0)
+                        .child(confirm_button)
+                        .child(cancel_button)
+                };
+                details = details.child(card(
+                    state,
+                    preferences,
+                    StatusTone::Accent,
+                    rune::col()
+                        .key("job-action-confirmation")
+                        .gap(8.0)
+                        .child(heading(
+                            format!("Confirm retry for {}", confirmation.title),
+                            kit,
+                        ))
+                        .child(quiet(
+                            format!(
+                                "{} · re-queues the failed task with a fresh request identity.",
+                                confirmation.job_id
+                            ),
+                            kit,
+                        ))
+                        .child(action_buttons),
+                ));
+            }
+            let matching_attempt = state.job_actions.attempt.as_ref().is_some_and(|(item, _)| {
+                item.action == JobAction::Retry && item.job_id == detail.job.id
+            });
+            match &state.job_actions.response {
+                Load::Loading if matching_attempt => {
+                    details = details.child(ui_components::async_status_strip(
+                        "job-action-loading",
+                        "Submitting retry…",
+                        "Sending scoped retry trigger to backend gateway",
+                        true,
+                        StatusTone::Accent,
+                        preferences,
+                        kit,
+                    ));
+                }
+                Load::Ready(receipt)
+                    if receipt.receipt.job_id == detail.job.id
+                        && receipt.receipt.action == JobAction::Retry =>
+                {
+                    details = details.child(
+                        ui_components::async_status_strip(
+                            "job-action-receipt",
+                            "Retry queued",
+                            format!(
+                                "Action {} · state {}",
+                                receipt.receipt.action_id, receipt.receipt.state
+                            ),
+                            false,
+                            StatusTone::Ok,
+                            preferences,
+                            kit,
+                        )
+                        .role("status"),
+                    );
+                }
+                Load::Failed(error) if matching_attempt => {
+                    details = details.child(line(error.clone(), kit).role("alert")).child(
+                        ActionButton::new("Retry exact request")
+                            .key("job-action-retry-exact")
+                            .icon(&icons::REFRESH)
+                            .finish(MetalFinish::GoldCta)
+                            .on_press(|state: &mut State| state.retry_exact_job_action())
+                            .build(kit, preferences, pointer_ref),
+                    );
+                }
+                Load::Failed(error) if state.job_actions.attempt.is_none() => {
+                    details = details.child(line(error.clone(), kit).role("alert"));
+                }
+                _ => {}
+            }
+            if let Some(message) = &state.job_actions.message {
+                details = details.child(line(message.clone(), kit).role("status"));
             }
             if let Some(result) = &detail.maintenance_result {
                 details = details.child(result.view(kit));

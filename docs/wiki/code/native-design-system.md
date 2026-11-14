@@ -26,11 +26,11 @@ Ordinary selection, progression, dismissal, confirmation and recovery belong to 
 | Brain Search | One search field; bounded interactive actor tiles; selected authoritative dossier with `DossierFacet` (`Overview`, `Associations`) `SegmentedControl` and `Collapsible` alias/attribute sections; no native graph |
 | OSINT Tools | Provider/service cards; interactive credential rows opening `Dialog` (`tool-api-key`) with masked primary/fallback inputs and explicit `Switch` toggles (`inline_toggle_row`) to clear primary or fallback slots |
 | Model Assignments | `ModelsTab` (`Roles`, `Providers`) `SegmentedControl`; configured provider cards with inline masked keys and `Switch` preserve-if-blank toggle; canonical role cards expanding `role_row_editor` (`Select` pickers for provider, model, reasoning variant and ordered fallback Move up/Move down/Remove actions) |
-| Jobs & Logs | Bounded workstation queue with `RollingText` count; interactive job tiles; `ProgressCircle` + determinate `Progress` bar; `Pop out summary` opening `Dialog` (`modal_prompt`); selecting a job supplies authorized safe operational summaries in `safe_log_table` |
+| Jobs & Logs | Bounded workstation queue with `RollingText` count; interactive job tiles; `ProgressCircle` + determinate `Progress` bar; `Pop out summary` opening `Dialog` (`modal_prompt`); `Retry job` CTA (`job-retry-preview`) with in-place confirmation (`job-action-confirmation`) and receipt strip for permitted failed retryable jobs; selecting a job supplies authorized safe operational summaries in `safe_log_table` |
 
 Sidebar order when connected is `Workstation Status` followed by `DB Seed & Train`, `News Cycles`, `Brain Search`, `OSINT Tools`, `Model Assignments`, `Jobs & Logs`; when disconnected (`!state.connected()`), only `Workstation Status` and `Setup Gateway` appear (`Page::ALL` is hidden and `navigate()`/`⌘1–6` clamp to `Workstation Status`). Render only the selected destination.
 
-Excluded: separate Test/Disconnect, saved-profile CRUD, workspace/folder/Trash controls, classifier activation, account creation/deletion/base-URL forms, configuration import/export, native article filters, manual tool Run/input/results, and job/log retry/cancel/filter/follow/copy/export toolbars. Backend APIs may retain these independent capabilities for authorized callers.
+Excluded: separate Test/Disconnect, saved-profile CRUD, workspace/folder/Trash controls, classifier activation, account creation/deletion/base-URL forms, configuration import/export, native article filters, manual tool Run/input/results, and job/log cancel/filter/follow/copy/export toolbars. Backend APIs may retain these independent capabilities for authorized callers.
 
 ## Identity, setup and actions
 

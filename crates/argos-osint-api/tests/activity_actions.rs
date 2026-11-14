@@ -17,6 +17,7 @@ use argos_osint_core::storage::jobs::NewJob;
 use argos_osint_core::storage::jobs::NewTask;
 use argos_osint_core::storage::open::Target;
 use argos_osint_core::storage::repo::Repository;
+use argos_osint_core::storage::setup_jobs;
 use axum::body::to_bytes;
 use axum::body::Body;
 use axum::http::Request;
@@ -29,7 +30,9 @@ use fleetworks_contracts::context::CredentialPurpose;
 use fleetworks_contracts::context::JobOrigin;
 use fleetworks_contracts::context::OriginSource;
 use fleetworks_contracts::context::Permission;
+use fleetworks_contracts::readiness::MaintenanceOperation;
 use fleetworks_contracts::JOB_CANCEL_PATH;
+use fleetworks_contracts::JOB_RETRY_PATH;
 use serde_json::json;
 use serde_json::Value;
 use tower::ServiceExt;
@@ -173,8 +176,8 @@ async fn scenario() {
         0,
         Vec::new(),
     );
-    let admission =
-        InteractiveAdmission::native(authority(), context, origin).expect("server admission");
+    let admission = InteractiveAdmission::native(authority(), context.clone(), origin)
+        .expect("server admission");
     job_dispatch::submit_interactive(
         repo.db(),
         &NewJob {
@@ -307,5 +310,132 @@ async fn scenario() {
             .expect("task state")
             .as_deref(),
         Some("cancelled")
+    );
+
+    // Failed actor_seed job also supports retry behind RetryJob permission & proof.
+    repo.db()
+        .query(setup_jobs::SCHEMA)
+        .await
+        .expect("setup schema")
+        .check()
+        .expect("setup schema statements");
+    job_dispatch::enable_pool(repo.db(), "actor_seed")
+        .await
+        .expect("enable actor_seed pool");
+    setup_jobs::enable_operation(repo.db(), MaintenanceOperation::SeedActors, true)
+        .await
+        .expect("enable actor_seed setup");
+    let retry_origin = JobOrigin::new(
+        &context,
+        OriginSource::Native,
+        "submit-retry-fixture".into(),
+        Utc::now().to_rfc3339(),
+        0,
+        Vec::new(),
+    );
+    let retry_admission = InteractiveAdmission::native(authority(), context.clone(), retry_origin)
+        .expect("retry admission");
+    job_dispatch::submit_interactive(
+        repo.db(),
+        &NewJob {
+            id: "action-retry-seed-job",
+            kind: "maintenance",
+            operation: "actor_seed",
+            parent: None,
+            created_at: Utc::now(),
+        },
+        &NewTask {
+            id: "action-retry-seed-job:execute",
+            job: "action-retry-seed-job",
+            pool: "actor_seed",
+            operation: "actor_seed",
+            priority: 0,
+            deps: Vec::new(),
+            input_hash: "fixture-seed-hash",
+            created_at: Utc::now(),
+        },
+        &retry_admission,
+    )
+    .await
+    .expect("submit retry fixture");
+    repo.db()
+        .query(
+            "CREATE setup_operation:`action-retry-seed-job` SET operation='actor_seed', payload_json='{}', payload_hash='fixture-seed-hash', scope_id='action-scope', updated_at=time::now() RETURN NONE;
+             UPDATE job:`action-retry-seed-job` SET state='failed', error_category='transient', error_summary='seed failed' RETURN NONE;
+             UPDATE task:`action-retry-seed-job:execute` SET state='failed', attempts=1 RETURN NONE;",
+        )
+        .await
+        .expect("fail retry fixture")
+        .check()
+        .expect("fail retry fixture statements");
+
+    let retry_input = json!({"id":"action-retry-seed-job","request_id":"retry-action-once"});
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            JOB_RETRY_PATH,
+            READER,
+            Some(&registration),
+            retry_input.clone()
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let (_, jobs_before) = call(
+        &app,
+        "GET",
+        "/api/v1/jobs",
+        ACTOR,
+        Some(&registration),
+        Value::Null,
+    )
+    .await;
+    let seed_row = jobs_before["rows"]
+        .as_array()
+        .expect("job rows")
+        .iter()
+        .find(|row| row["id"] == "action-retry-seed-job")
+        .expect("seed row");
+    assert_eq!(seed_row["can_retry"], true);
+
+    let (retry_status, retry_receipt) = call(
+        &app,
+        "POST",
+        JOB_RETRY_PATH,
+        ACTOR,
+        Some(&registration),
+        retry_input.clone(),
+    )
+    .await;
+    assert_eq!(retry_status, StatusCode::OK, "{retry_receipt}");
+    assert_eq!(retry_receipt["receipt"]["action"], "retry");
+    assert_eq!(retry_receipt["receipt"]["state"], "queued");
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            JOB_RETRY_PATH,
+            ACTOR,
+            Some(&registration),
+            retry_input
+        )
+        .await,
+        (StatusCode::OK, retry_receipt)
+    );
+    let mut after = repo
+        .db()
+        .query("RETURN type::record('task','action-retry-seed-job:execute').state;")
+        .await
+        .expect("task state query")
+        .check()
+        .expect("task state check");
+    assert_eq!(
+        after
+            .take::<Option<String>>(0)
+            .expect("retried task state")
+            .as_deref(),
+        Some("queued")
     );
 }

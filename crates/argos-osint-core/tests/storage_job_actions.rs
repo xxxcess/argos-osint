@@ -13,12 +13,14 @@ use argos_osint_core::storage::jobs;
 use argos_osint_core::storage::jobs::NewJob;
 use argos_osint_core::storage::jobs::NewTask;
 use argos_osint_core::storage::repo::Repository;
+use argos_osint_core::storage::setup_jobs;
 use chrono::Utc;
 use fleetworks_contracts::connect::RegistrationEnsureRequest;
 use fleetworks_contracts::connect::RegistrationReceipt;
 use fleetworks_contracts::context::JobOrigin;
 use fleetworks_contracts::context::OriginSource;
 use fleetworks_contracts::context::RegisteredContext;
+use fleetworks_contracts::readiness::MaintenanceOperation;
 use support::Server;
 
 fn authority(credential: &str) -> RegistryAuthority {
@@ -441,4 +443,144 @@ async fn accepted_causal_work_survives_registration_replacement_but_node_revocat
     )
     .await
     .is_err());
+}
+
+#[tokio::test]
+async fn failed_actor_seed_retries_and_respects_active_resource_owner() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server.repo("argos", "retry_actor_seed").await;
+    initialize(&repo).await;
+    repo.db()
+        .query(setup_jobs::SCHEMA)
+        .await
+        .expect("setup schema")
+        .check()
+        .expect("setup schema statements");
+    job_dispatch::enable_pool(repo.db(), "actor_seed")
+        .await
+        .expect("enable actor_seed pool");
+    setup_jobs::enable_operation(repo.db(), MaintenanceOperation::SeedActors, true)
+        .await
+        .expect("enable actor_seed operation");
+
+    let receipt = register(&repo, "node-a", "seed-retry-reg").await;
+    let ctx = context(&repo, &receipt).await;
+    let now = Utc::now();
+    for (job_id, req_id) in [("seed-failed", "seed-req-1"), ("seed-other", "seed-req-2")] {
+        let admission = native(&ctx, req_id);
+        job_dispatch::submit_interactive(
+            repo.db(),
+            &NewJob {
+                id: job_id,
+                kind: "maintenance",
+                operation: "actor_seed",
+                parent: None,
+                created_at: now,
+            },
+            &NewTask {
+                id: &format!("{job_id}-execute"),
+                job: job_id,
+                pool: "actor_seed",
+                operation: "actor_seed",
+                priority: 0,
+                deps: Vec::new(),
+                input_hash: "seed-payload-hash",
+                created_at: now,
+            },
+            &admission,
+        )
+        .await
+        .expect("submit actor_seed fixture");
+        repo.db()
+            .query("CREATE $op SET operation='actor_seed', payload_json='{}', payload_hash='seed-payload-hash', scope_id=$scope, updated_at=time::now() RETURN NONE")
+            .bind(("op", surrealdb::types::RecordId::new("setup_operation", job_id)))
+            .bind(("scope", authority("native-fixture").scope_id().to_owned()))
+            .await
+            .expect("setup operation record")
+            .check()
+            .expect("setup operation statement");
+    }
+
+    // Fail `seed-failed`, and assign `setup_resource:actor_catalog` to active `seed-other`.
+    repo.db()
+        .query(
+            "UPDATE job:`seed-failed` SET state='failed', error_category='transient', error_summary='seed failed' RETURN NONE;
+             UPDATE task:`seed-failed-execute` SET state='failed', attempts=1 RETURN NONE;
+             UPSERT setup_resource:actor_catalog SET revision=1, job_id='seed-other', payload_hash='other-hash', scope_id='fixture-scope' RETURN NONE;",
+        )
+        .await
+        .expect("mark seed failed with active resource holder")
+        .check()
+        .expect("state update");
+
+    let blocked =
+        job_actions::availability(&repo, "fixture-scope", &ctx, &["seed-failed".to_owned()])
+            .await
+            .expect("availability while active");
+    assert_eq!(blocked.len(), 1);
+    assert!(!blocked[0].can_retry);
+    assert!(job_actions::perform(
+        &repo,
+        &native(&ctx, "retry-while-busy"),
+        Action::Retry,
+        "seed-failed"
+    )
+    .await
+    .is_err());
+
+    // Once `seed-other` also fails, `seed-failed` becomes retryable and rebinds the resource.
+    repo.db()
+        .query(
+            "UPDATE job:`seed-other` SET state='failed' RETURN NONE;
+             UPDATE task:`seed-other-execute` SET state='failed', attempts=1 RETURN NONE;",
+        )
+        .await
+        .expect("fail other seed job")
+        .check()
+        .expect("fail other seed statement");
+
+    let ready =
+        job_actions::availability(&repo, "fixture-scope", &ctx, &["seed-failed".to_owned()])
+            .await
+            .expect("availability after conflict clears");
+    assert_eq!(ready.len(), 1);
+    assert!(ready[0].can_retry);
+
+    let retried = job_actions::perform(
+        &repo,
+        &native(&ctx, "retry-seed-once"),
+        Action::Retry,
+        "seed-failed",
+    )
+    .await
+    .expect("retry failed actor_seed");
+    assert_eq!(retried.action, Action::Retry);
+    assert_eq!(retried.state, "queued");
+    assert_eq!(retried.affected_tasks, 1);
+
+    let mut obs = repo
+        .db()
+        .query(
+            "RETURN type::record('job','seed-failed').state;
+             RETURN type::record('task','seed-failed-execute').state;
+             RETURN setup_resource:actor_catalog.job_id;",
+        )
+        .await
+        .expect("observe retried seed")
+        .check()
+        .expect("observe retried seed statements");
+    assert_eq!(
+        obs.take::<Option<String>>(0).unwrap().as_deref(),
+        Some("queued")
+    );
+    assert_eq!(
+        obs.take::<Option<String>>(1).unwrap().as_deref(),
+        Some("queued")
+    );
+    assert_eq!(
+        obs.take::<Option<String>>(2).unwrap().as_deref(),
+        Some("seed-failed")
+    );
 }

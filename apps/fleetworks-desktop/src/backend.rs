@@ -456,6 +456,7 @@ impl State {
         let switching = self.backend.selected_job.as_deref() != Some(id);
         if switching {
             self.job_actions.confirmation = None;
+            self.job_actions.message = None;
         }
         let Load::Ready(jobs) = &self.backend.jobs else {
             return;
@@ -478,6 +479,7 @@ impl State {
         let switching = self.backend.selected_job.as_deref() != Some(id);
         if switching {
             self.job_actions.confirmation = None;
+            self.job_actions.message = None;
             self.backend.detail = Load::Idle;
         }
         if self.registration.context.is_none() {

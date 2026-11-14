@@ -18,6 +18,7 @@ use super::job_context::InteractiveAdmission;
 use super::job_dispatch;
 use super::jobs;
 use super::repo::Repository;
+use super::setup_jobs;
 use super::tx::run_tx;
 use super::tx::RetryPolicy;
 use super::tx::Tx;
@@ -148,9 +149,20 @@ fn head_query() -> &'static str {
      (SELECT VALUE pool FROM task WHERE job=$parent.id LIMIT 1)[0] ?? '' AS task_pool,
      (SELECT VALUE operation FROM task WHERE job=$parent.id LIMIT 1)[0] ?? '' AS task_operation,
      (SELECT VALUE attempts FROM task WHERE job=$parent.id LIMIT 1)[0] ?? -1 AS attempts,
-     (SELECT VALUE enabled FROM ONLY job_dispatch_pool:atlas_cycle) ?? false AS retry_enabled
+     (SELECT VALUE enabled FROM job_dispatch_pool WHERE id=type::record('job_dispatch_pool', IF $parent.operation='manual_tool' {'manual_tools'} ELSE {$parent.operation}) LIMIT 1)[0] ?? false AS retry_enabled
      FROM job WHERE id IN $jobs AND kind!='service' AND created_at>=<datetime>$cutoff
        AND !record::exists(type::record('job_retirement',record::id(id))) LIMIT 200"
+}
+
+fn pool_for_operation(operation: &str) -> Option<&'static str> {
+    match operation {
+        job_dispatch::ATLAS_POOL => Some(job_dispatch::ATLAS_POOL),
+        "actor_seed" => Some("actor_seed"),
+        "classifier_train" => Some("classifier_train"),
+        "actor_reindex" => Some("actor_reindex"),
+        "manual_tool" => Some("manual_tools"),
+        _ => None,
+    }
 }
 
 fn available(head: &Head) -> ActionAvailability {
@@ -161,29 +173,22 @@ fn available(head: &Head) -> ActionAvailability {
         && head.task_count == 1
         && !head.cancel_requested
         && !head.stopped;
-    let queued_operation = matches!(
-        head.operation.as_str(),
-        "atlas_cycle" | "actor_seed" | "classifier_train" | "actor_reindex" | "manual_tool"
-    );
-    let expected_pool = if head.operation == "manual_tool" {
-        "manual_tools"
-    } else {
-        &head.operation
-    };
+    let expected_pool = pool_for_operation(&head.operation);
     let can_cancel = safe
-        && queued_operation
-        && head.task_pool == expected_pool
-        && head.task_operation == head.operation
-        && head.state == "queued"
-        && head.task_state == "queued"
-        && head.attempts == 0;
-    let can_retry = safe
-        && head.operation == job_dispatch::ATLAS_POOL
-        && head.state == "failed"
-        && head.task_state == "failed"
-        && head.task_pool == job_dispatch::ATLAS_POOL
-        && head.task_operation == job_dispatch::ATLAS_POOL
-        && head.retry_enabled;
+        && expected_pool.is_some_and(|pool| {
+            head.task_pool == pool
+                && head.task_operation == head.operation
+                && head.state == "queued"
+                && head.task_state == "queued"
+                && head.attempts == 0
+        });
+    let can_retry =
+        safe && expected_pool.is_some_and(|pool| {
+            head.task_pool == pool
+                && head.task_operation == head.operation
+                && head.state == "failed"
+                && head.task_state == "failed"
+        }) && head.retry_enabled;
     ActionAvailability {
         job_id: head.job_id.clone(),
         can_cancel,
@@ -232,7 +237,19 @@ pub async fn availability(
         .await?
         .check()?;
     let rows: Vec<Head> = response.take(0)?;
-    Ok(rows.iter().map(available).collect())
+    let mut items = Vec::with_capacity(rows.len());
+    for head in &rows {
+        let mut item = available(head);
+        if item.can_retry
+            && setup_jobs::is_setup_operation(&head.operation)
+            && !setup_jobs::retry_ready_db(repo.db(), &head.job_id, &head.operation).await?
+        {
+            item.can_retry = false;
+            item.reason_code = "operation_or_state_not_supported".into();
+        }
+        items.push(item);
+    }
+    Ok(items)
 }
 
 async fn proof_in(tx: &Tx, admission: &InteractiveAdmission) -> Result<(), TxError> {
@@ -317,7 +334,13 @@ pub async fn perform(
                     "cancelled"
                 }
                 Action::Retry=>{
-                    if !job_dispatch::retry_failed_atlas_in(&tx,job_id,&head.task_id,now).await? {return Err(abort("unsupported"));}
+                    let pool=pool_for_operation(&head.operation).ok_or_else(||abort("unsupported"))?;
+                    if setup_jobs::is_setup_operation(&head.operation)
+                        && !setup_jobs::claim_retry_resource_in(&tx,job_id,&head.operation).await?
+                    {
+                        return Err(abort("unsupported"));
+                    }
+                    if !job_dispatch::retry_failed_task_in(&tx,job_id,&head.task_id,pool,&head.operation,now).await? {return Err(abort("unsupported"));}
                     "queued"
                 }
             };

@@ -229,6 +229,74 @@ fn registered_paging_uses_server_tokens_and_keeps_dashboard_counts_separate() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn native_page_buttons_wait_for_delayed_registered_results() {
+    let mut state = registered_app();
+    state.page = crate::app::Page::Jobs;
+    state.request_jobs(JobsEvent::Apply);
+    let first = state
+        .scoped_jobs
+        .active_ticket()
+        .expect("first registered page request")
+        .clone();
+    state.complete_scoped_jobs(first.clone(), Ok(page(&first.binding, 1, Some(2))));
+    let mut runtime = Runtime::new(
+        state,
+        crate::app::view,
+        (1180.0, 780.0),
+        Env {
+            system_dark: true,
+            scale: 1.0,
+        },
+    );
+    let mut clock = 0.0;
+    runtime.frame(clock);
+    assert!(runtime.find("activity-job-fixture-job-1").is_some());
+
+    runtime.update(|_, tx| tx.scroll_into_view("jobs-page-next"));
+    clock += 1.0 / 60.0;
+    runtime.frame(clock);
+    let (x, y) = runtime
+        .find("jobs-page-next")
+        .expect("visible next-page button");
+    assert!(
+        (0.0..1180.0).contains(&x) && (50.0..780.0).contains(&y),
+        "next-page control must be inside the Jobs scroll viewport"
+    );
+    runtime.pointer_down(x, y);
+    runtime.pointer_up(x, y);
+    clock += 1.0 / 60.0;
+    runtime.frame(clock);
+    let next = runtime
+        .state
+        .scoped_jobs
+        .active_ticket()
+        .expect("actual next-page request")
+        .clone();
+    assert_eq!(next.query.cursor.as_deref(), Some(cursor(2).as_str()));
+    assert!(matches!(runtime.state.backend.jobs, Load::Loading));
+    assert!(runtime.find("activity-job-fixture-job-1").is_none());
+    assert!(runtime.find("activity-job-fixture-job-2").is_none());
+
+    let (release, response) = tokio::sync::oneshot::channel();
+    let mock_gateway = tokio::spawn(async move { response.await.expect("mock page released") });
+    assert!(
+        release.send(page(&next.binding, 2, None)).is_ok(),
+        "mock gateway must accept the second registered page"
+    );
+    let second_page = mock_gateway.await.expect("mock gateway task");
+    runtime.update(move |state, _| state.complete_scoped_jobs(next, Ok(second_page)));
+    clock += 1.0 / 60.0;
+    runtime.frame(clock);
+    assert!(runtime.find("activity-job-fixture-job-2").is_some());
+    assert!(runtime.find("activity-job-fixture-job-1").is_none());
+    assert_eq!(runtime.state.scoped_jobs.page_number(), 2);
+    assert!(runtime
+        .accessibility_json()
+        .to_string()
+        .contains("Synthetic eligible job 2"));
+}
+
 #[test]
 fn stale_query_context_auth_and_expired_cursor_never_repopulate_private_rows() {
     let mut jobs = JobsQueryState::default();

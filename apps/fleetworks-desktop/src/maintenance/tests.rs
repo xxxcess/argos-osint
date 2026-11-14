@@ -262,6 +262,94 @@ fn refresh_checks_reloads_read_only_availability_without_starting_work() {
         .all(|intent| matches!(intent, Intent::Readiness | Intent::BackendRead { .. })));
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn delayed_readiness_reply_controls_reindex_confirmation_and_failure() {
+    let mut runtime = runtime(state(false));
+    let mut clock = 0.0;
+    let Load::Ready(mut ready) = runtime.state.readiness.clone() else {
+        panic!("synthetic readiness must start available")
+    };
+    ready
+        .checks
+        .iter_mut()
+        .find(|check| check.id == ReadinessCheckId::ActorCatalog)
+        .expect("synthetic catalog check")
+        .state = ReadinessState::Ready;
+
+    click(&mut runtime, "maintenance-refresh", &mut clock);
+    let (release, response) = tokio::sync::oneshot::channel();
+    let mock_gateway =
+        tokio::spawn(async move { response.await.expect("mock gateway response released") });
+    assert!(runtime.state.maintenance.confirmation.is_none());
+    assert!(runtime
+        .state
+        .maintenance_disabled_reason(MaintenanceOperation::ReindexActors)
+        .is_some());
+    assert!(runtime
+        .accessibility_json()
+        .to_string()
+        .contains("Build Search Index (Unavailable)"));
+
+    release
+        .send(ready)
+        .expect("deliver observed catalog readiness");
+    let ready = mock_gateway.await.expect("mock gateway task");
+    runtime.update(move |state, _| state.complete_readiness(Ok(ready)));
+    clock += 1.0 / 60.0;
+    runtime.frame(clock);
+    assert!(runtime
+        .accessibility_json()
+        .to_string()
+        .contains("Build Search Index (Ready)"));
+    click(&mut runtime, "maintenance-reindex", &mut clock);
+    assert_eq!(
+        runtime
+            .state
+            .maintenance
+            .confirmation
+            .as_ref()
+            .expect("reindex confirmation after the response")
+            .operation,
+        MaintenanceOperation::ReindexActors
+    );
+    click(&mut runtime, "maintenance-confirm", &mut clock);
+    assert_eq!(
+        runtime
+            .state
+            .intents
+            .iter()
+            .filter(|intent| matches!(
+                intent,
+                Intent::Maintenance {
+                    operation: MaintenanceOperation::ReindexActors
+                }
+            ))
+            .count(),
+        1,
+        "the confirmed UI action must submit exactly one rebuild request"
+    );
+
+    click(&mut runtime, "maintenance-refresh", &mut clock);
+    let (release, response) = tokio::sync::oneshot::channel();
+    let mock_gateway =
+        tokio::spawn(async move { response.await.expect("mock gateway failure released") });
+    release
+        .send(Err("synthetic readiness outage".to_owned()))
+        .expect("deliver mock failure");
+    let failure = mock_gateway.await.expect("mock gateway task");
+    runtime.update(move |state, _| state.complete_readiness(failure));
+    clock += 1.0 / 60.0;
+    runtime.frame(clock);
+    assert!(runtime
+        .state
+        .maintenance_disabled_reason(MaintenanceOperation::ReindexActors)
+        .is_some());
+    assert!(runtime
+        .accessibility_json()
+        .to_string()
+        .contains("synthetic readiness outage"));
+}
+
 #[test]
 fn background_checks_are_bounded_to_the_focused_maintenance_page() {
     let mut state = state(false);

@@ -27,7 +27,10 @@
 //! provider observations separately from reviewed training evidence.
 
 pub mod artifact;
+#[cfg(feature = "classifier")]
+pub(crate) mod bert;
 pub mod calibration;
+pub mod candidate_activation;
 pub mod dataset;
 #[cfg(feature = "classifier")]
 pub(crate) mod engine;
@@ -38,6 +41,7 @@ pub(crate) mod promotion;
 pub mod provider_capture;
 pub mod provider_labels;
 pub mod readiness;
+pub mod remote;
 pub mod review;
 #[cfg(feature = "classifier")]
 pub(crate) mod runtime_proof;
@@ -87,6 +91,9 @@ pub const RUNTIME_STACK_LIMIT_BYTES: usize = 1024 * 1024;
 /// `BayesClassifier` per domain, scored in log space. Artifacts are only
 /// compatible with this algorithm.
 pub const ALGORITHM_VERSION: &str = "natural-bayes-binary-ovr-v1";
+
+/// Algorithm identity of the Atlas zero-shot worker.
+pub const ZERO_SHOT_ALGORITHM_VERSION: &str = "rust-bert-distilbert-mnli-v1";
 
 /// Versioned phrase feature policy shared by training and inference.
 /// Meaningful negation, acronyms, identifiers and numbers are preserved;
@@ -151,6 +158,8 @@ pub enum ClassifierError {
     /// No usable classifier: the `classifier` feature is disabled, or no
     /// engine is installed in this home.
     Unavailable,
+    /// Atlas has no Rust-BERT configuration at the resolved path.
+    MissingZeroShotConfig(std::path::PathBuf),
     /// An artifact or manifest is missing, corrupt, or fails validation.
     InvalidArtifact(String),
     /// An artifact was built for other versions (algorithm, preprocessing,
@@ -222,6 +231,13 @@ impl fmt::Display for ClassifierError {
         match self {
             ClassifierError::Unavailable => {
                 write!(f, "classifier engine unavailable in this build or home")
+            }
+            ClassifierError::MissingZeroShotConfig(path) => {
+                write!(
+                    f,
+                    "Rust-BERT configuration is missing at {}",
+                    path.display()
+                )
             }
             ClassifierError::InvalidArtifact(why) => {
                 write!(f, "invalid classifier artifact: {why}")
@@ -536,6 +552,8 @@ impl ClassificationReceipt {
         {
             return Err(invalid());
         }
+        let zero_shot = calibration::gate_version_for_model(&self.model_id)
+            == calibration::ZERO_SHOT_GATE_VERSION;
         if self.scores.len() != 6
             || !self
                 .scores
@@ -550,7 +568,7 @@ impl ClassificationReceipt {
                     || (!(0.0..=1.0).contains(&score.threshold) && score.threshold != 2.0)
                     || (score.passes_gate
                         && (score.calibrated_score < score.threshold
-                            || score.informative_features == 0))
+                            || (!zero_shot && score.informative_features == 0)))
             })
         {
             return Err(invalid());
@@ -584,7 +602,8 @@ impl ClassificationReceipt {
             }
 
             if diagnostics.schema_version != "classifier-raw-diagnostics-v1"
-                || diagnostics.calibration_version != calibration::CALIBRATION_VERSION
+                || diagnostics.calibration_version
+                    != calibration::gate_version_for_model(&self.model_id)
             {
                 return Err(invalid());
             }
@@ -768,6 +787,8 @@ pub fn decode_receipt(json: &str) -> Result<DecodedReceipt, ClassifierError> {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Provenance {
+    /// Externally pretrained NLI weights with no Atlas fitting or calibration.
+    ZeroShot,
     SyntheticBaseline {
         dataset_version: String,
         dataset_sha256: String,
@@ -826,6 +847,7 @@ impl Provenance {
     #[must_use]
     pub fn label(&self) -> &'static str {
         match self {
+            Provenance::ZeroShot => "Rust-BERT zero-shot (unfitted thresholds)",
             Provenance::SyntheticBaseline { .. } => "Synthetic baseline",
             Provenance::ReviewedReal { .. } => "Reviewed real",
             Provenance::ApprovedProvider { .. } => "Approved weak provider labels",
@@ -964,6 +986,7 @@ pub struct ClassifierService {
     pinned: Option<ModelSnapshot>,
     engine: Mutex<Option<Box<dyn InferenceEngine>>>,
     metrics: Mutex<InferenceMetrics>,
+    pub(crate) zero_shot_policy: Option<(String, GateSet)>,
 }
 
 impl Default for ClassifierService {
@@ -975,6 +998,7 @@ impl Default for ClassifierService {
             pinned: None,
             engine: Mutex::new(None),
             metrics: Mutex::new(InferenceMetrics::default()),
+            zero_shot_policy: None,
         }
     }
 }
@@ -989,6 +1013,7 @@ impl ClassifierService {
             pinned: None,
             engine: Mutex::new(None),
             metrics: Mutex::new(InferenceMetrics::default()),
+            zero_shot_policy: None,
         }
     }
 
@@ -1046,10 +1071,9 @@ impl ClassifierService {
     /// Checks availability first (a disabled feature reports
     /// [`ClassifierError::Unavailable`] even for an oversized batch), then
     /// the [`INFERENCE_BATCH_SIZE`] bound ([`ClassifierError::BatchTooLarge`]).
-    /// With the `classifier` feature off — or with the feature on but no
-    /// engine installed — this returns [`ClassifierError::Unavailable`]; it
-    /// never panics and never falls back to the remote classifier. Metrics
-    /// update only on success. Accounting failure does not block inference;
+    /// If no engine was installed when the service was pinned, this returns
+    /// [`ClassifierError::Unavailable`]. Metrics update only on success.
+    /// Accounting failure does not block inference;
     /// dropped updates are traced and [`Self::metrics`] reports a typed error.
     ///
     /// # Errors
@@ -1189,7 +1213,10 @@ pub fn status_for_model(
         return ClassifierStatus::Invalid;
     }
     if snapshot.taxonomy_version != TAXONOMY_VERSION
-        || snapshot.algorithm_version != ALGORITHM_VERSION
+        || !matches!(
+            snapshot.algorithm_version.as_str(),
+            ALGORITHM_VERSION | ZERO_SHOT_ALGORITHM_VERSION
+        )
         || snapshot.preprocessing_version != PREPROCESSING_VERSION
         || snapshot.policy_version != ADMISSION_POLICY_VERSION
     {
@@ -1392,6 +1419,7 @@ mod fault_tests {
             pinned: None,
             engine: Mutex::new(Some(Box::new(FaultEngine { fault, calls }))),
             metrics: Mutex::new(InferenceMetrics::default()),
+            zero_shot_policy: None,
         }
     }
     fn input() -> ClassifyInput {

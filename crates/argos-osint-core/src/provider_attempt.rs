@@ -11,9 +11,12 @@
 // boxing it would only add noise at every construction site.
 #![allow(clippy::result_large_err)]
 
+pub mod remote;
+
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::provider::{self, ChatMessage, Completion};
@@ -25,7 +28,8 @@ use crate::request_policy::RequestPolicy;
 use crate::secrets::ProviderSecret;
 
 /// How the single request is made.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Transport {
     NonStream,
     Stream,
@@ -54,7 +58,8 @@ impl Transport {
 /// `first_output`/`model_inactivity`, when set, bound *meaningful model
 /// output* (answer or reasoning deltas): heartbeat-only traffic never extends
 /// them. `total` caps the whole attempt; receiving data does not extend it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Deadlines {
     pub connect: Duration,
     pub first_response: Duration,
@@ -153,7 +158,8 @@ impl Deadlines {
 }
 
 /// Typed per-attempt progress. Never carries answer or reasoning text.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AttemptProgress {
     /// Request handed to the transport.
     Dispatched,
@@ -343,6 +349,56 @@ pub async fn attempt_spec(
     policy: &RequestPolicy,
     spec: AttemptSpec<'_>,
 ) -> AttemptReport {
+    let started = Instant::now();
+    match crate::provider_admission::direct(
+        secret,
+        Box::pin(attempt_spec_inner(
+            secret, messages, transport, deadlines, policy, spec,
+        )),
+    )
+    .await
+    {
+        Ok(report) => report,
+        Err(failure) => AttemptReport {
+            effective: None,
+            transport,
+            endpoint: crate::provider_diag::sanitize_endpoint(&secret.base_url),
+            elapsed_ms: started.elapsed().as_millis() as u64,
+            outcome: Err(failure.with_context(
+                &provider::effective_kind(secret),
+                &secret.model,
+                &secret.base_url,
+                transport.as_str(),
+            )),
+            policy_diagnostics: Vec::new(),
+            recovery: None,
+        },
+    }
+}
+
+async fn attempt_spec_inner(
+    secret: &ProviderSecret,
+    messages: &[ChatMessage],
+    transport: Transport,
+    deadlines: Deadlines,
+    policy: &RequestPolicy,
+    spec: AttemptSpec<'_>,
+) -> AttemptReport {
+    if provider::delegate_to_execution(secret) {
+        return AttemptReport {
+            transport,
+            endpoint: crate::provider_diag::sanitize_endpoint(&secret.base_url),
+            elapsed_ms: 0,
+            outcome: Err(ProviderFailure::new(
+                Stage::Configuration,
+                Category::Configuration,
+                "provider credentials are held by the execution service",
+            )),
+            policy_diagnostics: Vec::new(),
+            effective: None,
+            recovery: None,
+        };
+    }
     let AttemptSpec {
         observer,
         progress,
@@ -422,7 +478,7 @@ pub async fn attempt_spec(
     )
     .await;
     if let Err(failure) = &outcome {
-        crate::provider_rate_limit::failure(secret, failure);
+        crate::provider_rate_limit::failure(secret, failure).await;
     }
     let elapsed_ms = started.elapsed().as_millis() as u64;
     AttemptReport {
@@ -560,7 +616,7 @@ async fn send_once(
             }
             f
         })?;
-    crate::provider_rate_limit::wait(secret).await;
+    crate::provider_rate_limit::wait(secret).await?;
     // Queue time must not consume the provider's response/output deadlines.
     let started = Instant::now();
     let first_deadline = deadlines.first_response.min(deadlines.total);
@@ -587,7 +643,7 @@ async fn send_once(
     };
     *first_ms = Some(started.elapsed().as_millis() as u64);
     let status = resp.status();
-    crate::provider_rate_limit::response(secret, status.as_u16(), resp.headers());
+    crate::provider_rate_limit::response(secret, status.as_u16(), resp.headers()).await;
     if let Some(p) = progress {
         p(AttemptProgress::HeadersReceived {
             status: status.as_u16(),

@@ -2624,6 +2624,9 @@ pub fn commit_profile_config(
     auth: &AuthFile,
     quotas: &QuotaSettingsFile,
 ) -> Result<u64> {
+    if auth.credentials_withheld {
+        bail!("provider credentials are held by the execution service");
+    }
     paths::ensure_home()?;
     let lock = ConfigLock::acquire()?;
     lock.commit_files(&[

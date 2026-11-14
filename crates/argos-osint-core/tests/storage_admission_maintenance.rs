@@ -318,16 +318,12 @@ async fn historical_job_reopens_with_64_row_activations_originals_and_policy_der
         assert!(payload["atlas.host.rss_reason"].is_string());
         if payload["stage"] == "classification" {
             actual_scoring += 1;
+            let worker = &payload["atlas.classifier.worker"];
             assert_eq!(
-                payload["atlas.classifier.worker"]["atlas.classifier.latency_unit"],
-                "batch"
+                worker["atlas.classifier.unavailable_reason"],
+                "worker_performance_unavailable"
             );
-            assert!(
-                payload["atlas.classifier.worker"]["atlas.classifier.samples"]
-                    .as_u64()
-                    .unwrap()
-                    > 0
-            );
+            assert!(worker["atlas.classifier.samples"].is_null());
             assert!(
                 payload["atlas.classifier.page"]["computations"]
                     .as_u64()
@@ -451,7 +447,8 @@ async fn blocked_exact_pin_requires_a_new_explicit_resume_after_restoration() {
     let job = maintenance::start(
         &repo,
         &installed.home,
-        ReclassificationRequest::new("exact-resume", MaintenanceScope::AllRetained),
+        ReclassificationRequest::new("exact-resume", MaintenanceScope::AllRetained)
+            .with_model(installed.home.pin(None).await.unwrap().snapshot),
     )
     .await
     .unwrap();
@@ -549,7 +546,8 @@ async fn blocked_exact_pin_requires_a_new_explicit_resume_after_restoration() {
     let corrupt = maintenance::start(
         &repo,
         &installed.home,
-        ReclassificationRequest::new("corrupt-saved-pin", MaintenanceScope::AllRetained),
+        ReclassificationRequest::new("corrupt-saved-pin", MaintenanceScope::AllRetained)
+            .with_model(installed.home.pin(None).await.unwrap().snapshot),
     )
     .await
     .unwrap();
@@ -616,11 +614,8 @@ async fn default_pool_waits_for_initial_model_then_accepts_one_legacy_request_wi
         .await
         .unwrap();
     seed(&repo, "initial", 1).await;
-    let classifier = installed.directory.path().join("classifier");
-    let held = installed
-        .directory
-        .path()
-        .join("classifier-held-by-fixture");
+    let classifier = installed.directory.path().join("classifier/zero-shot.json");
+    let held = classifier.with_extension("held-fixture");
     std::fs::rename(&classifier, &held).unwrap();
     let pool = argos_osint_core::scheduler::WorkerPool::spawn_admission_maintenance_drainer(
         installed.directory.path().join("argos.db"),
@@ -635,7 +630,7 @@ async fn default_pool_waits_for_initial_model_then_accepts_one_legacy_request_wi
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "missing initial classifier did not produce an actual blocked startup diagnostic"
+            "missing live config must block startup even with a legacy Natural model installed"
         );
         tokio::task::yield_now().await;
     }
@@ -716,7 +711,8 @@ async fn already_current_and_derivative_only_activations_need_no_new_n1_runtime(
     let original = maintenance::start(
         &repo,
         &installed.home,
-        ReclassificationRequest::new("first-current", MaintenanceScope::AllRetained),
+        ReclassificationRequest::new("first-current", MaintenanceScope::AllRetained)
+            .with_model(installed.home.pin(None).await.unwrap().snapshot),
     )
     .await
     .unwrap();
@@ -742,7 +738,8 @@ async fn already_current_and_derivative_only_activations_need_no_new_n1_runtime(
     let next = maintenance::start(
         &repo,
         &installed.home,
-        ReclassificationRequest::new("already-current", MaintenanceScope::AllRetained),
+        ReclassificationRequest::new("already-current", MaintenanceScope::AllRetained)
+            .with_model(installed.home.pin(None).await.unwrap().snapshot),
     )
     .await
     .unwrap();

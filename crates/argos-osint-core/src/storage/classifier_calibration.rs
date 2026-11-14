@@ -557,7 +557,13 @@ async fn process_task(
         .map_err(|_| invalid("calibration_report_corrupt"))?;
     let snapshot: Option<ModelSnapshot> =
         serde_json::from_str(&job.snapshot_json).map_err(|_| invalid("calibration_pin_corrupt"))?;
+    let zero_shot = snapshot.as_ref().is_some_and(|snapshot| {
+        snapshot.algorithm_version == crate::classifier::ZERO_SHOT_ALGORITHM_VERSION
+    });
     let integrity = match snapshot {
+        // Monitoring consumes capture records only. Its durable terminal hook
+        // already binds the run identity; it never loads an NLI checkpoint.
+        Some(_) if zero_shot => Ok(()),
         Some(snapshot) => {
             home.validate_saved_pin_integrity(&snapshot, &job.manifest_sha256)
                 .await
@@ -657,7 +663,9 @@ async fn process_task(
         }
         .into();
     }
-    if report.state == "completed" && after >= job.watermark {
+    if report.state == "completed" && after >= job.watermark && zero_shot {
+        report.reason = "zero_shot_provider_monitoring_only".into();
+    } else if report.state == "completed" && after >= job.watermark {
         report.reason = match super::classifier_learning::consider(owner, home).await {
             Ok("unapproved_mapping_monitor_only") => "insufficient_reviewed_evidence".into(),
             Ok(reason) => reason.into(),

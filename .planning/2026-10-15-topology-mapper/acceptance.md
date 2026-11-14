@@ -9,8 +9,8 @@ Brain/Intel entry/history behavior. Requested list density exceptions preserve
 spaced defaults. No schema or version bump is included; typed seeds/snapshot
 fields are extended and default topology depth changes to two.
 
-The maintained [specification](../../docs/topology-mapper.md) and
-[verification record](../../docs/tui-verification-topology-2026-10-15.md) contain
+The maintained [specification](../../docs/wiki/concepts/topology-mapper.md) and
+[verification record](../../docs/archive/tui-verification-topology-2026-10-15.md) contain
 contracts, commands, concrete fixes and limits. Eight selected reviewed PNGs and
 13 final source hashes are retained in the linked screenshot receipts.
 

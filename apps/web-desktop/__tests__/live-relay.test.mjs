@@ -1,34 +1,54 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { WebSocket, WebSocketServer } from "ws";
 import { createLiveRelay } from "../live-relay.mjs";
+import { CONNECT_COOKIE } from "../connect-session.mjs";
+import {
+  installGatewayEnvironment,
+  startConnectGateway,
+} from "./connect-gateway-fixture.mjs";
 
-async function fixture(t) {
-  const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
-  await once(upstream, "listening");
-  const previous = process.env.ARGOS_RUST_API_ORIGIN;
-  process.env.ARGOS_RUST_API_ORIGIN = `http://127.0.0.1:${upstream.address().port}`;
+async function fixture(t, token) {
+  const gateway = await startConnectGateway(token ? { apiToken: token } : {});
+  const upstream = new WebSocketServer({ server: gateway.server });
   const server = createServer((_request, response) => response.end("ok"));
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   const port = server.address().port;
+  let origin = `http://127.0.0.1:${port}`;
+  if (token) origin = "http://localhost:9000";
+  const restore = installGatewayEnvironment(gateway, origin);
+  if (token) {
+    const directory = await mkdtemp(join(tmpdir(), "fleetworks-web-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const tokenFile = join(directory, "token");
+    await writeFile(tokenFile, `${token}\r\n`, { mode: 0o600 });
+    delete process.env.FLEETWORKS_API_TOKEN;
+    process.env.FLEETWORKS_API_TOKEN_FILE = tokenFile;
+    process.env.FLEETWORKS_WEB_ORIGIN = origin;
+  }
   const relay = createLiveRelay(port);
   server.on("upgrade", relay.upgrade);
   t.after(async () => {
     relay.close();
     for (const client of upstream.clients) client.terminate();
     await new Promise((resolve) => upstream.close(resolve));
+    await gateway.close();
     await new Promise((resolve) => server.close(resolve));
-    if (previous === undefined) delete process.env.ARGOS_RUST_API_ORIGIN;
-    else process.env.ARGOS_RUST_API_ORIGIN = previous;
+    restore();
   });
   return {
     upstream,
     port,
-    url: `ws://127.0.0.1:${port}/api/v1/live`,
-    origin: `http://127.0.0.1:${port}`,
+    url: `ws://127.0.0.1:${port}/api/v1/live?context_revision=1`,
+    origin,
+    gateway,
+    cookie: `${CONNECT_COOKIE}=${gateway.sessionToken}`,
   };
 }
 
@@ -58,7 +78,10 @@ test("relays subscription frames and Rust samples without storing channel state"
       });
     }),
   );
-  const client = new WebSocket(f.url, { origin: f.origin });
+  const client = new WebSocket(f.url, {
+    origin: f.origin,
+    headers: { cookie: f.cookie },
+  });
   await once(client, "open");
   const reply = once(client, "message");
   client.send(command);
@@ -75,7 +98,10 @@ test("refuses foreign origins before creating a Rust connection", async (t) => {
   f.upstream.on("connection", () => {
     connections++;
   });
-  const client = new WebSocket(f.url, { origin: "https://untrusted.example" });
+  const client = new WebSocket(f.url, {
+    origin: "https://untrusted.example",
+    headers: { cookie: f.cookie },
+  });
   client.on("error", () => {});
   const status = await new Promise((resolve) =>
     client.once("unexpected-response", (_request, response) => {
@@ -91,8 +117,83 @@ test("refuses foreign origins before creating a Rust connection", async (t) => {
 test("closes the browser stream when its Rust connection drops", async (t) => {
   const f = await fixture(t);
   f.upstream.once("connection", (socket) => socket.close());
-  const client = new WebSocket(f.url, { origin: f.origin });
+  const client = new WebSocket(f.url, {
+    origin: f.origin,
+    headers: { cookie: f.cookie },
+  });
   const [code, reason] = await once(client, "close");
   assert.equal(code, 1012);
   assert.equal(reason.toString(), "Live connection interrupted");
 });
+
+test("adds the server bearer to the upstream upgrade behind a remapped port", async (t) => {
+  const token = "fleetworks-fixture-token-123456789012";
+  const f = await fixture(t, token);
+  const connected = once(f.upstream, "connection");
+  const client = new WebSocket(f.url, {
+    origin: f.origin,
+    headers: {
+      host: new URL(f.origin).host,
+      authorization: "Bearer browser-controlled",
+      cookie: `${f.cookie}; private=browser-cookie`,
+      "x-fleetworks-session": "b".repeat(64),
+      "x-fleetworks-context-revision": "999",
+    },
+  });
+  t.after(() => client.terminate());
+  const [, request] = await connected;
+  assert.equal(request.headers.host, `127.0.0.1:${f.upstream.address().port}`);
+  assert.equal(request.headers.authorization, `Bearer ${token}`);
+  assert.equal(request.headers.origin, undefined);
+  assert.equal(request.headers.cookie, undefined);
+  assert.equal(request.headers["x-fleetworks-session"], f.gateway.sessionToken);
+  assert.equal(request.headers["x-fleetworks-context-revision"], "1");
+  const closed = once(client, "close");
+  client.close();
+  await closed;
+});
+
+test("missing cookies and stale context cannot open a live upstream", async (t) => {
+  const f = await fixture(t);
+  let connections = 0;
+  f.upstream.on("connection", () => {
+    connections++;
+  });
+  for (const [url, headers, expected] of [
+    [f.url, {}, 401],
+    [
+      f.url.replace("context_revision=1", "context_revision=2"),
+      { cookie: f.cookie },
+      409,
+    ],
+  ]) {
+    const client = new WebSocket(url, { origin: f.origin, headers });
+    client.on("error", () => {});
+    const status = await new Promise((resolve) =>
+      client.once("unexpected-response", (_request, response) => {
+        response.resume();
+        resolve(response.statusCode);
+        client.terminate();
+      }),
+    );
+    assert.equal(status, expected);
+  }
+  assert.equal(connections, 0);
+});
+
+test(
+  "revoked authority closes an established stream within the bounded recheck",
+  { timeout: 10_000 },
+  async (t) => {
+    const f = await fixture(t);
+    const client = new WebSocket(f.url, {
+      origin: f.origin,
+      headers: { cookie: f.cookie },
+    });
+    t.after(() => client.terminate());
+    await once(client, "open");
+    f.gateway.revoked.add(f.gateway.sessionToken);
+    const [code] = await once(client, "close");
+    assert.equal(code, 1008);
+  },
+);

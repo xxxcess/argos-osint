@@ -1,6 +1,6 @@
-# Argos classifier v2 distinct-scenario dataset
+# Fleetworks classifier v2 distinct-scenario dataset
 
-Use `argos_atlas_strategic_domains_v2.csv` with **ARGOS_NATURAL_CLASSIFIER_QUALITY_IMPLEMENTATION_SPEC.md**. The repository stores it in `datasets/`. Select it explicitly with `--file datasets/argos_atlas_strategic_domains_v2.csv`; automatic resolution uses this versioned filename. The original CSV remains a frozen v1 baseline. Version: `strategic-domains-v2-distinct-1`.
+`argos_atlas_strategic_domains_v2.csv` is the labeled synthetic dataset for the optional Natural classifier. Select it through native Workstation readiness and explicitly confirm durable candidate-only Natural training; activation is a separate consented operation. The original CSV remains a frozen v1 baseline. The dataset version is `strategic-domains-v2-distinct-1`. [Training setup](../deploy/README.md#optional-maintenance-and-inference)
 
 ## What changed
 
@@ -54,12 +54,12 @@ The UTF-8 CSV retains the original 18 field names. Quoted commas and apostrophes
 
 Stable domains:
 
-- `governance`: Governance & Political Stability.
-- `security`: Security & Threat Environment.
-- `economic`: Economic & Supply Chain Resilience.
-- `human`: Human Security & Public Welfare.
-- `environmental`: Environmental & Resource Security.
-- `scientific`: Scientific & Technological Capability.
+- `governance`: Politics & Governance.
+- `security`: Security & Conflict.
+- `economic`: Economy & Supply Chains.
+- `human`: Health & Public Welfare.
+- `environmental`: Environment & Resources.
+- `scientific`: Science & Technology.
 
 Membership is separate from truth or stance: a report denying an armed strike remains Security, but the classifier does not establish that the strike occurred. Fictional game/film metaphors are negatives because they report no actual strategic development. For test triads, any accepted subset of the ground-truth set is label-valid; assess omissions and primary ranking separately.
 

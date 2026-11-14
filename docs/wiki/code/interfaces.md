@@ -1,23 +1,19 @@
-# CLI and TUI map
+# Fleetworks interfaces
 
 [Code route](index.md) · [Usage](../concepts/usage.md)
 
-`@tag:tui-components`
+The native macOS app connects to an independently running gateway. Its six sidebar destinations share the selected deployment's resources within the caller's permissions; a protected installation identifies workstation request origin and activity. Workstation Status opens from the gateway header. Intel Web uses a separately provisioned relay credential and a server-issued registered session. Direct Docker Compose owns backend deployment. Venture, the six terminal clients and legacy `argos` are retired; installed-app and matching-hardware evidence remain separate.
 
-| Layer | Source | Contract |
+| Surface | Source | Contract |
 | --- | --- | --- |
-| CLI | [cli.rs](../../../crates/argos-osint-bin/src/cli.rs) | [Commands](../concepts/usage.md) |
-| Service launcher | [welcome.rs](../../../crates/argos-osint-bin/src/welcome.rs), [terminal.rs](../../../crates/argos-osint-bin/src/welcome/terminal.rs) | Ratatui wizard using the shared Argos theme; measured keyboard/mouse choices, editable ports, settings review and final TUI/logs choice; piped input retains text prompts; Esc previous-step/value and Venture-owned TUI return loop |
-| Service traffic | [traffic.rs](../../../crates/argos-osint-bin/src/stack/traffic.rs) | Bounded, redacted events attached to API/web service jobs; existing Rust Jobs → View logs navigation |
-| Runtime diagnostics | [logging.rs](../../../crates/argos-osint-bin/src/logging.rs) | During the application TUI, first-party tracing warnings/errors become redacted `runtime.diagnostic` events in Logs through the bounded ordered write queue. Venture does not echo child stderr onto that interactive screen; redirected files, CLI logs and captured launch-failure notices remain available. Terminal suppression lasts through restoration. |
-| App state and actions | [tui/app.rs](../../../crates/argos-osint-bin/src/tui/app.rs), [commands.rs](../../../crates/argos-osint-bin/src/tui/commands.rs) | [Design](tui-design-spec.md) |
-| Rendering | [tui/ui.rs](../../../crates/argos-osint-bin/src/tui/ui.rs) | [Shell figure](../../diagrams/tui-shell.html) |
-| Shared presentation primitives | [components.rs](../../../crates/argos-osint-bin/src/tui/components.rs) | [Component catalog](tui-components.md) |
-| Profile geometry | [profile_layout.rs](../../../crates/argos-osint-bin/src/tui/profile_layout.rs) | [Analytics dashboard](profile-analytics-dashboard.md) |
-| Storage reads | [db_reads.rs](../../../crates/argos-osint-bin/src/tui/db_reads.rs) | [Responsiveness](tui-database-responsiveness.md) |
+| Native macOS app | [Rune app](../../../apps/fleetworks-desktop) · [Bounded SDK](../../../crates/fleetworks-contracts/src/client.rs) | [Connections and context](native-connections.md) · [Protected workstation identity](native-workspaces.md) |
+| Backend deployment | [Standalone Compose](../../../deploy/compose.native-review.yml) · [Provisioning helper](../../../deploy/native_review.py) | [Independent deployment and credentials](../../../deploy/README.md) |
+| Native Jobs and Logs | [Activity API](../../../crates/argos-osint-api/src/activity.rs) · [Scoped storage](../../../crates/argos-osint-core/src/storage/jobs_view.rs) | Registered workstation activity; independent action permissions and private shared-job restrictions |
+| Intel web | [Web server](../../../apps/web-desktop) · [Intel UI](../../../packages/intel) · [API client](../../../packages/api-client) | [Intel web contract](intel-web.md) |
+| Brain and worker roles | [Service host](../../../services/api-host/src/main.rs) | [Service boundaries](architecture.md#fleetworks-service-boundaries) |
 
-For UI work, load `argos-tui-verify`. Follow [verification](tui-verification.md): deterministic TestBackend captures, actual PNG inspection, and separate action/metric checks. Shared layout must govern rendering, hit-testing and focus order. See [contributor workflow](contributing.md) for isolated builds and worktree constraints.
+[![Fleetworks workstation](../../diagrams/workspace.svg)](../../diagrams/workspace.html)
 
-The separate [local Intel web interface and stack launcher](intel-web.md) use an HTTP adapter over core. See the [web lifecycle figure](../../diagrams/intel-web.html); the terminal remains independent of HTTP.
+## Contributor checks
 
-Models role defaults open a Variant view after choosing a model. Confirmed provider/model capability values determine the choices; unknown models offer only the default. Save role persists exact role/provider/model effort selections in `defaults.model_variants`. Dispatch applies the chosen intent through the normal adapter and includes it in the audit declaration. Provider / operation default removes the override.
+Use the [native Runtime/PNG/tree fixtures](../../../apps/fleetworks-desktop/README.md) and [Fleetworks CI scopes](ci.md#fleetworksyml--scoped-branch-checks) for the affected client or service. Native-only builds do not compile backend engines. Use the [browser verification guide](react-ui-testing.md) for Intel Web. Historical terminal captures are preserved under the [retirement disposition](../../archive/cli-retirement.md); they are not native-app evidence.

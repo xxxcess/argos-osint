@@ -325,6 +325,13 @@ pub async fn upsert_actor_in(
         .bind(("now", now.to_string())),
     )
     .await?;
+    super::actor_search_outbox::enqueue_actors_in(
+        tx,
+        &[actor_id.to_owned()],
+        None,
+        chrono::Utc::now(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -417,6 +424,13 @@ pub async fn add_redirect_in(tx: &Tx, from: &str, to: &str, now: &str) -> Result
     if !take::<Vec<String>>(&mut r, 0)?.is_empty() {
         crate::actor_catalog::bump_catalog_epoch();
     }
+    super::actor_search_outbox::enqueue_actors_in(
+        tx,
+        &[from.to_owned(), to.to_owned()],
+        None,
+        chrono::Utc::now(),
+    )
+    .await?;
     Ok(())
 }
 

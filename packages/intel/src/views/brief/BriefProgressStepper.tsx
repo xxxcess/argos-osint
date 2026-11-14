@@ -61,9 +61,11 @@ export function BriefProgressStepper({
           const color =
             status === "failed"
               ? c.danger
-              : status === "active" || status === "complete"
-                ? c.accent
-                : c.muted;
+              : status === "complete"
+                ? c.success
+                : status === "active"
+                  ? c.cool
+                  : c.muted;
           const label =
             status === "active" && !connected
               ? "Updates interrupted"
@@ -90,7 +92,7 @@ export function BriefProgressStepper({
                         index === 0
                           ? "transparent"
                           : status === "complete"
-                            ? c.accent
+                            ? c.success
                             : c.border,
                     },
                   ]}
@@ -101,7 +103,7 @@ export function BriefProgressStepper({
                     {
                       borderColor: color,
                       backgroundColor:
-                        status === "complete" ? c.accent : c.panelRaised,
+                        status === "complete" ? c.success : c.panelRaised,
                     },
                   ]}
                 >
@@ -126,7 +128,7 @@ export function BriefProgressStepper({
                         index === stages.length - 1
                           ? "transparent"
                           : status === "complete"
-                            ? c.accent
+                            ? c.success
                             : c.border,
                     },
                   ]}

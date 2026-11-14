@@ -19,6 +19,13 @@ compile_error!(
     "argos-osint-core needs the `embedded` or `server` feature: SurrealDB is its only storage"
 );
 
+#[cfg(all(test, feature = "server"))]
+extern crate self as argos_osint_core;
+
+#[cfg(all(test, feature = "server"))]
+#[path = "../tests/support/mod.rs"]
+mod storage_fixture;
+
 pub mod actor_catalog;
 pub mod async_bridge;
 pub mod atlas;
@@ -41,6 +48,7 @@ pub mod brain_actor_dedup;
 pub mod brain_actors;
 pub mod brain_backfill;
 pub mod brain_browse;
+pub mod brain_graph;
 pub mod brain_kinds;
 pub mod brain_neighborhood_brief;
 pub mod brain_neighborhood_brief_exec;
@@ -49,11 +57,13 @@ pub mod brain_schema;
 pub mod brain_scope;
 mod brain_source_lifecycle;
 pub mod brain_topology;
+pub mod cancellation;
 pub mod classifier;
 pub mod config_commit;
 pub mod config_transfer;
 #[cfg(test)]
 mod config_transfer_tests;
+pub mod current_configuration;
 pub mod data_paths;
 pub mod embed;
 pub mod events;
@@ -74,6 +84,7 @@ pub mod job_registry;
 pub mod jobs_view;
 pub(crate) mod js_runtime_budget;
 pub mod memory_metadata;
+pub mod model_exec;
 pub mod nlp;
 pub mod osint;
 pub mod paths;
@@ -81,6 +92,7 @@ pub mod pipeline;
 pub mod profile_stats;
 pub mod provider;
 pub mod provider_adapters;
+mod provider_admission;
 pub mod provider_attempt;
 pub mod provider_capabilities;
 pub mod provider_chain;

@@ -12,7 +12,9 @@ Follow the shared [agent workflow](../../docs/wiki/code/agent-workflow.md) for e
 
 Keep work bounded by the shared [scope and finish line](../../docs/wiki/code/agent-workflow.md#scope-and-finish-line).
 
-For React UI changes, load `argos-react-ui` and, for components/state/performance, `argos-react-patterns`. Follow [shared UI rules](../../docs/wiki/code/react-ui.md) and the [Argos look and feel](../../docs/wiki/code/react-ui.md#argos-look--feel-reference). Design components creatively inside the Argos theme. Preserve the generated Next guidance above.
+The workstation redesign uses [matte design requirements](../../docs/wiki/code/native-design-system.md): preserve web structure and topology/list behavior while sharing palette/logo. Connect v2 uses an opaque workstation ID; optional IP metadata never defines identity. Reject old workspace contexts/cookies/query narrowing and retain authoritative session/revision/epoch fences.
+
+For React UI changes, load `argos-react-ui` and, for components/state/performance, `argos-react-patterns`. Follow [shared UI rules](../../docs/wiki/code/react-ui.md) and the [Fleetworks look and feel](../../docs/wiki/code/react-ui.md#fleetworks-look-and-feel). Design components creatively inside the Fleetworks theme. Preserve the generated Next guidance above.
 
 Keep the React Native Web alias/shared transpilation and React Compiler enabled in Next. `pnpm lint` enforces Hooks/compiler diagnostics with zero warnings; fix violations without disabling rules or adding blanket compiler opt-outs.
 

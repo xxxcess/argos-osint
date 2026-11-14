@@ -288,11 +288,11 @@ pub async fn cache_get_selected(
 pub fn resolved_summary_route() -> (String, String) {
     let auth = crate::secrets::AuthFile::load().unwrap_or_default();
     let settings = crate::provider::SettingsFile::load().unwrap_or_default();
-    crate::recon::model_exec::select_role_secret(
+    crate::model_exec::select_role_secret(
         &auth,
         &settings,
         "brain_summary",
-        crate::recon::model_exec::OperationFormat::Prose,
+        crate::model_exec::OperationFormat::Prose,
     )
     .map(|s| (s.kind, s.model))
     .ok_or(())

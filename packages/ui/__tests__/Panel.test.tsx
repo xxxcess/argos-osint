@@ -13,7 +13,7 @@ describe("Panel (real @argos/ui component)", () => {
     );
     const title = screen.getByText("Neighborhood");
     expect(sheetProp(title, "textTransform")).toBe("uppercase");
-    expect(paint(title, "color")).toBe(colors.accent);
+    expect(paint(title, "color")).toBe(colors.accent.toLowerCase());
     expect(sheetProp(title, "fontFamily")).toContain("ui-monospace");
 
     // The children stay visible under the title.
@@ -21,22 +21,26 @@ describe("Panel (real @argos/ui component)", () => {
   });
 
   it("renders no header when no title is given, children only", () => {
-    const { container } = render(<Panel><Copy>Body only</Copy></Panel>);
+    const { container } = render(
+      <Panel>
+        <Copy>Body only</Copy>
+      </Panel>,
+    );
     expect(container.firstElementChild!.textContent).toBe("Body only");
     expect(container.textContent).not.toMatch(/title/i);
   });
 
-  it("applies the HUD glass treatment from the shared glass token", () => {
+  it("applies the opaque matte card treatment from the shared compatibility token", () => {
     const { container } = render(
       <Panel title="Glass">
         <Copy>body</Copy>
       </Panel>,
     );
     const panel = container.firstElementChild as HTMLElement;
-    expect(paint(panel, "backgroundColor")).toBe(colors.glass);
-    expect(sheetProp(panel, "backdropFilter")).toBe("blur(12px)"); // HUD glass
-    expect(sheetProp(panel, "WebkitBackdropFilter")).toBe("blur(12px)");
-    expect(paint(panel, "borderTopColor")).toBe(colors.glassBorder);
+    expect(paint(panel, "backgroundColor")).toBe(colors.glass.toLowerCase());
+    expect(sheetProp(panel, "backdropFilter")).toBe("");
+    expect(sheetProp(panel, "WebkitBackdropFilter")).toBe("");
+    expect(paint(panel, "borderTopColor")).toBe(colors.cardEdge);
     expect(sheetProp(panel, "borderTopWidth")).toBe("1px");
     expect(sheetProp(panel, "padding")).toBe("20px"); // default density spacing
     expect(sheetProp(panel, "gap")).toBe("16px");
@@ -50,7 +54,7 @@ describe("Panel (real @argos/ui component)", () => {
     );
     const panel = container.firstElementChild as HTMLElement;
     // Glass is a spread base: glass colors stay, panel adds padding/gap.
-    expect(paint(panel, "backgroundColor")).toBe(colors.glass);
+    expect(paint(panel, "backgroundColor")).toBe(colors.glass.toLowerCase());
     expect(sheetProp(panel, "padding")).toBe("20px");
     expect(screen.getByText("content")).toBeVisible();
   });

@@ -16,8 +16,8 @@ use super::jobs::{rid, run, take};
 use super::recon_runs::{link_evidence_in, now};
 use super::recon_threads::sequence_counter;
 use super::repo::Repository;
+use super::thread_history::Message;
 use super::tx::{run_tx, RetryPolicy};
-use crate::recon::Message;
 
 /// Schema (idempotent).
 pub const SCHEMA: &str = "DEFINE TABLE IF NOT EXISTS extraction_job SCHEMAFULL;
@@ -157,8 +157,8 @@ pub async fn has_final_answer_for_run(repo: &Repository, run_id: &str) -> Result
 }
 
 /// `Store::recover_runs` (startup): running runs become interrupted,
-/// queued/running calls interrupted, running extraction jobs requeued and
-/// every held credit released. Returns the number of runs interrupted.
+/// queued/running Recon calls interrupted, running extraction jobs requeued,
+/// and Recon holds released. Returns the number of runs interrupted.
 pub async fn recover_runs(repo: &Repository) -> Result<usize> {
     let mut r = repo
         .db()
@@ -166,11 +166,12 @@ pub async fn recover_runs(repo: &Repository) -> Result<usize> {
             "UPDATE recon_run SET state = 'interrupted', stage = 'interrupted', updated_at = $at
                WHERE state = 'running' RETURN VALUE meta::id(id);
              UPDATE osint_call SET status = 'interrupted', completed_at = $at
-               WHERE status INSIDE ['queued', 'running'] RETURN NONE;
+               WHERE status INSIDE ['queued', 'running'] AND origin != $manual_origin RETURN NONE;
              UPDATE extraction_job SET state = 'queued', updated_at = $at
                WHERE state = 'running' RETURN NONE;",
         )
         .bind(("at", now()))
+        .bind(("manual_origin", crate::osint::manual::ORIGIN))
         .await?
         .check()?;
     let ids: Vec<String> = r.take(0usize)?;

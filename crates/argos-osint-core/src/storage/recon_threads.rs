@@ -23,10 +23,12 @@ use surrealdb::types::SurrealValue;
 use super::entities::{ensure_recon_entity_in, ReconEntity};
 use super::jobs::{rid, run, take};
 use super::pipeline_inputs::{app_state_get, app_state_set};
-use super::recon::get_thread;
 use super::repo::Repository;
+pub use super::thread_history::list_messages;
+use super::thread_history::{get_thread, Message, Thread, ThreadRow};
+pub use super::tool_state::{set_tool_enabled, tool_enabled};
 use super::tx::{run_tx, RetryPolicy};
-use crate::recon::{Message, Thread, PLACEHOLDER_TITLE};
+use crate::recon::PLACEHOLDER_TITLE;
 
 /// Schema (idempotent).
 pub const SCHEMA: &str = "DEFINE TABLE IF NOT EXISTS recon_thread_entity SCHEMAFULL;
@@ -51,31 +53,6 @@ fn now() -> String {
 
 pub(crate) fn sequence_counter(thread_id: &str) -> String {
     format!("recon_message:{thread_id}")
-}
-
-#[derive(Debug, Clone, SurrealValue)]
-struct ThreadRow {
-    id: String,
-    title: String,
-    created_at: String,
-    updated_at: String,
-    draft: String,
-    scroll: i64,
-    recall_insights: bool,
-}
-
-impl From<ThreadRow> for Thread {
-    fn from(t: ThreadRow) -> Self {
-        Thread {
-            id: t.id,
-            title: t.title,
-            created_at: t.created_at,
-            updated_at: t.updated_at,
-            draft: t.draft,
-            scroll: t.scroll,
-            recall_insights: t.recall_insights,
-        }
-    }
 }
 
 /// `Store::new_thread`: a blank title stores the placeholder.
@@ -199,43 +176,6 @@ pub async fn last_thread(repo: &Repository) -> Result<Option<String>> {
     Ok(get_thread(repo, &id).await?.map(|t| t.id))
 }
 
-#[derive(Debug, Clone, SurrealValue)]
-struct MessageRow {
-    id: String,
-    thread_id: String,
-    sequence: i64,
-    role: String,
-    content: String,
-    run_id: Option<String>,
-    created_at: String,
-}
-
-/// `Store::list_messages`, in sequence order.
-pub async fn list_messages(repo: &Repository, thread_id: &str) -> Result<Vec<Message>> {
-    let mut r = repo
-        .db()
-        .query(
-            "SELECT meta::id(id) AS id, thread_id, sequence, role, content, run_id, created_at
-               FROM recon_message WHERE thread_id = $t ORDER BY sequence",
-        )
-        .bind(("t", thread_id.to_string()))
-        .await?
-        .check()?;
-    let rows: Vec<MessageRow> = r.take(0usize)?;
-    Ok(rows
-        .into_iter()
-        .map(|m| Message {
-            id: m.id,
-            thread_id: m.thread_id,
-            sequence: m.sequence,
-            role: m.role,
-            content: m.content,
-            run_id: m.run_id,
-            created_at: m.created_at,
-        })
-        .collect())
-}
-
 /// `Store::add_message`: append to a live thread with the next sequence
 /// from the thread's counter, and touch the thread, in one transaction.
 pub async fn add_message(
@@ -357,28 +297,4 @@ pub async fn thread_entities(repo: &Repository, thread_id: &str) -> Result<Vec<(
         .check()?;
     let rows: Vec<EntityRow> = r.take(1usize)?;
     Ok(rows.into_iter().map(|e| (e.kind, e.canonical)).collect())
-}
-
-/// `Store::tool_enabled`: the stored preference, else the tool's default.
-pub async fn tool_enabled(repo: &Repository, tool_id: &str) -> Result<bool> {
-    let mut r = repo
-        .db()
-        .query("SELECT VALUE enabled FROM ONLY $p")
-        .bind(("p", rid("osint_preference", tool_id)))
-        .await?
-        .check()?;
-    let v: Option<bool> = r.take(0usize)?;
-    Ok(v.unwrap_or_else(|| crate::osint::default_enabled(tool_id)))
-}
-
-/// `Store::set_tool_enabled` (unknown tools are an error).
-pub async fn set_tool_enabled(repo: &Repository, tool_id: &str, enabled: bool) -> Result<()> {
-    ensure!(crate::osint::definition(tool_id).is_some(), "unknown tool");
-    repo.db()
-        .query("UPSERT $p SET enabled = $on RETURN NONE")
-        .bind(("p", rid("osint_preference", tool_id)))
-        .bind(("on", enabled))
-        .await?
-        .check()?;
-    Ok(())
 }

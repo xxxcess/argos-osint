@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 1064" role="img" aria-labelledby="intel-connect-gate-title intel-connect-gate-desc">
+<title id="intel-connect-gate-title">Central Intel Web gate and opaque current-context proof</title>
+<desc id="intel-connect-gate-desc">Every protected page, RSC or prefetch, REST/action/export and live upgrade passes the centralized server-only connection guard. Missing or revoked context denies data rather than relying on a client route guard. The accessible Connect form accepts only a bounded existing registered ID and an Origin-checked mutation. The configured web server uses its WebRelay purpose credential against its fixed backend to create or resolve an opaque session. Only a host-only HttpOnly workstation-v2 cookie reaches the browser; raw backend credentials and opaque proof tokens never enter JavaScript, local storage or URLs. The server attaches validated proof after stripping forged context claims. Mutations pin expected context revision; stale tabs get conflict. Live connections revalidate on a bounded schedule. Switch or logout clears scoped query/live state and requests backend revocation. Remote public HTTPS authentication ingress, advertised web URLs and internal API origins remain separate, and native need not stay open.</desc>
+<defs><marker id="intel-connect-gate-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker></defs>
+<style>text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}.figure-title{font-family:'Instrument Serif',Georgia,serif;font-size:30px}.label{font-size:20px;font-weight:600}.note{font-size:16px}.mono{font-family:'Geist Mono',ui-monospace,monospace;font-size:14px}.zone{font-size:13px;font-weight:600;letter-spacing:1px}.minor{font-size:14px;fill:#4f5d75}.node{fill:#fff;stroke:#4f5d75}.accent{fill:#fff6ed;stroke:#eb6c36}.edge{fill:none;stroke:#4f5d75;stroke-width:2;marker-end:url(#intel-connect-gate-arrow)}</style>
+<rect width="1440" height="1064" fill="#f5f5f5"/>
+<text x="48" y="44" class="figure-title">A server gate protects every Intel Web entry point</text>
+<text x="48" y="76" class="zone">PUBLIC BROWSER ORIGIN · REMOTE HTTPS REQUIRES EXPLICIT AUTHENTICATION INGRESS</text>
+<path d="M432 184H512" class="edge"/>
+<path d="M896 184H976" class="edge"/>
+<path d="M704 272V312H240V368" class="edge"/>
+<path d="M432 456H512" class="edge"/>
+<path d="M896 456H976" class="edge"/>
+<path d="M1184 544V680" class="edge"/>
+<path d="M976 768H944V296H832V272" class="edge"/>
+<path d="M976 800H896" class="edge"/>
+<path d="M512 768H432" class="edge"/>
+<path d="M240 680V600H704V544" class="edge"/>
+<g id="intel-connect-gate-browser">
+<rect x="48" y="104" width="384" height="168" rx="6" class="node"/>
+<text x="64" y="136" class="label">Intel Web browser</text>
+<text x="64" y="168" class="note">Use the configured advertised web origin</text>
+<text x="64" y="196" class="note">ForceCanvas topology + accessible list live here</text>
+<text x="64" y="224" class="note">Connection context is not a backend credential</text>
+<text x="64" y="252" class="minor">The native client may close independently</text>
+</g>
+<g id="intel-connect-gate-guard">
+<rect x="512" y="104" width="384" height="168" rx="6" class="node accent"/>
+<text x="528" y="136" class="label">One server-only connection guard</text>
+<text x="528" y="168" class="note">Page / RSC / prefetch / REST / action / export</text>
+<text x="528" y="196" class="note">Custom server and live upgrades use the guard</text>
+<text x="528" y="224" class="note">Resolve current backend session before access</text>
+<text x="528" y="252" class="minor">No client-only guard or developer data bypass</text>
+</g>
+<g id="intel-connect-gate-forward">
+<rect x="976" y="104" width="416" height="168" rx="6" class="node"/>
+<text x="992" y="136" class="label">Protected relay + backend validation</text>
+<text x="992" y="168" class="note">Strip forged delegation / origin-context headers</text>
+<text x="992" y="196" class="note">Attach server-derived session proof + WebRelay</text>
+<text x="992" y="224" class="note">Backend revalidates reads and durable admission</text>
+<text x="992" y="252" class="minor">No browser bearer forwarding or caller-selected upstream</text>
+</g>
+<text x="1000" y="312" class="minor">Current cookie proof returns to the same guard</text>
+<g id="intel-connect-gate-denied">
+<rect x="48" y="368" width="384" height="176" rx="6" class="node"/>
+<text x="64" y="400" class="label">No validated context: deny data</text>
+<text x="64" y="432" class="note">Pages redirect to the Connect form</text>
+<text x="64" y="460" class="note">REST / live deny; missing or revoked: 401</text>
+<text x="64" y="488" class="note">Origin: 403 · revision: 409 · outage: 503</text>
+<text x="64" y="520" class="minor">Rate-limited lookup: 429; no ID enumeration</text>
+</g>
+<g id="intel-connect-gate-form">
+<rect x="512" y="368" width="384" height="176" rx="6" class="node"/>
+<text x="528" y="400" class="label">Accessible existing-ID Connect form</text>
+<text x="528" y="432" class="mono">POST /api/connect</text>
+<text x="528" y="460" class="note">Opaque workstation ID; JSON at most 1 KiB</text>
+<text x="528" y="488" class="note">Same-origin mutation + CSRF / fetch-site checks</text>
+<text x="528" y="520" class="minor">No registration, auto-create or server launch</text>
+</g>
+<g id="intel-connect-gate-authority">
+<rect x="976" y="368" width="416" height="176" rx="6" class="node accent"/>
+<text x="992" y="400" class="label">Authoritative registry/session service</text>
+<text x="992" y="432" class="mono">POST /api/v1/connect/sessions</text>
+<text x="992" y="460" class="mono">POST /api/v1/connect/sessions/resolve</text>
+<text x="992" y="488" class="note">WebRelay + ResolveWebSession on fixed backend</text>
+<text x="992" y="520" class="minor">Create bounded to 20 attempts / minute / relay credential</text>
+</g>
+<text x="1000" y="624" class="minor">Server-only replies</text>
+<g id="intel-connect-gate-cookie">
+<rect x="976" y="680" width="416" height="200" rx="6" class="node"/>
+<text x="992" y="712" class="label">Opaque cookie, public safe context</text>
+<text x="992" y="744" class="note">Host-only HttpOnly; SameSite=Strict</text>
+<text x="992" y="772" class="note">Secure on HTTPS; authoritative 30-minute expiry</text>
+<text x="992" y="800" class="note">Public JSON contains context, never the token</text>
+<text x="992" y="828" class="note">No token in JavaScript, localStorage or URL</text>
+<text x="992" y="860" class="minor">Backend credentials remain server-only</text>
+</g>
+<g id="intel-connect-gate-current">
+<rect x="512" y="680" width="384" height="200" rx="6" class="node"/>
+<text x="528" y="712" class="label">Current context + bounded live</text>
+<text x="528" y="744" class="note">Mutations require expected context revision</text>
+<text x="528" y="772" class="note">Stale tab: 409; it cannot adopt another origin</text>
+<text x="528" y="800" class="note">Live authority recheck every 5 seconds</text>
+<text x="528" y="828" class="note">Stop forwarding at 10 seconds without proof</text>
+<text x="528" y="860" class="minor">Bounded buffers / expiry; no global fallback</text>
+</g>
+<g id="intel-connect-gate-logout">
+<rect x="48" y="680" width="384" height="200" rx="6" class="node"/>
+<text x="64" y="712" class="label">Switch or logout explicitly</text>
+<text x="64" y="744" class="mono">POST /api/connect/logout</text>
+<text x="64" y="772" class="note">Request backend revocation; clear local cookie</text>
+<text x="64" y="800" class="note">Clear scoped Query state; stop old live access</text>
+<text x="64" y="828" class="note">Reconnect through an existing registered ID</text>
+<text x="64" y="860" class="minor">An outage does not attest successful revocation</text>
+</g>
+<text x="48" y="936" class="note">The authenticated public HTTPS web URL and the fixed internal API origin are separate configuration, never browser routing input.</text>
+<text x="48" y="972" class="note">Accepted backend work continues independently of native/browser lifetime; closing a client does not request job cancellation.</text>
+<text x="48" y="1028" class="minor">Source contract only. Fixture success is not real ingress, installed-GUI, cross-architecture or publication evidence.</text>
+</svg>

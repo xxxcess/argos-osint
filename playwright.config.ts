@@ -24,11 +24,9 @@ export default defineConfig({
       ARGOS_WEB_TEST_DEV:
         development || process.env.ARGOS_WEB_TEST_DEV === "1" ? "1" : "0",
     },
-    command: development
-      ? `pnpm --dir apps/web-desktop dev --port ${port}`
-      : `node scripts/serve_web.mjs --port ${port}`,
+    command: `node apps/web-desktop/__tests__/serve-connect-fixture.mjs --port ${port}${development ? " --dev" : ""}`,
     timeout: 120_000,
-    url: `http://127.0.0.1:${port}`,
+    url: `http://127.0.0.1:${port}/connect`,
     reuseExistingServer: false,
   },
   reporter: "list",

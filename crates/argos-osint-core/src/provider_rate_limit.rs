@@ -1,14 +1,16 @@
-//! Process-wide pacing at the model HTTP boundary, shared by every caller.
+//! Pacing at the model HTTP boundary, shared by every caller.
 //!
-//! Each provider has one FIFO admission queue across models, accounts and
-//! transports. A send advances the clock from *now*, so idle time never earns
-//! a burst. Dropping a waiting future removes it without reserving a send.
+//! Each process keeps one FIFO per provider across models, accounts and
+//! transports. Network workspace processes share the provider's send clock in
+//! SurrealDB. A send advances the clock from *now*, so idle time earns no burst.
+//! A waiting caller reserves only when its send is due.
 
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use tokio::time::Instant;
 
+use crate::provider_diag::ProviderFailure;
 use crate::secrets::ProviderSecret;
 
 pub(crate) const PROVIDER_RPM: [(&str, u32); 3] =
@@ -59,7 +61,7 @@ impl Pacer {
     }
 }
 
-fn pacer(secret: &ProviderSecret) -> Option<&'static Pacer> {
+fn pacer(secret: &ProviderSecret) -> Option<(&'static str, &'static Pacer)> {
     // The binary's tests link core as a regular library, with `fixtures`
     // enabled. Their independent loopback servers must not inherit a live
     // provider clock or another fixture's scripted 429/503 cooldown.
@@ -78,7 +80,8 @@ fn pacer(secret: &ProviderSecret) -> Option<&'static Pacer> {
     static PACERS: OnceLock<[Pacer; 3]> = OnceLock::new();
     let kind = crate::provider::effective_kind(secret);
     let i = PROVIDER_RPM.iter().position(|(p, _)| *p == kind)?;
-    Some(&PACERS.get_or_init(|| PROVIDER_RPM.map(|(_, rpm)| Pacer::new(rpm)))[i])
+    let pacers = PACERS.get_or_init(|| PROVIDER_RPM.map(|(_, rpm)| Pacer::new(rpm)));
+    Some((PROVIDER_RPM[i].0, &pacers[i]))
 }
 
 // Mock transports in other unit tests do not share live provider quota state
@@ -91,7 +94,7 @@ tokio::task_local! {
 
 /// Wait immediately before sending, after compilation and authorization.
 /// No request deadline or retry sleep includes this queue residence.
-pub(crate) async fn wait(secret: &ProviderSecret) {
+pub(crate) async fn wait(secret: &ProviderSecret) -> Result<(), ProviderFailure> {
     #[cfg(test)]
     {
         if let Ok(pacer) = TEST_PACER.try_with(Clone::clone) {
@@ -100,26 +103,88 @@ pub(crate) async fn wait(secret: &ProviderSecret) {
         let _ = secret;
     }
     #[cfg(not(test))]
-    if let Some(pacer) = pacer(secret) {
+    if let Some((_provider, pacer)) = pacer(secret) {
+        #[cfg(feature = "surreal")]
+        if crate::storage::runtime::uses_network_storage() {
+            return wait_shared(_provider, pacer).await;
+        }
         pacer.wait().await;
+    }
+    Ok(())
+}
+
+#[cfg(all(not(test), feature = "surreal"))]
+const SHARED_STORAGE_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[cfg(all(not(test), feature = "surreal"))]
+async fn wait_shared(provider: &str, pacer: &Pacer) -> Result<(), ProviderFailure> {
+    use crate::provider_diag::{Category, Stage};
+    use crate::storage::{provider_pacer, runtime};
+
+    let _turn = pacer.queue.lock().await;
+    loop {
+        let local_until = *pacer.not_before.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(at) = local_until.filter(|at| *at > Instant::now()) {
+            tokio::time::sleep_until(at).await;
+            continue;
+        }
+        let result = tokio::time::timeout(SHARED_STORAGE_TIMEOUT, async {
+            let repo = runtime::repository().await?;
+            Ok::<_, anyhow::Error>(
+                provider_pacer::reserve(repo.db(), provider, pacer.interval).await?,
+            )
+        })
+        .await;
+        match result {
+            Ok(Ok(Some(wait))) => tokio::time::sleep(wait).await,
+            Ok(Ok(None)) => return Ok(()),
+            _ => {
+                return Err(ProviderFailure::new(
+                    Stage::Admission,
+                    Category::Persistence,
+                    "shared provider admission storage is unavailable",
+                ));
+            }
+        }
     }
 }
 
-fn defer(secret: &ProviderSecret, delay: Duration) {
+async fn defer(secret: &ProviderSecret, delay: Duration) {
     #[cfg(test)]
     {
         let _ = TEST_PACER.try_with(|pacer| pacer.defer(delay));
         let _ = secret;
     }
     #[cfg(not(test))]
-    if let Some(pacer) = pacer(secret) {
+    if let Some((_provider, pacer)) = pacer(secret) {
         pacer.defer(delay);
+        #[cfg(feature = "surreal")]
+        if crate::storage::runtime::uses_network_storage() {
+            let result = tokio::time::timeout(SHARED_STORAGE_TIMEOUT, async {
+                use crate::storage::{provider_pacer, runtime};
+
+                let repo = runtime::repository().await?;
+                provider_pacer::defer(repo.db(), _provider, delay).await?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await;
+            if !matches!(result, Ok(Ok(()))) {
+                tracing::warn!(
+                    provider = _provider,
+                    "could not persist shared provider cooldown"
+                );
+            }
+        }
     }
 }
 
 /// Apply feedback even on the last attempt or when switching fallback routes.
 /// Retry ownership stays with provider_chain; this only delays future sends.
-pub(crate) fn response(secret: &ProviderSecret, status: u16, headers: &reqwest::header::HeaderMap) {
+pub(crate) async fn response(
+    secret: &ProviderSecret,
+    status: u16,
+    headers: &reqwest::header::HeaderMap,
+) {
     if status < 400 {
         return;
     }
@@ -129,11 +194,11 @@ pub(crate) fn response(secret: &ProviderSecret, status: u16, headers: &reqwest::
         _ => None,
     });
     if let Some(delay) = delay {
-        defer(secret, delay);
+        defer(secret, delay).await;
     }
 }
 
-pub(crate) fn failure(secret: &ProviderSecret, failure: &crate::provider_diag::ProviderFailure) {
+pub(crate) async fn failure(secret: &ProviderSecret, failure: &ProviderFailure) {
     // HTTP errors already update the clock at response headers. This covers
     // rate limits and overloads delivered inside an HTTP-200 event stream.
     if failure.http_status.is_some_and(|s| s >= 400) {
@@ -146,7 +211,7 @@ pub(crate) fn failure(secret: &ProviderSecret, failure: &crate::provider_diag::P
         _ => None,
     };
     if let Some(delay) = failure.retry_after_ms.map(Duration::from_millis).or(delay) {
-        defer(secret, delay);
+        defer(secret, delay).await;
     }
 }
 
@@ -161,9 +226,9 @@ mod tests {
         let mut b = a.clone();
         b.model = "other-model".into();
         b.base_url = "https://other-proxy.example/v1".into();
-        assert!(std::ptr::eq(pacer(&a).unwrap(), pacer(&b).unwrap()));
+        assert!(std::ptr::eq(pacer(&a).unwrap().1, pacer(&b).unwrap().1));
         b.kind = "google".into();
-        assert!(!std::ptr::eq(pacer(&a).unwrap(), pacer(&b).unwrap()));
+        assert!(!std::ptr::eq(pacer(&a).unwrap().1, pacer(&b).unwrap().1));
         b.kind = "local".into();
         assert!(pacer(&b).is_none());
     }
@@ -261,14 +326,14 @@ mod tests {
                 let secret = crate::provider_attempt::mock::secret("https://openrouter.ai/api/v1");
                 let mut headers = reqwest::header::HeaderMap::new();
                 headers.insert("retry-after", "600".parse().unwrap());
-                response(&secret, 429, &headers);
+                response(&secret, 429, &headers).await;
                 let start = Instant::now();
                 pacer.wait().await;
                 assert_eq!(start.elapsed(), Duration::from_secs(600));
-                response(&secret, 429, &reqwest::header::HeaderMap::new());
+                response(&secret, 429, &reqwest::header::HeaderMap::new()).await;
                 pacer.wait().await;
                 assert_eq!(start.elapsed(), Duration::from_secs(660));
-                response(&secret, 503, &reqwest::header::HeaderMap::new());
+                response(&secret, 503, &reqwest::header::HeaderMap::new()).await;
                 pacer.wait().await;
                 assert_eq!(start.elapsed(), Duration::from_secs(670));
             })

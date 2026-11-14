@@ -2,21 +2,13 @@
 
 [Code route](index.md) · [Concept route](../concepts/index.md)
 
-All paths below belong to [argos-osint-core/src](../../../crates/argos-osint-core/src). Read [architecture](architecture.md) alongside source; use [storage](storage.md) for durable state.
+All paths below belong to [argos-osint-core/src](../../../crates/argos-osint-core/src). Read [architecture](architecture.md) alongside source; use [storage](storage.md) for durable state. The [Fleetworks architecture](architecture.md#fleetworks-service-boundaries) maps these core workflows to the API host and its worker roles.
 
-## Recon
+## Retained provider and tool execution
 
 `@tag:recon-flow` · `@tag:recon-bindings`
 
-Typed bindings gained actor association + original byte spans (span_start/span_end, half-open); actor association set only on subject-owned handles; appearance alone never proves ownership; model extraction quotes verified source evidence.
-
-[recon.rs](../../../crates/argos-osint-core/src/recon.rs) exposes investigations and orchestration. Follow [investigation/](../../../crates/argos-osint-core/src/recon/investigation) for binding/picking and [tool_io.rs](../../../crates/argos-osint-core/src/recon/investigation/tool_io.rs) for tool input/output contracts. Start with the [turn figure](../../diagrams/recon-turn.html) and [binding flow](../../diagrams/recon-bindings.html). Changes to tool contracts need coverage of binding kinds, extractors and producers.
-
-Mode classification is local-first: explicit prompt signals resolve with zero model calls; the `recon_decisions` bounded gate runs only when consequential; gate failures surface as diagnostics in plan binding_notes (no silent fallback).
-
-Plan artifacts produced once per plan: `Directive` carries required_evidence / queries / depends_on; dependencies restricted to earlier directive ids; opening discovery reuses the plan's query candidates (no second generation call); Jev picker request state carries directive depends_on.
-
-Missing inputs trigger one grounded discovery attempt per starved step; material-gap replan runs at most once per turn; fallback stops on repeated no progress (4 consecutive settled calls); compaction is threshold-only (NLP mode no longer forces compaction); turn-start catalog actor discovery note/binding seeding; discovery now searches both actor and article indexes (recon/orchestrate.rs discover_catalog_articles / replan_discovery).
+[model_exec.rs](../../../crates/argos-osint-core/src/model_exec.rs) owns shared model execution, including route fallback, cancellation, and attempt reporting. The tool executor and [tool contracts](../../../crates/argos-osint-core/src/recon/investigation/tool_io.rs) still share the investigation infrastructure for typed bindings, source spans, and validated producer relationships. The [provider guide](../concepts/providers.md) covers current route selection, pacing and admission.
 
 ## Discovery services composition
 
@@ -24,7 +16,7 @@ Missing inputs trigger one grounded discovery attempt per starved step; material
 - **`search_actor_aliases`** — aliases with strength `curated`/`catalog`/`learned`, `alias_type`, `provenance`; ambiguous when >1 live owner; exact + bounded prefix tiers on the alias index; owner-union merge.
 - **`search_articles`** — two per-field FULLTEXT BM25 statements on schema-v2 title/description indexes; title weighted above description-only; deterministic ties; matched-field attribution; rank = BM25 of matched field — relevance is NOT confidence; bounded excerpt on original byte offsets; dedup by article id; cursor ≤4096, page ≤50; category-membership/day/source/run filters; related candidates exclude the seed and are not corroboration; stale/pending/discarded/deleted hits rejected by construction — canonical corpus is admitted-only.
 
-Turn-start and material-gap discovery now search BOTH actor and article indexes (recon/orchestrate.rs discover_catalog_articles / replan_discovery). Lookup never creates actors or claims; Jev cannot override identity ambiguity.
+Discovery lookup reads existing actor and article records. It preserves identity ambiguity and performs no actor or claim publication.
 
 ## Intel
 
@@ -42,13 +34,13 @@ The UI-independent [Intel service](../../../crates/argos-osint-core/src/intel_se
 
 [atlas.rs](../../../crates/argos-osint-core/src/atlas.rs) collects and classifies; [atlas_store.rs](../../../crates/argos-osint-core/src/atlas_store.rs) is the store-facing entry. Read the [classification and Related contract](../concepts/atlas-classification-and-related-articles.md) and [cycle figure](../../diagrams/atlas-pipeline.html). Keep tentative article leads distinct from published memory.
 
-Current local admission uses `strategic-domains-v1`, six independent domains and exactly two qualifying memberships. Native readers require current taxonomy/admission/publication authority before interpreting those labels. `atlas-taxonomy-v2` and its seven-topic strings remain explicit historical data; legacy `economic` does not establish the new Economic domain. Historical rejection preserves original tags and published evidence.
+Atlas scores the six `strategic-domains-v1` domains independently. Admission requires a qualifying primary and can retain a second qualifying domain. Native readers require current taxonomy/admission/publication authority before interpreting those labels. `atlas-taxonomy-v2` and its seven-topic strings remain explicit historical data; legacy `economic` does not establish the new Economic domain. Historical rejection preserves original tags and published evidence.
 
 ## Classifier
 
 @tag:classifier · @tag:atlas-taxonomy
 
-[classifier/mod.rs](../../../crates/argos-osint-core/src/classifier/mod.rs) exposes the independent classifier feature and re-exports the taxonomy leaf. Engine/artifact/training, bounded dataset parsing and shared home management supply the local model lifecycle. CLI and Venture consume the shared readiness/manual-job DTOs; TUI Profile stores dataset and artifact paths. The feature is wired across all four workspace crates; disabled builds report unavailable. Atlas consumes the local adapter and pinned preflight; durable historical admission and provider monitoring run in separate pools. See the [classifier implementation](classifier.md) and its [acceptance evidence and limitations](../../../.planning/2026-11-05-atlas-performance-completion/acceptance.md).
+[classifier/mod.rs](../../../crates/argos-osint-core/src/classifier/mod.rs) exposes the independent classifier feature and re-exports the taxonomy leaf. New Atlas cycles pin a native Rust-BERT worker and its checkpoint before acquisition. Native readiness probes backend-owned model state without opening local engines. Shared Profile configuration stores backend dataset and classifier paths. Legacy Natural management retains QuickJS, bounded dataset parsing and immutable artifacts for historical replay. The feature is wired through Core, API and the backend service host. Disabled builds report unavailable. Durable historical admission and provider monitoring run in separate pools. See the [classifier implementation](classifier.md) and its [acceptance evidence and limitations](../../../.planning/2026-11-05-atlas-performance-completion/acceptance.md).
 
 [atlas_taxonomy.rs](../../../crates/argos-osint-core/src/atlas_taxonomy.rs) — leaf owning the six domain IDs + official names + `strategic-domains-v1` + explicit legacy identifiers + membership/validation helpers; integration direction `atlas_taxonomy ← {classifier, atlas, related_articles, storage, intel_service, article_discovery}`; the leaf does not import the classifier engine, nlp, storage, or orchestration.
 
@@ -62,7 +54,7 @@ Classifier status vocabulary: `missing / ready / training / invalid / incompatib
 
 [brain.rs](../../../crates/argos-osint-core/src/brain.rs) defines memory/provenance concepts and recall scoring; [store.rs](../../../crates/argos-osint-core/src/store.rs) exposes persistence-facing operations. Follow [storage/recall.rs](../../../crates/argos-osint-core/src/storage/recall.rs) for retrieval. Read [source lifecycle](../../diagrams/brain-source-lifecycle.html) and [topology](../concepts/topology-mapper.md) before changing eligibility or associations.
 
-Actor sourcing and Venture seed behavior are defined by the [seeded catalog](actor-catalog.md), implemented in [actor_catalog.rs](../../../crates/argos-osint-core/src/actor_catalog.rs) and [storage/actor_catalog.rs](../../../crates/argos-osint-core/src/storage/actor_catalog.rs).
+Actor sourcing and catalog ingestion are defined by the [seeded catalog](actor-catalog.md), implemented in [actor_catalog.rs](../../../crates/argos-osint-core/src/actor_catalog.rs) and [storage/actor_catalog.rs](../../../crates/argos-osint-core/src/storage/actor_catalog.rs).
 
 ## Providers and tool adapters
 

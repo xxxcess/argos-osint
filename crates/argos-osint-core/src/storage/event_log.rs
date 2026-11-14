@@ -33,6 +33,7 @@ use surrealdb::Surreal;
 
 use super::counters;
 use super::jobs::{rid, run, take};
+use super::jobs_client::{self, LogCommand};
 use super::tx::{run_tx, Tx, TxError};
 use crate::events::{
     bound, new_event_id, redact, severity_rank, EventFilter, EventRow, NewEvent, Severity,
@@ -202,6 +203,27 @@ pub async fn record_event(db: &Surreal<Any>, event: &NewEvent) -> Result<String>
         resource_ref: event.resource_ref.clone(),
         correlation_id: event.correlation_id.clone(),
     };
+    if jobs_client::configured() {
+        let row = EventRow {
+            id,
+            seq: 0,
+            ts: content.ts,
+            severity: content.severity,
+            app: content.app,
+            event_type: content.event_type,
+            message: content.message,
+            details: content.details,
+            job_id: content.job_id,
+            task_id: content.task_id,
+            attempt_id: content.attempt_id,
+            run_id: content.run_id,
+            resource_ref: content.resource_ref,
+            correlation_id: content.correlation_id,
+        };
+        return Ok(serde_json::from_value(
+            jobs_client::execute(LogCommand::Append { event: row }).await?,
+        )?);
+    }
     let key = id.clone();
     run_tx(db, counters::HOT_RECORD_POLICY, |tx| {
         let content = content.clone();
@@ -255,19 +277,34 @@ pub async fn list_events(
         sql.push_str(" AND seq < $before");
     }
     sql.push_str(" ORDER BY seq DESC LIMIT $limit");
-    let mut r = db
-        .query(sql)
-        .bind(("rank", filter.min_severity.map(severity_rank).unwrap_or(0)))
-        .bind(("app", filter.app.clone()))
-        .bind(("jobs", jobs.clone()))
-        .bind(("text", filter.text.replace('%', "")))
-        .bind(("since", filter.since.clone()))
-        .bind(("before", filter.before_seq.unwrap_or(0)))
-        .bind(("limit", limit.max(1) as i64))
-        .await?
-        .check()?;
-    let rows: Vec<StoredEvent> = r.take(0)?;
-    let mut rows: Vec<EventRow> = rows.into_iter().map(EventRow::from).collect();
+    let mut rows: Vec<EventRow> = if jobs_client::configured() {
+        serde_json::from_value(
+            jobs_client::execute(LogCommand::List {
+                min_rank: filter.min_severity.map(severity_rank),
+                app: filter.app.clone(),
+                job_ids: jobs.clone(),
+                text: filter.text.replace('%', ""),
+                since: filter.since.clone(),
+                before_seq: filter.before_seq,
+                limit: limit.max(1),
+            })
+            .await?,
+        )?
+    } else {
+        let mut r = db
+            .query(sql)
+            .bind(("rank", filter.min_severity.map(severity_rank).unwrap_or(0)))
+            .bind(("app", filter.app.clone()))
+            .bind(("jobs", jobs.clone()))
+            .bind(("text", filter.text.replace('%', "")))
+            .bind(("since", filter.since.clone()))
+            .bind(("before", filter.before_seq.unwrap_or(0)))
+            .bind(("limit", limit.max(1) as i64))
+            .await?
+            .check()?;
+        let rows: Vec<StoredEvent> = r.take(0)?;
+        rows.into_iter().map(EventRow::from).collect()
+    };
     if !filter.job_id.is_empty() && filter.before_seq.is_none() {
         // Retry/lifecycle records counted by Jobs are also readable from its Logs action.
         let mut r = db.query("SELECT record::id(id) AS key, <string>ts AS ts, severity, app, event_type, message, job_id FROM job_event WHERE job_id IN $jobs AND ($app = '' OR app = $app) AND ($since = '' OR ts >= <datetime>$since) AND severity IN $levels AND ($text = '' OR string::contains(message, $text)) ORDER BY ts DESC LIMIT $limit")
@@ -353,6 +390,11 @@ pub async fn get_event(db: &Surreal<Any>, id: &str) -> Result<Option<EventRow>> 
     if id.is_empty() {
         return Ok(None);
     }
+    if jobs_client::configured() {
+        return Ok(serde_json::from_value(
+            jobs_client::execute(LogCommand::Get { id: id.to_owned() }).await?,
+        )?);
+    }
     let mut r = db
         .query(format!("SELECT {EVENT_COLS} FROM ONLY $e"))
         .bind(("e", rid("argos_event", id)))
@@ -366,6 +408,11 @@ pub async fn get_event(db: &Surreal<Any>, id: &str) -> Result<Option<EventRow>> 
 /// Touches only `argos_event`.
 pub async fn prune_events(db: &Surreal<Any>, hours: i64) -> Result<usize> {
     let cutoff = (chrono::Utc::now() - chrono::Duration::hours(hours)).to_rfc3339();
+    if jobs_client::configured() {
+        return Ok(serde_json::from_value(
+            jobs_client::execute(LogCommand::Prune { before: cutoff }).await?,
+        )?);
+    }
     let mut r = db
         .query(
             "LET $gone = (DELETE argos_event WHERE ts < $cutoff RETURN BEFORE);
@@ -381,6 +428,11 @@ pub async fn prune_events(db: &Surreal<Any>, hours: i64) -> Result<usize> {
 /// `events::clear_events` on SurrealDB (Logs "Clear log"). Touches only
 /// `argos_event`: jobs, task results and memories are kept.
 pub async fn clear_events(db: &Surreal<Any>) -> Result<usize> {
+    if jobs_client::configured() {
+        return Ok(serde_json::from_value(
+            jobs_client::execute(LogCommand::Clear).await?,
+        )?);
+    }
     let mut r = db
         .query(
             "LET $gone = (DELETE argos_event RETURN BEFORE);
@@ -402,6 +454,11 @@ struct SeverityCount {
 /// header (unknown severities count as info) and errors in the last hour.
 pub async fn event_counts(db: &Surreal<Any>) -> Result<EventCounts> {
     let hour = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+    if jobs_client::configured() {
+        return Ok(serde_json::from_value(
+            jobs_client::execute(LogCommand::Counts { since: hour }).await?,
+        )?);
+    }
     let mut r = db
         .query(
             "SELECT severity, count() AS n FROM argos_event GROUP BY severity;
@@ -441,6 +498,11 @@ struct AppCount {
 /// order, and neither side folds case), so the output order and contents are
 /// unchanged.
 pub async fn event_apps(db: &Surreal<Any>) -> Result<Vec<String>> {
+    if jobs_client::configured() {
+        return Ok(serde_json::from_value(
+            jobs_client::execute(LogCommand::Apps).await?,
+        )?);
+    }
     let mut r = db
         .query("SELECT app, count() AS n FROM argos_event WHERE app != '' GROUP BY app;")
         .await?

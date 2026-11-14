@@ -1,4 +1,14 @@
-import { rustOrigin } from "../server-origin.mjs";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
+import { Readable } from "node:stream";
+import { directAgent, rustUpstream } from "../server-origin.mjs";
+import {
+  connectFailureResponse,
+  connectionProofHeaders,
+  requireConnection,
+  requireWebBoundary,
+} from "../connect-session.mjs";
+import type { ServerConnection } from "../connect-session.mjs";
 /** @tag:api-proxy — Server-only Rust transport. Browser requests can never select its destination. */
 const routes = new Map([
   ["health/ready", "GET"],
@@ -22,7 +32,8 @@ const routes = new Map([
   ["topology/summary/generate", "POST"],
 ]);
 const headers = {
-  "cache-control": "no-store",
+  "cache-control": "private, no-store, max-age=0",
+  vary: "Cookie, Origin",
   "x-content-type-options": "nosniff",
 };
 const failure = (status: number, error: string) =>
@@ -37,29 +48,34 @@ export async function proxyRust(
   if (!method) return failure(404, "Unknown API route");
   if (request.method !== method) return failure(405, "Method not allowed");
   const url = new URL(request.url);
-  const host = request.headers.get("host");
-  let presented: URL;
-  try {
-    presented = new URL(`${url.protocol}//${host || url.host}`);
-    if (
-      !["127.0.0.1", "localhost"].includes(presented.hostname) ||
-      presented.port !== url.port
-    )
-      return failure(403, "Host refused");
-  } catch {
-    return failure(403, "Host refused");
-  }
-  const origin = request.headers.get("origin");
   if (
-    // Next can reconstruct request.url with its internal hostname. The
-    // browser's origin must match the validated incoming Host instead.
-    (origin && origin !== presented.origin) ||
-    (!origin && request.headers.get("sec-fetch-site") === "cross-site")
+    [...url.searchParams.keys()].some((key) =>
+      [
+        "workspace",
+        "workspace_id",
+        "workspace_name",
+        "workspace_marker",
+      ].includes(key),
+    )
   )
-    return failure(403, "Origin refused");
+    return failure(
+      400,
+      "Legacy workspace scope is unsupported; reconnect with a workstation Connect ID",
+    );
+  try {
+    await requireWebBoundary(request, method === "POST");
+  } catch (error) {
+    return connectFailureResponse(error);
+  }
   let body: string | undefined;
   if (method === "POST") {
-    if (!request.headers.get("content-type")?.startsWith("application/json"))
+    if (
+      request.headers
+        .get("content-type")
+        ?.split(";")[0]
+        .trim()
+        .toLowerCase() !== "application/json"
+    )
       return failure(415, "JSON required");
     const reader = request.body?.getReader();
     const chunks: Uint8Array[] = [];
@@ -84,17 +100,30 @@ export async function proxyRust(
     }
     body = new TextDecoder().decode(data);
   }
+  let session: ServerConnection;
   try {
-    const target = new URL(`/api/v1/${endpoint}`, rustOrigin());
+    session = await requireConnection(request, { mutation: method === "POST" });
+  } catch (error) {
+    return connectFailureResponse(error);
+  }
+  try {
+    const upstream = await rustUpstream();
+    const target = new URL(`/api/v1/${endpoint}`, upstream.origin);
     target.search = url.search;
-    const response = await fetch(target, {
+    const signal = AbortSignal.any([
+      request.signal,
+      AbortSignal.timeout(55000),
+    ]);
+    if (!upstream.authorization)
+      return failure(503, "Connection authority unavailable");
+    const response = await directRustRequest(
+      target,
       method,
       body,
-      cache: "no-store",
-      redirect: "error",
-      headers: body === undefined ? {} : { "content-type": "application/json" },
-      signal: AbortSignal.any([request.signal, AbortSignal.timeout(55000)]),
-    });
+      signal,
+      upstream.authorization,
+      connectionProofHeaders(session),
+    );
     return new Response(response.body, {
       status: response.status,
       headers: {
@@ -105,7 +134,55 @@ export async function proxyRust(
   } catch {
     return failure(
       503,
-      "Workspace service unavailable; retry or inspect server diagnostics",
+      "Backend service unavailable; retry or inspect server diagnostics",
     );
   }
+}
+
+/** Use a dedicated direct HTTP agent when an upstream bearer is present. */
+function directRustRequest(
+  target: URL,
+  method: string,
+  body: string | undefined,
+  signal: AbortSignal,
+  authorization: string,
+  contextHeaders: Record<string, string>,
+): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    const request = target.protocol === "https:" ? httpsRequest : httpRequest;
+    const upstream = request(
+      target,
+      {
+        method,
+        signal,
+        agent: directAgent(target),
+        headers: {
+          host: target.host,
+          authorization,
+          ...contextHeaders,
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+        },
+      },
+      (reply) => {
+        const status = reply.statusCode;
+        if (
+          status === undefined ||
+          status < 200 ||
+          status > 599 ||
+          (status >= 300 && status < 400)
+        ) {
+          reply.destroy();
+          reject(new Error("Invalid Rust API response"));
+          return;
+        }
+        const data =
+          status === 204 || status === 205
+            ? null
+            : (Readable.toWeb(reply) as ReadableStream<Uint8Array>);
+        resolve(new Response(data, { status }));
+      },
+    );
+    upstream.once("error", reject);
+    upstream.end(body);
+  });
 }

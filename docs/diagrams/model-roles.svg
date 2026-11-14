@@ -1,46 +1,44 @@
-<svg role="img" aria-labelledby="model-roles-title model-roles-desc" viewBox="0 0 800 312" xmlns="http://www.w3.org/2000/svg">
-         <title id="model-roles-title">Models and roles</title>
-         <desc id="model-roles-desc">auth.json holds accounts. config.toml holds independent role assignments. Saving a key never writes a default. Legacy OpenAI stays until the user reassigns them. Six canonical model roles: recon_agent, recon_decisions, recon_analyst, atlas_evaluator, atlas_analyst, brain_summary (provider.rs). One-time migrate_pipeline_roles migration; preserve_pipeline_settings guards: non-TOML bodies pass through, blank role fields preserve archived routes, conflicting non-blank edits bail. TUI Defaults/Model-roles screens edit these six canonical roles directly via canonical keys (recon_agent, recon_decisions, recon_analyst, atlas_evaluator, atlas_analyst, brain_summary); the former Claim-Assessor editor now targets atlas_analyst (generation-only; incompatible-fallback gated), Evidence-Curator and Entity-Resolver are labeled ARCHIVED (caller-dependent, retired with investigation_controller), model-roles rows show inheritance via canonical keys (e.g. ← atlas_analyst), and the fast preset follows brain_summary.</desc>
-
-         <defs>
-           <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
-           <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#eb6c36"/></marker>
-           <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
-         </defs>
-
-         <rect width="800" height="312" fill="#f5f5f5"/>
-
-         <path d="M400 116 V140" fill="none" stroke="#eb6c36" stroke-width="1.2" marker-end="url(#arrow-accent)"/>
-         <path d="M180 116 V140" fill="none" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
-         <path d="M620 116 V140" fill="none" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
-         <path d="M180 224 V248" fill="none" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
-         <path d="M400 224 V248" fill="none" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
-         <path d="M620 224 V248" fill="none" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
-         <rect x="100" y="32" width="160" height="80" rx="6" fill="#fff" stroke="#2d3142" stroke-width="1"/>
-         <text x="180.0" y="60" text-anchor="middle" font-family="Geist,system-ui,sans-serif" font-size="13" font-weight="600" fill="#2d3142">OpenRouter</text>
-         <text x="180.0" y="78" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">key + catalog</text>
-         <rect x="320" y="32" width="160" height="80" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1.2"/>
-         <text x="400.0" y="60" text-anchor="middle" font-family="Geist,system-ui,sans-serif" font-size="13" font-weight="600" fill="#2d3142">Defaults</text>
-         <text x="400.0" y="78" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">role selector</text>
-         <rect x="540" y="32" width="160" height="80" rx="6" fill="#fff" stroke="#2d3142" stroke-width="1"/>
-         <text x="620.0" y="60" text-anchor="middle" font-family="Geist,system-ui,sans-serif" font-size="13" font-weight="600" fill="#2d3142">Google / Nvidia</text>
-         <text x="620.0" y="78" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">OpenAI-compat</text>
-         <rect x="100" y="144" width="160" height="80" rx="6" fill="#fff" stroke="#2d3142" stroke-width="1"/>
-         <text x="180.0" y="172" text-anchor="middle" font-family="Geist,system-ui,sans-serif" font-size="13" font-weight="600" fill="#2d3142">recon_agent</text>
-         <text x="180.0" y="190" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">directives + bindings</text>
-         <rect x="320" y="144" width="160" height="80" rx="6" fill="#fff" stroke="#2d3142" stroke-width="1"/>
-         <text x="400.0" y="172" text-anchor="middle" font-family="Geist,system-ui,sans-serif" font-size="13" font-weight="600" fill="#2d3142">recon_decisions</text>
-         <text x="400.0" y="190" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">JeV decisions</text>
-         <rect x="540" y="144" width="160" height="80" rx="6" fill="#fff" stroke="#2d3142" stroke-width="1"/>
-         <text x="620.0" y="172" text-anchor="middle" font-family="Geist,system-ui,sans-serif" font-size="13" font-weight="600" fill="#2d3142">recon_analyst</text>
-         <text x="620.0" y="190" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">analysis & extraction</text>
-         <rect x="100" y="256" width="160" height="56" rx="6" fill="#fff" stroke="#2d3142" stroke-width="1"/>
-         <text x="180.0" y="284" text-anchor="middle" font-family="Geist,system-ui,sans-serif" font-size="13" font-weight="600" fill="#2d3142">atlas_evaluator</text>
-         <text x="180.0" y="298" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">article classification</text>
-         <rect x="320" y="256" width="160" height="56" rx="6" fill="#fff" stroke="#2d3142" stroke-width="1"/>
-         <text x="400.0" y="284" text-anchor="middle" font-family="Geist,system-ui,sans-serif" font-size="13" font-weight="600" fill="#2d3142">atlas_analyst</text>
-         <text x="400.0" y="298" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">entity resolution</text>
-         <rect x="540" y="256" width="160" height="56" rx="6" fill="#fff" stroke="#2d3142" stroke-width="1"/>
-         <text x="620.0" y="284" text-anchor="middle" font-family="Geist,system-ui,sans-serif" font-size="13" font-weight="600" fill="#2d3142">brain_summary</text>
-         <text x="620.0" y="298" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">graph summaries</text>
-       </svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 368" role="img" aria-labelledby="model-roles-title model-roles-desc">
+<title id="model-roles-title">Fleetworks model routing</title>
+<desc id="model-roles-desc">A model-backed operation resolves its configured role chain and uses a compatible provider route. Atlas live domain admission uses its own Rust-BERT classifier.</desc>
+<defs>
+  <marker id="model-roles-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker>
+</defs>
+<style>
+  text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}
+  .heading{font-family:'Instrument Serif',Georgia,serif;font-size:24px}
+  .label{font-size:16px;font-weight:600}
+  .note{font-size:13px}
+  .code{font:12px 'Geist Mono',ui-monospace,monospace}
+  .zone{font-size:12px;font-weight:600;letter-spacing:1px}
+  .node{fill:white;stroke:#4f5d75}
+  .accent{fill:#fff6ed;stroke:#eb6c36}
+  .edge,.flow{fill:none;stroke:#4f5d75;stroke-width:1.5}
+  .edge{marker-end:url(#model-roles-arrow)}
+</style>
+<rect width="960" height="368" fill="#f5f5f5"/>
+<text x="40" y="36" class="heading" text-anchor="start">Select a route by the operation’s output contract</text>
+<path d="M244 124H296" class="edge"/>
+<path d="M500 124H552V92H604" class="edge"/>
+<path d="M552 124V212H604" class="edge"/>
+<path d="M244 292H296" class="edge"/>
+<rect x="40" y="84" width="204" height="80" rx="6" class="node"/>
+<text x="142" y="121" class="label" text-anchor="middle">Model operation</text>
+<text x="142" y="139" class="note" text-anchor="middle">Decision, JSON, or prose</text>
+<rect x="296" y="84" width="204" height="80" rx="6" class="accent"/>
+<text x="398" y="121" class="label" text-anchor="middle">Role defaults</text>
+<text x="398" y="139" class="note" text-anchor="middle">Resolve primary and fallbacks</text>
+<rect x="604" y="56" width="316" height="72" rx="6" class="node"/>
+<text x="762" y="89" class="label" text-anchor="middle">Native decisions</text>
+<text x="762" y="107" class="note" text-anchor="middle">Jev through OpenRouter</text>
+<rect x="604" y="176" width="316" height="72" rx="6" class="node"/>
+<text x="762" y="209" class="label" text-anchor="middle">Chat-capable route</text>
+<text x="762" y="227" class="note" text-anchor="middle">Provider adapter + configured model</text>
+<rect x="40" y="252" width="204" height="80" rx="6" class="node"/>
+<text x="142" y="289" class="label" text-anchor="middle">Atlas admission</text>
+<text x="142" y="307" class="note" text-anchor="middle">Article metadata</text>
+<rect x="296" y="252" width="204" height="80" rx="6" class="accent"/>
+<text x="398" y="289" class="label" text-anchor="middle">Private Rust-BERT</text>
+<text x="398" y="307" class="note" text-anchor="middle">Pinned zero-shot scoring</text>
+<text x="604" y="300" class="note" text-anchor="start">The Models client shows role defaults.</text>
+</svg>

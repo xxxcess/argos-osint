@@ -1,0 +1,43 @@
+# Optional Intel Web overlay: combine with compose.native-review.yml.
+# Provision its explicit loopback port with native_review.py init --web-port.
+services:
+  api:
+    environment:
+      FLEETWORKS_INTEL_WEB_URL: ${FLEETWORKS_WEB_ORIGIN:?Provision a Web origin}
+
+  web:
+    image: ${FLEETWORKS_WEB_IMAGE:?Provision the isolated Web image}
+    pull_policy: never
+    platform: ${PLATFORM}
+    user: "${FLEETWORKS_UID}:${FLEETWORKS_GID}"
+    restart: unless-stopped
+    environment:
+      HOME: /tmp
+      PORT: "3000"
+      FLEETWORKS_WEB_BIND: 0.0.0.0
+      FLEETWORKS_WEB_ORIGIN: ${FLEETWORKS_WEB_ORIGIN:?Provision a Web origin}
+      FLEETWORKS_API_ORIGIN: http://api:8080
+      FLEETWORKS_API_TOKEN_FILE: /run/secrets/gateway_web_token
+    secrets: [gateway_web_token]
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - target: 3000
+        published: "${FLEETWORKS_WEB_PORT:?Provision an unused Web port}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    healthcheck:
+      test: [CMD, node, /usr/local/lib/fleetworks/check-web.mjs]
+      interval: 5s
+      timeout: 4s
+      start_period: 15s
+      retries: 6
+    tmpfs:
+      - /tmp
+      - /opt/fleetworks-web/apps/web-desktop/.next/cache:mode=1777
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    stop_grace_period: 30s

@@ -27,6 +27,10 @@ pub struct AuthFile {
     /// longer supports them. Never serialized.
     #[serde(skip)]
     pub dropped_providers: Vec<String>,
+    /// The loaded copy dropped API keys because this process delegates model
+    /// calls. Saving it would erase the execution service's credentials.
+    #[serde(skip)]
+    pub(crate) credentials_withheld: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -64,6 +68,7 @@ struct AuthStamp {
 }
 
 struct CachedAuth {
+    path: std::path::PathBuf,
     stamp: AuthStamp,
     auth: AuthFile,
 }
@@ -195,7 +200,7 @@ impl AuthFile {
             if let Some(hit) = guard.as_ref() {
                 // No mtime means the stamp cannot tell a rewrite apart:
                 // treat it as a miss.
-                if stamp.modified.is_some() && hit.stamp == stamp {
+                if hit.path == path && stamp.modified.is_some() && hit.stamp == stamp {
                     return Ok(hit.auth.clone());
                 }
             }
@@ -204,6 +209,7 @@ impl AuthFile {
         let stamp = auth_stamp(&path);
         let mut guard = AUTH_CACHE.write().unwrap_or_else(|err| err.into_inner());
         *guard = Some(CachedAuth {
+            path,
             stamp,
             auth: auth.clone(),
         });
@@ -214,6 +220,14 @@ impl AuthFile {
     /// legacy `research` / `gmail` slots away; the migration rewrite itself goes
     /// through the commit store's secure primitive.
     pub fn load_from(path: &Path) -> Result<Self> {
+        if let Some(root) = crate::current_configuration::network_root()? {
+            anyhow::ensure!(path == root.join("auth.json"), "network auth path mismatch");
+            let mut auth = crate::current_configuration::read_auth(&root)?;
+            if crate::provider::execution_holds_provider_credentials() {
+                auth.withhold_delegated_keys();
+            }
+            return Ok(auth);
+        }
         if !path.exists() {
             return Ok(Self::default());
         }
@@ -228,7 +242,31 @@ impl AuthFile {
         if legacy {
             auth.save_to(path)?;
         }
+        if crate::provider::execution_holds_provider_credentials() {
+            auth.withhold_delegated_keys();
+        }
         Ok(auth)
+    }
+
+    /// Drop API keys for transports the execution service owns. Local and
+    /// subscription connections stay intact.
+    pub fn withhold_delegated_keys(&mut self) {
+        let clear = |secret: &mut ProviderSecret| {
+            let kind = crate::provider::effective_kind(secret);
+            if kind != "local" && kind != "openai-chatgpt" {
+                secret.api_key = None;
+            }
+        };
+        if let Some(secret) = &mut self.text {
+            clear(secret);
+        }
+        if let Some(secret) = &mut self.voice {
+            clear(secret);
+        }
+        for secret in self.accounts.values_mut() {
+            clear(secret);
+        }
+        self.credentials_withheld = true;
     }
 
     /// Commits ONLY the `auth` slot, serialised behind the app-wide configuration
@@ -236,6 +274,7 @@ impl AuthFile {
     /// needs all three files to move together uses the combined transfer entry
     /// point on `SettingsFile`.
     pub fn save(&self) -> Result<()> {
+        self.refuse_withheld_write()?;
         ensure_home()?;
         let lock = crate::config_commit::ConfigLock::acquire()?;
         lock.commit_files(&[crate::config_commit::CommitFile::new(
@@ -251,7 +290,15 @@ impl AuthFile {
     /// created 0600, written, flushed, fsynced, atomically renamed) and bypasses
     /// the cross-file lock by design.
     pub fn save_to(&self, path: &Path) -> Result<()> {
+        self.refuse_withheld_write()?;
         write_private(path, &serde_json::to_string_pretty(self)?)
+    }
+
+    fn refuse_withheld_write(&self) -> Result<()> {
+        if self.credentials_withheld {
+            anyhow::bail!("provider credentials are held by the execution service");
+        }
+        Ok(())
     }
 }
 
@@ -412,9 +459,21 @@ mod tests {
     #[test]
     fn auth_save_commits_only_the_auth_slot() {
         let dir = tempfile::tempdir().unwrap();
-        let before = crate::config_commit::current_generation();
+        let root_before = {
+            let lock = crate::config_commit::ConfigLock::acquire_at(dir.path()).unwrap();
+            lock.commit_files(&[crate::config_commit::CommitFile::new(
+                "auth",
+                dir.path().join("auth.json"),
+                serde_json::to_string_pretty(&AuthFile::default()).unwrap(),
+            )])
+            .unwrap()
+        };
+        let process_before = crate::config_commit::current_generation();
         let lock = crate::config_commit::ConfigLock::acquire_at(dir.path()).unwrap();
-        assert!(lock.generation() >= before);
+        assert_eq!(
+            lock.generation(), root_before,
+            "reopening the root must recover its durable revision independently of the process counter"
+        );
         let generation = lock
             .commit_files(&[crate::config_commit::CommitFile::new(
                 "auth",
@@ -422,16 +481,49 @@ mod tests {
                 serde_json::to_string_pretty(&AuthFile::default()).unwrap(),
             )])
             .unwrap();
-        assert!(generation > before, "commit must bump the generation");
+        assert!(
+            generation > root_before,
+            "commit must advance the root revision"
+        );
+        assert!(
+            generation > process_before,
+            "commit must advance the process generation"
+        );
         let after = crate::config_commit::current_generation();
         assert!(
-            after >= before,
-            "generation must advance monotonically: {before} -> {after}"
+            after >= generation,
+            "the process must observe the committed generation"
+        );
+        assert!(
+            after >= process_before,
+            "process generation must advance monotonically: {process_before} -> {after}"
         );
         assert!(dir.path().join("auth.json").exists());
         assert!(!dir.path().join("config.toml").exists());
         assert!(!dir.path().join("quota.json").exists());
         assert_no_staged_files(dir.path());
+    }
+
+    #[test]
+    fn withheld_api_keys_stay_out_of_a_worker_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let mut auth = AuthFile::default();
+        let mut remote = crate::provider::account_secret(&auth, "openrouter");
+        remote.api_key = Some("router-secret".into());
+        remote.model = "router-model".into();
+        auth.set_account(remote);
+        let mut local = crate::provider::account_secret(&auth, "local");
+        local.api_key = Some("local-secret".into());
+        auth.set_account(local);
+        auth.withhold_delegated_keys();
+        assert!(auth.account("openrouter").unwrap().api_key.is_none());
+        assert_eq!(
+            auth.account("local").unwrap().api_key.as_deref(),
+            Some("local-secret")
+        );
+        assert!(auth.save_to(&path).is_err());
+        assert!(!path.exists());
     }
 
     /// Asserts the directory holds no `*.tmp` or `*.staged` leftovers.

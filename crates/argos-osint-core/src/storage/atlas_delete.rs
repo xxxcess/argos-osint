@@ -35,6 +35,20 @@ use super::tx::{Tx, TxError};
 /// Runs older than this are pruned (`atlas_prune_expired`).
 pub const RETENTION_HOURS: i64 = 36;
 
+/// Serialize a source-bound publication with removal of any occurrence in the run.
+pub(crate) async fn guard_occurrence_removal_in(tx: &Tx, run_id: &str) -> Result<(), TxError> {
+    run(
+        tx,
+        tx.query("UPSERT $guard SET updated_at = time::now() RETURN NONE")
+            .bind((
+                "guard",
+                rid("atlas_classifier_guard", &encode(&["retention", run_id])),
+            )),
+    )
+    .await?;
+    Ok(())
+}
+
 #[derive(SurrealValue)]
 struct Source {
     id: RecordId,
@@ -436,6 +450,7 @@ pub async fn delete_run(publisher: &Publisher, run_id: &str) -> Result<bool, TxE
     publish(publisher, move |tx| {
         let run_id = run_id.clone();
         Box::pin(async move {
+            guard_occurrence_removal_in(&tx, &run_id).await?;
             let mut ids = delete_cycle_memories_in(&tx, &run_id).await?;
             ids.extend(retire_origin_in(&tx, "article", &run_id).await?.1);
             run(
@@ -526,6 +541,7 @@ pub async fn delete_article(
     publish(publisher, move |tx| {
         let (run_id, article_id) = (run_id.clone(), article_id.clone());
         Box::pin(async move {
+            guard_occurrence_removal_in(&tx, &run_id).await?;
             run(
                 &tx,
                 tx.query("DELETE type::record('atlas_article', $key) RETURN NONE")
@@ -574,6 +590,7 @@ pub async fn prune_expired(
             let protected: Vec<String> = take(&mut r, 1)?;
             let mut ids = Vec::new();
             for run_id in &runs {
+                guard_occurrence_removal_in(&tx, run_id).await?;
                 let mut rows = run(&tx, tx.query("SELECT VALUE article_id FROM atlas_article WHERE run_id = $run AND article_id NOTINSIDE $keep; RETURN count(SELECT id FROM atlas_article WHERE run_id = $run AND article_id INSIDE $keep LIMIT 1);")
                     .bind(("run", run_id.clone())).bind(("keep", protected.clone()))).await?;
                 let removed: Vec<String> = take(&mut rows, 0)?;

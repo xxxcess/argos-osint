@@ -395,3 +395,111 @@ async fn links(
         .await
         .unwrap()
 }
+
+async fn fail_completed_claims_publication(
+    repo: &argos_osint_core::storage::repo::Repository,
+) -> (String, argos_osint_core::storage::jobs::ClaimedTask) {
+    use argos_osint_core::intel_recon::{brief_pipeline::BriefInputs, brief_stages as engine};
+    use argos_osint_core::storage::brief_stages;
+    let article = article();
+    atlas::upsert_article(repo.db(), &article).await.unwrap();
+    let chain = brief_stages::ensure(
+        repo,
+        &BriefInputs {
+            article_id: article.id.clone(),
+            input_revision: "publication-recovery".into(),
+            metadata: engine::metadata_snapshot(&article),
+            stage_revisions: vec!["body".into(), "claims".into()],
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let config = engine::ExecConfig::default();
+    let mut claims_lease = None;
+    for _ in 0..2 {
+        let (lease, stage) = brief_stages::claim(repo, "first-worker", &config)
+            .await
+            .unwrap()
+            .unwrap();
+        if stage.operation == "intel_brief_claims" {
+            claims_lease = Some(lease);
+        }
+    }
+    let lease = claims_lease.expect("the independent Claims root was claimable");
+    repo.db().query("DEFINE FIELD OVERWRITE state_json ON intel_brief_stage_receipt TYPE string ASSERT $value = ''")
+        .await.unwrap().check().unwrap();
+    assert!(brief_stages::commit(repo, &lease, &claims(), 1, "")
+        .await
+        .unwrap());
+    assert_eq!(count(repo.db(), "stage_output").await, 1);
+    assert_eq!(count(repo.db(), "brief_publication_work").await, 1);
+    assert_eq!(count(repo.db(), "intel_brief_publication").await, 0);
+    assert!(memory_rows(repo, "claim").await.is_empty());
+
+    repo.db()
+        .query("DEFINE FIELD OVERWRITE state_json ON intel_brief_stage_receipt TYPE string")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    (chain.job_id, lease)
+}
+
+#[tokio::test]
+async fn completed_stage_replays_publication_after_receipt_write_failure() {
+    use argos_osint_core::storage::brief_stages;
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server.repo("argos", "brief_publication_recovery").await;
+    let (job_id, lease) = fail_completed_claims_publication(&repo).await;
+    // A fresh worker connection reuses the saved stage output after the
+    // failure. A repeated delivery cannot advance the canonical state again.
+    let recovered = server.repo("argos", "brief_publication_recovery").await;
+    assert_eq!(
+        brief_stages::drain_publications(&recovered, 8)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(count(repo.db(), "brief_publication_work").await, 0);
+    assert_eq!(count(repo.db(), "intel_brief_publication").await, 1);
+    let state = brief::retained_canonical_state(&repo, "a1", &job_id, "intel_brief_claims")
+        .await
+        .unwrap()
+        .expect("canonical receipt");
+    assert_eq!(state.state, "indexed", "{state:?}");
+    let memories = memory_rows(&repo, "claim").await;
+    assert_eq!(memories.len(), 1);
+    let index_count = index_work(&repo, &memories[0].0).await;
+    assert!(index_count > 0);
+    assert!(brief_stages::commit(&recovered, &lease, &claims(), 1, "")
+        .await
+        .unwrap());
+    assert_eq!(
+        brief_stages::drain_publications(&recovered, 8)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(memory_rows(&repo, "claim").await, memories);
+    assert_eq!(index_work(&repo, &memories[0].0).await, index_count);
+}
+
+#[tokio::test]
+async fn pending_publication_is_discarded_after_occurrence_removal() {
+    use argos_osint_core::storage::{atlas_delete, brief_stages};
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server.repo("argos", "brief_publication_removed").await;
+    fail_completed_claims_publication(&repo).await;
+    atlas_delete::delete_article(repo.publisher(), "run1", "a1")
+        .await
+        .unwrap();
+    assert_eq!(brief_stages::drain_publications(&repo, 8).await.unwrap(), 1);
+    assert_eq!(count(repo.db(), "brief_publication_work").await, 0);
+    assert_eq!(count(repo.db(), "intel_brief_publication").await, 0);
+    assert!(memory_rows(&repo, "claim").await.is_empty());
+}

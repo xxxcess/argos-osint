@@ -457,7 +457,7 @@ impl ContextDecisions<'_> {
     }
 }
 
-impl crate::recon::model_exec::DecisionsAdapter<HashMap<String, String>> for ContextDecisions<'_> {
+impl crate::model_exec::DecisionsAdapter<HashMap<String, String>> for ContextDecisions<'_> {
     fn compile_native(&self) -> (Value, Value) {
         crate::investigation::decisions::compile_native(&self.contract(), &json!(self.batch))
     }

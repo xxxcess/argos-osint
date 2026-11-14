@@ -308,10 +308,21 @@ pub async fn drain(
     secret: impl FnOnce() -> Option<ProviderSecret>,
     lease_secs: i64,
 ) -> Result<Vec<Outcome>> {
+    // Keep the large drain operation out of callers' inline poll frames,
+    // including the synchronous scheduler worker's runtime callback.
+    Box::pin(drain_inner(repo, owner, secret, lease_secs)).await
+}
+
+async fn drain_inner(
+    repo: &Repository,
+    owner: &str,
+    secret: impl FnOnce() -> Option<ProviderSecret>,
+    lease_secs: i64,
+) -> Result<Vec<Outcome>> {
     let mut out = Vec::new();
     let mut load = Some(secret);
     let mut secret: Option<ProviderSecret> = None;
-    let mut topology_runtime: Option<crate::recon::model_exec::RoleRuntime> = None;
+    let mut topology_runtime: Option<crate::model_exec::RoleRuntime> = None;
     for n in 0..8 {
         let now = Utc::now();
         let op_key = format!(
@@ -340,7 +351,7 @@ pub async fn drain(
         };
         if req.mode == SummarizationMode::TopologyNeighborhood {
             let runtime = topology_runtime.get_or_insert_with(|| {
-                crate::recon::model_exec::RoleRuntime::new(
+                crate::model_exec::RoleRuntime::new(
                     crate::secrets::AuthFile::load().unwrap_or_default(),
                     crate::provider::SettingsFile::load().unwrap_or_default(),
                 )

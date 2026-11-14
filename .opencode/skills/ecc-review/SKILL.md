@@ -7,4 +7,4 @@ Follow the canonical [scope and finish-line policy](../../../docs/wiki/code/agen
 
 Review the requested diff and its affected contracts/callers. Report demonstrated acceptance blockers by severity with `file:line` evidence and a minimal correction; otherwise report no findings and relevant limitations. Defer unrelated cleanup and speculative audits.
 
-Use applicable Rust, React or TUI skills. Check affected docs/diagrams under [conventions](../../../docs/wiki/code/conventions.md). The assigned build owner runs verification. Reuse unaffected evidence; review only the changed correction after a blocker is fixed, without an automatic final rereview cycle.
+Use applicable Rust, React or Rune skills. Check affected docs/diagrams under [conventions](../../../docs/wiki/code/conventions.md). The assigned build owner runs verification. Reuse unaffected evidence; review only the changed correction after a blocker is fixed, without an automatic final rereview cycle.

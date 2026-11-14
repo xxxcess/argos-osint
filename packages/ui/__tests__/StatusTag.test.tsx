@@ -21,7 +21,7 @@ describe("StatusTag (real @argos/ui component)", () => {
   ] as const)("renders the %s tone from the toneColor token map", (tone, token) => {
     render(<StatusTag tone={tone}>{tone}</StatusTag>);
     const tag = screen.getByText(`[${tone}]`);
-    expect(paint(tag, "color")).toBe(token);
+    expect(paint(tag, "color")).toBe(token.toLowerCase());
     // The rim is the same tone at ~40% alpha (color + "66" rendered as rgba).
     const rgb = token.replace("#", "");
     const comp = [0, 2, 4]
@@ -33,7 +33,7 @@ describe("StatusTag (real @argos/ui component)", () => {
   it("defaults to the accent tone", () => {
     render(<StatusTag>ALERT</StatusTag>);
     expect(paint(screen.getByText("[ALERT]"), "color")).toBe(
-      toneColor.accent,
+      toneColor.accent.toLowerCase(),
     );
   });
 

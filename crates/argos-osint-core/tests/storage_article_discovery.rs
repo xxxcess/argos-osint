@@ -53,7 +53,7 @@ async fn admit(
     current_admission::admit(repo, &mut row, vocabulary).await;
     assert_eq!(
         row.categories, categories,
-        "actual learner must select the fixture pair"
+        "fixture worker scores must select the fixture pair"
     );
 }
 

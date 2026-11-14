@@ -27,9 +27,9 @@ use serde_json::{json, Value};
 use surrealdb::types::SurrealValue;
 
 use super::codec;
-use super::jobs::{self, rid, ClaimedTask as Leased, Publish, StageSpec};
+use super::jobs::{self, rid, ClaimedTask as Leased, StageCommit, StageSpec};
 use super::repo::Repository;
-use super::tx::{run_tx, RetryPolicy};
+use super::tx::{run_tx, RetryPolicy, Tx, TxError};
 use crate::intel_recon::brief_context::ContextActor;
 use crate::intel_recon::brief_pipeline::{self, BriefInputs};
 use crate::intel_recon::brief_stages::{
@@ -38,6 +38,9 @@ use crate::intel_recon::brief_stages::{
 };
 use crate::store::AtlasArticleRow;
 use crate::tasks::ClaimedTask;
+
+mod publication;
+pub use publication::drain_publications;
 
 pub const SCHEMA: &str = "
 DEFINE TABLE IF NOT EXISTS brief_stage_input SCHEMAFULL;
@@ -57,6 +60,13 @@ DEFINE FIELD IF NOT EXISTS updated_at ON brief_activity TYPE string;
 DEFINE TABLE IF NOT EXISTS brief_stage_meta SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS item_count ON brief_stage_meta TYPE int;
 DEFINE FIELD IF NOT EXISTS empty_reason ON brief_stage_meta TYPE string;
+DEFINE TABLE IF NOT EXISTS brief_publication_work SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS job_id ON brief_publication_work TYPE string;
+DEFINE FIELD IF NOT EXISTS operation ON brief_publication_work TYPE string;
+DEFINE FIELD IF NOT EXISTS epoch ON brief_publication_work TYPE int;
+DEFINE FIELD IF NOT EXISTS due_at ON brief_publication_work TYPE datetime;
+DEFINE INDEX IF NOT EXISTS brief_publication_work_due ON brief_publication_work FIELDS due_at;
+DEFINE INDEX IF NOT EXISTS brief_publication_work_job ON brief_publication_work FIELDS job_id;
 ";
 
 /// Task id of one stage in a SurrealDB chain (`jobs::ensure_chain`).
@@ -64,15 +74,7 @@ pub fn task_id(job_id: &str, operation: &str) -> String {
     codec::encode(&[job_id, operation])
 }
 
-#[derive(SurrealValue)]
-struct ExistingRun {
-    job_id: String,
-    generation: i64,
-    state: String,
-    input_revision: String,
-}
-
-async fn latest_run(repo: &Repository, article_id: &str) -> Result<Option<ExistingRun>> {
+async fn latest_run(repo: &Repository, article_id: &str) -> Result<Option<jobs::ChainRun>> {
     let mut response = repo
         .db()
         .query(
@@ -82,7 +84,7 @@ async fn latest_run(repo: &Repository, article_id: &str) -> Result<Option<Existi
         .bind(("a", article_id.to_string()))
         .await?
         .check()?;
-    let rows: Vec<ExistingRun> = response.take(0)?;
+    let rows: Vec<jobs::ChainRun> = response.take(0)?;
     Ok(rows.into_iter().find(|run| run.state != "superseded"))
 }
 
@@ -90,20 +92,88 @@ async fn latest_run(repo: &Repository, article_id: &str) -> Result<Option<Existi
 /// article's chain for unchanged inputs, otherwise supersede it and admit
 /// the next generation with its captured stage inputs.
 pub async fn ensure(repo: &Repository, inputs: &BriefInputs) -> Result<jobs::Chain> {
-    // Reopen the same semantic inputs, including a previous explicit reload,
-    // without creating another generation. Changed inputs go through the
-    // authoritative transactional jobs::ensure_chain comparison below.
-    if !inputs.input_revision.contains(":reload:") {
-        if let Some(existing) = latest_run(repo, &inputs.article_id).await? {
-            if same_semantic_revision(&existing.input_revision, &inputs.input_revision) {
-                return Ok(jobs::Chain {
-                    job_id: existing.job_id,
-                    generation: existing.generation,
-                    created: false,
-                });
-            }
-        }
-    }
+    ensure_inner(repo, inputs, None).await
+}
+
+/// Admit a native or web request using its proof inside the chain transaction.
+pub async fn ensure_interactive(
+    repo: &Repository,
+    inputs: &BriefInputs,
+    admission: &super::job_context::InteractiveAdmission,
+) -> Result<jobs::Chain> {
+    ensure_inner(
+        repo,
+        inputs,
+        Some(Attribution {
+            authority: admission.authority(),
+            context: admission.context(),
+            origin: admission.origin(),
+            web_proof: admission.web_proof(),
+        }),
+    )
+    .await
+}
+
+struct Attribution<'a> {
+    authority: &'a super::connect_registry::RegistryAuthority,
+    context: &'a fleetworks_contracts::context::RegisteredContext,
+    origin: &'a fleetworks_contracts::context::JobOrigin,
+    web_proof: Option<(&'a str, u64)>,
+}
+
+/// Admit or reuse a brief and its genuine requester in the same transaction.
+///
+/// The gateway supplies authenticated registry authority and a server-captured
+/// origin. A reused chain retains its creator and gets a separate association.
+pub async fn ensure_attributed(
+    repo: &Repository,
+    inputs: &BriefInputs,
+    authority: &super::connect_registry::RegistryAuthority,
+    context: &fleetworks_contracts::context::RegisteredContext,
+    origin: &fleetworks_contracts::context::JobOrigin,
+) -> Result<jobs::Chain> {
+    ensure_inner(
+        repo,
+        inputs,
+        Some(Attribution {
+            authority,
+            context,
+            origin,
+            web_proof: None,
+        }),
+    )
+    .await
+}
+
+/// Retain browser proof through durable admission rather than trusting only
+/// an earlier gateway preflight that could race logout or revocation.
+pub async fn ensure_web_attributed(
+    repo: &Repository,
+    inputs: &BriefInputs,
+    authority: &super::connect_registry::RegistryAuthority,
+    context: &fleetworks_contracts::context::RegisteredContext,
+    origin: &fleetworks_contracts::context::JobOrigin,
+    session_token: &str,
+    expected_context_revision: u64,
+) -> Result<jobs::Chain> {
+    ensure_inner(
+        repo,
+        inputs,
+        Some(Attribution {
+            authority,
+            context,
+            origin,
+            web_proof: Some((session_token, expected_context_revision)),
+        }),
+    )
+    .await
+}
+
+async fn ensure_inner(
+    repo: &Repository,
+    inputs: &BriefInputs,
+    attribution: Option<Attribution<'_>>,
+) -> Result<jobs::Chain> {
     let specs: Vec<StageSpec<'_>> = brief_pipeline::STAGES
         .iter()
         .map(|(op, _)| StageSpec {
@@ -114,64 +184,106 @@ pub async fn ensure(repo: &Repository, inputs: &BriefInputs) -> Result<jobs::Cha
                 .collect(),
         })
         .collect();
-    let chain = jobs::ensure_chain(
-        repo.db(),
-        &inputs.article_id,
-        &inputs.input_revision,
-        &specs,
-        Utc::now(),
-    )
-    .await
-    .map_err(|e| anyhow!("ensure brief chain {}: {e}", inputs.article_id))?
-    .value;
-    if chain.created {
-        mirror_runs(repo, &inputs.article_id).await?;
-        let force_body = inputs.input_revision.contains(":reload:");
-        for (index, (operation, _)) in brief_pipeline::STAGES.iter().enumerate() {
-            let input = if brief_pipeline::prerequisites(operation).is_empty() {
-                json!({
-                    "article_id": inputs.article_id,
-                    "force_body": *operation == "intel_brief_body" && force_body,
-                    "metadata": inputs.metadata,
-                    "node_revision": inputs.stage_revisions.get(index).cloned().unwrap_or_default(),
-                })
-                .to_string()
-            } else {
-                String::new()
-            };
-            repo.db()
-                .query("UPSERT $r SET input_json = $i, role_snapshot = $s RETURN NONE")
-                .bind((
-                    "r",
-                    rid("brief_stage_input", &task_id(&chain.job_id, operation)),
-                ))
-                .bind(("i", input))
-                .bind(("s", inputs.role_snapshot.clone()))
-                .await?
-                .check()?;
+    let force_body = inputs.input_revision.contains(":reload:");
+    let now = Utc::now();
+    let committed = run_tx(repo.db(), RetryPolicy::default(), |tx| {
+        let specs = &specs;
+        let attribution = attribution.as_ref();
+        async move {
+            let admission = jobs::ensure_chain_in(
+                &tx,
+                &inputs.article_id,
+                &inputs.input_revision,
+                specs,
+                now,
+                |saved, requested| {
+                    saved == requested || (!force_body && same_semantic_revision(saved, requested))
+                },
+            )
+            .await?;
+            let chain = admission.chain;
+            if chain.created {
+                if let Some(previous) = admission.superseded {
+                    super::brief::record_run_in(
+                        &tx,
+                        &previous.job_id,
+                        &inputs.article_id,
+                        previous.generation,
+                        "superseded",
+                    )
+                    .await?;
+                }
+                super::brief::record_run_in(
+                    &tx,
+                    &chain.job_id,
+                    &inputs.article_id,
+                    chain.generation,
+                    "active",
+                )
+                .await?;
+                capture_stage_inputs(&tx, &chain.job_id, inputs, force_body).await?;
+            }
+            if let Some(attribution) = attribution {
+                if let Some((token, revision)) = attribution.web_proof {
+                    super::job_context::record_web_admission_in(
+                        &tx,
+                        attribution.authority,
+                        attribution.context,
+                        attribution.origin,
+                        token,
+                        revision,
+                        &chain.job_id,
+                        "intel_brief",
+                        chain.created,
+                    )
+                    .await?;
+                } else {
+                    super::job_context::record_admission_in(
+                        &tx,
+                        attribution.authority,
+                        attribution.context,
+                        attribution.origin,
+                        &chain.job_id,
+                        "intel_brief",
+                        chain.created,
+                    )
+                    .await?;
+                }
+            }
+            Ok(chain)
         }
-    }
-    Ok(chain)
+    })
+    .await
+    .map_err(|e| anyhow!("ensure brief chain {}: {e}", inputs.article_id))?;
+    Ok(committed.value)
 }
 
-/// Mirror the article's chain runs into `intel_brief_run`, the fence the
-/// retained Intel display seeds read (`storage::brief::record_run`).
-async fn mirror_runs(repo: &Repository, article_id: &str) -> Result<()> {
-    #[derive(SurrealValue)]
-    struct Row {
-        job_id: String,
-        generation: i64,
-        state: String,
-    }
-    let mut r = repo
-        .db()
-        .query("SELECT record::id(job) AS job_id, generation, state FROM brief_run WHERE article_id = $a")
-        .bind(("a", article_id.to_string()))
-        .await?
-        .check()?;
-    let rows: Vec<Row> = r.take(0)?;
-    for row in rows {
-        super::brief::record_run(repo, &row.job_id, article_id, row.generation, &row.state).await?;
+async fn capture_stage_inputs(
+    tx: &Tx,
+    job_id: &str,
+    inputs: &BriefInputs,
+    force_body: bool,
+) -> Result<(), TxError> {
+    for (index, (operation, _)) in brief_pipeline::STAGES.iter().enumerate() {
+        let input = if brief_pipeline::prerequisites(operation).is_empty() {
+            json!({
+                "article_id": inputs.article_id,
+                "force_body": *operation == "intel_brief_body" && force_body,
+                "metadata": inputs.metadata,
+                "node_revision": inputs.stage_revisions.get(index).cloned().unwrap_or_default(),
+            })
+            .to_string()
+        } else {
+            String::new()
+        };
+        jobs::run(
+            tx,
+            tx.query("CREATE $r SET input_json = $i, role_snapshot = $s RETURN NONE")
+                .bind(("r", rid("brief_stage_input", &task_id(job_id, operation))))
+                .bind(("i", input))
+                .bind(("s", inputs.role_snapshot.clone())),
+        )
+        .await?;
     }
     Ok(())
 }
@@ -465,9 +577,8 @@ pub async fn claim(
     }
 }
 
-/// Fenced stage commit: output, completion and the stage's item count, once
-/// per task and epoch. False (nothing written) when the lease is lost or the
-/// chain was cancelled.
+/// Commit output, completion and the stage's metadata together, once per
+/// task and epoch. False when the lease is lost or the chain was cancelled.
 pub async fn commit(
     repo: &Repository,
     leased: &Leased,
@@ -478,41 +589,71 @@ pub async fn commit(
     let json = output.to_string();
     let hash = crate::nlp::cache::hash(&json);
     let op_key = format!("brief-commit:{}:{}", leased.id, leased.lease_epoch);
-    let published = jobs::commit_stage(repo.db(), leased, &json, &hash, Utc::now(), &op_key)
-        .await
-        .map_err(|e| anyhow!("commit {}: {e}", leased.id))?
-        .value;
-    if published != Publish::Committed {
+    let now = Utc::now();
+    let committed = run_tx(repo.db(), RetryPolicy::default(), |tx| {
+        let (json, hash, op_key) = (&json, &hash, &op_key);
+        async move {
+            match jobs::commit_stage_in(&tx, leased, json, hash, now, op_key).await? {
+                StageCommit::Applied => {
+                    finish_stage_in(&tx, leased, items, reason).await?;
+                    publication::enqueue_in(&tx, leased).await?;
+                    Ok(true)
+                }
+                StageCommit::Replayed => Ok(true),
+                StageCommit::Rejected(_) => Ok(false),
+            }
+        }
+    })
+    .await
+    .map_err(|e| anyhow!("commit {}: {e}", leased.id))?;
+    if !committed.value {
         return Ok(false);
     }
-    let last = brief_pipeline::STAGES.last().map(|(op, _)| *op) == Some(leased.operation.as_str());
+    // The durable row is authoritative. A transient publication error cannot
+    // uncommit an extraction or require the model stage to execute again.
+    if let Err(error) = publication::publish_task(repo, &leased.id, leased.lease_epoch).await {
+        tracing::warn!(task = %leased.id, error = %crate::provider_diag::sanitize(&error.to_string()), "brief publication deferred");
+    }
+    Ok(true)
+}
+
+async fn finish_stage_in(
+    tx: &Tx,
+    leased: &Leased,
+    items: usize,
+    reason: &str,
+) -> Result<(), TxError> {
     // A completed-with-warnings stage keeps its checkpoints so Retry re-asks
     // only the items that failed.
-    repo.db()
-        .query(
+    jobs::run(
+        tx,
+        tx.query(
             "UPSERT $m SET item_count = $n, empty_reason = $reason RETURN NONE;
              IF !string::starts_with($reason, 'warning:') {
                  DELETE brief_checkpoint WHERE job_id = $job AND stage = $stage;
-             };
-             IF $last {
-                 UPDATE brief_run SET state = 'completed', updated_at = time::now() WHERE job = $j AND state = 'active';
-                 UPDATE $j SET state = 'completed', finished_at = time::now(),
-                   updated_at = time::now() WHERE state IN ['active', 'queued', 'running'];
              };",
         )
         .bind(("m", rid("brief_stage_meta", &leased.id)))
         .bind(("n", items as i64))
         .bind(("reason", reason.to_string()))
         .bind(("job", leased.job_id.clone()))
-        .bind(("stage", leased.operation.clone()))
-        .bind(("last", last))
-        .bind(("j", rid("job", &leased.job_id)))
-        .await?
-        .check()?;
-    let run = run_of(repo, &leased.job_id).await?;
+        .bind(("stage", leased.operation.clone())),
+    )
+    .await?;
+    let last = brief_pipeline::STAGES.last().map(|(op, _)| *op) == Some(leased.operation.as_str());
     if last {
-        super::brief::record_run(
-            repo,
+        let mut result = jobs::run(
+            tx,
+            tx.query("SELECT article_id, generation FROM brief_run WHERE job = $j LIMIT 1")
+                .bind(("j", rid("job", &leased.job_id))),
+        )
+        .await?;
+        let runs: Vec<Run> = jobs::take(&mut result, 0)?;
+        let run = runs
+            .first()
+            .ok_or_else(|| TxError::Abort(format!("brief run for {} missing", leased.job_id)))?;
+        super::brief::record_run_in(
+            tx,
             &leased.job_id,
             &run.article_id,
             run.generation,
@@ -520,154 +661,6 @@ pub async fn commit(
         )
         .await?;
     }
-    publish_stage(repo, &leased.job_id, &leased.operation, &run).await?;
-    Ok(true)
-}
-
-/// `brief_pipeline::publish_completed_stage`: merge a completed Claims,
-/// Inferences or Links stage into the displayed brief while its run is the
-/// article's newest live one, replace the links-stage leads, and bind the
-/// stage's canonical index state.
-///
-/// Canonical Brain publication runs through [`super::brief_publish`]; its
-/// failure is recorded in the bound state and never fails the stage.
-async fn publish_stage(repo: &Repository, job_id: &str, operation: &str, run: &Run) -> Result<()> {
-    let stage = super::brief::Stage::from_operation(operation);
-    if stage == super::brief::Stage::Other && operation != "intel_brief_body" {
-        return Ok(());
-    }
-    let mut r = repo
-        .db()
-        .query(
-            "RETURN count(SELECT 1 FROM brief_run WHERE article_id = $a AND generation > $g);
-             SELECT VALUE state FROM brief_run WHERE job = $j;",
-        )
-        .bind(("a", run.article_id.clone()))
-        .bind(("g", run.generation))
-        .bind(("j", rid("job", job_id)))
-        .await?
-        .check()?;
-    let newer: Option<i64> = r.take(0)?;
-    let states: Vec<String> = r.take(1)?;
-    let live = states
-        .first()
-        .is_some_and(|s| matches!(s.as_str(), "active" | "completed" | "failed"));
-    if newer.unwrap_or(0) > 0 || !live {
-        return Ok(());
-    }
-    if operation == "intel_brief_body" {
-        crate::atlas_actor_index::surreal::index_article_occurrences(repo, &run.article_id).await?;
-        return Ok(());
-    }
-    let stages = SurrealStages::new(repo);
-    let output = |op: &'static str| {
-        let stages = &stages;
-        async move {
-            stages
-                .stage_output(job_id, op)
-                .await
-                .unwrap_or_else(|_| json!({}))
-        }
-    };
-    let body = output("intel_brief_body").await;
-    let claims = output("intel_brief_claims").await;
-    let inferences = output("intel_brief_inferences").await;
-    let links = output("intel_brief_links").await;
-    let own = stages.stage_output(job_id, operation).await?;
-    let snapshot_hash = crate::nlp::cache::hash(&json!([operation, own]).to_string());
-    let captured = input(repo, &task_id(job_id, "intel_brief_claims"))
-        .await?
-        .and_then(|input| serde_json::from_str::<Value>(&input.input_json).ok())
-        .map(|input| input["metadata"].clone())
-        .unwrap_or(Value::Null);
-    let prepared = super::brief_publish::prepare_captured(
-        repo,
-        &run.article_id,
-        &captured,
-        &body,
-        &claims,
-        &inferences,
-        operation,
-    )
-    .await?;
-    if prepared
-        .as_ref()
-        .err()
-        .is_some_and(|reason| reason == super::brief_publish::CAPTURED_SOURCE_CHANGED)
-    {
-        return Ok(());
-    }
-    let written = super::brief::publish(
-        repo,
-        &super::brief::Publication {
-            article_id: run.article_id.clone(),
-            job_id: job_id.to_string(),
-            generation: run.generation,
-            contract: brief_pipeline::CONTRACT.to_string(),
-            body_hash: body["content_hash"].as_str().unwrap_or("").to_string(),
-            snapshot_hash: snapshot_hash.clone(),
-            claims: claims.clone(),
-            inferences: inferences.clone(),
-            leads: links["leads"].clone(),
-            stage,
-        },
-    )
-    .await?;
-    if !written {
-        return Ok(());
-    }
-    if stage == super::brief::Stage::Links {
-        let texts: std::collections::HashMap<&str, &str> = inferences["inferences"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|i| Some((i["id"].as_str()?, i["text"].as_str()?)))
-            .collect();
-        let leads: Vec<super::brief::Lead> = links["leads"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|lead| {
-                let inference = lead["inference_id"].as_str().unwrap_or("");
-                let candidate = lead["article_id"].as_str().unwrap_or("");
-                super::brief::Lead {
-                    id: format!(
-                        "{}:{}:{inference}:{}:{candidate}:{}",
-                        run.article_id,
-                        run.generation,
-                        lead["article_run_id"].as_str().unwrap_or(""),
-                        lead["metadata_revision"].as_str().unwrap_or("")
-                    ),
-                    inference_id: inference.to_string(),
-                    inference_text: texts.get(inference).copied().unwrap_or("").to_string(),
-                    candidate_article_id: candidate.to_string(),
-                    candidate_run_id: lead["article_run_id"].as_str().unwrap_or("").to_string(),
-                    candidate_metadata_revision: lead["metadata_revision"]
-                        .as_str()
-                        .unwrap_or("")
-                        .to_string(),
-                    interpretation: lead["why"].as_str().unwrap_or("").to_string(),
-                    verification_needed: lead["verification_needed"]
-                        .as_str()
-                        .unwrap_or("")
-                        .to_string(),
-                    citations_json: lead["metadata_evidence"].to_string(),
-                }
-            })
-            .collect();
-        super::brief::replace_leads(repo, &run.article_id, job_id, run.generation, &leads).await?;
-    }
-    let state = super::brief_publish::publish_stage(
-        repo,
-        &run.article_id,
-        job_id,
-        operation,
-        &prepared,
-        &snapshot_hash,
-    )
-    .await?;
-    super::brief::put_stage_receipt(repo, job_id, operation, &state).await?;
-    super::brief::put_index_state(repo, &run.article_id, &state).await?;
     Ok(())
 }
 
@@ -1222,6 +1215,9 @@ pub async fn drain_parallel(
 ) -> Result<usize> {
     let mut ran = 0;
     loop {
+        if !cancel.load(Ordering::Acquire) {
+            drain_publications(repo, 8).await?;
+        }
         let mut set = tokio::task::JoinSet::new();
         for _ in 0..slots.max(1) {
             if cancel.load(Ordering::Acquire) {
@@ -1386,7 +1382,7 @@ pub async fn inputs_for_article_with_auth(
         ),
     ] {
         let (resolved, secrets) =
-            crate::recon::model_exec::resolve_operation_routes(auth, settings, role, operation);
+            crate::model_exec::resolve_operation_routes(auth, settings, role, operation);
         let projection: Vec<_> = resolved
             .iter()
             .zip(&secrets)

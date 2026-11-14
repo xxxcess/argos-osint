@@ -13,6 +13,7 @@ import {
   intelStatus,
 } from "./intel-theme";
 import { intelFonts } from "./intel-fonts";
+import { FleetworksMark } from "@argos/ui";
 import type { JobState } from "./jobState";
 
 const subscribeHydration = () => () => {};
@@ -119,14 +120,7 @@ export function IntelStatusBar({
             style={s.app}
           >
             <View style={s.appLabel}>
-              <View
-                accessibilityElementsHidden
-                importantForAccessibility="no-hide-descendants"
-                style={s.globe}
-              >
-                <View style={s.meridian} />
-                <View style={s.equator} />
-              </View>
+              <FleetworksMark size={18} />
               <Text
                 nativeID="intel-status-app-label"
                 style={[s.appText, wide && s.appTextWide]}
@@ -189,7 +183,7 @@ export function IntelStatusBar({
             style={[
               s.api,
               { fontSize: navSize },
-              { color: connected ? c.accent : c.danger },
+              { color: connected ? c.success : c.danger },
             ]}
           >
             ● {connected ? "API_OK" : "OFFLINE"}
@@ -238,11 +232,7 @@ export function JobDropUp({ jobs }: { jobs: StatusJob[] }) {
             s.jobDot,
             {
               backgroundColor: tone,
-              boxShadow: ["failed", "running", "queued", "stale"].includes(
-                state,
-              )
-                ? `0 0 9px 3px ${tone}`
-                : "none",
+              boxShadow: "none",
             },
           ]}
         />
@@ -410,24 +400,6 @@ const s = StyleSheet.create({
     backgroundColor: c.accent,
   },
   appLabel: { flexDirection: "row", alignItems: "center", gap: 8 },
-  globe: {
-    width: 18,
-    height: 18,
-    borderWidth: 1.5,
-    borderColor: c.accent,
-    borderRadius: 9,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  meridian: {
-    position: "absolute",
-    width: 8,
-    height: 16,
-    borderWidth: 1,
-    borderColor: c.accent,
-    borderRadius: 8,
-  },
-  equator: { width: 16, height: 1, backgroundColor: c.accent },
   divider: { width: 1, height: 24, backgroundColor: c.borderStrong },
   app: {
     height: "100%",

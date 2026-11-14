@@ -1,105 +1,101 @@
 # CI workflows
 
-[Code route](index.md) · [Shared agent execution policy](agent-workflow.md) · [Wiki](../../index.md)
+[Code route](index.md) · [Contributing](contributing.md) · [Versioning](versioning.md)
 
-Six workflows live in `.github/workflows/` (owned by Code Architect; CI changes are scoped separately from product edits).
+One [Fleetworks workflow](../../../.github/workflows/fleetworks.yml) selects current product checks. Feature/fix PRs into `dev`, `nightly` or `main` run on creation and every pushed update. Integration-branch pushes verify the merged revision and publish only selected, verified artifacts.
 
-![CI matrix](../../img/ci-matrix.svg)
+[![Events, selected checks and channel publication](../../diagrams/ci-scopes.svg)](../../diagrams/ci-scopes.html)
 
-## `ci.yml` — build and test matrix
+| Event | Checks | Published output |
+| --- | --- | --- |
+| PR opened / synchronized / reopened / ready into `dev`, `nightly`, `main` | Changed components; read-only jobs | Test/fixture evidence; no release ZIPs or registry writes |
+| Push to `nightly` | Selected checks and artifact gates | Versioned GitHub assets and GHCR images; `nightly` channel |
+| Push to `dev` or `main` | Selected checks and artifact gates | Versioned GitHub assets and GHCR images; `stable` channel |
+| Manual Fleetworks dispatch | Full or exact-base scoped checks | Evidence only; no channel publication |
+| Direct embedded / mutation dispatch | Explicit compatibility / diagnostic matrix | Diagnostic evidence only |
 
-Runs on pushes to `main` and when a PR is opened, reopened or marked ready for review (drafts skipped). PR pushes do not build. Adding the `ci:full` label to a PR runs the full matrix in that PR's checks; Code Architect adds it at the end of a feature, fix or review-fix round (remove and re-add it to run again). A manual dispatch (`gh workflow run ci.yml --ref <branch>`) runs it on a branch with no PR, but those runs don't show in PR checks. All 8 legs run every time. `fail-fast: false`, 90-minute timeout, Rust 1.95.0, no debuginfo.
+PR synchronization already covers each feature/fix push; there is no second hardcoded feature-branch workflow. Commit-policy title/body edits and path-scoped dataset integrity retain their own triggers. No independent scheduled full rebuild, retired terminal build, Docker-save release archive, candidate workflow or automatic Release Please PR remains.
 
-| Platform | Runner | Legs |
-|---|---|---|
-| Linux x86_64 | `ubuntu-24.04` | embedded, server |
-| Linux aarch64 | `ubuntu-24.04-arm` | embedded, server |
-| macOS arm64 | `macos-14` | embedded, server |
-| macOS Intel | `macos-15-intel` | embedded, server |
+## `fleetworks.yml` — scoped branch checks
 
-Every leg calls the same entry point you run locally, `scripts/local_matrix.sh`:
+The [shared planner](../../../scripts/fleetworks_verify.py) compares PR merge bases or push revisions. Pure web UI changes select web checks and its image; local workstation/native changes select the two Mac legs. Shared Rust contracts widen backend/native checks. Unknown build inputs or unavailable comparisons select all scopes. Documentation alone selects repository policy checks (`scripts/fleetworks_doc_links.py`, `scripts/release_check.mjs`, `.opencode/tests/*.test.mjs`, `.github/scripts/test_*.py` and `scripts/test_fleetworks_*.py`). Manual `workflow_dispatch` accepts `mode` (`full` or `pr`), `base`, `head` and `components` (`auto`, `native`, `backend`, `all`), where scoped `pr` dispatches require an exact `base` SHA and non-`auto` component dispatches require an exact `head` SHA.
 
-- **Embedded** (default features `embedded,nlp,classifier`): installs libclang on Linux, then `local_matrix.sh --storage embedded` = `cargo fmt --check` → clippy `-D warnings` → `cargo test --workspace --locked` → `test_surreal.py --mode embedded` (all `storage_*` tests on in-process RocksDB).
-- **Server** (`--no-default-features --features server,nlp,classifier`): checks the pinned SurrealDB hashes in `scripts/test_surreal.py` match `.planning/2026-10-22-surrealdb/design.md`, fetches the SHA-256-verified SurrealDB 3.3.4 binary (cached), then `local_matrix.sh --storage server --surreal-bin <bin>` = clippy on core+bin → `test_surreal.py --mode server`. Unit tests are not rerun here.
+For trusted publication, the [release planner](../../../scripts/fleetworks_release.py) widens the same check/build plan to include changes since the last reachable published artifact. The first publication covers every production target. This prevents a replaced pending run or earlier failure from losing an unpublished component. Checks and publication consume this one authoritative plan.
 
-Storage tests are selected by `ARGOS_SURREAL_MODE`; with no mode and no `ARGOS_SURREAL_BIN` they skip, so the plain `cargo test` in the embedded leg doesn't duplicate them. `test_surreal.py` sets `ARGOS_SURREAL_REQUIRED=1`, so a missing server fails instead of skipping.
+| Selected scope | Required evidence |
+| --- | --- |
+| Rune native | Physical Intel and Apple Silicon Macs; scoped units, actual shared-view Runtime PNG/tree/input fixtures and complete debug app build |
+| Backend | Native Linux AMD64 and ARM64; service build/units, isolated pinned datastore, bootstrap/network roles and selected storage/queue recovery contracts |
+| Embedded storage | Linux AMD64 and ARM64 compatibility gate; separate from the Mac client graph |
+| Images / Compose | Selected image targets; exact loaded image IDs and isolated Compose/source journey when backend or relay/deployment inputs require it. Web-only packaging does not build backend engines |
+| React Native Web | Locked dependencies, types, Hooks/compiler lint, units, strict Next build/output guard, live relay/runtime lifecycle and production Chromium contracts; development profile when selected |
+| Rust-BERT | Native Linux AMD64 and ARM64 inside Debian bookworm; build/link/units, pinned real checkpoint inference and extracted bundle checks |
 
-Cache: `Swatinem/rust-cache` keyed per OS × storage, covering `target/agents` (where `scripts/agent_cargo.py` builds).
+`Fleetworks source checks` (`source_checks`) rejects failed planning, missing/failed/cancelled selected jobs and unexpected skips. Trusted image staging (`release_images` via [fleetworks-release-images.yml](../../../.github/workflows/fleetworks-release-images.yml) and [release_images.py](../../../.github/scripts/release_images.py)) then builds, smokes and pushes exact digests once; the separate image archive build is gone. `prepublish` gates trusted publication (`publish` via [publish_release.py](../../../.github/scripts/publish_release.py)), and final **Fleetworks required** (`required`) requires every selected check and publication step to succeed. An unselected lane must skip intentionally.
 
-**Local vs. hosted rule:** never run the all-platform or `server` storage stack from `.github/workflows/ci.yml` locally. Agents must **stabilize the local host machine build and embedded storage tests first** (`uname -ms`, `rustc -vV | grep '^host:'`), using [workspace-compatible targeted commands or intentional package-only alternatives](contributing.md#targeted-local-rust-builds-and-tests-fast-iteration) during iteration before running `scripts/local_matrix.sh --storage embedded`. Once local builds are stable and changes are pushed, monitor GitHub Actions checks/runs for issues on other platforms and `server` storage mode when CLI access is available (`gh pr checks`, `gh run list --branch "$(git branch --show-current)"`, `gh run view <run-id> --log-failed`).
+```sh
+base="$(git rev-parse HEAD^)"
+python3 scripts/fleetworks_verify.py plan --base "$base" --head "$(git rev-parse HEAD)"
+python3 scripts/fleetworks_verify.py local --base "$base"
+```
 
-## Efficient local verification before CI
+`--event pull_request` compares the merge base. `--json-output <file>` retains source/scope identity. Local mode includes working-tree changes. Manual hosted checks require a pushed exact revision:
 
-Follow the [scope/freeze policy](agent-workflow.md#scope-and-finish-line) and [contributor commands](contributing.md). Use one shared-cache build owner, stable features and affected checks; reuse unchanged evidence. After targeted stability, run the required native embedded gate with parent storage-mode variables unset. Server/all-platform/mutation execution stays hosted. Preserve `.github` ownership and user services; report local, skipped and hosted evidence separately.
+```sh
+python3 scripts/fleetworks_verify.py dispatch pr --ref <branch> --base <full-base-sha>
+python3 scripts/fleetworks_verify.py dispatch full --ref <branch>
+```
 
-## `datasets.yml` — LFS dataset integrity
+## Native app review evidence
 
-Runs for dataset, `.gitattributes` or its own workflow changes on `main` and pull requests, plus manual dispatch. This is the only job that requests an LFS checkout of the full actor catalog. `git lfs fsck --objects --pointers HEAD` verifies committed pointers and LFS objects; a metadata-only check confirms `datasets/argos_actors.csv` is an LFS pointer in Git and its checkout has the declared full file size. It does not parse the catalog or seed a datastore.
+[Native verification](native-verification.md) uses [fleetworks-native.yml](../../../.github/workflows/fleetworks-native.yml) on `macos-15-intel` (`x86_64-apple-darwin`) and `macos-15` (`aarch64-apple-darwin`), caching `target/agents` by target, toolchain, `Cargo.lock` and `apps/fleetworks-desktop/Cargo.toml`. Its `package` job runs `cargo fmt --check`, scoped unit tests (`fleetworks-desktop`, `fleetworks-workstation`, `fleetworks-contracts`) via `scripts/agent_cargo.py`, explicit `fleetworks_verify.py native-ui --agent --require-clean` captures, and `scripts/fleetworks_candidate.py build-native`. PRs build debug apps and fixture evidence; a selected trusted channel build packages a release ZIP with the calculated artifact version and runs the `verify` job (`fleetworks_candidate.py verify-native`) against the downloaded artifact ID, SHA256, source revision, architecture and linked libraries.
 
-Rust, mutation, web and policy checkouts explicitly leave LFS objects unmaterialized. Their tests use isolated synthetic catalogs; the large dataset is not embedded in Rust binaries. This avoids downloading the same catalog in every platform/storage leg. Checkout credentials are not persisted, and the Rust matrix has read-only contents permission.
+[![PR native checks and trusted versioned app publication](../../diagrams/native-release.svg)](../../diagrams/native-release.html)
 
-## `commit-policy.yml`
+App assets are unsigned. Fixture generation and downloaded-byte verification do not establish human visual approval, installed GUI/input/accessibility, minimum-OS behavior, signing or notarization. Those remain separate evidence. Actions evidence expires; verified GitHub Release assets persist.
 
-On PRs (including title/body edits) and pushes to `main`: `node scripts/release_check.mjs event` enforces Conventional Commits on the PR title/body or new `main` commits, `release_check.mjs versions` checks workspace/lockfile/manifest versions agree, and the `.opencode/tests` release/tool/planning tests run.
+## `embedded.yml` — affected storage compatibility
 
-## `release-please.yml`
+[Embedded compatibility](../../../.github/workflows/embedded.yml) is reusable for selected Linux storage changes. It runs format, Clippy with warnings denied, workspace tests, service-host help and required in-process storage contracts via `scripts/local_matrix.sh --storage embedded`. It enforces Jobs-only direct SQLite ownership and rejects LanceDB.
 
-On pushes to `main` (or manual dispatch): Release Please opens/updates the release PR and tags from Conventional Commits (`release-please-config.json`, `.release-please-manifest.json`). Uses a GitHub App token or `RELEASE_PLEASE_TOKEN` so release PRs trigger CI; see [versioning.md](versioning.md).
+A direct manual dispatch retains the four-platform diagnostic, including both Macs:
+
+```sh
+gh workflow run embedded.yml --ref <branch>
+```
+
+Normal Rune lanes do not install backend engines. The [local embedded gate](contributing.md#full-local-embedded-gate--github-ci-monitoring) still applies to affected compatibility changes.
 
 ## `intel-web.yml` — local web client checks
 
-The web workflow runs on matching web/config/build-check changes on `main` and pull requests (including PR pushes), plus manual dispatch. Node comes from `.node-version`; pnpm is pinned to 12.15.0. The first-party checkout/setup/artifact actions are pinned to their verified v7 commit SHAs. Existing Rust, commit-policy and release workflows are unchanged. Agents start here and inspect the affected workflow files before selecting checks; workflow edits remain Code Architect-owned.
+The reusable [web workflow](../../../.github/workflows/intel-web.yml) gets the exact event revision. Node comes from `.node-version`; pnpm is pinned by `package.json`. It has no duplicate automatic branch trigger. Direct dispatch remains available.
 
-| Check | Enforced behavior |
+Units and browser checks retain permission, reconnect, responsive-layout and React Compiler contracts. Screenshots are inspected evidence, not permission to relax pixel thresholds. Keep production and development results distinct. For local builds/browser checks, set `ARGOS_WEB_TEST_DEV=1` to preserve the user's `.next` output and locks. [Browser workflow](react-ui-testing.md)
+
+## `atlas-bert.yml` — classifier worker checks
+
+The [BERT workflow](../../../.github/workflows/atlas-bert.yml) runs only for affected classifier inputs or explicit full selection. Both physical Linux architectures use `python:3.11-bookworm`, matching deployment ABI. It configures the exact checkout's Git ownership before source checks, then verifies pinned Torch/checkpoint dependencies and real inference from the extracted worker bundle. Native app checks are separate. [Classifier boundary and commands](classifier.md)
+
+## Release, policy and diagnostics
+
+| Workflow | Responsibility |
 | --- | --- |
-| Frozen install and peer check | Reproducible lockfile and compatible dependency peers |
-| `pnpm test` | Offline unit, component and Query/MSW contracts; Vitest configuration changes trigger this workflow |
-| `pnpm typecheck` / `pnpm lint` | Type checking and recommended Hooks/compiler diagnostics with zero warnings |
-| `pnpm build` | Next server build using the strict React Compiler pipeline; the upstream need not run at build time |
-| `pnpm check:web-build` | Built Next configuration retains strict compiler options and RN Web/shared transpilation; compiled **application** chunks contain compiler memoization (framework runtime alone is insufficient) |
-| `pnpm test:live` | Offline raw-relay, production runtime/restart and isolated development/HMR lifecycle contracts; runs after the Next build and browser installation |
-| Offline Playwright | The same Chromium fixtures run against the production Next server and the Next development server; both exercise RN Web UI, compilation, hydration, connection/actions and responsive layout. Production nonce CSP and same-origin API assertions apply to the production server. |
-| Retained evidence | Export/dev test results and screenshots use separate directories under `test-results/`; HTML reports use `playwright-report/export` and `playwright-report/dev`. Uploaded with `always()` and seven-day retention. |
+| [fleetworks-native.yml](../../../.github/workflows/fleetworks-native.yml) | Reusable two-target native `package` + `verify` checks and trusted versioned app packaging |
+| [fleetworks-release-images.yml](../../../.github/workflows/fleetworks-release-images.yml) | Trusted native Linux image build/smoke/digest staging via [release_images.py](../../../.github/scripts/release_images.py); no PR registry credentials |
+| [commit-policy.yml](../../../.github/workflows/commit-policy.yml) | **Conventional commits and shared version** checks for PR title/body and integration landing policy; publication also runs policy inside its own dependency chain |
+| [datasets.yml](../../../.github/workflows/datasets.yml) | Path-scoped (`datasets/**`, `.gitattributes`) LFS pointer and full object integrity checks, never database seeding |
+| [mutation.yml](../../../.github/workflows/mutation.yml) | Explicit hosted Linux diagnostic (`ubuntu-24.04`); local agents do not run mutation tests |
 
-Local agents can isolate the production build/check pair with `ARGOS_WEB_TEST_DEV=1 pnpm build` followed by `ARGOS_WEB_TEST_DEV=1 pnpm check:web-build`. Both use the existing `.agent-scratch/next-web-tests` mapping and preserve launcher `.next`; omitting the setting keeps default build behavior. This pair verifies compiled output. Follow with `ARGOS_WEB_TEST_DEV=1 pnpm test:e2e` for the default production browser profile using that same isolated build; development remains `ARGOS_WEB_PROFILE=dev pnpm test:e2e`. Browser results and the full frontend gate remain separate evidence. Follow the [contributor isolation rules](contributing.md#build-and-test) and keep the user’s frontend running.
+Policy/helper tests run in the lightweight scope job. The backend resolves `ARGOS_SURREAL_BIN` and required server mode **before API unit tests**; passing checks without a configured datastore cannot replace storage evidence. Container Rust builds use the installed Git CLI for pinned Git dependencies; a source fetch is distinct from compiling the Rune UI or C++ storage engine.
 
-New PR web runs cancel stale runs for the same PR; main runs are not cancelled. The web job has a 25-minute limit for the build, live lifecycle tests and both browser profiles.
+Only trusted integration pushes get publication writes, with packages permissions confined to image staging/promotion and contents writes confined to the publisher. All selected artifacts must verify before channel aliases move. Retries preserve existing immutable assets. [Artifact identities, channels and recovery](versioning.md#release-automation)
 
-The evidence upload ignores absent files when an earlier step fails; it does not turn a missing build/test into a pass. Captures are review evidence, not automatic visual approval. No public deployment, live provider keys, secrets or native builds are involved. Path filters mean a docs-only PR does not run this job; configure required checks with that behavior in mind rather than assuming a workflow run for every PR.
+## Local verification before CI
 
-The user authorized the original web workflow addition and this follow-up CI update under Code Architect ownership. Workflow/action validation, the real build guard (including rejection cases), peer/type/lint/build/browser commands and artifact generation are checked locally. Hosted Actions execution requires publication and is not claimed as local evidence.
+Follow the [scope/freeze policy](agent-workflow.md#scope-and-finish-line). Use one build owner, the reusable debug graph and only affected checks. Source, fixture, downloaded-artifact and real deployment results prove different things; report skips and blockers explicitly.
 
-Local build owners apply [build cache hygiene](contributing.md#build-cache-hygiene) before verification, between large phases and at handoff. Preserve the reusable host/embedded cache, reclaim verified obsolete artifacts and measure disk headroom before launching the next gate.
+```sh
+python3 deploy/verify.py --name fresh-review --platform linux/amd64 --web --atlas --source-journey
+```
 
-Chromium browser fixtures disable LCD subpixel text and font hinting so the shared screenshot baselines use grayscale text on Linux and macOS. Keep the screenshot pixel threshold unchanged; inspect real layout or state differences rather than accepting them as rasterization noise.
-
-The required-mode storage runner includes actor-catalog associations and article confidence/sorting contracts. A workspace test pass without a configured datastore can skip these checks; use the embedded/server harness for datastore evidence.
-
-Worker lifecycle and ordered-queue fixtures own isolated test processes, private homes and Tokio runtimes. Repository initialization finishes before timing shutdown; the owning runtime stays alive until all pools and writes stop. The 500ms shutdown and 350ms Drop budgets remain enforced, and worker-thread panics fail the fixture.
-
-## Supplemental process checks
-
-Launcher/stack lifecycle changes also run `python3 scripts/test_web_stack.py --terminal-captures .agent-scratch/stack-review` after building `argos` and `argos-api-host` through the isolated Cargo wrapper and building the Next server. `--tui-only --tui-web-profile installed` narrows this to Venture back/value restoration, TUI return, same-parent storage reuse, shared API/Web TUI and terminal cleanup. These PTY/process checks are local supplemental evidence; the workflows above do not execute this script. Keep actual hosted results separate.
-
-The composer-launch regression `python3 scripts/test_web_stack.py --composer-smoke`
-runs the same PTY harness in its own temp `ARGOS_HOME`: `storage init --mode
-embedded`, then `stack up --tui`, submit a recon prompt from the Home composer,
-assert the investigation surface replaces the Home launcher, and then hold a
-bounded 45 s window in which no `stack overflow`/`fatal runtime error` may
-appear and the child must stay alive. It finishes with clean `ARGOS_EXIT=0` and
-termios restored. It needs only `argos` built (no
-`argos-api-host`) and is POSIX-only (skips elsewhere). Like the stack lifecycle
-checks, it is local supplemental evidence that the workflows do not execute;
-keep actual hosted results separate.
-
-Live-transport changes also run `pnpm test:live` after the Next build. Its offline Node fixtures verify origin checks, raw relay framing, dropped upstream connections and the real Next runtime across a stateless restart. Browser fixtures intercept WebSockets as well as REST; request-count assertions cover quiet pages, push metrics, pending work and reconnect. The web workflow runs these contracts in its live relay/runtime lifecycle step after building Next and installing Chromium. Local executions and hosted results remain separate evidence.
-
-## Scoped mutation diagnostics
-
-[mutation.yml](../../../.github/workflows/mutation.yml) is a Linux embedded diagnostic gate triggered on pushes to `main`, separate from the platform/storage matrix. Its current trigger is defined in the workflow; there is no manual-dispatch trigger. It pins cargo-mutants 27.1.0 and uses [.cargo/mutants.toml](../../../.cargo/mutants.toml) to restrict mutation sites to NLP selection, provider attempt/request policy and Atlas classification, with the core library and property integration tests as the oracle. Supported default features are `embedded,nlp,classifier`; the workflow remains authoritative for any explicit mutation feature selection. No live providers or server storage are used.
-
-The runner keeps the unmutated baseline check, fails on missed or timed-out mutations and retains outcome/log artifacts for seven days, including failure evidence. The 120-minute workflow limit bounds this expensive diagnostic; a timeout is incomplete evidence, not a passing baseline. Configuration and local smoke results do not establish a hosted mutation result. Review survivors before changing tests; equivalent mutants require a documented rationale rather than silently weakening the gate.
-
-## Rust mutation execution restriction
-
-Until further notice, agents must not run Rust mutation tests or mutation baselines locally, including `cargo mutants` and cargo-mutants runner invocations. Use the GitHub Actions `mutation.yml` workflow for execution and inspect its hosted results. Local mutation execution is deliberately skipped, not passed; ordinary targeted checks and the embedded gate remain required.
+This authorized smoke owns a fresh project and synthetic data. `--no-build --image-ids <file>` verifies preloaded images without building/pulling. It never owns the user's running stack. No workflow dispatch or release is implied merely by editing documentation.

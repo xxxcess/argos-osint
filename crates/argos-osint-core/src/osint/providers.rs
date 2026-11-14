@@ -1000,7 +1000,7 @@ fn site_url(v: &Value) -> Result<(String, String)> {
         .to_ascii_lowercase();
     domain(&host)?;
     ensure!(
-        !crate::recon::investigation::social_or_publisher(&host),
+        !super::host_policy::social_or_publisher(&host),
         "{host} is a social, publisher, or Q&A host; map and crawl run only on a site the subject owns"
     );
     Ok((page, host))

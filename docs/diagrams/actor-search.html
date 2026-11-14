@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Actor discovery: committed source to authorized dossier</title>
+<style>body{margin:32px;background:#f5f5f5;color:#2d3142;font-family:Geist,system-ui,sans-serif}main{max-width:1320px;margin:auto}h1{font-family:'Instrument Serif',Georgia,serif;font-size:38px;font-weight:400}svg{width:100%;height:auto}p{max-width:100ch;line-height:1.6}a{color:#394b65}</style></head><body><main>
+<h1>Committed source, visible search, canonical detail</h1>
+<p>SurrealDB owns actor identity and dossier data. The private Linux index is a rebuildable projection delivered through a durable, leased outbox. Native and authorized web discovery stay behind the authenticated gateway.</p>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 928" role="img" aria-labelledby="actor-search-title actor-search-desc">
+<title id="actor-search-title">Actor discovery: committed source to authorized dossier</title>
+<desc id="actor-search-desc">Actor and alias changes write projection intent in the same SurrealDB transaction. A database-leased paced worker persists one bounded pending batch and advances only on a matching committed and reader-visible receipt from the private Tantivy service. Native and authorized web clients submit bounded discovery queries through the authenticated gateway. Before returning labels or snippets, the gateway checks current canonical rows, revisions, eligibility and authority. Selecting a canonical actor ID requests an authorized SurrealDB dossier through that same gateway. Delayed, failed, throttled or incompatible delivery retains pending work for exact replay or explicit repair and shadow rebuild. Native clients never receive private search origins, index credentials or database access. Optional topology rendering belongs to the web client.</desc>
+<defs><marker id="actor-search-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker></defs>
+<style>text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}.label{font-size:20px;font-weight:600}.note{font-size:16px}.zone{font-size:13px;font-weight:600;letter-spacing:1px}.node{fill:#fff;stroke:#4f5d75}.accent{fill:#fff6ed;stroke:#eb6c36}.edge{fill:none;stroke:#4f5d75;stroke-width:2;marker-end:url(#actor-search-arrow)}.retry{fill:none;stroke:#4f5d75;stroke-width:2;stroke-dasharray:5 4;marker-end:url(#actor-search-arrow)}.minor{fill:#4f5d75;font-size:14px}</style>
+<rect width="1320" height="928" fill="#f5f5f5"/>
+<rect x="24" y="40" width="1272" height="244" fill="none" stroke="#a0a5b0" stroke-dasharray="6 5"/>
+<text x="48" y="68" class="zone">PRIVATE LINUX BACKEND · SOURCE AUTHORITY AND DISPOSABLE PROJECTION</text>
+<text x="48" y="316" class="zone">AUTHENTICATED DISCOVERY · GLOBAL BACKEND READ</text>
+
+<path d="M408 172H468" class="edge"/>
+<path d="M828 172H888" class="edge"/>
+<path d="M408 400H468" class="edge"/>
+<path d="M828 400H852V208H888" class="edge"/>
+<path d="M888 228H872V432H828" class="edge"/>
+<path d="M648 456V532" class="edge"/>
+<path d="M468 600H408" class="edge"/>
+<path d="M228 668V800H468" class="edge"/>
+<path d="M1176 240V532" class="edge"/>
+<path d="M1232 532V240" class="retry"/>
+
+<rect x="48" y="104" width="360" height="136" rx="6" class="node"/>
+<text x="64" y="136" class="label">SurrealDB + source outbox</text>
+<text x="64" y="166" class="note">Actor / alias / lifecycle changes</text>
+<text x="64" y="194" class="note">Same transaction: source + index intent</text>
+<text x="64" y="222" class="note">A rollback leaves no delivery intent</text>
+
+<rect x="468" y="104" width="360" height="136" rx="6" class="node"/>
+<text x="484" y="136" class="label">Leased, paced outbox worker</text>
+<text x="484" y="166" class="note">Bound batches, pace and resource use</text>
+<text x="484" y="194" class="note">Persist the exact pending batch</text>
+<text x="484" y="222" class="note">Advance only on a matching visible receipt</text>
+
+<rect x="888" y="104" width="384" height="136" rx="6" class="accent"/>
+<text x="904" y="136" class="label">Private Tantivy projection</text>
+<text x="904" y="166" class="note">Commit → reader reload → visible checkpoint</text>
+<text x="904" y="194" class="note">Deployment / epoch / generation fenced</text>
+<text x="904" y="222" class="note">Rebuildable from canonical database rows</text>
+
+<rect x="48" y="344" width="360" height="112" rx="6" class="node"/>
+<text x="64" y="376" class="label">Native app / authorized web</text>
+<text x="64" y="406" class="note">Gateway queries, paging and selection</text>
+<text x="64" y="434" class="note">No private index origin or credential</text>
+
+<rect x="468" y="344" width="360" height="112" rx="6" class="accent"/>
+<text x="484" y="376" class="label">Authenticated Brain gateway</text>
+<text x="484" y="406" class="note">Typed, bounded query; ReadBackend</text>
+<text x="484" y="434" class="note">Private pooled reader; no folder required</text>
+<text x="664" y="500" class="minor">Check before labels / snippets leave</text>
+
+<rect x="48" y="532" width="360" height="136" rx="6" class="node"/>
+<text x="64" y="564" class="label">Authorized hits and selection</text>
+<text x="64" y="594" class="note">At most 25 filtered actor matches</text>
+<text x="64" y="622" class="note">Name / aliases / bounded summary</text>
+<text x="64" y="650" class="note">Select canonical actor ID for detail</text>
+
+<rect x="468" y="532" width="360" height="136" rx="6" class="node"/>
+<text x="484" y="564" class="label">Current canonical hit filter</text>
+<text x="484" y="594" class="note">One bounded SurrealDB batch read</text>
+<text x="484" y="622" class="note">Revision / lifecycle / authority / eligibility</text>
+<text x="484" y="650" class="note">Drop stale or mismatched index documents</text>
+
+<rect x="888" y="532" width="384" height="136" rx="6" class="node"/>
+<text x="904" y="564" class="label">Delayed / failed / throttled</text>
+<text x="904" y="594" class="note">Keep durable pending work and retry delay</text>
+<text x="904" y="622" class="note">Replay exact batch; do not skip the cursor</text>
+<text x="904" y="650" class="note">Explicit repair / shadow rebuild if required</text>
+<text x="1000" y="500" class="minor">Status / exact retry</text>
+
+<rect x="468" y="744" width="804" height="112" rx="6" class="node"/>
+<text x="484" y="776" class="label">Selected canonical dossier · authenticated gateway</text>
+<text x="484" y="806" class="note">Resolve the actor ID against current SurrealDB lifecycle, detail and permissions.</text>
+<text x="484" y="834" class="note">Native shows results and a dossier. Optional topology remains web-only.</text>
+<text x="48" y="892" class="minor">Source committed, index committed, reader visible and dossier authorized are separate observations.</text>
+</svg>
+<p>This figure follows the source outbox, worker, private index and gateway filtering contracts. It does not establish a complete isolated Docker journey, production catalog load, live inference or installed Mac verification.</p>
+<p><a href="../wiki/code/actor-search.md">Actor search</a> · <a href="../wiki/code/actor-catalog.md">Actor catalog</a> · <a href="../diagrams.md">Diagram catalog</a></p>
+</main></body></html>

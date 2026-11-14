@@ -7,6 +7,7 @@ directory (sync on every commit, versioning off, appendix tuning profile),
 stops it, then runs `tests/storage_contracts.rs`, `tests/storage_jobs.rs`, `tests/storage_memory.rs` `tests/storage_insights.rs` `tests/storage_atlas.rs` `tests/storage_intel.rs` `tests/storage_lifecycle.rs` `tests/storage_atlas_delete.rs` `tests/storage_atlas_metadata.rs` `tests/storage_provenance.rs` `tests/storage_refresh.rs` `tests/storage_bootstrap.rs` `tests/storage_open.rs` `tests/storage_home.rs` `tests/storage_server.rs` `tests/storage_commands.rs` `tests/storage_install.rs` `tests/storage_runtime.rs` `tests/storage_memories.rs` `tests/storage_insight_views.rs` `tests/storage_vectors.rs` `tests/storage_browse.rs` `tests/storage_recon.rs` `tests/storage_browse_assoc.rs` `tests/storage_derivations.rs` `tests/storage_pipeline_inputs.rs` `tests/storage_refresh_exec.rs`, `tests/storage_topology.rs`, `tests/storage_topology_gaps.rs`, `tests/storage_entities.rs`, `tests/storage_live_evidence.rs`, `tests/storage_credits.rs`, `tests/storage_jobs_view.rs`, `tests/storage_recon_runs.rs`, `tests/storage_profile_view.rs`, `tests/storage_recon_exec.rs` `tests/storage_recon_delete.rs`, `tests/storage_recon_extract.rs` and `tests/storage_insight_owner.rs`, `tests/storage_recon_dispatch.rs`, `tests/storage_telemetry.rs`, `tests/storage_recon_jobs.rs`, `tests/storage_summaries.rs`, `tests/storage_brief.rs`, `tests/storage_recall_turn.rs`, `tests/storage_recon_delete_insights.rs`, `tests/storage_pipeline_exec.rs`, `tests/storage_investigation.rs`, `tests/storage_atlas_store.rs`, `tests/storage_logs.rs`, `tests/storage_atlas_memory.rs`, `tests/storage_actor_index.rs`, `tests/storage_app_jobs.rs`, `tests/storage_insight_retry.rs`, `tests/storage_index_drain.rs`, `tests/storage_actor_dedup.rs`, `tests/storage_brain_backfill.rs`, `tests/storage_summary_flush.rs`, `tests/storage_brain_scope.rs`, `tests/storage_store_bridge.rs`, `tests/storage_processes.rs` with ARGOS_SURREAL_BIN set and
 ARGOS_SURREAL_REQUIRED=1, so a missing server is a failure rather than a skip.
 Each contract test starts and stops its own server in its own temp directory.
+Release pins and checksum provenance live in surrealdb-release.json.
 
 `--mode embedded` instead runs the same suite against an in-process RocksDB
 datastore (`--features embedded`, ARGOS_SURREAL_MODE=embedded); no server is
@@ -23,9 +24,11 @@ Options: --cache-dir DIR (default ~/.cache/argos-surreal), --bin PATH (skip down
 """
 import argparse
 import hashlib
+import json
 import os
 from pathlib import Path
 import platform
+import re
 import secrets
 import shutil
 import socket
@@ -38,18 +41,30 @@ import urllib.request
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "3.3.4"
-# SHA-256 of the official GitHub release assets for v3.3.4. The release has no
-# published checksum file; these were computed from the downloaded assets on
-# 2026-10-22 and pin them against later replacement.
-ASSETS = {
-    ("Linux", "x86_64"): ("linux-amd64", "6593071833ad9c85cf533cf70b1643eb08966c868f8624001e30839ea29a2689"),
-    ("Linux", "aarch64"): ("linux-arm64", "978262fd9d1f3adfc5791031663855baf0a3cf8a89883428109734ba5a065811"),
-    ("Linux", "arm64"): ("linux-arm64", "978262fd9d1f3adfc5791031663855baf0a3cf8a89883428109734ba5a065811"),
-    ("Darwin", "x86_64"): ("darwin-amd64", "0723b555340da2cee1e0cff6f95552438536eab8d984b91f227b3ce2d52a5006"),
-    ("Darwin", "arm64"): ("darwin-arm64", "d0b0afc47948a46ceac9db178d2a10a7eb21e1c4f219a74b3573c850122ed9fb"),
+RELEASE_PATH = Path(__file__).resolve().with_name("surrealdb-release.json")
+HOST_ASSETS = {
+    ("Linux", "x86_64"): "linux-amd64",
+    ("Linux", "aarch64"): "linux-arm64",
+    ("Linux", "arm64"): "linux-arm64",
+    ("Darwin", "x86_64"): "darwin-amd64",
+    ("Darwin", "arm64"): "darwin-arm64",
 }
-URL = "https://github.com/surrealdb/surrealdb/releases/download/v{v}/surreal-v{v}.{p}.tgz"
+# These required-mode fixtures otherwise skip in the ordinary workspace run.
+CUTOVER_CONTRACTS = (
+    "storage_connect_registry",
+    "storage_cycle_history",
+    "storage_workstation_activity",
+    "storage_workstation_paging",
+    "storage_job_actions",
+    "storage_setup_jobs",
+    "storage_upload_tickets",
+    "storage_configuration_reset_barrier",
+    "storage_actor_search_outbox",
+    "storage_actor_search_rebuild",
+    "storage_actor_seed_execution",
+    "storage_classifier_activation",
+    "storage_operational_logs",
+)
 # Disk profile from the storage audit appendix (section 4).
 PROFILE = {
     "SURREAL_ROCKSDB_BLOCK_CACHE_SIZE": "67108864",
@@ -69,16 +84,40 @@ PROFILE = {
 }
 
 
-def fetch(cache_dir):
+def load_release():
+    try:
+        release = json.loads(RELEASE_PATH.read_text(encoding="utf-8"))
+        version = release["version"]
+        hashes = release["archive_sha256"]
+        if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+            raise ValueError("invalid version")
+        if not isinstance(hashes, dict) or set(hashes) != set(HOST_ASSETS.values()):
+            raise ValueError("expected one checksum per supported release archive")
+        if any(not isinstance(h, str) or not re.fullmatch(r"[0-9a-f]{64}", h) for h in hashes.values()):
+            raise ValueError("expected lowercase SHA-256 checksums")
+        if len(set(hashes.values())) != len(hashes):
+            raise ValueError("expected distinct archive checksums")
+        template = release["release_url_template"]
+        if not isinstance(template, str) or "{v}" not in template or "{p}" not in template:
+            raise ValueError("invalid release URL template")
+        template.format(v=version, p="linux-amd64")
+    except (OSError, ValueError, TypeError, KeyError, IndexError) as error:
+        sys.exit(f"test-surreal: invalid SurrealDB release manifest: {error}")
+    return release
+
+
+def fetch(cache_dir, release):
+    version = release["version"]
     key = (platform.system(), platform.machine())
-    if key not in ASSETS:
-        sys.exit(f"test-surreal: no pinned SurrealDB {VERSION} build for {key}")
-    name, digest = ASSETS[key]
-    target = cache_dir / f"{VERSION}-{name}" / "surreal"
+    if key not in HOST_ASSETS:
+        sys.exit(f"test-surreal: no pinned SurrealDB {version} build for {key}")
+    name = HOST_ASSETS[key]
+    digest = release["archive_sha256"][name]
+    target = cache_dir / f"{version}-{name}" / "surreal"
     if target.is_file():
         return target
     target.parent.mkdir(parents=True, exist_ok=True)
-    url = URL.format(v=VERSION, p=name)
+    url = release["release_url_template"].format(v=version, p=name)
     print(f"test-surreal: downloading {url}", flush=True)
     with tempfile.TemporaryDirectory() as tmp:
         archive = Path(tmp) / "surreal.tgz"
@@ -103,11 +142,11 @@ def free_port():
         return s.getsockname()[1]
 
 
-def smoke(binary):
+def smoke(binary, expected_version):
     """Start the server on loopback with RocksDB in a temp dir, then stop it."""
     version = subprocess.run([str(binary), "version"], capture_output=True, text=True, check=True).stdout
-    if not version.startswith(VERSION):
-        sys.exit(f"test-surreal: expected {VERSION}, got {version!r}")
+    if not version.startswith(expected_version):
+        sys.exit(f"test-surreal: expected {expected_version}, got {version!r}")
     with tempfile.TemporaryDirectory() as tmp:
         port = free_port()
         env = {**os.environ, **PROFILE, "SURREAL_USER": "root", "SURREAL_PASS": secrets.token_hex(16)}
@@ -154,20 +193,24 @@ def main():
     modes = ("server", "embedded") if args.mode == "both" else (args.mode,)
     binary = None
     if "server" in modes:
-        binary = args.bin.resolve() if args.bin else fetch(args.cache_dir)
+        release = load_release()
+        binary = args.bin.resolve() if args.bin else fetch(args.cache_dir, release)
         print(f"test-surreal: server binary {binary}", flush=True)
         if args.fetch_only:
             return
-        smoke(binary)
+        smoke(binary, release["version"])
     elif args.fetch_only:
         return
     for mode in modes:
-        # Same feature sets as scripts/local_matrix.sh, so each leg reuses
-        # its clippy/test build: embedded is the default build, server is
-        # `--no-default-features --features server,nlp,classifier`.
+        # Embedded retains workspace unit targets as well as the selected storage
+        # integrations. Omitting those targets changes dev/transitive features
+        # (including api-host's core/fixtures) and forks the validated build graph.
+        # The server lane remains storage-only with its explicit feature set.
+        unit_targets = ["--lib", "--bins"] if mode == "embedded" else []
         features = [] if mode == "embedded" else ["--no-default-features", "--features", "server,nlp,classifier"]
-        command = [*cargo, "test", "--workspace", "--locked", *features, "--test", "storage_contracts", "--test", "storage_jobs", "--test", "storage_memory", "--test", "storage_insights", "--test", "storage_atlas", "--test", "storage_article_discovery", "--test", "storage_classifier_admission",
-            "--test", "storage_atlas_derivatives", "--test", "storage_classifier_single_domain", "--test", "storage_admission_maintenance", "--test", "storage_classifier_calibration", "--test", "storage_intel", "--test", "storage_lifecycle", "--test", "storage_atlas_delete", "--test", "storage_atlas_metadata", "--test", "storage_provenance", "--test", "storage_refresh", "--test", "storage_bootstrap", "--test", "storage_open", "--test", "storage_home", "--test", "storage_server", "--test", "storage_commands", "--test", "storage_install", "--test", "storage_runtime", "--test", "storage_memories", "--test", "storage_insight_views", "--test", "storage_vectors", "--test", "storage_browse", "--test", "storage_recon", "--test", "storage_browse_assoc", "--test", "storage_derivations", "--test", "storage_pipeline_inputs", "--test", "storage_refresh_exec", "--test", "storage_topology", "--test", "storage_topology_gaps", "--test", "storage_entities", "--test", "storage_live_evidence", "--test", "storage_credits", "--test", "storage_jobs_view", "--test", "storage_recon_runs", "--test", "storage_profile_view", "--test", "storage_recon_exec", "--test", "storage_recon_delete", "--test", "storage_recon_extract", "--test", "storage_insight_owner", "--test", "storage_recon_dispatch", "--test", "storage_telemetry", "--test", "storage_recon_jobs", "--test", "storage_summaries", "--test", "storage_brief", "--test", "storage_recall_turn", "--test", "storage_recon_delete_insights", "--test", "storage_pipeline_exec", "--test", "storage_investigation", "--test", "storage_atlas_store", "--test", "storage_logs", "--test", "storage_atlas_memory", "--test", "storage_actor_index", "--test", "storage_actor_catalog", "--test", "storage_intel_articles", "--test", "storage_app_jobs", "--test", "storage_insight_retry", "--test", "storage_index_drain", "--test", "storage_actor_dedup", "--test", "storage_brain_backfill", "--test", "storage_summary_flush", "--test", "storage_brain_scope", "--test", "storage_store_bridge", "--test", "storage_processes", "--test", "storage_brief_publish", "--test", "storage_curated_links", "--test", "storage_intelligence_contracts", "--test", "storage_indexed_links", *extra, "--", "--nocapture"]
+        cutover_targets = [argument for name in CUTOVER_CONTRACTS for argument in ("--test", name)]
+        command = [*cargo, "test", "--workspace", "--locked", *features, *unit_targets, "--test", "storage_contracts", "--test", "storage_jobs", "--test", "storage_memory", "--test", "storage_insights", "--test", "storage_atlas", "--test", "storage_article_discovery", "--test", "storage_classifier_admission",
+            "--test", "storage_atlas_derivatives", "--test", "storage_classifier_single_domain", "--test", "storage_admission_maintenance", "--test", "storage_classifier_calibration", "--test", "storage_intel", "--test", "storage_lifecycle", "--test", "storage_atlas_delete", "--test", "storage_atlas_metadata", "--test", "storage_provenance", "--test", "storage_refresh", "--test", "storage_bootstrap", "--test", "storage_open", "--test", "storage_home", "--test", "storage_server", "--test", "storage_commands", "--test", "storage_install", "--test", "storage_runtime", "--test", "storage_memories", "--test", "storage_insight_views", "--test", "storage_vectors", "--test", "storage_browse", "--test", "storage_recon", "--test", "storage_browse_assoc", "--test", "storage_derivations", "--test", "storage_pipeline_inputs", "--test", "storage_refresh_exec", "--test", "storage_topology", "--test", "storage_topology_gaps", "--test", "storage_entities", "--test", "storage_live_evidence", "--test", "storage_credits", "--test", "storage_provider_pacer", "--test", "storage_provider_account", "--test", "storage_jobs_view", "--test", "storage_recon_runs", "--test", "storage_profile_view", "--test", "storage_recon_exec", "--test", "storage_recon_delete", "--test", "storage_recon_extract", "--test", "storage_insight_owner", "--test", "storage_recon_dispatch", "--test", "storage_telemetry", "--test", "storage_recon_jobs", "--test", "storage_summaries", "--test", "storage_brief", "--test", "storage_recall_turn", "--test", "storage_recon_delete_insights", "--test", "storage_pipeline_exec", "--test", "storage_investigation", "--test", "storage_atlas_store", "--test", "storage_logs", "--test", "storage_atlas_memory", "--test", "storage_actor_index", "--test", "storage_actor_catalog", "--test", "storage_intel_articles", "--test", "storage_app_jobs", "--test", "storage_insight_retry", "--test", "storage_index_drain", "--test", "storage_actor_dedup", "--test", "storage_brain_backfill", "--test", "storage_summary_flush", "--test", "storage_brain_scope", "--test", "storage_store_bridge", "--test", "storage_processes", "--test", "storage_brief_publish", "--test", "storage_curated_links", "--test", "storage_intelligence_contracts", "--test", "storage_indexed_links", *cutover_targets, *extra, "--", "--nocapture"]
         env = {**os.environ, "ARGOS_SURREAL_MODE": mode, "ARGOS_SURREAL_REQUIRED": "1"}
         if binary:
             env["ARGOS_SURREAL_BIN"] = str(binary)

@@ -18,7 +18,13 @@ use anyhow::{anyhow, Result};
 use crate::atlas_metadata::ArticleMetadata;
 use crate::store::{AtlasArticleRow, AtlasRunRow};
 
-pub use crate::recon::backend::surreal_selected;
+#[cfg(feature = "surreal")]
+pub use crate::storage::runtime::configured as surreal_selected;
+
+#[cfg(not(feature = "surreal"))]
+pub fn surreal_selected() -> bool {
+    false
+}
 
 /// The Atlas store a caller uses for one unit of work.
 #[derive(Clone)]
@@ -337,6 +343,18 @@ impl AtlasStore {
                 .await
                 .map_err(tx("atlas quota")))
     }
+    pub(crate) async fn reserve_quota(
+        &self,
+        provider: &str,
+        day: &str,
+        cap: u32,
+        previous: Option<(&str, &str)>,
+    ) -> Result<bool> {
+        dispatch!(self,
+            r => crate::storage::atlas::quota_reserve(r.db(), provider, day, cap, previous)
+                .await
+                .map_err(tx("atlas reserve quota")))
+    }
     pub async fn quota_bump(&self, provider: &str, day: &str) -> Result<u32> {
         dispatch!(self,
             r => crate::storage::atlas::quota_bump(r.db(), provider, day)
@@ -362,7 +380,7 @@ impl AtlasStore {
     }
     pub async fn tool_enabled(&self, id: &str) -> Result<bool> {
         dispatch!(self,
-            r => crate::storage::recon_threads::tool_enabled(r, id).await)
+            r => crate::storage::tool_state::tool_enabled(r, id).await)
     }
 
     // ---- work units -------------------------------------------------------

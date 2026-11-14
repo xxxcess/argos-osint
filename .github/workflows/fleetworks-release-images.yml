@@ -1,0 +1,79 @@
+name: Stage verified native Linux image digests
+
+on:
+  workflow_call:
+    inputs:
+      head: {type: string, required: true}
+      version: {type: string, required: true}
+      image-tag: {type: string, required: true}
+      image-targets: {type: string, required: true}
+      compose: {type: boolean, default: false}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  images:
+    if: github.event_name == 'push' && contains(fromJson('["refs/heads/dev","refs/heads/nightly","refs/heads/main"]'), github.ref)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: amd64, runner: ubuntu-24.04}
+          - {arch: arm64, runner: ubuntu-24.04-arm}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.head }}
+          persist-credentials: false
+          lfs: false
+      - name: Test selected private search contracts
+        if: contains(inputs.image-targets, 'search-index')
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal
+          python3 scripts/agent_cargo.py test --locked --no-default-features -p fleetworks-search-index
+      - name: Authenticate trusted image staging
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Build once, smoke exact IDs, then stage selected digests
+        env:
+          HEAD: ${{ inputs.head }}
+          VERSION: ${{ inputs.version }}
+          IMAGE_TAG: ${{ inputs.image-tag }}
+          IMAGE_TARGETS: ${{ inputs.image-targets }}
+          IMAGE_ARCH: ${{ matrix.arch }}
+          OWNER: ${{ github.repository_owner }}
+          COMPOSE_SELECTED: ${{ inputs.compose }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          registry="ghcr.io/${OWNER,,}"
+          compose=()
+          if [[ "$COMPOSE_SELECTED" == true ]]; then compose=(--compose); fi
+          python3 .github/scripts/release_images.py --revision "$HEAD" --version "$VERSION" \
+            --image-tag "$IMAGE_TAG" --targets "$IMAGE_TARGETS" --arch "$IMAGE_ARCH" \
+            --registry "$registry" --directory "$RUNNER_TEMP/release-images" --push "${compose[@]}"
+      - name: Retain exact staged digest identities
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: fleetworks-release-images-${{ matrix.arch }}-${{ github.run_id }}.${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-images/release-images-*.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain actual image smoke evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: fleetworks-image-smoke-${{ matrix.arch }}-${{ github.run_id }}.${{ github.run_attempt }}
+          path: .agent-scratch/native-review/images-*/public-smoke-*.json
+          if-no-files-found: ignore
+          retention-days: 7

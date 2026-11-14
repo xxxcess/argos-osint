@@ -14,9 +14,9 @@
 //! definitions still roll back. As in the legacy store (`user_version`), a
 //! database written by a newer build is refused and the transaction rolls
 //! back. Every definition is `IF NOT EXISTS`, so a re-run (or a concurrent
-//! bootstrap, which retries on conflict) is a no-op. There is no in-place
-//! migration ladder: the SurrealDB database starts fresh (wipe, no import;
-//! acceptance.md P4).
+//! bootstrap, which retries on conflict) is a no-op. Version nine adds the
+//! explicit atomic workstation-contract migration after definitions and before
+//! the version checkpoint; it preserves domain records and historical origins.
 
 use surrealdb::engine::any::Any;
 use surrealdb::Surreal;
@@ -28,8 +28,15 @@ use super::tx::{run_tx, RetryPolicy, TxError};
 /// staging and rejection-receipt tables plus the canonical `categories`
 /// array, `admitted_at`, the `categories.*` membership index and the two
 /// article full-text indexes — all additive `IF NOT EXISTS` definitions, so
-/// opening a v1 database upgrades it in place without a wipe.
-pub const SCHEMA_VERSION: i64 = 3;
+/// opening a v1 database upgrades it in place without a wipe. v4 adds the
+/// durable dispatch outbox for opt-in worker pools. v6 adds leased model account admission.
+/// v8 includes native registry/origin/reset fences and durable actor rebuild state;
+/// runtime readers reject incomplete earlier metadata until explicit bootstrap.
+/// v9 migrates active workspace registrations to workstation-only identity atomically,
+/// preserving immutable origins and fencing incompatible writers.
+/// v10 adds durable native pairing, scoped installation credentials and revocation.
+/// v11 adds authenticated dataset upload tickets shared across gateway replicas.
+pub const SCHEMA_VERSION: i64 = 11;
 
 /// Module schemas in apply order: counters before the outbox; the graph
 /// before lifecycle (which indexes `brain_graph_node`); Atlas before its
@@ -37,9 +44,10 @@ pub const SCHEMA_VERSION: i64 = 3;
 /// before refresh. The event logs (`argos_event`, `investigation_event`)
 /// stand alone; telemetry writes use `profile_view`'s tables, with
 /// `telemetry_meta` after them.
-pub fn schemas() -> [(&'static str, &'static str); 45] {
+pub fn schemas() -> [(&'static str, &'static str); 58] {
     [
         ("counters", super::counters::SCHEMA),
+        ("native_pairing", super::native_pairing::SCHEMA),
         ("outbox", super::outbox::SCHEMA),
         ("memory", super::memory::SCHEMA),
         ("graph", super::graph::SCHEMA),
@@ -87,6 +95,8 @@ pub fn schemas() -> [(&'static str, &'static str); 45] {
         ),
         ("pipeline_exec", super::pipeline_exec::SCHEMA),
         ("profile_view", super::profile_view::SCHEMA),
+        ("provider_account", super::provider_account::SCHEMA),
+        ("provider_pacer", super::provider_pacer::SCHEMA),
         ("telemetry", super::telemetry::SCHEMA),
         ("investigation", super::investigation::SCHEMA),
         ("atlas_work", super::atlas_work::SCHEMA),
@@ -96,6 +106,19 @@ pub fn schemas() -> [(&'static str, &'static str); 45] {
         ("brain_scope", super::brain_scope::SCHEMA),
         ("brief_stages", super::brief_stages::SCHEMA),
         ("meta", META_SCHEMA),
+        ("connect_registry", super::connect_registry::SCHEMA),
+        ("cycle_history", super::cycle_history::SCHEMA),
+        ("configuration_reset", super::configuration_reset::SCHEMA),
+        ("job_context", super::job_context::SCHEMA),
+        ("job_actions", super::job_actions::SCHEMA),
+        ("job_dispatch", super::job_dispatch::SCHEMA),
+        ("setup_jobs", super::setup_jobs::SCHEMA),
+        ("upload_ticket", super::upload_ticket::SCHEMA),
+        (
+            "classifier_activation",
+            super::classifier_activation::SCHEMA,
+        ),
+        ("actor_search_outbox", super::actor_search_outbox::SCHEMA),
     ]
 }
 
@@ -118,6 +141,55 @@ pub struct Bootstrap {
     /// Version recorded before this call (0: fresh database).
     pub previous: i64,
     pub version: i64,
+}
+
+/// Check the schema version using a database-scoped runtime session.
+///
+/// The runtime process does not write metadata or apply schema definitions.
+pub async fn verify_schema(db: &Surreal<Any>) -> Result<Bootstrap, TxError> {
+    let failed = |_| TxError::Abort("could not read the network storage schema".into());
+    let mut result = db
+        .query("SELECT VALUE version FROM ONLY storage_meta:schema")
+        .await
+        .and_then(|result| result.check())
+        .map_err(failed)?;
+    let version: Option<i64> = result.take(0).map_err(failed)?;
+    match version {
+        Some(version) if version == SCHEMA_VERSION => Ok(Bootstrap {
+            previous: version,
+            version,
+        }),
+        Some(version) => Err(TxError::Abort(format!(
+            "network storage schema version {version} does not match this build ({SCHEMA_VERSION})"
+        ))),
+        None => Err(TxError::Abort(
+            "network storage schema is missing. Run the storage bootstrap".into(),
+        )),
+    }
+}
+
+/// Retain the database identity across restarts. A fresh in-memory server
+/// receives a new identity, which fences work enqueued for the previous store.
+/// Establish the retained identity during explicit network bootstrap.
+/// Readiness, observations and ordinary runtime requests must never call this.
+pub async fn ensure_network_identity(db: &Surreal<Any>) -> Result<(), TxError> {
+    let identity = crate::store::new_id();
+    run_tx(db, RetryPolicy::default(), |tx| {
+        let identity = identity.clone();
+        async move {
+            run(
+                &tx,
+                tx.query(
+                    "UPSERT storage_meta:identity SET instance_id = instance_id ?? $new RETURN NONE",
+                )
+                .bind(("new", identity)),
+            )
+            .await?;
+            Ok(())
+        }
+    })
+    .await?;
+    Ok(())
 }
 
 /// Apply every schema and record [`SCHEMA_VERSION`] in one transaction.
@@ -153,6 +225,7 @@ pub async fn ensure_schema(db: &Surreal<Any>) -> Result<Bootstrap, TxError> {
                     "database schema version {previous} is newer than this Argos build"
                 )));
             }
+            super::connect_registry::migrate_workstation_contract_in(&tx).await?;
             run(
                 &tx,
                 tx.query(

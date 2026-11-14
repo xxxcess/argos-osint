@@ -7,7 +7,7 @@
 <g font-family="system-ui,sans-serif" fill="#2d3142" text-anchor="middle">
 <text x="35" y="28" text-anchor="start" font-size="14">INGESTION / PUBLICATION</text>
 <rect x="35" y="45" width="190" height="80" fill="#fff" stroke="#2d3142"/>
-<text x="130" y="74" font-size="14">Atlas · Recon · Claims</text><text x="130" y="100" font-size="12">original spelling + provenance</text>
+<text x="130" y="74" font-size="14">Atlas · Claims · retained sources</text><text x="130" y="100" font-size="12">original spelling + provenance</text>
 <rect x="310" y="45" width="245" height="80" fill="#fff4ee" stroke="#eb6c36"/>
 <text x="432" y="73" font-size="14">Normalize → scoped bind</text><text x="432" y="99" font-size="12">aliases / identifiers / redirects</text>
 <rect x="640" y="45" width="225" height="80" fill="#fff" stroke="#2d3142"/>

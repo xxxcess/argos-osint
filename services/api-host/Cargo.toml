@@ -1,0 +1,38 @@
+[package]
+name = "argos-api-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["embedded", "nlp", "classifier"]
+embedded = ["argos-osint-core/embedded", "argos-osint-api/embedded"]
+server = ["argos-osint-core/server", "argos-osint-api/server"]
+nlp = ["argos-osint-core/nlp", "argos-osint-api/nlp"]
+classifier = ["argos-osint-core/classifier", "argos-osint-api/classifier"]
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+httpdate = "1"
+libc = "0.2"
+fleetworks-jobs = { path = "../../crates/fleetworks-jobs" }
+fleetworks-contracts = { path = "../../crates/fleetworks-contracts" }
+reqwest.workspace = true
+tracing.workspace = true
+argos-osint-core = { path = "../../crates/argos-osint-core", default-features = false }
+axum = "0.8.8"
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+url.workspace = true
+argos-osint-api = { path = "../../crates/argos-osint-api", default-features = false }
+clap.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+argos-osint-core = { path = "../../crates/argos-osint-core", default-features = false, features = ["fixtures"] }
+tempfile.workspace = true

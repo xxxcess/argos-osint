@@ -2,12 +2,13 @@ name: Dataset integrity
 
 on:
   push:
-    branches: [main]
+    branches: [dev, nightly, main]
     paths: &dataset_paths
       - 'datasets/**'
       - '.gitattributes'
       - '.github/workflows/datasets.yml'
   pull_request:
+    branches: [dev, nightly, main]
     paths: *dataset_paths
   workflow_dispatch:
 

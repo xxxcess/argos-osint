@@ -20,6 +20,158 @@ const LEASE: i64 = 30;
 /// Per pool, one claim in eight (jobs::HEAD_EVERY) starts at the head.
 const HEAD_BOUND: usize = 8;
 
+#[tokio::test]
+async fn dispatch_pool_configuration_upgrades_legacy_records() {
+    use argos_osint_core::storage::job_dispatch;
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let db = server.raw_root("argos", "legacy_dispatch_pool").await;
+    jobs::apply_schema(&db).await.unwrap();
+    // Persist a pool before the required transport revision field existed.
+    db.query(
+        "DEFINE TABLE storage_meta SCHEMALESS;
+        CREATE storage_meta:identity SET instance_id='fixture-store';
+        DEFINE TABLE job_dispatch_pool SCHEMAFULL;
+        DEFINE FIELD enabled ON job_dispatch_pool TYPE bool;
+        CREATE job_dispatch_pool:atlas_cycle SET enabled=true;",
+    )
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+    db.query(job_dispatch::SCHEMA)
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    job_dispatch::configure_pool(&db, job_dispatch::ATLAS_POOL, false)
+        .await
+        .unwrap();
+    assert!(
+        !scalar::<bool>(
+            &db,
+            "RETURN (SELECT VALUE enabled FROM ONLY job_dispatch_pool:atlas_cycle)"
+        )
+        .await
+    );
+    assert_eq!(
+        scalar::<i64>(
+            &db,
+            "RETURN (SELECT VALUE transport_revision FROM ONLY job_dispatch_pool:atlas_cycle)"
+        )
+        .await,
+        0
+    );
+
+    job_dispatch::ensure_queue_transport(&db, job_dispatch::ATLAS_POOL)
+        .await
+        .unwrap();
+    db.query("UPDATE job_dispatch_pool:atlas_cycle SET transport_revision=7")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    for enabled in [true, false, true] {
+        job_dispatch::configure_pool(&db, job_dispatch::ATLAS_POOL, enabled)
+            .await
+            .unwrap();
+        assert_eq!(
+            scalar::<bool>(
+                &db,
+                "RETURN (SELECT VALUE enabled FROM ONLY job_dispatch_pool:atlas_cycle)"
+            )
+            .await,
+            enabled
+        );
+        assert_eq!(
+            scalar::<i64>(
+                &db,
+                "RETURN (SELECT VALUE transport_revision FROM ONLY job_dispatch_pool:atlas_cycle)"
+            )
+            .await,
+            7
+        );
+        assert_eq!(
+            scalar::<String>(
+                &db,
+                "RETURN (SELECT VALUE transport FROM ONLY job_dispatch_pool:atlas_cycle)"
+            )
+            .await,
+            "jobs_rocksdb_v1"
+        );
+    }
+}
+
+#[tokio::test]
+async fn embedded_queue_transport_requires_legacy_tasks_to_drain() {
+    use argos_osint_core::storage::job_dispatch;
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let db = fresh(&server, "queue_transport_cutover").await;
+    let now = Utc::now();
+    jobs::create_job(
+        &db,
+        &job("legacy", None, now),
+        &[task(
+            "legacy-task",
+            "legacy",
+            job_dispatch::ATLAS_POOL,
+            0,
+            now,
+        )],
+    )
+    .await
+    .unwrap();
+    db.query(job_dispatch::SCHEMA)
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert!(matches!(
+        job_dispatch::ensure_queue_transport(&db, job_dispatch::ATLAS_POOL).await,
+        Err(TxError::Abort(reason)) if reason == "drain_existing_atlas_jobs_before_queue_cutover"
+    ));
+    db.query("UPDATE $task SET state='completed'")
+        .bind((
+            "task",
+            surrealdb::types::RecordId::new("task", "legacy-task"),
+        ))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert!(
+        job_dispatch::ensure_queue_transport(&db, job_dispatch::ATLAS_POOL)
+            .await
+            .is_err(),
+        "a finished task does not prove its job has drained"
+    );
+    db.query("UPDATE job:legacy SET state='completed'")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    job_dispatch::ensure_queue_transport(&db, job_dispatch::ATLAS_POOL)
+        .await
+        .unwrap();
+    job_dispatch::ensure_queue_transport(&db, job_dispatch::ATLAS_POOL)
+        .await
+        .unwrap();
+    db.query("UPDATE job_dispatch_pool:atlas_cycle SET transport='future_transport'")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert!(
+        job_dispatch::ensure_queue_transport(&db, job_dispatch::ATLAS_POOL)
+            .await
+            .is_err()
+    );
+}
+
 /// Held by every test that runs many concurrent clients. Their bounds
 /// (retry p99, the oldest-task claim position) are defined for one test's
 /// 8 clients; run in parallel, three such tests put 24 clients on the box,
@@ -1086,6 +1238,33 @@ async fn exactly_one_scheduler_wins_and_takes_over_after_expiry() {
         .unwrap()
         .value;
     assert!(take.elected && take.epoch == 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shared_repository_scheduler_election_avoids_self_contention() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server.repo("argos", "sched_shared_repo").await;
+    let now = Utc::now();
+    let mut handles = Vec::new();
+    for _ in 0..16 {
+        let repo = repo.clone();
+        handles.push(tokio::spawn(async move {
+            repo.scheduler_elected("shared-owner", LEASE, now).await
+        }));
+    }
+    for handle in handles {
+        assert!(handle.await.unwrap().unwrap());
+    }
+    assert_eq!(
+        scalar::<String>(
+            repo.db(),
+            "SELECT VALUE owner FROM ONLY scheduler_lease:singleton",
+        )
+        .await,
+        "shared-owner"
+    );
 }
 
 // --- claim window: approximately FIFO, never across a priority level ---------

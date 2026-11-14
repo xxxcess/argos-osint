@@ -1,34 +1,58 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Argos terminal workspace</title><style>body{margin:32px;background:#f5f5f5;color:#2d3142;font-family:Geist,system-ui,sans-serif}main{max-width:1100px;margin:auto}h1{font-family:'Instrument Serif',Georgia,serif}svg{width:100%;height:auto}p{line-height:1.6}a{color:#394b65}</style></head><body><main><h1>Argos terminal workspace</h1><p>Home launches four terminal applications over one SurrealDB storage boundary. Intel prepares article briefs; independent Recon investigations remain available. Tools, Models and Profile configure Argos; Jobs and Logs monitor background work.</p><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 460" role="img" aria-labelledby="workspace-title workspace-desc">
-<title id="workspace-title">Argos terminal workspace</title><desc id="workspace-desc">Home launches four terminal applications over one SurrealDB storage boundary. Intel prepares article briefs; independent Recon investigations remain available. Tools, Models and Profile configure Argos; Jobs and Logs monitor background work.</desc>
-<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker></defs>
-<rect width="960" height="460" fill="#f5f5f5"/>
-<style>text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}.label{font-size:18px}.note{font-size:13px}.line{fill:none;stroke:#4f5d75;stroke-width:2;marker-end:url(#arrow)}</style>
-<rect x="360" y="24" width="240" height="88" rx="6" fill="white" stroke="#eb6c36"/>
-<text x="480.0" y="52" text-anchor="middle" class="label">Home</text>
-<text x="480.0" y="75" text-anchor="middle" class="note">Application launcher</text>
-<path d="M480 112V136H132V160" class="line"/>
-<rect x="32" y="160" width="200" height="88" rx="6" fill="white" stroke="#4f5d75"/>
-<text x="132.0" y="188" text-anchor="middle" class="label">Intel</text>
-<text x="132.0" y="211" text-anchor="middle" class="note">Article briefs</text>
-<path d="M132 248V276H480V304" class="line"/>
-<path d="M480 112V136H364V160" class="line"/>
-<rect x="264" y="160" width="200" height="88" rx="6" fill="white" stroke="#4f5d75"/>
-<text x="364.0" y="188" text-anchor="middle" class="label">Atlas</text>
-<text x="364.0" y="211" text-anchor="middle" class="note">Collect + classify</text>
-<path d="M364 248V276H480V304" class="line"/>
-<path d="M480 112V136H596V160" class="line"/>
-<rect x="496" y="160" width="200" height="88" rx="6" fill="white" stroke="#4f5d75"/>
-<text x="596.0" y="188" text-anchor="middle" class="label">Recon</text>
-<text x="596.0" y="211" text-anchor="middle" class="note">Investigations</text>
-<path d="M596 248V276H480V304" class="line"/>
-<path d="M480 112V136H828V160" class="line"/>
-<rect x="728" y="160" width="200" height="88" rx="6" fill="white" stroke="#4f5d75"/>
-<text x="828.0" y="188" text-anchor="middle" class="label">Brain</text>
-<text x="828.0" y="211" text-anchor="middle" class="note">Memory + topology</text>
-<path d="M828 248V276H480V304" class="line"/>
-<rect x="264" y="304" width="432" height="88" rx="6" fill="white" stroke="#eb6c36"/>
-<text x="480.0" y="332" text-anchor="middle" class="label">SurrealDB</text>
-<text x="480.0" y="355" text-anchor="middle" class="note">Memories · provenance · graph · vectors</text>
-<text x="480.0" y="373" text-anchor="middle" class="note">Embedded by default; server opt-in</text>
-<text x="480" y="428" text-anchor="middle" class="note">Tools · Models · Profile configure Argos; Jobs · Logs monitor work.</text>
-</svg><p><a href="../diagrams.md">Diagram catalog</a> · <a href="../index.md">Wiki</a></p></main></body></html>
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Native workstation identity and shared backend</title>
+<style>body{margin:0;padding:32px;color:#242424;background:#fff;font:16px/1.6 Geist,Arial,sans-serif}main{max-width:1200px;margin:auto}h1{font:36px/1.2 "Instrument Serif",Georgia,serif;margin:0 0 16px}p{max-width:88ch}svg{display:block;width:100%;height:auto;margin:24px 0}a{color:#a14b24}</style></head><body><main><h1>Native workstation identity and shared backend</h1><p>Protected installation settings retain identity, non-secret references and journals. Native credentials and pending polling secrets live in macOS Keychain, bound to installation and gateway origin. The gateway owns shared resources, workstation authority and durable activity; historical folders remain preserved.</p>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 784" role="img" aria-labelledby="workspace-title workspace-desc">
+<title id="workspace-title">Native workstation identity and shared backend</title>
+<desc id="workspace-desc">Protected installation settings retain identity, non-secret references and journals. Native credentials and pending polling secrets live in macOS Keychain, bound to installation and gateway origin. The gateway owns shared resources, workstation authority and durable activity; historical folders remain preserved.</desc>
+<style>text{font-family:Geist,Arial,sans-serif;fill:#242424}.zone{font-size:14px;letter-spacing:1.4px;fill:#666}.label{font-size:20px;font-weight:600}.note{font-size:16px;fill:#555}.small{font-size:14px;fill:#666}.node{fill:#fff;stroke:#aaa;stroke-width:1}.focus{fill:#fff4ee;stroke:#eb6c36;stroke-width:2}.wire{fill:none;stroke:#555;stroke-width:2;marker-end:url(#arrow)}.lane{fill:#fafafa;stroke:#ddd;stroke-width:1}</style>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#555"/></marker></defs>
+<rect width="1200" height="784" fill="#fff"/>
+<rect x="24" y="72" width="536" height="632" class="lane"/><rect x="640" y="72" width="536" height="632" class="lane"/>
+<text x="40" y="48" class="zone">MAC · PROTECTED INSTALLATION</text>
+<text x="656" y="48" class="zone">GATEWAY · AUTHENTICATED DEPLOYMENT</text>
+<g data-card="true"><rect x="48" y="96" width="488" height="128" rx="6" class="focus"/>
+<text x="64" y="128" class="label">Fleetworks Desktop</text>
+<text x="64" y="160" class="note">Six destinations + Status and pairing setup</text>
+<text x="64" y="186" class="note">Rune API client; no backend startup</text>
+</g>
+<g data-card="true"><rect x="48" y="256" width="488" height="112" rx="6" class="node"/>
+<text x="64" y="288" class="label">OS home / .fleetworks</text>
+<text x="64" y="320" class="note">Installation identity + non-secret references</text>
+<text x="64" y="346" class="note">Origins, pending IDs and recovery journals</text>
+</g>
+<g data-card="true"><rect x="48" y="400" width="488" height="112" rx="6" class="node"/>
+<text x="64" y="432" class="label">macOS Keychain</text>
+<text x="64" y="464" class="note">Approved Native credential + polling secret</text>
+<text x="64" y="490" class="note">Exact origin and installation binding</text>
+</g>
+<g data-card="true"><rect x="48" y="544" width="488" height="120" rx="6" class="node"/>
+<text x="64" y="576" class="label">Preserved historical records</text>
+<text x="64" y="608" class="note">Existing folders, markers and old journals</text>
+<text x="64" y="634" class="note">No active folder or Trash controls</text>
+</g>
+<g data-card="true"><rect x="664" y="96" width="488" height="148" rx="6" class="focus"/>
+<text x="680" y="128" class="label">Registered workstation</text>
+<text x="680" y="160" class="note">Stable opaque workstation ID = Connect ID</text>
+<text x="680" y="186" class="note">Authenticated scope + installation hash</text>
+<text x="680" y="212" class="note">IP remains optional metadata</text>
+</g>
+<g data-card="true"><rect x="664" y="320" width="488" height="120" rx="6" class="node"/>
+<text x="680" y="352" class="label">Shared backend resources</text>
+<text x="680" y="384" class="note">Actors, search, models and provider keys</text>
+<text x="680" y="410" class="note">Permissions define resource access</text>
+</g>
+<g data-card="true"><rect x="664" y="520" width="488" height="128" rx="6" class="node"/>
+<text x="680" y="552" class="label">Durable jobs and associations</text>
+<text x="680" y="584" class="note">Immutable creator + requester membership</text>
+<text x="680" y="610" class="note">Private details remain independently guarded</text>
+</g>
+<path d="M 536 160 H 664" class="wire"/>
+<path d="M 292 224 V 256" class="wire"/>
+<path d="M 292 368 V 400" class="wire"/>
+<path d="M 908 244 V 320" class="wire"/>
+<path d="M 908 440 V 520" class="wire"/>
+<text x="570" y="140" class="small">Current proof</text>
+<text x="40" y="736" class="note">Independent operators own deployment files, containers and private backend stores.</text>
+<text x="40" y="768" class="small">Keychain secrets are not stored in the settings folder; a Connect ID never grants access.</text>
+</svg>
+<p><a href="../wiki/code/native-workspaces.md">Workstation identity contract</a> · <a href="../wiki/code/native-connections.md">Connections and activity</a> · <a href="../diagrams.md">Diagram catalog</a></p></main></body></html>

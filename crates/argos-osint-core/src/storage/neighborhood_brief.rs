@@ -22,7 +22,7 @@ use crate::brain_neighborhood_brief_exec::{
     build_request, delivered_for, fallback_result, generate, generated_result, Delivery,
     FailureKind, GenerationFailure, Outcome,
 };
-use crate::recon::model_exec::RoleRuntime;
+use crate::model_exec::RoleRuntime;
 use crate::summarization::SummaryRequest;
 
 fn task_id(req: &SummaryRequest) -> String {

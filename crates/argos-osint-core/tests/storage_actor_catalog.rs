@@ -77,12 +77,13 @@ async fn partial_seed_retries_without_duplicates_and_only_complete_receipts_hide
             .needs_seed
     );
     let cancel = AtomicBool::new(false);
-    let result = actor_catalog::seed_actors(&repo, actors(129), "fixture-v1", &cancel, |p| {
-        if p.processed == 128 {
-            cancel.store(true, Ordering::Release);
-        }
-    })
-    .await;
+    let result =
+        actor_catalog::seed_actors_pinned(&repo, actors(129), "fixture-v1", &cancel, |p| {
+            if p.processed == 128 {
+                cancel.store(true, Ordering::Release);
+            }
+        })
+        .await;
     assert!(result.is_err());
     assert!(
         actor_catalog::status(repo.db())
@@ -100,9 +101,15 @@ async fn partial_seed_retries_without_duplicates_and_only_complete_receipts_hide
         .expect("catalog remains enabled")
         .is_empty());
     cancel.store(false, Ordering::Release);
-    let progress = actor_catalog::seed_actors(&repo, actors(129), "fixture-v1", &cancel, |_| {})
-        .await
-        .expect("retry seed");
+    assert!(
+        actor_catalog::seed_actors_pinned(&repo, actors(1), "fixture-v2", &cancel, |_| {})
+            .await
+            .is_err()
+    );
+    let progress =
+        actor_catalog::seed_actors_pinned(&repo, actors(129), "fixture-v1", &cancel, |_| {})
+            .await
+            .expect("retry seed");
     assert!(progress.complete);
     assert_eq!(progress.processed, 129);
     assert!(
@@ -111,7 +118,13 @@ async fn partial_seed_retries_without_duplicates_and_only_complete_receipts_hide
             .expect("complete status")
             .needs_seed
     );
-    actor_catalog::seed_actors(&repo, actors(129), "fixture-v1", &cancel, |_| {})
+    assert!(
+        actor_catalog::seed_actors_pinned(&repo, actors(1), "fixture-v2", &cancel, |_| {})
+            .await
+            .is_err()
+    );
+    assert!(actor_catalog::status(repo.db()).await.unwrap().complete);
+    actor_catalog::seed_actors_pinned(&repo, actors(129), "fixture-v1", &cancel, |_| {})
         .await
         .expect("repeat seed");
     let mut r = repo.db().query("RETURN count(SELECT id FROM brain_actor); RETURN count(SELECT id FROM memory WHERE memory_kind = 'actor'); RETURN count(SELECT id FROM brain_actor_alias);").await.expect("counts").check().expect("valid counts");

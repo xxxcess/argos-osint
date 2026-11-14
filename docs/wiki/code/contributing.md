@@ -19,25 +19,130 @@ ARGOS_WEB_TEST_DEV=1 pnpm check:web-build
 
 Without that setting, both retain the normal launcher `.next` behavior. The isolated build/check pair does not establish a production browser pass or the full frontend gate. After that pair, `ARGOS_WEB_TEST_DEV=1 pnpm test:e2e` runs the repository’s default production browser profile against the same isolated output. Development uses `ARGOS_WEB_PROFILE=dev pnpm test:e2e` and always isolates output. Never stop the user’s launcher or remove its lock to make verification run.
 
-Rust 1.95.0 pinned. Agents always build through `python3 scripts/agent_cargo.py … --locked` (artifacts in `target/agents`; `target/debug` is the user's), with `ARGOS_EMBED` unset (the wrapper removes inherited values). `cargo fmt` runs directly. Local Rust builds and tests target the **host machine's native platform** (`uname -ms`, `rustc -vV | grep '^host:'`) and **embedded storage mode** (`--storage embedded`, default features `embedded,nlp,classifier`).
+Rust 1.95.0 is pinned. Agents build through `python3 scripts/agent_cargo.py … --locked`, which writes to `target/agents`. Leave `ARGOS_EMBED` unset. The wrapper also removes inherited values. Use `cargo fmt` directly. Keep `target/debug` for the user's builds. Local checks use the host's native architecture.
+
+Run `cargo fmt --all -- --check` before costly Rust checks. If it fails, inspect the dirty diff, format the affected task-owned files under the existing authorization, preserve semantics and unrelated work, then rerun the check. Formatting failure must be resolved or reported; never silently waive the gate.
+
+For Fleetworks client, service, deployment or web work, start with the [scope planner](ci.md#fleetworksyml--scoped-branch-checks). `local` runs the selected host-native iteration checks and includes working-tree paths. Native client contract and workstation unit tests need no datastore. Run the selected hosted checks for platform, server and packaged evidence. Use the embedded gate for affected compatibility and embedded-storage behavior.
+
+<a id="development-loops-local-cli-and-docker"></a>
+
+### Development loops: native app and Docker
+
+Fleetworks has a Rune macOS client, an independently operated Linux backend and Intel Web. The app connects to the gateway; direct Docker Compose operates services. Pick the shortest loop that exercises the changed contract, then widen. The commands below are the fast paths; deployment details stay in the [deployment guide](../../../deploy/README.md).
+
+[![Fleetworks development loops](../../diagrams/dev-loops.svg)](../../diagrams/dev-loops.html)
+
+| Changed code | Loop | Rebuild needed |
+| --- | --- | --- |
+| Rune app and its client/workstation contracts | **1. Native app** | Scoped host debug tests, selected real-view captures and complete app bundle |
+| `argos-api-host` roles, core, storage, jobs (service side) | **2. Runtime image** | `runtime` image |
+| `apps/web-desktop/app`, `packages/{ui,intel,api-client}/src` | **3. Web dev container** | None; files reload |
+| Web dependencies, relay, Next config, Dockerfile, Compose, SurrealDB wrapper, private search | **4. Image build** | Affected `web`, `runtime`, `surrealdb` or `search-index` image |
+| Platform, packaging or release behavior | **5. Hosted CI** | Pushed revision |
+
+**1. Native app loop.** Detect the physical host, run affected app/contracts/workstation tests and build the complete review app through the shared helper. Default host builds reuse the implicit debug graph; an explicit target intentionally selects its separate target directory. Opening the app remains explicit.
+
+[![Native app development loop](../../diagrams/dev-loop-native.svg)](../../diagrams/dev-loop-native.html)
+
+```sh
+python3 scripts/fleetworks_verify.py platform --format json
+python3 scripts/agent_cargo.py test --locked -p fleetworks-desktop -p fleetworks-workstation -p fleetworks-contracts
+python3 scripts/fleetworks_candidate.py build-native --agent --target host --profile debug
+```
+
+Use [selected native verification](native-verification.md) for affected Runtime/PNG/tree/script evidence. The helper streams Cargo progress/diagnostics and stage markers live on stderr, then packages/validates and prints the `.app` path and result metadata. Only `--open` opens the validated app; an already running app is preserved. Native build/fixture commands do not provision a backend. Installed-app, minimum-OS and platform validation stay separate from fixture generation.
+
+**2. Runtime image loop (service changes).** Service roles run from the `runtime` image, so a host build alone does not change them. Run the single helper command to auto-initialize `native-local` if missing, rebuild the backend service images, redeploy the Docker Compose containers, and trigger `fleetworks_candidate.py build-native --target host --profile debug --open` on supported macOS (`x86_64-apple-darwin` or `aarch64-apple-darwin`; pass `--backend-only` or run on Linux to skip the native build):
+
+```sh
+python3 deploy/native_review.py up
+```
+
+Edit the private, Git-ignored root `compose.env` for local settings; concurrent reviews (`--name <other> --api-port <port>`) keep their per-review env paths without touching an existing root `compose.env`. Reuse the exact env file/project for `ps`, `logs` and `down`. BuildKit retains dependencies; rebuilding an image alone without `up` or `--force-recreate` does not recreate a running consumer. For a server-feature check without containers, use the `server,nlp,classifier` graph in [Targeted local Rust builds](#targeted-local-rust-builds-and-tests-fast-iteration).
+
+[![Runtime service image development loop](../../diagrams/dev-loop-runtime.svg)](../../diagrams/dev-loop-runtime.html)
+
+**3. Web development loop.** The independently configured Next server uses a fixed internal gateway origin and separate WebRelay credential. For Docker development, layer `compose.yml` and `compose.dev.yml` over the same native-review base. Source mounts reload on save; dependency, relay or Next configuration changes require the affected image. Start/stop the exact selected Compose files and project explicitly. Browser checks use isolated output as described under [Build and test](#build-and-test).
+
+[![Web development container and browser loop](../../diagrams/dev-loop-web.svg)](../../diagrams/dev-loop-web.html)
+
+**4. Image build loop.** Build a single target to validate packaging without running the stack, then smoke it.
+
+[![Dockerfile targets and packaged image loop](../../diagrams/dev-loop-images.svg)](../../diagrams/dev-loop-images.html)
+
+```sh
+export VERSION="$(tr -d '[:space:]' < version.txt)"
+docker buildx bake -f deploy/docker-bake.hcl web                # one image
+docker buildx bake -f deploy/docker-bake.hcl backend
+docker build -f deploy/Dockerfile --target runtime -t fleetworks-runtime:local .
+docker build -f deploy/Dockerfile --target surrealdb -t fleetworks-surrealdb:3.3.4 .
+python3 deploy/verify.py --name isolated-review [--web] [--dev] [--atlas]
+```
+
+The standalone Compose command uses `up --no-build --pull never` with the exact preloaded review tags. The [deployment guide](../../../deploy/README.md) supplies provisioning, env-file and project selection; no terminal-client images remain.
+
+**5. Hosted CI.** Preview the selected lanes with `python3 scripts/fleetworks_verify.py plan`, push, and inspect results for the exact revision as described in [CI](ci.md#fleetworksyml--scoped-branch-checks). Compose and packaged smokes on AMD64 and ARM64 run here.
+
+[![Fleetworks development scopes](../../diagrams/ci-scopes.svg)](../../diagrams/ci-scopes.html)
+
+Stable iteration order: static checks and unit tests (loop 1), then the affected container loop (2 to 4), then hosted CI (5). Do not jump to image builds for changes a host build and unit test can verify.
+
+**Resource and isolation rules.** Docker and Compose runs are heavy and shared. Use a dedicated workspace and `COMPOSE_PROJECT_NAME` per checkout, and remap `FLEETWORKS_WEB_PORT` and `FLEETWORKS_API_PORT` when another stack is running. Never stop, rebuild or remove the user's running stack, volumes or images. Check `docker system df` and free disk before image builds. Raise Docker Desktop memory if a Rust image build is killed.
 
 ### Verification ownership and host resources
 
-One integration/build owner uses a stable feature graph and resource-based concurrency; see [execution policy](agent-workflow.md#coordinate-work-that-can-actually-run-in-parallel). Freeze edits before builds and reuse unaffected evidence. Workspace bin tests activate core fixtures; switching to core-only commands may rebuild dependencies.
+One integration/build owner uses a stable feature graph and resource-based concurrency; see [execution policy](agent-workflow.md#coordinate-work-that-can-actually-run-in-parallel). Freeze edits before builds and reuse unaffected evidence.
+
+| Verification need | Cache choice |
+| --- | --- |
+| Native settings, SDK or view iteration | Warm scoped native debug graph; no backend engine build |
+| Focused API/storage test matching the embedded gate | Retain the gate's exact workspace package/target set, features, profile, host and storage mode; narrow execution with the relevant test filter |
+| Deliberately smaller package graph | Inspect its resolved dependency features once, record the difference and budget a separate build |
+
+The service-host development dependency activates core fixtures. Matching core feature names alone does not guarantee matching `log`, `tracing`, proc-macro or build-dependency inputs; compare the resolved graph. A test-name filter limits cases; Cargo may still compile and launch every selected test harness, including harnesses with zero matches. [Artifact costs](build-artifacts.md#build-cost-signals)
+
+Prefer public typed constructors for internal test fixtures; use literal JSON when the wire format or its rejection is the contract under test. Production-only checks exclude `#[cfg(test)]` fixtures. Before linking many workspace test executables, run the [workspace/all-target Clippy recipe](#targeted-local-rust-builds-and-tests-fast-iteration) in the selected graph to catch fixture API/SDK type errors early.
+
+To focus required embedded execution while retaining the workspace test graph:
+
+```sh
+ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1 \
+  python3 scripts/agent_cargo.py test --workspace --locked '<test-filter>' \
+  -- --nocapture --test-threads=1
+```
+
+Replace `<test-filter>` with the meaningful API/storage test name or module. This compiles selected workspace targets and executes matching tests; confirm the intended tests actually matched and ran. Choose a deliberately scoped package/target command below when a separate graph is appropriate.
+
+### Build artifacts and paths
+
+[![Build outputs, QA evidence and persistent data](../../diagrams/build-artifacts.svg)](../../diagrams/build-artifacts.html)
+
+Storage/compatibility test binaries may link embedded SurrealDB/RocksDB: they are QA harnesses, not extra deployed services. The native API client stays engine-free. See the [build artifact map](build-artifacts.md) for tools, target/profile paths, packages, web/Docker outputs and persistent-data boundaries. Preserve active graphs and user outputs.
 
 ### Build cache hygiene
 
 Check `df -h .` and scoped `du -sh` before builds, between large phases and at handoff.
 
-- Retain the selected native/embedded `target/agents` profile, useful binary and reusable dependencies/fingerprints/incremental cache. Protect the user's `target/debug` by default.
-- Remove only proven obsolete repo-local agent artifacts. Check exact ownership, path and active processes/locks first; age or an unused lock alone is insufficient proof.
-- Never clean active builds, remove locks to bypass contention, run blanket `cargo clean`, or erase global caches, source, user data or unresolved evidence.
-- Budget growth plus a reserve from a comparable build. If space is insufficient, report the shortfall instead of starting a likely failed build or silently reducing required checks.
-- Cleanup proof must be proportional: do not hash whole caches. At handoff report removed paths/free space and confirm the retained binary exists; hash it only for required immutable provenance.
+| Check | Action |
+| --- | --- |
+| Graph and paths | Reuse the [selected graph](#verification-ownership-and-host-resources) in `target/agents/debug`, or `target/agents/<triple>/debug` for an explicit target. Reuse unchanged preflight evidence. |
+| Build mode | Use scoped debug `check`/`test`, or `build`/`run` when an executable is needed. Release/cross-target builds serve required evidence. Cargo validates freshness. |
+| Ownership | One build owner retains useful binaries, dependencies, fingerprints and incrementals. No fresh per-agent caches, copied fingerprints or cache-switch restarts. Protect `target/debug`. |
+| Capacity | Budget growth, linking/debug information and a reserve from a comparable graph. Monitor between stages; stop only task-owned work before exhausting the reserve and report remaining phases as blocked. |
+| Obsolete candidate | Require exact package/target/hash provenance in `.d` and fingerprint metadata showing the unit is no longer selectable by current required graphs. Removed packages or mandatory dependency changes can supply that proof; age, an old hash or an unused lock cannot. |
+
+If recovery is necessary:
+
+1. Inventory a bounded repo-local agent-cache subset: owner, regular-file/no-symlink status, device/inode, link count and allocated bytes. Deduplicate inodes; reclaim estimates include only single-link files or fully covered hardlinks. Do not hash whole caches.
+2. The build owner revalidates provenance, identity, active outputs and open files immediately before removal, briefly quiescing only its own build if needed. Preserve current native/server/embedded graphs and shared dependencies.
+3. Measure actual free space afterward; allocated estimates may differ. Record removed paths, retained useful binary and remaining reserve in the task handoff.
+
+Never run blanket `cargo clean`, remove locks to bypass contention or erase user/global caches, source, scripts, logs, credentials, QA evidence or unresolved data. Interrupted, skipped and unreached phases never count as passes.
 
 ### Targeted local Rust builds and tests (fast iteration)
 
-Detect the native host with `uname -ms` and `rustc -vV | grep '^host:'`. Reuse the selected feature graph, default `embedded,nlp,classifier`, and `target/agents`; set `CARGO_BUILD_JOBS` from memory pressure. Scope by package/target/filter without changing graphs unnecessarily.
+Detect the native host with `uname -ms` and `rustc -vV | grep '^host:'`. Reuse one feature graph and `target/agents`. Set `CARGO_BUILD_JOBS` from memory pressure. For an affected embedded contract, keep the workspace's compatibility features `embedded,nlp,classifier`.
 
 ```sh
 python3 scripts/agent_cargo.py check --locked -p argos-osint-core
@@ -47,7 +152,17 @@ ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1 \
   --test storage_jobs <filter> -- --nocapture
 ```
 
-Use `--lib`, `--bin <bin>` or `--test <name>` for the relevant target. Preserve activating targets when matching workspace features; zero-match targets are not passes. `python3 scripts/test_surreal.py --mode embedded --no-fail-fast` runs required embedded contracts. CLI/API/PTY checks follow the affected contract in [CI](ci.md).
+Use `--lib`, `--bin <bin>` or `--test <name>` for the relevant target. Preserve activating targets when matching workspace features. Confirm that tests ran. `python3 scripts/test_surreal.py --mode embedded --no-fail-fast` runs required embedded contracts. Native, API and administrative process checks follow the affected contract in [CI](ci.md).
+
+Future smaller gateway test lanes or reduced-debug profiles remain unvalidated follow-ups. Plan profile/feature changes separately, budget a fresh build and rerun affected checks.
+
+For an authorized focused Fleetworks storage contract, use an isolated pinned server and the network service feature graph. Resolve the checksum-verified executable with `python3 scripts/test_surreal.py --mode server --fetch-only`.
+
+```sh
+ARGOS_SURREAL_MODE=server ARGOS_SURREAL_REQUIRED=1 ARGOS_SURREAL_BIN=/absolute/path/to/surreal \
+  python3 scripts/agent_cargo.py test --locked -p argos-osint-core \
+  --no-default-features --features server,nlp,classifier --test storage_brief
+```
 
 ### Fail early, then run the gate
 
@@ -55,22 +170,23 @@ Follow the [scope/freeze policy](agent-workflow.md#scope-and-finish-line). Exerc
 
 ### Full local embedded gate & GitHub CI monitoring
 
-After targeted stability, run:
+For affected embedded and compatibility changes, run the native gate after focused stability.
 
 ```sh
 env -u ARGOS_SURREAL_MODE -u ARGOS_SURREAL_BIN -u ARGOS_SURREAL_REQUIRED \
   scripts/local_matrix.sh --storage embedded
 ```
 
-The gate runs format, Clippy, workspace tests, CLI smoke and required embedded storage. Parent mode variables stay unset so mode-selected storage runs once; targeted storage tests set mode/required explicitly. Some native-only fixtures execute in both phases: inspect their mode contracts before estimating work.
+The gate runs format, Clippy, workspace tests, actual service-host CLI help and required embedded storage. Its broad workspace test phase uses `--no-fail-fast` to collect independent target failures while retaining a failing exit status; the earlier formatting and compile/lint preflight still stop on errors. Parent mode variables stay unset so mode-selected storage runs once. Targeted storage tests set mode and required execution explicitly. Embedded storage retains workspace library/binary unit targets to preserve dependency-feature unification; those units and some native-only fixtures execute in both phases. Selecting only storage integration targets can create another cold graph. CLI help prints Cargo progress while building the normal service executable and may require a separate runtime graph.
 
-Never run the local all-platform, server storage or Rust mutation matrix/baselines. Once changes are published, inspect hosted checks when available (`gh pr checks`, `gh run list`, `gh run view --log-failed`); no hosted pass is implied by local results. `.github` remains Code Architect-owned. MiniLM requires explicit opt-in and is not part of ordinary checks.
+Pull requests into `dev`, `nightly` and `main` run selected Fleetworks checks on creation and every pushed update. Affected Linux storage changes select embedded compatibility; the normal Rune Mac lanes stay engine-free. Direct `gh workflow run embedded.yml --ref <branch>` retains the four-platform diagnostic. Integration pushes publish only verified, source-scoped [channel artifacts](versioning.md#release-automation). Dispatch `mutation.yml` for hosted mutation evidence. Once changes are published, inspect the checks for the exact revision with `gh pr checks`, `gh run list` or `gh run view --log-failed`. `.github` remains Code Architect-owned. MiniLM requires explicit opt-in.
 
 ## Storage facts
 
-- Default features `embedded,nlp,classifier`: embedded SurrealDB (RocksDB, in-process) under `<ARGOS_HOME>/storage/surreal`; `ARGOS_HOME` defaults to `~/.argos`.
-- Server mode is opt-in: `--no-default-features --features server,nlp,classifier`, selected by `argos storage init --mode server` or `ARGOS_STORAGE_MODE=server|embedded` (env → `storage/config.json` → embedded).
-- Storage is SurrealDB only. CI fails if `rusqlite` or `lancedb` appears in `cargo tree`.
+- Fleetworks uses a workspace-specific network datastore. See [direct backend deployment](../../../deploy/README.md).
+- Network service builds use `--no-default-features --features server,nlp,classifier`.
+- The compatibility build and embedded storage contracts use `embedded,nlp,classifier`.
+- Domain storage uses SurrealDB. Only `fleetworks-jobs` may directly depend on SQLite (`rusqlite`); CI enforces that boundary and rejects LanceDB.
 - Storage tests pick their mode from `ARGOS_SURREAL_MODE` and skip without it (and without `ARGOS_SURREAL_BIN`); run them via `test_surreal.py`.
 
 
@@ -91,7 +207,7 @@ The seed corpus resolution order for the classifier is:
 
 ## Classifier bundle build workflow
 
-**Status:** bundle build/parity scripts, Venture setup, local admission and the background monitoring consumer are implemented. Verification results are recorded separately; these commands do not establish a quality or performance result. Synthetic-only installations retain the explicitly activated baseline until independently reviewed promotion evidence exists.
+**Status:** bundle build/parity scripts, explicit native maintenance, local admission and the background monitoring consumer are implemented. Verification results are recorded separately; these commands do not establish a quality or performance result. Synthetic-only installations retain the explicitly activated baseline until independently reviewed promotion evidence exists.
 
 - **Rebuild:** run `node scripts/build_classifier_bundle.mjs` to generate the committed bundle at `crates/argos-osint-core/assets/classifier/natural-classifier.js` from the verified vendored upstream files (`natural@8.2.6`, `apparatus@0.0.10`) via the deterministic adaptation patch. The script performs **no network access** at build time; the pinned packages must already be present locally.
 - **Verify:** run `node scripts/build_classifier_bundle.mjs --check` to compute the SHA-256 of the current bundle and compare it against the committed `source-manifest.json` entry; this verifies byte-for-byte fidelity and fails closed on upstream drift. Output includes `crates/argos-osint-core/assets/classifier/source-manifest.json` with upstream versions/commits/tarball+per-file hashes/adaptation list/bundle hash.
@@ -101,9 +217,9 @@ The seed corpus resolution order for the classifier is:
 
 ## Workflow rules
 
-- **Worktrees are edit-only:** in a feature worktree run only `cargo fmt`. One combined integration tree runs the gate (`local_matrix.sh --storage embedded`).
+- **Worktrees are edit-only:** run only `cargo fmt` there. The integration checkout owns scoped verification and any affected compatibility gate.
 - **Scope and verification:** follow the [finish-line policy](agent-workflow.md#scope-and-finish-line); no unrequested cleanup, late broad audits or unchanged full-suite retries.
-- **Commits:** Conventional Commits (`feat` minor, `fix`/`perf` patch; breaking = `!` + `BREAKING CHANGE:` footer). Check with `node scripts/release_check.mjs message --file <path>` and `… versions`. Release Please owns version bumps; never hand-bump or invent `Release-As`. Stage exact paths; preserve unrelated changes.
+- **Commits:** Conventional Commits (`feat` minor, `fix`/`perf` patch; breaking = `!` + `BREAKING CHANGE:` footer). Check with `node scripts/release_check.mjs message --file <path>` and `… versions`. Artifact CI calculates commit-derived versions; source baseline updates remain explicit maintainer work. Never hand-bump during ordinary work or invent `Release-As`. Stage exact paths; preserve unrelated changes.
 - **`.github`** changes go through Code Architect.
 - **Planning:** multi-phase work uses `.planning/<YYYY-MM-DD-slug>/` (`task_plan.md`, `findings.md`, `progress.md`); see [planning-artifacts](planning-artifacts.md).
 - **Scratch** lives only in `.agent-scratch/`, never in `crates/`, `docs/`, `scripts/`; never stage it.

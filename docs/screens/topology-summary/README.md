@@ -1,5 +1,7 @@
 # Topology neighborhood summary — screenshots (Phase 3)
 
+> Historical capture record for the retired terminal executable. Preserve these results as originally recorded; see the [retirement disposition](../../archive/cli-retirement.md) for current entry points.
+
 Actual-cell captures from `dump_brain_topology_screens` (`scripts/tui_review.py capture`, include `topology-summary-*`), fictional fixture data. Ten representative captures of the full set (generated at 160x50, 120x40, 80x24 and 60x18; generating, blocked, failed, stale, limited, overflow). Re-capture the full matrix with `scripts/tui_review.py capture` (include `topology-summary-*`; sizes 160x50, 120x40, 100x32, 80x24, 60x20, 60x18, 40x20). 60x18 and 40x20 show only the existing too-small notice, so only one is kept.
 States: `generating`, `generated`, `blocked` (no usable Summarization model; Retry/Logs/Models), `failed` (rejected; Retry/Logs), `stale` (refresh failed, previous snapshot retained), `limited`, `overflow` (scrolled).
 

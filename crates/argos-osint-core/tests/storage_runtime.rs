@@ -25,9 +25,18 @@ async fn one_entry_point_serves_async_and_plain_thread_callers() {
 
     // Not initialized yet.
     assert!(runtime::repository().await.is_err());
+    let side_store = dir.path().join("side-store");
+    let legacy_side_store = argos_osint_core::recon::backend::legacy_side_store_path;
+    assert_eq!(
+        runtime::legacy_side_store_path(&side_store),
+        Some(side_store.as_path())
+    );
+    assert_eq!(legacy_side_store(&side_store), Some(side_store.as_path()));
     runtime::init(layout.clone()).unwrap();
     runtime::init(layout.clone()).unwrap();
     assert!(runtime::init(Layout::new(dir.path().join("other"))).is_err());
+    assert!(runtime::legacy_side_store_path(&side_store).is_none());
+    assert!(legacy_side_store(&side_store).is_none());
 
     let a = runtime::repository().await.unwrap();
     let b = runtime::repository().await.unwrap();

@@ -16,15 +16,23 @@ classifier = ["argos-osint-core/classifier"]
 anyhow.workspace = true
 argos-osint-core = { path = "../argos-osint-core", default-features = false }
 axum = { version = "0.8.8", features = ["ws"] }
+chrono.workspace = true
+fleetworks-contracts = { path = "../fleetworks-contracts" }
+reqwest.workspace = true
+futures-util.workspace = true
 tokio.workspace = true
+toml.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 url.workspace = true
 sysinfo.workspace = true
+tracing.workspace = true
+sha2.workspace = true
+subtle = "2.6"
 
 [dev-dependencies]
+surrealdb.workspace = true
 tempfile.workspace = true
 tower = { version = "0.5", features = ["util"] }
-chrono.workspace = true
 futures-util.workspace = true
 tokio-tungstenite = "=0.29.0"

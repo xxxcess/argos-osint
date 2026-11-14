@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Web source development: mounted HMR and isolated browser evidence</title>
+<style>body{margin:32px;background:#f5f5f5;color:#2d3142;font-family:Geist,system-ui,sans-serif}main{max-width:1320px;margin:auto}h1{font-family:'Instrument Serif',Georgia,serif;font-size:38px;font-weight:400}svg{width:100%;height:auto}p{max-width:100ch;line-height:1.6}a{color:#394b65}</style></head><body><main>
+<h1>Mounted source reloads; browser checks stay isolated</h1>
+<p>The web development overlay keeps host source mounts read-only while Next writes generated files inside the web container. Use HMR for the mounted app and package source. Rebuild and explicitly recreate for changed unmounted runtime inputs; keep browser verification in its own Next output and lock directory.</p>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 696" role="img" aria-labelledby="dev-loop-web-title dev-loop-web-desc">
+<title id="dev-loop-web-title">Web source development: mounted HMR and isolated browser evidence</title>
+<desc id="dev-loop-web-desc">The Compose web development overlay uses the web service with the web_dev Dockerfile target. It read-only mounts apps/web-desktop/app and the api-client, intel and ui package source directories. Watchpack polling supports browser live reload over the configured loopback port while generated Next files remain in the container. Browser private pages and live requests pass through the Connect gate and same-origin server relay using a server-only WebRelay credential and private gateway origin. Lockfiles, dependencies, Next configuration and unmounted server or relay runtime changes select a rebuild and explicit recreation of the isolated owned web service. Repository Playwright fixtures with ARGOS_WEB_TEST_DEV=1 direct Next output and development locks to .agent-scratch/next-web-tests, preserving the active frontend .next. Source checks, generated artifacts and visual inspection remain distinct evidence.</desc>
+<defs><marker id="dev-loop-web-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker></defs>
+<style>text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}.label{font-size:20px;font-weight:600}.note{font-size:16px}.zone{font-size:13px;font-weight:600;letter-spacing:1px}.node{fill:#fff;stroke:#4f5d75}.accent{fill:#fff6ed;stroke:#eb6c36}.edge{fill:none;stroke:#4f5d75;stroke-width:2;marker-end:url(#dev-loop-web-arrow)}.minor{fill:#4f5d75;font-size:14px}.code{font-family:'Geist Mono',ui-monospace,monospace;font-size:14px}</style>
+<rect width="1320" height="696" fill="#f5f5f5"/>
+<text x="48" y="68" class="zone">WEB DEVELOPMENT · READ-ONLY HOST SOURCES AND SEPARATE TEST OUTPUT</text>
+<path d="M408 172H468" class="edge"/>
+<path d="M828 172H888" class="edge"/>
+<path d="M1080 240V336" class="edge"/>
+<path d="M648 240V336" class="edge"/>
+<path d="M228 240V336" class="edge"/>
+
+<rect x="48" y="104" width="360" height="136" rx="6" class="node"/>
+<text x="64" y="136" class="label">Edit React / Next source</text>
+<text x="64" y="166" class="note">apps/web-desktop/app</text>
+<text x="64" y="194" class="note">api-client / intel / ui package src</text>
+<text x="64" y="222" class="note">Native app views use a separate loop</text>
+<rect x="468" y="104" width="360" height="136" rx="6" class="accent"/>
+<text x="484" y="136" class="label">Web dev target</text>
+<text x="484" y="166" class="note">Read-only app + three package src mounts</text>
+<text x="484" y="194" class="note">Next generated files stay in the container</text>
+<text x="484" y="222" class="note">Watchpack polling; loopback published port</text>
+<rect x="888" y="104" width="384" height="136" rx="6" class="node"/>
+<text x="904" y="136" class="label">Browser HMR and input</text>
+<text x="904" y="166" class="note">Use the isolated configured loopback port</text>
+<text x="904" y="194" class="note">Review affected flows and actual screenshots</text>
+<text x="904" y="222" class="note">Connect gate precedes private pages / live</text>
+<rect x="888" y="336" width="384" height="136" rx="6" class="node"/>
+<text x="904" y="368" class="label">Same-origin API + live relay</text>
+<text x="904" y="398" class="note">Server-only WebRelay credential file</text>
+<text x="904" y="426" class="note">Private gateway origin; authoritative session</text>
+<text x="904" y="454" class="note">Keep backend and index credentials private</text>
+<rect x="468" y="336" width="360" height="136" rx="6" class="node"/>
+<text x="484" y="368" class="label">Rebuild only changed inputs</text>
+<text x="484" y="398" class="note">Lockfile / dependencies / Next config</text>
+<text x="484" y="426" class="note">server.mjs and relay runtime changes</text>
+<text x="484" y="454" class="note">Recreate the isolated owned web service</text>
+<rect x="48" y="336" width="360" height="136" rx="6" class="accent"/>
+<text x="64" y="368" class="label">Isolated browser verification</text>
+<text x="64" y="398" class="code">ARGOS_WEB_TEST_DEV=1</text>
+<text x="64" y="426" class="note">Separate Next output, cache and dev lock</text>
+<text x="64" y="454" class="note">Keep the user's active .next untouched</text>
+<text x="48" y="548" class="zone">TEST NEXT OUTPUT</text>
+<text x="48" y="580" class="code">.agent-scratch/next-web-tests</text>
+<text x="48" y="612" class="note">Use repository Playwright fixtures for affected flows; assertions and PNG generation remain separate from visual inspection.</text>
+<text x="48" y="648" class="minor">Preserve the user's frontend, caches and data. Stop only the isolated review when switching development / production profiles.</text>
+</svg>
+<p>The overlay mounts only the app directory and three package src directories. Other runtime inputs arrive through the image. Playwright selects its own configured test port and refuses to reuse an existing server; ARGOS_WEB_TEST_DEV=1 redirects its Next output without taking the launcher’s .next lock.</p>
+<p><a href="../../deploy/compose.dev.yml">Development mounts</a> · <a href="../wiki/code/react-ui-testing.md">React UI testing</a> · <a href="../../playwright.config.ts">Playwright configuration</a> · <a href="../diagrams.md">Diagram catalog</a></p>
+</main></body></html>

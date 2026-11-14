@@ -1,4 +1,4 @@
-# Argos strategic domains — synthetic seed dataset
+# Fleetworks strategic domains — synthetic seed dataset
 
 Place `argos_atlas_strategic_domains.csv` in `<repo>/datasets/`. Version: `strategic-domains-v1-seed-1`. Use with revision 6 of the Atlas cycle performance implementation spec. Do not mix with the old seven-topic dataset. Every statement is fictional synthetic training material, not sourced reporting; never ingest this CSV into live Atlas/Brain evidence.
 
@@ -17,12 +17,12 @@ Each domain has 200 focused rows plus 100 overlap memberships, including 190 pos
 
 | ID | Scope |
 |---|---|
-| governance | Governance & Political Stability: institutions, elections, authority, diplomacy |
-| security | Security & Threat Environment: armed threats, crime, cyber incidents, protective actions |
-| economic | Economic & Supply Chain Resilience: finance, trade, production, logistics |
-| human | Human Security & Public Welfare: health, displacement, food access, essential services |
-| environmental | Environmental & Resource Security: hazards, pollution, water, ecosystems |
-| scientific | Scientific & Technological Capability: research, technical performance, infrastructure capability |
+| governance | Politics & Governance: institutions, elections, authority, diplomacy |
+| security | Security & Conflict: armed threats, crime, cyber incidents, protective actions |
+| economic | Economy & Supply Chains: finance, trade, production, logistics |
+| human | Health & Public Welfare: health, displacement, food access, essential services |
+| environmental | Environment & Resources: hazards, pollution, water, ecosystems |
+| scientific | Science & Technology: research, technical performance, infrastructure capability |
 
 Use explicit article evidence; broad conceivable consequences do not justify another label. For example, an administrative election procedure is governance-only; threats against election offices support governance + security. Laboratory battery performance is scientific-only; input shortages blocking pilot production also support economic. Negation/denial preserves the topic but does not establish the disputed event as true.
 

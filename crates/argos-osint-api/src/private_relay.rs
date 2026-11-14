@@ -1,0 +1,256 @@
+//! Shared bounded HTTP transport for allowlisted private service routes.
+
+use std::time::Duration;
+
+use anyhow::ensure;
+use axum::extract::Request;
+use axum::http::{header, HeaderValue, Method, StatusCode};
+use axum::response::{IntoResponse, Response};
+use url::Url;
+
+use crate::request_context::ContextFailure;
+use crate::request_context::ResolvedRequest;
+use crate::request_context::DELEGATION_HEADER;
+use crate::{network, ApiError};
+
+const MAX_QUERY_BYTES: usize = 8 * 1024;
+const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Service {
+    Brain,
+    Tools,
+    Control,
+    Jobs,
+}
+
+impl Service {
+    fn oversized_query(self) -> &'static str {
+        match self {
+            Self::Brain => "Brain query exceeds the size limit",
+            Self::Tools => "Tools query exceeds the size limit",
+            Self::Control => "Control query exceeds the size limit",
+            Self::Jobs => "Jobs query exceeds the size limit",
+        }
+    }
+
+    fn allows(self, method: &Method, path: &str) -> bool {
+        use fleetworks_contracts::{
+            JOBS_PATH, JOB_CANCEL_PATH, JOB_DETAIL_PATH, JOB_RETRY_PATH, TOOL_RESULT_PATH,
+            TOOL_RUN_PATH,
+        };
+        match self {
+            // The Brain router has already selected the operation.
+            Self::Brain => true,
+            Self::Tools => matches!(
+                (method, path),
+                (&Method::GET, "/api/v1/tools" | TOOL_RESULT_PATH) | (&Method::POST, TOOL_RUN_PATH)
+            ),
+            Self::Control => matches!(
+                (method, path),
+                (
+                    &Method::GET | &Method::HEAD,
+                    "/api/v1/profile" | "/api/v1/models/defaults"
+                ) | (
+                    &Method::POST,
+                    "/api/v1/profile/export"
+                        | "/api/v1/profile/import"
+                        | "/api/v1/models/defaults/set"
+                        | "/api/v1/profile/accounts/upsert"
+                        | "/api/v1/profile/accounts/delete"
+                        | "/api/v1/profile/tools/set"
+                )
+            ),
+            Self::Jobs => matches!(
+                (method, path),
+                (
+                    &Method::GET | &Method::HEAD,
+                    JOBS_PATH
+                        | JOB_DETAIL_PATH
+                        | "/api/v1/logs"
+                        | "/api/v1/logs/export"
+                        | "/api/v1/logs/follow"
+                ) | (&Method::POST, JOB_RETRY_PATH | JOB_CANCEL_PATH)
+            ),
+        }
+    }
+
+    fn unavailable(self, reason: &'static str) -> Response {
+        eprintln!("{self:?} service relay failed: {reason}");
+        let message = match self {
+            Self::Brain => "Brain service unavailable",
+            Self::Tools => "Tools service unavailable",
+            Self::Control => "Control service unavailable",
+            Self::Jobs => "Jobs service unavailable",
+        };
+        ApiError(StatusCode::BAD_GATEWAY, message).into_response()
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct PrivateClient {
+    origin: Url,
+    authorization: HeaderValue,
+    http: reqwest::Client,
+    service: Service,
+}
+
+impl PrivateClient {
+    pub(crate) fn new(origin: &str, token: &str, service: Service) -> anyhow::Result<Self> {
+        let origin = network::validate_origin(origin)?;
+        ensure!(
+            network::valid_token(token.as_bytes()),
+            "invalid {service:?} bearer token"
+        );
+        let mut authorization = HeaderValue::from_str(&format!("Bearer {token}"))?;
+        authorization.set_sensitive(true);
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(50))
+            .build()?;
+        Ok(Self {
+            origin,
+            authorization,
+            http,
+            service,
+        })
+    }
+
+    pub(crate) async fn forward(self, request: Request) -> Result<Response, Response> {
+        // Only gateway middleware can supply this extension. Never copy an
+        // inbound delegation, claimed origin, cookie or authorization header.
+        let context = request
+            .extensions()
+            .get::<ResolvedRequest>()
+            .ok_or_else(|| ContextFailure::registration_required().into_response())?;
+        let delegation = context
+            .delegation_header()
+            .map_err(IntoResponse::into_response)?;
+        // The service router selects the operation. Request data cannot
+        // change the upstream origin.
+        let uri = request.uri();
+        if !self.service.allows(request.method(), uri.path()) {
+            return Err(StatusCode::METHOD_NOT_ALLOWED.into_response());
+        }
+        if uri
+            .query()
+            .is_some_and(|query| query.len() > MAX_QUERY_BYTES)
+        {
+            return Err(
+                ApiError(StatusCode::URI_TOO_LONG, self.service.oversized_query()).into_response(),
+            );
+        }
+        let mut url = self.origin;
+        url.set_path(uri.path());
+        url.set_query(uri.query());
+        let method = request.method().clone();
+        let transfer = matches!(self.service, Service::Control)
+            && matches!(
+                uri.path(),
+                "/api/v1/profile/import" | "/api/v1/profile/export"
+            );
+        let log_export =
+            matches!(self.service, Service::Jobs) && uri.path() == "/api/v1/logs/export";
+        let body_limit = if transfer {
+            2 * 1024 * 1024
+        } else {
+            crate::MAX_REQUEST_BYTES
+        };
+        let content_type = request.headers().get(header::CONTENT_TYPE).cloned();
+        let payload = axum::body::to_bytes(request.into_body(), body_limit)
+            .await
+            .map_err(|_| {
+                ApiError(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "Private request exceeds its size limit",
+                )
+                .into_response()
+            })?;
+        // Public Authorization, Host, Origin and cookies never leave the gateway.
+        let mut upstream = self
+            .http
+            .request(method, url)
+            .header(header::AUTHORIZATION, self.authorization)
+            .header(DELEGATION_HEADER, delegation)
+            .body(payload);
+        if let Some(value) = content_type {
+            upstream = upstream.header(header::CONTENT_TYPE, value);
+        }
+        let mut upstream = upstream
+            .send()
+            .await
+            .map_err(|_| self.service.unavailable("request failed"))?;
+        let status = upstream.status();
+        if status.is_redirection()
+            || matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
+        {
+            return Err(self
+                .service
+                .unavailable("service refused the internal request"));
+        }
+        let content_type = upstream.headers().get(header::CONTENT_TYPE).cloned();
+        let disposition = if transfer || log_export {
+            upstream.headers().get(header::CONTENT_DISPOSITION).cloned()
+        } else {
+            None
+        };
+        let log_cursor = if log_export {
+            upstream
+                .headers()
+                .get("x-fleetworks-next-log-cursor")
+                .cloned()
+        } else {
+            None
+        };
+        let apps_complete = if log_export {
+            upstream
+                .headers()
+                .get("x-fleetworks-log-apps-complete")
+                .cloned()
+        } else {
+            None
+        };
+        let response_limit = if transfer {
+            2 * 1024 * 1024
+        } else {
+            MAX_RESPONSE_BYTES
+        };
+        let mut bytes = Vec::new();
+        while let Some(chunk) = upstream
+            .chunk()
+            .await
+            .map_err(|_| self.service.unavailable("response interrupted"))?
+        {
+            if chunk.len() > response_limit - bytes.len() {
+                return Err(self.service.unavailable("response exceeds the size limit"));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let mut response = (status, bytes).into_response();
+        if let Some(value) = content_type {
+            response.headers_mut().insert(header::CONTENT_TYPE, value);
+        }
+        if let Some(value) = disposition {
+            response
+                .headers_mut()
+                .insert(header::CONTENT_DISPOSITION, value);
+        }
+        if let Some(value) = log_cursor {
+            response
+                .headers_mut()
+                .insert("x-fleetworks-next-log-cursor", value);
+        }
+        if let Some(value) = apps_complete {
+            response
+                .headers_mut()
+                .insert("x-fleetworks-log-apps-complete", value);
+        }
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store, private"),
+        );
+        Ok(response)
+    }
+}

@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::Result;
 
 use crate::brain::{Memory, MemorySource};
+use crate::brain_graph::{GraphEdge, GraphEdgeKind, GraphNode, GraphNodeKind, MemoryGraph};
 use crate::memory_metadata::MemoryKind;
 use crate::related_articles::canonical_url;
 use crate::store::{AtlasArticleRow, Store};
@@ -151,16 +152,12 @@ impl Store {
         crate::storage::brain_store::record_thread_actor(thread, name, kind)
     }
 
-    pub fn actor_group_graph(&self, group: &ActorGroup) -> Result<crate::recon::MemoryGraph> {
+    pub fn actor_group_graph(&self, group: &ActorGroup) -> Result<MemoryGraph> {
         crate::storage::brain_store::actor_group_graph(group)
     }
 
     /// Build the graph from the same immutable associations used by Related.
-    pub fn actor_group_graph_from(
-        group: &ActorGroup,
-        a: Associations,
-    ) -> crate::recon::MemoryGraph {
-        use crate::recon::{GraphEdge, GraphEdgeKind, GraphNode, GraphNodeKind, MemoryGraph};
+    pub fn actor_group_graph_from(group: &ActorGroup, a: Associations) -> MemoryGraph {
         let root = group.key();
         let node = |id: String, kind, label: String| GraphNode {
             id,

@@ -349,6 +349,11 @@ async fn stress_test_holehe_cancellation_responsiveness() {
         max_sites: Some(2),
     };
 
+    // Warm up cold code/IDNA pages and yield after synchronous TLS root store load
+    // so the stopwatch measures holehe::lookup rather than CFS preemption after Client::build.
+    let _ = holehe::lookup(&client, input.clone(), None, &pre_cancel).await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
     let start = Instant::now();
     let res = holehe::lookup(&client, input.clone(), None, &pre_cancel).await;
     let elapsed = start.elapsed();

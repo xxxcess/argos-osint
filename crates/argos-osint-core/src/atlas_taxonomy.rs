@@ -85,16 +85,16 @@ impl DomainId {
         }
     }
 
-    /// Official category name, as agreed in the implementation spec.
+    /// Short display name used by Atlas and Intel.
     #[must_use]
     pub fn display_name(self) -> &'static str {
         match self {
-            DomainId::Governance => "Governance & Political Stability",
-            DomainId::Security => "Security & Threat Environment",
-            DomainId::Economic => "Economic & Supply Chain Resilience",
-            DomainId::Human => "Human Security & Public Welfare",
-            DomainId::Environmental => "Environmental & Resource Security",
-            DomainId::Scientific => "Scientific & Technological Capability",
+            DomainId::Governance => "Politics & Governance",
+            DomainId::Security => "Security & Conflict",
+            DomainId::Economic => "Economy & Supply Chains",
+            DomainId::Human => "Health & Public Welfare",
+            DomainId::Environmental => "Environment & Resources",
+            DomainId::Scientific => "Science & Technology",
         }
     }
 

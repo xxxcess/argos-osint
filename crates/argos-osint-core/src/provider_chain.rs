@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::provider_admission;
 use crate::tasks::{self, AdmissionGuard};
 
 /// Primary route: initial call plus three retries.
@@ -722,7 +723,45 @@ where
             }
             let queued_at = stamp();
             let queue_start = std::time::Instant::now();
-            let guard = if admission_key.is_empty() {
+            let shared = !admission_key.is_empty() && provider_admission::shared();
+            let shared_lease = if shared {
+                match provider_admission::acquire(
+                    admission_key,
+                    opts.interactive,
+                    remaining(),
+                    opts.cancel.as_deref(),
+                )
+                .await
+                {
+                    Ok(lease) => Some(lease),
+                    Err(failure) => {
+                        use crate::provider_diag::Category;
+                        if failure.category == Category::Timeout {
+                            if let Some(cap) = wall_clock {
+                                let last = report.terminal_failure.take();
+                                cap_failure(&mut report, cap, last);
+                                return report;
+                            }
+                        }
+                        report.cancelled = failure.category == Category::Cancelled;
+                        report.stopped = !report.cancelled;
+                        report.history.push(AttemptRecord {
+                            at: stamp(),
+                            route_index: route_index as u32,
+                            attempt,
+                            model: route.model.clone(),
+                            dispatched: false,
+                            outcome: if report.cancelled { "cancel" } else { "fail" }.into(),
+                            reason: failure.summary(),
+                        });
+                        report.terminal_failure = Some(failure);
+                        return report;
+                    }
+                }
+            } else {
+                None
+            };
+            let guard = if shared || admission_key.is_empty() {
                 None
             } else {
                 let _waiting = opts
@@ -750,7 +789,7 @@ where
             if report.cancelled {
                 break;
             }
-            if guard.is_none() && !admission_key.is_empty() {
+            if guard.is_none() && shared_lease.is_none() && !admission_key.is_empty() {
                 // Admission wait consumed the cap.
                 if let Some(cap) = wall_clock {
                     let last = report.terminal_failure.take();
@@ -802,6 +841,15 @@ where
             };
             backoff = Duration::ZERO;
             let dispatch_fut = dispatch(ctx, route);
+            let dispatch_fut = async {
+                match &shared_lease {
+                    Some(lease) => lease
+                        .run(dispatch_fut, None)
+                        .await
+                        .map_err(DispatchError::from_failure)?,
+                    None => dispatch_fut.await,
+                }
+            };
             let result = match &opts.cancel {
                 None => dispatch_fut.await,
                 Some(cancel_flag) => {
@@ -811,6 +859,12 @@ where
                     }
                 }
             };
+            if shared {
+                if let Some(delay) = result.as_ref().err().and_then(|error| error.retry_after) {
+                    provider_admission::defer(admission_key, delay).await;
+                }
+            }
+            drop(shared_lease);
             drop(guard);
             let err = match result {
                 Ok(value) => {
@@ -931,7 +985,7 @@ where
                 // The wait alone would exhaust the cap: try the next route now.
                 break;
             }
-            if !opts.instant {
+            if !opts.instant && !shared {
                 if let Some(extra) = err.retry_after {
                     tasks::note_shared_rate_limit(admission_key, extra);
                 }
@@ -1001,14 +1055,12 @@ fn secret_route(secret: &crate::secrets::ProviderSecret) -> Route {
     } else {
         secret.kind.clone()
     };
-    let admission_key = format!("{}:{}:{}", kind, host, account);
-    let missing_key = secret
-        .api_key
-        .as_deref()
-        .map(str::trim)
-        .unwrap_or("")
-        .is_empty()
-        && crate::provider::effective_kind(secret) != "local";
+    let admission_key = if provider_admission::shared() {
+        provider_admission::account_key(secret, "")
+    } else {
+        format!("{}:{}:{}", kind, host, account)
+    };
+    let missing_key = !crate::provider::route_can_authenticate(secret);
     let missing_model = secret.model.trim().is_empty();
     let skip = if missing_model {
         Some("model is not configured".into())

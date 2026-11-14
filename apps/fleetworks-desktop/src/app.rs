@@ -106,6 +106,20 @@ impl Page {
         }
     }
 
+    fn compact_title(self) -> &'static str {
+        match self {
+            Self::Seed => "Seed & Train",
+            Self::Atlas => "Cycles",
+            Self::Brain => "Brain",
+            Self::Tools => "Tools",
+            Self::Models => "Models",
+            Self::Profile => "Profile",
+            Self::Workstation => "Status",
+            Self::Workspaces => "Workspaces",
+            Self::Jobs => "Jobs",
+        }
+    }
+
     pub fn key(self) -> &'static str {
         match self {
             Self::Seed => "seed",
@@ -999,14 +1013,27 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     } else {
         "Workstation activity: registration required".to_owned()
     };
-    let toolbar = Toolbar::new()
-        .title(if state.setup_gateway {
-            "Setup Gateway"
-        } else if !state.connected() {
-            Page::Workstation.title()
+    let compact_header = cx
+        .layout_size("page-content")
+        .is_some_and(|size| size[0] < 520.0);
+    let title_page = if state.connected() {
+        state.page
+    } else {
+        Page::Workstation
+    };
+    let toolbar_title = if state.setup_gateway {
+        if compact_header {
+            "Setup"
         } else {
-            state.page.title()
-        })
+            "Setup Gateway"
+        }
+    } else if compact_header {
+        title_page.compact_title()
+    } else {
+        title_page.title()
+    };
+    let toolbar = Toolbar::new()
+        .title(toolbar_title)
         .trailing(crate::material::compact_toolbar(
             ActionButton::new("Setup Gateway")
                 .key("connection-editor")
@@ -1260,7 +1287,7 @@ fn context_rail(state: &State, kit: &rune_kit::Kit, connection_tone: StatusTone)
                 .w_full()
                 .pt(14.0)
                 .gap(8.0)
-                .border_sides([0.0, 1.0, 0.0, 0.0], theme::hex(theme::BORDER_SUBTLE))
+                .border_sides([0.0, 0.0, 1.0, 0.0], theme::hex(theme::BORDER_SUBTLE))
                 .child(
                     rune::text("SCOPE")
                         .font(kit.ty.text_xsmall_medium)
@@ -1276,7 +1303,7 @@ fn context_rail(state: &State, kit: &rune_kit::Kit, connection_tone: StatusTone)
         .child(
             activity
                 .pt(14.0)
-                .border_sides([0.0, 1.0, 0.0, 0.0], theme::hex(theme::BORDER_SUBTLE)),
+                .border_sides([0.0, 0.0, 1.0, 0.0], theme::hex(theme::BORDER_SUBTLE)),
         )
 }
 

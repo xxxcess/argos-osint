@@ -134,7 +134,9 @@ jobs:
           set -euo pipefail
           python3 scripts/fleetworks_verify.py native-ui --agent --require-clean \
             --revision "$FLEETWORKS_HEAD" --output "$RUNNER_TEMP/fleetworks-native-evidence/shell-settings" \
-            --scene registration-ready --size 1440x860 --scale 1 \
+            --scene registration-ready --scene workstation-partial-seed \
+            --scene atlas-articles-ready --scene jobs-page-two \
+            --size 1440x860 --size 640x480 --scale 1 \
             --script registration-ready=apps/fleetworks-desktop/tests/fixtures/scripts/workstation-settings-open.json \
             --script-expect-key registration-ready=workstation-settings-body
       - name: Build the debug app for pull-request review

@@ -94,6 +94,9 @@ test("switching in another tab invalidates the old view and stale mutations rece
       exact: true,
     }),
   ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Open Intel", exact: true }),
+  ).toBeVisible();
   const previous = await (await page.request.get("/api/connect")).json();
   const second = await context.newPage();
   await second.goto("/connect");

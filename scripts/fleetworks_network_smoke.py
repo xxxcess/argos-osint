@@ -420,7 +420,7 @@ def exercise_brain(workspace, binary, env, api_port, public_headers):
             assert wait_for(brain, brain_port, ready, auth)["service"] == "fleetworks-brain"
             assert request(brain_port, ready, public_headers)[0] == 401
             assert request(brain_port, detail, auth)[0] == 401
-            assert request(brain_port, "/api/v1/jobs", auth)[0] == 404
+            assert request(brain_port, "/api/v1/jobs", auth)[0] == 401
             assert request(api_port, detail, public_headers)[0] == 404
             path = "/api/v1/actors/search?query=Harbor%20Council"
             status, names = request(api_port, path, public_headers)
@@ -462,7 +462,7 @@ def exercise_private_tools(workspace, binary, env, api_port, public_headers):
                 assert request(port, catalog, auth)[0] == 401
                 assert request(api_port, catalog, auth)[0] == 401
                 assert request(port, ready, {**auth, "Host": "other.test"})[0] == 403
-                assert request(port, "/api/v1/jobs", auth)[0] == 404
+                assert request(port, "/api/v1/jobs", auth)[0] == 401
                 status, listed = request(api_port, catalog, public_headers)
                 assert status == 200 and listed["tools"], (status, listed)
                 path, result = exercise_tools(api, api_port, public_headers, "private-dork-fixture")
@@ -513,9 +513,9 @@ def exercise_control_jobs(workspace, binary, env, api_port, public_headers):
                 assert request(jobs_port, jobs_path, jobs_auth)[0] == 401
                 assert request(api_port, profile, control_auth)[0] == 401
                 assert request(api_port, jobs_path, jobs_auth)[0] == 401
-                assert request(control_port, jobs_path, control_auth)[0] == 404
-                assert request(jobs_port, profile, jobs_auth)[0] == 404
-                assert request(jobs_port, "/api/v1/live", jobs_auth)[0] == 404
+                assert request(control_port, jobs_path, control_auth)[0] == 401
+                assert request(jobs_port, profile, jobs_auth)[0] == 401
+                assert request(jobs_port, "/api/v1/live", jobs_auth)[0] == 401
                 status, relayed_profile = request(api_port, profile, public_headers)
                 assert status == 200 and isinstance(relayed_profile.get("configuration_revision"), int), (status, relayed_profile)
                 for path in (jobs_path, "/api/v1/logs?limit=1"):
@@ -601,5 +601,5 @@ if __name__ == "__main__":
             exercise_classifier(tmp, binary)
         except Exception:
             for log in sorted(tmp.rglob("*.log")):
-                print(log.name, log.read_text()[-1500:])
+                print(log.name, log.read_text(errors="replace")[-1500:])
             raise

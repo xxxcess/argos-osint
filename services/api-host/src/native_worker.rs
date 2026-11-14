@@ -113,6 +113,13 @@ pub(crate) async fn run(
     }
     // Queue transport and the actual bounded activation lane are now owned.
     classifier_activation::configure_consumer(&repo, true).await?;
+    tracing::info!(
+        role = "native-worker",
+        worker_pools = pools.len(),
+        actor_index_pump = reindex,
+        storage = "connected",
+        "Fleetworks startup summary: maintenance worker ready"
+    );
     let relay_repo = repo.clone();
     let relay_stop = receive.clone();
     tasks.spawn(

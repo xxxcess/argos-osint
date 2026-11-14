@@ -12,7 +12,11 @@ fn main() -> Result<()> {
         "the private search service is a Linux backend product"
     );
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                tracing_subscriber::EnvFilter::new("warn,fleetworks_search_index=info")
+            }),
+        )
         .init();
     let config = Config::from_environment()?;
     // Opening/dropping mmap writers and reading protected config happen on the
@@ -36,13 +40,18 @@ fn main() -> Result<()> {
         let listener = tokio::net::TcpListener::bind(config.bind)
             .await
             .context("cannot bind private search listener")?;
-        axum::serve(
-            listener,
-            http::router_with_slot(config, engine.clone(), reason)?,
-        )
-        .with_graceful_shutdown(shutdown())
-        .await
-        .context("private search server failed")
+        let listen = listener.local_addr()?;
+        let router = http::router_with_slot(config, engine.clone(), reason)?;
+        tracing::info!(
+            role = "search-index",
+            %listen,
+            index_available = reason.is_empty(),
+            "Fleetworks startup summary: private search listener ready"
+        );
+        axum::serve(listener, router)
+            .with_graceful_shutdown(shutdown())
+            .await
+            .context("private search server failed")
     })?;
     drop(runtime);
     drop(engine);

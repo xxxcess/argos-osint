@@ -44,7 +44,7 @@ struct Args {
     activate: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum Role {
     /// Existing local API host with its background workers.
     Combined,
@@ -147,8 +147,14 @@ async fn main() -> Result<()> {
         })
         .await??;
         let listener = tokio::net::TcpListener::bind(SocketAddr::new(bind, port)).await?;
-        let port = listener.local_addr()?.port();
+        let listen = listener.local_addr()?;
+        let port = listen.port();
         let router = argos_osint_api::guard_network(router, policy, Arc::new(Vec::new()), port);
+        tracing::info!(
+            role = ?role,
+            %listen,
+            "Fleetworks startup summary: private HTTP listener ready"
+        );
         return serve_with_graceful_shutdown_timeout(
             listener,
             router,
@@ -223,7 +229,11 @@ async fn main() -> Result<()> {
         )
         .await?;
         fleetworks::export_deployment_identity(&repo).await?;
-        println!("Fleetworks storage ready");
+        tracing::info!(
+            role = ?role,
+            storage = "ready",
+            "Fleetworks startup summary: bootstrap complete"
+        );
         return Ok(());
     }
     let jobs_store = if role == Role::Jobs {
@@ -248,7 +258,8 @@ async fn main() -> Result<()> {
         })
         .await??;
         let listener = tokio::net::TcpListener::bind(SocketAddr::new(bind, port)).await?;
-        let port = listener.local_addr()?.port();
+        let listen = listener.local_addr()?;
+        let port = listen.port();
         let owner_state = argos_osint_api::ApiState {
             repo: repo.clone(),
             instance_id: format!("execution-{}-{}", std::process::id(), chrono_id()),
@@ -262,6 +273,12 @@ async fn main() -> Result<()> {
             port,
         );
         let router = reset_services::attach_http_owner(router, &owner_state, policy, role).await?;
+        tracing::info!(
+            role = ?role,
+            %listen,
+            storage = "connected",
+            "Fleetworks startup summary: private HTTP listener ready"
+        );
         let result = serve_with_graceful_shutdown_timeout(
             listener,
             router,
@@ -315,6 +332,12 @@ async fn main() -> Result<()> {
             role,
             move |stop| async move {
                 let (beat, workers) = start_workers(role).await?;
+                tracing::info!(
+                    role = ?role,
+                    worker_pools = workers.len(),
+                    storage = "connected",
+                    "Fleetworks startup summary: worker pools ready"
+                );
                 reset_services::stopped(stop).await;
                 tokio::task::spawn_blocking(move || {
                     argos_osint_core::scheduler::WorkerPool::shutdown_all(workers);
@@ -379,14 +402,6 @@ async fn main() -> Result<()> {
             );
             argos_osint_api::router(state)
         };
-        let service = match role {
-            Role::Brain => "Brain",
-            Role::Tools => "Tools",
-            Role::Control => "Control",
-            Role::Jobs => "Jobs",
-            _ => "API",
-        };
-        println!("Argos {service} http://{}:{port}", api.bind);
         Some((listener, router))
     } else {
         None
@@ -397,6 +412,13 @@ async fn main() -> Result<()> {
         None
     };
     let served = if let Some((listener, router)) = http {
+        let listen = listener.local_addr()?;
+        tracing::info!(
+            role = ?role,
+            %listen,
+            storage = "connected",
+            "Fleetworks startup summary: HTTP listener ready"
+        );
         serve_with_graceful_shutdown_timeout(
             listener,
             router,

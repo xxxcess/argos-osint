@@ -588,6 +588,40 @@ class PrepareReviewTests(unittest.TestCase):
             self.assertIn("Prepared isolated backend review:", output.getvalue())
             self.assertIn("[6/6]", output.getvalue())
 
+    def test_local_approval_handoff_reaches_only_the_native_candidate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            helper = mock.Mock()
+            helper.poll.return_value = None
+            with mock.patch.object(native_review.sys, "platform", "darwin"), \
+                 mock.patch.dict(os.environ, {"DOCKER_CONTEXT": "desktop-linux"}), \
+                 mock.patch.object(native_review.subprocess, "check_output", side_effect=[
+                     "desktop-linux\n", '"unix:///var/run/docker.sock"\n', "linux/x86_64\n",
+                 ]), \
+                 mock.patch.object(native_review.subprocess, "run") as processes, \
+                 mock.patch.object(native_review, "start_local_pairing_handoff",
+                                   return_value=(helper, "/tmp/review/approval.sock")) as handoff, \
+                 redirect_stdout(io.StringIO()):
+                native_review.run_review(root, "local", approval_handoff=True)
+            handoff.assert_called_once()
+            self.assertEqual(len(processes.call_args_list), 6)
+            self.assertTrue(all("env" not in call.kwargs for call in processes.call_args_list[:5]))
+            candidate = processes.call_args_list[-1]
+            self.assertEqual(candidate.kwargs["env"]["FLEETWORKS_LOCAL_REVIEW_APPROVAL_SOCKET"],
+                             "/tmp/review/approval.sock")
+            helper.terminate.assert_not_called()
+
+    def test_local_approval_handoff_requires_mac_native_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            with mock.patch.object(native_review.sys, "platform", "darwin"), \
+                 mock.patch.object(native_review.subprocess, "check_output") as docker, \
+                 self.assertRaisesRegex(native_review.ReviewConfigurationError, "macOS native review"):
+                native_review.run_review(root, "local", backend_only=True, approval_handoff=True)
+            docker.assert_not_called()
+
     def test_up_preserves_existing_root_compose_env_for_second_review_and_rejects_mismatched_overrides(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -9,6 +9,7 @@ import shlex
 import os
 import re
 import secrets
+import select
 import stat
 import subprocess
 import sys
@@ -264,6 +265,48 @@ class ReviewConfigurationError(ValueError):
     """A controlled, non-secret operator action message."""
 
 
+def start_local_pairing_handoff(root, prepared):
+    """Start a short-lived, separately authorized operator prompt for this review."""
+    socket_dir = Path("/tmp") / ("fw-approval-" + secrets.token_hex(12))
+    command = [
+        sys.executable, str(root / "deploy/local_pairing_approval.py"), "serve",
+        "--socket-dir", str(socket_dir), "--origin", prepared["origin"],
+        "--operator-token-file", str(prepared["operator"]),
+    ]
+    process = None
+    try:
+        process = subprocess.Popen(
+            command, cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, start_new_session=True, text=True,
+        )
+        if process.stdout is None or not select.select([process.stdout], [], [], 5)[0]:
+            raise ReviewConfigurationError("Local pairing helper did not become ready")
+        ready = process.stdout.readline().rstrip("\n")
+        expected = (socket_dir / "approval.sock").resolve()
+        if ready != f"READY {expected}" or process.poll() is not None:
+            raise ReviewConfigurationError("Local pairing helper returned an invalid readiness response")
+        info = expected.stat()
+        if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise ReviewConfigurationError("Local pairing helper socket is not private")
+        process.stdout.close()
+        return process, str(expected)
+    except (OSError, ValueError) as error:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        try:
+            socket_dir.rmdir()
+        except OSError:
+            pass
+        if isinstance(error, ReviewConfigurationError):
+            raise
+        raise ReviewConfigurationError("Local pairing helper could not start") from error
+
+
 def detect_docker_platform():
     """Detect the matching Docker engine platform for the current workstation."""
     scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
@@ -280,7 +323,7 @@ def detect_docker_platform():
     return info.docker_platform
 
 
-def run_review(root, name, *, backend_only=False, api_port=None, web_port=None, platform=None, root_env=False):
+def run_review(root, name, *, backend_only=False, approval_handoff=False, api_port=None, web_port=None, platform=None, root_env=False):
     """Auto-initialize if needed, build before stopping, and launch the native app on macOS."""
     root = root.resolve(strict=True)
     workspace = review_path(root, name)
@@ -307,6 +350,8 @@ def run_review(root, name, *, backend_only=False, api_port=None, web_port=None, 
     if platform is not None and platform != environment.get("PLATFORM"):
         raise ReviewConfigurationError("Review already exists with a different platform; edit compose.env or choose another --name")
     open_native = sys.platform == "darwin" and not backend_only
+    if approval_handoff and not open_native:
+        raise ReviewConfigurationError("Local pairing handoff requires a macOS native review")
     stages = 6 if open_native else 5
     stage = "Docker preflight"
     with preparation_lock(prepared["workspace"], ".up.lock", wait=False):
@@ -359,10 +404,22 @@ def run_review(root, name, *, backend_only=False, api_port=None, web_port=None, 
             if open_native:
                 stage = "native build/open"
                 print("[6/6] Backend ready. Building and opening the native app; Cargo output follows…", flush=True)
-                subprocess.run([
-                    sys.executable, str(root / "scripts/fleetworks_candidate.py"),
-                    "build-native", "--target", "host", "--profile", "debug", "--open",
-                ], cwd=root, check=True)
+                helper = None
+                candidate_env = os.environ.copy()
+                if approval_handoff:
+                    helper, socket_path = start_local_pairing_handoff(root, prepared)
+                    candidate_env["FLEETWORKS_LOCAL_REVIEW_APPROVAL_SOCKET"] = socket_path
+                try:
+                    subprocess.run([
+                        sys.executable, str(root / "scripts/fleetworks_candidate.py"),
+                        "build-native", "--target", "host", "--profile", "debug", "--open",
+                    ], cwd=root, check=True, **({"env": candidate_env} if approval_handoff else {}))
+                except BaseException:
+                    if helper is not None and helper.poll() is None:
+                        helper.terminate()
+                    raise
+                if helper is not None:
+                    print("Local pairing confirmation is ready for this review (expires within one hour).", flush=True)
             elif not backend_only:
                 print("Backend ready. Native build/open requires macOS; skipped.", flush=True)
             print_approval(root, prepared)
@@ -482,6 +539,7 @@ def main():
     update.add_argument("--root-env", action="store_true", help="require linking editable settings to repo-root compose.env on init; refuse an existing file")
     update.add_argument("--platform", choices=("linux/amd64", "linux/arm64"), help="target Docker platform when initializing (auto-detected when omitted)")
     update.add_argument("--backend-only", action="store_true", help="skip building/opening the native app")
+    update.add_argument("--approval-handoff", action="store_true", help="enable explicit local operator confirmation for macOS native review")
     args = parser.parse_args()
     try:
         if args.command == "init":
@@ -510,6 +568,7 @@ def main():
                 ROOT,
                 args.name,
                 backend_only=args.backend_only,
+                approval_handoff=args.approval_handoff,
                 api_port=args.api_port,
                 web_port=args.web_port,
                 platform=args.platform,

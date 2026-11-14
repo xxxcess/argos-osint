@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
@@ -18,11 +19,108 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
+use tokio::net::UnixListener;
 use tokio::task::JoinHandle;
 
 use super::*;
 
 const ACCESS: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+
+#[test]
+fn local_review_handoff_requires_absolute_socket_and_loopback_origin() {
+    let socket = Path::new("/tmp/fleetworks-review.sock");
+    assert_eq!(
+        local_review_destination("http://127.0.0.1:18092/", socket),
+        Some((socket.to_path_buf(), "http://127.0.0.1:18092/".to_owned()))
+    );
+    assert!(local_review_destination("https://example.com/", socket).is_none());
+    assert!(local_review_destination("https://127.0.0.1:18092/", socket).is_none());
+    assert!(
+        local_review_destination("http://127.0.0.1:18092/", Path::new("review.sock")).is_none()
+    );
+}
+
+#[test]
+fn local_review_handoff_announces_each_pairing_id_once_with_bounded_history() {
+    let mut pairing = Pairing::default();
+    assert!(pairing.record_local_review_announcement("first"));
+    assert!(!pairing.record_local_review_announcement("first"));
+    for index in 0..32 {
+        assert!(pairing.record_local_review_announcement(&format!("next-{index}")));
+    }
+    assert_eq!(pairing.local_review_announced.len(), 32);
+    assert!(!pairing.record_local_review_announcement("next-31"));
+    assert!(pairing.record_local_review_announcement("first"));
+}
+
+#[tokio::test]
+async fn local_review_handoff_sends_only_bounded_non_secret_fields() {
+    let temporary = tempfile::tempdir().unwrap();
+    let socket = temporary.path().join("review.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let sender = tokio::spawn(send_local_review_handoff(
+        socket,
+        "http://127.0.0.1:18092/".to_owned(),
+        "synthetic-pairing-id".to_owned(),
+        2_000_000_000_000,
+    ));
+    let (mut stream, _) =
+        tokio::time::timeout(std::time::Duration::from_secs(2), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+    let mut payload = Vec::new();
+    stream.read_to_end(&mut payload).await.unwrap();
+    sender.await.unwrap();
+    assert!(payload.len() <= 769);
+    assert!(payload.ends_with(b"\n"));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&payload).unwrap(),
+        serde_json::json!({
+            "version": 1,
+            "origin": "http://127.0.0.1:18092/",
+            "pairing_id": "synthetic-pairing-id",
+            "expires_at_ms": 2_000_000_000_000_u64,
+        })
+    );
+}
+
+#[tokio::test]
+async fn local_review_handoff_rejects_insecure_socket_mode() {
+    let temporary = tempfile::tempdir().unwrap();
+    let socket = temporary.path().join("review.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o666)).unwrap();
+    send_local_review_handoff(
+        socket,
+        "http://127.0.0.1:18092/".to_owned(),
+        "synthetic-pairing-id".to_owned(),
+        2_000_000_000_000,
+    )
+    .await;
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn local_review_handoff_missing_socket_finishes_without_pairing_failure() {
+    let temporary = tempfile::tempdir().unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        send_local_review_handoff(
+            temporary.path().join("missing.sock"),
+            "http://127.0.0.1:18092/".to_owned(),
+            "synthetic-pairing-id".to_owned(),
+            2_000_000_000_000,
+        ),
+    )
+    .await
+    .unwrap();
+}
 
 #[derive(Default)]
 struct StoreState {
@@ -605,10 +703,18 @@ fn focus_pause_and_destination_change_fence_pending_pairing_callbacks() {
         expires_at_ms: 1,
         poll_after_ms: 2000,
     };
-    state.pairing_progress(old, PairingStage::Waiting(challenge.clone()));
+    state.pairing_progress(
+        old,
+        "http://127.0.0.1:18092/",
+        PairingStage::Waiting(challenge.clone()),
+    );
     state.pairing_focus(false);
     assert!(state.pairing.paused && !state.pairing.busy());
-    state.pairing_progress(old, PairingStage::Failed(PairingFailure::Denied));
+    state.pairing_progress(
+        old,
+        "http://127.0.0.1:18092/",
+        PairingStage::Failed(PairingFailure::Denied),
+    );
     state.complete_pairing_connection(old, Err(PairingFailure::Authentication));
     assert_eq!(state.pairing.stage, PairingStage::Waiting(challenge));
     assert!(state.client.is_none());

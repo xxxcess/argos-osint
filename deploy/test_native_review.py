@@ -678,6 +678,22 @@ class PrepareReviewTests(unittest.TestCase):
                 native_review.main()
             self.assertEqual(mismatch.exception.code, 2)
 
+    def test_supports_native_review_checks_host_arch_without_subprocesses(self):
+        cases = (
+            ("darwin", "arm64", True),
+            ("linux", "x86_64", True),
+            ("linux", "amd64", True),
+            ("linux", "aarch64", False),
+            ("win32", "x86_64", False),
+        )
+        for plat, machine, expected in cases:
+            with self.subTest(plat=plat, machine=machine), \
+                 mock.patch.object(native_review.sys, "platform", plat), \
+                 mock.patch.object(native_review.host_platform, "machine", return_value=machine), \
+                 mock.patch.object(native_review.subprocess, "run") as proc_run:
+                self.assertIs(native_review.supports_native_review(), expected)
+                proc_run.assert_not_called()
+
 
 class BootstrapCatalogTests(unittest.TestCase):
     def test_up_rejects_missing_catalog_before_docker(self):

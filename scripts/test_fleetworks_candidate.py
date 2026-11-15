@@ -578,10 +578,25 @@ class LinuxNativeCandidateTests(unittest.TestCase):
         icd_dir = self.root / "vulkan-icd"
         icd_dir.mkdir()
         (icd_dir / "lvp_icd.json").write_text("{}")
-        with self.assertRaisesRegex(ValueError, "WAYLAND_DISPLAY or DISPLAY"):
-            linux_runtime_preflight({}, vulkan_icd_dirs=[empty_icd])
+        with mock.patch("fleetworks_candidate.shutil.which", return_value=None):
+            with self.assertRaisesRegex(ValueError, "WAYLAND_DISPLAY or DISPLAY"):
+                linux_runtime_preflight({}, vulkan_icd_dirs=[empty_icd])
+            with self.assertRaisesRegex(ValueError, "Vulkan"):
+                linux_runtime_preflight({"DISPLAY": ":0"}, vulkan_icd_dirs=[empty_icd])
         with self.assertRaisesRegex(ValueError, "Vulkan"):
-            linux_runtime_preflight({"DISPLAY": ":0"}, vulkan_icd_dirs=[empty_icd])
+            linux_runtime_preflight(
+                {"DISPLAY": ":0"},
+                vulkan_icd_dirs=[empty_icd],
+                runner=lambda cmd, **_: subprocess.CompletedProcess(cmd, 1, "", "vulkaninfo unavailable"),
+            )
+        self.assertEqual(
+            linux_runtime_preflight(
+                {"WAYLAND_DISPLAY": "wayland-0"},
+                vulkan_icd_dirs=[empty_icd],
+                runner=lambda cmd, **_: subprocess.CompletedProcess(cmd, 0, "GPU0: llvmpipe", ""),
+            ),
+            {"display": "wayland", "dbus_session": False, "vulkan": True},
+        )
         self.assertEqual(
             linux_runtime_preflight({"DISPLAY": ":0", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus"}, vulkan_icd_dirs=[icd_dir]),
             {"display": "x11", "dbus_session": True, "vulkan": True},

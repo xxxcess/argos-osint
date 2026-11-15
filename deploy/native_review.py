@@ -7,6 +7,7 @@ import importlib.util
 import json
 import shlex
 import os
+import platform as host_platform
 import re
 import secrets
 import select
@@ -332,7 +333,7 @@ def supports_native_review():
     if sys.platform == "darwin":
         return True
     if sys.platform.startswith("linux"):
-        return _load_platform_info().native_target == "x86_64-unknown-linux-gnu"
+        return host_platform.machine().lower() in ("x86_64", "amd64")
     return False
 
 

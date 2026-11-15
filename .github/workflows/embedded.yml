@@ -88,9 +88,9 @@ jobs:
               print(f"::error::{error}")
           sys.exit(bool(errors))
           PY
-      - name: Install libclang (RocksDB bindgen)
+      - name: Install Linux build dependencies (libclang for RocksDB, libxkbcommon for Rune)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libclang-dev
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libclang-dev libxkbcommon-dev
       - name: Select Xcode libclang for RocksDB bindgen
         if: runner.os == 'macOS'
         shell: bash

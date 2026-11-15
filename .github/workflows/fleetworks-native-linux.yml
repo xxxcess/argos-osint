@@ -118,7 +118,7 @@ jobs:
             export VK_ICD_FILENAMES="$icd"
             export VK_DRIVER_FILES="$icd"
           fi
-          vulkaninfo --summary
+          vulkaninfo --summary | tee "${{ runner.temp }}/linux-native-evidence/vulkaninfo-summary.txt"
           python3 scripts/fleetworks_verify.py native-ui --agent --require-clean \
             --revision "${{ inputs.expected-head }}" \
             --output "${{ runner.temp }}/linux-native-evidence/ui" \

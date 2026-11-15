@@ -2,7 +2,7 @@
 
 [Code route](index.md) · [Architecture](architecture.md) · [Deployment guide](../../../deploy/README.md)
 
-Fleetworks Desktop is the API-only macOS and Linux x86_64 control hub. Its six operations destinations are DB Seed & Train, News Cycles, Brain Search, OSINT Tools, Model Assignments and Jobs & Logs. The compact sidebar also opens Workstation Status and a category-based Workstation Settings dialog. Wide windows show selected operational content with a read-only context rail; there is no chat transcript. The gateway header opens Workstation Status (featuring the **Actor search** hero card); Setup Gateway opens a URL-only connectivity flow. Backend resources remain shared within permissions, while activity is attributed to the registered workstation. Start with [native connections](native-connections.md), [protected identity](native-workspaces.md), the [design system](native-design-system.md) and [native build/fixture guide](../../../apps/fleetworks-desktop/README.md). App launch never launches the backend or Intel Web.
+Fleetworks Desktop is the engine-free macOS (`x86_64` / `aarch64`) and Linux (`x86_64`) control hub. Its six operations destinations are DB Seed & Train, News Cycles, Brain Search, OSINT Tools, Model Assignments, and Jobs & Logs. The compact sidebar also opens Workstation Status (featuring the **Actor search** hero card) and Workstation Settings; **Setup Gateway** switches between **Remote Gateway** (URL-only pairing) and **Local Embedded** (framed stdin/stdout IPC companion `argos-api-host --role local-ipc` without TCP sockets or Docker). Backend resources remain shared within permissions, while activity is attributed to the registered workstation. Start with [native connections](native-connections.md), [protected identity](native-workspaces.md), the [design system](native-design-system.md), and [native build/fixture guide](../../../apps/fleetworks-desktop/README.md). App launch never starts Docker or Intel Web.
 
 Linux domain services share the network datastore. Jobs exclusively owns its SQLite operational logs and embedded RocksDB queue; [actor discovery](actor-search.md) has a separate private Tantivy service. The [isolated native-review deployment](../../../deploy/README.md) builds backend-only images and leaves web/client launch independent. Backend network readers accept explicit current-format configuration and saved credentials; they do not migrate historical files or revive environment provider keys during ordinary reads.
 
@@ -24,13 +24,13 @@ Protected settings initialize without creating a default child. The opaque backe
 
 ## Launch the Compose stack
 
-Use the [standalone backend recipe](../../../deploy/README.md#isolated-native-backend-review): one command auto-detects host platform / initializes `native-local` on port `18091` when missing, builds the backend service images, redeploys the Docker Compose containers, and triggers the native app build on supported macOS (`x86_64-apple-darwin` or `aarch64-apple-darwin`) and Linux x86_64 (`x86_64-unknown-linux-gnu`) hosts:
+Use the [standalone backend recipe](../../../deploy/README.md#isolated-native-backend-review): one command auto-detects host platform, initializes `native-local` on port `18091` if missing, builds and starts the `backend` containers (`runtime`, `surrealdb`, `search-index`), and builds/opens the native app on supported macOS and Linux `x86_64` hosts:
 
 ```sh
 python3 deploy/native_review.py up
 ```
 
-`native_review.py up` preserves existing credentials/data (and never overwrites an existing root `compose.env`), checks the Docker context and daemon architecture against `PLATFORM`, builds the `backend` Bake group (`runtime`, `surrealdb`, `search-index`), stops and recreates the Compose containers with `--force-recreate --detach --wait`, and runs `python3 scripts/fleetworks_candidate.py build-native --target host --profile debug --open` on supported macOS and Linux x86_64 hosts (pass `--backend-only` to skip the native step; unsupported hosts such as Linux ARM64 skip it cleanly). Edit the private, Git-ignored root `compose.env` for local settings and keep the same Compose project for `ps`, `logs` and `down`. Stop preserves data; no startup resets configuration or rotates credentials.
+Existing credentials, scope/epochs, and data stay preserved across reruns (pass `--backend-only` to skip the native step, or `--approval-handoff` on macOS for one-click pairing approval). See [deploy/README.md](../../../deploy/README.md#prepare-an-existing-review) for `compose.env`, `ps`/`logs`/`down`, and concurrent reviews.
 
 Optional Intel Web and Atlas services require explicit deployment configuration. The browser authenticates its Connect form with an already registered Connect ID; the ID alone grants no authority. Use native News Cycles to submit collection work when a real worker is advertised. [Deployment](../../../deploy/README.md) · [Atlas](../../../deploy/atlas-dispatch.md)
 
@@ -70,18 +70,19 @@ With the Atlas overlay, `atlas-worker` consumes Jobs-owned embedded queue delive
 
 | Area | Implemented behavior |
 | --- | --- |
-| Native app and workstation identity | URL-only pairing, origin-bound Keychain access, stable workstation Connect ID and scoped request context |
+| Native app and workstation identity | Remote URL-only pairing (macOS Keychain, Linux Secret Service, or explicit session-only) plus Local Embedded (`--role local-ipc`) stdio IPC companion, stable workstation Connect ID, and scoped request context |
 | Direct Docker backend | Independently provisioned purpose credentials, private services, workers and persistent stores |
 | Atlas | Durable dispatch and replay, separate NLP/Rust-BERT services, shared daily NewsAPI quota in SurrealDB |
 | Brain and Intel | Canonical actor discovery, dossiers, retained briefs and publication recovery; explicit seed maintenance |
 | Tools and Model Assignments | Provider/service cards, protected inline keys, shared routing defaults and confirmed revisions |
 | Jobs & Logs | Workstation membership before rows/counts/pagination, private-safe logs and explicitly authorized actions |
 
-Installed-app, matching-hardware accessibility, both Mac architectures and real backend integration require their own recorded evidence. Retirement was explicitly authorized; it does not close those verification gaps or the separate production scheduler migration. [Native verification](native-verification.md) · [CI](ci.md#fleetworksyml--scoped-branch-checks)
+Installed-app, matching-hardware accessibility, multi-architecture, and real backend integration require their own recorded evidence. Retirement was explicitly authorized; it does not close those verification gaps or the separate production scheduler migration. [Native verification](native-verification.md) · [CI](ci.md#fleetworksyml--scoped-branch-checks)
 
 ## Verification
 
-Use [the network smoke](../../../scripts/fleetworks_network_smoke.py) with the built host and the repository-pinned SurrealDB 3.3.4 binary. It creates isolated memory and disk fixtures and checks authenticated startup, retained routes and restart behavior.
+- **Local embedded IPC & HTTP parity:** use [the local backend smoke](../../../scripts/fleetworks_local_backend_smoke.py) with `--role local-ipc` and the live `http_ipc_parity` contract test in `argos-api-host`.
+- **Network backend:** use [the network smoke](../../../scripts/fleetworks_network_smoke.py) with the built host and the repository-pinned SurrealDB 3.3.4 binary. It creates isolated memory and disk fixtures and checks authenticated startup, retained routes, and restart behavior.
 
 ## Operational persistence migration
 

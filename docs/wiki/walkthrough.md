@@ -8,13 +8,13 @@ Follow these routes from setup to implementation.
 
 ## What this repository is
 
-Fleetworks collects public-source intelligence and prepares cited Focus Briefs. The native macOS app and Intel Web connect to an independently deployed authenticated Linux backend with SurrealDB, private services and workers.
+Fleetworks collects public-source intelligence and prepares cited Focus Briefs. The native app (**macOS `x86_64`/`aarch64` and Linux `x86_64`**) connects either to its bundled **Local Embedded** companion (`argos-api-host --role local-ipc` over stdio IPC) or, alongside Intel Web, to an independently deployed authenticated Linux Docker backend with SurrealDB, private services, and workers.
 
 Start with the [README](../../README.md), [concepts](concepts/index.md), and [glossary](concepts/glossary.md). Follow the [code map](code/index.md) and [diagrams](../diagrams.md) for implementation.
 
 ## Run the client and backend
 
-Install the pinned Rust 1.95.0 toolchain and Xcode tools for native app packaging. Docker and Compose v2.20+ operate the separate backend. Start at the [quick start](../../README.md#quick-start), then follow [native connections](code/native-connections.md) and [direct deployment](../../deploy/README.md). The app never launches services.
+Install the pinned Rust **1.95.0** toolchain, Python **3.9+**, and macOS Xcode tools or Linux native packages (`pkg-config`, `libclang-dev`, D-Bus, X11/Wayland, Vulkan). Add Docker and Compose **v2.20+** for the container backend. Start at the [quick start](../../README.md#quick-start), then follow [native connections](code/native-connections.md) and [direct deployment](../../deploy/README.md). The desktop UI crate itself never compiles or embeds database engines.
 
 Use the same deployment env file, Compose files and project for startup, status, logs and stop. Keep backend data separate from the protected native container. Retired terminal instructions are preserved only as [historical evidence](../archive/cli-retirement.md).
 
@@ -54,7 +54,7 @@ Start with the [web contract](code/intel-web.md), then the [UI rules](code/react
 
 ## Native client and historical terminals
 
-The Rune app supplies Atlas, Brain, Tools, Models, Profile, Workstation, Workspaces and scoped Jobs & Logs. Intel Web supplies topology and its list twin. Venture, the six terminal clients and the older Ratatui executable are retired. [Native verification](code/native-verification.md) · [Historical disposition](../archive/cli-retirement.md)
+The Rune app supplies **Setup Gateway** (`Remote Gateway` / `Local Embedded`), **Workstation Status** (with the **Actor search** hero card), **DB Seed & Train**, **News Cycles**, **Brain Search**, **OSINT Tools**, **Model Assignments**, and **Jobs & Logs**. Intel Web supplies topology and its list twin. Venture, the six terminal clients, and the older Ratatui executable are retired. [Native verification](code/native-verification.md) · [Historical disposition](../archive/cli-retirement.md)
 
 ## Where the code lives
 
@@ -62,7 +62,7 @@ Use the [repository map](../index.md#directory-map) for the directory index.
 
 | Path | Role |
 | --- | --- |
-| [apps/fleetworks-desktop](../../apps/fleetworks-desktop) | Native Rune macOS control hub |
+| [apps/fleetworks-desktop](../../apps/fleetworks-desktop) | Native Rune macOS & Linux `x86_64` control hub |
 | [crates/fleetworks-contracts](../../crates/fleetworks-contracts) | Client-safe contracts and origin-pinned SDK |
 | [apps/web-desktop](../../apps/web-desktop) | Intel web server and relay |
 | [packages](../../packages) | Shared React Native UI, Intel screens, and API client |

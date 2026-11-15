@@ -1,6 +1,10 @@
 # Fleetworks native client
 
-The Rune/rune-kit macOS and Linux x86_64 API client connects to an independently running gateway. It never starts backend engines, Docker or Intel Web. Its six sidebar destinations are DB Seed & Train, News Cycles, Brain Search, OSINT Tools, Model Assignments and Jobs & Logs. The gateway header opens Workstation Status, featuring the **Actor search** hero card alongside Native Client, Gateway Backend and Host Resources details. Setup Gateway opens URL → operator approval → macOS Keychain / Linux D-Bus Secret Service (or explicit Linux session-only mode) → authenticated checks/registration.
+The Rune/rune-kit **macOS (`x86_64` / `aarch64`)** and **Linux (`x86_64`)** API client keeps the desktop UI binary 100% engine-free while supporting two connection modes in **Setup Gateway**:
+- **Local Embedded:** spawns and supervises the packaged `argos-api-host --role local-ipc` companion over framed stdin/stdout IPC (zero open network sockets, no Docker or Intel Web required). Optional `nlp` and `classifier` capabilities are advertised explicitly and never faked. Closing the window leaves active local jobs running cleanly; explicit stop or app quit checkpoints and relinquishes leases so restart resumes the same `job_id`.
+- **Remote Gateway:** connects to an independently deployed gateway via `URL → operator approval → macOS Keychain / Linux D-Bus Secret Service (or explicit Linux session-only mode) → authenticated registration`.
+
+Its six sidebar destinations are **DB Seed & Train**, **News Cycles**, **Brain Search**, **OSINT Tools**, **Model Assignments**, and **Jobs & Logs**. The gateway header opens **Workstation Status**, featuring the **Actor search** hero card alongside Native Client, Gateway Backend, and Host Resources details.
 
 [Design and control allowlist](../../docs/wiki/code/native-design-system.md) · [Connection contracts](../../docs/wiki/code/native-connections.md) · [Protected identity](../../docs/wiki/code/native-workspaces.md) · [Implementation/verification status](../../.planning/2026-11-12-native-pairing-implementation/acceptance.md)
 
@@ -12,7 +16,7 @@ Normal setup uses [pairing and macOS Keychain](../../docs/wiki/code/native-conne
 
 Use the complete-app helper; agent builds add `--agent` and reuse the shared debug graph. Opening the app is an explicit action.
 
-Build flow: live Cargo progress/diagnostics and stage markers on stderr → package/validate → artifact paths and result metadata. `--open` opens only after validation and preserves an already running app; add `--diagnostic` (`fleetworks-desktop --diagnostic`) for foreground stderr startup diagnostics and early-crash capture instead of silent GUI exit. [Build loop](../../docs/diagrams/dev-loop-native.html)
+Build flow: live Cargo progress/diagnostics on stderr → strip/package/validate desktop + companion (`--without-companion` omits `argos-api-host`) → artifact paths and metadata. `--open` opens after validation while preserving an existing running instance; add `--diagnostic` (`fleetworks-desktop --diagnostic`) for foreground stderr startup diagnostics and early-crash capture. Pass `--local-backend-bin <PATH>` to override the packaged companion binary. [Build loop](../../docs/diagrams/dev-loop-native.html)
 
 ```sh
 python3 scripts/fleetworks_candidate.py build-native --agent --target host --profile debug
@@ -73,6 +77,6 @@ python3 scripts/fleetworks_verify.py native-ui --agent \
 
 Discover scene names from the current executable; generation alone is not visual approval. [Native verification](../../docs/wiki/code/native-verification.md) records build/cache isolation and inspection requirements. Hosted evidence retains both Mac architectures; minimum OS, installed GUI/input/accessibility, signing/notarization and real backend integration remain separate. Read the acceptance tracker for actual pass/fail/skip results rather than treating these command examples as executed checks.
 
-Selected PR checks build debug apps and Rune evidence on Intel/Apple Silicon, without ZIPs or publication. Trusted branch pushes package versioned release ZIPs, verify downloads by artifact ID/digest/checksum and publish after required checks: `nightly` → nightly prereleases, `dev`/`main` → stable. These automatically published apps remain unsigned; signing/notarization and installed-hardware acceptance are separate evidence. [Release flow](../../docs/diagrams/native-release.html) · [Artifact map](../../docs/wiki/code/build-artifacts.md#hosted-artifacts-and-publication)
+Selected PR checks build debug apps, Rune UI fixtures, stripped debug archives, extracted-bundle IPC smoke, and live HTTP ↔ local-IPC parity (`http_ipc_parity`) on Intel Mac, Apple Silicon Mac, and Linux `x86_64` without channel publication. Trusted branch pushes package versioned release bundles, verify downloads by artifact ID/digest/checksum, and publish macOS ZIPs after required checks (`nightly` → nightly prereleases, `dev`/`main` → stable; Linux `.tar.gz` remains a CI artifact). Automatically published apps remain unsigned; signing/notarization and installed-hardware acceptance are separate evidence. [Release flow](../../docs/diagrams/native-release.html) · [Artifact map](../../docs/wiki/code/build-artifacts.md#hosted-artifacts-and-publication)
 
 Pairing tests use injected Keychain stores. Installed-app launch, real Keychain approval/reconnect and backend integration need separate evidence within the current task's authorized scope. Record actual results and remaining gaps in its acceptance tracker.

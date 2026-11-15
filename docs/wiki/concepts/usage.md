@@ -4,7 +4,7 @@
 
 [![Provision, connect and register a workstation](../../diagrams/native-connections.svg)](../../diagrams/native-connections.html)
 
-**Native setup:** Gateway URL → operator approval once → macOS Keychain → authenticated reconnect. Enter the independent gateway URL in Setup Gateway and share its request ID/code with the operator. The app saves approved access and registers this installation; no file management is needed. Explicit operator/headless clients retain token-file mode. [Pairing/recovery](../code/native-connections.md#pairing-and-keychain-agreed-target) · [Verification](../../../.planning/2026-11-12-native-pairing-implementation/acceptance.md)
+**Native setup:** choose **Local Embedded** (`Start Local Backend` over framed stdio IPC, no Docker required) or **Remote Gateway** (`Gateway URL → operator approval → macOS Keychain / Linux D-Bus Secret Service / explicit Linux session-only mode → authenticated reconnect`). Explicit operator/headless clients retain `--api-origin` + `--api-token-file` mode. [Pairing/recovery](../code/native-connections.md#pairing-and-keychain-agreed-target) · [Verification](../../../.planning/2026-11-12-native-pairing-implementation/acceptance.md)
 
 The opaque workstation Connect ID also selects the browser’s separately authorized session. IP is optional metadata. Native launch starts no services or child folders.
 
@@ -18,13 +18,13 @@ Intel Web opens at `/connect`. **Bulletin** browses retained articles; **Focus B
 
 | Surface | Use it for | Contract |
 | --- | --- | --- |
-| DB Seed & Train | Configured actor seed/index/Natural candidate triggers; no picker or activation | [Readiness and maintenance](../code/native-connections.md#readiness-and-maintenance) |
+| DB Seed & Train | Schema-checked actor/classifier CSV pickers and confirmed seed, index-build, or Natural training triggers (no automatic activation) | [Readiness and maintenance](../code/native-connections.md#readiness-and-maintenance) |
 | News Cycles | New Cycle, workstation history and association Delete; shared evidence/audit stays intact | [Atlas setup](../../../deploy/atlas-dispatch.md) |
 | Brain Search | One search field, bounded canonical results, selected dossier; no native graph | [Actor discovery](../code/actor-search.md) |
 | OSINT Tools | Service/provider cards and protected key modal; no manual tool execution | [Keys and choices](../code/native-connections.md#configuration-and-model-choices) |
 | Model Assignments | Configured provider keys, supported routing/variants and ordered fallbacks | [Providers](providers.md) |
 | Jobs & Logs | Workstation queue and selected-job safe summaries, without tabs/filters/action toolbars | [Activity/privacy](../code/native-connections.md#durable-requests-and-activity) |
-| Status, via gateway header | Native identity, gateway/readiness and optional API-host resources | [Control allowlist](../code/native-design-system.md) |
+| Status, via gateway header | **Actor search** readiness hero card, native identity, gateway/readiness, and optional API-host resources | [Control allowlist](../code/native-design-system.md) |
 
 <a id="atlas"></a><a id="brain"></a><a id="jobs-and-logs"></a><a id="profile"></a>
 

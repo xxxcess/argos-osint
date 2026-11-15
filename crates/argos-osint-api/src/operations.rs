@@ -13,18 +13,18 @@ use serde_json::{json, Value};
 use crate::network::AccessMode;
 use crate::{bad, internal, storage_ready, ApiError, ApiResult, ApiState};
 
-pub(crate) async fn submit_atlas_cycle(
-    State(state): State<ApiState>,
-    Extension(context): Extension<crate::request_context::ResolvedRequest>,
-    Json(request): Json<AtlasCycleRequest>,
-) -> Result<(StatusCode, Json<AtlasCycleReceipt>), ApiError> {
+pub(crate) async fn submit_atlas_cycle_request(
+    state: &ApiState,
+    context: &crate::request_context::ResolvedRequest,
+    request: AtlasCycleRequest,
+) -> Result<AtlasCycleReceipt, ApiError> {
     use storage::job_dispatch::{self, ATLAS_POOL};
     use storage::jobs::{NewJob, NewTask};
     use storage::tx::TxError;
 
     let admission = crate::admission::capture_checked(
-        &state.repo,
-        &context,
+        state,
+        context,
         &request.request_id,
         ATLAS_CYCLE_OPERATION,
         request.context.as_ref(),
@@ -75,11 +75,24 @@ pub(crate) async fn submit_atlas_cycle(
         }
         other => internal(other),
     })?;
+    Ok(cycle)
+}
+
+pub(crate) async fn submit_atlas_cycle(
+    State(state): State<ApiState>,
+    Extension(context): Extension<crate::request_context::ResolvedRequest>,
+    Json(request): Json<AtlasCycleRequest>,
+) -> Result<(StatusCode, Json<AtlasCycleReceipt>), ApiError> {
+    let cycle = submit_atlas_cycle_request(&state, &context, request).await?;
     Ok((StatusCode::ACCEPTED, Json(cycle)))
 }
 
+pub(crate) fn tools_value() -> Value {
+    json!({"tools": osint::registry()})
+}
+
 pub(crate) async fn tools() -> Json<Value> {
-    Json(json!({"tools": osint::registry()}))
+    Json(tools_value())
 }
 
 pub(crate) async fn model_defaults() -> ApiResult {

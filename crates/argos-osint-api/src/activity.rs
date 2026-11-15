@@ -22,6 +22,7 @@ use serde_json::Value;
 
 use crate::request_context::ContextFailure;
 use crate::request_context::ResolvedRequest;
+use crate::ApiError;
 use crate::ApiResult;
 use crate::ApiState;
 
@@ -29,15 +30,15 @@ use crate::ApiState;
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ActivityQuery {
-    id: Option<String>,
-    job_id: Option<String>,
-    workspace_id: Option<String>,
-    limit: Option<usize>,
-    status: Option<String>,
-    app: Option<String>,
-    operation: Option<String>,
-    text: Option<String>,
-    since: Option<String>,
+    pub(crate) id: Option<String>,
+    pub(crate) job_id: Option<String>,
+    pub(crate) workspace_id: Option<String>,
+    pub(crate) limit: Option<usize>,
+    pub(crate) status: Option<String>,
+    pub(crate) app: Option<String>,
+    pub(crate) operation: Option<String>,
+    pub(crate) text: Option<String>,
+    pub(crate) since: Option<String>,
 }
 
 fn bounded(value: &str, limit: usize) -> bool {
@@ -241,12 +242,11 @@ fn maintenance_result(result: Value) -> Option<Value> {
     Some(Value::Object(safe))
 }
 
-pub(crate) async fn jobs(
-    State(state): State<ApiState>,
-    extension: Option<Extension<ResolvedRequest>>,
-    Query(query): Query<ActivityQuery>,
-) -> ApiResult {
-    let request = request(&extension)?;
+pub(crate) async fn jobs_value(
+    state: &ApiState,
+    request: &ResolvedRequest,
+    query: ActivityQuery,
+) -> Result<Value, ApiError> {
     let (filter, limit) = filter(&query)?;
     let scope = scope_for_request(&state.repo, request, query.workspace_id.as_deref()).await?;
     let mut rows = storage::jobs_view::list_activity_jobs(
@@ -270,18 +270,27 @@ pub(crate) async fn jobs(
     }
     action_availability(&state.repo, request, &mut rows).await?;
     request.revalidate(&state.repo).await?;
-    Ok(Json(
-        json!({"rows":rows,"counts":counts,"apps":apps,"activity_scope":scope,
-        "relation_counts_available":false,"activity_actions_available":rows.iter().any(|row|row.activity_actions_available)}),
-    ))
+    Ok(json!({
+        "rows":rows,"counts":counts,"apps":apps,"activity_scope":scope,
+        "relation_counts_available":false,"activity_actions_available":rows.iter().any(|row|row.activity_actions_available)
+    }))
 }
 
-pub(crate) async fn job(
+#[allow(dead_code)]
+pub(crate) async fn jobs(
     State(state): State<ApiState>,
     extension: Option<Extension<ResolvedRequest>>,
     Query(query): Query<ActivityQuery>,
 ) -> ApiResult {
     let request = request(&extension)?;
+    Ok(Json(jobs_value(&state, request, query).await?))
+}
+
+pub(crate) async fn job_value(
+    state: &ApiState,
+    request: &ResolvedRequest,
+    query: ActivityQuery,
+) -> Result<Value, ApiError> {
     let scope = scope_for_request(&state.repo, request, query.workspace_id.as_deref()).await?;
     let id = job_id(&query)?;
     let mut job = authorized_job(&state.repo, request, &scope, id).await?;
@@ -305,10 +314,19 @@ pub(crate) async fn job(
     }
     job.job.error_summary = provider_diag::sanitize(&job.job.error_summary);
     action_availability(&state.repo, request, std::slice::from_mut(&mut job)).await?;
-    Ok(Json(
-        json!({"job":job,"stages":stages,"maintenance_result":maintenance,"private_details_available":job.private_details_available,
-        "relation_counts_available":false,"activity_actions_available":job.activity_actions_available}),
-    ))
+    Ok(json!({
+        "job":job,"stages":stages,"maintenance_result":maintenance,"private_details_available":job.private_details_available,
+        "relation_counts_available":false,"activity_actions_available":job.activity_actions_available
+    }))
+}
+
+pub(crate) async fn job(
+    State(state): State<ApiState>,
+    extension: Option<Extension<ResolvedRequest>>,
+    Query(query): Query<ActivityQuery>,
+) -> ApiResult {
+    let request = request(&extension)?;
+    Ok(Json(job_value(&state, request, query).await?))
 }
 
 pub(crate) async fn stages(

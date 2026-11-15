@@ -341,12 +341,7 @@ async fn operational_logs_authorize_before_counts_export_follow_and_cursor_reval
         ],
     )
     .expect("actual purpose policy");
-    let state = ApiState {
-        repo: repo.clone(),
-        instance_id: "logs-api".into(),
-        port: 8080,
-        origins: Arc::new(Vec::new()),
-    };
+    let state = ApiState::new(repo.clone(), "logs-api".into(), 8080, Arc::new(Vec::new()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("fixture-owned private listener");

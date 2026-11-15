@@ -207,12 +207,12 @@ mod tests {
         )
         .expect("fixture policy");
         let gateway = crate::network_router_with_private_services(
-            crate::ApiState {
+            crate::ApiState::new(
                 repo,
-                instance_id: "relay-fixture".into(),
-                port: 8080,
-                origins: std::sync::Arc::new(vec!["https://public.example".into()]),
-            },
+                "relay-fixture".into(),
+                8080,
+                std::sync::Arc::new(vec!["https://public.example".into()]),
+            ),
             policy,
             crate::PrivateServices::new(Some(client), None, None, None),
         );

@@ -52,19 +52,19 @@ const TICK: Duration = Duration::from_secs(1);
 #[serde(deny_unknown_fields)]
 pub(crate) struct LogQuery {
     #[serde(alias = "id")]
-    job_id: Option<String>,
-    workspace_id: Option<String>,
-    descendants: Option<bool>,
-    min_rank: Option<i64>,
-    app: Option<String>,
-    text: Option<String>,
-    since: Option<String>,
-    limit: Option<usize>,
-    cursor: Option<String>,
-    wait_ms: Option<u64>,
+    pub(crate) job_id: Option<String>,
+    pub(crate) workspace_id: Option<String>,
+    pub(crate) descendants: Option<bool>,
+    pub(crate) min_rank: Option<i64>,
+    pub(crate) app: Option<String>,
+    pub(crate) text: Option<String>,
+    pub(crate) since: Option<String>,
+    pub(crate) limit: Option<usize>,
+    pub(crate) cursor: Option<String>,
+    pub(crate) wait_ms: Option<u64>,
 }
 #[derive(Serialize)]
-struct PublicPage {
+pub(crate) struct PublicPage {
     rows: Vec<OperationalLog>,
     counts: Option<ScopedLogCounts>,
     apps: Vec<String>,
@@ -327,20 +327,25 @@ fn protected(mut response: Response) -> Response {
     response
 }
 
-pub(crate) async fn page(
-    State(state): State<ApiState>,
-    extension: Option<Extension<ResolvedRequest>>,
-    Extension(cache): Extension<Arc<LogCursors>>,
-    Query(query): Query<LogQuery>,
-) -> Result<Response, ApiError> {
-    let context = context(extension)?;
-    let record = match start(&state, &context, &cache, &query, Kind::Page).await? {
+pub(crate) struct LogExportPayload {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) next_cursor: Option<String>,
+    pub(crate) apps_complete: bool,
+}
+
+pub(crate) async fn page_value(
+    state: &ApiState,
+    context: &ResolvedRequest,
+    cache: &Arc<LogCursors>,
+    query: &LogQuery,
+) -> Result<PublicPage, ApiError> {
+    let record = match start(state, context, cache, query, Kind::Page).await? {
         Ok(record) => record,
-        Err(page) => return Ok(protected(Json(page).into_response())),
+        Err(page) => return Ok(page),
     };
     let (page, shared) = read(
-        &state,
-        &context,
+        state,
+        context,
         &record.snapshot,
         LogDirection::Older,
         record.upper,
@@ -377,42 +382,46 @@ pub(crate) async fn page(
     } else {
         None
     };
-    Ok(protected(
-        Json(PublicPage {
-            rows: safe_rows(&page),
-            counts: Some(page.counts),
-            apps: page.apps,
-            apps_complete: page.apps_complete,
-            next_cursor,
-            follow_cursor,
-            available: true,
-            private_logs_only: true,
-            shared_private_logs_available: !shared,
-            reason_code: None,
-            narrowing_hint: None,
-            has_more: page.has_more,
-        })
-        .into_response(),
-    ))
+    Ok(PublicPage {
+        rows: safe_rows(&page),
+        counts: Some(page.counts),
+        apps: page.apps,
+        apps_complete: page.apps_complete,
+        next_cursor,
+        follow_cursor,
+        available: true,
+        private_logs_only: true,
+        shared_private_logs_available: !shared,
+        reason_code: None,
+        narrowing_hint: None,
+        has_more: page.has_more,
+    })
 }
-pub(crate) async fn export(
+
+pub(crate) async fn page(
     State(state): State<ApiState>,
     extension: Option<Extension<ResolvedRequest>>,
     Extension(cache): Extension<Arc<LogCursors>>,
     Query(query): Query<LogQuery>,
 ) -> Result<Response, ApiError> {
     let context = context(extension)?;
-    let record = match start(&state, &context, &cache, &query, Kind::Export).await? {
+    let page = page_value(&state, &context, &cache, &query).await?;
+    Ok(protected(Json(page).into_response()))
+}
+
+pub(crate) async fn export_payload(
+    state: &ApiState,
+    context: &ResolvedRequest,
+    cache: &Arc<LogCursors>,
+    query: &LogQuery,
+) -> Result<Result<LogExportPayload, PublicPage>, ApiError> {
+    let record = match start(state, context, cache, query, Kind::Export).await? {
         Ok(record) => record,
-        Err(page) => {
-            return Ok(protected(
-                (StatusCode::CONFLICT, Json(page)).into_response(),
-            ))
-        }
+        Err(page) => return Ok(Err(page)),
     };
     let (page, _) = read(
-        &state,
-        &context,
+        state,
+        context,
         &record.snapshot,
         LogDirection::Older,
         record.upper,
@@ -427,6 +436,43 @@ pub(crate) async fn export(
         );
         body.push('\n');
     }
+    let next_cursor = if page.has_more {
+        Some(
+            cache
+                .issue(Record::next(
+                    record.snapshot,
+                    Kind::Export,
+                    Some(page.upper_seq),
+                    page.next_boundary,
+                ))
+                .await
+                .map_err(|_| crate::internal("log export cursor unavailable"))?,
+        )
+    } else {
+        None
+    };
+    Ok(Ok(LogExportPayload {
+        bytes: body.into_bytes(),
+        next_cursor,
+        apps_complete: page.apps_complete,
+    }))
+}
+
+pub(crate) async fn export(
+    State(state): State<ApiState>,
+    extension: Option<Extension<ResolvedRequest>>,
+    Extension(cache): Extension<Arc<LogCursors>>,
+    Query(query): Query<LogQuery>,
+) -> Result<Response, ApiError> {
+    let context = context(extension)?;
+    let payload = match export_payload(&state, &context, &cache, &query).await? {
+        Ok(payload) => payload,
+        Err(page) => {
+            return Ok(protected(
+                (StatusCode::CONFLICT, Json(page)).into_response(),
+            ))
+        }
+    };
     let mut response = (
         [
             (header::CONTENT_TYPE, "application/x-ndjson"),
@@ -435,23 +481,18 @@ pub(crate) async fn export(
                 "attachment; filename=workstation-logs.ndjson",
             ),
         ],
-        body,
+        payload.bytes,
     )
         .into_response();
     response.headers_mut().insert(
         "x-fleetworks-log-apps-complete",
-        HeaderValue::from_static(if page.apps_complete { "true" } else { "false" }),
+        HeaderValue::from_static(if payload.apps_complete {
+            "true"
+        } else {
+            "false"
+        }),
     );
-    if page.has_more {
-        let token = cache
-            .issue(Record::next(
-                record.snapshot,
-                Kind::Export,
-                Some(page.upper_seq),
-                page.next_boundary,
-            ))
-            .await
-            .map_err(|_| crate::internal("log export cursor unavailable"))?;
+    if let Some(token) = payload.next_cursor {
         response.headers_mut().insert(
             "x-fleetworks-next-log-cursor",
             HeaderValue::from_str(&token).map_err(|_| crate::internal("log cursor unavailable"))?,
@@ -459,35 +500,49 @@ pub(crate) async fn export(
     }
     Ok(protected(response))
 }
-pub(crate) async fn follow(
-    state: State<ApiState>,
-    extension: Option<Extension<ResolvedRequest>>,
-    cache: Extension<Arc<LogCursors>>,
-    query: Query<LogQuery>,
-) -> Result<Response, ApiError> {
-    tokio::time::timeout(FOLLOW_LIMIT, follow_inner(state, extension, cache, query))
-        .await
-        .map_err(|_| {
-            ApiError(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Bounded operational log follow is busy; retry this scoped cursor",
-            )
-        })?
+
+pub(crate) async fn follow_value(
+    state: &ApiState,
+    context: &ResolvedRequest,
+    cache: &Arc<LogCursors>,
+    query: &LogQuery,
+) -> Result<PublicPage, ApiError> {
+    tokio::time::timeout(
+        FOLLOW_LIMIT,
+        follow_inner_value(state, context, cache, query),
+    )
+    .await
+    .map_err(|_| {
+        ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Bounded operational log follow is busy; retry this scoped cursor",
+        )
+    })?
 }
 
-async fn follow_inner(
+pub(crate) async fn follow(
     State(state): State<ApiState>,
     extension: Option<Extension<ResolvedRequest>>,
     Extension(cache): Extension<Arc<LogCursors>>,
     Query(query): Query<LogQuery>,
 ) -> Result<Response, ApiError> {
     let context = context(extension)?;
+    let page = follow_value(&state, &context, &cache, &query).await?;
+    Ok(protected(Json(page).into_response()))
+}
+
+async fn follow_inner_value(
+    state: &ApiState,
+    context: &ResolvedRequest,
+    cache: &Arc<LogCursors>,
+    query: &LogQuery,
+) -> Result<PublicPage, ApiError> {
     let token = query.cursor.as_deref().ok_or_else(crate::bad)?;
     let record = cache
-        .get(token, &binding(&context)?, Kind::Follow)
+        .get(token, &binding(context)?, Kind::Follow)
         .await
         .map_err(|_| changed())?;
-    overrides(&query, &record.snapshot)?;
+    overrides(query, &record.snapshot)?;
     let wait = Duration::from_millis(query.wait_ms.unwrap_or(1000));
     if wait > FOLLOW_LIMIT - TICK {
         return Err(crate::bad());
@@ -526,23 +581,20 @@ async fn follow_inner(
                 ))
                 .await
                 .map_err(|_| crate::internal("log follow cursor unavailable"))?;
-            return Ok(protected(
-                Json(PublicPage {
-                    rows: safe_rows(&page),
-                    counts: Some(page.counts),
-                    apps: page.apps,
-                    apps_complete: page.apps_complete,
-                    next_cursor: Some(next),
-                    follow_cursor: None,
-                    available: true,
-                    private_logs_only: true,
-                    shared_private_logs_available: !shared,
-                    reason_code: None,
-                    narrowing_hint: None,
-                    has_more: page.has_more,
-                })
-                .into_response(),
-            ));
+            return Ok(PublicPage {
+                rows: safe_rows(&page),
+                counts: Some(page.counts),
+                apps: page.apps,
+                apps_complete: page.apps_complete,
+                next_cursor: Some(next),
+                follow_cursor: None,
+                available: true,
+                private_logs_only: true,
+                shared_private_logs_available: !shared,
+                reason_code: None,
+                narrowing_hint: None,
+                has_more: page.has_more,
+            });
         }
         tokio::time::sleep(TICK.min(deadline.saturating_duration_since(Instant::now()))).await;
     }

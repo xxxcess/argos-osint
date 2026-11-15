@@ -173,6 +173,7 @@ async fn handle(
             DeliveryFinish::Completed | DeliveryFinish::Requeued | DeliveryFinish::Stale => {
                 Disposition::Ack
             }
+            DeliveryFinish::Relinquished => Disposition::Requeue,
             DeliveryFinish::Failed => Disposition::DeadLetter,
         };
     received.settle(disposition).await?;

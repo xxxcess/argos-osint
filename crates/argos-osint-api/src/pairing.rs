@@ -172,8 +172,9 @@ async fn revoke(
     let authority = operator(principal)?;
     // Never take a DB guard while waiting for the configuration owner. The
     // writer performs its dynamic-authority check after taking this same lock.
-    let lock = tokio::task::spawn_blocking(|| {
-        let root = crate::configuration::workspace().map_err(|_| {
+    let state_for_revoke = state.clone();
+    let lock = tokio::task::spawn_blocking(move || {
+        let root = crate::configuration::workspace_for(&state_for_revoke).map_err(|_| {
             PairingError(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Configuration owner unavailable for revocation",

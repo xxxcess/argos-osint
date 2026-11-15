@@ -54,10 +54,7 @@ pub(crate) fn routes() -> Router<ApiState> {
         .route(ACTIVATION_PATH, post(submit))
         .route(ACTIVATION_RESULT_PATH, get(result))
 }
-fn authority(context: Option<Extension<ResolvedRequest>>) -> Result<ResolvedRequest, ApiError> {
-    let Some(Extension(context)) = context else {
-        return Err(ContextFailure::registration_required().into());
-    };
+pub(crate) fn ensure_activation_authority(context: &ResolvedRequest) -> Result<(), ApiError> {
     if context.purpose() != CredentialPurpose::Native
         || !context.permits(Permission::MaintainBackend)
         || !context.permits(Permission::ReadWorkstationActivity)
@@ -65,6 +62,14 @@ fn authority(context: Option<Extension<ResolvedRequest>>) -> Result<ResolvedRequ
         return Err(ContextFailure::forbidden().into());
     }
     context.registered()?;
+    Ok(())
+}
+
+fn authority(context: Option<Extension<ResolvedRequest>>) -> Result<ResolvedRequest, ApiError> {
+    let Some(Extension(context)) = context else {
+        return Err(ContextFailure::registration_required().into());
+    };
+    ensure_activation_authority(&context)?;
     Ok(context)
 }
 fn artifacts(
@@ -77,9 +82,9 @@ fn artifacts(
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PreviewQuery {
-    training_job_id: String,
-    model_id: String,
+pub(crate) struct PreviewQuery {
+    pub(crate) training_job_id: String,
+    pub(crate) model_id: String,
 }
 async fn eligible(
     state: &ApiState,
@@ -93,7 +98,7 @@ async fn eligible(
     }
     Ok(())
 }
-async fn actual_preview(
+pub(crate) async fn actual_preview(
     state: &ApiState,
     context: &ResolvedRequest,
     owner: &ActivationArtifacts,
@@ -138,22 +143,21 @@ async fn preview(
         actual_preview(&state, &context, &owner, &query).await?,
     ))
 }
-async fn submit(
-    State(state): State<ApiState>,
-    context: Option<Extension<ResolvedRequest>>,
-    owner: Option<Extension<Arc<ActivationArtifacts>>>,
-    Json(request): Json<ActivationRequest>,
-) -> Result<(StatusCode, Json<ActivationReceipt>), ApiError> {
-    let context = authority(context)?;
-    let owner = artifacts(owner)?;
+pub(crate) async fn submit_request(
+    state: &ApiState,
+    context: &ResolvedRequest,
+    owner: &ActivationArtifacts,
+    request: ActivationRequest,
+) -> Result<ActivationReceipt, ApiError> {
+    ensure_activation_authority(context)?;
     request.validate().map_err(|error| {
         if error == fleetworks_contracts::classifier_activation::ActivationInputError::MissingConfigurationRevision {
             ApiError(StatusCode::PRECONDITION_REQUIRED, "Configuration revision required")
         } else {crate::bad()}
     })?;
     let admission = crate::admission::capture_checked(
-        &state.repo,
-        &context,
+        state,
+        context,
         &request.request_id,
         classifier_activation::OPERATION,
         Some(&request.context),
@@ -168,9 +172,9 @@ async fn submit(
         .is_some();
     if !replay {
         let preview = actual_preview(
-            &state,
-            &context,
-            &owner,
+            state,
+            context,
+            owner,
             &PreviewQuery {
                 training_job_id: request.candidate.training_job_id.clone(),
                 model_id: request.candidate.model_id.clone(),
@@ -200,9 +204,20 @@ async fn submit(
             ));
         }
     }
-    let receipt = classifier_activation::admit(&state.repo, &admission, &request)
+    classifier_activation::admit(&state.repo, &admission, &request)
         .await
-        .map_err(storage_failure)?;
+        .map_err(storage_failure)
+}
+
+async fn submit(
+    State(state): State<ApiState>,
+    context: Option<Extension<ResolvedRequest>>,
+    owner: Option<Extension<Arc<ActivationArtifacts>>>,
+    Json(request): Json<ActivationRequest>,
+) -> Result<(StatusCode, Json<ActivationReceipt>), ApiError> {
+    let context = authority(context)?;
+    let owner = artifacts(owner)?;
+    let receipt = submit_request(&state, &context, &owner, request).await?;
     Ok((StatusCode::ACCEPTED, Json(receipt)))
 }
 #[derive(Deserialize)]
@@ -210,19 +225,28 @@ async fn submit(
 struct ResultQuery {
     job_id: String,
 }
+pub(crate) async fn result_request(
+    state: &ApiState,
+    context: &ResolvedRequest,
+    job_id: &str,
+) -> Result<ActivationResult, ApiError> {
+    ensure_activation_authority(context)?;
+    eligible(state, context, job_id).await?;
+    let result = classifier_activation::result_for_job(&state.repo, job_id)
+        .await
+        .map_err(storage_failure)?
+        .ok_or_else(crate::missing)?;
+    eligible(state, context, job_id).await?;
+    Ok(result)
+}
+
 async fn result(
     State(state): State<ApiState>,
     context: Option<Extension<ResolvedRequest>>,
     Query(query): Query<ResultQuery>,
 ) -> Result<Json<ActivationResult>, ApiError> {
     let context = authority(context)?;
-    eligible(&state, &context, &query.job_id).await?;
-    let result = classifier_activation::result_for_job(&state.repo, &query.job_id)
-        .await
-        .map_err(storage_failure)?
-        .ok_or_else(crate::missing)?;
-    eligible(&state, &context, &query.job_id).await?;
-    Ok(Json(result))
+    Ok(Json(result_request(&state, &context, &query.job_id).await?))
 }
 fn storage_failure(error: argos_osint_core::storage::tx::TxError) -> ApiError {
     match error {

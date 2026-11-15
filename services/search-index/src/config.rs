@@ -5,6 +5,7 @@ use std::env;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::path::PathBuf;
 
 use anyhow::ensure;
 use anyhow::Context;
@@ -14,6 +15,56 @@ use fleetworks_contracts::actor_index::ActorIndexLimits;
 use sha2::Digest;
 
 use crate::engine::EngineConfig;
+
+/// Transport-free configuration for running [`crate::service::SearchService`]
+/// in-process without HTTP listener or token-file environment variables.
+#[derive(Clone, Debug)]
+pub struct LocalEngineConfig {
+    pub query_capacity: usize,
+    pub engine: EngineConfig,
+    pub limits: ActorIndexLimits,
+}
+
+impl LocalEngineConfig {
+    pub fn new(engine: EngineConfig, limits: ActorIndexLimits) -> Result<Self> {
+        limits.validate()?;
+        engine.validate()?;
+        let query_capacity = usize::from(limits.query_capacity);
+        ensure!(
+            (1..=8).contains(&query_capacity),
+            "search query capacity must be 1 through 8"
+        );
+        ensure!(
+            engine.writer_memory_bytes == limits.writer_memory_bytes as usize
+                && engine.writer_threads == usize::from(limits.writer_threads)
+                && engine.merge_threads == usize::from(limits.merge_threads),
+            "engine writer budget must match actor index limits"
+        );
+        Ok(Self {
+            query_capacity,
+            engine,
+            limits,
+        })
+    }
+
+    pub fn for_identity(
+        directory: PathBuf,
+        deployment_id: String,
+        source_epoch: String,
+        limits: ActorIndexLimits,
+    ) -> Result<Self> {
+        limits.validate()?;
+        let engine = EngineConfig {
+            directory,
+            deployment_id,
+            source_epoch,
+            writer_memory_bytes: limits.writer_memory_bytes as usize,
+            writer_threads: usize::from(limits.writer_threads),
+            merge_threads: usize::from(limits.merge_threads),
+        };
+        Self::new(engine, limits)
+    }
+}
 
 #[derive(Clone)]
 pub struct Config {
@@ -26,7 +77,31 @@ pub struct Config {
     pub limits: ActorIndexLimits,
 }
 
+impl From<&Config> for LocalEngineConfig {
+    fn from(config: &Config) -> Self {
+        Self {
+            query_capacity: config.query_capacity,
+            engine: config.engine.clone(),
+            limits: config.limits.clone(),
+        }
+    }
+}
+
+impl From<Config> for LocalEngineConfig {
+    fn from(config: Config) -> Self {
+        Self {
+            query_capacity: config.query_capacity,
+            engine: config.engine,
+            limits: config.limits,
+        }
+    }
+}
+
 impl Config {
+    pub fn local_engine(&self) -> LocalEngineConfig {
+        LocalEngineConfig::from(self)
+    }
+
     pub fn from_environment() -> Result<Self> {
         let bind = env::var("FLEETWORKS_SEARCH_BIND")
             .unwrap_or_else(|_| "127.0.0.1:8087".into())
@@ -84,32 +159,24 @@ impl Config {
         )?)
         .context("invalid query capacity")?;
         limits.validate()?;
-        let engine = EngineConfig {
-            directory: env::var("FLEETWORKS_SEARCH_INDEX_DIR")
+        let local = LocalEngineConfig::for_identity(
+            env::var("FLEETWORKS_SEARCH_INDEX_DIR")
                 .context("FLEETWORKS_SEARCH_INDEX_DIR is required")?
                 .into(),
-            deployment_id: env::var("FLEETWORKS_SEARCH_DEPLOYMENT_ID")
+            env::var("FLEETWORKS_SEARCH_DEPLOYMENT_ID")
                 .context("FLEETWORKS_SEARCH_DEPLOYMENT_ID is required")?,
-            source_epoch: env::var("FLEETWORKS_SEARCH_SOURCE_EPOCH")
+            env::var("FLEETWORKS_SEARCH_SOURCE_EPOCH")
                 .context("FLEETWORKS_SEARCH_SOURCE_EPOCH is required")?,
-            writer_memory_bytes: limits.writer_memory_bytes as usize,
-            writer_threads: usize::from(limits.writer_threads),
-            merge_threads: usize::from(limits.merge_threads),
-        };
-        engine.validate()?;
-        let query_capacity = usize::from(limits.query_capacity);
-        ensure!(
-            (1..=8).contains(&query_capacity),
-            "search query capacity must be 1 through 8"
-        );
+            limits,
+        )?;
         Ok(Self {
             bind,
             allowed_hosts,
             read_digest,
             write_digest,
-            query_capacity,
-            engine,
-            limits,
+            query_capacity: local.query_capacity,
+            engine: local.engine,
+            limits: local.limits,
         })
     }
 }

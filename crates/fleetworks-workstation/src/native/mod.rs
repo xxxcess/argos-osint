@@ -27,11 +27,17 @@ mod tests;
 mod trash;
 mod workstation;
 
+pub use connections::canonical_local_origin;
+pub use connections::canonical_target_origin;
+pub use connections::local_origin_for_profile;
+pub use connections::BackendKind;
 pub use connections::ConnectionProfilesSnapshot;
 pub use connections::CredentialReference;
 pub use connections::GatewayProfile;
 pub use connections::GatewayProfileInput;
 pub use connections::CONNECTIONS_FILE;
+pub use connections::DEFAULT_LOCAL_ORIGIN;
+pub use connections::LOCAL_BACKEND_DIR;
 pub use pairing::CredentialStorage;
 pub use pairing::PairedGateway;
 pub use pairing::PairingCatalogSnapshot;
@@ -50,6 +56,7 @@ pub use trash::PreparedTrash;
 pub use trash::TrashAdapter;
 pub use trash::TrashReference;
 pub use trash::TrashTarget;
+pub use workstation::AcceptedActorReindex;
 pub use workstation::PendingActorReindex;
 pub use workstation::PendingCycleDeletion;
 

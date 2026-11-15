@@ -2,6 +2,9 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use argos_osint_core::storage::actor_search_outbox;
@@ -28,13 +31,34 @@ use crate::AuthenticatedPrincipal;
 
 const MAX_RESPONSE: usize = 1024 * 1024;
 
+/// Boxed asynchronous future returned by an in-process actor search backend.
+pub type SearchFuture<'a, T> = Pin<Box<dyn Future<Output = anyhow::Result<T>> + Send + 'a>>;
+
+/// In-process actor index reader backend used when search runs without HTTP loopback.
+pub trait ActorSearchBackend: Send + Sync {
+    /// Probe index status without triggering ingest or rebuild work.
+    fn status(&self) -> SearchFuture<'_, ActorIndexStatus>;
+
+    /// Execute a validated bounded actor discovery query.
+    fn query<'a>(&'a self, query: &'a ActorIndexQuery)
+        -> SearchFuture<'a, ActorIndexQueryResponse>;
+}
+
+#[derive(Clone)]
+enum SearchClientTransport {
+    Http {
+        origin: Url,
+        authorization: HeaderValue,
+        http: reqwest::Client,
+    },
+    Local(Arc<dyn ActorSearchBackend>),
+}
+
 /// An explicitly configured, pooled private reader. Public request fields never
 /// select its origin, credential, filesystem path or authority.
 #[derive(Clone)]
 pub struct SearchClient {
-    origin: Url,
-    authorization: HeaderValue,
-    http: reqwest::Client,
+    transport: SearchClientTransport,
 }
 
 impl SearchClient {
@@ -53,39 +77,66 @@ impl SearchClient {
             .timeout(Duration::from_secs(8))
             .build()?;
         Ok(Self {
-            origin,
-            authorization,
-            http,
+            transport: SearchClientTransport::Http {
+                origin,
+                authorization,
+                http,
+            },
         })
     }
 
-    fn endpoint(&self, path: &str) -> Url {
-        let mut endpoint = self.origin.clone();
+    /// Construct a `SearchClient` backed by an in-process [`ActorSearchBackend`].
+    #[must_use]
+    pub fn from_local(backend: Arc<dyn ActorSearchBackend>) -> Self {
+        Self {
+            transport: SearchClientTransport::Local(backend),
+        }
+    }
+
+    fn endpoint(origin: &Url, path: &str) -> Url {
+        let mut endpoint = origin.clone();
         endpoint.set_path(path);
         endpoint
     }
 
     /// Probe configured private status without triggering an ingest or rebuild.
     pub async fn status(&self) -> anyhow::Result<ActorIndexStatus> {
-        let response = self
-            .http
-            .get(self.endpoint("/internal/v1/actors/status"))
-            .header(header::AUTHORIZATION, self.authorization.clone())
-            .send()
-            .await?;
-        bounded_json(response).await
+        match &self.transport {
+            SearchClientTransport::Http {
+                origin,
+                authorization,
+                http,
+            } => {
+                let response = http
+                    .get(Self::endpoint(origin, "/internal/v1/actors/status"))
+                    .header(header::AUTHORIZATION, authorization.clone())
+                    .send()
+                    .await?;
+                bounded_json(response).await
+            }
+            SearchClientTransport::Local(backend) => backend.status().await,
+        }
     }
 
-    async fn query(&self, query: &ActorIndexQuery) -> anyhow::Result<ActorIndexQueryResponse> {
+    /// Execute a validated bounded actor index query through the configured transport.
+    pub async fn query(&self, query: &ActorIndexQuery) -> anyhow::Result<ActorIndexQueryResponse> {
         query.validate()?;
-        let response = self
-            .http
-            .post(self.endpoint("/internal/v1/actors/query"))
-            .header(header::AUTHORIZATION, self.authorization.clone())
-            .json(query)
-            .send()
-            .await?;
-        bounded_json(response).await
+        match &self.transport {
+            SearchClientTransport::Http {
+                origin,
+                authorization,
+                http,
+            } => {
+                let response = http
+                    .post(Self::endpoint(origin, "/internal/v1/actors/query"))
+                    .header(header::AUTHORIZATION, authorization.clone())
+                    .json(query)
+                    .send()
+                    .await?;
+                bounded_json(response).await
+            }
+            SearchClientTransport::Local(backend) => backend.query(query).await,
+        }
     }
 }
 

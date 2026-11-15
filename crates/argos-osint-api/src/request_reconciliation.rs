@@ -9,14 +9,15 @@ use fleetworks_contracts::context::WorkstationRequestDetailQuery;
 
 use crate::request_context::ContextFailure;
 use crate::request_context::ResolvedRequest;
+use crate::ApiError;
 use crate::ApiResult;
 use crate::ApiState;
 
-pub(crate) async fn read(
-    State(state): State<ApiState>,
-    Extension(request): Extension<ResolvedRequest>,
-    Query(query): Query<WorkstationRequestDetailQuery>,
-) -> ApiResult {
+pub(crate) async fn read_value(
+    state: &ApiState,
+    request: &ResolvedRequest,
+    query: &WorkstationRequestDetailQuery,
+) -> Result<serde_json::Value, ApiError> {
     if !request.permits(Permission::ReadWorkstationActivity) {
         return Err(ContextFailure::forbidden().into());
     }
@@ -54,7 +55,13 @@ pub(crate) async fn read(
     .map_err(crate::internal)?
     .ok_or_else(crate::missing)?;
     request.revalidate(&state.repo).await?;
-    Ok(Json(
-        serde_json::to_value(receipt).map_err(crate::internal)?,
-    ))
+    serde_json::to_value(receipt).map_err(crate::internal)
+}
+
+pub(crate) async fn read(
+    State(state): State<ApiState>,
+    Extension(request): Extension<ResolvedRequest>,
+    Query(query): Query<WorkstationRequestDetailQuery>,
+) -> ApiResult {
+    Ok(Json(read_value(&state, &request, &query).await?))
 }

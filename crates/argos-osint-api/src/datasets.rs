@@ -45,7 +45,7 @@ use crate::request_context::ResolvedRequest;
 use crate::ApiState;
 use crate::AuthenticatedPrincipal;
 
-fn upload_binding(context: &ResolvedRequest) -> Option<UploadTicketBinding> {
+pub(crate) fn upload_binding(context: &ResolvedRequest) -> Option<UploadTicketBinding> {
     if !matches!(
         context.purpose(),
         CredentialPurpose::Native | CredentialPurpose::Operator
@@ -64,10 +64,10 @@ fn upload_binding(context: &ResolvedRequest) -> Option<UploadTicketBinding> {
 }
 
 #[derive(Default)]
-struct StageExpectation<'a> {
-    size: Option<u64>,
-    context: Option<&'a ResolvedRequest>,
-    permit: Option<OwnedSemaphorePermit>,
+pub(crate) struct StageExpectation<'a> {
+    pub(crate) size: Option<u64>,
+    pub(crate) context: Option<&'a ResolvedRequest>,
+    pub(crate) permit: Option<OwnedSemaphorePermit>,
 }
 
 struct CancelValidation(Arc<AtomicBool>);
@@ -81,7 +81,7 @@ impl Drop for CancelValidation {
 #[derive(Clone)]
 pub struct DatasetStore {
     root: Arc<PathBuf>,
-    uploads: Arc<Semaphore>,
+    pub(crate) uploads: Arc<Semaphore>,
     #[cfg(unix)]
     identity: (u64, u64),
 }
@@ -132,7 +132,7 @@ impl DatasetStore {
         })
     }
 
-    async fn verify_root(&self) -> anyhow::Result<()> {
+    pub(crate) async fn verify_root(&self) -> anyhow::Result<()> {
         let metadata = tokio::fs::symlink_metadata(self.root.as_ref()).await?;
         anyhow::ensure!(
             metadata.is_dir() && !metadata.file_type().is_symlink(),
@@ -149,7 +149,7 @@ impl DatasetStore {
         Ok(())
     }
 
-    fn path(&self, id: &str, suffix: &str) -> anyhow::Result<PathBuf> {
+    pub(crate) fn path(&self, id: &str, suffix: &str) -> anyhow::Result<PathBuf> {
         anyhow::ensure!(
             (1..=128).contains(&id.len())
                 && id
@@ -236,7 +236,7 @@ impl DatasetStore {
         .await
     }
 
-    async fn stage_checked<S, E>(
+    pub(crate) async fn stage_checked<S, E>(
         &self,
         repo: &Repository,
         authority: &RegistryAuthority,
@@ -437,6 +437,33 @@ pub(crate) struct UploadQuery {
     sha256: String,
 }
 
+pub(crate) async fn list_value(
+    state: &ApiState,
+    principal: &AuthenticatedPrincipal,
+) -> Result<serde_json::Value, (StatusCode, &'static str)> {
+    if !principal.permits(Permission::ReadBackend) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Dataset metadata permission required",
+        ));
+    }
+    let authority = RegistryAuthority::new(
+        principal.scope_id(),
+        principal.credential_id(),
+        principal.access_epoch(),
+    )
+    .map_err(|_| (StatusCode::FORBIDDEN, "Dataset authority unavailable"))?;
+    match setup_jobs::list_datasets(&state.repo, &authority).await {
+        Ok((rows, truncated)) => Ok(
+            json!({"rows":rows,"truncated":truncated,"limits":{"actor_catalog":setup_jobs::ACTOR_DATASET_LIMIT,"classifier_training":setup_jobs::TRAINING_DATASET_LIMIT}}),
+        ),
+        Err(_) => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Dataset metadata unavailable",
+        )),
+    }
+}
+
 pub(crate) async fn list(
     State(state): State<ApiState>,
     principal: Option<Extension<AuthenticatedPrincipal>>,
@@ -447,34 +474,9 @@ pub(crate) async fn list(
             json!({"error":"Purpose-scoped credential required"}),
         );
     };
-    if !principal.permits(Permission::ReadBackend) {
-        return response(
-            StatusCode::FORBIDDEN,
-            json!({"error":"Dataset metadata permission required"}),
-        );
-    }
-    let authority = match RegistryAuthority::new(
-        principal.scope_id(),
-        principal.credential_id(),
-        principal.access_epoch(),
-    ) {
-        Ok(value) => value,
-        Err(_) => {
-            return response(
-                StatusCode::FORBIDDEN,
-                json!({"error":"Dataset authority unavailable"}),
-            )
-        }
-    };
-    match setup_jobs::list_datasets(&state.repo, &authority).await {
-        Ok((rows, truncated)) => response(
-            StatusCode::OK,
-            json!({"rows":rows,"truncated":truncated,"limits":{"actor_catalog":setup_jobs::ACTOR_DATASET_LIMIT,"classifier_training":setup_jobs::TRAINING_DATASET_LIMIT}}),
-        ),
-        Err(_) => response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            json!({"error":"Dataset metadata unavailable"}),
-        ),
+    match list_value(&state, &principal).await {
+        Ok(value) => response(StatusCode::OK, value),
+        Err((status, message)) => response(status, json!({"error":message})),
     }
 }
 
@@ -569,6 +571,44 @@ pub(crate) async fn upload(
     }
 }
 
+pub(crate) async fn create_upload_ticket(
+    state: &ApiState,
+    context: &ResolvedRequest,
+    store: Option<&DatasetStore>,
+    input: &DatasetUploadRequest,
+) -> Result<fleetworks_contracts::dataset_upload::DatasetUploadTicket, (StatusCode, &'static str)> {
+    if input.validate().is_err() {
+        return Err((StatusCode::BAD_REQUEST, "Invalid dataset upload metadata"));
+    }
+    let Some(binding) = upload_binding(context) else {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Registered native maintenance authority required",
+        ));
+    };
+    if context.revalidate(&state.repo).await.is_err() {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Current upload authority unavailable",
+        ));
+    }
+    let Some(store) = store else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Dataset staging unavailable",
+        ));
+    };
+    if store.verify_root().await.is_err() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Dataset staging unavailable",
+        ));
+    }
+    upload_ticket::issue(&state.repo, &binding, input)
+        .await
+        .map_err(|error| ticket_failure_status_message(error, StatusCode::SERVICE_UNAVAILABLE))
+}
+
 /// Issue an authenticated, short-lived destination for exact selected bytes.
 pub(crate) async fn create_upload(
     State(state): State<ApiState>,
@@ -576,39 +616,16 @@ pub(crate) async fn create_upload(
     store: Option<Extension<DatasetStore>>,
     Json(input): Json<DatasetUploadRequest>,
 ) -> Response {
-    if input.validate().is_err() {
-        return response(
-            StatusCode::BAD_REQUEST,
-            json!({"error":"Invalid dataset upload metadata"}),
-        );
-    }
-    let Some(binding) = upload_binding(&context) else {
-        return response(
-            StatusCode::FORBIDDEN,
-            json!({"error":"Registered native maintenance authority required"}),
-        );
-    };
-    if context.revalidate(&state.repo).await.is_err() {
-        return response(
-            StatusCode::UNAUTHORIZED,
-            json!({"error":"Current upload authority unavailable"}),
-        );
-    }
-    let Some(Extension(store)) = store else {
-        return response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            json!({"error":"Dataset staging unavailable"}),
-        );
-    };
-    if store.verify_root().await.is_err() {
-        return response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            json!({"error":"Dataset staging unavailable"}),
-        );
-    }
-    match upload_ticket::issue(&state.repo, &binding, &input).await {
+    match create_upload_ticket(
+        &state,
+        &context,
+        store.as_ref().map(|Extension(store)| store),
+        &input,
+    )
+    .await
+    {
         Ok(ticket) => response(StatusCode::CREATED, json!(ticket)),
-        Err(error) => ticket_failure(error, StatusCode::SERVICE_UNAVAILABLE),
+        Err((status, message)) => response(status, json!({"error":message})),
     }
 }
 
@@ -726,10 +743,10 @@ pub(crate) async fn put_upload(
     }
 }
 
-fn ticket_failure(
+pub(crate) fn ticket_failure_status_message(
     error: argos_osint_core::storage::tx::TxError,
     unavailable: StatusCode,
-) -> Response {
+) -> (StatusCode, &'static str) {
     let status = match &error {
         argos_osint_core::storage::tx::TxError::Abort(code) if code == "upload_ticket:capacity" => {
             StatusCode::TOO_MANY_REQUESTS
@@ -755,6 +772,14 @@ fn ticket_failure(
         StatusCode::GONE => "Upload URL expired or used; request a new destination",
         _ => "Upload destination authority is unavailable",
     };
+    (status, message)
+}
+
+fn ticket_failure(
+    error: argos_osint_core::storage::tx::TxError,
+    unavailable: StatusCode,
+) -> Response {
+    let (status, message) = ticket_failure_status_message(error, unavailable);
     response(status, json!({"error":message}))
 }
 

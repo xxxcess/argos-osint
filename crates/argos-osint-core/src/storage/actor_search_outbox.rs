@@ -531,6 +531,42 @@ pub async fn renew(repo: &Repository, lease: &Lease, now: DateTime<Utc>) -> Resu
     Ok(())
 }
 
+/// Gracefully release this owner's coordinator lease on clean shutdown while
+/// advancing the fencing epoch so stale in-flight ticks cannot commit later.
+pub async fn release_lease(repo: &Repository, owner: &str) -> Result<bool, TxError> {
+    if !valid(owner) {
+        return Err(invalid("actor_index_owner_invalid"));
+    }
+    let owner = owner.to_owned();
+    Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| {
+        let owner = owner.clone();
+        async move {
+            guard(&tx).await?;
+            let control = control_in(&tx).await?;
+            if control.lease_owner != owner {
+                return Ok(false);
+            }
+            let epoch = control
+                .lease_epoch
+                .checked_add(1)
+                .ok_or_else(|| invalid("actor_index_epoch_exhausted"))?;
+            jobs::run(
+                &tx,
+                tx.query(
+                    "UPDATE actor_search_control:catalog
+                     SET lease_owner='', lease_epoch=$epoch, lease_until=<datetime>'1970-01-01T00:00:00Z'
+                     RETURN NONE",
+                )
+                .bind(("epoch", epoch)),
+            )
+            .await?;
+            Ok(true)
+        }
+    })
+    .await?
+    .value)
+}
+
 async fn backfill_in(tx: &Tx, control: &Control, now: DateTime<Utc>) -> Result<(), TxError> {
     if control.backfill_complete
         || (control.next_sequence - control.acknowledged_sequence) as u64

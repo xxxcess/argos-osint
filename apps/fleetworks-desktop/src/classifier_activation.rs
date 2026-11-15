@@ -173,6 +173,21 @@ impl State {
     }
 
     pub fn activation_disabled_reason(&self) -> Option<String> {
+        if self.is_local_backend()
+            && self
+                .connection
+                .capabilities
+                .as_ref()
+                .is_some_and(|capabilities| {
+                    !crate::local_backend::assess_local_capabilities(capabilities)
+                        .classifier_available
+                })
+        {
+            return Some(
+                "Local companion backend was built without the optional classifier capability."
+                    .into(),
+            );
+        }
         let context = match self.activation_read_context() {
             Ok(context) => context,
             Err(reason) => return Some(reason),

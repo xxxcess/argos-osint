@@ -857,7 +857,6 @@ async fn accepted_actor_reindex_recovers_job_id_across_restart_without_duplicate
     use fleetworks_contracts::context::JobOrigin;
     use fleetworks_contracts::context::OriginSource;
     use fleetworks_contracts::readiness::MaintenanceReceipt;
-    use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
     use tokio::io::AsyncReadExt;
@@ -892,7 +891,7 @@ async fn accepted_actor_reindex_recovers_job_id_across_restart_without_duplicate
         .await
         .expect("bind loopback reindex server");
     let origin = format!("http://{}", listener.local_addr().unwrap());
-    let post_count = Arc::new(AtomicUsize::new(0));
+    let post_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let server_posts = Arc::clone(&post_count);
     let expected_context = context.clone();
     let server = tokio::spawn(async move {
@@ -1022,6 +1021,200 @@ async fn accepted_actor_reindex_recovers_job_id_across_restart_without_duplicate
         &normal_state.maintenance.receipt,
         Load::Ready(r) if r.job_id == "job-accepted-restart-1"
     ));
+}
+
+#[tokio::test]
+async fn non_fixture_receipt_persists_accepted_job_and_restores_after_restart_without_second_post()
+{
+    use fleetworks_contracts::context::JobOrigin;
+    use fleetworks_contracts::context::OriginSource;
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+
+    let temporary = tempfile::tempdir().expect("temporary home");
+    let home_path = temporary.path().canonicalize().expect("physical home");
+    let container = Arc::new(
+        fleetworks_workstation::native::NativeContainer::open_settings(&home_path)
+            .expect("settings container"),
+    );
+    let receipt = RegistrationReceipt::new(
+        "synthetic-deployment".into(),
+        "synthetic-workstation".into(),
+        "synthetic-registration".into(),
+        None,
+        1,
+    );
+    let context =
+        RegisteredContext::new(receipt, 1, 1, "configuration-a".into(), "access-a".into())
+            .expect("context");
+    let confirmation = MaintenanceConfirmation {
+        operation: MaintenanceOperation::ReindexActors,
+        context: context.clone(),
+        origin_revision: 1,
+        configuration_revision: 3,
+        dataset: None,
+    };
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback reindex server");
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let post_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let server_posts = Arc::clone(&post_count);
+    let expected_context = context.clone();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept reindex POST");
+        let mut buf = Vec::new();
+        let header_end = loop {
+            let mut chunk = [0_u8; 1024];
+            let read = socket.read(&mut chunk).await.expect("read POST");
+            assert!(read > 0);
+            buf.extend_from_slice(&chunk[..read]);
+            if let Some(pos) = buf.windows(4).position(|window| window == b"\r\n\r\n") {
+                break pos + 4;
+            }
+        };
+        let head = String::from_utf8_lossy(&buf[..header_end]).into_owned();
+        let content_len = head
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())?
+            })
+            .expect("content-length");
+        while buf.len() < header_end + content_len {
+            let mut chunk = [0_u8; 1024];
+            let read = socket.read(&mut chunk).await.expect("read POST body");
+            assert!(read > 0);
+            buf.extend_from_slice(&chunk[..read]);
+        }
+        let first_line = head.lines().next().unwrap_or_default().to_owned();
+        assert!(first_line.starts_with(&format!("POST {ACTOR_REINDEX_PATH} ")));
+        server_posts.fetch_add(1, Ordering::SeqCst);
+
+        let request: MaintenanceRequest =
+            serde_json::from_slice(&buf[header_end..header_end + content_len])
+                .expect("decode MaintenanceRequest");
+        let job_origin = JobOrigin::new(
+            &expected_context,
+            OriginSource::Native,
+            request.request_id.clone(),
+            "2026-11-15T01:00:00Z".into(),
+            3,
+            Vec::new(),
+        );
+        let receipt = MaintenanceReceipt::new(
+            "job-accepted-nonfixture-1".into(),
+            MaintenanceOperation::ReindexActors,
+            job_origin,
+            None,
+            false,
+        );
+        let body = serde_json::to_vec(&receipt).unwrap();
+        let reply = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        socket.write_all(reply.as_bytes()).await.unwrap();
+        socket.write_all(&body).await.unwrap();
+        request.request_id
+    });
+
+    let client = fleetworks_contracts::Client::new(&origin, Some("fixture-token"))
+        .expect("loopback client")
+        .with_registered_context(&context)
+        .expect("registered context");
+    let admitted = admit_maintenance_request(
+        &client,
+        Some(&container),
+        &origin,
+        &confirmation,
+        None,
+        None,
+    )
+    .await
+    .expect("HTTP admission succeeds");
+    let request_id = server.await.expect("server handled POST");
+    assert_eq!(post_count.load(Ordering::SeqCst), 1);
+
+    let effects = Arc::new(GatewayEffects::new(tokio::runtime::Handle::current()));
+    let mut non_fixture_state = State::with_services(effects);
+    assert!(!non_fixture_state.fixture);
+    non_fixture_state.connection.origin = rune::TextEdit::new(&origin);
+    non_fixture_state.connection.status = ConnectionStatus::Connected;
+    non_fixture_state.registration.context = Some(context.clone());
+    non_fixture_state.workspaces.container = Some(Arc::clone(&container));
+    non_fixture_state.apply_maintenance_outcome(
+        MaintenanceOperation::ReindexActors,
+        admitted,
+        &origin,
+    );
+    assert!(non_fixture_state.maintenance.pending_reindex.is_none());
+    assert!(matches!(
+        &non_fixture_state.maintenance.receipt,
+        Load::Ready(r) if r.job_id == "job-accepted-nonfixture-1"
+    ));
+
+    // Wait for non-fixture persistence task to promote pending guard into accepted association.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let pending = container
+            .pending_actor_reindex(&origin)
+            .expect("read pending");
+        let accepted = container
+            .accepted_actor_reindex(&origin)
+            .expect("read accepted");
+        if pending.is_none() && accepted.is_some() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for non-fixture accepted-job persistence"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    drop(non_fixture_state);
+    drop(container);
+
+    // Restart with a fresh non-fixture state and reopened workstation container.
+    let reopened = Arc::new(
+        fleetworks_workstation::native::NativeContainer::open_settings(&home_path)
+            .expect("reopen container after non-fixture receipt"),
+    );
+    let pending_after_restart = reopened
+        .pending_actor_reindex(&origin)
+        .expect("read pending after restart");
+    assert!(pending_after_restart.is_none());
+    let accepted_after_restart = reopened
+        .accepted_actor_reindex(&origin)
+        .expect("read accepted after restart");
+    assert_eq!(
+        accepted_after_restart
+            .as_ref()
+            .map(|entry| entry.association.job_id.as_str()),
+        Some("job-accepted-nonfixture-1")
+    );
+
+    let effects_reopened = Arc::new(GatewayEffects::new(tokio::runtime::Handle::current()));
+    let mut reopened_state = State::with_services(effects_reopened);
+    assert!(!reopened_state.fixture);
+    reopened_state.connection.origin = rune::TextEdit::new(&origin);
+    reopened_state.connection.status = ConnectionStatus::Connected;
+    reopened_state.registration.context = Some(context);
+    reopened_state.workspaces.container = Some(reopened);
+    reopened_state
+        .apply_restored_actor_reindex_journal(pending_after_restart, accepted_after_restart);
+    let restored = reopened_state
+        .maintenance
+        .reindex_association
+        .as_ref()
+        .expect("restored accepted job association without another POST");
+    assert_eq!(restored.job_id, "job-accepted-nonfixture-1");
+    assert_eq!(restored.origin.request_id, request_id);
+    assert!(reopened_state.maintenance.pending_reindex.is_none());
+    assert_eq!(post_count.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -1262,6 +1455,12 @@ async fn exact_retry_auth_rejection_preserves_journal_for_read_only_reconciliati
         ),
     }
     assert!(container.pending_actor_reindex(&origin).unwrap().is_none());
+    let accepted = container
+        .accepted_actor_reindex(&origin)
+        .unwrap()
+        .expect("reconciliation must retain bounded accepted job association");
+    assert_eq!(accepted.association.job_id, "job-auth-retry-1");
+    assert_eq!(accepted.request.request_id, original_request.request_id);
     let server_request_id = server.await.expect("server completed scripted sequence");
     assert_eq!(server_request_id, original_request.request_id);
 }

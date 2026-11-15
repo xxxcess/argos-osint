@@ -258,11 +258,17 @@ async fn captured_configuration_stays_locked_through_acceptance_then_save_fences
         .await
         .expect("actual ingress");
     assert_eq!(response.status(), StatusCode::OK);
+    let state = ApiState::new(
+        repo.clone(),
+        "admission-guard-fixture".into(),
+        8080,
+        Arc::new(Vec::new()),
+    );
     let context = receive.await.expect("server-resolved request authority");
     let mutation = MutationContext::new(context.registered().expect("current registration"))
         .with_configuration_revision(initial_revision);
     let admission = capture_checked(
-        &repo,
+        &state,
         &context,
         "guard-fresh-nonce",
         manual::TOOLS_OPERATION,
@@ -303,15 +309,9 @@ async fn captured_configuration_stays_locked_through_acceptance_then_save_fences
     drop(retained);
 
     // Start the real normal writer only after all capture guards are released.
-    let state = ApiState {
-        repo: repo.clone(),
-        instance_id: "admission-guard-fixture".into(),
-        port: 8080,
-        origins: Arc::new(Vec::new()),
-    };
     let request=serde_json::from_value::<configuration::SetRole>(json!({"expected_revision":initial_revision,"role":"brain_summary","primary":null,"fallbacks":[]})).expect("normal typed configuration save");
     let Json(saved) = configuration::save_role(
-        State(state),
+        State(state.clone()),
         Some(Extension(context.clone())),
         Json(request),
     )
@@ -335,7 +335,7 @@ async fn captured_configuration_stays_locked_through_acceptance_then_save_fences
     assert_eq!(reopened, saved_revision);
 
     let stale = capture_checked(
-        &repo,
+        &state,
         &context,
         "guard-stale-new-nonce",
         manual::TOOLS_OPERATION,
@@ -347,7 +347,7 @@ async fn captured_configuration_stays_locked_through_acceptance_then_save_fences
         "fresh nonce cannot use the pre-save confirmed revision"
     );
     let replay = capture_checked(
-        &repo,
+        &state,
         &context,
         "guard-fresh-nonce",
         manual::TOOLS_OPERATION,
@@ -392,12 +392,12 @@ async fn captured_configuration_stays_locked_through_acceptance_then_save_fences
 
     // Exercise the actual collection/delete handlers with the native typed body,
     // using this fixture's existing isolated configuration environment.
-    let cycle_state = ApiState {
-        repo: repo.clone(),
-        instance_id: "cycle-config-fixture".into(),
-        port: 8080,
-        origins: Arc::new(Vec::new()),
-    };
+    let cycle_state = ApiState::new(
+        repo.clone(),
+        "cycle-config-fixture".into(),
+        8080,
+        Arc::new(Vec::new()),
+    );
     job_dispatch::enable_pool(repo.db(), job_dispatch::ATLAS_POOL)
         .await
         .expect("cycle consumer");

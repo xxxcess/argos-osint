@@ -40,15 +40,12 @@ pub(crate) async fn retry(
     perform(state, context, input, Action::Retry).await
 }
 
-async fn perform(
-    state: ApiState,
-    context: Option<Extension<ResolvedRequest>>,
+pub(crate) async fn perform_request(
+    state: &ApiState,
+    context: &ResolvedRequest,
     input: ActionRequest,
     action: Action,
-) -> ApiResult {
-    let Some(Extension(context)) = context else {
-        return Err(ContextFailure::registration_required().into());
-    };
+) -> Result<serde_json::Value, ApiError> {
     let permission = match action {
         Action::Cancel => Permission::CancelJob,
         Action::Retry => Permission::RetryJob,
@@ -67,19 +64,33 @@ async fn perform(
     {
         return Err(crate::bad());
     }
-    let scope = crate::activity::scope_for_request(&state.repo, &context, None).await?;
-    let job = crate::activity::authorized_job(&state.repo, &context, &scope, &input.id).await?;
+    let scope = crate::activity::scope_for_request(&state.repo, context, None).await?;
+    let job = crate::activity::authorized_job(&state.repo, context, &scope, &input.id).await?;
     if !job.private_details_available {
         return Err(ContextFailure::forbidden().into());
     }
-    let admission = crate::admission::capture(&context, &input.request_id).await?;
+    let admission = crate::admission::capture(state, context, &input.request_id).await?;
     // This is not a check followed by an unscoped operator call: proof,
     // ownership/privacy, job state, mutation and action receipt share one TX.
     let receipt = job_actions::perform(&state.repo, &admission, action, &input.id)
         .await
         .map_err(action_error)?;
-    Ok(Json(
+    Ok(
         json!({"done":action==Action::Cancel,"requeued":if action==Action::Retry {receipt.affected_tasks}else{0},"receipt":receipt}),
+    )
+}
+
+async fn perform(
+    state: ApiState,
+    context: Option<Extension<ResolvedRequest>>,
+    input: ActionRequest,
+    action: Action,
+) -> ApiResult {
+    let Some(Extension(context)) = context else {
+        return Err(ContextFailure::registration_required().into());
+    };
+    Ok(Json(
+        perform_request(&state, &context, input, action).await?,
     ))
 }
 

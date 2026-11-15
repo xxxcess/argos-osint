@@ -20,6 +20,7 @@ httpdate = "1"
 libc = "0.2"
 fleetworks-jobs = { path = "../../crates/fleetworks-jobs" }
 fleetworks-contracts = { path = "../../crates/fleetworks-contracts" }
+fleetworks-search-index = { path = "../search-index" }
 reqwest.workspace = true
 tracing.workspace = true
 argos-osint-core = { path = "../../crates/argos-osint-core", default-features = false }

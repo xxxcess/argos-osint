@@ -225,45 +225,73 @@ fn section_content(state: &State, preferences: ViewPreferences, kit: &Kit) -> El
                 )),
             kit,
         )),
-        SettingsSection::Gateway => rune::col().w_full().gap(22.0).child(setting_group(
-            "Connection",
-            rune::col()
-                .child(setting_row(
-                    "Gateway URL",
-                    state.connection.origin.text.clone(),
-                    Some(ui_components::status_pill(
-                        if state.connected() {
-                            "Connected"
-                        } else {
-                            "Disconnected"
-                        },
-                        None,
-                        if state.connected() {
-                            StatusTone::Ok
-                        } else {
-                            StatusTone::Warn
-                        },
-                        kit,
-                    )),
+        SettingsSection::Gateway => {
+            let mut rows = rune::col().child(setting_row(
+                if state.is_local_backend() {
+                    "Local Embedded Backend"
+                } else {
+                    "Gateway URL"
+                },
+                if state.is_local_backend() {
+                    format!(
+                        "{} ({})",
+                        state.connection.origin.text,
+                        state.local_state_dir_label()
+                    )
+                } else {
+                    state.connection.origin.text.clone()
+                },
+                Some(ui_components::status_pill(
+                    if state.connected() {
+                        "Connected"
+                    } else {
+                        "Disconnected"
+                    },
+                    None,
+                    if state.connected() {
+                        StatusTone::Ok
+                    } else {
+                        StatusTone::Warn
+                    },
                     kit,
-                ))
-                .child(setting_row(
-                    "Pairing and access",
-                    "Review the current origin or pair with a gateway.",
+                )),
+                kit,
+            ));
+            if state.local_backend.active() {
+                rows = rows.child(setting_row(
+                    "Local companion process",
+                    "Gracefully shut down the embedded companion backend.",
                     Some(
-                        ActionButton::new("Setup Gateway")
-                            .key("settings-gateway-open")
+                        ActionButton::new("Stop Local Backend")
+                            .key("settings-stop-local-backend")
                             .finish(MetalFinish::Gunmetal)
-                            .on_press(|state: &mut State| {
-                                state.settings_open = false;
-                                state.setup_gateway = true;
-                            })
+                            .disabled(state.local_backend.stopping)
+                            .on_press(|state: &mut State| state.stop_local_backend())
                             .build(kit, preferences, pointer),
                     ),
                     kit,
-                )),
-            kit,
-        )),
+                ));
+            }
+            rows = rows.child(setting_row(
+                "Pairing and access",
+                "Switch between Remote Gateway and Local Embedded, or inspect connection status.",
+                Some(
+                    ActionButton::new("Setup Gateway")
+                        .key("settings-gateway-open")
+                        .finish(MetalFinish::Gunmetal)
+                        .on_press(|state: &mut State| {
+                            state.settings_open = false;
+                            state.setup_gateway = true;
+                        })
+                        .build(kit, preferences, pointer),
+                ),
+                kit,
+            ));
+            rune::col()
+                .w_full()
+                .gap(22.0)
+                .child(setting_group("Connection", rows, kit))
+        }
         SettingsSection::Models => rune::col().w_full().gap(22.0).child(setting_group(
             "Routing",
             rune::col().child(setting_row(

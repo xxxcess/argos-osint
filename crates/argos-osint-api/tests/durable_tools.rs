@@ -123,12 +123,12 @@ fn app(repo: &Repository) -> Router {
         NetworkPolicy::with_credentials(&["127.0.0.1:8080".into()], vec![native, web, read_only])
             .expect("fixture gateway policy");
     network_router(
-        ApiState {
-            repo: repo.clone(),
-            instance_id: "fixture-tools".into(),
-            port: 8080,
-            origins: Arc::new(Vec::new()),
-        },
+        ApiState::new(
+            repo.clone(),
+            "fixture-tools".into(),
+            8080,
+            Arc::new(Vec::new()),
+        ),
         policy,
     )
 }

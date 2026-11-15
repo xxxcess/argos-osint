@@ -226,12 +226,12 @@ async fn scenario() {
     )
     .expect("read credential");
     let app = network_router(
-        ApiState {
-            repo: repo.clone(),
-            instance_id: "action-fixture".into(),
-            port: 8080,
-            origins: Arc::new(Vec::new()),
-        },
+        ApiState::new(
+            repo.clone(),
+            "action-fixture".into(),
+            8080,
+            Arc::new(Vec::new()),
+        ),
         NetworkPolicy::with_credentials(&["127.0.0.1:8080".into()], vec![actor, reader])
             .expect("scoped policy"),
     );

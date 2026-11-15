@@ -4,10 +4,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use fleetworks_contracts::ipc::IpcEvent;
+use fleetworks_contracts::ipc::ShutdownAck;
 use fleetworks_contracts::readiness::ReadinessState;
 use fleetworks_contracts::readiness::WorkstationReadiness;
 use fleetworks_contracts::search::ActorSearchQuery;
 use fleetworks_contracts::Client;
+use fleetworks_workstation::native::canonical_local_origin;
+use fleetworks_workstation::native::BackendKind;
+use fleetworks_workstation::native::DEFAULT_LOCAL_ORIGIN;
+use fleetworks_workstation::native::LOCAL_BACKEND_DIR;
 use rune::AppSpec;
 use rune::Cx;
 use rune::El;
@@ -50,6 +56,9 @@ use crate::icons;
 use crate::job_actions::JobAction;
 use crate::job_actions::JobActions;
 use crate::jobs_query::JobsQueryState;
+use crate::local_backend::LocalBackendProcess;
+use crate::local_backend::LocalBackendState;
+use crate::local_backend::LocalJobProgress;
 use crate::logs::ActivityTab;
 use crate::logs::LogAction;
 use crate::logs::LogState;
@@ -221,6 +230,8 @@ pub enum Load<T> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Intent {
     Connect,
+    SwitchBackendKind(BackendKind),
+    StopLocalBackend,
     PairingConnect,
     PairingRestart,
     PairingSessionOnly,
@@ -264,6 +275,8 @@ pub struct State {
     pub accessibility: Accessibility,
     pub page: Page,
     pub setup_gateway: bool,
+    pub backend_kind: BackendKind,
+    pub local_backend: LocalBackendState,
     pub(crate) settings_open: bool,
     pub(crate) settings_section: crate::workstation_settings::SettingsSection,
     pub tool_key_dialog: bool,
@@ -315,6 +328,7 @@ pub struct State {
     pub(crate) services: Option<Arc<GatewayEffects>>,
     pub(crate) client: Option<Client>,
     connection_request: Option<RequestTask>,
+    local_shutdown_request: Option<RequestTask>,
     readiness_request: Option<RequestTask>,
     pub(crate) search_request: Option<RequestTask>,
     pub(crate) dossier_request: Option<RequestTask>,
@@ -332,6 +346,8 @@ impl Default for State {
             accessibility: Accessibility::default(),
             page: Page::Workstation,
             setup_gateway: false,
+            backend_kind: BackendKind::Remote,
+            local_backend: LocalBackendState::default(),
             settings_open: false,
             settings_section: Default::default(),
             tool_key_dialog: false,
@@ -382,6 +398,7 @@ impl Default for State {
             services: None,
             client: None,
             connection_request: None,
+            local_shutdown_request: None,
             readiness_request: None,
             search_request: None,
             dossier_request: None,
@@ -491,15 +508,112 @@ impl State {
     pub(crate) fn close_window_cleanup(&mut self) {
         self.cancel_requests();
         self.clear_session_secrets();
+        // Window close preserves any active local companion backend and running jobs.
     }
 
     pub(crate) fn quit_cleanup(&mut self) {
+        self.shutdown_local_backend("application_quit", true);
         self.cancel_requests();
         self.clear_session_secrets();
     }
 
+    /// Whether the workstation is configured for or attached to the local embedded backend.
+    #[must_use]
+    pub fn is_local_backend(&self) -> bool {
+        self.backend_kind == BackendKind::Local
+    }
+
+    /// Expected or provisioned private `0o700` state directory label for local display.
+    #[must_use]
+    pub fn local_state_dir_label(&self) -> String {
+        if let Some(dir) = &self.local_backend.state_dir {
+            return dir.display().to_string();
+        }
+        if let Some(container) = &self.workspaces.container {
+            let slug = self.local_profile_slug();
+            return container
+                .root()
+                .join(LOCAL_BACKEND_DIR)
+                .join(slug)
+                .display()
+                .to_string();
+        }
+        format!(
+            "<workstation>/{LOCAL_BACKEND_DIR}/{}",
+            self.local_profile_slug()
+        )
+    }
+
+    fn local_profile_slug(&self) -> String {
+        canonical_local_origin(&self.connection.origin.text)
+            .ok()
+            .and_then(|origin| origin.strip_prefix("local://").map(str::to_owned))
+            .unwrap_or_else(|| "embedded".to_owned())
+    }
+
+    /// Switch destination mode between Remote Gateway and Local Embedded without leaking tokens or URLs.
+    pub fn set_backend_kind(&mut self, kind: BackendKind) {
+        if self.backend_kind == kind {
+            return;
+        }
+        self.disconnect();
+        self.backend_kind = kind;
+        self.record(Intent::SwitchBackendKind(kind));
+        match kind {
+            BackendKind::Local => {
+                if canonical_local_origin(&self.connection.origin.text).is_err() {
+                    self.connection.origin = rune::TextEdit::new(DEFAULT_LOCAL_ORIGIN);
+                }
+                self.connection.token_file = rune::TextEdit::new("");
+                self.connection_profiles.credential = None;
+                self.connection_profiles.operator_token_override = false;
+                self.local_backend.refresh_binary_status();
+                if self.local_backend.state_dir.is_none() {
+                    if let Some(container) = &self.workspaces.container {
+                        self.local_backend.state_dir = Some(
+                            container
+                                .root()
+                                .join(LOCAL_BACKEND_DIR)
+                                .join(self.local_profile_slug()),
+                        );
+                    }
+                }
+            }
+            BackendKind::Remote => {
+                if canonical_local_origin(&self.connection.origin.text).is_ok() {
+                    self.connection.origin =
+                        rune::TextEdit::new(fleetworks_contracts::DEFAULT_API_ORIGIN);
+                }
+                self.local_backend.clear_runtime_notices();
+            }
+            _ => {}
+        }
+    }
+
+    /// Explicitly stop the running local embedded companion backend cleanly.
+    pub fn stop_local_backend(&mut self) {
+        self.record(Intent::StopLocalBackend);
+        self.disconnect();
+    }
+
+    pub(crate) fn shutdown_local_backend(&mut self, reason: &str, wait_for_quit: bool) {
+        self.local_backend.event_task = None;
+        let Some(process) = self.local_backend.session.take() else {
+            return;
+        };
+        self.client = None;
+        self.local_backend.stopping = true;
+        self.local_backend.shutdown_message =
+            Some(format!("Stopping local companion backend ({reason})…"));
+        if let Some(services) = &self.services {
+            self.local_shutdown_request =
+                services.shutdown_local_backend(process, reason.to_owned(), wait_for_quit);
+        }
+    }
+
     /// Isolate data immediately on destination/auth changes and reject old callbacks.
     pub fn disconnect(&mut self) {
+        self.shutdown_local_backend("disconnect", false);
         self.clear_session_secrets();
         self.reset_connection_state();
     }
@@ -542,6 +656,10 @@ impl State {
     }
 
     pub fn connect(&mut self) {
+        if self.backend_kind == BackendKind::Local {
+            self.connect_local();
+            return;
+        }
         if self.uses_native_pairing() {
             self.connect_pairing(false);
             return;
@@ -554,6 +672,31 @@ impl State {
             self.connection_request = services.connect(
                 self.connection.origin.text.clone(),
                 self.editor_credential(),
+                self.connection.epoch,
+            );
+        }
+    }
+
+    /// Start or attach to the supervised local embedded companion backend over framed stdio IPC.
+    pub fn connect_local(&mut self) {
+        self.backend_kind = BackendKind::Local;
+        self.connection_profiles.initial_selection_applied = true;
+        self.disconnect();
+        self.local_backend.clear_runtime_notices();
+        if canonical_local_origin(&self.connection.origin.text).is_err() {
+            self.connection.origin = rune::TextEdit::new(DEFAULT_LOCAL_ORIGIN);
+        }
+        self.local_backend.refresh_binary_status();
+        self.connection.status = ConnectionStatus::Connecting;
+        self.record(Intent::Connect);
+        if let Some(services) = &self.services {
+            let slug = self.local_profile_slug();
+            let explicit_dir = self.local_backend.state_dir.clone();
+            self.connection_request = services.connect_local(
+                self.local_backend.cli_binary_override.clone(),
+                self.workspaces.container.clone(),
+                explicit_dir,
+                slug,
                 self.connection.epoch,
             );
         }
@@ -572,6 +715,16 @@ impl State {
                 self.connection.ready = Some(connected.ready);
                 self.connection.capabilities = Some(connected.capabilities);
                 self.connection.status = ConnectionStatus::Connected;
+                if let Some(process) = connected.local_backend {
+                    self.local_backend.state_dir = Some(process.state_dir().to_path_buf());
+                    self.local_backend.session = Some(Arc::clone(&process));
+                    self.local_backend.stopping = false;
+                    self.local_backend.clear_runtime_notices();
+                    if let Some(services) = &self.services {
+                        self.local_backend.event_task =
+                            services.watch_local_backend_events(process, epoch);
+                    }
+                }
                 self.ensure_registration();
                 self.refresh_readiness();
                 if self.page == Page::Workstation {
@@ -580,6 +733,128 @@ impl State {
                 }
             }
             Err(error) => self.connection.status = ConnectionStatus::Failed(error),
+        }
+    }
+
+    pub(crate) fn apply_local_backend_event(
+        &mut self,
+        epoch: u64,
+        process: &Arc<LocalBackendProcess>,
+        event: IpcEvent,
+    ) {
+        if self.connection.epoch != epoch
+            || !self
+                .local_backend
+                .session
+                .as_ref()
+                .is_some_and(|active| Arc::ptr_eq(active, process))
+        {
+            return;
+        }
+        match event {
+            IpcEvent::JobProgress {
+                job_id,
+                phase,
+                summary,
+            } => {
+                self.local_backend.last_job_progress = Some(LocalJobProgress {
+                    job_id,
+                    phase,
+                    summary,
+                });
+            }
+            IpcEvent::WorkstationReadinessChanged if self.connected() => {
+                self.refresh_readiness();
+            }
+            IpcEvent::PressurePaused { reason_code } => {
+                self.local_backend.pressure_paused = Some(reason_code);
+            }
+            IpcEvent::ShutdownNotice {
+                checkpointed,
+                relinquished_leases,
+            } => {
+                self.local_backend.shutdown_message = Some(format!(
+                    "Local companion backend shutdown notice (checkpointed={checkpointed}, relinquished_leases={relinquished_leases})."
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn handle_local_backend_lag(
+        &mut self,
+        epoch: u64,
+        process: &Arc<LocalBackendProcess>,
+        skipped: u64,
+    ) {
+        if self.connection.epoch != epoch
+            || !self
+                .local_backend
+                .session
+                .as_ref()
+                .is_some_and(|active| Arc::ptr_eq(active, process))
+        {
+            return;
+        }
+        self.local_backend.shutdown_message = Some(format!(
+            "Local IPC event stream skipped {skipped} notifications; refreshing readiness."
+        ));
+        if self.connected() {
+            self.refresh_readiness();
+        }
+    }
+
+    pub(crate) fn handle_local_backend_closed(
+        &mut self,
+        epoch: u64,
+        _closed: bool,
+        stderr: String,
+    ) {
+        if self.connection.epoch != epoch {
+            return;
+        }
+        if !stderr.is_empty() {
+            self.local_backend.stderr_excerpt = Some(stderr.clone());
+        }
+        if !self.local_backend.stopping && self.local_backend.session.is_some() {
+            self.local_backend.session = None;
+            self.local_backend.event_task = None;
+            self.client = None;
+            let detail = if stderr.is_empty() {
+                "Local companion backend IPC pipe closed unexpectedly (HTTP fallback disabled)."
+                    .to_owned()
+            } else {
+                format!(
+                    "Local companion backend IPC pipe closed unexpectedly (HTTP fallback disabled): {stderr}"
+                )
+            };
+            self.local_backend.pipe_closed_error = Some(detail.clone());
+            self.connection.status = ConnectionStatus::Failed(detail);
+        }
+    }
+
+    pub(crate) fn complete_local_backend_shutdown(
+        &mut self,
+        outcome: Result<ShutdownAck, String>,
+        stderr: String,
+    ) {
+        self.local_backend.stopping = false;
+        self.local_shutdown_request = None;
+        if !stderr.is_empty() {
+            self.local_backend.stderr_excerpt = Some(stderr);
+        }
+        match outcome {
+            Ok(ack) => {
+                self.local_backend.shutdown_message = Some(format!(
+                    "Local companion backend stopped cleanly (checkpointed={}, relinquished_leases={}).",
+                    ack.checkpointed, ack.relinquished_leases
+                ));
+                self.local_backend.last_shutdown_ack = Some(ack);
+            }
+            Err(error) => {
+                self.local_backend.shutdown_message =
+                    Some(format!("Local companion backend shutdown notice: {error}"));
+            }
         }
     }
 

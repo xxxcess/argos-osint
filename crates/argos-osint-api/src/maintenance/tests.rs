@@ -190,12 +190,12 @@ async fn picked_datasets_preserve_fences_and_reindex_requires_completed_nonempty
         .expect("response");
     assert_eq!(response.status(), StatusCode::OK);
     let context = receive.await.expect("resolved context");
-    let state = ApiState {
-        repo: repo.clone(),
-        instance_id: "maintenance-fixture".into(),
-        port: 8080,
-        origins: Arc::new(Vec::new()),
-    };
+    let state = ApiState::new(
+        repo.clone(),
+        "maintenance-fixture".into(),
+        8080,
+        Arc::new(Vec::new()),
+    );
     let confirmed = MutationContext::new(context.registered().expect("registered context"))
         .with_configuration_revision(0);
     let actors = DatasetRef::new(

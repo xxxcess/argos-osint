@@ -15,16 +15,16 @@ use crate::ApiState;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct HistoryQuery {
-    limit: Option<usize>,
-    cursor: Option<String>,
+    pub(crate) limit: Option<usize>,
+    pub(crate) cursor: Option<String>,
 }
 
-pub(crate) async fn list(
-    State(state): State<ApiState>,
-    Extension(context): Extension<ResolvedRequest>,
-    Query(query): Query<HistoryQuery>,
-) -> Result<Json<CycleHistory>, ApiError> {
-    let scope = crate::activity::scope_for_request(&state.repo, &context, None).await?;
+pub(crate) async fn list_value(
+    state: &ApiState,
+    context: &ResolvedRequest,
+    query: HistoryQuery,
+) -> Result<CycleHistory, ApiError> {
+    let scope = crate::activity::scope_for_request(&state.repo, context, None).await?;
     let limit = query.limit.unwrap_or(50);
     if !(1..=100).contains(&limit)
         || query.cursor.as_ref().is_some_and(|cursor| {
@@ -47,17 +47,41 @@ pub(crate) async fn list(
     )
     .await
     .map_err(crate::internal)?;
-    finish_history(&state, &context, history).await
+    context.revalidate(&state.repo).await?;
+    Ok(history)
 }
 
-/// Fence a completed read before exposing its payload after possible revocation.
-async fn finish_history(
+pub(crate) async fn list(
+    State(state): State<ApiState>,
+    Extension(context): Extension<ResolvedRequest>,
+    Query(query): Query<HistoryQuery>,
+) -> Result<Json<CycleHistory>, ApiError> {
+    Ok(Json(list_value(&state, &context, query).await?))
+}
+
+pub(crate) async fn delete_request(
     state: &ApiState,
     context: &ResolvedRequest,
-    history: CycleHistory,
-) -> Result<Json<CycleHistory>, ApiError> {
-    context.revalidate(&state.repo).await?;
-    Ok(Json(history))
+    request: DeleteCycleRequest,
+) -> Result<DeleteCycleReceipt, ApiError> {
+    // Unlike collection, hiding a history entry requires workstation activity authority.
+    crate::activity::scope_for_request(&state.repo, context, None).await?;
+    let admission = crate::admission::capture_checked(
+        state,
+        context,
+        &request.request_id,
+        argos_osint_core::storage::cycle_history::DELETE_OPERATION,
+        Some(&request.context),
+    )
+    .await?;
+    argos_osint_core::storage::cycle_history::delete(&state.repo, &admission, &request)
+        .await
+        .map_err(|_| {
+            ApiError(
+                axum::http::StatusCode::CONFLICT,
+                "Cycle history changed or is unavailable; refresh before retrying",
+            )
+        })
 }
 
 pub(crate) async fn delete(
@@ -65,26 +89,7 @@ pub(crate) async fn delete(
     Extension(context): Extension<ResolvedRequest>,
     Json(request): Json<DeleteCycleRequest>,
 ) -> Result<Json<DeleteCycleReceipt>, ApiError> {
-    // Unlike collection, hiding a history entry requires workstation activity authority.
-    crate::activity::scope_for_request(&state.repo, &context, None).await?;
-    let admission = crate::admission::capture_checked(
-        &state.repo,
-        &context,
-        &request.request_id,
-        argos_osint_core::storage::cycle_history::DELETE_OPERATION,
-        Some(&request.context),
-    )
-    .await?;
-    let receipt =
-        argos_osint_core::storage::cycle_history::delete(&state.repo, &admission, &request)
-            .await
-            .map_err(|_| {
-                ApiError(
-                    axum::http::StatusCode::CONFLICT,
-                    "Cycle history changed or is unavailable; refresh before retrying",
-                )
-            })?;
-    Ok(Json(receipt))
+    Ok(Json(delete_request(&state, &context, request).await?))
 }
 
 #[cfg(test)]
@@ -170,12 +175,7 @@ mod tests {
             .expect("native credential")],
         )
         .expect("policy");
-        let state = ApiState {
-            repo,
-            instance_id: "fixture-instance".into(),
-            port: 8080,
-            origins: Arc::new(vec![]),
-        };
+        let state = ApiState::new(repo, "fixture-instance".into(), 8080, Arc::new(vec![]));
         async fn read_then_revoke(
             State(state): State<ApiState>,
             Extension(principal): Extension<AuthenticatedPrincipal>,
@@ -215,7 +215,8 @@ mod tests {
                 .map_err(crate::internal)?
                 .check()
                 .map_err(crate::internal)?;
-            super::finish_history(&state, &context, history).await
+            context.revalidate(&state.repo).await?;
+            Ok(Json(history))
         }
         let app = crate::guard_network(
             Router::new()

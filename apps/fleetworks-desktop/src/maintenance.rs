@@ -27,6 +27,7 @@ use fleetworks_contracts::search::ACTOR_REINDEX_PATH;
 use fleetworks_contracts::Client;
 use fleetworks_contracts::ClientError;
 use fleetworks_contracts::DatasetUpload;
+use fleetworks_workstation::native::AcceptedActorReindex;
 use fleetworks_workstation::native::NativeContainer;
 use fleetworks_workstation::native::PendingActorReindex;
 use rune::FileDialogOptions;
@@ -272,6 +273,22 @@ impl State {
     }
 
     pub fn maintenance_disabled_reason(&self, operation: MaintenanceOperation) -> Option<String> {
+        if operation == MaintenanceOperation::TrainClassifier
+            && self.is_local_backend()
+            && self
+                .connection
+                .capabilities
+                .as_ref()
+                .is_some_and(|capabilities| {
+                    !crate::local_backend::assess_local_capabilities(capabilities)
+                        .classifier_available
+                })
+        {
+            return Some(
+                "Local companion backend was built without the optional classifier capability."
+                    .into(),
+            );
+        }
         if !self.permission(Permission::MaintainBackend) {
             return Some("Backend maintenance permission required".into());
         }
@@ -523,6 +540,7 @@ impl State {
     pub(crate) fn restore_actor_reindex(&mut self) {
         if self.fixture
             || self.maintenance.pending_reindex.is_some()
+            || self.maintenance.reindex_association.is_some()
             || self.maintenance.reindex_journal_request.is_some()
         {
             return;
@@ -542,7 +560,12 @@ impl State {
         let origin_revision = self.origin_revision;
         let revision = self.maintenance.operation_revision;
         let task = services.runtime.spawn(async move {
-            let result = tokio::task::spawn_blocking(move || container.pending_actor_reindex(&origin)).await;
+            let result = tokio::task::spawn_blocking(move || {
+                let pending = container.pending_actor_reindex(&origin)?;
+                let accepted = container.accepted_actor_reindex(&origin)?;
+                Ok::<_, anyhow::Error>((pending, accepted))
+            })
+            .await;
             ui.update(move |state, _| {
                 if state.connection.epoch != epoch
                     || state.origin_revision != origin_revision
@@ -552,8 +575,9 @@ impl State {
                 }
                 state.maintenance.reindex_journal_request = None;
                 match result {
-                    Ok(Ok(Some(pending))) => state.recover_pending_actor_reindex(pending),
-                    Ok(Ok(None)) => {}
+                    Ok(Ok((pending, accepted))) => {
+                        state.apply_restored_actor_reindex_journal(pending, accepted);
+                    }
                     _ => {
                         state.maintenance.message = Some(
                             "Could not read protected actor index journal; resolve storage before building the index"
@@ -564,6 +588,31 @@ impl State {
             });
         });
         self.maintenance.reindex_journal_request = Some(RequestTask(task.abort_handle()));
+    }
+
+    pub(crate) fn apply_restored_actor_reindex_journal(
+        &mut self,
+        pending: Option<PendingActorReindex>,
+        accepted: Option<AcceptedActorReindex>,
+    ) {
+        if let Some(pending) = pending {
+            self.recover_pending_actor_reindex(pending);
+        } else if let Some(accepted) = accepted {
+            self.recover_accepted_actor_reindex(accepted);
+        }
+    }
+
+    pub(crate) fn recover_accepted_actor_reindex(&mut self, accepted: AcceptedActorReindex) {
+        if self.registration.context.as_ref() != Some(&accepted.context) {
+            return;
+        }
+        self.maintenance.pending_reindex = None;
+        self.maintenance.reindex_association = Some(accepted.association.clone());
+        self.maintenance.message = Some(format!(
+            "Recovered accepted job {} for actor index request {}",
+            accepted.association.job_id, accepted.request.request_id
+        ));
+        self.refresh_readiness();
     }
 
     pub(crate) fn recover_pending_actor_reindex(&mut self, pending: PendingActorReindex) {
@@ -581,13 +630,12 @@ impl State {
                 Vec::new(),
             );
             let origin = pending.origin;
+            let context = pending.context;
             let request = pending.request;
+            let association =
+                JobRequestAssociation::new(job_id.clone(), recovered_origin, String::new());
             self.maintenance.pending_reindex = None;
-            self.maintenance.reindex_association = Some(JobRequestAssociation::new(
-                job_id.clone(),
-                recovered_origin,
-                String::new(),
-            ));
+            self.maintenance.reindex_association = Some(association.clone());
             self.maintenance.message = Some(format!(
                 "Recovered accepted job {job_id} for actor index request {}",
                 request.request_id
@@ -599,7 +647,12 @@ impl State {
                 {
                     services.runtime.spawn(async move {
                         let _ = tokio::task::spawn_blocking(move || {
-                            container.complete_actor_reindex(&origin, &request)
+                            container.record_accepted_actor_reindex_association(
+                                &origin,
+                                &context,
+                                &request,
+                                &association,
+                            )
                         })
                         .await;
                     });
@@ -618,7 +671,9 @@ impl State {
         let Some(pending) = &self.maintenance.pending_reindex else {
             return false;
         };
-        let Ok(current_origin) = Client::canonical_origin(&self.connection.origin.text) else {
+        let Ok(current_origin) =
+            fleetworks_workstation::native::canonical_target_origin(&self.connection.origin.text)
+        else {
             return false;
         };
         pending.origin == current_origin
@@ -669,13 +724,24 @@ impl State {
                 if valid_reindex_association(&pending, association) {
                     if let Some(container) = container {
                         let origin = origin.clone();
+                        let context = pending.context.clone();
                         let request = pending.request.clone();
-                        let _ = tokio::task::spawn_blocking(move || {
-                            container.complete_actor_reindex(&origin, &request)
+                        let association = association.clone();
+                        tokio::task::spawn_blocking(move || {
+                            container.record_accepted_actor_reindex_association(
+                                &origin,
+                                &context,
+                                &request,
+                                &association,
+                            )
                         })
-                        .await;
+                        .await
+                        .ok()
+                        .and_then(|result| result.ok())
+                        .is_some()
+                    } else {
+                        true
                     }
-                    true
                 } else {
                     false
                 }
@@ -901,27 +967,49 @@ impl State {
                 if receipt.operation == MaintenanceOperation::SeedActors {
                     self.maintenance.seed_accepted_at = Some(receipt.origin.submitted_at.clone());
                 }
-                if receipt.operation == MaintenanceOperation::ReindexActors {
-                    self.maintenance.pending_reindex = None;
-                }
-                self.maintenance.reindex_association = None;
+                let persisted_association =
+                    if receipt.operation == MaintenanceOperation::ReindexActors {
+                        self.maintenance.pending_reindex = None;
+                        let association = JobRequestAssociation::new(
+                            receipt.job_id.clone(),
+                            receipt.origin.clone(),
+                            String::new(),
+                        );
+                        self.maintenance.reindex_association = Some(association.clone());
+                        Some(association)
+                    } else {
+                        None
+                    };
                 self.maintenance.receipt = Load::Ready(receipt.clone());
                 self.refresh_readiness();
-                // Clear the durable accepted attempt only after UI state holds the receipt.
-                if receipt.operation == MaintenanceOperation::ReindexActors && !self.fixture {
-                    if let (Some(services), Some(container), Some(request)) = (
-                        &self.services,
-                        self.workspaces.container.clone(),
-                        admitted.saved_request,
-                    ) {
-                        let origin = origin.to_owned();
-                        services.runtime.spawn(async move {
-                            let _ = tokio::task::spawn_blocking(move || {
-                                container.complete_actor_reindex(&origin, &request)
-                            })
-                            .await;
-                        });
-                    }
+                // Promote the pending guard into the bounded accepted-job record only after UI state holds the receipt.
+                if let (
+                    Some(association),
+                    false,
+                    Some(services),
+                    Some(container),
+                    Some(context),
+                    Some(request),
+                ) = (
+                    persisted_association,
+                    self.fixture,
+                    &self.services,
+                    self.workspaces.container.clone(),
+                    admitted.saved_context,
+                    admitted.saved_request,
+                ) {
+                    let origin = origin.to_owned();
+                    services.runtime.spawn(async move {
+                        let _ = tokio::task::spawn_blocking(move || {
+                            container.record_accepted_actor_reindex_association(
+                                &origin,
+                                &context,
+                                &request,
+                                &association,
+                            )
+                        })
+                        .await;
+                    });
                 }
             }
             MaintenanceOutcome::Reconciled(association) => {
@@ -943,6 +1031,7 @@ impl State {
 
 pub(crate) struct AdmittedMaintenance {
     saved_request: Option<MaintenanceRequest>,
+    saved_context: Option<RegisteredContext>,
     pending_entry: Option<PendingActorReindex>,
     outcome: MaintenanceOutcome,
 }
@@ -1042,6 +1131,7 @@ async fn admit_maintenance_request(
     };
     Ok(AdmittedMaintenance {
         saved_request,
+        saved_context: Some(confirmation.context.clone()),
         pending_entry,
         outcome,
     })
@@ -1242,13 +1332,27 @@ async fn reconcile_uncertain_reindex(
             if valid_reindex_association(&pending, &association) {
                 if let Some(container) = container.cloned() {
                     let origin = origin.to_owned();
+                    let context = pending.context.clone();
                     let request = pending.request.clone();
-                    let _ = tokio::task::spawn_blocking(move || {
-                        container.complete_actor_reindex(&origin, &request)
+                    let association_for_journal = association.clone();
+                    let persisted = tokio::task::spawn_blocking(move || {
+                        container.record_accepted_actor_reindex_association(
+                            &origin,
+                            &context,
+                            &request,
+                            &association_for_journal,
+                        )
                     })
-                    .await;
+                    .await
+                    .ok()
+                    .and_then(|result| result.ok())
+                    .is_some();
+                    if persisted {
+                        *pending_entry = None;
+                    }
+                } else {
+                    *pending_entry = None;
                 }
-                *pending_entry = None;
                 return MaintenanceOutcome::Reconciled(association);
             }
         }

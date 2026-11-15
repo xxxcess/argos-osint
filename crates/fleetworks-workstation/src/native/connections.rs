@@ -23,10 +23,111 @@ use super::fs::ObjectIdentity;
 use super::NativeContainer;
 
 pub const CONNECTIONS_FILE: &str = ".native-connections.json";
+/// Canonical origin identifier for the default embedded local companion backend.
+pub const DEFAULT_LOCAL_ORIGIN: &str = "local://embedded";
+/// Private subdirectory under the workstation root for per-profile local backend state.
+pub const LOCAL_BACKEND_DIR: &str = "local-backend";
 const FORMAT: u16 = 1;
 const MAX_PROFILES: usize = 32;
 const MAX_CATALOG_BYTES: u64 = 256 * 1024;
 const TOKEN_LIMIT: u64 = 4096;
+
+/// Transport kind for a saved Fleetworks destination profile.
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize,
+)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum BackendKind {
+    /// Remote HTTP(S) gateway paired via token or system keyring.
+    #[default]
+    Remote,
+    /// Supervised local embedded companion backend running over stdio IPC.
+    Local,
+}
+
+/// Canonicalize a `local://<slug>` identifier for local embedded backends.
+pub fn canonical_local_origin(origin: &str) -> Result<String> {
+    anyhow::ensure!(
+        origin.len() <= 2048 && origin.trim() == origin && !origin.chars().any(char::is_control),
+        "local backend origin contains invalid characters or edge whitespace"
+    );
+    let prefix = origin
+        .get(..8)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("local://"))
+        .context("local backend origin must start with local://")?;
+    let _ = prefix;
+    let slug = origin[8..].strip_suffix('/').unwrap_or(&origin[8..]);
+    validate_local_slug(slug)?;
+    Ok(format!("local://{}", slug.to_ascii_lowercase()))
+}
+
+/// Derive the canonical `local://` origin string for a saved local profile ID.
+pub fn local_origin_for_profile(profile_id: &str) -> Result<String> {
+    validate_local_slug(profile_id)?;
+    Ok(format!("local://{}", profile_id.to_ascii_lowercase()))
+}
+
+/// Canonicalize either a `local://<slug>` target or a remote HTTP(S) gateway origin.
+pub fn canonical_target_origin(origin: &str) -> Result<String> {
+    if origin
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("local://"))
+    {
+        canonical_local_origin(origin)
+    } else {
+        Client::canonical_origin(origin).map_err(anyhow::Error::from)
+    }
+}
+
+fn validate_local_slug(slug: &str) -> Result<()> {
+    anyhow::ensure!(
+        !slug.is_empty()
+            && slug.len() <= 64
+            && slug != "."
+            && slug != ".."
+            && slug
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'),
+        "local backend slug must be 1–64 ASCII alphanumeric, '-' or '_' characters"
+    );
+    Ok(())
+}
+
+fn validate_local_state_dir_path(path: &Path) -> Result<()> {
+    let text = path
+        .to_str()
+        .context("local backend state directory must be valid UTF-8")?;
+    anyhow::ensure!(
+        path.is_absolute()
+            && path.parent().is_some()
+            && text.len() <= 4096
+            && !text.chars().any(char::is_control)
+            && path
+                .components()
+                .all(|component| matches!(component, Component::RootDir | Component::Normal(_))),
+        "local backend state directory must be a clean absolute path without traversal"
+    );
+    Ok(())
+}
+
+fn ensure_private_child_directory(
+    parent: &rustix::fd::OwnedFd,
+    name: &str,
+) -> Result<(rustix::fd::OwnedFd, ObjectIdentity)> {
+    match fs::entry_identity(parent, name)? {
+        Some(_) => {}
+        None => match rustix::fs::mkdirat(parent, name, fs::PRIVATE_DIRECTORY) {
+            Ok(()) => {}
+            Err(rustix::io::Errno::EXIST) => {}
+            Err(error) => return Err(error).context("create private local backend directory"),
+        },
+    }
+    let dir_fd = rustix::fs::openat(parent, name, fs::DIRECTORY_FLAGS, Mode::empty())
+        .context("local backend state directory must be a real directory without symlinks")?;
+    let object = fs::directory_identity(&dir_fd, true)?;
+    Ok((dir_fd, object))
+}
 
 /// Origin-bound reference to one explicitly selected protected token file.
 /// Serialization contains identity/path only; Debug omits its private path.
@@ -145,9 +246,14 @@ fn open_token(path: &Path) -> Result<(File, ObjectIdentity)> {
 pub struct GatewayProfile {
     pub id: String,
     pub revision: u64,
+    #[serde(default)]
+    pub kind: BackendKind,
     pub name: String,
     pub origin: String,
-    pub credential: CredentialReference,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential: Option<CredentialReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_state_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -171,11 +277,14 @@ impl ConnectionProfilesSnapshot {
 
 #[derive(Clone, Debug)]
 pub struct GatewayProfileInput {
+    kind: BackendKind,
     name: String,
-    origin: String,
-    credential: CredentialReference,
+    origin: Option<String>,
+    credential: Option<CredentialReference>,
+    local_state_dir: Option<PathBuf>,
 }
 impl GatewayProfileInput {
+    /// Construct validated metadata for a remote HTTP(S) gateway profile.
     pub fn new(name: String, origin: String, credential: CredentialReference) -> Result<Self> {
         validate_name(&name)?;
         let origin = Client::canonical_origin(&origin)?;
@@ -184,9 +293,34 @@ impl GatewayProfileInput {
             "select a credential reference bound to this exact gateway origin"
         );
         Ok(Self {
+            kind: BackendKind::Remote,
+            name,
+            origin: Some(origin),
+            credential: Some(credential),
+            local_state_dir: None,
+        })
+    }
+
+    /// Construct validated metadata for a local embedded companion backend profile.
+    pub fn new_local(
+        name: String,
+        origin: Option<String>,
+        local_state_dir: Option<PathBuf>,
+    ) -> Result<Self> {
+        validate_name(&name)?;
+        let origin = match origin {
+            Some(origin) => Some(canonical_local_origin(&origin)?),
+            None => None,
+        };
+        if let Some(dir) = &local_state_dir {
+            validate_local_state_dir_path(dir)?;
+        }
+        Ok(Self {
+            kind: BackendKind::Local,
             name,
             origin,
-            credential,
+            credential: None,
+            local_state_dir,
         })
     }
 }
@@ -221,7 +355,7 @@ impl NativeContainer {
             .profiles
             .iter()
             .enumerate()
-            .filter(|(_, profile)| profile.origin == origin)
+            .filter(|(_, profile)| profile.kind == BackendKind::Remote && profile.origin == origin)
             .map(|(index, _)| index)
             .collect();
         anyhow::ensure!(
@@ -235,7 +369,7 @@ impl NativeContainer {
             .context("credential binding revision exhausted")?;
         let id = if let Some(index) = matches.first() {
             let profile = &mut catalog.snapshot.profiles[*index];
-            profile.credential = credential;
+            profile.credential = Some(credential);
             profile.revision = revision;
             profile.id.clone()
         } else {
@@ -247,9 +381,11 @@ impl NativeContainer {
             catalog.snapshot.profiles.push(GatewayProfile {
                 id: id.clone(),
                 revision,
+                kind: BackendKind::Remote,
                 name: format!("Gateway {}", &id[..12]),
                 origin,
-                credential,
+                credential: Some(credential),
+                local_state_dir: None,
             });
             id
         };
@@ -258,19 +394,52 @@ impl NativeContainer {
         self.write_connections(&catalog, object)
     }
 
-    /// Resolve a single binding; no origin fallback, token scanning or file adoption.
+    /// Resolve a single remote binding; no origin fallback, token scanning or file adoption.
     pub fn credential_binding(&self, origin: &str) -> Result<CredentialReference> {
         let origin = Client::canonical_origin(origin)?;
         let catalog = self.connection_profiles()?;
         let matches: Vec<_> = catalog
             .profiles
             .iter()
-            .filter(|profile| profile.origin == origin)
+            .filter(|profile| profile.kind == BackendKind::Remote && profile.origin == origin)
             .collect();
         anyhow::ensure!(matches.len() == 1,
             "gateway credential missing or ambiguous; run --provision-gateway-credential --api-origin <URL> --api-token-file <private-file>");
-        drop(matches[0].credential.open_verified(&origin)?);
-        Ok(matches[0].credential.clone())
+        let credential = matches[0]
+            .credential
+            .as_ref()
+            .context("remote gateway profile is missing its credential reference")?;
+        drop(credential.open_verified(&origin)?);
+        Ok(credential.clone())
+    }
+
+    /// Provision and verify a private `0o700` state directory for a local embedded profile.
+    pub fn ensure_local_backend_state_dir(&self, profile_slug: &str) -> Result<PathBuf> {
+        validate_local_slug(profile_slug)?;
+        self.revalidate_root()?;
+        let (base_fd, _base_identity) =
+            ensure_private_child_directory(&self.root_fd, LOCAL_BACKEND_DIR)?;
+        let (_profile_fd, _profile_identity) =
+            ensure_private_child_directory(&base_fd, profile_slug)?;
+        self.revalidate_root()?;
+        Ok(self.root.join(LOCAL_BACKEND_DIR).join(profile_slug))
+    }
+
+    /// Validate or provision an explicit local backend state directory without symlinks or public access.
+    pub fn validate_local_backend_state_dir(&self, path: &Path) -> Result<PathBuf> {
+        validate_local_state_dir_path(path)?;
+        self.revalidate_root()?;
+        let parent_path = path
+            .parent()
+            .context("local backend state directory must have a parent")?;
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .context("local backend state directory name must be valid UTF-8")?;
+        let parent_fd = fs::open_absolute_directory(parent_path)?;
+        let (_dir_fd, _identity) = ensure_private_child_directory(&parent_fd, name)?;
+        self.revalidate_root()?;
+        Ok(path.to_path_buf())
     }
 
     /// Add/edit using an explicit catalog revision; no last-writer-wins overwrite.
@@ -288,7 +457,6 @@ impl NativeContainer {
             catalog.snapshot.revision == expected_revision,
             "saved connections changed; refresh before saving"
         );
-        drop(input.credential.open_verified(&input.origin)?);
         anyhow::ensure!(
             !catalog
                 .snapshot
@@ -301,21 +469,16 @@ impl NativeContainer {
         let revision = expected_revision
             .checked_add(1)
             .context("saved connection revision exhausted")?;
-        let id = match id {
+        let profile_id = match id {
             Some(id) => {
-                let profile = catalog
-                    .snapshot
-                    .profiles
-                    .iter_mut()
-                    .find(|profile| profile.id == id)
-                    .context("saved connection no longer exists")?;
-                *profile = GatewayProfile {
-                    id: id.to_owned(),
-                    revision,
-                    name: input.name,
-                    origin: input.origin,
-                    credential: input.credential,
-                };
+                anyhow::ensure!(
+                    catalog
+                        .snapshot
+                        .profiles
+                        .iter()
+                        .any(|profile| profile.id == id),
+                    "saved connection no longer exists"
+                );
                 id.to_owned()
             }
             None => {
@@ -323,19 +486,66 @@ impl NativeContainer {
                     catalog.snapshot.profiles.len() < MAX_PROFILES,
                     "saved connection catalog is full"
                 );
-                let id = fs::random_marker()?;
-                catalog.snapshot.profiles.push(GatewayProfile {
-                    id: id.clone(),
-                    revision,
-                    name: input.name,
-                    origin: input.origin,
-                    credential: input.credential,
-                });
-                id
+                fs::random_marker()?
             }
         };
+        let next_profile = match input.kind {
+            BackendKind::Remote => {
+                let origin = input
+                    .origin
+                    .context("remote gateway profile requires an origin")?;
+                let credential = input
+                    .credential
+                    .context("remote gateway profile requires a credential reference")?;
+                drop(credential.open_verified(&origin)?);
+                GatewayProfile {
+                    id: profile_id.clone(),
+                    revision,
+                    kind: BackendKind::Remote,
+                    name: input.name,
+                    origin,
+                    credential: Some(credential),
+                    local_state_dir: None,
+                }
+            }
+            BackendKind::Local => {
+                let origin = match input.origin {
+                    Some(origin) => canonical_local_origin(&origin)?,
+                    None => local_origin_for_profile(&profile_id)?,
+                };
+                let state_dir = match input.local_state_dir {
+                    Some(dir) => self.validate_local_backend_state_dir(&dir)?,
+                    None => self.ensure_local_backend_state_dir(&profile_id)?,
+                };
+                GatewayProfile {
+                    id: profile_id.clone(),
+                    revision,
+                    kind: BackendKind::Local,
+                    name: input.name,
+                    origin,
+                    credential: None,
+                    local_state_dir: Some(state_dir),
+                }
+            }
+        };
+        match id {
+            Some(existing_id) => {
+                let profile = catalog
+                    .snapshot
+                    .profiles
+                    .iter_mut()
+                    .find(|profile| profile.id == existing_id)
+                    .context("saved connection no longer exists")?;
+                anyhow::ensure!(
+                    profile.kind == next_profile.kind,
+                    "saved destination cannot switch between remote gateway and local embedded"
+                );
+                *profile = next_profile;
+            }
+            None => catalog.snapshot.profiles.push(next_profile),
+        }
         catalog.snapshot.revision = revision;
-        catalog.snapshot.selected_profile_id = Some(id);
+        catalog.snapshot.selected_profile_id = Some(profile_id);
         self.write_connections(&catalog, object)?;
         Ok(catalog.snapshot)
     }
@@ -427,12 +637,37 @@ impl NativeContainer {
                     && profile.revision > 0
                     && profile.revision <= catalog.snapshot.revision
                     && names.insert(UniCase::new(profile.name.as_str()).to_folded_case())
-                    && profile.origin.len() <= 2048
-                    && Client::canonical_origin(&profile.origin)? == profile.origin
-                    && profile.credential.origin == profile.origin,
+                    && profile.origin.len() <= 2048,
                 "saved connection identity, name or destination conflicts"
             );
-            profile.credential.validate(self.root_object.owner)?;
+            match profile.kind {
+                BackendKind::Remote => {
+                    anyhow::ensure!(
+                        profile.local_state_dir.is_none()
+                            && Client::canonical_origin(&profile.origin)? == profile.origin,
+                        "remote connection destination conflicts with local state metadata"
+                    );
+                    let credential = profile
+                        .credential
+                        .as_ref()
+                        .context("remote saved connection is missing a credential reference")?;
+                    anyhow::ensure!(
+                        credential.origin == profile.origin,
+                        "saved connection identity, name or destination conflicts"
+                    );
+                    credential.validate(self.root_object.owner)?;
+                }
+                BackendKind::Local => {
+                    anyhow::ensure!(
+                        profile.credential.is_none()
+                            && canonical_local_origin(&profile.origin)? == profile.origin,
+                        "local embedded connection must not store remote deployment credentials"
+                    );
+                    if let Some(dir) = &profile.local_state_dir {
+                        validate_local_state_dir_path(dir)?;
+                    }
+                }
+            }
         }
         anyhow::ensure!(
             catalog

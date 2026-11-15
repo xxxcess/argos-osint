@@ -30,7 +30,7 @@ use serde_json::Value;
 use crate::ApiState;
 use crate::AuthenticatedPrincipal;
 
-pub(crate) struct ConnectError(StatusCode, &'static str);
+pub(crate) struct ConnectError(pub(crate) StatusCode, pub(crate) &'static str);
 
 impl IntoResponse for ConnectError {
     fn into_response(self) -> Response {
@@ -56,12 +56,12 @@ fn protected(status: StatusCode, value: Value) -> Response {
     response
 }
 
-fn require(
-    principal: Option<Extension<AuthenticatedPrincipal>>,
+fn require_ref(
+    principal: Option<&AuthenticatedPrincipal>,
     permission: Permission,
     web_relay: bool,
 ) -> Result<RegistryAuthority, ConnectError> {
-    let Some(Extension(principal)) = principal else {
+    let Some(principal) = principal else {
         return Err(ConnectError(
             StatusCode::UNAUTHORIZED,
             "Purpose-scoped gateway credential required",
@@ -87,6 +87,18 @@ fn require(
         principal.access_epoch(),
     )
     .map_err(|_| ConnectError(StatusCode::FORBIDDEN, "Credential authority is unavailable"))
+}
+
+fn require(
+    principal: Option<Extension<AuthenticatedPrincipal>>,
+    permission: Permission,
+    web_relay: bool,
+) -> Result<RegistryAuthority, ConnectError> {
+    require_ref(
+        principal.as_ref().map(|Extension(p)| p),
+        permission,
+        web_relay,
+    )
 }
 
 fn failure(error: RegistryError, browser: bool) -> ConnectError {
@@ -133,15 +145,13 @@ fn failure(error: RegistryError, browser: bool) -> ConnectError {
     }
 }
 
-/// Native ensure is never added to the ordinary browser relay allowlist.
-pub(crate) async fn ensure(
-    State(state): State<ApiState>,
-    principal: Option<Extension<AuthenticatedPrincipal>>,
-    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
-    Json(input): Json<RegistrationEnsureRequest>,
-) -> Result<Response, ConnectError> {
-    let authority = require(principal, Permission::RegisterWorkstation, false)?;
-    let observed_peer = peer.map(|Extension(ConnectInfo(address))| address.ip());
+pub(crate) async fn ensure_request(
+    state: &ApiState,
+    principal: Option<&AuthenticatedPrincipal>,
+    observed_peer: Option<IpAddr>,
+    input: RegistrationEnsureRequest,
+) -> Result<(StatusCode, Value), ConnectError> {
+    let authority = require_ref(principal, Permission::RegisterWorkstation, false)?;
     let result = connect_registry::ensure_observed(&state.repo, &authority, &input, observed_peer)
         .await
         .map_err(|error| failure(error, false))?;
@@ -156,25 +166,43 @@ pub(crate) async fn ensure(
             "Registration response unavailable",
         )
     })?;
+    Ok((status, value))
+}
+
+/// Native ensure is never added to the ordinary browser relay allowlist.
+pub(crate) async fn ensure(
+    State(state): State<ApiState>,
+    principal: Option<Extension<AuthenticatedPrincipal>>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    Json(input): Json<RegistrationEnsureRequest>,
+) -> Result<Response, ConnectError> {
+    let observed_peer = peer.map(|Extension(ConnectInfo(address))| address.ip());
+    let (status, value) = ensure_request(
+        &state,
+        principal.as_ref().map(|Extension(p)| p),
+        observed_peer,
+        input,
+    )
+    .await?;
     Ok(protected(status, value))
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RebindRequest {
-    request_id: String,
-    registration_id: String,
-    expected_revision: u64,
-    workstation_ip: Option<IpAddr>,
-    installation_marker: String,
+    pub(crate) request_id: String,
+    pub(crate) registration_id: String,
+    pub(crate) expected_revision: u64,
+    pub(crate) workstation_ip: Option<IpAddr>,
+    pub(crate) installation_marker: String,
 }
 
-pub(crate) async fn rebind(
-    State(state): State<ApiState>,
-    principal: Option<Extension<AuthenticatedPrincipal>>,
-    Json(input): Json<RebindRequest>,
-) -> Result<Response, ConnectError> {
-    let authority = require(principal, Permission::RebindWorkstation, false)?;
+pub(crate) async fn rebind_request(
+    state: &ApiState,
+    principal: Option<&AuthenticatedPrincipal>,
+    input: RebindRequest,
+) -> Result<Value, ConnectError> {
+    let authority = require_ref(principal, Permission::RebindWorkstation, false)?;
     let request = RegistrationEnsureRequest::new(
         input.request_id,
         input.workstation_ip,
@@ -185,33 +213,42 @@ pub(crate) async fn rebind(
     let result = connect_registry::rebind(&state.repo, &authority, &input)
         .await
         .map_err(|error| failure(error, false))?;
-    let value = serde_json::to_value(result.receipt).map_err(|_| {
+    serde_json::to_value(result.receipt).map_err(|_| {
         ConnectError(
             StatusCode::SERVICE_UNAVAILABLE,
             "Registration response unavailable",
         )
-    })?;
+    })
+}
+
+pub(crate) async fn rebind(
+    State(state): State<ApiState>,
+    principal: Option<Extension<AuthenticatedPrincipal>>,
+    Json(input): Json<RebindRequest>,
+) -> Result<Response, ConnectError> {
+    let value = rebind_request(&state, principal.as_ref().map(|Extension(p)| p), input).await?;
     Ok(protected(StatusCode::OK, value))
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RegistrationRevisionRequest {
-    registration_id: String,
-    expected_revision: u64,
+    pub(crate) registration_id: String,
+    pub(crate) expected_revision: u64,
 }
 
-pub(crate) async fn retire(
-    State(state): State<ApiState>,
-    principal: Option<Extension<AuthenticatedPrincipal>>,
-    Json(input): Json<RegistrationRevisionRequest>,
-) -> Result<Response, ConnectError> {
-    let authority = require(principal, Permission::RebindWorkstation, false)?;
+pub(crate) async fn retire_request(
+    state: &ApiState,
+    principal: Option<&AuthenticatedPrincipal>,
+    registration_id: &str,
+    expected_revision: u64,
+) -> Result<(StatusCode, Value), ConnectError> {
+    let authority = require_ref(principal, Permission::RebindWorkstation, false)?;
     let pending = connect_registry::begin_retirement(
         &state.repo,
         &authority,
-        &input.registration_id,
-        input.expected_revision,
+        registration_id,
+        expected_revision,
     )
     .await
     .map_err(|error| failure(error, false))?;
@@ -224,7 +261,7 @@ pub(crate) async fn retire(
     .await
     .map_err(|error| failure(error, false))?;
     Ok(match result {
-        connect_registry::RetirementResult::Complete(receipt) => protected(
+        connect_registry::RetirementResult::Complete(receipt) => (
             StatusCode::OK,
             json!({
                 "status":"retired","deletion_ready":true,"deployment_id":receipt.deployment_id,"registration_id":receipt.registration_id,
@@ -232,7 +269,7 @@ pub(crate) async fn retire(
                 "receipt_id":receipt.receipt_id,"admission_fenced":receipt.admission_fenced,"sessions_revoked":receipt.sessions_revoked,"active_work_drained":receipt.active_work_drained
             }),
         ),
-        connect_registry::RetirementResult::Pending(pending) => protected(
+        connect_registry::RetirementResult::Pending(pending) => (
             StatusCode::ACCEPTED,
             json!({
                 "status":"retirement_pending", "deletion_ready":false,
@@ -249,21 +286,70 @@ pub(crate) async fn retire(
     })
 }
 
+pub(crate) async fn retire(
+    State(state): State<ApiState>,
+    principal: Option<Extension<AuthenticatedPrincipal>>,
+    Json(input): Json<RegistrationRevisionRequest>,
+) -> Result<Response, ConnectError> {
+    let (status, value) = retire_request(
+        &state,
+        principal.as_ref().map(|Extension(p)| p),
+        &input.registration_id,
+        input.expected_revision,
+    )
+    .await?;
+    Ok(protected(status, value))
+}
+
+pub(crate) async fn registration_context_request(
+    state: &ApiState,
+    principal: Option<&AuthenticatedPrincipal>,
+    registration_id: &str,
+    expected_revision: u64,
+) -> Result<Value, ConnectError> {
+    let authority = require_ref(principal, Permission::RegisterWorkstation, false)?;
+    let context = connect_registry::registration_context(
+        &state.repo,
+        &authority,
+        registration_id,
+        expected_revision,
+    )
+    .await
+    .map_err(|error| failure(error, false))?;
+    Ok(json!({"context":context}))
+}
+
 pub(crate) async fn registration_context(
     State(state): State<ApiState>,
     principal: Option<Extension<AuthenticatedPrincipal>>,
     Json(input): Json<RegistrationRevisionRequest>,
 ) -> Result<Response, ConnectError> {
-    let authority = require(principal, Permission::RegisterWorkstation, false)?;
-    let context = connect_registry::registration_context(
-        &state.repo,
-        &authority,
+    let value = registration_context_request(
+        &state,
+        principal.as_ref().map(|Extension(p)| p),
         &input.registration_id,
         input.expected_revision,
     )
-    .await
-    .map_err(|error| failure(error, false))?;
-    Ok(protected(StatusCode::OK, json!({"context":context})))
+    .await?;
+    Ok(protected(StatusCode::OK, value))
+}
+
+pub(crate) async fn create_session_request(
+    state: &ApiState,
+    principal: Option<&AuthenticatedPrincipal>,
+    connect_id: &fleetworks_contracts::connect::ConnectId,
+) -> Result<(StatusCode, Value), ConnectError> {
+    let authority = require_ref(principal, Permission::ResolveWebSession, true)?;
+    let session = connect_registry::create_session(&state.repo, &authority, connect_id)
+        .await
+        .map_err(|error| failure(error, true))?;
+    Ok((
+        StatusCode::CREATED,
+        json!({
+            "session_token":session.token.expose_secret(),
+            "context":session.context, "expires_at":session.expires_at
+        }),
+    ))
 }
 
 /// Token response is for the authenticated server relay, never browser JavaScript.
@@ -272,17 +358,13 @@ pub(crate) async fn create_session(
     principal: Option<Extension<AuthenticatedPrincipal>>,
     Json(input): Json<WebSessionCreateRequest>,
 ) -> Result<Response, ConnectError> {
-    let authority = require(principal, Permission::ResolveWebSession, true)?;
-    let session = connect_registry::create_session(&state.repo, &authority, &input.connect_id)
-        .await
-        .map_err(|error| failure(error, true))?;
-    Ok(protected(
-        StatusCode::CREATED,
-        json!({
-            "session_token":session.token.expose_secret(),
-            "context":session.context, "expires_at":session.expires_at
-        }),
-    ))
+    let (status, value) = create_session_request(
+        &state,
+        principal.as_ref().map(|Extension(p)| p),
+        &input.connect_id,
+    )
+    .await?;
+    Ok(protected(status, value))
 }
 
 /// This body intentionally has no Debug/Serialize implementation.

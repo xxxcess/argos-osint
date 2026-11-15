@@ -28,6 +28,8 @@ struct Options {
     workspace: Option<PathBuf>,
     #[arg(long, requires_all = ["api_origin", "api_token_file"])]
     provision_gateway_credential: bool,
+    #[arg(long)]
+    local_backend_bin: Option<PathBuf>,
 }
 
 fn arguments() -> Result<(Options, Vec<String>), clap::Error> {
@@ -37,7 +39,7 @@ fn arguments() -> Result<(Options, Vec<String>), clap::Error> {
     while let Some(argument) = args.next() {
         if matches!(
             argument.as_str(),
-            "--api-origin" | "--api-token-file" | "--workspace"
+            "--api-origin" | "--api-token-file" | "--workspace" | "--local-backend-bin"
         ) {
             native.push(argument);
             if let Some(value) = args.next() {
@@ -46,6 +48,7 @@ fn arguments() -> Result<(Options, Vec<String>), clap::Error> {
         } else if argument.starts_with("--api-origin=")
             || argument.starts_with("--api-token-file=")
             || argument.starts_with("--workspace=")
+            || argument.starts_with("--local-backend-bin=")
             || argument == "--provision-gateway-credential"
             || matches!(argument.as_str(), "--help" | "-h" | "--version" | "-V")
         {
@@ -99,6 +102,8 @@ pub fn run() -> anyhow::Result<()> {
             if let Some(path) = &options.api_token_file {
                 state.connection.token_file = TextEdit::new(path.to_string_lossy());
             }
+            state.local_backend.cli_binary_override = options.local_backend_bin.clone();
+            state.local_backend.refresh_binary_status();
             state.initialize_workspaces(options.workspace.clone());
             state
         })

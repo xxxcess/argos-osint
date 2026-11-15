@@ -1,9 +1,11 @@
 //! Gateway-only effects. No application operation starts a process or service.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use fleetworks_contracts::capabilities::Capabilities;
 use fleetworks_contracts::readiness::WorkstationReadiness;
@@ -17,10 +19,12 @@ use fleetworks_workstation::native::NativeContainer;
 use rune::AppHandle;
 use rune::TextEdit;
 use tokio::runtime::Handle;
+use tokio::sync::broadcast;
 use tokio::task::AbortHandle;
 
 use crate::app::State;
 use crate::brain::ActorDossier;
+use crate::local_backend::LocalBackendProcess;
 
 const TOKEN_LIMIT: u64 = 4096;
 
@@ -78,6 +82,7 @@ pub(crate) struct Connected {
     pub ready: Ready,
     pub capabilities: Capabilities,
     pub credential: Option<CredentialReference>,
+    pub local_backend: Option<Arc<LocalBackendProcess>>,
 }
 
 #[derive(Clone)]
@@ -244,6 +249,124 @@ impl GatewayEffects {
                 .map_err(|error| error.message);
             ui.update(move |state, _| state.complete_connection(epoch, result));
         });
+        Some(RequestTask(task.abort_handle()))
+    }
+
+    pub(crate) fn connect_local(
+        &self,
+        binary_override: Option<PathBuf>,
+        container: Option<Arc<NativeContainer>>,
+        explicit_state_dir: Option<PathBuf>,
+        slug: String,
+        epoch: u64,
+    ) -> Option<RequestTask> {
+        let ui = self.ui.get()?.clone();
+        let task = self.runtime.spawn(async move {
+            let result = async {
+                let binary =
+                    crate::local_backend::resolve_companion_binary(binary_override.as_deref())
+                        .map_err(|error| error.to_string())?;
+                let state_dir = tokio::task::spawn_blocking(move || -> anyhow::Result<PathBuf> {
+                    let container = match container {
+                        Some(container) => container,
+                        None => {
+                            Arc::new(NativeContainer::open_settings(&crate::platform::home()?)?)
+                        }
+                    };
+                    match explicit_state_dir {
+                        Some(dir) => container.validate_local_backend_state_dir(&dir),
+                        None => container.ensure_local_backend_state_dir(&slug),
+                    }
+                })
+                .await
+                .map_err(|_| "Local backend storage worker stopped".to_owned())?
+                .map_err(|error| error.to_string())?;
+                let process = Arc::new(
+                    LocalBackendProcess::spawn(&binary, &state_dir)
+                        .await
+                        .map_err(|error| error.to_string())?,
+                );
+                Ok(Connected {
+                    client: process.client().clone(),
+                    ready: process.ready().clone(),
+                    capabilities: process.capabilities().clone(),
+                    credential: None,
+                    local_backend: Some(process),
+                })
+            }
+            .await;
+            ui.update(move |state, _| state.complete_connection(epoch, result));
+        });
+        Some(RequestTask(task.abort_handle()))
+    }
+
+    pub(crate) fn watch_local_backend_events(
+        &self,
+        process: Arc<LocalBackendProcess>,
+        epoch: u64,
+    ) -> Option<RequestTask> {
+        let ui = self.ui.get()?.clone();
+        let task = self.runtime.spawn(async move {
+            let mut rx = process.subscribe_events();
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        let process_ref = Arc::clone(&process);
+                        ui.update(move |state, _| {
+                            state.apply_local_backend_event(epoch, &process_ref, event);
+                        });
+                    }
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        let process_ref = Arc::clone(&process);
+                        ui.update(move |state, _| {
+                            state.handle_local_backend_lag(epoch, &process_ref, skipped);
+                        });
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        let stderr = process.captured_stderr_lossy();
+                        let closed = process.is_closed();
+                        ui.update(move |state, _| {
+                            state.handle_local_backend_closed(epoch, closed, stderr);
+                        });
+                        break;
+                    }
+                }
+            }
+        });
+        Some(RequestTask(task.abort_handle()))
+    }
+
+    pub(crate) fn shutdown_local_backend(
+        &self,
+        process: Arc<LocalBackendProcess>,
+        reason: String,
+        wait_for_quit: bool,
+    ) -> Option<RequestTask> {
+        let ui = self.ui.get().cloned();
+        let (tx, rx) = wait_for_quit
+            .then(|| std::sync::mpsc::sync_channel(1))
+            .unzip();
+        let task = self.runtime.spawn(async move {
+            let outcome = process
+                .shutdown(&reason)
+                .await
+                .map_err(|error| error.to_string());
+            let stderr = process.captured_stderr_lossy();
+            drop(process);
+            if let Some(sender) = tx {
+                let _ = sender.try_send(outcome.clone());
+            }
+            if let Some(ui) = ui {
+                ui.update(move |state, _| {
+                    state.complete_local_backend_shutdown(outcome, stderr);
+                });
+            }
+        });
+        if let Some(receiver) = rx {
+            if tokio::runtime::Handle::try_current().is_err() {
+                let _ = receiver.recv_timeout(Duration::from_millis(1800));
+            }
+        }
         Some(RequestTask(task.abort_handle()))
     }
 
@@ -417,6 +540,7 @@ pub(crate) async fn handshake_token(
         ready,
         capabilities,
         credential,
+        local_backend: None,
     })
 }
 

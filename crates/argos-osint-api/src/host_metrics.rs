@@ -211,10 +211,12 @@ impl HostSampler {
     }
 }
 
-pub(crate) async fn read(
-    Extension(sampler): Extension<SharedSampler>,
-) -> Result<Json<HostMetrics>, ApiError> {
-    let snapshot = tokio::task::spawn_blocking(move || {
+pub(crate) fn new_sampler() -> SharedSampler {
+    std::sync::Arc::new(std::sync::Mutex::new(HostSampler::default()))
+}
+
+pub(crate) async fn sample_current(sampler: SharedSampler) -> Result<HostMetrics, ApiError> {
+    tokio::task::spawn_blocking(move || {
         let mut sampler = sampler
             .lock()
             .map_err(|_| crate::internal("Host metrics lock poisoned"))?;
@@ -222,8 +224,13 @@ pub(crate) async fn read(
         Ok::<_, ApiError>(sampler.sample(Instant::now(), home))
     })
     .await
-    .map_err(crate::internal)??;
-    Ok(Json(snapshot))
+    .map_err(crate::internal)?
+}
+
+pub(crate) async fn read(
+    Extension(sampler): Extension<SharedSampler>,
+) -> Result<Json<HostMetrics>, ApiError> {
+    Ok(Json(sample_current(sampler).await?))
 }
 
 fn host_cores(system: &System) -> usize {

@@ -338,12 +338,12 @@ async fn explicit_activation_enforces_permissions_source_privacy_revision_and_ex
         ],
     )
     .expect("distinct purpose policy");
-    let state = ApiState {
-        repo: repo.clone(),
-        instance_id: "fixture-api".into(),
-        port: 8080,
-        origins: Arc::new(Vec::new()),
-    };
+    let state = ApiState::new(
+        repo.clone(),
+        "fixture-api".into(),
+        8080,
+        Arc::new(Vec::new()),
+    );
     let app = network_router(state, policy).layer(Extension(Arc::new(
         ActivationArtifacts::new(root.clone()).expect("real server-owned artifact home"),
     )));

@@ -320,12 +320,12 @@ impl Fixture {
             ],
         )
         .expect("actual gateway ingress policy");
-        let state = ApiState {
-            repo: repo.clone(),
-            instance_id: "paging-api".into(),
-            port: 8080,
-            origins: Arc::new(Vec::new()),
-        };
+        let state = ApiState::new(
+            repo.clone(),
+            "paging-api".into(),
+            8080,
+            Arc::new(Vec::new()),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("owned private Jobs endpoint");

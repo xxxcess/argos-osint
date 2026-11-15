@@ -372,6 +372,7 @@ dependencies = [
  "clap",
  "fleetworks-contracts",
  "fleetworks-jobs",
+ "fleetworks-search-index",
  "futures-util",
  "httpdate",
  "libc",

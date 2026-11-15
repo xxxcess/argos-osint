@@ -38,31 +38,31 @@ use crate::ApiState;
 #[serde(deny_unknown_fields)]
 pub(crate) struct JobsQuery {
     #[serde(skip_serializing_if = "Option::is_none")]
-    id: Option<String>,
+    pub(crate) id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    job_id: Option<String>,
+    pub(crate) job_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    workspace_id: Option<String>,
+    pub(crate) workspace_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    limit: Option<usize>,
+    pub(crate) limit: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    status: Option<String>,
+    pub(crate) status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    app: Option<String>,
+    pub(crate) app: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    operation: Option<String>,
+    pub(crate) operation: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    kind: Option<String>,
+    pub(crate) kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    correlation_id: Option<String>,
+    pub(crate) correlation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    text: Option<String>,
+    pub(crate) text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    since: Option<String>,
+    pub(crate) since: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    sort: Option<String>,
+    pub(crate) sort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    cursor: Option<String>,
+    pub(crate) cursor: Option<String>,
 }
 
 pub(crate) fn routes() -> Router<ApiState> {
@@ -161,12 +161,12 @@ fn overrides(query: &JobsQuery, snapshot: &Snapshot) -> Result<(), ApiError> {
     Ok(())
 }
 
-pub(crate) async fn jobs(
-    State(state): State<ApiState>,
-    extension: Option<Extension<ResolvedRequest>>,
-    Extension(cache): Extension<Arc<JobsCursors>>,
-    Query(query): Query<JobsQuery>,
-) -> ApiResult {
+pub(crate) async fn jobs_value(
+    state: &ApiState,
+    request: &ResolvedRequest,
+    cache: &JobsCursors,
+    query: JobsQuery,
+) -> Result<serde_json::Value, ApiError> {
     if query.sort.is_none()
         && query.cursor.is_none()
         && query.kind.is_none()
@@ -175,15 +175,11 @@ pub(crate) async fn jobs(
         let legacy: activity::ActivityQuery =
             serde_json::from_value(serde_json::to_value(query).map_err(crate::internal)?)
                 .map_err(|_| crate::bad())?;
-        return activity::jobs(State(state), extension, Query(legacy)).await;
+        return activity::jobs_value(state, request, legacy).await;
     }
     if query.sort.as_deref() != Some("newest") || query.id.is_some() || query.job_id.is_some() {
         return Err(crate::bad());
     }
-    let request = extension
-        .as_ref()
-        .map(|Extension(request)| request)
-        .ok_or_else(ContextFailure::registration_required)?;
     let proof = binding(request)?;
     let (record, current_cursor) = if let Some(cursor) = &query.cursor {
         let record = cache.get(cursor, &proof).await.map_err(|_| changed())?;
@@ -263,12 +259,25 @@ pub(crate) async fn jobs(
         ),
         None => None,
     };
-    Ok(Json(
-        json!({"rows":page.rows,"activity_scope":current_scope,"counts":counts,
+    Ok(json!({
+        "rows":page.rows,"activity_scope":current_scope,"counts":counts,
         "dashboard_counts_scope":"unfiltered_top_level_workstation_activity",
         "relation_counts_available":false,"activity_actions_available":page.rows.iter().any(|row|row.activity_actions_available),
         "sort":"newest","has_more":page.has_more,"page_cursor":page_cursor,"next_cursor":next_cursor,
         "matched_total":page.matched_total,"observed_at":page.observed_at,"apps":page.apps,"apps_complete":page.apps_complete,
-        "visibility":"current_membership_and_status_with_fixed_creation_window"}),
-    ))
+        "visibility":"current_membership_and_status_with_fixed_creation_window"
+    }))
+}
+
+pub(crate) async fn jobs(
+    State(state): State<ApiState>,
+    extension: Option<Extension<ResolvedRequest>>,
+    Extension(cache): Extension<Arc<JobsCursors>>,
+    Query(query): Query<JobsQuery>,
+) -> ApiResult {
+    let request = extension
+        .as_ref()
+        .map(|Extension(request)| request)
+        .ok_or_else(ContextFailure::registration_required)?;
+    Ok(Json(jobs_value(&state, request, &cache, query).await?))
 }

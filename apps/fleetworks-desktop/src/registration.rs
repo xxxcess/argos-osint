@@ -170,6 +170,12 @@ impl State {
         let Some(capabilities) = &self.connection.capabilities else {
             return;
         };
+        if self.is_local_backend() && capabilities.links.intel_web.is_none() {
+            self.registration.message = Some(
+                "Intel Web handoff is available only when connected to a remote gateway.".into(),
+            );
+            return;
+        }
         let result = capabilities
             .links
             .intel_web

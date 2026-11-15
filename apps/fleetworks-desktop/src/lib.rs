@@ -19,6 +19,7 @@ pub mod job_actions;
 mod jobs_effects;
 pub mod jobs_query;
 pub mod launch;
+pub mod local_backend;
 mod log_effects;
 pub mod logs;
 pub mod maintenance;

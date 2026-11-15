@@ -1,9 +1,11 @@
 //! Selected native workstation destinations. Topology presentation belongs to Intel Web.
 
+use fleetworks_contracts::capabilities::Capabilities;
 use fleetworks_contracts::readiness::MaintenanceOperation;
 use fleetworks_contracts::readiness::ReadinessCheckId;
 use fleetworks_contracts::readiness::ReadinessState;
 use fleetworks_contracts::search::IndexState;
+use fleetworks_workstation::native::BackendKind;
 use rune::Cx;
 use rune::El;
 use rune::ScrollSpec;
@@ -25,6 +27,8 @@ use crate::app::WorkstationInspector;
 use crate::brain::Association;
 use crate::connection::ConnectionStatus;
 use crate::icons;
+use crate::local_backend::assess_local_capabilities;
+use crate::local_backend::BinaryDiscoveryStatus;
 use crate::material;
 use crate::material::MetalFinish;
 use crate::pairing::PairingFailure;
@@ -95,11 +99,460 @@ pub(crate) fn page(state: &State, cx: &mut Cx<State>, kit: &Kit, layers: &mut Ve
 
 fn connection_status(state: &State) -> String {
     match &state.connection.status {
-        ConnectionStatus::Disconnected => "No gateway connection".into(),
-        ConnectionStatus::Connecting => "Checking gateway authentication and compatibility…".into(),
-        ConnectionStatus::Connected => "Connected to a compatible gateway".into(),
+        ConnectionStatus::Disconnected => {
+            if state.is_local_backend() {
+                "Local companion backend is stopped".into()
+            } else {
+                "No gateway connection".into()
+            }
+        }
+        ConnectionStatus::Connecting => {
+            if state.is_local_backend() {
+                "Starting local companion backend over stdio IPC…".into()
+            } else {
+                "Checking gateway authentication and compatibility…".into()
+            }
+        }
+        ConnectionStatus::Connected => {
+            if state.is_local_backend() {
+                "Connected to local embedded companion backend (stdio IPC)".into()
+            } else {
+                "Connected to a compatible gateway".into()
+            }
+        }
         ConnectionStatus::Failed(error) => error.clone(),
     }
+}
+
+fn backend_mode_card(
+    state: &State,
+    narrow: bool,
+    busy: bool,
+    preferences: crate::accessibility::ViewPreferences,
+    kit: &Kit,
+    pointer_ref: Option<&rune::Live<[f32; 2]>>,
+    shadow_ref: Option<&rune::Live<[f32; 2]>>,
+) -> El {
+    let remote_btn = ActionButton::new("Remote Gateway")
+        .key("backend-mode-remote")
+        .icon(&icons::SERVER)
+        .finish(if !state.is_local_backend() {
+            MetalFinish::GoldCta
+        } else {
+            MetalFinish::Gunmetal
+        })
+        .disabled(busy)
+        .on_press(|state: &mut State| state.set_backend_kind(BackendKind::Remote))
+        .build(kit, preferences, pointer_ref);
+    let local_btn = ActionButton::new("Local Embedded")
+        .key("backend-mode-local")
+        .icon(&icons::WORKSTATION)
+        .finish(if state.is_local_backend() {
+            MetalFinish::GoldCta
+        } else {
+            MetalFinish::Gunmetal
+        })
+        .disabled(busy)
+        .on_press(|state: &mut State| state.set_backend_kind(BackendKind::Local))
+        .build(kit, preferences, pointer_ref);
+    let buttons = if narrow {
+        rune::col()
+            .key("backend-mode")
+            .w_full()
+            .gap(8.0)
+            .child(remote_btn)
+            .child(local_btn)
+    } else {
+        rune::row()
+            .key("backend-mode")
+            .w_full()
+            .gap(8.0)
+            .child(remote_btn)
+            .child(local_btn)
+    };
+    material::luminous_card(
+        rune::col()
+            .padding(16.0)
+            .gap(10.0)
+            .child(ui_components::section_header(
+                &icons::SERVER,
+                "Backend Mode",
+                Some(if state.is_local_backend() {
+                    "Supervise a private local companion backend on this workstation via framed stdio IPC"
+                } else {
+                    "Connect over HTTPS or loopback HTTP to a paired Fleetworks gateway"
+                }),
+                None,
+                None,
+                kit,
+            ))
+            .child(buttons),
+        StatusTone::Neutral,
+        false,
+        preferences,
+        pointer_ref,
+        shadow_ref,
+    )
+}
+
+fn local_capabilities_summary(
+    capabilities: &Capabilities,
+    preferences: crate::accessibility::ViewPreferences,
+    kit: &Kit,
+) -> El {
+    let assessment = assess_local_capabilities(capabilities);
+    let features_label = if capabilities.features.is_empty() {
+        "none advertised".to_owned()
+    } else {
+        capabilities.features.join(", ")
+    };
+    let build_label = capabilities.build.as_ref().map_or_else(
+        || "unknown build".to_owned(),
+        |build| format!("{} ({})", build.version, build.revision),
+    );
+    let mut section = rune::col()
+        .key("local-capabilities-card")
+        .gap(8.0)
+        .child(heading("Advertised Capabilities", kit))
+        .child(quiet(
+            format!(
+                "API v{} · Build {} · Features: {}",
+                capabilities.api_version, build_label, features_label
+            ),
+            kit,
+        ))
+        .child(
+            rune::row()
+                .w_full()
+                .gap(6.0)
+                .child(ui_components::status_pill(
+                    if assessment.nlp_available {
+                        "NLP ready"
+                    } else {
+                        "NLP absent"
+                    },
+                    None,
+                    if assessment.nlp_available {
+                        StatusTone::Ok
+                    } else {
+                        StatusTone::Warn
+                    },
+                    kit,
+                ))
+                .child(ui_components::status_pill(
+                    if assessment.classifier_available {
+                        "Classifier ready"
+                    } else {
+                        "Classifier absent"
+                    },
+                    None,
+                    if assessment.classifier_available {
+                        StatusTone::Ok
+                    } else {
+                        StatusTone::Warn
+                    },
+                    kit,
+                ))
+                .child(ui_components::status_pill(
+                    if assessment.actor_search_available {
+                        "Search ready"
+                    } else {
+                        "Search absent"
+                    },
+                    None,
+                    if assessment.actor_search_available {
+                        StatusTone::Ok
+                    } else {
+                        StatusTone::Warn
+                    },
+                    kit,
+                )),
+        );
+    if !assessment.warnings.is_empty() {
+        section = section.child(
+            ui_components::async_status_strip(
+                "local-capability-warnings",
+                "Optional capabilities unavailable",
+                assessment.warnings.join(" "),
+                false,
+                StatusTone::Warn,
+                preferences,
+                kit,
+            )
+            .role("status"),
+        );
+    }
+    section
+}
+
+fn local_runtime_diagnostics(
+    state: &State,
+    preferences: crate::accessibility::ViewPreferences,
+    kit: &Kit,
+) -> Option<El> {
+    let mut diagnostics = rune::col().gap(8.0);
+    let mut has_any = false;
+    if let Some(error) = &state.local_backend.pipe_closed_error {
+        has_any = true;
+        diagnostics = diagnostics.child(
+            ui_components::async_status_strip(
+                "local-pipe-closed-alert",
+                "Local IPC disconnected",
+                error.clone(),
+                false,
+                StatusTone::Err,
+                preferences,
+                kit,
+            )
+            .role("alert"),
+        );
+    }
+    if let Some(reason_code) = &state.local_backend.pressure_paused {
+        has_any = true;
+        diagnostics = diagnostics.child(
+            ui_components::async_status_strip(
+                "local-pressure-paused-alert",
+                "Local backend paused under resource pressure",
+                format!(
+                    "Reason code: {reason_code}. Active work paused safely until pressure clears."
+                ),
+                false,
+                StatusTone::Warn,
+                preferences,
+                kit,
+            )
+            .role("alert"),
+        );
+    }
+    if let Some(progress) = &state.local_backend.last_job_progress {
+        has_any = true;
+        diagnostics = diagnostics.child(
+            quiet(
+                format!(
+                    "Local job {} [{}]: {}",
+                    progress.job_id, progress.phase, progress.summary
+                ),
+                kit,
+            )
+            .key("local-job-progress"),
+        );
+    }
+    if let Some(message) = &state.local_backend.shutdown_message {
+        has_any = true;
+        diagnostics = diagnostics.child(
+            ui_components::async_status_strip(
+                "local-shutdown-status",
+                "Local companion lifecycle",
+                message.clone(),
+                state.local_backend.stopping,
+                StatusTone::Neutral,
+                preferences,
+                kit,
+            )
+            .role("status"),
+        );
+    }
+    if let Some(stderr) = &state.local_backend.stderr_excerpt {
+        if !stderr.is_empty() {
+            has_any = true;
+            diagnostics = diagnostics.child(
+                quiet(format!("Companion stderr (bounded): {stderr}"), kit)
+                    .key("local-stderr-diagnostics"),
+            );
+        }
+    }
+    has_any.then_some(diagnostics)
+}
+
+fn local_backend_setup_card(
+    state: &State,
+    narrow: bool,
+    preferences: crate::accessibility::ViewPreferences,
+    kit: &Kit,
+    pointer_ref: Option<&rune::Live<[f32; 2]>>,
+    shadow_ref: Option<&rune::Live<[f32; 2]>>,
+) -> El {
+    let mut body = rune::col()
+        .padding(16.0)
+        .gap(12.0)
+        .key("local-backend-card")
+        .child(ui_components::section_header(
+            &icons::WORKSTATION,
+            "Local Embedded Backend",
+            Some(&state.connection.origin.text),
+            Some(ui_components::status_pill(
+                if state.connected() {
+                    "Running"
+                } else if state.connection.status == ConnectionStatus::Connecting {
+                    "Starting"
+                } else if state.local_backend.stopping {
+                    "Stopping"
+                } else {
+                    "Stopped"
+                },
+                None,
+                if state.connected() {
+                    StatusTone::Ok
+                } else if state.connection.status == ConnectionStatus::Connecting {
+                    StatusTone::Warn
+                } else {
+                    StatusTone::Neutral
+                },
+                kit,
+            )),
+            None,
+            kit,
+        ))
+        .child(
+            quiet(
+                format!(
+                    "Private 0700 state directory: {}",
+                    state.local_state_dir_label()
+                ),
+                kit,
+            )
+            .key("local-state-dir"),
+        );
+
+    let binary_strip = match &state.local_backend.binary_status {
+        BinaryDiscoveryStatus::Ready(path) => ui_components::async_status_strip(
+            "local-binary-status",
+            "Companion binary verified",
+            path.display().to_string(),
+            false,
+            StatusTone::Ok,
+            preferences,
+            kit,
+        ),
+        BinaryDiscoveryStatus::Missing(reason) => ui_components::async_status_strip(
+            "local-binary-status",
+            "Companion binary missing or invalid",
+            reason.clone(),
+            false,
+            StatusTone::Err,
+            preferences,
+            kit,
+        )
+        .role("alert"),
+        BinaryDiscoveryStatus::Unknown => ui_components::async_status_strip(
+            "local-binary-status",
+            "Companion binary resolution pending",
+            "Sibling `argos-api-host`, `FLEETWORKS_LOCAL_BACKEND_BIN`, or `--local-backend-bin <PATH>` will be checked on start (PATH is never searched).",
+            false,
+            StatusTone::Neutral,
+            preferences,
+            kit,
+        ),
+    };
+    body = body.child(binary_strip);
+
+    if let Some(diagnostics) = local_runtime_diagnostics(state, preferences, kit) {
+        body = body.child(diagnostics);
+    }
+
+    if state.connected() {
+        body = body
+            .child(ui_components::async_status_strip(
+                "connection-status",
+                "Connected to local embedded backend",
+                "Framed stdio IPC verified (no HTTP fallback)",
+                false,
+                StatusTone::Ok,
+                preferences,
+                kit,
+            ))
+            .child(registration_status(state, kit));
+        if let Some(capabilities) = &state.connection.capabilities {
+            body = body.child(local_capabilities_summary(capabilities, preferences, kit));
+        }
+        body = body.child(ui_components::inline_toggle_row(
+            "setup-advanced-toggle",
+            state.setup_advanced_open,
+            "Inspect local readiness checks",
+            Some("Reveal per-service probes and observation freshness"),
+            false,
+            kit,
+            |state: &mut State| state.setup_advanced_open = !state.setup_advanced_open,
+        ));
+        if state.setup_advanced_open {
+            body = body.child(crate::readiness_cards::checks(state, preferences, kit));
+        }
+        let stop_btn = ActionButton::new("Stop Local Backend")
+            .key("stop-local-backend")
+            .finish(MetalFinish::Gunmetal)
+            .disabled(state.local_backend.stopping)
+            .on_press(|state: &mut State| state.stop_local_backend())
+            .build(kit, preferences, pointer_ref);
+        let switch_btn = ActionButton::new("Open Gateway")
+            .key("switch-remote-gateway")
+            .finish(MetalFinish::Gunmetal)
+            .on_press(|state: &mut State| state.set_backend_kind(BackendKind::Remote))
+            .build(kit, preferences, pointer_ref);
+        let mut actions = if narrow {
+            rune::col().w_full().gap(8.0)
+        } else {
+            rune::row().w_full().gap(8.0)
+        };
+        if state.registration.context.is_some() {
+            actions = actions.child(
+                ActionButton::new("Done")
+                    .key("gateway-setup-done")
+                    .icon(&icons::SHIELD_CHECK)
+                    .finish(MetalFinish::GoldCta)
+                    .on_press(|state: &mut State| state.setup_gateway = false)
+                    .build(kit, preferences, pointer_ref),
+            );
+        }
+        actions = actions.child(stop_btn).child(switch_btn);
+        body = body.child(actions);
+    } else {
+        if let ConnectionStatus::Failed(error) = &state.connection.status {
+            body = body.child(
+                ui_components::async_status_strip(
+                    "local-connection-error",
+                    "Local companion backend failed to start",
+                    error.clone(),
+                    false,
+                    StatusTone::Err,
+                    preferences,
+                    kit,
+                )
+                .role("alert"),
+            );
+        }
+        let connecting = state.connection.status == ConnectionStatus::Connecting;
+        let start_btn = ActionButton::new("Start Local Backend")
+            .key("connect-local")
+            .icon(&icons::WORKSTATION)
+            .finish(MetalFinish::GoldCta)
+            .busy(connecting)
+            .disabled(connecting)
+            .on_press(|state: &mut State| state.connect_local())
+            .build(kit, preferences, pointer_ref);
+        let switch_btn = ActionButton::new("Open Gateway")
+            .key("switch-remote-gateway")
+            .finish(MetalFinish::Gunmetal)
+            .disabled(connecting)
+            .on_press(|state: &mut State| state.set_backend_kind(BackendKind::Remote))
+            .build(kit, preferences, pointer_ref);
+        let actions = if narrow {
+            rune::col().w_full().gap(8.0)
+        } else {
+            rune::row().w_full().gap(8.0)
+        }
+        .child(start_btn)
+        .child(switch_btn);
+        body = body.child(actions);
+    }
+
+    let tone = if state.connected() {
+        StatusTone::Ok
+    } else if matches!(state.connection.status, ConnectionStatus::Failed(_)) {
+        StatusTone::Err
+    } else {
+        StatusTone::Accent
+    };
+    material::luminous_card(body, tone, false, preferences, pointer_ref, shadow_ref)
 }
 
 fn setup_gateway(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
@@ -108,42 +561,58 @@ fn setup_gateway(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
         .for_view(state.fixture, cx.is_reduced_motion());
     let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
     let shadow_ref = (!preferences.matte()).then_some(&state.shadow_offset);
-    let busy = state.pairing.busy() || state.connection.status == ConnectionStatus::Connecting;
+    let narrow = cx
+        .layout_size("page-content")
+        .is_some_and(|size| size[0] < 520.0);
+    let busy = state.pairing.busy()
+        || state.connection.status == ConnectionStatus::Connecting
+        || state.local_backend.stopping;
     let active_step = if state.connected() {
         2
-    } else if matches!(
-        state.pairing.stage,
-        PairingStage::Working(_) | PairingStage::Waiting(_) | PairingStage::Connected
-    ) {
+    } else if (state.is_local_backend() && state.connection.status == ConnectionStatus::Connecting)
+        || matches!(
+            state.pairing.stage,
+            PairingStage::Working(_) | PairingStage::Waiting(_) | PairingStage::Connected
+        )
+    {
         1
     } else {
         0
     };
 
-    let origin = TextInput::new(&state.connection.origin)
-        .label("Gateway URL")
-        .placeholder("https://gateway.example.test")
-        .width(None)
-        .disabled(busy || state.connected())
-        .on_edit(|state: &mut State| &mut state.connection.origin)
-        .on_change(|state: &mut State, _| state.profile_editor_changed(true))
-        .on_submit(|state: &mut State, _| state.connect())
-        .build(kit)
-        .key("gateway-origin");
-
     let header = ui_components::section_header(
         &icons::KEY,
         "Setup Gateway",
-        Some(if cfg!(target_os = "macos") {
+        Some(if state.is_local_backend() {
+            "Start and supervise the local companion backend over framed stdio IPC."
+        } else if cfg!(target_os = "macos") {
             "Pair once via macOS Keychain. Accepted jobs persist independently."
         } else {
             "Pair once via your system keyring or for this session. Accepted jobs persist independently."
         }),
         Some(ui_components::status_pill(
             match active_step {
-                2 => "Paired",
-                1 => "Pairing",
-                _ => "Origin Setup",
+                2 => {
+                    if state.is_local_backend() {
+                        "Local Ready"
+                    } else {
+                        "Paired"
+                    }
+                }
+                1 => {
+                    if state.is_local_backend() {
+                        "Starting"
+                    } else {
+                        "Pairing"
+                    }
+                }
+                _ => {
+                    if state.is_local_backend() {
+                        "Local Setup"
+                    } else {
+                        "Origin Setup"
+                    }
+                }
             },
             None,
             match active_step {
@@ -157,46 +626,82 @@ fn setup_gateway(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
         kit,
     );
 
-    let url_card = material::luminous_card(
-        rune::col()
-            .padding(16.0)
-            .gap(10.0)
-            .child(ui_components::section_header(
-                &icons::SERVER,
-                "Gateway URL",
-                Some(if cfg!(target_os = "macos") {
-                    "Target API origin for keychain-bound requests"
-                } else {
-                    "Target API origin for keyring-bound requests"
-                }),
-                None,
-                None,
-                kit,
-            ))
-            .child(origin),
-        if state.connected() {
-            StatusTone::Ok
-        } else {
-            StatusTone::Accent
-        },
-        false,
-        preferences,
-        pointer_ref,
-        shadow_ref,
-    );
-
-    let body = rune::col()
+    let mut body = rune::col()
         .gap(14.0)
         .child(header)
         .child(ui_components::stage_stepper(
             "gateway-setup-stepper",
-            &["Origin URL", "Workstation Pair", "Gateway Ready"],
+            if state.is_local_backend() {
+                &["Local Backend", "IPC Handshake", "Backend Ready"]
+            } else {
+                &["Origin URL", "Workstation Pair", "Gateway Ready"]
+            },
             active_step,
             preferences,
             kit,
         ))
-        .child(url_card)
-        .child(pairing_status(state, preferences, kit));
+        .child(backend_mode_card(
+            state,
+            narrow,
+            busy,
+            preferences,
+            kit,
+            pointer_ref,
+            shadow_ref,
+        ));
+
+    if state.is_local_backend() {
+        body = body.child(local_backend_setup_card(
+            state,
+            narrow,
+            preferences,
+            kit,
+            pointer_ref,
+            shadow_ref,
+        ));
+    } else {
+        let origin = TextInput::new(&state.connection.origin)
+            .label("Gateway URL")
+            .placeholder("https://gateway.example.test")
+            .width(None)
+            .disabled(busy || state.connected())
+            .on_edit(|state: &mut State| &mut state.connection.origin)
+            .on_change(|state: &mut State, _| state.profile_editor_changed(true))
+            .on_submit(|state: &mut State, _| state.connect())
+            .build(kit)
+            .key("gateway-origin");
+
+        let url_card = material::luminous_card(
+            rune::col()
+                .padding(16.0)
+                .gap(10.0)
+                .child(ui_components::section_header(
+                    &icons::SERVER,
+                    "Gateway URL",
+                    Some(if cfg!(target_os = "macos") {
+                        "Target API origin for keychain-bound requests"
+                    } else {
+                        "Target API origin for keyring-bound requests"
+                    }),
+                    None,
+                    None,
+                    kit,
+                ))
+                .child(origin),
+            if state.connected() {
+                StatusTone::Ok
+            } else {
+                StatusTone::Accent
+            },
+            false,
+            preferences,
+            pointer_ref,
+            shadow_ref,
+        );
+        body = body
+            .child(url_card)
+            .child(pairing_status(state, preferences, kit));
+    }
     scroll(body, "gateway-setup-body")
 }
 
@@ -512,52 +1017,82 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
         ConnectionStatus::Failed(_) => StatusTone::Err,
         ConnectionStatus::Disconnected => StatusTone::Neutral,
     };
-    let gateway = material::luminous_card(
-        rune::col()
-            .padding(16.0)
-            .gap(10.0)
-            .key("gateway-backend-card")
-            .child(ui_components::section_header(
-                &icons::SERVER,
-                "Gateway Backend",
-                Some(&state.connection.origin.text),
-                Some(ui_components::status_pill(
-                    match &state.connection.status {
-                        ConnectionStatus::Connected => "Connected".to_owned(),
-                        ConnectionStatus::Connecting => "Connecting".to_owned(),
-                        ConnectionStatus::Failed(_) => "Fault".to_owned(),
-                        ConnectionStatus::Disconnected => "Disconnected".to_owned(),
-                    },
-                    None,
-                    gateway_tone,
-                    kit,
-                )),
-                Some(ui_components::status_pill(
-                    state.connection.deployment_label().to_owned(),
-                    None,
-                    StatusTone::Neutral,
-                    kit,
-                )),
+    let mut gateway_body = rune::col()
+        .padding(16.0)
+        .gap(10.0)
+        .key("gateway-backend-card")
+        .child(ui_components::section_header(
+            &icons::SERVER,
+            "Gateway Backend",
+            Some(if state.is_local_backend() {
+                "Local Embedded (framed stdio IPC)"
+            } else {
+                &state.connection.origin.text
+            }),
+            Some(ui_components::status_pill(
+                match &state.connection.status {
+                    ConnectionStatus::Connected => "Connected".to_owned(),
+                    ConnectionStatus::Connecting => "Connecting".to_owned(),
+                    ConnectionStatus::Failed(_) => "Fault".to_owned(),
+                    ConnectionStatus::Disconnected => "Disconnected".to_owned(),
+                },
+                None,
+                gateway_tone,
                 kit,
-            ))
-            .child(
-                line(connection_status(state), kit)
-                    .key("connection-status")
-                    .role("status"),
+            )),
+            Some(ui_components::status_pill(
+                state.connection.deployment_label().to_owned(),
+                None,
+                StatusTone::Neutral,
+                kit,
+            )),
+            kit,
+        ))
+        .child(
+            line(connection_status(state), kit)
+                .key("connection-status")
+                .role("status"),
+        );
+    if state.is_local_backend() {
+        gateway_body = gateway_body.child(
+            quiet(
+                format!("Private 0700 state dir: {}", state.local_state_dir_label()),
+                kit,
             )
-            .children((!state.connected()).then(|| {
-                ActionButton::new("Setup Gateway")
-                    .key("workstation-setup-gateway")
-                    .icon(&icons::KEY)
-                    .finish(MetalFinish::GoldCta)
-                    .on_press(|state: &mut State| state.setup_gateway = true)
-                    .build(kit, preferences, pointer_ref)
-            }))
-            .children(
-                state
-                    .connected()
-                    .then(|| crate::readiness_cards::checks(state, preferences, kit)),
-            ),
+            .key("workstation-local-state-dir"),
+        );
+        if let Some(diagnostics) = local_runtime_diagnostics(state, preferences, kit) {
+            gateway_body = gateway_body.child(diagnostics);
+        }
+        if state.connected() {
+            if let Some(capabilities) = &state.connection.capabilities {
+                gateway_body =
+                    gateway_body.child(local_capabilities_summary(capabilities, preferences, kit));
+            }
+            gateway_body = gateway_body.child(
+                ActionButton::new("Stop Local Backend")
+                    .key("workstation-stop-local-backend")
+                    .finish(MetalFinish::Gunmetal)
+                    .disabled(state.local_backend.stopping)
+                    .on_press(|state: &mut State| state.stop_local_backend())
+                    .build(kit, preferences, pointer_ref),
+            );
+        }
+    }
+    if !state.connected() {
+        gateway_body = gateway_body.child(
+            ActionButton::new("Setup Gateway")
+                .key("workstation-setup-gateway")
+                .icon(&icons::KEY)
+                .finish(MetalFinish::GoldCta)
+                .on_press(|state: &mut State| state.setup_gateway = true)
+                .build(kit, preferences, pointer_ref),
+        );
+    } else {
+        gateway_body = gateway_body.child(crate::readiness_cards::checks(state, preferences, kit));
+    }
+    let gateway = material::luminous_card(
+        gateway_body,
         gateway_tone,
         false,
         preferences,
@@ -2257,5 +2792,92 @@ mod tests {
                 assert!(rt.state.backend.selected_job.is_none());
             }
         }
+    }
+
+    #[test]
+    fn setup_backend_mode_switches_between_remote_and_local_at_640x480_1280x800_and_1440x860() {
+        use fleetworks_workstation::native::BackendKind;
+        for size in [(640.0, 480.0), (1280.0, 800.0), (1440.0, 860.0)] {
+            let mut rt = runtime(Page::Workstation, true, size);
+            let mut clock = 0.0;
+            rt.frame(clock);
+            assert!(rt.find("backend-mode").is_some());
+            assert!(rt.find("backend-mode-remote").is_some());
+            assert!(rt.find("backend-mode-local").is_some());
+            assert!(rt.find("gateway-origin").is_some());
+            assert!(rt.find("connect").is_some());
+            assert!(rt.find("local-backend-card").is_none());
+
+            click_within(&mut rt, "backend-mode-local", size, &mut clock);
+            assert_eq!(rt.state.backend_kind, BackendKind::Local);
+            assert!(rt.find("gateway-origin").is_none());
+            assert!(rt.find("local-backend-card").is_some());
+            assert!(rt.find("local-state-dir").is_some());
+            assert!(rt.find("local-binary-status").is_some());
+            assert!(rt.find("connect-local").is_some());
+            assert!(rt.find("switch-remote-gateway").is_some());
+
+            // Verify keyboard focus and viewport fit for local mode controls.
+            rt.update(|_, tx| tx.focus("connect-local", true));
+            clock += 1.0 / 60.0;
+            rt.frame(clock);
+            let (cx, cy) = rt.find("connect-local").expect("connect-local coordinates");
+            assert!(
+                (0.0..size.0).contains(&cx) && (0.0..size.1).contains(&cy),
+                "connect-local ({cx}, {cy}) outside viewport {size:?}"
+            );
+
+            click_within(&mut rt, "switch-remote-gateway", size, &mut clock);
+            assert_eq!(rt.state.backend_kind, BackendKind::Remote);
+            assert!(rt.find("gateway-origin").is_some());
+            assert!(rt.find("local-backend-card").is_none());
+        }
+    }
+
+    #[test]
+    fn local_connected_setup_and_status_render_capability_warnings_and_pressure_alert() {
+        use fleetworks_contracts::capabilities::Capabilities;
+        use fleetworks_contracts::capabilities::CONNECT_REGISTRY_FEATURE;
+        use fleetworks_workstation::native::BackendKind;
+
+        let mut base = crate::tests::registered_fixture();
+        base.backend_kind = BackendKind::Local;
+        base.connection.origin = rune::TextEdit::new("local://embedded");
+        base.local_backend.state_dir = Some(std::path::PathBuf::from("/private/tmp/local-state"));
+        base.local_backend.pressure_paused = Some("memory_pressure".into());
+        let mut caps = Capabilities::default();
+        caps.deployment_id = Some("local-deployment".into());
+        caps.features = vec![CONNECT_REGISTRY_FEATURE.into()];
+        base.connection.capabilities = Some(caps);
+
+        // Setup Gateway view in connected Local Embedded mode.
+        base.setup_gateway = true;
+        let mut setup_rt = Runtime::new(
+            base,
+            app::view,
+            (1280.0, 800.0),
+            Env {
+                system_dark: true,
+                scale: 1.0,
+            },
+        );
+        setup_rt.frame(0.0);
+        assert!(setup_rt.find("local-backend-card").is_some());
+        assert!(setup_rt.find("local-capabilities-card").is_some());
+        assert!(setup_rt.find("local-capability-warnings").is_some());
+        assert!(setup_rt.find("local-pressure-paused-alert").is_some());
+        assert!(setup_rt.find("stop-local-backend").is_some());
+        let setup_tree = setup_rt.accessibility_json().to_string();
+        assert!(setup_tree.contains("Optional capabilities unavailable"));
+        assert!(setup_tree.contains("memory_pressure"));
+
+        // Workstation Status view in connected Local Embedded mode.
+        setup_rt.update(|state, _| state.setup_gateway = false);
+        setup_rt.frame(1.0 / 60.0);
+        assert!(setup_rt.find("gateway-backend-card").is_some());
+        assert!(setup_rt.find("workstation-local-state-dir").is_some());
+        assert!(setup_rt.find("workstation-stop-local-backend").is_some());
+        assert!(setup_rt.find("local-pressure-paused-alert").is_some());
+        assert!(setup_rt.find("local-capability-warnings").is_some());
     }
 }

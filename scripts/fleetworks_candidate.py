@@ -807,26 +807,49 @@ def _validate_extracted_companion(app, manifest, target, relative_exe, *, runner
         raise ValueError("Companion backend library dependencies do not match manifest")
 
 
+def _redact_diagnostic_text(text):
+    """Mask bearer tokens and credential key-value assignments from captured output."""
+    redacted = re.sub(r"(?i)(authorization\s*:\s*(?:bearer|basic)\s+)\S+", r"\1[REDACTED]", text)
+    redacted = re.sub(r"(?i)(\bbearer\s+)[A-Za-z0-9._~+/=-]+", r"\1[REDACTED]", redacted)
+    return re.sub(r"(?i)((?:api[_-]?token|token|password|secret)\s*[=:]\s*)\S+", r"\1[REDACTED]", redacted)
+
+
 def _diagnostic_foreground_launch(executable, app, *, startup_probe_seconds=DIAGNOSTIC_STARTUP_PROBE_SECONDS, popen=None):
-    """Run the packaged binary directly with `--diagnostic` and fail closed on early crash."""
-    proc = (popen or subprocess.Popen)(
-        [str(executable), "--diagnostic"],
-        cwd=Path(app),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    """Run the packaged binary directly with `--diagnostic`, separating process start from window readiness."""
+    try:
+        proc = (popen or subprocess.Popen)(
+            [str(executable), "--diagnostic"],
+            cwd=Path(app),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as error:
+        raise ValueError(
+            f"Diagnostic foreground launch failed (process_started=false, window_readiness_observed=false): {error}"
+        ) from error
     deadline = time.monotonic() + max(0.0, float(startup_probe_seconds))
     while proc.poll() is None and time.monotonic() < deadline:
         time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
     rc = proc.poll()
     if rc is not None:
         out, err = proc.communicate(timeout=2)
-        excerpt = ((err or b"") + b"\n" + (out or b"")).decode("utf-8", errors="replace").strip()[-4000:]
+        combined = ((err or b"") + b"\n" + (out or b"")).decode("utf-8", errors="replace")
+        excerpt = _redact_diagnostic_text(combined).strip()[-4000:]
         if rc != 0:
-            raise ValueError(f"Diagnostic foreground launch exited early ({rc}): {excerpt or 'no stderr captured'}")
-        return f"Diagnostic foreground launch exited cleanly (0){f': {excerpt}' if excerpt else '.'}"
-    return f"Launched native executable in foreground diagnostic mode (pid={proc.pid}); startup probe remained healthy."
+            raise ValueError(
+                f"Diagnostic foreground launch exited early ({rc}; process_started=true, pid={proc.pid}, "
+                f"window_readiness_observed=false): {excerpt or 'no stderr captured'}"
+            )
+        return (
+            f"Diagnostic foreground launch exited cleanly (0; process_started=true, pid={proc.pid}, "
+            f"window_readiness_observed=false: exited before window readiness observation)"
+            f"{f': {excerpt}' if excerpt else '.'}"
+        )
+    return (
+        f"Launched native executable in foreground diagnostic mode (process_started=true, pid={proc.pid}, "
+        f"window_readiness_observed=false: startup probe checks process survival only, not GUI window readiness)."
+    )
 
 
 def open_native(app, info, target, *, diagnostic=False, startup_probe_seconds=DIAGNOSTIC_STARTUP_PROBE_SECONDS,

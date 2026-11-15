@@ -213,6 +213,12 @@ jobs:
           python3 scripts/fleetworks_local_backend_smoke.py \
             --app "$extracted/Fleetworks-linux-x86_64" \
             --output "${{ runner.temp }}/linux-native-evidence/local-backend-smoke-$LINUX_TARGET.json"
+          if [[ "${{ inputs.profile }}" == debug ]]; then
+            ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1 \
+              FLEETWORKS_PARITY_REPORT_PATH="${{ runner.temp }}/linux-native-evidence/http-ipc-parity-$LINUX_TARGET.json" \
+              python3 scripts/agent_cargo.py test --locked --target "$LINUX_TARGET" \
+              -p argos-api-host --features embedded --test http_ipc_parity -- --nocapture --test-threads=1
+          fi
 
       - name: Upload Linux native candidate archive
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

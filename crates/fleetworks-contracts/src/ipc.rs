@@ -717,6 +717,107 @@ impl fmt::Debug for IpcOperation {
 }
 
 impl IpcOperation {
+    /// Complete canonical list of [`IpcOperation`] names for parity coverage checks.
+    pub const ALL_OPERATION_NAMES: &'static [&'static str] = &[
+        "ready",
+        "capabilities",
+        "workstation_readiness",
+        "host_metrics",
+        "datasets_list",
+        "tools_list",
+        "models_defaults",
+        "profile_read",
+        "actors_search",
+        "actor_detail",
+        "articles_list",
+        "jobs_list",
+        "job_detail",
+        "tool_result",
+        "logs_page",
+        "job_logs",
+        "logs_follow",
+        "logs_export",
+        "workstation_request_detail",
+        "cycle_history",
+        "classifier_candidate_detail",
+        "classifier_activation_result",
+        "registration_ensure",
+        "registration_context",
+        "registration_rebind",
+        "registration_retire",
+        "web_session_create",
+        "atlas_cycle_submit",
+        "cycle_delete",
+        "tool_run",
+        "job_retry",
+        "job_cancel",
+        "dataset_upload_start",
+        "dataset_upload_chunk",
+        "dataset_upload_finish",
+        "seed_actors",
+        "train_classifier",
+        "reindex_actors",
+        "classifier_activate",
+        "model_role_set",
+        "profile_account_upsert",
+        "profile_account_delete",
+        "profile_tools_set",
+        "configuration_export",
+        "configuration_import",
+    ];
+
+    /// Return the stable canonical snake_case operation name for this [`IpcOperation`].
+    #[must_use]
+    pub const fn operation_name(&self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Capabilities => "capabilities",
+            Self::WorkstationReadiness => "workstation_readiness",
+            Self::HostMetrics => "host_metrics",
+            Self::DatasetsList => "datasets_list",
+            Self::ToolsList => "tools_list",
+            Self::ModelsDefaults => "models_defaults",
+            Self::ProfileRead => "profile_read",
+            Self::ActorsSearch(_) => "actors_search",
+            Self::ActorDetail(_) => "actor_detail",
+            Self::ArticlesList(_) => "articles_list",
+            Self::JobsList(_) => "jobs_list",
+            Self::JobDetail(_) => "job_detail",
+            Self::ToolResult(_) => "tool_result",
+            Self::LogsPage(_) => "logs_page",
+            Self::JobLogs(_) => "job_logs",
+            Self::LogsFollow(_) => "logs_follow",
+            Self::LogsExport(_) => "logs_export",
+            Self::WorkstationRequestDetail(_) => "workstation_request_detail",
+            Self::CycleHistory(_) => "cycle_history",
+            Self::ClassifierCandidateDetail(_) => "classifier_candidate_detail",
+            Self::ClassifierActivationResult(_) => "classifier_activation_result",
+            Self::RegistrationEnsure(_) => "registration_ensure",
+            Self::RegistrationContext(_) => "registration_context",
+            Self::RegistrationRebind(_) => "registration_rebind",
+            Self::RegistrationRetire(_) => "registration_retire",
+            Self::WebSessionCreate(_) => "web_session_create",
+            Self::AtlasCycleSubmit(_) => "atlas_cycle_submit",
+            Self::CycleDelete(_) => "cycle_delete",
+            Self::ToolRun(_) => "tool_run",
+            Self::JobRetry(_) => "job_retry",
+            Self::JobCancel(_) => "job_cancel",
+            Self::DatasetUploadStart(_) => "dataset_upload_start",
+            Self::DatasetUploadChunk { .. } => "dataset_upload_chunk",
+            Self::DatasetUploadFinish { .. } => "dataset_upload_finish",
+            Self::SeedActors(_) => "seed_actors",
+            Self::TrainClassifier(_) => "train_classifier",
+            Self::ReindexActors(_) => "reindex_actors",
+            Self::ClassifierActivate(_) => "classifier_activate",
+            Self::ModelRoleSet(_) => "model_role_set",
+            Self::ProfileAccountUpsert(_) => "profile_account_upsert",
+            Self::ProfileAccountDelete(_) => "profile_account_delete",
+            Self::ProfileToolsSet(_) => "profile_tools_set",
+            Self::ConfigurationExport { .. } => "configuration_export",
+            Self::ConfigurationImport { .. } => "configuration_import",
+        }
+    }
+
     /// Map this typed IPC operation to its corresponding logical API method and route.
     #[must_use]
     pub fn into_typed_route(&self) -> (IpcMethod, &'static str) {
@@ -2254,6 +2355,24 @@ mod tests {
             IpcOperation::from_post("/api/v1/not-a-route", &serde_json::json!({})),
             Err(ClientError::InvalidRoute)
         );
+    }
+
+    #[test]
+    fn all_operation_names_are_unique_and_non_empty() {
+        let mut seen = std::collections::BTreeSet::new();
+        for &name in IpcOperation::ALL_OPERATION_NAMES {
+            assert!(!name.is_empty());
+            assert!(
+                seen.insert(name),
+                "duplicate IpcOperation name in ALL_OPERATION_NAMES: {name}"
+            );
+        }
+        assert_eq!(
+            IpcOperation::Ready.operation_name(),
+            "ready",
+            "operation_name must stay aligned with ALL_OPERATION_NAMES"
+        );
+        assert!(seen.contains(&IpcOperation::Ready.operation_name()));
     }
 
     #[tokio::test]

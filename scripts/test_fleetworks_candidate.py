@@ -856,11 +856,15 @@ class LinuxNativeCandidateTests(unittest.TestCase):
 
         def fail_popen(cmd, **_kwargs):
             popen_cmds.append(cmd)
-            return FakeProc(101, stderr=b"early_crash_marker: missing display backend\n")
+            return FakeProc(
+                101,
+                stderr=b"early_crash_marker: Authorization: Bearer topsecret-abc password=hunter2\n",
+                stdout=b"api_token=tok_xyz_999\n",
+            )
 
         with mock.patch("sys.stderr", io.StringIO()), \
              mock.patch.dict(os.environ, {"DISPLAY": ":0"}, clear=True):
-            with self.assertRaisesRegex(ValueError, "early_crash_marker"):
+            with self.assertRaises(ValueError) as early_ctx:
                 open_native(
                     bundle, info, "x86_64-unknown-linux-gnu",
                     diagnostic=True, startup_probe_seconds=0.01,
@@ -868,6 +872,14 @@ class LinuxNativeCandidateTests(unittest.TestCase):
                     preflight=lambda: {"display": "x11", "dbus_session": False, "vulkan": True},
                     popen=fail_popen,
                 )
+        err_msg = str(early_ctx.exception)
+        self.assertIn("early_crash_marker", err_msg)
+        self.assertIn("process_started=true", err_msg)
+        self.assertIn("window_readiness_observed=false", err_msg)
+        self.assertNotIn("topsecret-abc", err_msg)
+        self.assertNotIn("hunter2", err_msg)
+        self.assertNotIn("tok_xyz_999", err_msg)
+        self.assertIn("[REDACTED]", err_msg)
         self.assertEqual(popen_cmds, [[str(bundle / "bin" / NATIVE_BINARY), "--diagnostic"]])
 
         with mock.patch("sys.stderr", io.StringIO()), \
@@ -884,10 +896,24 @@ class LinuxNativeCandidateTests(unittest.TestCase):
                 diagnostic=True, startup_probe_seconds=0.01,
                 runner=lambda cmd, **_: subprocess.CompletedProcess(cmd, 0, "", ""),
                 preflight=lambda: {"display": "x11", "dbus_session": False, "vulkan": True},
-                popen=lambda *_a, **_kw: FakeProc(0, stderr=b"diagnostic ok\n"),
+                popen=lambda *_a, **_kw: FakeProc(0, stderr=b"diagnostic ok Bearer secret-clean\n"),
             )
+            with self.assertRaisesRegex(ValueError, "process_started=false, window_readiness_observed=false"):
+                open_native(
+                    bundle, info, "x86_64-unknown-linux-gnu",
+                    diagnostic=True, startup_probe_seconds=0.01,
+                    runner=lambda cmd, **_: subprocess.CompletedProcess(cmd, 0, "", ""),
+                    preflight=lambda: {"display": "x11", "dbus_session": False, "vulkan": True},
+                    popen=mock.Mock(side_effect=OSError("exec format error")),
+                )
+        self.assertIn("process_started=true", healthy)
         self.assertIn("pid=777", healthy)
-        self.assertIn("exited cleanly (0): diagnostic ok", clean_exit)
+        self.assertIn("window_readiness_observed=false", healthy)
+        self.assertIn("exited cleanly (0", clean_exit)
+        self.assertIn("process_started=true", clean_exit)
+        self.assertIn("window_readiness_observed=false", clean_exit)
+        self.assertNotIn("secret-clean", clean_exit)
+        self.assertIn("[REDACTED]", clean_exit)
 
 
 if __name__ == "__main__":

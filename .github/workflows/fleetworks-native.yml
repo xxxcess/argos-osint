@@ -223,6 +223,10 @@ jobs:
           python3 scripts/fleetworks_local_backend_smoke.py \
             --app "$extracted/Fleetworks.app" \
             --output "$evidence/local-backend-smoke-$NATIVE_TARGET.json"
+          ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1 \
+            FLEETWORKS_PARITY_REPORT_PATH="$evidence/http-ipc-parity-$NATIVE_TARGET.json" \
+            python3 scripts/agent_cargo.py test --locked --target "$NATIVE_TARGET" \
+            -p argos-api-host --features embedded --test http_ipc_parity -- --nocapture --test-threads=1
       - name: Package the trusted versioned release app
         if: inputs.release-version != ''
         id: package

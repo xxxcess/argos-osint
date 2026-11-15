@@ -107,21 +107,21 @@ For each new or updated `spec implementation: <feature name>` PR, spawn a dedica
      node scripts/release_check.mjs message --file <msg_file>
      node scripts/release_check.mjs versions
      ```
-5. **Commit, push & report back**:
-   - Stage only the exact changed files (`git add <paths...>`, never `git add .`).
-   - Commit and push to `origin HEAD:<headRefName>`.
-   - Return the new `headRefOid` (`pushed_sha`), changed file list, and exact test results so the parent records `status: "ci_pending"` in `.agent-scratch/gsd-state.json` and monitors the resulting CI run.
+5. **Commit & push regularly as verified slices progress**:
+   - Do not hold all edits local until the very end of a multi-part spec: commit and push verified milestone slices (`git add <paths...>`, never `git add .`, push to `origin HEAD:<headRefName>`) regularly as packages/tests pass so PR reviewers, CI, and Cursor see steady incremental progress.
+   - Return each pushed `headRefOid` (`pushed_sha`), changed file list, and exact test results so the parent records `status: "ci_pending"` in `.agent-scratch/gsd-state.json` and monitors the resulting CI run.
 
-### 3. Dispatch fixes for Cursor bot (`cursor[bot]`) security findings
+### 3. Resolve Cursor bot security findings & well-scoped PR implementation comments
 
-On every cycle, inspect `cursor_security_findings` reported by `gsd_poll.py` (which scans active, non-stale inline review comments, PR reviews, and issue comments from `cursor[bot]`):
+On every cycle, inspect `cursor_security_findings` **and** `pr_feedback_comments` reported by `gsd_poll.py` (which scans active, non-stale inline review comments, PR reviews, and issue comments):
 
-1. For each PR with unaddressed findings (`unaddressed: true`), dispatch or resume that PR's subagent (`invoke_subagent` or `send_message`) in `.agent-scratch/worktrees/pr-<num>`:
-   - Inspect every cited `path`, `line`, and security explanation in detail.
-   - Verify the exploit/vulnerability path in the actual codebase — never blindly suppress warnings or weaken validation.
-   - Implement a root-cause security fix preserving performance and scalability, and add a focused regression test proving the fix where feasible.
+1. For each PR with unaddressed Cursor security findings (`unaddressed_cursor_count > 0`) or unaddressed reviewer/implementation feedback comments (`unaddressed_feedback_count > 0`), dispatch or resume that PR's subagent (`invoke_subagent` or `send_message`) in `.agent-scratch/worktrees/pr-<num>`:
+   - Inspect every cited `path`, `line`, security explanation, and reviewer request in detail.
+   - For security findings, verify the exploit/vulnerability path in the actual codebase — never blindly suppress warnings or weaken validation.
+   - For reviewer/implementation feedback, resolve all well-scoped actionable items cleanly within PR boundaries (and explicitly note out-of-scope suggestions rather than expanding scope recklessly).
+   - Implement clean root-cause fixes preserving performance and scalability, and add a focused regression test proving each fix where feasible.
 2. Validate affected tests + commit/version policy, commit only exact changed files, and push to `origin HEAD:<headRefName>`.
-3. Record each resolved finding's `uid` (e.g., `review_comment:4573016625`) in `addressed_cursor_comments` in `.agent-scratch/gsd-state.json` (and reply concisely on the PR/comment referencing the fix commit SHA if helpful). Wait for Cursor's next review pass on the new commit to verify no new findings remain.
+3. Record resolved IDs in `addressed_cursor_comments` / `addressed_feedback_comments` in `.agent-scratch/gsd-state.json` (and reply concisely on the PR/comment referencing the fix commit SHA when appropriate). Wait for Cursor/CI on the new commit to verify no new findings remain.
 
 ### 4. Babysit open PR CI checks & backend container logs
 
@@ -133,7 +133,7 @@ For each tracked open PR (both regular open PRs and pushed `spec implementation:
    - Distinguish **transient runner/infra issues** (e.g. runner lost communication, macOS capacity timeout, GitHub API 502/rate limit) from **real code/lint/test/service-log failures**.
    - For transient failures: rerun failed jobs with `gh run rerun <run_id> -R xxxcess/argos-osint --failed` (at most twice per commit SHA before flagging as blocked).
    - For real failures or backend container errors / actionable semantic warnings: dispatch or wake that PR's subagent in `.agent-scratch/worktrees/pr-<num>` to fix the root cause cleanly, verify with the affected local test, validate commit message & versions, and push back to `origin HEAD:<headRefName>`.
-4. **All checks green and `unaddressed_cursor_count == 0` and no unresolved container errors/actionable warnings**:
+4. **All checks green, `unaddressed_cursor_count == 0`, `unaddressed_feedback_count == 0`, and no unresolved container errors/actionable warnings**:
    - Mark the PR's current `headRefOid` as `"complete"` in `.agent-scratch/gsd-state.json`.
    - **Do NOT merge the PR.** Leave merging to the user and note that the PR is green and ready for review/merge.
 

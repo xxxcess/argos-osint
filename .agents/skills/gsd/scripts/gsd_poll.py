@@ -16,6 +16,7 @@ SEVERITY_RE = re.compile(r"Severity:\s*([A-Z]+)", re.IGNORECASE)
 STALE_MARKER = "<summary>Stale comment</summary>"
 SKIP_BRANCH_PREFIXES = ("release-please--",)
 CURSOR_LOGINS = {"cursor[bot]", "cursor-bot", "cursor"}
+IGNORE_FEEDBACK_LOGINS = {"github-actions[bot]", "codecov[bot]", "release-please[bot]"}
 
 
 def run_gh(args: list[str]) -> str:
@@ -50,9 +51,15 @@ def is_cursor_author(item: dict) -> bool:
     return login in CURSOR_LOGINS or login.startswith("cursor[bot]")
 
 
-def fetch_cursor_security_findings(repo: str, pr_number: int, addressed_ids: set[str]) -> list[dict]:
-    """Collect active (non-stale) Cursor bot review/security comments for a PR."""
-    findings: list[dict] = []
+def collect_pr_comments(
+    repo: str,
+    pr_number: int,
+    addressed_cursor_ids: set[str],
+    addressed_feedback_ids: set[str],
+) -> tuple[list[dict], list[dict]]:
+    """Collect active Cursor security findings and well-scoped PR feedback in one API pass."""
+    cursor_findings: list[dict] = []
+    feedback_comments: list[dict] = []
     endpoints = (
         ("review_comment", f"repos/{repo}/pulls/{pr_number}/comments"),
         ("review", f"repos/{repo}/pulls/{pr_number}/reviews"),
@@ -60,26 +67,33 @@ def fetch_cursor_security_findings(repo: str, pr_number: int, addressed_ids: set
     )
     for source, endpoint in endpoints:
         for item in gh_json_paginated(endpoint):
-            if not is_cursor_author(item):
-                continue
             body = (item.get("body") or "").strip()
             if not body or STALE_MARKER in body:
                 continue
+            login = ((item.get("user") or {}).get("login") or "").lower()
+            if source == "review" and (item.get("state") or "").upper() == "DISMISSED":
+                continue
             cid = f"{source}:{item.get('id')}"
-            severity_match = SEVERITY_RE.search(body)
-            findings.append({
+            entry = {
                 "uid": cid,
                 "id": item.get("id"),
                 "source": source,
+                "author": (item.get("user") or {}).get("login") or "",
                 "path": item.get("path"),
                 "line": item.get("line") or item.get("original_line"),
                 "commit_id": item.get("commit_id"),
-                "severity": severity_match.group(1).upper() if severity_match else "INFO",
                 "url": item.get("html_url") or "",
-                "unaddressed": cid not in addressed_ids,
                 "body": body,
-            })
-    return findings
+            }
+            if is_cursor_author(item):
+                severity_match = SEVERITY_RE.search(body)
+                entry["severity"] = severity_match.group(1).upper() if severity_match else "INFO"
+                entry["unaddressed"] = cid not in addressed_cursor_ids
+                cursor_findings.append(entry)
+            elif login not in IGNORE_FEEDBACK_LOGINS and not login.endswith("[bot]"):
+                entry["unaddressed"] = cid not in addressed_feedback_ids
+                feedback_comments.append(entry)
+    return cursor_findings, feedback_comments
 
 
 def summarize_checks(rollup: list[dict] | None) -> dict:
@@ -176,7 +190,8 @@ def main() -> int:
         spec_match = SPEC_TITLE_RE.match(title.strip())
         checks = summarize_checks(pr.get("statusCheckRollup"))
         prev = state["prs"].get(num, {})
-        addressed_ids = set(prev.get("addressed_cursor_comments", []))
+        addressed_cursor_ids = set(prev.get("addressed_cursor_comments", []))
+        addressed_feedback_ids = set(prev.get("addressed_feedback_comments", []))
 
         if pr.get("isCrossRepository") or branch.startswith(SKIP_BRANCH_PREFIXES):
             report["skipped_prs"].append({
@@ -187,8 +202,11 @@ def main() -> int:
             })
             continue
 
-        cursor_findings = fetch_cursor_security_findings(args.repo, pr["number"], addressed_ids)
+        cursor_findings, feedback_comments = collect_pr_comments(
+            args.repo, pr["number"], addressed_cursor_ids, addressed_feedback_ids
+        )
         unaddressed_cursor = [f for f in cursor_findings if f["unaddressed"]]
+        unaddressed_feedback = [f for f in feedback_comments if f["unaddressed"]]
 
         entry = {
             "number": pr["number"],
@@ -204,6 +222,8 @@ def main() -> int:
             "pending_checks": len(checks["pending"]),
             "cursor_security_findings": cursor_findings,
             "unaddressed_cursor_count": len(unaddressed_cursor),
+            "pr_feedback_comments": feedback_comments,
+            "unaddressed_feedback_count": len(unaddressed_feedback),
             "tracked_status": prev.get("status", "new"),
             "tracked_sha": prev.get("head_sha"),
             "needs_implementation": bool(
@@ -219,6 +239,7 @@ def main() -> int:
             "kind": "spec_impl" if spec_match else "babysit",
             "last_checks": checks["counts"],
             "last_unaddressed_cursor_count": len(unaddressed_cursor),
+            "last_unaddressed_feedback_count": len(unaddressed_feedback),
         }
 
         if spec_match:

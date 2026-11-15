@@ -48,6 +48,9 @@ ALLOWED_RUSQLITE_PARENTS = ("fleetworks-jobs",)
 MAX_NATIVE_UNPACKED_BYTES = 1024 * 1024 * 1024
 MAX_NATIVE_ARCHIVE_BYTES = 512 * 1024 * 1024
 DIAGNOSTIC_STARTUP_PROBE_SECONDS = 2.0
+DIAGNOSTIC_ECHO_LIMIT = 256 * 1024
+DIAGNOSTIC_TAIL_LIMIT = 8 * 1024
+DIAGNOSTIC_LINE_LIMIT = 8 * 1024
 VERSION_PATTERN = r"([0-9]+)\.([0-9]+)\.([0-9]+)(?:-[A-Za-z0-9.-]+)?(?:\+[A-Za-z0-9.-]+)?"
 ARTIFACT_VERSION_PATTERN = (
     r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
@@ -814,98 +817,142 @@ def _redact_diagnostic_text(text):
     return re.sub(r"(?i)((?:api[_-]?token|token|password|secret)\s*[=:]\s*)\S+", r"\1[REDACTED]", redacted)
 
 
-def _open_diagnostic_logs(log_dir):
-    """Create retained stdout/stderr log files; return (dir, out, err) or None when unavailable.
+class _RedactedDrain:
+    """Drain one child pipe on a thread: redact each line, echo a bounded amount, keep a tail.
 
-    Log setup is best effort so it never becomes another source of launch failure.
+    Nothing is persisted. Reading never stops before EOF, so a child that writes past the echo
+    limit (or past any pipe buffer) cannot stall.
     """
-    try:
-        if log_dir is None:
-            log_dir = tempfile.mkdtemp(prefix="fleetworks-diagnostic-")
-        log_dir = Path(log_dir)
-        log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        handles = []
-        for name in ("stdout.log", "stderr.log"):
-            fd = os.open(log_dir / name, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            handles.append(os.fdopen(fd, "wb"))
-        return log_dir, handles[0], handles[1]
-    except OSError:
-        return None
 
+    def __init__(self, stream, label, sink, echo_limit, tail_limit):
+        self._stream = stream
+        self.label = label
+        self._sink = sink
+        self._echo_left = echo_limit
+        self._tail_limit = tail_limit
+        self._tail = []
+        self._tail_size = 0
+        self.truncated = False
+        self._lock = threading.Lock()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
 
-def _diagnostic_log_excerpt(log_dir, limit):
-    """Read a bounded, redacted tail of the retained logs."""
-    parts = []
-    for name in ("stderr.log", "stdout.log"):
+    def _run(self):
         try:
-            with open(log_dir / name, "rb") as handle:
-                handle.seek(0, os.SEEK_END)
-                handle.seek(max(0, handle.tell() - limit))
-                parts.append(handle.read())
-        except OSError:
-            continue
-    return _redact_diagnostic_text(b"\n".join(parts).decode("utf-8", errors="replace")).strip()[-limit:]
+            while True:
+                raw = self._stream.readline(DIAGNOSTIC_LINE_LIMIT)
+                if not raw:
+                    break
+                line = _redact_diagnostic_text(raw.decode("utf-8", errors="replace"))
+                with self._lock:
+                    self._tail.append(line)
+                    self._tail_size += len(line)
+                    while self._tail_size > self._tail_limit and len(self._tail) > 1:
+                        self._tail_size -= len(self._tail.pop(0))
+                if self._sink is None:
+                    continue
+                if len(line) <= self._echo_left:
+                    self._echo_left -= len(line)
+                    self._sink.write(f"[{self.label}] {line if line.endswith(chr(10)) else line + chr(10)}")
+                    self._sink.flush()
+                elif not self.truncated:
+                    self.truncated = True
+                    self._echo_left = 0
+                    self._sink.write(f"[{self.label}] output above diagnostic limit; still draining, not shown\n")
+                    self._sink.flush()
+        except (OSError, ValueError):
+            pass
+
+    def join(self, timeout):
+        self._thread.join(timeout)
+
+    def tail(self):
+        with self._lock:
+            return "".join(self._tail)
 
 
 def _diagnostic_foreground_launch(executable, app, *, startup_probe_seconds=DIAGNOSTIC_STARTUP_PROBE_SECONDS,
-                                  popen=None, log_dir=None):
-    """Run the packaged binary with `--diagnostic` and probe startup.
+                                  popen=None, sink=None, echo_limit=DIAGNOSTIC_ECHO_LIMIT,
+                                  supervise_seconds=None):
+    """Run the packaged binary with `--diagnostic` in the foreground and supervise it.
 
-    The child writes stdout/stderr straight to retained log files, so it can never block on a
-    full pipe, and errors emitted after the probe window remain on disk. A process that
-    survives the probe is reported as "still running", not "healthy", with the log location.
+    stdout/stderr are drained continuously on threads, redacted line by line, and streamed to
+    `sink` (stderr by default) up to `echo_limit` characters per stream. No raw output is saved.
+    A process that survives the startup probe is reported as "still running", not "healthy",
+    and supervision continues until it exits (or `supervise_seconds` elapses), so a late
+    failure is still reported with a redacted excerpt.
     """
-    logs = _open_diagnostic_logs(log_dir)
-    if logs is None:
-        log_dir, out_handle, err_handle = None, subprocess.DEVNULL, subprocess.DEVNULL
-        log_note = "diagnostic logs unavailable"
-    else:
-        log_dir, out_handle, err_handle = logs
-        log_note = f"diagnostic logs: {log_dir}"
+    sink = sys.stderr if sink is None else sink
     try:
-        try:
-            proc = (popen or subprocess.Popen)(
-                [str(executable), "--diagnostic"],
-                cwd=Path(app),
-                stdin=subprocess.DEVNULL,
-                stdout=out_handle,
-                stderr=err_handle,
-            )
-        except OSError as error:
-            raise ValueError(
-                f"Diagnostic foreground launch failed (process_started=false, window_readiness_observed=false; "
-                f"{log_note}): {error}"
-            ) from error
-    finally:
-        # The child holds its own descriptors; the parent copies are no longer needed.
-        if logs is not None:
-            out_handle.close()
-            err_handle.close()
+        proc = (popen or subprocess.Popen)(
+            [str(executable), "--diagnostic"],
+            cwd=Path(app),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as error:
+        raise ValueError(
+            f"Diagnostic foreground launch failed (process_started=false, window_readiness_observed=false): {error}"
+        ) from error
 
-    deadline = time.monotonic() + max(0.0, float(startup_probe_seconds))
-    while proc.poll() is None and time.monotonic() < deadline:
-        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+    drains = [
+        _RedactedDrain(stream, label, sink, echo_limit, DIAGNOSTIC_TAIL_LIMIT)
+        for stream, label in ((proc.stderr, "stderr"), (proc.stdout, "stdout"))
+        if stream is not None
+    ]
 
-    rc = proc.poll()
+    def excerpt(limit):
+        """Redacted tail with stderr given priority, so a late error is never crowded out."""
+        for drain in drains:
+            drain.join(1.0)
+        tails = {d.label: d.tail().strip() for d in drains}
+        err = tails.get("stderr", "")[-limit:]
+        room = limit - len(err) - 1
+        out = tails.get("stdout", "")[-room:] if room > 0 else ""
+        return "\n".join(part for part in (out, err) if part)
+
+    def wait_until(deadline):
+        while proc.poll() is None and (deadline is None or time.monotonic() < deadline):
+            time.sleep(0.05 if deadline is None else min(0.05, max(0.0, deadline - time.monotonic())))
+        return proc.poll()
+
+    rc = wait_until(time.monotonic() + max(0.0, float(startup_probe_seconds)))
     if rc is not None:
-        excerpt = _diagnostic_log_excerpt(log_dir, 4000) if log_dir is not None else ""
         if rc != 0:
             raise ValueError(
                 f"Diagnostic foreground launch exited early ({rc}; process_started=true, pid={proc.pid}, "
-                f"window_readiness_observed=false; {log_note}): {excerpt or 'no output captured'}"
+                f"window_readiness_observed=false): {excerpt(4000) or 'no output captured'}"
             )
+        text = excerpt(4000)
         return (
             f"Diagnostic foreground launch exited cleanly (0; process_started=true, pid={proc.pid}, "
-            f"window_readiness_observed=false: exited before window readiness observation; {log_note})"
-            f"{f': {excerpt}' if excerpt else '.'}"
+            f"window_readiness_observed=false: exited before window readiness observation)"
+            f"{f': {text}' if text else '.'}"
         )
 
-    excerpt = _diagnostic_log_excerpt(log_dir, 500) if log_dir is not None else ""
-    return (
+    _progress(
         f"Diagnostic foreground launch still running (process_started=true, pid={proc.pid}, "
-        f"window_readiness_observed=false: startup probe confirms process survival, not GUI readiness; "
-        f"later output continues in {log_note})."
-        f"{f' Early output: {excerpt}' if excerpt else ''}"
+        f"window_readiness_observed=false); supervising until it exits"
+    )
+    try:
+        rc = wait_until(None if supervise_seconds is None else time.monotonic() + max(0.0, float(supervise_seconds)))
+    except KeyboardInterrupt:
+        proc.terminate()
+        raise
+    if rc is None:
+        return (
+            f"Diagnostic foreground launch still running (process_started=true, pid={proc.pid}, "
+            f"window_readiness_observed=false: startup probe confirms process survival, not GUI readiness)."
+        )
+    if rc != 0:
+        raise ValueError(
+            f"Diagnostic foreground launch failed after startup ({rc}; process_started=true, pid={proc.pid}, "
+            f"window_readiness_observed=false): {excerpt(4000) or 'no output captured'}"
+        )
+    return (
+        f"Diagnostic foreground launch exited after startup (0; process_started=true, pid={proc.pid}, "
+        f"window_readiness_observed=false)."
     )
 
 

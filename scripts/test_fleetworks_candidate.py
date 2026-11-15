@@ -839,143 +839,133 @@ class LinuxNativeCandidateTests(unittest.TestCase):
     def test_diagnostic_foreground_launch_captures_early_crash_and_healthy_probe(self):
         bundle = Path(self.pack()["app"])
         info = SimpleNamespace(system="Linux", native_target="x86_64-unknown-linux-gnu")
-        log_root = tempfile.TemporaryDirectory()
-        self.addCleanup(log_root.cleanup)
-        tempdir_patch = mock.patch("tempfile.tempdir", log_root.name)
-        tempdir_patch.start()
-        self.addCleanup(tempdir_patch.stop)
 
         class FakeProc:
-            def __init__(self, rc, err_data=b"", out_data=b"", **popen_kwargs):
+            def __init__(self, rc, err_data=b"", out_data=b"", exit_after=None, later_rc=None):
                 self.pid = 777
                 self._rc = rc
-                # Mimic a child writing to the descriptors the probe hands it.
-                for key, data in (("stdout", out_data), ("stderr", err_data)):
-                    handle = popen_kwargs.get(key)
-                    if data and hasattr(handle, "write"):
-                        handle.write(data)
-                        handle.flush()
+                self._later_rc = later_rc
+                self._exit_at = None if exit_after is None else time.monotonic() + exit_after
+                self.stdout = io.BytesIO(out_data)
+                self.stderr = io.BytesIO(err_data)
 
             def poll(self):
+                if self._exit_at is not None and time.monotonic() >= self._exit_at:
+                    return self._later_rc
                 return self._rc
 
         popen_cmds = []
 
-        def fail_popen(cmd, **kwargs):
+        def fail_popen(cmd, **_kwargs):
             popen_cmds.append(cmd)
             return FakeProc(
                 101,
                 err_data=b"early_crash_marker: Authorization: Bearer topsecret-abc password=hunter2\n",
                 out_data=b"api_token=tok_xyz_999\n",
-                **kwargs,
             )
 
-        with mock.patch("sys.stderr", io.StringIO()), \
+        def launch(popen):
+            return open_native(
+                bundle, info, "x86_64-unknown-linux-gnu",
+                diagnostic=True, startup_probe_seconds=0.01,
+                runner=lambda cmd, **_: subprocess.CompletedProcess(cmd, 0, "", ""),
+                preflight=lambda: {"display": "x11", "dbus_session": False, "vulkan": True},
+                popen=popen,
+            )
+
+        early_stderr = io.StringIO()
+        with mock.patch("sys.stderr", early_stderr), \
              mock.patch.dict(os.environ, {"DISPLAY": ":0"}, clear=True):
             with self.assertRaises(ValueError) as early_ctx:
-                open_native(
-                    bundle, info, "x86_64-unknown-linux-gnu",
-                    diagnostic=True, startup_probe_seconds=0.01,
-                    runner=lambda cmd, **_: subprocess.CompletedProcess(cmd, 0, "", ""),
-                    preflight=lambda: {"display": "x11", "dbus_session": False, "vulkan": True},
-                    popen=fail_popen,
-                )
+                launch(fail_popen)
         err_msg = str(early_ctx.exception)
         self.assertIn("early_crash_marker", err_msg)
         self.assertIn("process_started=true", err_msg)
         self.assertIn("window_readiness_observed=false", err_msg)
-        self.assertNotIn("topsecret-abc", err_msg)
-        self.assertNotIn("hunter2", err_msg)
-        self.assertNotIn("tok_xyz_999", err_msg)
+        for secret in ("topsecret-abc", "hunter2", "tok_xyz_999"):
+            self.assertNotIn(secret, err_msg)
+            self.assertNotIn(secret, early_stderr.getvalue())
         self.assertIn("[REDACTED]", err_msg)
         self.assertEqual(popen_cmds, [[str(bundle / "bin" / NATIVE_BINARY), "--diagnostic"]])
 
-        with mock.patch("sys.stderr", io.StringIO()), \
+        healthy_stderr = io.StringIO()
+        with mock.patch("sys.stderr", healthy_stderr), \
              mock.patch.dict(os.environ, {"DISPLAY": ":0"}, clear=True):
-            healthy = open_native(
-                bundle, info, "x86_64-unknown-linux-gnu",
-                diagnostic=True, startup_probe_seconds=0.01,
-                runner=lambda cmd, **_: subprocess.CompletedProcess(cmd, 0, "", ""),
-                preflight=lambda: {"display": "x11", "dbus_session": False, "vulkan": True},
-                popen=lambda *_a, **_kw: FakeProc(None),
-            )
-            clean_exit = open_native(
-                bundle, info, "x86_64-unknown-linux-gnu",
-                diagnostic=True, startup_probe_seconds=0.01,
-                runner=lambda cmd, **_: subprocess.CompletedProcess(cmd, 0, "", ""),
-                preflight=lambda: {"display": "x11", "dbus_session": False, "vulkan": True},
-                popen=lambda *_a, **kw: FakeProc(0, err_data=b"diagnostic ok Bearer secret-clean\n", **kw),
-            )
+            healthy = launch(lambda *_a, **_kw: FakeProc(None, exit_after=0.2, later_rc=0))
+            clean_exit = launch(lambda *_a, **_kw: FakeProc(0, err_data=b"diagnostic ok Bearer secret-clean\n"))
             with self.assertRaisesRegex(ValueError, "process_started=false, window_readiness_observed=false"):
-                open_native(
-                    bundle, info, "x86_64-unknown-linux-gnu",
-                    diagnostic=True, startup_probe_seconds=0.01,
-                    runner=lambda cmd, **_: subprocess.CompletedProcess(cmd, 0, "", ""),
-                    preflight=lambda: {"display": "x11", "dbus_session": False, "vulkan": True},
-                    popen=mock.Mock(side_effect=OSError("exec format error")),
-                )
-        self.assertIn("process_started=true", healthy)
-        self.assertIn("pid=777", healthy)
+                launch(mock.Mock(side_effect=OSError("exec format error")))
+        self.assertIn("still running (process_started=true, pid=777", healthy_stderr.getvalue())
+        self.assertIn("exited after startup (0; process_started=true, pid=777", healthy)
         self.assertIn("window_readiness_observed=false", healthy)
         self.assertIn("exited cleanly (0", clean_exit)
         self.assertIn("process_started=true", clean_exit)
         self.assertIn("window_readiness_observed=false", clean_exit)
         self.assertNotIn("secret-clean", clean_exit)
+        self.assertNotIn("secret-clean", healthy_stderr.getvalue())
         self.assertIn("[REDACTED]", clean_exit)
 
-    def test_diagnostic_launch_real_child_cannot_block_and_keeps_delayed_errors(self):
+    def test_diagnostic_launch_real_child_cannot_stall_persists_nothing_and_reports_late_failure(self):
         from fleetworks_candidate import _diagnostic_foreground_launch
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             child = tmp / "chatty-child"
-            # Writes ~256 KiB (well past a 64 KiB pipe buffer), then errors after the probe window.
+            # ~320 KiB of stdout (past any pipe buffer and the echo limit) carrying a synthetic
+            # credential, then a late error after the startup probe window.
             child.write_text(
                 f"#!{sys.executable}\n"
                 "import sys, time\n"
-                "sys.stdout.write('x' * 262144)\n"
+                "for _ in range(4000):\n"
+                "    sys.stdout.write('line api_token=synthetic-cred-123 ' + 'x' * 40 + '\\n')\n"
                 "sys.stdout.flush()\n"
-                "sys.stderr.write('started token=early-secret\\n')\n"
+                "sys.stderr.write('started Authorization: Bearer synthetic-bearer-456\\n')\n"
                 "sys.stderr.flush()\n"
                 "time.sleep(0.6)\n"
-                "sys.stderr.write('delayed_error_marker\\n')\n"
+                "sys.stderr.write('late_failure_marker password=synthetic-pass-789\\n')\n"
                 "sys.stderr.flush()\n"
                 "sys.exit(3)\n"
             )
             child.chmod(0o755)
-            log_dir = tmp / "logs"
+            sink = io.StringIO()
             started = time.monotonic()
-            message = _diagnostic_foreground_launch(child, tmp, startup_probe_seconds=0.3, log_dir=log_dir)
-            self.assertLess(time.monotonic() - started, 5)
-            self.assertIn("still running", message)
-            self.assertIn(str(log_dir), message)
-            self.assertNotIn("early-secret", message)
-            deadline = time.monotonic() + 10
-            while "delayed_error_marker" not in (log_dir / "stderr.log").read_text() and time.monotonic() < deadline:
-                time.sleep(0.05)
-            self.assertIn("delayed_error_marker", (log_dir / "stderr.log").read_text())
-            self.assertEqual((log_dir / "stdout.log").stat().st_size, 262144)
+            with mock.patch("sys.stderr", io.StringIO()) as progress:
+                with self.assertRaises(ValueError) as ctx:
+                    _diagnostic_foreground_launch(
+                        child, tmp, startup_probe_seconds=0.3, sink=sink, echo_limit=4096,
+                        supervise_seconds=20,
+                    )
+            self.assertLess(time.monotonic() - started, 15)
+            message = str(ctx.exception)
+            self.assertIn("failed after startup (3", message)
+            self.assertIn("late_failure_marker", message)
+            self.assertIn("still running", progress.getvalue())
+            self.assertIn("output above diagnostic limit", sink.getvalue())
+            self.assertLessEqual(len(sink.getvalue()), 3 * 4096 + 512)
+            for secret in ("synthetic-cred-123", "synthetic-bearer-456", "synthetic-pass-789"):
+                self.assertNotIn(secret, message)
+                self.assertNotIn(secret, sink.getvalue())
+            # No diagnostic files are written anywhere under the launch directory.
+            self.assertEqual(sorted(p.name for p in tmp.iterdir()), ["chatty-child"])
 
-    def test_diagnostic_launch_survives_unavailable_log_dir(self):
+    def test_diagnostic_launch_reports_still_running_when_supervision_window_ends(self):
         from fleetworks_candidate import _diagnostic_foreground_launch
 
-        with tempfile.TemporaryDirectory() as tmp:
-            blocker = Path(tmp) / "not-a-dir"
-            blocker.write_text("")
+        class Proc:
+            pid = 42
+            stdout = io.BytesIO(b"")
+            stderr = io.BytesIO(b"")
 
-            class Proc:
-                pid = 42
+            def poll(self):
+                return None
 
-                def poll(self):
-                    return None
-
+        with mock.patch("sys.stderr", io.StringIO()):
             message = _diagnostic_foreground_launch(
-                Path(tmp) / "bin", tmp, startup_probe_seconds=0.0,
-                popen=lambda *_a, **_kw: Proc(), log_dir=blocker / "logs",
+                Path("bin"), ".", startup_probe_seconds=0.0, sink=io.StringIO(),
+                popen=lambda *_a, **_kw: Proc(), supervise_seconds=0.0,
             )
-        self.assertIn("still running", message)
-        self.assertIn("diagnostic logs unavailable", message)
-
+        self.assertIn("still running (process_started=true, pid=42", message)
+        self.assertIn("not GUI readiness", message)
 
 if __name__ == "__main__":
     unittest.main()

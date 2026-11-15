@@ -1023,3 +1023,245 @@ async fn accepted_actor_reindex_recovers_job_id_across_restart_without_duplicate
         Load::Ready(r) if r.job_id == "job-accepted-restart-1"
     ));
 }
+
+#[tokio::test]
+async fn exact_retry_auth_rejection_preserves_journal_for_read_only_reconciliation() {
+    use fleetworks_contracts::context::JobOrigin;
+    use fleetworks_contracts::context::OriginSource;
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+
+    let temporary = tempfile::tempdir().expect("temporary home");
+    let home_path = temporary.path().canonicalize().expect("physical home");
+    let container = Arc::new(
+        fleetworks_workstation::native::NativeContainer::open_settings(&home_path)
+            .expect("settings installation"),
+    );
+
+    let receipt = RegistrationReceipt::new(
+        "synthetic-deployment".into(),
+        "synthetic-workstation".into(),
+        "synthetic-registration".into(),
+        None,
+        1,
+    );
+    let context =
+        RegisteredContext::new(receipt, 1, 1, "configuration-a".into(), "access-a".into())
+            .expect("context");
+    let confirmation = MaintenanceConfirmation {
+        operation: MaintenanceOperation::ReindexActors,
+        context: context.clone(),
+        origin_revision: 1,
+        configuration_revision: 3,
+        dataset: None,
+    };
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback auth-retry server");
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let expected_context = context.clone();
+
+    let server = tokio::spawn(async move {
+        // 1. Initial POST arrives, server accepts work, then connection drops (lost reply).
+        let recorded_request_id = {
+            let (mut socket, _) = listener.accept().await.expect("accept initial POST");
+            let mut buf = Vec::new();
+            let header_end = loop {
+                let mut chunk = [0_u8; 1024];
+                let read = socket.read(&mut chunk).await.expect("read POST head");
+                assert!(read > 0);
+                buf.extend_from_slice(&chunk[..read]);
+                if let Some(pos) = buf.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break pos + 4;
+                }
+            };
+            let head = String::from_utf8_lossy(&buf[..header_end]).into_owned();
+            let content_len = head
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())?
+                })
+                .expect("content-length");
+            while buf.len() < header_end + content_len {
+                let mut chunk = [0_u8; 1024];
+                let read = socket.read(&mut chunk).await.expect("read POST body");
+                assert!(read > 0);
+                buf.extend_from_slice(&chunk[..read]);
+            }
+            let request: MaintenanceRequest =
+                serde_json::from_slice(&buf[header_end..header_end + content_len])
+                    .expect("decode MaintenanceRequest");
+            drop(socket);
+            request.request_id
+        };
+
+        // Helper closure-like loop steps for the subsequent HTTP exchanges:
+        // 2. Initial read-only reconcile probe -> 503 Service Unavailable
+        // 3. First exact retry POST -> 401 Unauthorized; probe -> 401 Unauthorized
+        // 4. Second exact retry POST -> 403 Forbidden; probe -> 403 Forbidden
+        // 5. Final read-only Check request GET -> 200 OK with original job association
+        let responses = [
+            ("GET ", "503 Service Unavailable", None),
+            ("POST ", "401 Unauthorized", None),
+            ("GET ", "401 Unauthorized", None),
+            ("POST ", "403 Forbidden", None),
+            ("GET ", "403 Forbidden", None),
+            ("GET ", "200 OK", Some(recorded_request_id.clone())),
+        ];
+
+        for (expected_method, status_line, assoc_req_id) in responses {
+            let (mut socket, _) = listener.accept().await.expect("accept HTTP request");
+            let mut buf = Vec::new();
+            let header_end = loop {
+                let mut chunk = [0_u8; 1024];
+                let read = socket.read(&mut chunk).await.expect("read request");
+                assert!(read > 0);
+                buf.extend_from_slice(&chunk[..read]);
+                if let Some(pos) = buf.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break pos + 4;
+                }
+            };
+            let head = String::from_utf8_lossy(&buf[..header_end]).into_owned();
+            let content_len = head
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())?
+                })
+                .unwrap_or(0);
+            while buf.len() < header_end + content_len {
+                let mut chunk = [0_u8; 1024];
+                let read = socket.read(&mut chunk).await.expect("read body");
+                assert!(read > 0);
+                buf.extend_from_slice(&chunk[..read]);
+            }
+            let first_line = head.lines().next().unwrap_or_default();
+            assert!(
+                first_line.starts_with(expected_method),
+                "expected {expected_method}, got {first_line}"
+            );
+            let body = if let Some(req_id) = assoc_req_id {
+                let job_origin = JobOrigin::new(
+                    &expected_context,
+                    OriginSource::Native,
+                    req_id,
+                    "2026-11-14T22:00:00Z".into(),
+                    3,
+                    Vec::new(),
+                );
+                let association = JobRequestAssociation::new(
+                    "job-auth-retry-1".into(),
+                    job_origin,
+                    "2026-11-14T22:00:01Z".into(),
+                );
+                serde_json::to_vec(&association).unwrap()
+            } else {
+                format!("{{\"error\":\"{status_line}\"}}").into_bytes()
+            };
+            let reply = format!(
+                "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(reply.as_bytes()).await.unwrap();
+            socket.write_all(&body).await.unwrap();
+        }
+        recorded_request_id
+    });
+
+    let client = fleetworks_contracts::Client::new(&origin, Some("fixture-token"))
+        .expect("loopback client")
+        .with_registered_context(&context)
+        .expect("registered context");
+
+    // Step 1-2: initial submission loses reply and probe gets 503.
+    let initial = admit_maintenance_request(
+        &client,
+        Some(&container),
+        &origin,
+        &confirmation,
+        None,
+        None,
+    )
+    .await
+    .expect("initial uncertain delivery returns AdmittedMaintenance");
+    assert!(matches!(initial.outcome, MaintenanceOutcome::Failed(_)));
+    let pending_after_loss = container
+        .pending_actor_reindex(&origin)
+        .unwrap()
+        .expect("lost reply must retain pending journal entry");
+    let original_request = pending_after_loss.request.clone();
+
+    // Step 3: exact retry gets 401 Unauthorized -> journal must keep original request.
+    let retry_401 = admit_maintenance_request(
+        &client,
+        Some(&container),
+        &origin,
+        &confirmation,
+        Some(original_request.clone()),
+        Some(original_request.clone()),
+    )
+    .await
+    .expect("401 retry preserves pending attempt");
+    assert!(retry_401.pending_entry.is_some());
+    assert!(matches!(retry_401.outcome, MaintenanceOutcome::Failed(_)));
+    assert_eq!(
+        container
+            .pending_actor_reindex(&origin)
+            .unwrap()
+            .expect("401 on exact retry must not clear pending journal")
+            .request
+            .request_id,
+        original_request.request_id
+    );
+
+    // Step 4: exact retry gets 403 Forbidden -> journal must still keep original request.
+    let retry_403 = admit_maintenance_request(
+        &client,
+        Some(&container),
+        &origin,
+        &confirmation,
+        Some(original_request.clone()),
+        Some(original_request.clone()),
+    )
+    .await
+    .expect("403 retry preserves pending attempt");
+    assert!(retry_403.pending_entry.is_some());
+    assert!(matches!(retry_403.outcome, MaintenanceOutcome::Failed(_)));
+    let active_pending = container
+        .pending_actor_reindex(&origin)
+        .unwrap()
+        .expect("403 on exact retry must not clear pending journal");
+    assert_eq!(
+        active_pending.request.request_id,
+        original_request.request_id
+    );
+
+    // Step 5: subsequent read-only reconciliation establishes the original job and clears journal.
+    let mut active = Some(active_pending);
+    let reconciled = reconcile_uncertain_reindex(
+        &client,
+        Some(&container),
+        &origin,
+        &mut active,
+        fleetworks_contracts::ClientError::Status(403),
+    )
+    .await;
+    assert!(active.is_none());
+    match reconciled {
+        MaintenanceOutcome::Reconciled(association) => {
+            assert_eq!(association.job_id, "job-auth-retry-1");
+            assert_eq!(association.origin.request_id, original_request.request_id);
+        }
+        other => panic!(
+            "expected read-only reconciliation after 401/403 retry, got {:?}",
+            matches!(other, MaintenanceOutcome::Failed(_))
+        ),
+    }
+    assert!(container.pending_actor_reindex(&origin).unwrap().is_none());
+    let server_request_id = server.await.expect("server completed scripted sequence");
+    assert_eq!(server_request_id, original_request.request_id);
+}

@@ -960,7 +960,7 @@ async fn admit_maintenance_request(
         let container = container.cloned();
         let origin = origin.to_owned();
         move || {
-            prepare_maintenance_request(
+            prepare_maintenance_attempt(
                 &confirmation,
                 container.as_deref(),
                 &origin,
@@ -972,8 +972,13 @@ async fn admit_maintenance_request(
     .await
     .map_err(|_| "Maintenance request worker stopped".to_owned())
     .and_then(|result| result);
-    let (saved_request, mut pending_entry, request) = match prepared {
-        Ok((request, pending)) => (Some(request.clone()), pending, request),
+    let (saved_request, mut pending_entry, request, exact_retry) = match prepared {
+        Ok(prepared) => (
+            Some(prepared.request.clone()),
+            prepared.pending,
+            prepared.request,
+            prepared.exact_retry,
+        ),
         Err(error) => return Err(error),
     };
     let route = match confirmation.operation {
@@ -1011,7 +1016,12 @@ async fn admit_maintenance_request(
         Ok(_) => MaintenanceOutcome::Failed(
             "Gateway returned an acceptance receipt for a different request".into(),
         ),
-        Err(ClientError::Status(status)) if is_definitive_client_rejection(status) => {
+        Err(ClientError::Status(status))
+            if is_definitive_client_rejection(status)
+                && !(confirmation.operation == MaintenanceOperation::ReindexActors
+                    && exact_retry
+                    && matches!(status, 401 | 403)) =>
+        {
             if confirmation.operation == MaintenanceOperation::ReindexActors {
                 if let Some(container) = container.cloned() {
                     let origin_for_clear = origin.to_owned();
@@ -1043,6 +1053,13 @@ enum MaintenanceOutcome {
     Failed(String),
 }
 
+struct PreparedMaintenance {
+    request: MaintenanceRequest,
+    pending: Option<PendingActorReindex>,
+    exact_retry: bool,
+}
+
+#[cfg(test)]
 fn prepare_maintenance_request(
     confirmation: &MaintenanceConfirmation,
     container: Option<&NativeContainer>,
@@ -1050,6 +1067,17 @@ fn prepare_maintenance_request(
     previous: Option<MaintenanceRequest>,
     replay: Option<MaintenanceRequest>,
 ) -> Result<(MaintenanceRequest, Option<PendingActorReindex>), String> {
+    prepare_maintenance_attempt(confirmation, container, origin, previous, replay)
+        .map(|prepared| (prepared.request, prepared.pending))
+}
+
+fn prepare_maintenance_attempt(
+    confirmation: &MaintenanceConfirmation,
+    container: Option<&NativeContainer>,
+    origin: &str,
+    previous: Option<MaintenanceRequest>,
+    replay: Option<MaintenanceRequest>,
+) -> Result<PreparedMaintenance, String> {
     let context = MutationContext::new(&confirmation.context)
         .with_configuration_revision(confirmation.configuration_revision);
     if confirmation.operation == MaintenanceOperation::ReindexActors {
@@ -1069,7 +1097,11 @@ fn prepare_maintenance_request(
             }
             if let Some(replay_request) = replay {
                 if pending.request == replay_request && pending.context == confirmation.context {
-                    return Ok((pending.request.clone(), Some(pending)));
+                    return Ok(PreparedMaintenance {
+                        request: pending.request.clone(),
+                        pending: Some(pending),
+                        exact_retry: true,
+                    });
                 }
             }
             if pending.request.context == context
@@ -1078,13 +1110,18 @@ fn prepare_maintenance_request(
                     .validate(MaintenanceOperation::ReindexActors)
                     .is_ok()
             {
-                return Ok((pending.request.clone(), Some(pending)));
+                return Ok(PreparedMaintenance {
+                    request: pending.request.clone(),
+                    pending: Some(pending),
+                    exact_retry: true,
+                });
             }
             return Err(
                 "Unresolved actor index attempt exists for an earlier registration or configuration; check or clear it first"
                     .to_owned(),
             );
         }
+        let exact_retry = replay.is_some();
         let request = match replay {
             Some(request) if request.context == context => {
                 request
@@ -1106,14 +1143,22 @@ fn prepare_maintenance_request(
         let entry = container
             .begin_actor_reindex(origin, &confirmation.context, &request)
             .map_err(|error| error.to_string())?;
-        return Ok((request, Some(entry)));
+        return Ok(PreparedMaintenance {
+            request,
+            pending: Some(entry),
+            exact_retry,
+        });
     }
     if let Some(previous) = previous {
         if previous.context == context
             && previous.dataset == confirmation.dataset
             && previous.validate(confirmation.operation).is_ok()
         {
-            return Ok((previous, None));
+            return Ok(PreparedMaintenance {
+                request: previous,
+                pending: None,
+                exact_retry: replay.is_some(),
+            });
         }
     }
     let id = platform::request_id().map_err(|error| error.to_string())?;
@@ -1138,7 +1183,11 @@ fn prepare_maintenance_request(
         .map_err(|error| error.to_string())?,
         _ => return Err("Unsupported maintenance operation".into()),
     };
-    Ok((request, None))
+    Ok(PreparedMaintenance {
+        request,
+        pending: None,
+        exact_retry: replay.is_some(),
+    })
 }
 
 fn valid_receipt(

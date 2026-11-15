@@ -294,7 +294,7 @@ mod live {
     pub(crate) fn map_service_error(error: ServiceError) -> KeychainError {
         match error {
             ServiceError::Locked | ServiceError::Prompt => KeychainError::LockedDenied,
-            ServiceError::ZbusFdo(ref fdo) => match **fdo {
+            ServiceError::ZbusFdo(ref fdo) => match *fdo {
                 zbus::fdo::Error::AccessDenied(_) | zbus::fdo::Error::AuthFailed(_) => {
                     KeychainError::LockedDenied
                 }

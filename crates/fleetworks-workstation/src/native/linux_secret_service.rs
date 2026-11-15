@@ -293,20 +293,21 @@ mod live {
 
     pub(crate) fn map_service_error(error: ServiceError) -> KeychainError {
         match error {
-            ServiceError::Locked | ServiceError::Prompt => KeychainError::LockedDenied,
-            ServiceError::ZbusFdo(ref fdo) => match *fdo {
-                zbus::fdo::Error::AccessDenied(_) | zbus::fdo::Error::AuthFailed(_) => {
-                    KeychainError::LockedDenied
-                }
-                _ => KeychainError::Unavailable,
-            },
-            ServiceError::Zbus(zbus::Error::FDO(ref fdo)) => match **fdo {
-                zbus::fdo::Error::AccessDenied(_) | zbus::fdo::Error::AuthFailed(_) => {
-                    KeychainError::LockedDenied
-                }
-                _ => KeychainError::Unavailable,
-            },
-            ServiceError::Unavailable
+            ServiceError::Locked
+            | ServiceError::Prompt
+            | ServiceError::ZbusFdo(
+                zbus::fdo::Error::AccessDenied(_) | zbus::fdo::Error::AuthFailed(_),
+            ) => KeychainError::LockedDenied,
+            ServiceError::Zbus(zbus::Error::FDO(ref fdo))
+                if matches!(
+                    **fdo,
+                    zbus::fdo::Error::AccessDenied(_) | zbus::fdo::Error::AuthFailed(_)
+                ) =>
+            {
+                KeychainError::LockedDenied
+            }
+            ServiceError::ZbusFdo(_)
+            | ServiceError::Unavailable
             | ServiceError::NoResult
             | ServiceError::Crypto(_)
             | ServiceError::Zvariant(_)

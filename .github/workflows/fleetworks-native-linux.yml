@@ -71,9 +71,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config binutils \
-            libdbus-1-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libdbus-1-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libxkbcommon-x11-0 \
             libx11-dev libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-            libvulkan-dev vulkan-tools mesa-vulkan-drivers
+            libvulkan1 libvulkan-dev vulkan-tools mesa-vulkan-drivers
 
       - name: Install pinned Rust toolchain
         run: |
@@ -107,10 +107,18 @@ jobs:
           ! grep -Eq 'test result: FAILED\.' "${{ runner.temp }}/linux-native-evidence/unit-tests.log"
 
       - name: Render headless Linux native UI fixture captures (Lavapipe)
-        env:
-          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        shell: bash
         run: |
+          set -euo pipefail
           mkdir -p "${{ runner.temp }}/linux-native-evidence"
+          ls -la /usr/share/vulkan/icd.d /etc/vulkan/icd.d 2>/dev/null || true
+          icd="$(find /usr/share/vulkan/icd.d /etc/vulkan/icd.d -maxdepth 1 \( -type f -o -type l \) \( -name 'lvp_icd*.json' -o -name 'pipe_icd*.json' \) 2>/dev/null | head -n 1 || true)"
+          echo "Selected Lavapipe ICD: ${icd:-<default>}"
+          if [[ -n "$icd" ]]; then
+            export VK_ICD_FILENAMES="$icd"
+            export VK_DRIVER_FILES="$icd"
+          fi
+          vulkaninfo --summary
           python3 scripts/fleetworks_verify.py native-ui --agent --require-clean \
             --revision "${{ inputs.expected-head }}" \
             --output "${{ runner.temp }}/linux-native-evidence/ui" \

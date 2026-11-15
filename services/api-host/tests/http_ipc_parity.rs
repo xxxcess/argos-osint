@@ -182,7 +182,10 @@ impl ParityReport {
     fn new() -> Self {
         Self {
             report_version: 1,
-            generated_by: "services/api-host/tests/http_ipc_parity.rs".to_owned(),
+            generated_by: format!(
+                "services/api-host/tests/http_ipc_parity.rs (companion: {})",
+                companion_source_description()
+            ),
             total_ipc_operations: IpcOperation::ALL_OPERATION_NAMES.len(),
             covered_ipc_operations: 0,
             operations: BTreeMap::new(),
@@ -267,14 +270,41 @@ fn create_private_dir(prefix: &str) -> PathBuf {
     dir.canonicalize().expect("canonical temp root")
 }
 
+/// Spawn a local IPC companion process for parity testing.
+///
+/// In CI, the `FLEETWORKS_PARITY_COMPANION_PATH` environment variable should be set to the
+/// extracted companion binary path from the native archive. When unset (local dev), falls back
+/// to the Cargo-built binary via `CARGO_BIN_EXE_argos-api-host`.
+///
+/// The test records which binary was exercised in the parity report's `generated_by` field.
 fn spawn_local_ipc_command(state_dir: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_argos-api-host"));
+    let companion_path = std::env::var("FLEETWORKS_PARITY_COMPANION_PATH");
+    let mut command = match companion_path {
+        Ok(ref path) => {
+            let path = std::path::PathBuf::from(path);
+            assert!(
+                path.is_file(),
+                "FLEETWORKS_PARITY_COMPANION_PATH does not point to a file: {}",
+                path.display()
+            );
+            Command::new(path)
+        }
+        Err(_) => Command::new(env!("CARGO_BIN_EXE_argos-api-host")),
+    };
     command
         .arg("--role")
         .arg("local-ipc")
         .arg("--state-dir")
         .arg(state_dir);
     command
+}
+
+/// Returns a description of which companion binary source is being used.
+fn companion_source_description() -> String {
+    match std::env::var("FLEETWORKS_PARITY_COMPANION_PATH") {
+        Ok(path) => format!("extracted companion from native archive: {}", path),
+        Err(_) => "Cargo-built argos-api-host (dev fallback)".to_owned(),
+    }
 }
 
 struct HttpHarness {

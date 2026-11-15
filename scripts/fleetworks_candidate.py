@@ -815,7 +815,12 @@ def _redact_diagnostic_text(text):
 
 
 def _diagnostic_foreground_launch(executable, app, *, startup_probe_seconds=DIAGNOSTIC_STARTUP_PROBE_SECONDS, popen=None):
-    """Run the packaged binary directly with `--diagnostic`, separating process start from window readiness."""
+    """Run the packaged binary directly with `--diagnostic`, draining pipes to avoid blocking.
+
+    The probe polls the child while continuously draining stdout/stderr into bounded buffers.
+    A process that survives the probe window is reported as "still running", not "healthy".
+    Callers must supervise the returned process for later errors.
+    """
     try:
         proc = (popen or subprocess.Popen)(
             [str(executable), "--diagnostic"],
@@ -828,13 +833,47 @@ def _diagnostic_foreground_launch(executable, app, *, startup_probe_seconds=DIAG
         raise ValueError(
             f"Diagnostic foreground launch failed (process_started=false, window_readiness_observed=false): {error}"
         ) from error
+
+    # Drain pipes continuously to prevent a chatty child from blocking on write.
+    # Bound buffers to avoid unbounded memory growth from a misbehaving process.
+    MAX_DIAGNOSTIC_BUFFER = 64 * 1024  # 64 KiB per stream
+    stdout_chunks = []
+    stderr_chunks = []
+    stdout_done = False
+    stderr_done = False
+
+    def read_available(stream, chunks, done_flag):
+        """Non-blocking read from stream, appending to bounded buffer."""
+        if done_flag[0]:
+            return
+        try:
+            import select
+            if hasattr(stream, 'fileno'):
+                ready, _, _ = select.select([stream], [], [], 0)
+                if ready:
+                    chunk = stream.read(4096)
+                    if not chunk:
+                        done_flag[0] = True
+                    elif sum(len(c) for c in chunks) < MAX_DIAGNOSTIC_BUFFER:
+                        chunks.append(chunk)
+        except (OSError, ValueError):
+            done_flag[0] = True
+
     deadline = time.monotonic() + max(0.0, float(startup_probe_seconds))
     while proc.poll() is None and time.monotonic() < deadline:
+        read_available(proc.stdout, stdout_chunks, [stdout_done])
+        read_available(proc.stderr, stderr_chunks, [stderr_done])
         time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+
     rc = proc.poll()
     if rc is not None:
-        out, err = proc.communicate(timeout=2)
-        combined = ((err or b"") + b"\n" + (out or b"")).decode("utf-8", errors="replace")
+        # Process exited during probe; collect remaining output.
+        remaining_out, remaining_err = proc.communicate(timeout=2)
+        if remaining_out:
+            stdout_chunks.append(remaining_out)
+        if remaining_err:
+            stderr_chunks.append(remaining_err)
+        combined = (b"".join(stderr_chunks) + b"\n" + b"".join(stdout_chunks)).decode("utf-8", errors="replace")
         excerpt = _redact_diagnostic_text(combined).strip()[-4000:]
         if rc != 0:
             raise ValueError(
@@ -846,10 +885,16 @@ def _diagnostic_foreground_launch(executable, app, *, startup_probe_seconds=DIAG
             f"window_readiness_observed=false: exited before window readiness observation)"
             f"{f': {excerpt}' if excerpt else '.'}"
         )
+
+    # Process survived the probe but pipes must continue to be drained by caller.
+    # Return the process handle so the caller can supervise and read later output.
+    excerpt = (b"".join(stderr_chunks) + b"\n" + b"".join(stdout_chunks)).decode("utf-8", errors="replace").strip()[-500:]
     return (
-        f"Launched native executable in foreground diagnostic mode (process_started=true, pid={proc.pid}, "
-        f"window_readiness_observed=false: startup probe checks process survival only, not GUI window readiness)."
-    )
+        f"Diagnostic foreground launch still running (process_started=true, pid={proc.pid}, "
+        f"window_readiness_observed=false: startup probe confirms process survival, not GUI readiness; "
+        f"stdout/stderr pipes are open and must be drained by caller)."
+        f"{f' Early output: {excerpt}' if excerpt else ''}"
+    ), proc
 
 
 def open_native(app, info, target, *, diagnostic=False, startup_probe_seconds=DIAGNOSTIC_STARTUP_PROBE_SECONDS,

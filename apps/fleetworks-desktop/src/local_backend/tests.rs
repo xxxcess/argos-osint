@@ -430,3 +430,45 @@ async fn simulated_ipc_events_and_pipe_close_update_state_without_http_fallback(
     ));
     assert!(state.client.is_none());
 }
+
+#[test]
+fn selecting_local_backend_on_fresh_root_leaves_state_dir_implicit_and_provisions_on_connect() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().canonicalize().expect("canonical tempdir");
+    let container =
+        fleetworks_workstation::native::NativeContainer::open_settings(&home).expect("container");
+    let mut state = State::fixture();
+    state.workspaces.container = Some(Arc::new(container));
+    assert_eq!(state.backend_kind, BackendKind::Remote);
+    assert!(state.local_backend.state_dir.is_none());
+
+    state.set_backend_kind(BackendKind::Local);
+    assert_eq!(state.backend_kind, BackendKind::Local);
+    assert!(
+        state.local_backend.state_dir.is_none(),
+        "switching to Local mode must leave implicit state_dir unset before connect"
+    );
+    let displayed = state.local_state_dir_label();
+    assert!(
+        displayed.ends_with("local-backend/embedded"),
+        "expected implicit fallback display path, got {displayed}"
+    );
+    let expected_default = PathBuf::from(&displayed);
+    assert!(
+        !expected_default.exists(),
+        "default state dir must not exist yet on fresh workstation"
+    );
+
+    // Explicit validation before provisioning fails; implicit provisioning (`None`) creates 0o700 dir.
+    let container_ref = state.workspaces.container.as_ref().expect("container");
+    assert!(container_ref
+        .validate_local_backend_state_dir(&expected_default)
+        .is_err());
+    let provisioned = match state.local_backend.state_dir.as_deref() {
+        Some(dir) => container_ref.validate_local_backend_state_dir(dir),
+        None => container_ref.ensure_local_backend_state_dir(&state.local_profile_slug()),
+    }
+    .expect("fresh workstation provisions implicit local state_dir");
+    assert!(provisioned.ends_with("local-backend/embedded"));
+    assert!(provisioned.is_dir());
+}

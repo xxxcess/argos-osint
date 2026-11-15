@@ -92,7 +92,7 @@ pub const MAX_IPC_QUEUE_DEPTH: usize = 64;
 /// Maximum retained stderr bytes captured from an attached child process.
 pub const MAX_IPC_STDERR_BYTES: usize = 64 * 1024;
 
-const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(50);
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const EVENT_CHANNEL_CAPACITY: usize = 64;
@@ -1088,8 +1088,10 @@ pub type LocalIpcTransport = LocalIpcClient;
 type PendingMap = HashMap<u64, oneshot::Sender<Result<IpcOutcome, IpcError>>>;
 type ShutdownWaiter = Arc<Mutex<Option<oneshot::Sender<Result<ShutdownAck, IpcError>>>>>;
 
-struct LocalIpcInner {
-    outbound_tx: mpsc::Sender<IpcEnvelope>,
+const CHILD_EXIT_GRACE: Duration = Duration::from_secs(2);
+const CHILD_REAP_POLL: Duration = Duration::from_millis(5);
+
+struct LocalIpcShared {
     inflight: Arc<Semaphore>,
     pending: Arc<Mutex<PendingMap>>,
     shutdown_waiter: ShutdownWaiter,
@@ -1099,33 +1101,71 @@ struct LocalIpcInner {
     capabilities: Option<Capabilities>,
     ready: Option<Ready>,
     stderr_buffer: Arc<Mutex<Vec<u8>>>,
+}
+
+struct LocalIpcSession {
+    shared: Arc<LocalIpcShared>,
+    outbound_tx: Mutex<Option<mpsc::Sender<IpcEnvelope>>>,
     reader_task: Mutex<Option<JoinHandle<()>>>,
     writer_task: Mutex<Option<JoinHandle<()>>>,
     stderr_task: Mutex<Option<JoinHandle<()>>>,
     child: Mutex<Option<Child>>,
 }
 
-impl Drop for LocalIpcInner {
+impl LocalIpcSession {
+    fn clone_outbound_tx(&self) -> Option<mpsc::Sender<IpcEnvelope>> {
+        self.outbound_tx.lock().expect("outbound tx lock").clone()
+    }
+
+    fn take_child(&self) -> Option<Child> {
+        self.child.lock().expect("child lock").take()
+    }
+
+    fn terminate_tasks(&self) {
+        close_shared(&self.shared, IpcError::PipeClosed);
+        if let Ok(mut guard) = self.outbound_tx.lock() {
+            *guard = None;
+        }
+        for slot in [&self.reader_task, &self.writer_task, &self.stderr_task] {
+            if let Ok(mut guard) = slot.lock() {
+                if let Some(handle) = guard.take() {
+                    handle.abort();
+                }
+            }
+        }
+    }
+}
+
+fn reap_child_sync(child: &mut Child) {
+    let deadline = std::time::Instant::now() + CHILD_EXIT_GRACE;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) if std::time::Instant::now() >= deadline => return,
+            Ok(None) => std::thread::sleep(CHILD_REAP_POLL),
+        }
+    }
+}
+
+async fn reap_child_async(mut child: Child, graceful: bool) {
+    if graceful
+        && tokio::time::timeout(CHILD_EXIT_GRACE, child.wait())
+            .await
+            .is_ok()
+    {
+        return;
+    }
+    let _ = child.start_kill();
+    let _ = tokio::time::timeout(CHILD_EXIT_GRACE, child.wait()).await;
+}
+
+impl Drop for LocalIpcSession {
     fn drop(&mut self) {
-        self.closed.store(true, Ordering::Release);
-        if let Ok(mut guard) = self.reader_task.lock() {
-            if let Some(handle) = guard.take() {
-                handle.abort();
-            }
-        }
-        if let Ok(mut guard) = self.writer_task.lock() {
-            if let Some(handle) = guard.take() {
-                handle.abort();
-            }
-        }
-        if let Ok(mut guard) = self.stderr_task.lock() {
-            if let Some(handle) = guard.take() {
-                handle.abort();
-            }
-        }
+        self.terminate_tasks();
         if let Ok(mut guard) = self.child.lock() {
             if let Some(mut child) = guard.take() {
                 let _ = child.start_kill();
+                reap_child_sync(&mut child);
             }
         }
     }
@@ -1134,7 +1174,7 @@ impl Drop for LocalIpcInner {
 /// Multiplexed, bounded local IPC client over an inherited child pipe or async stream.
 #[derive(Clone)]
 pub struct LocalIpcClient {
-    inner: Arc<LocalIpcInner>,
+    session: Arc<LocalIpcSession>,
     request_timeout: Duration,
     backpressure: BackpressurePolicy,
 }
@@ -1142,9 +1182,15 @@ pub struct LocalIpcClient {
 impl fmt::Debug for LocalIpcClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LocalIpcClient")
-            .field("closed", &self.inner.closed.load(Ordering::Acquire))
-            .field("has_capabilities", &self.inner.capabilities.is_some())
-            .field("has_ready", &self.inner.ready.is_some())
+            .field(
+                "closed",
+                &self.session.shared.closed.load(Ordering::Acquire),
+            )
+            .field(
+                "has_capabilities",
+                &self.session.shared.capabilities.is_some(),
+            )
+            .field("has_ready", &self.session.shared.ready.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -1271,8 +1317,7 @@ impl LocalIpcClient {
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let shutdown_waiter = Arc::new(Mutex::new(None));
 
-        let inner = Arc::new(LocalIpcInner {
-            outbound_tx,
+        let shared = Arc::new(LocalIpcShared {
             inflight: Arc::new(Semaphore::new(MAX_IPC_INFLIGHT)),
             pending: Arc::clone(&pending),
             shutdown_waiter: Arc::clone(&shutdown_waiter),
@@ -1282,22 +1327,22 @@ impl LocalIpcClient {
             capabilities: ack.capabilities,
             ready: ack.ready,
             stderr_buffer,
-            reader_task: Mutex::new(None),
-            writer_task: Mutex::new(None),
+        });
+
+        let writer_handle = tokio::spawn(run_writer(writer, outbound_rx, Arc::clone(&shared)));
+        let reader_handle = tokio::spawn(run_reader(reader, Arc::clone(&shared)));
+
+        let session = Arc::new(LocalIpcSession {
+            shared,
+            outbound_tx: Mutex::new(Some(outbound_tx)),
+            reader_task: Mutex::new(Some(reader_handle)),
+            writer_task: Mutex::new(Some(writer_handle)),
             stderr_task: Mutex::new(stderr_task),
             child: Mutex::new(child),
         });
 
-        let writer_inner = Arc::clone(&inner);
-        let writer_handle = tokio::spawn(run_writer(writer, outbound_rx, writer_inner));
-        let reader_inner = Arc::clone(&inner);
-        let reader_handle = tokio::spawn(run_reader(reader, reader_inner));
-
-        *inner.writer_task.lock().expect("writer task lock") = Some(writer_handle);
-        *inner.reader_task.lock().expect("reader task lock") = Some(reader_handle);
-
         Ok(Self {
-            inner,
+            session,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             backpressure: BackpressurePolicy::FailFast,
         })
@@ -1320,31 +1365,32 @@ impl LocalIpcClient {
     /// Capabilities advertised during the `HelloAck` handshake, if provided.
     #[must_use]
     pub fn capabilities(&self) -> Option<&Capabilities> {
-        self.inner.capabilities.as_ref()
+        self.session.shared.capabilities.as_ref()
     }
 
     /// Initial readiness advertised during the `HelloAck` handshake, if provided.
     #[must_use]
     pub fn ready_snapshot(&self) -> Option<&Ready> {
-        self.inner.ready.as_ref()
+        self.session.shared.ready.as_ref()
     }
 
     /// Subscribe to unsolicited backend `IpcEvent` notifications.
     #[must_use]
     pub fn subscribe_events(&self) -> broadcast::Receiver<IpcEvent> {
-        self.inner.events_tx.subscribe()
+        self.session.shared.events_tx.subscribe()
     }
 
     /// Return true if the underlying pipe has closed or shutdown has completed.
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        self.inner.closed.load(Ordering::Acquire)
+        self.session.shared.closed.load(Ordering::Acquire)
     }
 
     /// Return the bounded stderr bytes captured from an attached child process.
     #[must_use]
     pub fn captured_stderr(&self) -> Vec<u8> {
-        self.inner
+        self.session
+            .shared
             .stderr_buffer
             .lock()
             .expect("stderr buffer lock")
@@ -1363,13 +1409,14 @@ impl LocalIpcClient {
 
         let _permit = match self.backpressure {
             BackpressurePolicy::FailFast => self
-                .inner
+                .session
+                .shared
                 .inflight
                 .clone()
                 .try_acquire_owned()
                 .map_err(|_| IpcError::InflightFull)?,
             BackpressurePolicy::Wait(limit) => {
-                tokio::time::timeout(limit, self.inner.inflight.clone().acquire_owned())
+                tokio::time::timeout(limit, self.session.shared.inflight.clone().acquire_owned())
                     .await
                     .map_err(|_| IpcError::InflightFull)?
                     .map_err(|_| IpcError::PipeClosed)?
@@ -1380,10 +1427,24 @@ impl LocalIpcClient {
             return Err(IpcError::PipeClosed);
         }
 
-        let request_id = self.inner.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let outbound_tx = self
+            .session
+            .clone_outbound_tx()
+            .ok_or(IpcError::PipeClosed)?;
+
+        let request_id = self
+            .session
+            .shared
+            .next_request_id
+            .fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         {
-            let mut pending = self.inner.pending.lock().expect("pending map lock");
+            let mut pending = self
+                .session
+                .shared
+                .pending
+                .lock()
+                .expect("pending map lock");
             if self.is_closed() {
                 return Err(IpcError::PipeClosed);
             }
@@ -1396,17 +1457,12 @@ impl LocalIpcClient {
             op,
         };
         let enqueue_result = match self.backpressure {
-            BackpressurePolicy::FailFast => {
-                self.inner
-                    .outbound_tx
-                    .try_send(frame)
-                    .map_err(|err| match err {
-                        mpsc::error::TrySendError::Full(_) => IpcError::QueueFull,
-                        mpsc::error::TrySendError::Closed(_) => IpcError::PipeClosed,
-                    })
-            }
+            BackpressurePolicy::FailFast => outbound_tx.try_send(frame).map_err(|err| match err {
+                mpsc::error::TrySendError::Full(_) => IpcError::QueueFull,
+                mpsc::error::TrySendError::Closed(_) => IpcError::PipeClosed,
+            }),
             BackpressurePolicy::Wait(limit) => {
-                match tokio::time::timeout(limit, self.inner.outbound_tx.send(frame)).await {
+                match tokio::time::timeout(limit, outbound_tx.send(frame)).await {
                     Ok(Ok(())) => Ok(()),
                     Ok(Err(_)) => Err(IpcError::PipeClosed),
                     Err(_) => Err(IpcError::QueueFull),
@@ -1415,7 +1471,8 @@ impl LocalIpcClient {
         };
 
         if let Err(err) = enqueue_result {
-            self.inner
+            self.session
+                .shared
                 .pending
                 .lock()
                 .expect("pending map lock")
@@ -1427,7 +1484,8 @@ impl LocalIpcClient {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(_)) => Err(IpcError::PipeClosed),
             Err(_) => {
-                self.inner
+                self.session
+                    .shared
                     .pending
                     .lock()
                     .expect("pending map lock")
@@ -1478,15 +1536,27 @@ impl LocalIpcClient {
         serde_json::from_value(value).map_err(|_| ClientError::InvalidResponse)
     }
 
-    /// Send a graceful `Shutdown` frame and await `ShutdownAck`.
+    /// Send a graceful `Shutdown` frame, await `ShutdownAck`, and reap any attached child process.
     pub async fn shutdown(&self, reason: &str) -> Result<ShutdownAck, IpcError> {
         if self.is_closed() {
+            self.session.terminate_tasks();
+            if let Some(child) = self.session.take_child() {
+                reap_child_async(child, false).await;
+            }
             return Err(IpcError::PipeClosed);
         }
+        let Some(outbound_tx) = self.session.clone_outbound_tx() else {
+            self.session.terminate_tasks();
+            if let Some(child) = self.session.take_child() {
+                reap_child_async(child, false).await;
+            }
+            return Err(IpcError::PipeClosed);
+        };
         let (tx, rx) = oneshot::channel();
         {
             let mut waiter = self
-                .inner
+                .session
+                .shared
                 .shutdown_waiter
                 .lock()
                 .expect("shutdown waiter lock");
@@ -1499,12 +1569,17 @@ impl LocalIpcClient {
         let frame = IpcEnvelope::Shutdown {
             reason: reason.to_owned(),
         };
-        if let Err(err) = self.inner.outbound_tx.try_send(frame) {
+        if let Err(err) = outbound_tx.try_send(frame) {
             *self
-                .inner
+                .session
+                .shared
                 .shutdown_waiter
                 .lock()
                 .expect("shutdown waiter lock") = None;
+            self.session.terminate_tasks();
+            if let Some(child) = self.session.take_child() {
+                reap_child_async(child, false).await;
+            }
             return Err(match err {
                 mpsc::error::TrySendError::Full(_) => IpcError::QueueFull,
                 mpsc::error::TrySendError::Closed(_) => IpcError::PipeClosed,
@@ -1516,15 +1591,17 @@ impl LocalIpcClient {
             Ok(Err(_)) => Err(IpcError::PipeClosed),
             Err(_) => {
                 *self
-                    .inner
+                    .session
+                    .shared
                     .shutdown_waiter
                     .lock()
                     .expect("shutdown waiter lock") = None;
                 Err(IpcError::Timeout)
             }
         };
-        if result.is_ok() {
-            close_inner(&self.inner, IpcError::PipeClosed);
+        self.session.terminate_tasks();
+        if let Some(child) = self.session.take_child() {
+            reap_child_async(child, result.is_ok()).await;
         }
         result
     }
@@ -1533,20 +1610,20 @@ impl LocalIpcClient {
 async fn run_writer<W>(
     mut writer: W,
     mut outbound_rx: mpsc::Receiver<IpcEnvelope>,
-    inner: Arc<LocalIpcInner>,
+    shared: Arc<LocalIpcShared>,
 ) where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     while let Some(frame) = outbound_rx.recv().await {
         if let Err(err) = write_frame(&mut writer, &frame).await {
-            close_inner(&inner, err);
+            close_shared(&shared, err);
             return;
         }
     }
-    close_inner(&inner, IpcError::PipeClosed);
+    close_shared(&shared, IpcError::PipeClosed);
 }
 
-async fn run_reader<R>(mut reader: R, inner: Arc<LocalIpcInner>)
+async fn run_reader<R>(mut reader: R, shared: Arc<LocalIpcShared>)
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
@@ -1556,7 +1633,7 @@ where
                 request_id,
                 outcome,
             })) => {
-                let tx = inner
+                let tx = shared
                     .pending
                     .lock()
                     .expect("pending map lock")
@@ -1566,13 +1643,13 @@ where
                 }
             }
             Ok(Some(IpcEnvelope::Event(event))) => {
-                let _ = inner.events_tx.send(event);
+                let _ = shared.events_tx.send(event);
             }
             Ok(Some(IpcEnvelope::ShutdownAck {
                 checkpointed,
                 relinquished_leases,
             })) => {
-                let waiter = inner
+                let waiter = shared
                     .shutdown_waiter
                     .lock()
                     .expect("shutdown waiter lock")
@@ -1585,31 +1662,31 @@ where
                 }
             }
             Ok(Some(_)) => {
-                close_inner(&inner, IpcError::UnexpectedFrame);
+                close_shared(&shared, IpcError::UnexpectedFrame);
                 return;
             }
             Ok(None) => {
-                close_inner(&inner, IpcError::PipeClosed);
+                close_shared(&shared, IpcError::PipeClosed);
                 return;
             }
             Err(err) => {
-                close_inner(&inner, err);
+                close_shared(&shared, err);
                 return;
             }
         }
     }
 }
 
-fn close_inner(inner: &LocalIpcInner, reason: IpcError) {
-    inner.closed.store(true, Ordering::Release);
+fn close_shared(shared: &LocalIpcShared, reason: IpcError) {
+    shared.closed.store(true, Ordering::Release);
     let pending: Vec<_> = {
-        let mut guard = inner.pending.lock().expect("pending map lock");
+        let mut guard = shared.pending.lock().expect("pending map lock");
         guard.drain().map(|(_, tx)| tx).collect()
     };
     for tx in pending {
         let _ = tx.send(Err(reason));
     }
-    if let Some(tx) = inner
+    if let Some(tx) = shared
         .shutdown_waiter
         .lock()
         .expect("shutdown waiter lock")
@@ -1983,7 +2060,7 @@ mod tests {
             }));
         }
         // Wait until all 64 permits are acquired.
-        while client.inner.inflight.available_permits() > 0 {
+        while client.session.shared.inflight.available_permits() > 0 {
             tokio::task::yield_now().await;
         }
         let saturated = client.execute(None, IpcOperation::Ready).await;
@@ -2407,5 +2484,153 @@ mod tests {
         let ack = client.shutdown_local("test_done").await.unwrap();
         assert!(ack.checkpointed);
         server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn last_client_drop_breaks_arc_cycle_and_closes_session() {
+        let (client_stream, mut server_stream) = tokio::io::duplex(4096);
+        let server_task = tokio::spawn(async move {
+            let _ = read_frame(&mut server_stream).await.unwrap();
+            write_frame(
+                &mut server_stream,
+                &IpcEnvelope::HelloAck(IpcHelloAck::compatible(None, None)),
+            )
+            .await
+            .unwrap();
+            // Keep server stream open until client writer closes on last-client drop.
+            let _ = read_frame(&mut server_stream).await;
+        });
+
+        let client = LocalIpcClient::connect_stream(client_stream, "drop-cycle-test", "1.0.0")
+            .await
+            .unwrap();
+        let clone = client.clone();
+        let weak = Arc::downgrade(&client.session);
+        assert_eq!(weak.strong_count(), 2);
+
+        drop(client);
+        assert_eq!(weak.strong_count(), 1);
+        drop(clone);
+        assert_eq!(
+            weak.strong_count(),
+            0,
+            "reader/writer tasks must not retain strong references to LocalIpcSession"
+        );
+        server_task.await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn last_client_drop_kills_and_reaps_child_immediately() {
+        let mut dir = std::env::temp_dir();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        dir.push(format!(
+            "fleetworks-ipc-reap-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ack_path = dir.join("ack.bin");
+        let pid_path = dir.join("child.pid");
+
+        let ack = IpcEnvelope::HelloAck(IpcHelloAck::compatible(None, None));
+        let ack_bytes = serde_json::to_vec(&ack).unwrap();
+        let mut frame = Vec::with_capacity(4 + ack_bytes.len());
+        frame.extend_from_slice(&(ack_bytes.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&ack_bytes);
+        std::fs::write(&ack_path, &frame).unwrap();
+
+        let mut cmd = Command::new("sh");
+        cmd.args([
+            "-c",
+            "echo $$ > \"$2\"; cat \"$1\"; exec sleep 60",
+            "sh",
+            ack_path.to_str().unwrap(),
+            pid_path.to_str().unwrap(),
+        ]);
+        let client = LocalIpcClient::spawn_command(&mut cmd, "reap-test", "1.0.0")
+            .await
+            .unwrap();
+
+        let pid_text = std::fs::read_to_string(&pid_path).unwrap();
+        let pid = pid_text.trim().to_owned();
+        let alive_before = std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(
+            alive_before,
+            "child PID {pid} should be alive while client is held"
+        );
+
+        drop(client);
+
+        let alive_after = std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(
+            !alive_after,
+            "child PID {pid} must be killed and reaped synchronously when last LocalIpcClient drops"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_timeout_kills_and_reaps_unresponsive_child_before_returning() {
+        let mut dir = std::env::temp_dir();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        dir.push(format!("fleetworks-ipc-sd-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ack_path = dir.join("ack.bin");
+        let pid_path = dir.join("child.pid");
+
+        let ack = IpcEnvelope::HelloAck(IpcHelloAck::compatible(None, None));
+        let ack_bytes = serde_json::to_vec(&ack).unwrap();
+        let mut frame = Vec::with_capacity(4 + ack_bytes.len());
+        frame.extend_from_slice(&(ack_bytes.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&ack_bytes);
+        std::fs::write(&ack_path, &frame).unwrap();
+
+        let mut cmd = Command::new("sh");
+        cmd.args([
+            "-c",
+            "echo $$ > \"$2\"; cat \"$1\"; exec sleep 60",
+            "sh",
+            ack_path.to_str().unwrap(),
+            pid_path.to_str().unwrap(),
+        ]);
+        let client = LocalIpcClient::spawn_command(&mut cmd, "shutdown-reap-test", "1.0.0")
+            .await
+            .unwrap();
+        let pid = std::fs::read_to_string(&pid_path)
+            .unwrap()
+            .trim()
+            .to_owned();
+
+        let err = client.shutdown("reap_unresponsive").await.unwrap_err();
+        assert_eq!(err, IpcError::Timeout);
+
+        let alive_after = std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(
+            !alive_after,
+            "child PID {pid} must be killed and reaped before shutdown returns"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

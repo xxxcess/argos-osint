@@ -110,7 +110,7 @@ mod embedded {
     const LOCK_FILENAME: &str = ".local-backend.lock";
     const SOURCE_EPOCH_FILENAME: &str = "source-epoch";
     const NATIVE_QUEUE_NAME: &str = "fleetworks.native";
-    const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
     /// Advisory exclusive lock held for the lifetime of the local IPC backend.
     struct StateDirLock {
@@ -644,7 +644,12 @@ mod embedded {
             return Ok(());
         }
 
-        let caps = gateway.capabilities();
+        let caps = gateway
+            .capabilities(principal.permissions().collect())
+            .await
+            .map_err(|(status, message)| {
+                anyhow!("local capabilities error ({status}): {message}")
+            })?;
         let ready = gateway.ready().await;
         let ack = IpcEnvelope::HelloAck(IpcHelloAck::compatible(Some(caps), Some(ready)));
         write_frame(&mut writer, &ack).await?;
@@ -669,6 +674,17 @@ mod embedded {
             let _ = writer.flush().await;
         });
 
+        let (inbound_tx, mut inbound_rx) = mpsc::channel(MAX_IPC_QUEUE_DEPTH);
+        let reader_task = tokio::spawn(async move {
+            loop {
+                let frame = read_frame(&mut reader).await;
+                let terminal = matches!(frame, Ok(None) | Err(_));
+                if inbound_tx.send(frame).await.is_err() || terminal {
+                    break;
+                }
+            }
+        });
+
         let inflight = Arc::new(Semaphore::new(MAX_IPC_INFLIGHT));
         let mut request_tasks: JoinSet<()> = JoinSet::new();
         let mut worker_result: Option<Result<usize>> = None;
@@ -688,7 +704,11 @@ mod embedded {
                     break;
                 }
                 Some(_) = request_tasks.join_next(), if !request_tasks.is_empty() => {}
-                frame = read_frame(&mut reader) => {
+                inbound = inbound_rx.recv() => {
+                    let Some(frame) = inbound else {
+                        stream_broken = true;
+                        break;
+                    };
                     match frame {
                         Ok(Some(IpcEnvelope::Request { request_id, registration, op })) => {
                             match Arc::clone(&inflight).try_acquire_owned() {
@@ -750,6 +770,10 @@ mod embedded {
                 }
             }
         }
+
+        drop(inbound_rx);
+        reader_task.abort();
+        let _ = reader_task.await;
 
         let _ = worker_stop_tx.send(());
         let relinquished_leases = match worker_result {
@@ -952,6 +976,16 @@ mod embedded {
             .expect("handshake ok");
             let caps = client.capabilities().expect("capabilities present");
             let ready = client.ready_snapshot().expect("ready present");
+            caps.require_native_contract()
+                .expect("HelloAck capabilities satisfy native contract");
+            assert!(caps
+                .deployment_id
+                .as_deref()
+                .is_some_and(|id| !id.is_empty()));
+            assert!(caps
+                .configuration_epoch
+                .as_deref()
+                .is_some_and(|epoch| !epoch.is_empty()));
             assert!(caps.auth);
             assert!(ready.ready);
             assert!(ready.storage);
@@ -961,6 +995,123 @@ mod embedded {
                 .expect("shutdown ack");
             assert!(ack.checkpointed);
             server_task2.await.expect("join 2").expect("serve 2 ok");
+        }
+
+        #[cfg(feature = "embedded")]
+        #[tokio::test]
+        async fn serve_streams_preserves_slow_chunked_frame_across_select_completions() {
+            use tokio::io::AsyncWriteExt;
+
+            let dir = tempfile::tempdir().expect("tempdir");
+            let state_dir = dir.path().canonicalize().expect("canonical").join("state");
+            let context = LocalBackendContext::open(state_dir, None, None, false)
+                .await
+                .expect("open context");
+            let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+            let (server_read, server_write) = tokio::io::split(server_io);
+            let (mut client_read, mut client_write) = tokio::io::split(client_io);
+            let (_sig_tx, sig_rx) = oneshot::channel::<()>();
+            let server_task = tokio::spawn(context.serve(server_read, server_write, async move {
+                let _ = sig_rx.await;
+            }));
+
+            write_frame(
+                &mut client_write,
+                &IpcEnvelope::Hello(fleetworks_contracts::ipc::IpcHello::new(
+                    "slow-chunk-test".to_owned(),
+                    "1.0.0".to_owned(),
+                )),
+            )
+            .await
+            .expect("write Hello");
+            match read_frame(&mut client_read).await.expect("read HelloAck") {
+                Some(IpcEnvelope::HelloAck(ack)) => {
+                    assert!(ack.compatible);
+                    ack.capabilities
+                        .expect("HelloAck capabilities")
+                        .require_native_contract()
+                        .expect("native contract valid");
+                }
+                other => panic!("expected HelloAck, got {other:?}"),
+            }
+
+            // Encode two requests; write Request 1 completely, then write only a split prefix
+            // of Request 2 while Request 1 finishes and `request_tasks.join_next()` wakes `select!`.
+            let req1 = IpcEnvelope::Request {
+                request_id: 1,
+                registration: None,
+                op: IpcOperation::Ready,
+            };
+            let req2 = IpcEnvelope::Request {
+                request_id: 2,
+                registration: None,
+                op: IpcOperation::Capabilities,
+            };
+            let req2_body = serde_json::to_vec(&req2).expect("serialize req2");
+            let mut req2_wire = Vec::with_capacity(4 + req2_body.len());
+            req2_wire.extend_from_slice(&(req2_body.len() as u32).to_be_bytes());
+            req2_wire.extend_from_slice(&req2_body);
+
+            write_frame(&mut client_write, &req1)
+                .await
+                .expect("write req1");
+
+            // Send Request 2 slowly: 2 bytes of its 4-byte length prefix BEFORE reading req1's response.
+            let (head, rest) = req2_wire.split_at(2);
+            client_write
+                .write_all(head)
+                .await
+                .expect("write partial length prefix");
+            client_write.flush().await.expect("flush partial prefix");
+
+            // Wait until Request 1 completes and its Response frame arrives (confirming
+            // `request_tasks.join_next()` has woken and iterated `tokio::select!`).
+            match read_frame(&mut client_read)
+                .await
+                .expect("read req1 response")
+            {
+                Some(IpcEnvelope::Response {
+                    request_id: 1,
+                    outcome: IpcOutcome::Ok(_),
+                }) => {}
+                other => panic!("expected req1 Ok response, got {other:?}"),
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+
+            // Now trickle remaining bytes in two chunks across a short pause.
+            let mid = rest.len() / 2;
+            client_write
+                .write_all(&rest[..mid])
+                .await
+                .expect("write req2 chunk 1");
+            client_write.flush().await.expect("flush chunk 1");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            client_write
+                .write_all(&rest[mid..])
+                .await
+                .expect("write req2 chunk 2");
+            client_write.flush().await.expect("flush chunk 2");
+
+            match read_frame(&mut client_read)
+                .await
+                .expect("read req2 response")
+            {
+                Some(IpcEnvelope::Response {
+                    request_id: 2,
+                    outcome: IpcOutcome::Ok(_),
+                }) => {}
+                other => panic!("expected req2 Ok response, got {other:?}"),
+            }
+
+            write_frame(
+                &mut client_write,
+                &IpcEnvelope::Shutdown {
+                    reason: "slow_chunk_done".into(),
+                },
+            )
+            .await
+            .expect("write Shutdown");
+            server_task.await.expect("join server").expect("server ok");
         }
 
         #[cfg(feature = "embedded")]

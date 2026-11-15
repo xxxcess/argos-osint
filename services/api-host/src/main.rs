@@ -106,9 +106,30 @@ fn init_tracing() {
         .try_init();
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     init_tracing();
+    let args = Args::parse();
+    let runtime = tokio::runtime::Runtime::new()?;
+    if args.role == Role::LocalIpc {
+        ensure!(
+            args.file.is_none() && args.expected_sha256.is_none() && !args.activate,
+            "CSV worker options are incompatible with --role local-ipc"
+        );
+        let result = runtime.block_on(local_ipc::run(
+            args.state_dir.expect("required for local-ipc"),
+            args.nlp_cmd,
+            args.classifier_cmd,
+            shutdown_signal(),
+        ));
+        // `local_ipc::run` drops storage/index/lock/helpers before returning; bound teardown so
+        // an external parent that waits for child exit before closing stdin cannot hang on `read(0)`.
+        runtime.shutdown_timeout(Duration::from_millis(100));
+        return result;
+    }
+    runtime.block_on(run_non_ipc(args))
+}
+
+async fn run_non_ipc(args: Args) -> Result<()> {
     let Args {
         role,
         port,
@@ -119,20 +140,7 @@ async fn main() -> Result<()> {
         state_dir,
         nlp_cmd,
         classifier_cmd,
-    } = Args::parse();
-    if role == Role::LocalIpc {
-        ensure!(
-            file.is_none() && expected_sha256.is_none() && !activate,
-            "CSV worker options are incompatible with --role local-ipc"
-        );
-        return local_ipc::run(
-            state_dir.expect("required for local-ipc"),
-            nlp_cmd,
-            classifier_cmd,
-            shutdown_signal(),
-        )
-        .await;
-    }
+    } = args;
     ensure!(
         state_dir.is_none() && nlp_cmd.is_none() && classifier_cmd.is_none(),
         "--state-dir, --nlp-cmd, and --classifier-cmd require --role local-ipc"

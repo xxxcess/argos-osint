@@ -544,7 +544,7 @@ impl State {
         )
     }
 
-    fn local_profile_slug(&self) -> String {
+    pub(crate) fn local_profile_slug(&self) -> String {
         canonical_local_origin(&self.connection.origin.text)
             .ok()
             .and_then(|origin| origin.strip_prefix("local://").map(str::to_owned))
@@ -568,16 +568,6 @@ impl State {
                 self.connection_profiles.credential = None;
                 self.connection_profiles.operator_token_override = false;
                 self.local_backend.refresh_binary_status();
-                if self.local_backend.state_dir.is_none() {
-                    if let Some(container) = &self.workspaces.container {
-                        self.local_backend.state_dir = Some(
-                            container
-                                .root()
-                                .join(LOCAL_BACKEND_DIR)
-                                .join(self.local_profile_slug()),
-                        );
-                    }
-                }
             }
             BackendKind::Remote => {
                 if canonical_local_origin(&self.connection.origin.text).is_ok() {

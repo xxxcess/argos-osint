@@ -190,11 +190,53 @@ impl LocalGateway {
         })
     }
 
-    /// Return static local capability metadata governed by `LocalCapabilityConfig`.
-    #[must_use]
-    pub fn capabilities(&self) -> Capabilities {
-        self.build_capabilities(None, None, Vec::new(), Vec::new())
-            .unwrap_or_default()
+    /// Return runtime-backed local capability metadata governed by `LocalCapabilityConfig`.
+    pub async fn capabilities(
+        &self,
+        permissions: Vec<Permission>,
+    ) -> Result<Capabilities, (StatusCode, &'static str)> {
+        self.capabilities_inner(permissions)
+            .await
+            .map_err(|ApiError(status, message)| (status, message))
+    }
+
+    async fn capabilities_inner(
+        &self,
+        permissions: Vec<Permission>,
+    ) -> Result<Capabilities, ApiError> {
+        let deployment = storage::connect_registry::deployment_state(&self.state.repo)
+            .await
+            .map_err(crate::internal)?;
+        let mut extra_features = Vec::new();
+        if self.capability_config.jobs_enabled {
+            for (pool, feature) in [
+                (storage::job_dispatch::ATLAS_POOL, "atlas-cycles"),
+                (
+                    argos_osint_core::osint::manual::TOOLS_POOL,
+                    "tool-execution",
+                ),
+            ] {
+                let mut result = self
+                    .state
+                    .repo
+                    .db()
+                    .query("SELECT VALUE enabled FROM ONLY type::record('job_dispatch_pool',$pool)")
+                    .bind(("pool", pool.to_owned()))
+                    .await
+                    .map_err(crate::internal)?
+                    .check()
+                    .map_err(crate::internal)?;
+                if result.take::<Option<bool>>(0).map_err(crate::internal)? == Some(true) {
+                    extra_features.push(feature.to_owned());
+                }
+            }
+        }
+        self.build_capabilities(
+            Some(deployment.deployment_id),
+            Some(deployment.configuration_epoch),
+            permissions,
+            extra_features,
+        )
     }
 
     /// Probe datastore readiness for embedded or local health status.
@@ -1055,39 +1097,9 @@ impl LocalGateway {
         &self,
         principal: &AuthenticatedPrincipal,
     ) -> Result<IpcPayload, DispatchError> {
-        let deployment = storage::connect_registry::deployment_state(&self.state.repo)
-            .await
-            .map_err(crate::internal)?;
-        let mut extra_features = Vec::new();
-        if self.capability_config.jobs_enabled {
-            for (pool, feature) in [
-                (storage::job_dispatch::ATLAS_POOL, "atlas-cycles"),
-                (
-                    argos_osint_core::osint::manual::TOOLS_POOL,
-                    "tool-execution",
-                ),
-            ] {
-                let mut result = self
-                    .state
-                    .repo
-                    .db()
-                    .query("SELECT VALUE enabled FROM ONLY type::record('job_dispatch_pool',$pool)")
-                    .bind(("pool", pool.to_owned()))
-                    .await
-                    .map_err(crate::internal)?
-                    .check()
-                    .map_err(crate::internal)?;
-                if result.take::<Option<bool>>(0).map_err(crate::internal)? == Some(true) {
-                    extra_features.push(feature.to_owned());
-                }
-            }
-        }
-        let response = self.build_capabilities(
-            Some(deployment.deployment_id),
-            Some(deployment.configuration_epoch),
-            principal.permissions().collect(),
-            extra_features,
-        )?;
+        let response = self
+            .capabilities_inner(principal.permissions().collect())
+            .await?;
         json_payload(response)
     }
 
@@ -1667,30 +1679,39 @@ mod tests {
             .expect("initial config commit")
     }
 
-    async fn open_test_repo(root: &Path, namespace: &str, db_name: &str) -> Repository {
+    struct TestRepo {
+        repo: Repository,
+        _server: Option<crate::storage_test_support::Server>,
+    }
+
+    async fn open_test_repo(root: &Path, namespace: &str, db_name: &str) -> TestRepo {
         #[cfg(not(feature = "embedded"))]
-        let repo = {
+        let (repo, _server) = {
             let datastore = crate::storage_test_support::Server::start()
                 .expect("required pinned isolated SurrealDB harness");
-            datastore.repo(namespace, db_name).await
+            let repo = datastore.repo(namespace, db_name).await;
+            (repo, Some(datastore))
         };
         #[cfg(feature = "embedded")]
-        let repo = Repository::connect(
-            &argos_osint_core::storage::open::Target::Embedded {
-                path: root.join("store"),
-            },
-            namespace,
-            db_name,
-        )
-        .await
-        .expect("embedded test repository");
+        let (repo, _server) = (
+            Repository::connect(
+                &argos_osint_core::storage::open::Target::Embedded {
+                    path: root.join("store"),
+                },
+                namespace,
+                db_name,
+            )
+            .await
+            .expect("embedded test repository"),
+            None,
+        );
         bootstrap::ensure_network_identity(repo.db())
             .await
             .expect("deployment identity");
         connect_registry::initialize_control(repo.db())
             .await
             .expect("connect control");
-        repo
+        TestRepo { repo, _server }
     }
 
     fn full_ipc_permissions() -> Vec<Permission> {
@@ -1792,10 +1813,15 @@ mod tests {
     async fn workspace_for_uses_explicit_workspace_root_without_env_vars() {
         let dir = tempfile::tempdir().expect("temp workspace");
         let root = dir.path().canonicalize().expect("canonical");
-        init_workspace_config(&root);
-        let repo = open_test_repo(&root, "local_ws", "isolated_root").await;
-        let state = ApiState::new(repo, "inst-ws".to_owned(), 0, Arc::new(Vec::new()))
-            .with_workspace_root(root.clone());
+        let initial_revision = init_workspace_config(&root);
+        let test_repo = open_test_repo(&root, "local_ws", "isolated_root").await;
+        let state = ApiState::new(
+            test_repo.repo,
+            "inst-ws".to_owned(),
+            0,
+            Arc::new(Vec::new()),
+        )
+        .with_workspace_root(root.clone());
 
         assert_eq!(
             configuration::workspace_for(&state).expect("explicit workspace"),
@@ -1804,14 +1830,14 @@ mod tests {
         let profile = configuration::profile_value(&state)
             .await
             .expect("profile from explicit root");
-        assert_eq!(profile["configuration_revision"], json!(1));
+        assert_eq!(profile["configuration_revision"], json!(initial_revision));
     }
 
     #[tokio::test]
     async fn local_gateway_capabilities_and_dispatch_enforce_security_and_operations() {
         let dir = tempfile::tempdir().expect("temp workspace");
         let root = dir.path().canonicalize().expect("canonical");
-        let _initial_revision = init_workspace_config(&root);
+        let initial_revision = init_workspace_config(&root);
         let staging_dir = root.join("datasets");
         std::fs::create_dir_all(&staging_dir).expect("create dataset dir");
         #[cfg(unix)]
@@ -1822,7 +1848,8 @@ mod tests {
         }
         let dataset_store = datasets::DatasetStore::open(staging_dir).expect("dataset store");
 
-        let repo = open_test_repo(&root, "local_dispatch", "gateway_test").await;
+        let test_repo = open_test_repo(&root, "local_dispatch", "gateway_test").await;
+        let repo = test_repo.repo;
         let deployment = storage::connect_registry::deployment_state(&repo)
             .await
             .expect("deployment");
@@ -1859,11 +1886,25 @@ mod tests {
             },
         )
         .expect("disabled gateway");
-        let disabled_caps = disabled_gateway.capabilities();
+        let disabled_caps = disabled_gateway
+            .capabilities(Vec::new())
+            .await
+            .expect("disabled capabilities");
         assert!(disabled_caps.search.is_none());
         assert!(!disabled_caps.features.iter().any(|f| f == "jobs"));
         assert!(!disabled_caps.features.iter().any(|f| f == "classifier"));
         assert!(!disabled_caps.features.iter().any(|f| f == "nlp"));
+        disabled_caps
+            .require_native_contract()
+            .expect("disabled gateway still advertises deployment contract");
+        assert_eq!(
+            disabled_caps.deployment_id.as_deref(),
+            Some(deployment.deployment_id.as_str())
+        );
+        assert_eq!(
+            disabled_caps.configuration_epoch.as_deref(),
+            Some(deployment.configuration_epoch.as_str())
+        );
 
         let gateway = LocalGateway::new(
             state,
@@ -1876,11 +1917,25 @@ mod tests {
             },
         )
         .expect("enabled gateway");
-        let enabled_caps = gateway.capabilities();
+        let enabled_caps = gateway
+            .capabilities(full_ipc_permissions())
+            .await
+            .expect("enabled capabilities");
         assert!(enabled_caps.search.is_some());
         assert!(enabled_caps.features.iter().any(|f| f == "jobs"));
         assert!(enabled_caps.features.iter().any(|f| f == "classifier"));
         assert!(enabled_caps.features.iter().any(|f| f == "nlp"));
+        enabled_caps
+            .require_native_contract()
+            .expect("enabled gateway satisfies native contract");
+        assert_eq!(
+            enabled_caps.deployment_id.as_deref(),
+            Some(deployment.deployment_id.as_str())
+        );
+        assert_eq!(
+            enabled_caps.configuration_epoch.as_deref(),
+            Some(deployment.configuration_epoch.as_str())
+        );
         assert!(gateway.ready().await.ready);
 
         let principal = AuthenticatedPrincipal::for_local_ipc(
@@ -1946,7 +2001,7 @@ mod tests {
                 &read_only,
                 None,
                 IpcOperation::ConfigurationExport {
-                    expected_revision: 1,
+                    expected_revision: initial_revision,
                 },
             )
             .await;
@@ -1958,7 +2013,7 @@ mod tests {
                 &principal,
                 None,
                 IpcOperation::ConfigurationExport {
-                    expected_revision: 1,
+                    expected_revision: initial_revision,
                 },
             )
             .await;
@@ -1970,8 +2025,8 @@ mod tests {
                 &principal,
                 None,
                 IpcOperation::ConfigurationImport {
-                    expected_revision: 1,
-                    bytes_b64,
+                    expected_revision: initial_revision,
+                    bytes_b64: bytes_b64.clone(),
                 },
             )
             .await;
@@ -1979,6 +2034,33 @@ mod tests {
             panic!("expected configuration import ok, got {imported:?}");
         };
         assert_eq!(imported_json["saved"], json!(true));
+        let updated_revision = imported_json["configuration_revision"]
+            .as_u64()
+            .expect("updated configuration revision");
+        assert!(updated_revision > initial_revision);
+
+        // Stale revision after import is rejected with 409 Conflict.
+        let stale_export = gateway
+            .dispatch(
+                &principal,
+                None,
+                IpcOperation::ConfigurationExport {
+                    expected_revision: initial_revision,
+                },
+            )
+            .await;
+        assert!(matches!(stale_export, IpcOutcome::Err { status: 409, .. }));
+        let stale_import = gateway
+            .dispatch(
+                &principal,
+                None,
+                IpcOperation::ConfigurationImport {
+                    expected_revision: initial_revision,
+                    bytes_b64,
+                },
+            )
+            .await;
+        assert!(matches!(stale_import, IpcOutcome::Err { status: 409, .. }));
 
         // Registered context required on activity/maintenance routes.
         let jobs_query = fleetworks_contracts::ipc::JobsListQuery::default();

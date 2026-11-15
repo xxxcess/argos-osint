@@ -771,7 +771,11 @@ mod tests {
 
         let search_dir = base.join("search");
         std::fs::create_dir_all(&search_dir).expect("search dir");
-        let limits = ActorIndexLimits::default();
+        // Other unit tests in the shared `argos-api-host` binary keep embedded RocksDB/Tantivy/model
+        // allocations resident; give this lease-relinquishment test headroom above harness RSS.
+        let mut limits = ActorIndexLimits::default();
+        limits.memory_resume_bytes = 2 * 1024 * 1024 * 1024;
+        limits.memory_pause_bytes = 4 * 1024 * 1024 * 1024;
         let engine_config = LocalEngineConfig::for_identity(
             search_dir,
             deployment.deployment_id.clone(),

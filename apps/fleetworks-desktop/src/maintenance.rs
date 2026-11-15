@@ -617,6 +617,9 @@ impl State {
 
     pub(crate) fn recover_pending_actor_reindex(&mut self, pending: PendingActorReindex) {
         if let Some(job_id) = pending.accepted_job_id.clone() {
+            if self.registration.context.as_ref() != Some(&pending.context) {
+                return;
+            }
             let recovered_origin = fleetworks_contracts::context::JobOrigin::new(
                 &pending.context,
                 fleetworks_contracts::context::OriginSource::Native,
@@ -1013,7 +1016,6 @@ impl State {
                 }
             }
             MaintenanceOutcome::Reconciled(association) => {
-                self.maintenance.pending_reindex = None;
                 self.maintenance.reindex_association = Some(association.clone());
                 self.maintenance.message = Some(format!(
                     "Recovered accepted job {} for actor index request {}",

@@ -5,6 +5,7 @@ use std::cell::Cell;
 use std::time::Duration;
 use std::time::Instant;
 
+#[cfg(target_os = "macos")]
 use objc2_app_kit::NSWorkspace;
 
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
@@ -44,9 +45,16 @@ impl Accessibility {
     }
 
     pub(crate) fn for_view(&self, fixture: bool, rune_reduced_motion: bool) -> ViewPreferences {
-        self.resolve(fixture, rune_reduced_motion, Instant::now(), || {
-            NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceTransparency()
-        })
+        #[cfg(target_os = "macos")]
+        {
+            self.resolve(fixture, rune_reduced_motion, Instant::now(), || {
+                NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceTransparency()
+            })
+        }
+        #[cfg(target_os = "linux")]
+        {
+            self.resolve(fixture, rune_reduced_motion, Instant::now(), || false)
+        }
     }
 
     fn resolve(
@@ -81,7 +89,7 @@ impl Accessibility {
         ViewPreferences {
             reduced_motion: rune_reduced_motion,
             reduced_transparency,
-            matte_fallback: false,
+            matte_fallback: cfg!(target_os = "linux"),
         }
     }
 }

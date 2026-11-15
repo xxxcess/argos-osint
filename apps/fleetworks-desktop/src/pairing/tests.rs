@@ -747,3 +747,89 @@ fn destination_edit_drops_explicit_operator_file_authority() {
     assert!(state.connection.token_file.text.is_empty());
     assert!(state.uses_native_pairing());
 }
+
+#[tokio::test]
+async fn session_only_mode_stores_secrets_only_in_ram_and_wipes_on_disconnect_and_restart() {
+    use fleetworks_workstation::native::CredentialStorage;
+
+    let (_temporary, container, durable_store) = installation();
+    let gateway = Gateway::start(false).await;
+    let session_store = Arc::new(crate::connection::SessionKeychain::default());
+
+    let connected = connect_or_pair_with_storage(
+        container.clone(),
+        gateway.origin.clone(),
+        session_store.clone(),
+        CredentialStorage::SessionOnly,
+        false,
+        |_| {},
+    )
+    .await
+    .expect("session-only pairing");
+    assert_eq!(
+        connected.capabilities.deployment_id.as_deref(),
+        Some("synthetic-deployment")
+    );
+    assert_eq!(session_store.len(), 1);
+    assert!(durable_store.0.lock().unwrap().items.is_empty());
+
+    let catalog = container.pairing_catalog().unwrap();
+    assert_eq!(catalog.paired_gateways.len(), 1);
+    assert_eq!(
+        catalog.paired_gateways[0].credential_storage,
+        CredentialStorage::SessionOnly
+    );
+    let json = std::fs::read_to_string(container.root().join(PAIRING_FILE)).unwrap();
+    assert!(json.contains("\"credential_storage\":\"session_only\""));
+    assert!(!json.contains(ACCESS));
+
+    // After restart, attempting normal durable connect refuses silent reconnect -> SessionEnded.
+    let restart_result = connect_or_pair_with_storage(
+        container.clone(),
+        gateway.origin.clone(),
+        durable_store.clone(),
+        CredentialStorage::SystemKeyring,
+        false,
+        |_| {},
+    )
+    .await;
+    assert!(matches!(restart_result, Err(PairingFailure::SessionEnded)));
+
+    // State cleanup helpers wipe RAM secrets immediately.
+    let effects = Arc::new(GatewayEffects::new(tokio::runtime::Handle::current()));
+    effects
+        .session_keychain
+        .set(
+            &KeychainItem::for_credential("i", &gateway.origin, "c"),
+            &SecretToken::new(ACCESS.into()).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(effects.session_keychain.len(), 1);
+    let mut state = State::with_services(effects.clone());
+    state.pairing.storage_mode = CredentialStorage::SessionOnly;
+    state.disconnect();
+    assert_eq!(effects.session_keychain.len(), 0);
+    assert_eq!(state.pairing.storage_mode, CredentialStorage::SystemKeyring);
+
+    effects
+        .session_keychain
+        .set(
+            &KeychainItem::for_credential("i", &gateway.origin, "c"),
+            &SecretToken::new(ACCESS.into()).unwrap(),
+        )
+        .unwrap();
+    state.close_window_cleanup();
+    assert_eq!(effects.session_keychain.len(), 0);
+
+    effects
+        .session_keychain
+        .set(
+            &KeychainItem::for_credential("i", &gateway.origin, "c"),
+            &SecretToken::new(ACCESS.into()).unwrap(),
+        )
+        .unwrap();
+    state.quit_cleanup();
+    assert_eq!(effects.session_keychain.len(), 0);
+
+    gateway.finish().await;
+}

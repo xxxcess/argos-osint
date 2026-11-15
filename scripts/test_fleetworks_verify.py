@@ -1,5 +1,6 @@
 """Offline fixtures for the Fleetworks exact-revision scope planner."""
 
+import io
 import json
 import os
 import subprocess
@@ -7,7 +8,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+import fleetworks_verify
 from fleetworks_verify import ALL_IMAGES, ALL_SCOPES, BACKEND_IMAGES, RUST_IMAGES, component_plan, path_images, path_scopes, select_scopes
 
 PLANNER = Path(__file__).with_name("fleetworks_verify.py").resolve()
@@ -35,6 +38,7 @@ class PathScopesTests(unittest.TestCase):
             "scripts/fleetworks_candidate.py": {"desktop"},
             "scripts/test_fleetworks_candidate.py": {"desktop"},
             ".github/workflows/fleetworks-native.yml": {"desktop"},
+            ".github/workflows/fleetworks-native-linux.yml": {"desktop"},
             "apps/web-desktop/server.mjs": {"web", "web_dev", "compose", "images"},
             "apps/web-desktop/app/page.tsx": {"web", "images"},
             "apps/web-desktop/app/api/v1/route.ts": {"web", "web_dev", "compose", "images"},
@@ -282,6 +286,24 @@ class GitScopeTests(unittest.TestCase):
         self.assertNotEqual(run.returncode, 0)
         self.assertIn("Checkout does not match the requested head", run.stderr)
         self.assertFalse(self.output.exists())
+
+    def test_run_local_schedules_desktop_checks_on_linux_x86_64_but_not_aarch64(self):
+        ran = []
+        with mock.patch("fleetworks_verify.platform.system", return_value="Linux"), \
+             mock.patch("fleetworks_verify.platform.machine", return_value="x86_64"), \
+             mock.patch("fleetworks_verify.run", side_effect=lambda cmd, **_kw: ran.append(cmd) or 0), \
+             mock.patch("sys.stdout", io.StringIO()):
+            self.assertEqual(fleetworks_verify.run_local({"desktop"}), 0)
+        self.assertTrue(any("agent_cargo.py" in " ".join(cmd) for cmd in ran))
+
+        ran.clear()
+        with mock.patch("fleetworks_verify.platform.system", return_value="Linux"), \
+             mock.patch("fleetworks_verify.platform.machine", return_value="aarch64"), \
+             mock.patch("fleetworks_verify.run", side_effect=lambda cmd, **_kw: ran.append(cmd) or 0), \
+             mock.patch("sys.stdout", io.StringIO()) as out:
+            self.assertEqual(fleetworks_verify.run_local({"desktop"}), 0)
+        self.assertFalse(any("agent_cargo.py" in " ".join(cmd) for cmd in ran))
+        self.assertIn("macOS and Linux x86_64", out.getvalue())
 
 
 if __name__ == "__main__":

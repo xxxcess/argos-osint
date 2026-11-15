@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build, package and verify native Mac app candidates.
+"""Build, package and verify native Mac and Linux x86_64 app candidates.
 
 Native helpers require Python 3.9 or newer and never provision a backend,
 initialize user workspaces, reset configuration or publish an artifact.
@@ -7,7 +7,9 @@ initialize user workspaces, reset configuration or publish an artifact.
 
 import argparse
 import codecs
+import gzip
 import hashlib
+import io
 import json
 import os
 import plistlib
@@ -18,6 +20,7 @@ import stat
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -25,14 +28,18 @@ import urllib.parse
 import zipfile
 from pathlib import Path, PurePosixPath
 
-from fleetworks_platform import NATIVE_TARGETS, detect, resolve_native_target
+from fleetworks_platform import DARWIN_NATIVE_TARGETS, LINUX_NATIVE_TARGETS, NATIVE_TARGETS, detect, resolve_native_target
 
 ROOT = Path(__file__).resolve().parents[1]
 NATIVE_BINARY = "fleetworks-desktop"
 NATIVE_APP = "Fleetworks.app"
 NATIVE_MANIFEST = "Fleetworks.app.manifest.json"
+LINUX_APP = "Fleetworks-linux-x86_64"
+LINUX_MANIFEST = "Fleetworks-linux-x86_64.manifest.json"
 NATIVE_FORMAT = "fleetworks-native-1"
 NATIVE_CPU_TYPES = {"x86_64-apple-darwin": 0x01000007, "aarch64-apple-darwin": 0x0100000C}
+LINUX_ELF_MACHINES = {"x86_64-unknown-linux-gnu": 62}
+DISALLOWED_LINUX_LIBRARIES = ("libssl", "libcrypto", "librocksdb", "libsurreal", "libtorch", "libonnxruntime")
 VERSION_PATTERN = r"([0-9]+)\.([0-9]+)\.([0-9]+)(?:-[A-Za-z0-9.-]+)?(?:\+[A-Za-z0-9.-]+)?"
 ARTIFACT_VERSION_PATTERN = (
     r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
@@ -118,12 +125,21 @@ def _run_cargo(command, *, root=ROOT, environment=None, timeout=3600):
             return stdout
 
 
+def native_bundle_name(target):
+    return LINUX_APP if target in LINUX_NATIVE_TARGETS else NATIVE_APP
+
+
+def native_manifest_name(target):
+    return LINUX_MANIFEST if target in LINUX_NATIVE_TARGETS else NATIVE_MANIFEST
+
+
 def native_archive_name(version, target, revision, run_id, attempt):
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", str(run_id)):
         raise ValueError("Candidate run identity must be a bounded filename-safe value")
     if not re.fullmatch(r"[1-9][0-9]{0,5}", str(attempt)):
         raise ValueError("Candidate run attempt must be a positive bounded integer")
-    return f"Fleetworks-{version}-{revision[:12]}-{run_id}.{attempt}-{target}.zip"
+    extension = ".tar.gz" if target in LINUX_NATIVE_TARGETS else ".zip"
+    return f"Fleetworks-{version}-{revision[:12]}-{run_id}.{attempt}-{target}{extension}"
 
 
 def apple_versions(version, bundle_version=None):
@@ -258,9 +274,47 @@ def macho_architecture(binary):
     return fields[1]
 
 
+def elf_architecture(binary):
+    if binary.is_symlink() or not binary.is_file() or not os.access(binary, os.X_OK):
+        raise ValueError("Native binary must be a regular executable file")
+    with binary.open("rb") as source:
+        header = source.read(20)
+    if len(header) != 20 or header[:4] != b"\x7fELF" or header[4] != 2 or header[5] != 1:
+        raise ValueError("Native binary is not a 64-bit little-endian ELF executable")
+    e_type, e_machine = struct.unpack("<HH", header[16:20])
+    if e_type not in (2, 3):
+        raise ValueError("ELF input is not an executable")
+    return e_machine
+
+
+def binary_architecture_matches(binary, target):
+    if target in DARWIN_NATIVE_TARGETS:
+        return macho_architecture(binary) == NATIVE_CPU_TYPES[target]
+    if target in LINUX_NATIVE_TARGETS:
+        return elf_architecture(binary) == LINUX_ELF_MACHINES[target]
+    raise ValueError("Unsupported native target")
+
+
 def inspect_native_binary(binary, target, *, runner=None):
-    if macho_architecture(binary) != NATIVE_CPU_TYPES[target]:
+    if not binary_architecture_matches(binary, target):
         raise ValueError(f"Native binary has the wrong architecture for {target}")
+    if target in LINUX_NATIVE_TARGETS:
+        listing = _run(["readelf", "-d", str(binary)], runner=runner)
+        libraries = []
+        for line in listing.splitlines():
+            match = re.search(r"\(NEEDED\)\s+Shared library:\s+\[([^\]]+)\]", line)
+            if not match:
+                continue
+            library = match.group(1).strip()
+            if not library or "/" in library or "\\" in library or ".." in library:
+                raise ValueError(f"Native Linux binary references an unsafe library path: {library}")
+            lower = library.lower()
+            if any(lower.startswith(prefix) for prefix in DISALLOWED_LINUX_LIBRARIES):
+                raise ValueError(f"Native Linux binary links disallowed library: {library}")
+            libraries.append(library)
+        if not libraries:
+            raise ValueError("readelf did not report Linux shared library dependencies")
+        return libraries
     listing = _run(["otool", "-L", str(binary)], runner=runner)
     lines = listing.splitlines()
     if not lines or not lines[0].rstrip().endswith(":"):
@@ -276,6 +330,41 @@ def inspect_native_binary(binary, target, *, runner=None):
             raise ValueError(f"Native bundle has an unbundled/non-system library: {library}")
         libraries.append(library)
     return libraries
+
+
+def linux_runtime_preflight(environment=None, *, vulkan_icd_dirs=None, runner=None):
+    """Validate Linux desktop display, Vulkan, and session bus preconditions without side effects."""
+    env = os.environ if environment is None else environment
+    display = bool(env.get("WAYLAND_DISPLAY") or env.get("DISPLAY"))
+    if not display:
+        raise ValueError("Linux GUI launch requires an active Wayland or X11 display (WAYLAND_DISPLAY or DISPLAY)")
+    icd_candidates = list(vulkan_icd_dirs) if vulkan_icd_dirs is not None else [
+        Path(p) for p in (env.get("VK_ICD_FILENAMES", ""), env.get("VK_DRIVER_FILES", "")) if p
+    ] + [
+        Path("/usr/share/vulkan/icd.d"),
+        Path("/etc/vulkan/icd.d"),
+        Path("/usr/local/share/vulkan/icd.d"),
+    ]
+    has_icd = any(
+        (candidate.is_file() or (candidate.is_dir() and any(candidate.glob("*.json"))))
+        for candidate in icd_candidates
+    )
+    if not has_icd:
+        # Allow vulkaninfo confirmation if custom driver path is configured outside standard dirs.
+        ok = False
+        if shutil.which("vulkaninfo") or runner is not None:
+            try:
+                out = _run(["vulkaninfo", "--summary"], runner=runner)
+                ok = bool(out.strip())
+            except (OSError, ValueError):
+                ok = False
+        if not ok:
+            raise ValueError("Linux GUI launch requires a working Vulkan ICD driver configuration")
+    return {
+        "display": "wayland" if env.get("WAYLAND_DISPLAY") else "x11",
+        "dbus_session": bool(env.get("DBUS_SESSION_BUS_ADDRESS")),
+        "vulkan": True,
+    }
 
 
 def _write_json(path, value):
@@ -313,6 +402,72 @@ def _zip_app(app, archive):
                     shutil.copyfileobj(source, destination, length=1024 * 1024)
 
 
+def _tar_gz_bundle(bundle_dir, archive):
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as output:
+        for path in [bundle_dir, *sorted(bundle_dir.rglob("*"))]:
+            relative = path.relative_to(bundle_dir.parent).as_posix()
+            info = tarfile.TarInfo(relative)
+            info.mtime = 0
+            info.uid = 0
+            info.gid = 0
+            info.uname = "root"
+            info.gname = "root"
+            if path.is_dir():
+                info.type = tarfile.DIRTYPE
+                info.mode = 0o755
+                output.addfile(info)
+            else:
+                info.type = tarfile.REGTYPE
+                info.mode = 0o755 if os.access(path, os.X_OK) else 0o644
+                info.size = path.stat().st_size
+                with path.open("rb") as source:
+                    output.addfile(info, source)
+    with archive.open("xb") as raw:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed:
+            compressed.write(buffer.getvalue())
+
+
+def _linux_desktop_entry():
+    return (
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=Fleetworks\n"
+        "Comment=Fleetworks Workstation Client\n"
+        f"Exec={NATIVE_BINARY}\n"
+        "Icon=fleetworks\n"
+        "Terminal=false\n"
+        "Categories=Network;Utility;\n"
+        "StartupWMClass=Fleetworks\n"
+    )
+
+
+def _atomic_install_stage(destination, stage, outputs, bundle_name, manifest_name):
+    backup = stage / "previous"
+    backup.mkdir()
+    replaced, installed = [], []
+    try:
+        for name in outputs:
+            existing = destination / name
+            if existing.exists() or existing.is_symlink():
+                if name not in (bundle_name, manifest_name):
+                    raise ValueError("Native candidate archive identity already exists; it is immutable")
+                os.replace(existing, backup / name)
+                replaced.append(name)
+            os.replace(stage / name, existing)
+            installed.append(name)
+    except BaseException:
+        for name in reversed(installed):
+            path = destination / name
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            elif path.exists() or path.is_symlink():
+                path.unlink()
+        for name in reversed(replaced):
+            os.replace(backup / name, destination / name)
+        raise
+
+
 def package_native(destination, binary, resources, *, version, target, revision, profile,
                    rune_revision, toolchain, dirty, minimum_os=None, bundle_version=None,
                    run_id=None, attempt="1", workflow="local", archive=False,
@@ -320,7 +475,7 @@ def package_native(destination, binary, resources, *, version, target, revision,
     """Stage a checked complete app and replace only this helper's outputs.
 
     Packaging/architecture/library checks are not a GUI, signing, notarization
-    or minimum-OS pass. Existing unrelated apps and immutable ZIP identities
+    or minimum-OS pass. Existing unrelated apps and immutable archive identities
     are never overwritten.
     """
     if target not in NATIVE_TARGETS or profile not in ("debug", "release"):
@@ -333,27 +488,6 @@ def package_native(destination, binary, resources, *, version, target, revision,
         raise ValueError("Native resource directory cannot be a symlink")
     resources = resources.resolve()
     resource_files = _resource_files(resources)
-    plist_path = resources / "Info.plist"
-    if plist_path.is_symlink() or not plist_path.is_file():
-        raise ValueError("Native resources require a regular Info.plist")
-    with plist_path.open("rb") as source:
-        plist = plistlib.load(source)
-    if not isinstance(plist, dict) or not re.fullmatch(r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+", str(plist.get("CFBundleIdentifier", ""))):
-        raise ValueError("Native Info.plist requires a valid bundle identifier")
-    resource_minimum = plist.get("LSMinimumSystemVersion")
-    minimum_os = minimum_os or resource_minimum
-    if not isinstance(minimum_os, str) or not re.fullmatch(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?", minimum_os):
-        raise ValueError("Native minimum macOS must be explicit in Info.plist or --minimum-macos")
-    if isinstance(resource_minimum, str) and re.fullmatch(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?", resource_minimum):
-        selected = tuple(map(int, minimum_os.split("."))) + (0,) * (3 - len(minimum_os.split(".")))
-        required = tuple(map(int, resource_minimum.split("."))) + (0,) * (3 - len(resource_minimum.split(".")))
-        if selected < required:
-            raise ValueError("--minimum-macos cannot be lower than the app resource minimum")
-    icon = plist.get("CFBundleIconFile")
-    if icon:
-        icon_name = icon if str(icon).endswith(".icns") else str(icon) + ".icns"
-        if Path(icon_name).name != icon_name or not (resources / icon_name).is_file():
-            raise ValueError("Declared native app icon is missing")
     binary = Path(binary)
     if binary.is_symlink():
         raise ValueError("Native binary cannot be a symlink")
@@ -364,22 +498,68 @@ def package_native(destination, binary, resources, *, version, target, revision,
     archive_file = native_archive_name(version, target, revision, run_id, attempt)
     if archive and (destination / archive_file).exists():
         raise ValueError("Native candidate archive identity already exists; it is immutable")
-    manifest = {
-        "format": NATIVE_FORMAT, "version": version, "revision": revision,
-        "dirty": bool(dirty), "target": target, "architecture": NATIVE_TARGETS[target],
-        "profile": profile, "rune_revision": rune_revision, "toolchain": toolchain,
-        "minimum_macos": minimum_os, "bundle_identifier": plist["CFBundleIdentifier"],
-        "bundle_short_version": short_version, "bundle_version": build_version,
-        "workflow": workflow, "run_id": run_id, "run_attempt": str(attempt),
-        "backend_compatibility": {"api_version": 1, "required_connect_contract": 1},
-        "dependency_provenance": {"cargo_lock_sha256": cargo_lock_sha256},
-        "signing": {"status": "unsigned-review", "notarization": "not_requested", "verified": False},
-        "verification": {"architecture": "pass", "libraries": "pass", "bundle": "pass",
-                         "gui_launch": "not_run", "minimum_os": "not_tested", "product_tests": "not_recorded"},
-        "libraries": libraries,
-    }
-    old_app = destination / NATIVE_APP
-    old_manifest = destination / NATIVE_MANIFEST
+
+    bundle_name = native_bundle_name(target)
+    manifest_name = native_manifest_name(target)
+    bundle_identifier = "dev.fleetworks.desktop"
+
+    if target in LINUX_NATIVE_TARGETS:
+        icon_path = resources / "fleetworks.svg"
+        if icon_path.is_symlink() or not icon_path.is_file():
+            raise ValueError("Native Linux bundle requires resources/fleetworks.svg icon asset")
+        manifest = {
+            "format": NATIVE_FORMAT, "platform": "linux", "version": version, "revision": revision,
+            "dirty": bool(dirty), "target": target, "architecture": LINUX_NATIVE_TARGETS[target],
+            "profile": profile, "rune_revision": rune_revision, "toolchain": toolchain,
+            "bundle_identifier": bundle_identifier,
+            "workflow": workflow, "run_id": run_id, "run_attempt": str(attempt),
+            "backend_compatibility": {"api_version": 1, "required_connect_contract": 1},
+            "dependency_provenance": {"cargo_lock_sha256": cargo_lock_sha256},
+            "signing": {"status": "unsigned-review", "notarization": "not_requested", "verified": False},
+            "verification": {"architecture": "pass", "libraries": "pass", "bundle": "pass",
+                             "gui_launch": "not_run", "desktop_environment": "not_tested", "product_tests": "not_recorded"},
+            "libraries": libraries,
+        }
+    else:
+        plist_path = resources / "Info.plist"
+        if plist_path.is_symlink() or not plist_path.is_file():
+            raise ValueError("Native resources require a regular Info.plist")
+        with plist_path.open("rb") as source:
+            plist = plistlib.load(source)
+        if not isinstance(plist, dict) or not re.fullmatch(r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+", str(plist.get("CFBundleIdentifier", ""))):
+            raise ValueError("Native Info.plist requires a valid bundle identifier")
+        bundle_identifier = plist["CFBundleIdentifier"]
+        resource_minimum = plist.get("LSMinimumSystemVersion")
+        minimum_os = minimum_os or resource_minimum
+        if not isinstance(minimum_os, str) or not re.fullmatch(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?", minimum_os):
+            raise ValueError("Native minimum macOS must be explicit in Info.plist or --minimum-macos")
+        if isinstance(resource_minimum, str) and re.fullmatch(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?", resource_minimum):
+            selected = tuple(map(int, minimum_os.split("."))) + (0,) * (3 - len(minimum_os.split(".")))
+            required = tuple(map(int, resource_minimum.split("."))) + (0,) * (3 - len(resource_minimum.split(".")))
+            if selected < required:
+                raise ValueError("--minimum-macos cannot be lower than the app resource minimum")
+        icon = plist.get("CFBundleIconFile")
+        if icon:
+            icon_name = icon if str(icon).endswith(".icns") else str(icon) + ".icns"
+            if Path(icon_name).name != icon_name or not (resources / icon_name).is_file():
+                raise ValueError("Declared native app icon is missing")
+        manifest = {
+            "format": NATIVE_FORMAT, "platform": "macos", "version": version, "revision": revision,
+            "dirty": bool(dirty), "target": target, "architecture": DARWIN_NATIVE_TARGETS[target],
+            "profile": profile, "rune_revision": rune_revision, "toolchain": toolchain,
+            "minimum_macos": minimum_os, "bundle_identifier": bundle_identifier,
+            "bundle_short_version": short_version, "bundle_version": build_version,
+            "workflow": workflow, "run_id": run_id, "run_attempt": str(attempt),
+            "backend_compatibility": {"api_version": 1, "required_connect_contract": 1},
+            "dependency_provenance": {"cargo_lock_sha256": cargo_lock_sha256},
+            "signing": {"status": "unsigned-review", "notarization": "not_requested", "verified": False},
+            "verification": {"architecture": "pass", "libraries": "pass", "bundle": "pass",
+                             "gui_launch": "not_run", "minimum_os": "not_tested", "product_tests": "not_recorded"},
+            "libraries": libraries,
+        }
+
+    old_app = destination / bundle_name
+    old_manifest = destination / manifest_name
     if old_app.exists() or old_app.is_symlink() or old_manifest.exists() or old_manifest.is_symlink():
         if old_app.is_symlink() or old_manifest.is_symlink() or not old_app.is_dir() or not old_manifest.is_file():
             raise ValueError("Existing native output is not an owned app/manifest pair")
@@ -389,71 +569,104 @@ def package_native(destination, binary, resources, *, version, target, revision,
     destination.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".fleetworks-stage-", dir=destination) as temporary:
         stage = Path(temporary)
-        app = stage / NATIVE_APP
-        contents = app / "Contents"
-        executable = contents / "MacOS" / NATIVE_BINARY
-        executable.parent.mkdir(parents=True)
-        bundled_resources = contents / "Resources"
-        bundled_resources.mkdir()
-        shutil.copyfile(binary, executable)
-        executable.chmod(0o755)
-        for path in resource_files:
-            target_path = bundled_resources / path.relative_to(resources)
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(path, target_path)
-            target_path.chmod(0o644)
-        plist.update(CFBundleExecutable=NATIVE_BINARY, CFBundleName="Fleetworks",
-                     CFBundleDisplayName="Fleetworks", CFBundlePackageType="APPL",
-                     CFBundleShortVersionString=short_version, CFBundleVersion=build_version,
-                     LSMinimumSystemVersion=minimum_os)
-        with (contents / "Info.plist").open("wb") as output:
-            plistlib.dump(plist, output, sort_keys=True)
-        manifest["files"] = {path.relative_to(app).as_posix(): sha256(path)
-                             for path in sorted(app.rglob("*")) if path.is_file()}
-        _write_json(bundled_resources / "fleetworks-manifest.json", manifest)
-        _write_json(stage / NATIVE_MANIFEST, manifest)
-        outputs = [NATIVE_APP, NATIVE_MANIFEST]
+        app = stage / bundle_name
+        if target in LINUX_NATIVE_TARGETS:
+            bin_dir = app / "bin"
+            bin_dir.mkdir(parents=True)
+            executable = bin_dir / NATIVE_BINARY
+            shutil.copyfile(binary, executable)
+            executable.chmod(0o755)
+            desktop_dir = app / "share/applications"
+            desktop_dir.mkdir(parents=True)
+            desktop_file = desktop_dir / "fleetworks.desktop"
+            desktop_file.write_text(_linux_desktop_entry(), encoding="utf-8")
+            desktop_file.chmod(0o644)
+            icon_dir = app / "share/icons/hicolor/scalable/apps"
+            icon_dir.mkdir(parents=True)
+            staged_icon = icon_dir / "fleetworks.svg"
+            shutil.copyfile(resources / "fleetworks.svg", staged_icon)
+            staged_icon.chmod(0o644)
+            share_res = app / "share/fleetworks/resources"
+            share_res.mkdir(parents=True)
+            for path in resource_files:
+                target_path = share_res / path.relative_to(resources)
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(path, target_path)
+                target_path.chmod(0o644)
+            manifest["files"] = {path.relative_to(app).as_posix(): sha256(path)
+                                 for path in sorted(app.rglob("*")) if path.is_file()}
+            _write_json(app / "share/fleetworks/fleetworks-manifest.json", manifest)
+        else:
+            contents = app / "Contents"
+            executable = contents / "MacOS" / NATIVE_BINARY
+            executable.parent.mkdir(parents=True)
+            bundled_resources = contents / "Resources"
+            bundled_resources.mkdir()
+            shutil.copyfile(binary, executable)
+            executable.chmod(0o755)
+            for path in resource_files:
+                target_path = bundled_resources / path.relative_to(resources)
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(path, target_path)
+                target_path.chmod(0o644)
+            plist.update(CFBundleExecutable=NATIVE_BINARY, CFBundleName="Fleetworks",
+                         CFBundleDisplayName="Fleetworks", CFBundlePackageType="APPL",
+                         CFBundleShortVersionString=short_version, CFBundleVersion=build_version,
+                         LSMinimumSystemVersion=minimum_os)
+            with (contents / "Info.plist").open("wb") as output:
+                plistlib.dump(plist, output, sort_keys=True)
+            manifest["files"] = {path.relative_to(app).as_posix(): sha256(path)
+                                 for path in sorted(app.rglob("*")) if path.is_file()}
+            _write_json(bundled_resources / "fleetworks-manifest.json", manifest)
+        _write_json(stage / manifest_name, manifest)
+        outputs = [bundle_name, manifest_name]
         digest = None
         if archive:
-            _zip_app(app, stage / archive_file)
+            if target in LINUX_NATIVE_TARGETS:
+                _tar_gz_bundle(app, stage / archive_file)
+            else:
+                _zip_app(app, stage / archive_file)
             digest = sha256(stage / archive_file)
             (stage / (archive_file + ".sha256")).write_text(checksum_line(stage / archive_file, digest), encoding="utf-8")
             outputs.extend([archive_file, archive_file + ".sha256"])
-        backup = stage / "previous"
-        backup.mkdir()
-        replaced, installed = [], []
-        try:
-            for name in outputs:
-                existing = destination / name
-                if existing.exists() or existing.is_symlink():
-                    if name not in (NATIVE_APP, NATIVE_MANIFEST):
-                        raise ValueError("Native candidate archive identity already exists; it is immutable")
-                    os.replace(existing, backup / name)
-                    replaced.append(name)
-                os.replace(stage / name, existing)
-                installed.append(name)
-        except BaseException:
-            for name in reversed(installed):
-                path = destination / name
-                if path.is_dir() and not path.is_symlink():
-                    shutil.rmtree(path)
-                elif path.exists() or path.is_symlink():
-                    path.unlink()
-            for name in reversed(replaced):
-                os.replace(backup / name, destination / name)
-            raise
-    return {"app": str(destination / NATIVE_APP), "manifest": str(destination / NATIVE_MANIFEST),
+        _atomic_install_stage(destination, stage, outputs, bundle_name, manifest_name)
+    return {"app": str(destination / bundle_name),
+            "executable": str(destination / bundle_name / ("bin" if target in LINUX_NATIVE_TARGETS else "Contents/MacOS") / NATIVE_BINARY),
+            "manifest": str(destination / manifest_name),
             "archive": str(destination / archive_file) if archive else None, "sha256": digest,
             "identity": manifest}
 
 
-def open_native(app, info, target, *, runner=None):
-    if info.system != "Darwin" or target != info.native_target:
-        raise ValueError("--open requires an artifact matching this physical Mac architecture")
+def open_native(app, info, target, *, runner=None, preflight=None):
+    if info.system not in ("Darwin", "Linux") or target != info.native_target:
+        raise ValueError("--open requires an artifact matching this physical host architecture")
     _progress("Checking whether Fleetworks is already running")
     commands = _run(["ps", "-axo", "comm="], runner=runner)
     if any(Path(line.strip()).name == NATIVE_BINARY for line in commands.splitlines()):
         return "Fleetworks is already running; close it normally, then open the new printed app path. No process was stopped."
+    if info.system == "Linux":
+        if os.environ.get("FLEETWORKS_LOCAL_REVIEW_APPROVAL_SOCKET"):
+            raise ValueError("Local review approval socket is macOS-only; use separate CLI approval on Linux")
+        if preflight is None:
+            linux_runtime_preflight(runner=runner)
+        else:
+            preflight()
+        executable = Path(app) / "bin" / NATIVE_BINARY
+        if executable.is_symlink() or not executable.is_file() or not os.access(executable, os.X_OK):
+            raise ValueError("Linux bundle executable is missing or not executable")
+        _progress(f"Launching {executable}")
+        if runner is not None:
+            _run([str(executable)], runner=runner)
+        else:
+            subprocess.Popen(
+                [str(executable)],
+                cwd=Path(app),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        return "Launched Linux native executable in an isolated session; actual GUI readiness and keyring behavior remain unverified."
     _progress(f"Opening {app} through Launch Services")
     command = ["open"]
     review_socket = os.environ.get("FLEETWORKS_LOCAL_REVIEW_APPROVAL_SOCKET")
@@ -466,9 +679,83 @@ def open_native(app, info, target, *, runner=None):
     return "Requested Launch Services opening; actual GUI readiness and authenticated operations remain unverified."
 
 
+def _extract_linux_archive(archive, destination, *, expected_digest, version, target, revision,
+                           rune_revision, profile=None, require_clean=False, runner=None):
+    embedded_name = f"{LINUX_APP}/share/fleetworks/fleetworks-manifest.json"
+    exe_name = f"{LINUX_APP}/bin/{NATIVE_BINARY}"
+    with tarfile.open(archive, "r:gz") as tar:
+        members = tar.getmembers()
+        names = [member.name for member in members]
+        if not members or len(members) > 10000 or len(set(names)) != len(names):
+            raise ValueError("Native archive has missing, duplicate or excessive entries")
+        if sum(member.size for member in members) > 1024 * 1024 * 1024:
+            raise ValueError("Native archive exceeds its uncompressed size limit")
+        for member in members:
+            path = PurePosixPath(member.name)
+            if len(member.name) > 1024 or any(ord(char) < 32 for char in member.name) \
+                    or path.is_absolute() or ".." in path.parts or "\\" in member.name \
+                    or not path.parts or path.parts[0] != LINUX_APP \
+                    or member.name.rstrip("/") != path.as_posix():
+                raise ValueError("Native archive contains an unsafe or unexpected path")
+            if member.issym() or member.islnk() or not (member.isdir() or member.isfile()):
+                raise ValueError("Native archive contains forbidden symlinks or special files")
+            expected_mode = 0o755 if (member.isdir() or member.name == exe_name) else 0o644
+            if (member.mode & 0o777) != expected_mode:
+                raise ValueError("Native archive entry permissions are invalid")
+        if embedded_name not in names or tar.getmember(embedded_name).size > 1024 * 1024:
+            raise ValueError("Native archive has no bounded embedded manifest")
+        with tar.extractfile(tar.getmember(embedded_name)) as manifest_stream:
+            manifest = json.loads(manifest_stream.read())
+        if not isinstance(manifest, dict) or manifest.get("format") != NATIVE_FORMAT \
+                or manifest.get("platform") != "linux" \
+                or manifest.get("version") != version or manifest.get("revision") != revision \
+                or manifest.get("target") != target or manifest.get("rune_revision") != rune_revision \
+                or manifest.get("architecture") != LINUX_NATIVE_TARGETS[target] \
+                or (profile is not None and manifest.get("profile") != profile):
+            raise ValueError("Native manifest does not match expected version, revision, target and Rune pin")
+        if require_clean and manifest.get("dirty") is not False:
+            raise ValueError("Verified CI/release artifact must have a clean source identity")
+        if native_archive_name(version, target, revision, manifest.get("run_id"), manifest.get("run_attempt")) != archive.name:
+            raise ValueError("Native archive filename does not match its immutable identity")
+        hashes = manifest.get("files")
+        if not isinstance(hashes, dict) or not hashes:
+            raise ValueError("Native manifest has no file hashes")
+        file_names = {f"{LINUX_APP}/{name}" for name in hashes} | {embedded_name}
+        if file_names != {member.name for member in members if member.isfile()}:
+            raise ValueError("Native archive files do not match the manifest")
+        for name, expected in hashes.items():
+            if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+                raise ValueError("Native manifest contains an invalid file digest")
+            with tar.extractfile(tar.getmember(f"{LINUX_APP}/{name}")) as source:
+                digest = hashlib.sha256()
+                for block in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(block)
+            if digest.hexdigest() != expected:
+                raise ValueError(f"Native bundle file digest mismatch: {name}")
+        destination.mkdir(parents=True, exist_ok=True)
+        for member in members:
+            target_path = destination.joinpath(*PurePosixPath(member.name).parts)
+            if member.isdir():
+                target_path.mkdir(parents=True, exist_ok=True)
+                target_path.chmod(0o755)
+            else:
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                with tar.extractfile(member) as source, target_path.open("xb") as output:
+                    shutil.copyfileobj(source, output, length=1024 * 1024)
+                target_path.chmod(member.mode & 0o777)
+    app = destination / LINUX_APP
+    if not (app / "share/applications/fleetworks.desktop").is_file() \
+            or not (app / "share/icons/hicolor/scalable/apps/fleetworks.svg").is_file():
+        raise ValueError("Linux bundle is missing desktop entry or application icon")
+    libraries = inspect_native_binary(app / "bin" / NATIVE_BINARY, target, runner=runner)
+    if libraries != manifest.get("libraries"):
+        raise ValueError("Native library dependencies do not match the manifest")
+    return app, manifest
+
+
 def extract_native(archive, destination, *, expected_digest, version, target, revision,
                    rune_revision, profile=None, require_clean=False, runner=None):
-    """Validate a downloaded immutable ZIP before bounded private extraction.
+    """Validate a downloaded immutable archive before bounded private extraction.
 
     The caller obtains the expected digest/identity from its trusted packaging
     job or review record, not from the archive being verified. Extraction does
@@ -483,10 +770,16 @@ def extract_native(archive, destination, *, expected_digest, version, target, re
         raise ValueError("Native archive must be a bounded regular file")
     if sha256(archive) != expected_digest:
         raise ValueError("Native archive does not match the packaging job's SHA-256")
-    if archive.with_suffix(archive.suffix + ".sha256").read_text(encoding="utf-8") != checksum_line(archive, expected_digest):
+    if archive.with_name(archive.name + ".sha256").read_text(encoding="utf-8") != checksum_line(archive, expected_digest):
         raise ValueError("Native archive checksum sidecar does not match the packaging job")
     if destination.is_symlink() or (destination.exists() and (not destination.is_dir() or any(destination.iterdir()))):
         raise ValueError("Native extraction requires an empty private directory")
+    if target in LINUX_NATIVE_TARGETS:
+        return _extract_linux_archive(
+            archive, destination, expected_digest=expected_digest, version=version,
+            target=target, revision=revision, rune_revision=rune_revision,
+            profile=profile, require_clean=require_clean, runner=runner,
+        )
     embedded_name = f"{NATIVE_APP}/Contents/Resources/fleetworks-manifest.json"
     with zipfile.ZipFile(archive) as zipped:
         entries = zipped.infolist()
@@ -579,9 +872,10 @@ def native_main(args):
     toolchain = validate_toolchain(info)
     destination = native_output(args.output, target, args.profile)
     command = cargo_native_command(target, args.profile, agent=args.agent, implicit_host=args.target == "host") if args.command == "build-native" else None
+    bundle_path = str(destination / native_bundle_name(target))
     if args.dry_run:
         print(json.dumps({"target": target, "platform": info.as_dict(), "profile": args.profile, "version": version,
-                          "build_command": command, "app": str(destination / NATIVE_APP),
+                          "build_command": command, "app": bundle_path,
                           "archive_requested": args.archive, "open_requested": args.open,
                           "prerequisites": "SDK/package inputs checked during build/package, not this dry run"}, indent=2))
         return 0
@@ -592,9 +886,13 @@ def native_main(args):
     rune_revision = locked_rune_revision()
     resources = args.resources or ROOT / "apps/fleetworks-desktop/resources"
     if command:
-        _progress("Checking Xcode command-line tools and the macOS SDK")
-        _run(["xcode-select", "-p"])
-        _run(["xcrun", "--sdk", "macosx", "--show-sdk-path"])
+        if target in DARWIN_NATIVE_TARGETS:
+            _progress("Checking Xcode command-line tools and the macOS SDK")
+            _run(["xcode-select", "-p"])
+            _run(["xcrun", "--sdk", "macosx", "--show-sdk-path"])
+        else:
+            _progress("Checking Linux x86_64 native build tools")
+            _run(["readelf", "--version"])
         environment = dict(os.environ)
         environment.pop("ARGOS_EMBED", None)
         environment["RUSTUP_AUTO_INSTALL"] = "0"
@@ -620,8 +918,8 @@ def native_main(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    build_native = commands.add_parser("build-native", help="Build and package the API-only Mac app; never starts a backend")
-    pack_native = commands.add_parser("package-native", help="Package a built Mac executable using the same checked app packager")
+    build_native = commands.add_parser("build-native", help="Build and package the API-only Mac or Linux x86_64 app; never starts a backend")
+    pack_native = commands.add_parser("package-native", help="Package a built native executable using the same checked app packager")
     for command in (build_native, pack_native):
         command.add_argument("--target", choices=("host", *NATIVE_TARGETS), default="host")
         command.add_argument("--profile", choices=("debug", "release"), default="debug")
@@ -640,7 +938,7 @@ def main():
         command.add_argument("--require-clean", action="store_true")
         command.add_argument("--agent", action="store_true", help="Use scripts/agent_cargo.py and target/agents for a build")
     pack_native.add_argument("--binary", type=Path, required=True)
-    verify_native = commands.add_parser("verify-native", help="Verify an exact downloaded app ZIP; does not install or launch by default")
+    verify_native = commands.add_parser("verify-native", help="Verify an exact downloaded app archive; does not install or launch by default")
     verify_native.add_argument("--archive", type=Path, required=True)
     verify_native.add_argument("--sha256", required=True)
     verify_native.add_argument("--revision", required=True)
@@ -675,7 +973,7 @@ def main():
                               "bundle_checks": "pass", "gui_launch": "not_run",
                               "signing": manifest["signing"]}, indent=2))
             return 0
-    except (OSError, ValueError, subprocess.SubprocessError, zipfile.BadZipFile, plistlib.InvalidFileException) as error:
+    except (OSError, ValueError, subprocess.SubprocessError, tarfile.TarError, zipfile.BadZipFile, plistlib.InvalidFileException) as error:
         print(f"fleetworks-candidate: {error}", file=sys.stderr)
         return 1
     return 0

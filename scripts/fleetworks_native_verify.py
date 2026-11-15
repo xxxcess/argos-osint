@@ -16,8 +16,8 @@ import tempfile
 import time
 import zlib
 
-from fleetworks_candidate import NATIVE_CPU_TYPES, cargo_executable, locked_rune_revision
-from fleetworks_candidate import macho_architecture, native_output, repository_identity, sha256, validate_toolchain
+from fleetworks_candidate import binary_architecture_matches, cargo_executable, locked_rune_revision
+from fleetworks_candidate import native_output, repository_identity, sha256, validate_toolchain
 from fleetworks_platform import NATIVE_TARGETS, detect, resolve_native_target
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -319,11 +319,19 @@ def execute(args, *, root=ROOT, runner=None, info=None):
         environment["RUSTUP_AUTO_INSTALL"] = "0"
         cargo_output = run_logged(command, destination, "cargo-fixture", manifest["commands"], environment=environment, runner=runner, timeout=3600, stdout_limit=64 * 1024 * 1024, root=root)
         binary = cargo_executable(bounded_bytes(cargo_output, 64 * 1024 * 1024).decode("utf-8"), name=EXAMPLE, kind="example")
-        if macho_architecture(binary) != NATIVE_CPU_TYPES[target]:
-            raise ValueError("Fixture compiler artifact architecture differs from the physical Mac")
+        if not binary_architecture_matches(binary, target):
+            raise ValueError(f"Fixture compiler artifact architecture differs from host target {target}")
         manifest["fixture"] = {"path": str(binary), "sha256": sha256(binary)}
         with tempfile.TemporaryDirectory(prefix="fixture-home-", dir=destination) as home:
-            environment = {key: value for key, value in os.environ.items() if key in ("PATH", "TMPDIR", "LANG", "LC_ALL", "RUST_BACKTRACE", "DYLD_FRAMEWORK_PATH", "DYLD_LIBRARY_PATH")}
+            # Forward Linux display/Vulkan runtime vars while isolating HOME/XDG/DBUS.
+            forwarded = (
+                "PATH", "TMPDIR", "LANG", "LC_ALL", "RUST_BACKTRACE",
+                "DYLD_FRAMEWORK_PATH", "DYLD_LIBRARY_PATH",
+                "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR",
+                "VK_ICD_FILENAMES", "VK_DRIVER_FILES", "LD_LIBRARY_PATH",
+                "MESA_VK_DEVICE_SELECT", "LIBGL_ALWAYS_SOFTWARE",
+            )
+            environment = {key: value for key, value in os.environ.items() if key in forwarded}
             environment.update({"HOME": home, "ARGOS_HOME": home, "FLEETWORKS_WORKSPACE": home, "XDG_CACHE_HOME": home, "RUSTUP_AUTO_INSTALL": "0"})
             if args.local_review_fixture:
                 # This marker is never a live socket; fixture state cannot send pairing effects.

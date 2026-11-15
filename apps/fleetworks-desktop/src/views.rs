@@ -1,18 +1,25 @@
 //! Selected native workstation destinations. Topology presentation belongs to Intel Web.
 
+use fleetworks_contracts::readiness::MaintenanceOperation;
+use fleetworks_contracts::readiness::ReadinessCheckId;
+use fleetworks_contracts::readiness::ReadinessState;
 use fleetworks_contracts::search::IndexState;
 use rune::Cx;
 use rune::El;
 use rune::ScrollSpec;
 use rune::Transition;
 use rune_kit::Collapsible;
+use rune_kit::Dialog;
 use rune_kit::Kit;
+use rune_kit::Progress;
 use rune_kit::SegmentedControl;
 use rune_kit::TextInput;
 
+use crate::accessibility::ViewPreferences;
 use crate::app::DossierFacet;
 use crate::app::Load;
 use crate::app::Page;
+use crate::app::SeedStage;
 use crate::app::State;
 use crate::app::WorkstationInspector;
 use crate::brain::Association;
@@ -127,7 +134,11 @@ fn setup_gateway(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
     let header = ui_components::section_header(
         &icons::KEY,
         "Setup Gateway",
-        Some("Pair once via macOS Keychain. Accepted jobs persist independently."),
+        Some(if cfg!(target_os = "macos") {
+            "Pair once via macOS Keychain. Accepted jobs persist independently."
+        } else {
+            "Pair once via your system keyring or for this session. Accepted jobs persist independently."
+        }),
         Some(ui_components::status_pill(
             match active_step {
                 2 => "Paired",
@@ -153,7 +164,11 @@ fn setup_gateway(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
             .child(ui_components::section_header(
                 &icons::SERVER,
                 "Gateway URL",
-                Some("Target API origin for keychain-bound requests"),
+                Some(if cfg!(target_os = "macos") {
+                    "Target API origin for keychain-bound requests"
+                } else {
+                    "Target API origin for keyring-bound requests"
+                }),
                 None,
                 None,
                 kit,
@@ -242,7 +257,11 @@ fn pairing_status(
         body = match &state.pairing.stage {
             PairingStage::Idle => body
                 .child(quiet(
-                    "Pair this Mac once. Your gateway operator approves access, then Fleetworks saves it in macOS Keychain.",
+                    if cfg!(target_os = "macos") {
+                        "Pair this Mac once. Your gateway operator approves access, then Fleetworks saves it in macOS Keychain."
+                    } else {
+                        "Pair this workstation once. Your gateway operator approves access, then Fleetworks saves it in your system keyring."
+                    },
                     kit,
                 ))
                 .child(
@@ -274,7 +293,7 @@ fn pairing_status(
                     if crate::pairing::local_review_handoff_configured(
                         &state.connection.origin.text,
                     ) {
-                        "Confirm the matching values in the macOS approval prompt."
+                        "Confirm the matching values in the local approval prompt."
                     } else {
                         "Share this approval code with your gateway operator."
                     },
@@ -317,8 +336,50 @@ fn pairing_status(
                     PairingFailure::Denied
                         | PairingFailure::Expired
                         | PairingFailure::KeychainMissing
+                        | PairingFailure::SessionEnded
                         | PairingFailure::Authentication
                 );
+                let offer_session_only = matches!(
+                    failure,
+                    PairingFailure::KeychainDenied
+                        | PairingFailure::KeychainUnavailable
+                        | PairingFailure::SessionEnded
+                );
+                let primary_label = if restart {
+                    "Pair again"
+                } else if matches!(failure, PairingFailure::KeychainDenied)
+                    && cfg!(target_os = "linux")
+                {
+                    "Unlock keyring"
+                } else {
+                    "Retry"
+                };
+                let mut actions = rune::row().gap(8.0).child(
+                    ActionButton::new(primary_label)
+                        .key(if restart { "pairing-restart" } else { "connect" })
+                        .icon(&icons::REFRESH)
+                        .finish(MetalFinish::GoldCta)
+                        .disabled(state.connection.origin.text.trim().is_empty())
+                        .on_press(move |state: &mut State| {
+                            if restart {
+                                state.restart_pairing();
+                            } else {
+                                state.connect();
+                            }
+                        })
+                        .build(kit, preferences, pointer_ref),
+                );
+                if offer_session_only {
+                    actions = actions.child(
+                        ActionButton::new("Use for this session")
+                            .key("pairing-session-only")
+                            .icon(&icons::KEY)
+                            .finish(MetalFinish::ObsidianPill)
+                            .disabled(state.connection.origin.text.trim().is_empty())
+                            .on_press(|state: &mut State| state.use_session_only_pairing())
+                            .build(kit, preferences, pointer_ref),
+                    );
+                }
                 body.child(
                     ui_components::async_status_strip(
                         "pairing-failure",
@@ -335,21 +396,7 @@ fn pairing_status(
                     )
                     .role("alert"),
                 )
-                .child(
-                    ActionButton::new(if restart { "Pair again" } else { "Retry" })
-                        .key(if restart { "pairing-restart" } else { "connect" })
-                        .icon(&icons::REFRESH)
-                        .finish(MetalFinish::GoldCta)
-                        .disabled(state.connection.origin.text.trim().is_empty())
-                        .on_press(move |state: &mut State| {
-                            if restart {
-                                state.restart_pairing();
-                            } else {
-                                state.connect();
-                            }
-                        })
-                        .build(kit, preferences, pointer_ref),
-                )
+                .child(actions)
             }
             PairingStage::Connected => body.child(ui_components::async_status_strip(
                 "pairing-progress",
@@ -440,8 +487,13 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
             ))
             .child(line(
                 format!(
-                    "Fleetworks {} · macOS · {}",
+                    "Fleetworks {} · {} · {}",
                     env!("CARGO_PKG_VERSION"),
+                    if cfg!(target_os = "linux") {
+                        "Linux"
+                    } else {
+                        "macOS"
+                    },
                     std::env::consts::ARCH
                 ),
                 kit,
@@ -470,12 +522,22 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
                 "Gateway Backend",
                 Some(&state.connection.origin.text),
                 Some(ui_components::status_pill(
-                    state.connection.deployment_label().to_owned(),
+                    match &state.connection.status {
+                        ConnectionStatus::Connected => "Connected".to_owned(),
+                        ConnectionStatus::Connecting => "Connecting".to_owned(),
+                        ConnectionStatus::Failed(_) => "Fault".to_owned(),
+                        ConnectionStatus::Disconnected => "Disconnected".to_owned(),
+                    },
                     None,
                     gateway_tone,
                     kit,
                 )),
-                None,
+                Some(ui_components::status_pill(
+                    state.connection.deployment_label().to_owned(),
+                    None,
+                    StatusTone::Neutral,
+                    kit,
+                )),
                 kit,
             ))
             .child(
@@ -503,10 +565,37 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
         shadow_ref,
     );
 
+    let narrow_workstation = cx
+        .layout_size("page-content")
+        .is_some_and(|size| size[0] < 540.0);
     let mut body = rune::col()
         .gap(14.0)
         .child(heading("Workstation Status", kit));
     if state.connected() {
+        body = body.child(actor_search_summary_card(state, preferences, kit));
+        if state.confirm_maintenance_dialog {
+            if let Some(confirmation) = &state.maintenance.confirmation {
+                let width = cx
+                    .layout_size("page-content")
+                    .map(|size| (size[0] - 24.0).clamp(320.0, 520.0))
+                    .unwrap_or(460.0);
+                Dialog::new("maintenance-confirm-dialog", "Build actor search index")
+                    .open(true)
+                    .width(width)
+                    .fit()
+                    .click_outside(true)
+                    .on_close(|state: &mut State| state.cancel_maintenance_confirmation())
+                    .child(rune::col().w_full().px(16.0).pb(16.0).child(
+                        crate::backend_views::maintenance_confirmation_content(
+                            state,
+                            confirmation,
+                            preferences,
+                            kit,
+                        ),
+                    ))
+                    .build(kit, layers);
+            }
+        }
         let mut resources = rune::col()
             .padding(16.0)
             .gap(12.0)
@@ -538,7 +627,11 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
                 resources = resources.child(line(error.clone(), kit).role("alert"));
             }
             Load::Ready(metrics) => {
-                let mut tiles = rune::row().w_full().gap(10.0);
+                let mut tiles = if narrow_workstation {
+                    rune::col().w_full().gap(10.0)
+                } else {
+                    rune::row().w_full().gap(10.0)
+                };
                 for (inspector, key, label_name, value, glyph) in [
                     (
                         WorkstationInspector::Cpu,
@@ -625,22 +718,22 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
                                 .map(|chipset| quiet(format!("Architecture: {chipset}"), kit)),
                         );
                     ui_components::modal_prompt(
-                    "workstation-telemetry",
-                    title,
-                    "Measurements describe the API host; unreported metrics remain unavailable.",
-                    true,
-                    440.0,
-                    |state: &mut State| state.workstation_inspector = None,
-                    detail_body,
-                    Some(
-                        ActionButton::new("Close")
-                            .finish(MetalFinish::GoldCta)
-                            .on_press(|state: &mut State| state.workstation_inspector = None)
-                            .build(kit, preferences, pointer_ref),
-                    ),
-                    kit,
-                    layers,
-                );
+                        "workstation-telemetry",
+                        title,
+                        "Measurements describe the API host; unreported metrics remain unavailable.",
+                        true,
+                        440.0,
+                        |state: &mut State| state.workstation_inspector = None,
+                        detail_body,
+                        Some(
+                            ActionButton::new("Close")
+                                .finish(MetalFinish::GoldCta)
+                                .on_press(|state: &mut State| state.workstation_inspector = None)
+                                .build(kit, preferences, pointer_ref),
+                        ),
+                        kit,
+                        layers,
+                    );
                 }
             }
         }
@@ -652,9 +745,398 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
             pointer_ref,
             shadow_ref,
         );
-        body = body.child(resources);
+        body = body.child(gateway).child(resources);
+    } else {
+        body = body.child(gateway);
     }
-    scroll(body.child(native).child(gateway), "workstation-body")
+    scroll(body.child(native), "workstation-body")
+}
+
+struct ActorSearchSummary {
+    status_label: &'static str,
+    tone: StatusTone,
+    next_action: String,
+    freshness: String,
+    can_search: bool,
+    building: bool,
+    stage: Option<String>,
+    scanned: Option<u64>,
+    total: Option<u64>,
+    needs_seed: bool,
+    details: Vec<String>,
+}
+
+fn summarize_actor_search(state: &State) -> ActorSearchSummary {
+    let reindex_job = active_or_selected_reindex_job(state);
+    let receipt_job = match &state.maintenance.receipt {
+        Load::Ready(receipt) if receipt.operation == MaintenanceOperation::ReindexActors => {
+            Some(receipt.job_id.as_str())
+        }
+        _ => None,
+    };
+    let mut details = Vec::new();
+    let (catalog_check, search_check, observed_at) = match &state.readiness {
+        Load::Ready(readiness) => (
+            readiness
+                .checks
+                .iter()
+                .find(|check| check.id == ReadinessCheckId::ActorCatalog),
+            readiness
+                .checks
+                .iter()
+                .find(|check| check.id == ReadinessCheckId::ActorSearch),
+            Some(readiness.observed_at.as_str()),
+        ),
+        _ => (None, None, None),
+    };
+    let search_fresh = search_check.is_some_and(|check| state.readiness_check_fresh(check));
+    let catalog_ready = catalog_check.is_some_and(|check| {
+        check.state == ReadinessState::Ready && state.readiness_check_fresh(check)
+    });
+    let capability_ready = state
+        .connection
+        .capabilities
+        .as_ref()
+        .is_some_and(|capabilities| capabilities.require_actor_search().is_ok());
+
+    if let Some(check) = search_check {
+        details.push(format!("Reason: {}", check.reason_code));
+        if !check.job_ids.is_empty() {
+            details.push(format!("Jobs: {}", check.job_ids.join(", ")));
+        }
+        if !check.artifact_ids.is_empty() {
+            details.push(format!("Serving refs: {}", check.artifact_ids.join(", ")));
+        }
+        if !check.explanation.is_empty() {
+            details.push(check.explanation.clone());
+        }
+    }
+    if let Some(pending) = &state.maintenance.pending_reindex {
+        details.push(format!("Pending request: {}", pending.request.request_id));
+    }
+
+    let freshness = match (observed_at, search_check) {
+        (Some(ts), Some(_)) if search_fresh => format!("Observed {ts} · Fresh"),
+        (Some(ts), _) => format!("Observed {ts} · Stale — refresh checks"),
+        (None, _) => "Readiness has not been observed yet.".to_owned(),
+    };
+
+    let (status_label, tone, next_action, can_search, building, needs_seed) = if state
+        .maintenance
+        .pending_reindex
+        .is_some()
+    {
+        (
+            "Needs attention",
+            StatusTone::Warn,
+            "Check request status or clear the unresolved actor index attempt before rebuilding."
+                .to_owned(),
+            false,
+            false,
+            false,
+        )
+    } else if let Some(check) = search_check {
+        let reason_lower = check.reason_code.to_ascii_lowercase();
+        let explanation_lower = check.explanation.to_ascii_lowercase();
+        let paused = reason_lower.contains("pause")
+            || reason_lower.contains("paced")
+            || explanation_lower.contains("paused");
+        if check.state == ReadinessState::Ready && search_fresh {
+            (
+                "Ready",
+                StatusTone::Ok,
+                "Actor search is ready; open Search actors to query the catalog.".to_owned(),
+                capability_ready,
+                false,
+                false,
+            )
+        } else if paused {
+            (
+                    "Paused",
+                    StatusTone::Warn,
+                    "Indexing is paused or write-paced on the backend; inspect job details or refresh checks."
+                        .to_owned(),
+                    false,
+                    false,
+                    false,
+                )
+        } else if check.state == ReadinessState::Running
+            || reindex_job.is_some_and(|job| crate::backend::job_is_active(&job.state))
+        {
+            (
+                    "Building",
+                    StatusTone::Info,
+                    "Actor search index build is active; readiness updates automatically when finished."
+                        .to_owned(),
+                    false,
+                    true,
+                    false,
+                )
+        } else if receipt_job.is_some() {
+            (
+                "Queued",
+                StatusTone::Info,
+                "Actor index request is queued on the backend; follow progress in Jobs.".to_owned(),
+                false,
+                false,
+                false,
+            )
+        } else if !catalog_ready
+            && catalog_check.is_some_and(|c| c.state == ReadinessState::NotReady)
+        {
+            (
+                    "Seed actors first",
+                    StatusTone::Warn,
+                    "Seed a non-empty actor CSV catalog in DB Seed & Train before building the search index."
+                        .to_owned(),
+                    false,
+                    false,
+                    true,
+                )
+        } else if check.state == ReadinessState::NotReady {
+            (
+                "Not built",
+                StatusTone::Warn,
+                "Click Build actor index to generate the shared backend search projection."
+                    .to_owned(),
+                false,
+                false,
+                false,
+            )
+        } else if check.state == ReadinessState::Degraded || !search_fresh {
+            (
+                "Needs attention",
+                StatusTone::Warn,
+                "Refresh checks or inspect backend diagnostics to resolve actor search status."
+                    .to_owned(),
+                false,
+                false,
+                false,
+            )
+        } else {
+            (
+                    "Unavailable",
+                    StatusTone::Err,
+                    "Actor search backend status is currently unavailable; refresh checks or inspect gateway health."
+                        .to_owned(),
+                    false,
+                    false,
+                    false,
+                )
+        }
+    } else if receipt_job.is_some() {
+        (
+            "Queued",
+            StatusTone::Info,
+            "Actor index request is queued on the backend; follow progress in Jobs.".to_owned(),
+            false,
+            false,
+            false,
+        )
+    } else {
+        (
+            "Unavailable",
+            StatusTone::Neutral,
+            "Refresh checks to inspect actor catalog and search index readiness.".to_owned(),
+            false,
+            false,
+            false,
+        )
+    };
+
+    let (stage, scanned, total) = match reindex_job {
+        Some(job) => (
+            (!job.phase.is_empty()).then(|| job.phase.clone()),
+            job.progress_done
+                .and_then(|value| u64::try_from(value).ok()),
+            job.progress_total
+                .and_then(|value| u64::try_from(value).ok()),
+        ),
+        None => (None, None, None),
+    };
+
+    ActorSearchSummary {
+        status_label,
+        tone,
+        next_action,
+        freshness,
+        can_search,
+        building,
+        stage,
+        scanned,
+        total,
+        needs_seed,
+        details,
+    }
+}
+
+fn active_or_selected_reindex_job(state: &State) -> Option<&crate::backend::ActivityJob> {
+    if let Load::Ready(detail) = &state.backend.detail {
+        if detail.job.operation == "actor_reindex" {
+            return Some(&detail.job);
+        }
+    }
+    if let Load::Ready(jobs) = &state.backend.jobs {
+        return jobs
+            .rows
+            .iter()
+            .find(|job| job.operation == "actor_reindex");
+    }
+    None
+}
+
+fn actor_search_summary_card(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
+    let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
+    let shadow_ref = (!preferences.matte()).then_some(&state.shadow_offset);
+    let summary = summarize_actor_search(state);
+    let disabled_reason = state.maintenance_disabled_reason(MaintenanceOperation::ReindexActors);
+    let refreshing = matches!(state.readiness, Load::Pending | Load::Loading);
+    let busy_submit =
+        state.maintenance.busy() || matches!(state.maintenance.receipt, Load::Loading);
+
+    let mut card_body = rune::col()
+        .padding(16.0)
+        .gap(10.0)
+        .key("actor-search-summary-card")
+        .child(ui_components::section_header(
+            &icons::BRAIN,
+            "Actor search",
+            Some(&summary.freshness),
+            Some(ui_components::status_pill(
+                summary.status_label,
+                None,
+                summary.tone,
+                kit,
+            )),
+            Some(ui_components::status_pill(
+                "Connected",
+                None,
+                StatusTone::Ok,
+                kit,
+            )),
+            kit,
+        ))
+        .child(line(summary.next_action, kit));
+
+    if summary.building || summary.scanned.is_some() {
+        let stage_label = summary.stage.as_deref().unwrap_or("building");
+        let progress_label = match (summary.scanned, summary.total) {
+            (Some(done), Some(total)) if total > 0 => {
+                format!("{stage_label} · Scanned {done} / {total}")
+            }
+            (Some(done), _) => format!("{stage_label} · Scanned {done} (total unknown)"),
+            (None, _) => format!("Stage: {stage_label}"),
+        };
+        let frac = summary
+            .scanned
+            .zip(summary.total)
+            .and_then(|(done, total)| {
+                (total > 0).then(|| (done as f32 / total as f32).clamp(0.0, 1.0))
+            });
+        card_body = card_body.child(
+            Progress::new(frac)
+                .label(progress_label)
+                .build(kit)
+                .w_full(),
+        );
+    }
+
+    let mut actions = rune::row().w_full().gap(8.0).center_y();
+    actions = actions.child(
+        ActionButton::new("Build actor index")
+            .key("workstation-build-actor-index")
+            .icon(&icons::BRAIN)
+            .finish(if disabled_reason.is_none() && !summary.can_search {
+                MetalFinish::GoldCta
+            } else {
+                MetalFinish::Gunmetal
+            })
+            .busy(busy_submit)
+            .disabled(disabled_reason.is_some() || busy_submit)
+            .on_press(|state: &mut State| {
+                state.preview_maintenance(MaintenanceOperation::ReindexActors);
+            })
+            .build(kit, preferences, pointer_ref),
+    );
+    if summary.can_search {
+        actions = actions.child(
+            ActionButton::new("Search actors")
+                .key("workstation-search-actors")
+                .icon(&icons::BRAIN)
+                .finish(MetalFinish::GoldCta)
+                .on_press(|state: &mut State| state.navigate(Page::Brain))
+                .build(kit, preferences, pointer_ref),
+        );
+    }
+    if summary.needs_seed {
+        actions = actions.child(
+            ActionButton::new("Open DB Seed & Train")
+                .key("workstation-open-seed")
+                .icon(&icons::SEED)
+                .finish(MetalFinish::GoldCta)
+                .on_press(|state: &mut State| {
+                    state.seed_stage = SeedStage::Seed;
+                    state.navigate(Page::Seed);
+                })
+                .build(kit, preferences, pointer_ref),
+        );
+    }
+    actions = actions.child(
+        ActionButton::new("Refresh checks")
+            .key("workstation-refresh-readiness")
+            .icon(&icons::REFRESH)
+            .finish(MetalFinish::ObsidianPill)
+            .busy(refreshing)
+            .disabled(refreshing)
+            .on_press(|state: &mut State| state.refresh_readiness())
+            .build(kit, preferences, pointer_ref),
+    );
+    card_body = card_body.child(actions);
+
+    if let Some(banner) = crate::backend_views::actor_index_receipt_banner(state, preferences, kit)
+    {
+        card_body = card_body.child(banner);
+    }
+    if let Some(unresolved) =
+        crate::backend_views::unresolved_actor_reindex_banner(state, preferences, kit)
+    {
+        card_body = card_body.child(unresolved);
+    }
+    if !summary.details.is_empty() {
+        let mut details_col = rune::col().gap(4.0);
+        for detail in summary.details.iter().take(6) {
+            details_col = details_col.child(quiet(detail.clone(), kit));
+        }
+        card_body = card_body.child(
+            ActionButton::new(if state.maintenance.reindex_details_open {
+                "Hide details"
+            } else {
+                "Details"
+            })
+            .key("workstation-index-details-toggle")
+            .finish(MetalFinish::ObsidianPill)
+            .on_press(|state: &mut State| {
+                state.maintenance.reindex_details_open = !state.maintenance.reindex_details_open;
+            })
+            .build(kit, preferences, pointer_ref),
+        );
+        if state.maintenance.reindex_details_open {
+            card_body = card_body.child(
+                Collapsible::new("Bounded index diagnostics", true)
+                    .child(details_col)
+                    .build(kit),
+            );
+        }
+    }
+
+    material::luminous_card(
+        card_body,
+        summary.tone,
+        false,
+        preferences,
+        pointer_ref,
+        shadow_ref,
+    )
 }
 
 fn brain(state: &State, cx: &mut Cx<State>, kit: &Kit) -> El {
@@ -1320,6 +1802,7 @@ mod tests {
             PairingFailure::KeychainMissing,
             PairingFailure::KeychainDenied,
             PairingFailure::KeychainUnavailable,
+            PairingFailure::SessionEnded,
             PairingFailure::CatalogUnavailable,
             PairingFailure::Network,
             PairingFailure::GatewayUnavailable,
@@ -1337,6 +1820,7 @@ mod tests {
             let restart = matches!(
                 failure,
                 PairingFailure::KeychainMissing
+                    | PairingFailure::SessionEnded
                     | PairingFailure::Authentication
                     | PairingFailure::Denied
                     | PairingFailure::Expired
@@ -1429,6 +1913,349 @@ mod tests {
                 runtime.state.intents.is_empty(),
                 "rendering a destination cannot submit work"
             );
+        }
+    }
+
+    fn click_within(runtime: &mut Runtime<State>, key: &str, size: (f32, f32), clock: &mut f64) {
+        runtime.update(|_, tx| tx.scroll_into_view(key));
+        *clock += 1.0 / 60.0;
+        runtime.frame(*clock);
+        let (x, y) = runtime
+            .find(key)
+            .unwrap_or_else(|| panic!("visible control {key} at {size:?}"));
+        assert!(
+            (0.0..size.0).contains(&x) && (0.0..size.1).contains(&y),
+            "control {key} ({x}, {y}) must fit inside viewport {size:?}"
+        );
+        runtime.pointer_down(x, y);
+        runtime.pointer_up(x, y);
+        *clock += 1.0 / 60.0;
+        runtime.frame(*clock);
+    }
+
+    #[test]
+    fn workstation_hero_card_covers_actor_search_states_details_and_confirmation_escape() {
+        use fleetworks_contracts::context::Permission;
+        use fleetworks_contracts::readiness::{
+            ReadinessAction, ReadinessActionId, ReadinessCheck, ReadinessCheckId, ReadinessState,
+            WorkstationReadiness,
+        };
+
+        let mut initial = crate::tests::registered_fixture();
+        if let Some(capabilities) = &mut initial.connection.capabilities {
+            let mut search = fleetworks_contracts::capabilities::SearchCapabilities::default();
+            search.actors = Some(Default::default());
+            capabilities.search = Some(search);
+        }
+        initial.backend.profile = crate::app::Load::Ready(crate::backend::ProfileSnapshot {
+            configuration_revision: 0,
+            configuration_format: 1,
+            accounts: vec![],
+            tool_credentials: vec![],
+            setup_required: false,
+            portable_schema_version: 4,
+        });
+        let receipt = fleetworks_contracts::connect::RegistrationReceipt::new(
+            "synthetic-deployment".into(),
+            "synthetic-node".into(),
+            "synthetic-registration".into(),
+            Some("192.0.2.42".parse().expect("fixture IP")),
+            1,
+        );
+        let mut cat = ReadinessCheck::new(
+            ReadinessCheckId::ActorCatalog,
+            ReadinessState::Ready,
+            "ready".into(),
+            "Catalog ready".into(),
+            "2026-11-14T22:00:00Z".into(),
+        );
+        cat.fresh_for_ms = 30_000;
+        let mut search = ReadinessCheck::new(
+            ReadinessCheckId::ActorSearch,
+            ReadinessState::NotReady,
+            "not_built".into(),
+            "Actor search index has not been built yet.".into(),
+            "2026-11-14T22:00:00Z".into(),
+        );
+        search.fresh_for_ms = 30_000;
+        search.actions.push(ReadinessAction::new(
+            ReadinessActionId::RebuildActorIndex,
+            Permission::MaintainBackend,
+            true,
+        ));
+        let mut readiness = WorkstationReadiness::new(
+            "synthetic-deployment".into(),
+            "2026-11-14T22:00:00Z".into(),
+            vec![cat, search],
+        );
+        readiness.registration = Some(receipt);
+        initial.readiness = crate::app::Load::Ready(readiness);
+        initial.readiness_received_at = Some(0.0);
+
+        let mut rt = Runtime::new(
+            initial,
+            app::view,
+            (1280.0, 800.0),
+            Env {
+                system_dark: true,
+                scale: 1.0,
+            },
+        );
+        let mut clock = 0.0;
+        rt.frame(clock);
+        // Frame 1 resolves layout sizes cleanly.
+        clock += 1.0 / 60.0;
+        rt.frame(clock);
+
+        // Toggle bounded Details disclosure on the Workstation hero card.
+        assert!(rt.find("actor-search-summary-card").is_some());
+        click_within(
+            &mut rt,
+            "workstation-index-details-toggle",
+            (1280.0, 800.0),
+            &mut clock,
+        );
+        assert!(rt.state.maintenance.reindex_details_open);
+        click_within(
+            &mut rt,
+            "workstation-index-details-toggle",
+            (1280.0, 800.0),
+            &mut clock,
+        );
+        assert!(!rt.state.maintenance.reindex_details_open);
+
+        // Hero card renders distinct status badges & single-sentence guidance across backend states.
+        let scenarios = [
+            (
+                ReadinessState::NotReady,
+                ReadinessState::NotReady,
+                "not_seeded",
+                "Seed actors first",
+            ),
+            (
+                ReadinessState::Ready,
+                ReadinessState::NotReady,
+                "not_built",
+                "Not built",
+            ),
+            (
+                ReadinessState::Ready,
+                ReadinessState::NotReady,
+                "paused",
+                "Paused",
+            ),
+            (
+                ReadinessState::Ready,
+                ReadinessState::Degraded,
+                "failed",
+                "Needs attention",
+            ),
+            (
+                ReadinessState::Ready,
+                ReadinessState::Unavailable,
+                "unavailable",
+                "Unavailable",
+            ),
+        ];
+        for (cat_state, search_state, reason, label) in scenarios {
+            rt.update(move |state, _| {
+                if let crate::app::Load::Ready(readiness) = &mut state.readiness {
+                    readiness.checks.retain(|c| {
+                        !matches!(
+                            c.id,
+                            ReadinessCheckId::ActorCatalog | ReadinessCheckId::ActorSearch
+                        )
+                    });
+                    let mut cat = ReadinessCheck::new(
+                        ReadinessCheckId::ActorCatalog,
+                        cat_state,
+                        "cat".into(),
+                        "Catalog check".into(),
+                        "2026-11-14T22:00:00Z".into(),
+                    );
+                    cat.fresh_for_ms = 30_000;
+                    let mut search = ReadinessCheck::new(
+                        ReadinessCheckId::ActorSearch,
+                        search_state,
+                        reason.into(),
+                        format!("Explanation for {label}"),
+                        "2026-11-14T22:00:00Z".into(),
+                    );
+                    search.fresh_for_ms = 30_000;
+                    search.actions.push(ReadinessAction::new(
+                        ReadinessActionId::RebuildActorIndex,
+                        Permission::MaintainBackend,
+                        true,
+                    ));
+                    readiness.checks.push(cat);
+                    readiness.checks.push(search);
+                }
+            });
+            clock += 1.0 / 60.0;
+            rt.frame(clock);
+            let tree = rt.accessibility_json().to_string();
+            assert!(tree.contains("Connected"));
+            assert!(tree.contains(label), "missing hero state {label}");
+        }
+
+        // Building state with unknown total keeps indeterminate progress & no invented percent.
+        rt.update(|state, _| {
+            if let crate::app::Load::Ready(readiness) = &mut state.readiness {
+                if let Some(c) = readiness
+                    .checks
+                    .iter_mut()
+                    .find(|c| c.id == ReadinessCheckId::ActorSearch)
+                {
+                    c.state = ReadinessState::NotReady;
+                    c.reason_code = "building".into();
+                }
+            }
+            let job: crate::backend::ActivityJob = serde_json::from_value(serde_json::json!({
+                "id": "job-build-1",
+                "app": "worker",
+                "operation": "actor_reindex",
+                "title": "Actor index",
+                "state": "running",
+                "phase": "scanning",
+                "progress_done": 128,
+                "progress_total": null,
+                "error_summary": "",
+                "private_details_available": false,
+                "activity_actions_available": false,
+                "status_only": false
+            }))
+            .unwrap();
+            state.backend.jobs = crate::app::Load::Ready(crate::backend::ActivityJobs {
+                rows: vec![job],
+                activity_scope: fleetworks_contracts::context::ActivityScope::for_workstation(
+                    state.registration.context.as_ref().unwrap(),
+                ),
+                relation_counts_available: false,
+                activity_actions_available: false,
+            });
+        });
+        clock += 1.0 / 60.0;
+        rt.frame(clock);
+        let building_tree = rt.accessibility_json().to_string();
+        assert!(building_tree.contains("Building"));
+        assert!(
+            !building_tree.contains('%'),
+            "unknown total cannot invent a percentage"
+        );
+
+        // Clicking Build actor index opens the modal confirmation, and Escape returns focus cleanly.
+        click_within(
+            &mut rt,
+            "workstation-build-actor-index",
+            (1280.0, 800.0),
+            &mut clock,
+        );
+        assert!(rt.state.confirm_maintenance_dialog);
+        let dialog_tree = rt.accessibility_json().to_string();
+        assert!(dialog_tree.contains("Shared backend catalog"));
+        assert!(rt.find("maintenance-confirm").is_some());
+        assert!(rt.find("maintenance-cancel").is_some());
+        rt.key(KeyEvent {
+            key: Key::Escape,
+            mods: Mods::default(),
+        });
+        clock += 1.0 / 60.0;
+        rt.frame(clock);
+        assert!(!rt.state.confirm_maintenance_dialog);
+        assert!(rt.state.maintenance.confirmation.is_none());
+
+        // Ready state offers Search actors which navigates directly to Page::Brain.
+        rt.update(|state, _| {
+            if let crate::app::Load::Ready(readiness) = &mut state.readiness {
+                if let Some(c) = readiness
+                    .checks
+                    .iter_mut()
+                    .find(|c| c.id == ReadinessCheckId::ActorSearch)
+                {
+                    c.state = ReadinessState::Ready;
+                    c.reason_code = "ready".into();
+                }
+            }
+        });
+        clock += 1.0 / 60.0;
+        rt.frame(clock);
+        click_within(
+            &mut rt,
+            "workstation-search-actors",
+            (1280.0, 800.0),
+            &mut clock,
+        );
+        assert_eq!(rt.state.page, Page::Brain);
+    }
+
+    #[test]
+    fn responsive_shell_and_jobs_layout_adapt_at_1364x1024_1280x800_and_640x480() {
+        for size in [(1364.0, 1024.0), (1280.0, 800.0), (640.0, 480.0)] {
+            let mut state = crate::tests::registered_fixture();
+            state.page = Page::Jobs;
+            let one_job: crate::backend::ActivityJob = serde_json::from_value(serde_json::json!({
+                "id": "job-long-identifier-1234567890-abcdef-987654321",
+                "app": "worker",
+                "operation": "actor_reindex",
+                "title": "Build actor index",
+                "state": "completed",
+                "phase": "completed",
+                "progress_done": 100,
+                "progress_total": 100,
+                "error_summary": "",
+                "private_details_available": true,
+                "activity_actions_available": false,
+                "status_only": false
+            }))
+            .unwrap();
+            state.backend.jobs = crate::app::Load::Ready(crate::backend::ActivityJobs {
+                rows: vec![one_job],
+                activity_scope: fleetworks_contracts::context::ActivityScope::for_workstation(
+                    state.registration.context.as_ref().unwrap(),
+                ),
+                relation_counts_available: false,
+                activity_actions_available: false,
+            });
+            let mut rt = Runtime::new(
+                state,
+                app::view,
+                size,
+                Env {
+                    system_dark: true,
+                    scale: 1.0,
+                },
+            );
+            let mut clock = 0.0;
+            rt.frame(clock);
+            clock += 1.0 / 60.0;
+            rt.frame(clock);
+
+            if size.0 < 820.0 {
+                assert!(
+                    rt.find("compact-icon-rail").is_some(),
+                    "640x480 must collapse sidebar into compact-icon-rail"
+                );
+            } else {
+                assert!(rt.find("compact-icon-rail").is_none());
+            }
+            assert!(rt.find("nav-workstation").is_some());
+            assert!(rt.find("nav-jobs").is_some());
+            assert!(rt.find("connection-editor").is_some());
+            let jobs_tree = rt.accessibility_json().to_string();
+            assert!(jobs_tree.contains("1 job") && !jobs_tree.contains("1 jobs"));
+
+            // Selecting a job on compact width shows detail pane behind selection + Back button.
+            if size.0 < 760.0 {
+                rt.update(|s, _| {
+                    s.backend.selected_job =
+                        Some("job-long-identifier-1234567890-abcdef-987654321".into())
+                });
+                clock += 1.0 / 60.0;
+                rt.frame(clock);
+                assert!(rt.find("jobs-back-to-list").is_some());
+                click_within(&mut rt, "jobs-back-to-list", size, &mut clock);
+                assert!(rt.state.backend.selected_job.is_none());
+            }
         }
     }
 }

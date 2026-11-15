@@ -307,20 +307,33 @@ def start_local_pairing_handoff(root, prepared):
         raise ReviewConfigurationError("Local pairing helper could not start") from error
 
 
-def detect_docker_platform():
-    """Detect the matching Docker engine platform for the current workstation."""
+def _load_platform_info():
     scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
     spec = importlib.util.spec_from_file_location("fleetworks_platform", scripts_dir / "fleetworks_platform.py")
     if spec is None or spec.loader is None:
         raise ReviewConfigurationError("Unable to load host platform detector")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    info = module.detect()
+    return module.detect()
+
+
+def detect_docker_platform():
+    """Detect the matching Docker engine platform for the current workstation."""
+    info = _load_platform_info()
     if not info.docker_platform:
         raise ReviewConfigurationError(
             f"Unsupported host platform for Docker review: {info.system}/{info.physical_architecture}"
         )
     return info.docker_platform
+
+
+def supports_native_review():
+    """Return True when the host OS/architecture supports building and opening the native desktop app."""
+    if sys.platform == "darwin":
+        return True
+    if sys.platform.startswith("linux"):
+        return _load_platform_info().native_target == "x86_64-unknown-linux-gnu"
+    return False
 
 
 def run_review(root, name, *, backend_only=False, approval_handoff=False, api_port=None, web_port=None, platform=None, root_env=False):
@@ -349,8 +362,8 @@ def run_review(root, name, *, backend_only=False, approval_handoff=False, api_po
         raise ReviewConfigurationError("Review already exists with a different Web port; edit compose.env or choose another --name")
     if platform is not None and platform != environment.get("PLATFORM"):
         raise ReviewConfigurationError("Review already exists with a different platform; edit compose.env or choose another --name")
-    open_native = sys.platform == "darwin" and not backend_only
-    if approval_handoff and not open_native:
+    open_native = supports_native_review() and not backend_only
+    if approval_handoff and (sys.platform != "darwin" or backend_only):
         raise ReviewConfigurationError("Local pairing handoff requires a macOS native review")
     stages = 6 if open_native else 5
     stage = "Docker preflight"
@@ -420,8 +433,14 @@ def run_review(root, name, *, backend_only=False, approval_handoff=False, api_po
                     raise
                 if helper is not None:
                     print("Local pairing confirmation is ready for this review (expires within one hour).", flush=True)
+                elif sys.platform.startswith("linux"):
+                    print(
+                        "Linux native review uses unlocked Secret Service or session-only credentials; "
+                        "approve pairing with the CLI command below.",
+                        flush=True,
+                    )
             elif not backend_only:
-                print("Backend ready. Native build/open requires macOS; skipped.", flush=True)
+                print("Backend ready. Native build/open requires macOS or Linux x86_64; skipped.", flush=True)
             print_approval(root, prepared)
         except subprocess.CalledProcessError as error:
             raise ReviewActionError(stage, error.returncode) from None

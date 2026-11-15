@@ -24,10 +24,13 @@ use crate::views::quiet;
 
 impl State {
     pub(crate) fn readiness_check_fresh(&self, check: &ReadinessCheck) -> bool {
+        self.readiness_check_fresh_at(check, self.clock)
+    }
+
+    pub(crate) fn readiness_check_fresh_at(&self, check: &ReadinessCheck, now: f64) -> bool {
         check.fresh_for_ms > 0
             && self.readiness_received_at.is_some_and(|received| {
-                self.clock >= received
-                    && (self.clock - received) * 1000.0 <= check.fresh_for_ms as f64
+                now >= received && (now - received) * 1000.0 <= check.fresh_for_ms as f64
             })
     }
 }

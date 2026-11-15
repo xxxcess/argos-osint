@@ -599,15 +599,18 @@ impl State {
             }
             Ok(ReadResult::JobDetail(detail)) => {
                 if self.backend.selected_job.as_deref() == Some(&detail.job.id) {
-                    let transitioned = match &self.backend.detail {
+                    let (transitioned, finished_active) = match &self.backend.detail {
                         Load::Ready(previous) if previous.job.id == detail.job.id => {
-                            previous.job.state != detail.job.state
+                            let changed = previous.job.state != detail.job.state
                                 || previous.job.phase != detail.job.phase
                                 || previous.job.progress_done != detail.job.progress_done
                                 || previous.job.progress_total != detail.job.progress_total
-                                || previous.job.error_summary != detail.job.error_summary
+                                || previous.job.error_summary != detail.job.error_summary;
+                            let finished = job_is_active(&previous.job.state)
+                                && !job_is_active(&detail.job.state);
+                            (changed, finished)
                         }
-                        _ => false,
+                        _ => (false, false),
                     };
                     if let Load::Ready(jobs) = &mut self.backend.jobs {
                         if let Some(row) = jobs.rows.iter_mut().find(|row| row.id == detail.job.id)
@@ -623,6 +626,9 @@ impl State {
                     }
                     self.backend.detail = Load::Ready(*detail);
                     self.sync_operational_logs_with_selected_job(transitioned);
+                    if finished_active && !self.fixture {
+                        self.refresh_readiness();
+                    }
                 } else {
                     self.backend
                         .failed(kind, "Gateway returned a different job".into());

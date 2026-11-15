@@ -103,10 +103,18 @@ pub fn run() -> anyhow::Result<()> {
             state
         })
         .args(tooling)
-        .chrome(Chrome {
-            full_size_content: true,
-            traffic_lights: Some((16.0, 17.0)),
-            drag_regions: true,
+        .chrome(if cfg!(target_os = "macos") {
+            Chrome {
+                full_size_content: true,
+                traffic_lights: Some((16.0, 17.0)),
+                drag_regions: true,
+            }
+        } else {
+            Chrome {
+                full_size_content: false,
+                traffic_lights: None,
+                drag_regions: false,
+            }
         })
         .on_focus(|state, focused, _| {
             state.pairing_focus(focused);
@@ -114,11 +122,12 @@ pub fn run() -> anyhow::Result<()> {
                 state.accessibility.invalidate();
             }
         })
-        .on_close(|state, _| state.cancel_requests());
+        .on_close(|state, _| state.close_window_cleanup())
+        .on_quit(|state, _| state.quit_cleanup());
     services
         .install_ui(app.handle())
         .map_err(anyhow::Error::msg)?;
-    app.run();
+    let result = app.try_run();
     runtime.shutdown_timeout(Duration::from_secs(2));
-    Ok(())
+    result.map_err(anyhow::Error::msg)
 }

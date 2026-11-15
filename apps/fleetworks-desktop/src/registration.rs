@@ -152,6 +152,7 @@ impl State {
                 self.registration.receipt = Load::Ready(registered.receipt);
                 self.registration.message = Some("Workstation registration verified".into());
                 self.restore_cycle_deletion();
+                self.restore_actor_reindex();
                 self.refresh_readiness();
                 self.refresh_page();
             }

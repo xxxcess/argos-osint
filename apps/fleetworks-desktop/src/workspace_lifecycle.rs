@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::platform;
-use crate::platform_trash::MacTrash;
+use crate::platform_trash::PlatformTrash;
 use crate::workspaces;
 use crate::workspaces::WorkspaceCommand;
 use crate::workspaces::WorkspaceUpdate;
@@ -227,7 +227,7 @@ async fn run_removal_inner(
             match container.finish_removal(&current.operation_id)? {
                 RemovalOutcome::RemovedFromApp => "Removed from this app. The folder remains on disk.".into(),
                 RemovalOutcome::TrashPending(intent) => {
-                    container.trash_owned_workspace(&intent, &MacTrash)?;
+                    container.trash_owned_workspace(&intent, &PlatformTrash)?;
                     "Moved the verified folder to macOS Trash. Finder can restore it.".into()
                 }
                 _ => "Folder cleanup remains pending; files are preserved.".into(),

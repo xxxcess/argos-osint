@@ -77,6 +77,11 @@ impl KeychainItem {
     }
 
     #[must_use]
+    pub fn for_credential(installation: &str, origin: &str, id: &str) -> Self {
+        Self::new(installation, origin, "credential", id)
+    }
+
+    #[must_use]
     pub fn service(&self) -> &str {
         &self.service
     }
@@ -95,7 +100,7 @@ pub trait KeychainStore: Send + Sync {
     fn delete(&self, item: &KeychainItem) -> Result<(), KeychainError>;
 }
 
-/// macOS login Keychain generic-password adapter; unsupported platforms fail closed.
+/// System secret store adapter (macOS login Keychain or Linux D-Bus Secret Service).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemKeychain;
 
@@ -157,7 +162,22 @@ fn map_platform_error(error: security_framework::base::Error) -> KeychainError {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+impl KeychainStore for SystemKeychain {
+    fn get(&self, item: &KeychainItem) -> Result<SecretToken, KeychainError> {
+        super::linux_secret_service::LinuxSecretService.get(item)
+    }
+
+    fn set(&self, item: &KeychainItem, token: &SecretToken) -> Result<(), KeychainError> {
+        super::linux_secret_service::LinuxSecretService.set(item, token)
+    }
+
+    fn delete(&self, item: &KeychainItem) -> Result<(), KeychainError> {
+        super::linux_secret_service::LinuxSecretService.delete(item)
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 impl KeychainStore for SystemKeychain {
     fn get(&self, _: &KeychainItem) -> Result<SecretToken, KeychainError> {
         Err(KeychainError::Unavailable)

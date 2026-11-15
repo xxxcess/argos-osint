@@ -106,8 +106,27 @@ impl State {
         result: Result<JobsPage, ClientError>,
     ) {
         self.sync_jobs_binding();
+        let active_before: Vec<String> = match &self.backend.jobs {
+            Load::Ready(jobs) => jobs
+                .rows
+                .iter()
+                .filter(|job| crate::backend::job_is_active(&job.state))
+                .map(|job| job.id.clone())
+                .collect(),
+            _ => Vec::new(),
+        };
         if self.scoped_jobs.complete(&ticket, result) {
             self.project_jobs_page();
+            let completed_active = match &self.backend.jobs {
+                Load::Ready(jobs) => jobs.rows.iter().any(|job| {
+                    active_before.iter().any(|id| id == &job.id)
+                        && !crate::backend::job_is_active(&job.state)
+                }),
+                _ => false,
+            };
+            if completed_active && !self.fixture {
+                self.refresh_readiness();
+            }
             if let (Some(selected_id), Load::Ready(jobs)) =
                 (self.backend.selected_job.clone(), &self.backend.jobs)
             {

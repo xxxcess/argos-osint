@@ -18,6 +18,7 @@ pub mod legacy_connect;
 mod lifecycle_catalog;
 #[cfg(test)]
 mod lifecycle_tests;
+mod linux_secret_service;
 mod pairing;
 mod rebind;
 mod state;
@@ -31,6 +32,7 @@ pub use connections::CredentialReference;
 pub use connections::GatewayProfile;
 pub use connections::GatewayProfileInput;
 pub use connections::CONNECTIONS_FILE;
+pub use pairing::CredentialStorage;
 pub use pairing::PairedGateway;
 pub use pairing::PairingCatalogSnapshot;
 pub use pairing::PairingError;
@@ -48,6 +50,7 @@ pub use trash::PreparedTrash;
 pub use trash::TrashAdapter;
 pub use trash::TrashReference;
 pub use trash::TrashTarget;
+pub use workstation::PendingActorReindex;
 pub use workstation::PendingCycleDeletion;
 
 use std::collections::BTreeSet;

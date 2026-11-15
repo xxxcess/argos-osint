@@ -373,8 +373,18 @@ fn background_checks_are_bounded_to_the_focused_maintenance_page() {
     let mut state = state(false);
     state.scoped_logs.window_focused = true;
     state.refresh_readiness();
-    assert!(!state.maintenance_checks_due(3.9));
-    assert!(state.maintenance_checks_due(4.0));
+    // Fresh idle checks stay quiet until stale (> 5000ms).
+    assert!(!state.maintenance_checks_due(1.9));
+    assert!(!state.maintenance_checks_due(4.0));
+    assert!(state.maintenance_checks_due(5.1));
+    // Running checks poll on the 2s cadence even while fresh.
+    if let Load::Ready(readiness) = &mut state.readiness {
+        readiness.checks[1].state = ReadinessState::Running;
+    }
+    assert!(!state.maintenance_checks_due(1.9));
+    assert!(state.maintenance_checks_due(2.0));
+    state.page = Page::Workstation;
+    assert!(state.maintenance_checks_due(2.0));
     state.scoped_logs.window_focused = false;
     assert!(!state.maintenance_checks_due(10.0));
     state.scoped_logs.window_focused = true;
@@ -510,4 +520,334 @@ async fn cancelled_csv_preparation_retains_capacity_until_blocking_work_exits() 
         .await
         .expect("completed preparation must release capacity")
         .unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn actor_reindex_persists_before_post_and_reconciles_uncertain_delivery() {
+    use fleetworks_contracts::context::JobOrigin;
+    use fleetworks_contracts::context::JobRequestAssociation;
+    use fleetworks_contracts::context::OriginSource;
+    use fleetworks_contracts::context::WORKSTATION_REQUEST_DETAIL_PATH;
+    use fleetworks_workstation::native::NativeContainer;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let home = tempfile::tempdir().expect("isolated workstation home");
+    let home_path = home.path().canonicalize().expect("canonical home");
+    let container = NativeContainer::open_settings(&home_path).expect("protected container");
+
+    let receipt = RegistrationReceipt::new(
+        "synthetic-deployment".into(),
+        "synthetic-workstation".into(),
+        "synthetic-registration".into(),
+        None,
+        1,
+    );
+    let context = RegisteredContext::new(
+        receipt.clone(),
+        1,
+        1,
+        "synthetic-config".into(),
+        "synthetic-access".into(),
+    )
+    .expect("registered context");
+    let confirmation = MaintenanceConfirmation {
+        operation: MaintenanceOperation::ReindexActors,
+        context: context.clone(),
+        origin_revision: 1,
+        configuration_revision: 3,
+        dataset: None,
+    };
+
+    let (request, entry) = prepare_maintenance_request(
+        &confirmation,
+        Some(&container),
+        "https://gateway.example.test",
+        None,
+        None,
+    )
+    .expect("persist pre-POST actor reindex attempt");
+    let pending = entry.expect("actor reindex writes pending attempt before HTTP");
+
+    // Reopening from disk retains the exact request/context identity before HTTP runs.
+    let reopened = std::sync::Arc::new(
+        NativeContainer::open_settings(&home_path).expect("reopened container"),
+    );
+    let disk_pending = reopened
+        .pending_actor_reindex("https://gateway.example.test")
+        .expect("read pending reindex")
+        .expect("pending attempt persisted");
+    assert_eq!(disk_pending.request, request);
+    assert_eq!(disk_pending.context, context);
+
+    // Repeating preparation under valid authority replays the exact same request ID.
+    let (replayed, _) = prepare_maintenance_request(
+        &confirmation,
+        Some(reopened.as_ref()),
+        "https://gateway.example.test",
+        None,
+        None,
+    )
+    .expect("replay exact pending attempt");
+    assert_eq!(replayed.request_id, request.request_id);
+
+    // Changing configuration_revision refuses silent replacement while pending work is unresolved.
+    let mut stale_confirmation = confirmation.clone();
+    stale_confirmation.configuration_revision = 4;
+    let stale_err = prepare_maintenance_request(
+        &stale_confirmation,
+        Some(reopened.as_ref()),
+        "https://gateway.example.test",
+        None,
+        None,
+    )
+    .expect_err("stale configuration must refuse creating a second pending attempt");
+    assert!(stale_err.contains("earlier registration or configuration"));
+
+    // Simulate uncertain POST delivery followed by GET /api/v1/workstation/requests/detail lookup.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback request detail server");
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let expected_req_id = request.request_id.clone();
+    let expected_context = context.clone();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept request_detail");
+        let mut buf = Vec::new();
+        while !buf.ends_with(b"\r\n\r\n") {
+            let mut b = [0_u8; 1];
+            assert_eq!(socket.read(&mut b).await.unwrap(), 1);
+            buf.push(b[0]);
+        }
+        let head = String::from_utf8(buf).unwrap();
+        let first_line = head.lines().next().unwrap_or_default().to_owned();
+        let job_origin = JobOrigin::new(
+            &expected_context,
+            OriginSource::Native,
+            expected_req_id,
+            "2026-11-14T22:00:00Z".into(),
+            3,
+            Vec::new(),
+        );
+        let association = JobRequestAssociation::new(
+            "job-reconciled-1".into(),
+            job_origin,
+            "2026-11-14T22:00:01Z".into(),
+        );
+        let body = serde_json::to_vec(&association).unwrap();
+        let reply = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        socket.write_all(reply.as_bytes()).await.unwrap();
+        socket.write_all(&body).await.unwrap();
+        first_line
+    });
+
+    let client = fleetworks_contracts::Client::new(&origin, Some("fixture-token"))
+        .expect("loopback client")
+        .with_registered_context(&context)
+        .expect("registered context");
+    let mut active_pending = Some(pending);
+    let outcome = reconcile_uncertain_reindex(
+        &client,
+        Some(&reopened),
+        "https://gateway.example.test",
+        &mut active_pending,
+        fleetworks_contracts::ClientError::Status(503),
+    )
+    .await;
+    assert!(active_pending.is_none());
+    match outcome {
+        MaintenanceOutcome::Reconciled(association) => {
+            assert_eq!(association.job_id, "job-reconciled-1");
+        }
+        _ => panic!("expected reconciled association"),
+    }
+    assert!(
+        reopened
+            .pending_actor_reindex("https://gateway.example.test")
+            .unwrap()
+            .is_none(),
+        "reconciled request must clear durable pending journal"
+    );
+    let line = server.await.unwrap();
+    assert!(line.starts_with(&format!("GET {WORKSTATION_REQUEST_DETAIL_PATH}?")));
+    assert!(line.contains("operation=actor_reindex"));
+}
+
+#[test]
+fn workstation_reindex_confirmation_guards_duplicates_supports_escape_and_refreshes_on_terminal_job(
+) {
+    use fleetworks_contracts::context::JobOrigin;
+    use fleetworks_contracts::context::OriginSource;
+    use fleetworks_contracts::readiness::MaintenanceReceipt;
+
+    let mut s = state(true);
+    s.page = crate::app::Page::Workstation;
+    if let Load::Ready(readiness) = &mut s.readiness {
+        for check in &mut readiness.checks {
+            if check.id == ReadinessCheckId::ActorSearch {
+                check
+                    .actions
+                    .push(fleetworks_contracts::readiness::ReadinessAction::new(
+                        ReadinessActionId::RebuildActorIndex,
+                        fleetworks_contracts::context::Permission::MaintainBackend,
+                        true,
+                    ));
+            }
+        }
+    }
+
+    s.preview_maintenance(MaintenanceOperation::ReindexActors);
+    assert!(s.confirm_maintenance_dialog);
+    assert!(s.maintenance.confirmation.is_some());
+
+    // Simulate Loading receipt / in-flight operation blocking duplicate confirm_maintenance clicks.
+    s.maintenance.receipt = Load::Loading;
+    s.confirm_maintenance();
+    assert!(
+        s.confirm_maintenance_dialog,
+        "duplicate click while receipt is already Loading must ignore confirmation without submitting"
+    );
+
+    // Idle receipt lets confirmation submit once.
+    s.maintenance.receipt = Load::Idle;
+    s.confirm_maintenance();
+    assert!(!s.confirm_maintenance_dialog);
+    assert_eq!(
+        s.intents
+            .iter()
+            .filter(|i| matches!(
+                i,
+                Intent::Maintenance {
+                    operation: MaintenanceOperation::ReindexActors
+                }
+            ))
+            .count(),
+        1
+    );
+
+    // Cancel clears confirmation dialog cleanly.
+    s.preview_maintenance(MaintenanceOperation::ReindexActors);
+    assert!(s.confirm_maintenance_dialog);
+    s.cancel_maintenance_confirmation();
+    assert!(!s.confirm_maintenance_dialog);
+    assert!(s.maintenance.confirmation.is_none());
+
+    // Validate receipt equality check without changing current page.
+    let confirmation = MaintenanceConfirmation {
+        operation: MaintenanceOperation::ReindexActors,
+        context: s.registration.context.clone().unwrap(),
+        origin_revision: s.origin_revision,
+        configuration_revision: s.configuration_revision().unwrap(),
+        dataset: None,
+    };
+    let req = MaintenanceRequest::for_reindex(
+        "synthetic-reindex-req".into(),
+        MutationContext::new(&confirmation.context).with_configuration_revision(0),
+    )
+    .unwrap();
+    let origin = JobOrigin::new(
+        &confirmation.context,
+        OriginSource::Native,
+        "synthetic-reindex-req".into(),
+        "2026-11-14T22:00:00Z".into(),
+        0,
+        Vec::new(),
+    );
+    let receipt = MaintenanceReceipt::new(
+        "job-reindex-99".into(),
+        MaintenanceOperation::ReindexActors,
+        origin,
+        None,
+        true,
+    );
+    assert!(valid_receipt(&receipt, &confirmation, &req));
+    s.maintenance.receipt = Load::Ready(receipt);
+    assert_eq!(s.page, crate::app::Page::Workstation);
+
+    // When a running job finishes in scoped_jobs, readiness refreshes once while preserving rows/selection.
+    let running: crate::backend::ActivityJob = serde_json::from_value(serde_json::json!({
+        "id": "job-reindex-99",
+        "app": "worker",
+        "operation": "actor_reindex",
+        "title": "Actor index",
+        "state": "running",
+        "phase": "scanning",
+        "progress_done": 64,
+        "progress_total": null,
+        "error_summary": "",
+        "private_details_available": true,
+        "activity_actions_available": false,
+        "status_only": false
+    }))
+    .unwrap();
+    let completed: crate::backend::ActivityJob = serde_json::from_value(serde_json::json!({
+        "id": "job-reindex-99",
+        "app": "worker",
+        "operation": "actor_reindex",
+        "title": "Actor index",
+        "state": "completed",
+        "phase": "completed",
+        "progress_done": 128,
+        "progress_total": 128,
+        "error_summary": "",
+        "private_details_available": true,
+        "activity_actions_available": false,
+        "status_only": false
+    }))
+    .unwrap();
+    let binding = crate::jobs_query::JobsBinding {
+        context: s.registration.context.clone().unwrap(),
+        connection_epoch: s.connection.epoch,
+        origin_revision: s.origin_revision,
+    };
+    let mut initial_page = crate::jobs_query::JobsPage {
+        rows: vec![running],
+        activity_scope: fleetworks_contracts::context::ActivityScope::for_workstation(
+            &binding.context,
+        ),
+        relation_counts_available: false,
+        activity_actions_available: false,
+        counts: None,
+        dashboard_counts_scope: "unfiltered_top_level_workstation_activity".into(),
+        matched_total: Some(1),
+        observed_at: "2026-11-14T22:00:00Z".into(),
+        apps: vec!["worker".into()],
+        apps_complete: true,
+        has_more: false,
+        page_cursor: format!("{:064x}", 1),
+        next_cursor: None,
+    };
+    if let Some(capabilities) = &mut s.connection.capabilities {
+        capabilities
+            .permissions
+            .push(Permission::ReadWorkstationActivity);
+    }
+    s.sync_jobs_binding();
+    s.request_jobs(crate::jobs_query::JobsEvent::Apply);
+    let first_ticket = s
+        .scoped_jobs
+        .active_ticket()
+        .expect("initial jobs ticket")
+        .clone();
+    s.complete_scoped_jobs(first_ticket, Ok(initial_page.clone()));
+    s.select_job("job-reindex-99");
+    let before_readiness_rev = s.readiness_revision;
+    s.intents.clear();
+
+    s.request_jobs(crate::jobs_query::JobsEvent::Poll);
+    let poll_ticket = s
+        .scoped_jobs
+        .active_ticket()
+        .expect("poll jobs ticket")
+        .clone();
+    s.fixture = false;
+    initial_page.rows = vec![completed];
+    s.complete_scoped_jobs(poll_ticket, Ok(initial_page));
+    assert!(
+        s.readiness_revision > before_readiness_rev,
+        "terminal job completion must trigger one readiness refresh"
+    );
+    assert_eq!(s.backend.selected_job.as_deref(), Some("job-reindex-99"));
 }

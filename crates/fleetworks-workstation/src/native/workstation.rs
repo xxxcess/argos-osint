@@ -7,6 +7,9 @@ use fleetworks_contracts::connect::RegistrationReceipt;
 use fleetworks_contracts::connect::RegistrationStatus;
 use fleetworks_contracts::context::{MutationContext, RegisteredContext};
 use fleetworks_contracts::cycle_history::DeleteCycleRequest;
+use fleetworks_contracts::readiness::MaintenanceOperation;
+use fleetworks_contracts::readiness::MaintenanceRequest;
+use fleetworks_contracts::Client;
 use rustix::fs::AtFlags;
 use serde::Deserialize;
 use serde::Serialize;
@@ -31,6 +34,8 @@ struct Journal {
     bindings: Vec<Binding>,
     #[serde(default)]
     pending_cycle_deletions: Vec<PendingCycleDeletion>,
+    #[serde(default)]
+    pending_actor_reindexes: Vec<PendingActorReindex>,
 }
 
 /// An exact unresolved deletion captured before delivery; contains no credentials.
@@ -39,6 +44,16 @@ struct Journal {
 pub struct PendingCycleDeletion {
     pub context: RegisteredContext,
     pub request: DeleteCycleRequest,
+}
+
+/// Bounded non-secret unresolved actor reindex attempt captured before HTTP POST.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct PendingActorReindex {
+    pub origin: String,
+    pub context: RegisteredContext,
+    pub request: MaintenanceRequest,
 }
 
 impl NativeContainer {
@@ -176,6 +191,91 @@ impl NativeContainer {
         self.revalidate_root()
     }
 
+    /// Persist or confirm an exact non-secret actor reindex attempt before HTTP POST.
+    pub fn begin_actor_reindex(
+        &self,
+        origin: &str,
+        context: &RegisteredContext,
+        request: &MaintenanceRequest,
+    ) -> Result<PendingActorReindex> {
+        let origin = Client::canonical_origin(origin).context("invalid gateway origin")?;
+        request
+            .validate(MaintenanceOperation::ReindexActors)
+            .context("invalid actor reindex request")?;
+        let mut expected = MutationContext::new(context);
+        if let Some(revision) = request.context.expected_configuration_revision {
+            expected = expected.with_configuration_revision(revision);
+        }
+        anyhow::ensure!(
+            request.context == expected,
+            "actor reindex context mismatch"
+        );
+        super::require_operation_id(&request.request_id)?;
+        let _guard = self.locked()?;
+        let (mut journal, object) = self.read_workstation()?;
+        if let Some(previous) = journal
+            .pending_actor_reindexes
+            .iter()
+            .find(|pending| pending.origin == origin)
+        {
+            anyhow::ensure!(
+                previous.context == *context && previous.request == *request,
+                "reconcile earlier actor index attempt before creating another request"
+            );
+            return Ok(previous.clone());
+        }
+        anyhow::ensure!(
+            journal.pending_actor_reindexes.len() < 128,
+            "actor reindex journal capacity reached"
+        );
+        let entry = PendingActorReindex {
+            origin,
+            context: context.clone(),
+            request: request.clone(),
+        };
+        journal.pending_actor_reindexes.push(entry.clone());
+        fs::write_json(&self.root_fd, FILE, &journal, object)?;
+        self.revalidate_root()?;
+        Ok(entry)
+    }
+
+    /// Read-only lookup of any unresolved actor reindex attempt for one gateway origin.
+    pub fn pending_actor_reindex(&self, origin: &str) -> Result<Option<PendingActorReindex>> {
+        let origin = Client::canonical_origin(origin).context("invalid gateway origin")?;
+        let _guard = self.locked()?;
+        Ok(self
+            .read_workstation()?
+            .0
+            .pending_actor_reindexes
+            .into_iter()
+            .find(|pending| pending.origin == origin))
+    }
+
+    /// Clear only the exact reindex attempt after authoritative acceptance or reconciliation.
+    pub fn complete_actor_reindex(&self, origin: &str, request: &MaintenanceRequest) -> Result<()> {
+        let origin = Client::canonical_origin(origin).context("invalid gateway origin")?;
+        let _guard = self.locked()?;
+        let (mut journal, object) = self.read_workstation()?;
+        journal
+            .pending_actor_reindexes
+            .retain(|pending| !(pending.origin == origin && pending.request == *request));
+        fs::write_json(&self.root_fd, FILE, &journal, object)?;
+        self.revalidate_root()
+    }
+
+    /// Explicitly discard a stale unresolved attempt identified by its exact request ID.
+    pub fn clear_stale_actor_reindex(&self, origin: &str, request_id: &str) -> Result<()> {
+        let origin = Client::canonical_origin(origin).context("invalid gateway origin")?;
+        super::require_operation_id(request_id)?;
+        let _guard = self.locked()?;
+        let (mut journal, object) = self.read_workstation()?;
+        journal.pending_actor_reindexes.retain(|pending| {
+            !(pending.origin == origin && pending.request.request_id == request_id)
+        });
+        fs::write_json(&self.root_fd, FILE, &journal, object)?;
+        self.revalidate_root()
+    }
+
     fn read_workstation(&self) -> Result<(Journal, Option<fs::ObjectIdentity>)> {
         let (journal, object) =
             match rustix::fs::statat(&self.root_fd, FILE, AtFlags::SYMLINK_NOFOLLOW) {
@@ -185,6 +285,7 @@ impl NativeContainer {
                         installation_marker: self.installation_marker.clone(),
                         bindings: Vec::new(),
                         pending_cycle_deletions: Vec::new(),
+                        pending_actor_reindexes: Vec::new(),
                     },
                     None,
                 ),
@@ -199,7 +300,8 @@ impl NativeContainer {
             journal.version == 2
                 && journal.installation_marker == self.installation_marker
                 && journal.bindings.len() <= 128
-                && journal.pending_cycle_deletions.len() <= 128,
+                && journal.pending_cycle_deletions.len() <= 128
+                && journal.pending_actor_reindexes.len() <= 128,
             "workstation journal format/ownership requires repair"
         );
         let mut deletions = std::collections::BTreeSet::new();
@@ -218,6 +320,25 @@ impl NativeContainer {
                         &pending.context.workstation_id
                     )),
                 "cycle deletion journal identity conflict"
+            );
+        }
+        let mut reindex_origins = std::collections::BTreeSet::new();
+        for pending in &journal.pending_actor_reindexes {
+            super::require_operation_id(&pending.request.request_id)?;
+            let mut expected = MutationContext::new(&pending.context);
+            if let Some(revision) = pending.request.context.expected_configuration_revision {
+                expected = expected.with_configuration_revision(revision);
+            }
+            anyhow::ensure!(
+                Client::canonical_origin(&pending.origin).ok().as_deref()
+                    == Some(pending.origin.as_str())
+                    && pending
+                        .request
+                        .validate(MaintenanceOperation::ReindexActors)
+                        .is_ok()
+                    && pending.request.context == expected
+                    && reindex_origins.insert(&pending.origin),
+                "actor reindex journal identity conflict"
             );
         }
         let mut deployments = std::collections::BTreeSet::new();
@@ -353,5 +474,70 @@ mod tests {
             .expect("pending deleted")
             .is_empty());
         assert!(!reopened.root().join("default").exists());
+    }
+
+    #[test]
+    fn actor_reindex_attempt_persists_per_origin_for_exact_reconciliation() {
+        let temporary = tempfile::tempdir().expect("temporary home");
+        let home = temporary.path().canonicalize().expect("physical home");
+        let container = NativeContainer::open_settings(&home).expect("settings installation");
+        let receipt = RegistrationReceipt::new(
+            "deployment-one".into(),
+            "node-one".into(),
+            "registration-one".into(),
+            None,
+            1,
+        );
+        let context = RegisteredContext::new(
+            receipt,
+            1,
+            1,
+            "configuration-one".into(),
+            "access-one".into(),
+        )
+        .expect("context");
+        let request =
+            MaintenanceRequest::for_reindex("reindex-req-1".into(), MutationContext::new(&context))
+                .expect("request");
+
+        let saved = container
+            .begin_actor_reindex("http://127.0.0.1:8080", &context, &request)
+            .expect("persist reindex");
+        assert_eq!(saved.origin, "http://127.0.0.1:8080/");
+        drop(container);
+
+        let reopened = NativeContainer::open_settings(&home).expect("reopen settings");
+        let pending = reopened
+            .pending_actor_reindex("http://127.0.0.1:8080")
+            .expect("read pending")
+            .expect("pending attempt");
+        assert_eq!(pending.request, request);
+
+        // Exact replay succeeds; conflicting request ID for the same origin is rejected.
+        reopened
+            .begin_actor_reindex("http://127.0.0.1:8080", &context, &request)
+            .expect("exact replay");
+        let other =
+            MaintenanceRequest::for_reindex("reindex-req-2".into(), MutationContext::new(&context))
+                .expect("other");
+        assert!(reopened
+            .begin_actor_reindex("http://127.0.0.1:8080", &context, &other)
+            .is_err());
+
+        // Separate origin can still track its own unresolved attempt cleanly.
+        reopened
+            .begin_actor_reindex("http://127.0.0.1:8081", &context, &other)
+            .expect("second origin");
+        reopened
+            .complete_actor_reindex("http://127.0.0.1:8080", &request)
+            .expect("complete first");
+        assert!(reopened
+            .pending_actor_reindex("http://127.0.0.1:8080")
+            .expect("read")
+            .is_none());
+        assert!(reopened
+            .pending_actor_reindex("http://127.0.0.1:8081")
+            .expect("read second")
+            .is_some());
     }
 }

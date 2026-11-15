@@ -484,14 +484,18 @@ class PrepareReviewTests(unittest.TestCase):
             self.assertFalse(any(command[-1] == "stop" for command in calls))
 
 
-    def test_up_backend_only_and_non_macos_do_not_build_or_open_native(self):
-        for platform, flags in (("darwin", ["--backend-only"]), ("linux", [])):
+    def test_up_backend_only_and_unsupported_native_hosts_skip_native_open(self):
+        for platform, flags, supported in (
+            ("darwin", ["--backend-only"], True),
+            ("linux", [], False),
+        ):
             with self.subTest(platform=platform, flags=flags), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 self.fixture(root)
                 output = io.StringIO()
                 with mock.patch.object(native_review, "ROOT", root), \
                      mock.patch.object(native_review.sys, "platform", platform), \
+                     mock.patch.object(native_review, "supports_native_review", return_value=supported), \
                      mock.patch("sys.argv", ["native_review.py", "up", "--name", "local"] + flags), \
                      mock.patch.dict(os.environ, {"DOCKER_CONTEXT": "desktop-linux"}), \
                      mock.patch.object(native_review.subprocess, "check_output", side_effect=[
@@ -502,8 +506,36 @@ class PrepareReviewTests(unittest.TestCase):
                 self.assertEqual(processes.call_args.args[0][-1], "ps")
                 self.assertFalse(any("build-native" in call.args[0] for call in processes.call_args_list))
                 self.assertIn("http://127.0.0.1:18091", output.getvalue())
-                if platform == "linux":
-                    self.assertIn("requires macOS; skipped", output.getvalue())
+                if not supported:
+                    self.assertIn("requires macOS or Linux x86_64; skipped", output.getvalue())
+
+    def test_up_builds_and_opens_linux_x86_64_native_without_mac_handoff(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            output = io.StringIO()
+            with mock.patch.object(native_review, "ROOT", root), \
+                 mock.patch.object(native_review.sys, "platform", "linux"), \
+                 mock.patch.object(native_review, "supports_native_review", return_value=True), \
+                 mock.patch("sys.argv", ["native_review.py", "up", "--name", "local"]), \
+                 mock.patch.dict(os.environ, {"DOCKER_CONTEXT": "desktop-linux"}), \
+                 mock.patch.object(native_review.subprocess, "check_output", side_effect=[
+                     "desktop-linux\n", '"unix:///var/run/docker.sock"\n', "linux/x86_64\n"]), \
+                 mock.patch.object(native_review.subprocess, "run") as processes, redirect_stdout(output):
+                self.assertEqual(native_review.main(), 0)
+            self.assertEqual(processes.call_count, 6)
+            self.assertEqual(processes.call_args.args[0], [
+                native_review.sys.executable,
+                str(root.resolve() / "scripts/fleetworks_candidate.py"),
+                "build-native", "--target", "host", "--profile", "debug", "--open",
+            ])
+            self.assertIn("Linux native review uses unlocked Secret Service or session-only credentials", output.getvalue())
+            with mock.patch.object(native_review.sys, "platform", "linux"), \
+                 mock.patch.object(native_review, "supports_native_review", return_value=True), \
+                 mock.patch.object(native_review.subprocess, "check_output") as docker, \
+                 self.assertRaisesRegex(native_review.ReviewConfigurationError, "macOS native review"):
+                native_review.run_review(root, "local", approval_handoff=True)
+            docker.assert_not_called()
 
     def test_up_cancelled_build_never_stops_running_services(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -630,6 +662,7 @@ class PrepareReviewTests(unittest.TestCase):
             existing.write_text("KEEP='1'\n")
             with mock.patch.object(native_review, "ROOT", root), \
                  mock.patch.object(native_review.sys, "platform", "linux"), \
+                 mock.patch.object(native_review, "supports_native_review", return_value=False), \
                  mock.patch.object(native_review, "detect_docker_platform", return_value="linux/amd64"), \
                  mock.patch("sys.argv", ["native_review.py", "up", "--name", "second", "--api-port", "18092"]), \
                  mock.patch.dict(os.environ, {"DOCKER_CONTEXT": "desktop-linux"}), \

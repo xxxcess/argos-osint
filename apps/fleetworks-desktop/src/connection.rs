@@ -1,6 +1,8 @@
 //! Gateway-only effects. No application operation starts a process or service.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 
 use fleetworks_contracts::capabilities::Capabilities;
@@ -132,11 +134,81 @@ pub struct ConnectionTestSummary {
     pub credential: Option<CredentialReference>,
 }
 
+/// Process-local RAM-only secret store for explicit session-only mode.
+#[derive(Default)]
+pub(crate) struct SessionKeychain {
+    secrets:
+        Mutex<BTreeMap<(String, String), fleetworks_workstation::native::keychain::SecretToken>>,
+}
+
+impl SessionKeychain {
+    pub(crate) fn clear(&self) {
+        let mut guard = self
+            .secrets
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        guard.clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.secrets
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .len()
+    }
+}
+
+impl fleetworks_workstation::native::keychain::KeychainStore for SessionKeychain {
+    fn get(
+        &self,
+        item: &fleetworks_workstation::native::keychain::KeychainItem,
+    ) -> Result<
+        fleetworks_workstation::native::keychain::SecretToken,
+        fleetworks_workstation::native::keychain::KeychainError,
+    > {
+        self.secrets
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .get(&(item.service().to_owned(), item.account().to_owned()))
+            .cloned()
+            .ok_or(fleetworks_workstation::native::keychain::KeychainError::Missing)
+    }
+
+    fn set(
+        &self,
+        item: &fleetworks_workstation::native::keychain::KeychainItem,
+        token: &fleetworks_workstation::native::keychain::SecretToken,
+    ) -> Result<(), fleetworks_workstation::native::keychain::KeychainError> {
+        self.secrets
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .insert(
+                (item.service().to_owned(), item.account().to_owned()),
+                token.clone(),
+            );
+        Ok(())
+    }
+
+    fn delete(
+        &self,
+        item: &fleetworks_workstation::native::keychain::KeychainItem,
+    ) -> Result<(), fleetworks_workstation::native::keychain::KeychainError> {
+        self.secrets
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .remove(&(item.service().to_owned(), item.account().to_owned()))
+            .map(|_| ())
+            .ok_or(fleetworks_workstation::native::keychain::KeychainError::Missing)
+    }
+}
+
 /// One app-owned Tokio executor sends results back through Rune's UI-thread handle.
 pub struct GatewayEffects {
     pub(crate) runtime: Handle,
     pub(crate) ui: OnceLock<AppHandle<State>>,
     pub(crate) keychain: Arc<dyn fleetworks_workstation::native::keychain::KeychainStore>,
+    pub(crate) session_keychain: Arc<SessionKeychain>,
 }
 
 impl GatewayEffects {
@@ -145,7 +217,12 @@ impl GatewayEffects {
             runtime,
             ui: OnceLock::new(),
             keychain: Arc::new(fleetworks_workstation::native::keychain::SystemKeychain),
+            session_keychain: Arc::new(SessionKeychain::default()),
         }
+    }
+
+    pub(crate) fn clear_session_secrets(&self) {
+        self.session_keychain.clear();
     }
 
     pub fn install_ui(&self, handle: AppHandle<State>) -> Result<(), &'static str> {

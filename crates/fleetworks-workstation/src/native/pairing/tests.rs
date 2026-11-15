@@ -552,3 +552,88 @@ fn hostile_metadata_origins_and_secret_diagnostics_fail_closed() {
         "untrusted metadata"
     );
 }
+
+#[test]
+fn session_only_marker_round_trips_and_rejects_unknown_modes_without_dropping_prior_durable_pair() {
+    let (_temporary, path) = home();
+    let container = NativeContainer::open_settings(&path).expect("installation");
+    let durable_store = FakeKeychain::default();
+    let session_store = FakeKeychain::default();
+
+    // First pair durably.
+    let begun = container
+        .begin_pairing(
+            0,
+            pending(ORIGIN, "synthetic-request-durable-1"),
+            &secret(POLL),
+            &durable_store,
+        )
+        .expect("begin durable");
+    let durable_pair =
+        PairedGateway::new(ORIGIN, "cred-durable".into(), "dep-1".into()).expect("durable pair");
+    let paired = container
+        .complete_pairing(
+            begun.revision,
+            "synthetic-request-durable-1",
+            durable_pair.clone(),
+            &secret(ACCESS),
+            &durable_store,
+        )
+        .expect("complete durable");
+    assert_eq!(paired.paired_gateways, vec![durable_pair.clone()]);
+
+    // Start a session-only replacement and abandon before completing -> durable pair preserved.
+    let started_replacement = container
+        .begin_pairing(
+            paired.revision,
+            pending(ORIGIN, "synthetic-request-session-1"),
+            &secret(&"e".repeat(64)),
+            &session_store,
+        )
+        .expect("begin replacement");
+    let aborted = container
+        .clear_pending_pairing(
+            started_replacement.revision,
+            ORIGIN,
+            "synthetic-request-session-1",
+            &session_store,
+        )
+        .expect("abandon replacement");
+    assert_eq!(aborted.paired_gateways, vec![durable_pair]);
+
+    // Now finish a session-only pairing: updates marker to session_only without writing secret.
+    let begun_session = container
+        .begin_pairing(
+            aborted.revision,
+            pending(ORIGIN, "synthetic-request-session-2"),
+            &secret(&"f".repeat(64)),
+            &session_store,
+        )
+        .expect("begin session");
+    let session_pair =
+        PairedGateway::new_session_only(ORIGIN, "cred-session".into(), "dep-1".into())
+            .expect("session pair");
+    let finished = container
+        .complete_pairing(
+            begun_session.revision,
+            "synthetic-request-session-2",
+            session_pair.clone(),
+            &secret(&"1".repeat(64)),
+            &session_store,
+        )
+        .expect("complete session");
+    assert!(!session_pair.is_durable());
+    assert_eq!(finished.paired_gateways, vec![session_pair]);
+
+    let metadata = std::fs::read_to_string(container.root().join(PAIRING_FILE)).expect("json");
+    assert!(metadata.contains("\"credential_storage\":\"session_only\""));
+    assert!(!metadata.contains(&"1".repeat(64)));
+
+    // Reject unknown credential_storage values closed.
+    let corrupted = metadata.replace("\"session_only\"", "\"plaintext_file\"");
+    std::fs::write(container.root().join(PAIRING_FILE), corrupted).expect("write tampered");
+    assert_eq!(
+        container.pairing_catalog(),
+        Err(PairingError::CatalogUnavailable)
+    );
+}

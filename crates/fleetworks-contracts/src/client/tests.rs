@@ -517,3 +517,73 @@ async fn log_export_refuses_missing_context_and_untrusted_error_prose() {
     assert!(!error.to_string().contains("synthetic"));
     request.await.unwrap();
 }
+
+#[tokio::test]
+async fn workstation_readiness_reindex_and_request_detail_enforce_context_and_routes() {
+    let unregistered = Client::new("http://127.0.0.1:1", None).unwrap();
+    let receipt = crate::connect::RegistrationReceipt::new(
+        "deployment".into(),
+        "node".into(),
+        "registration-a".into(),
+        None,
+        3,
+    );
+    let context = crate::context::RegisteredContext::new(
+        receipt,
+        4,
+        5,
+        "fresh-configuration".into(),
+        "access-epoch".into(),
+    )
+    .unwrap();
+    let req = crate::readiness::MaintenanceRequest::for_reindex(
+        "reindex-req-1".into(),
+        crate::context::MutationContext::new(&context),
+    )
+    .unwrap();
+    assert_eq!(
+        unregistered.reindex_actors(&req).await.unwrap_err(),
+        ClientError::InvalidRequest
+    );
+    let query = crate::context::WorkstationRequestDetailQuery::new(
+        "reindex-req-1".into(),
+        crate::readiness::ACTOR_REINDEX_OPERATION.into(),
+        Some("registration-a".into()),
+    );
+    assert_eq!(
+        unregistered.request_detail(&query).await.unwrap_err(),
+        ClientError::InvalidRequest
+    );
+
+    let receipt_body = serde_json::to_vec(&crate::readiness::MaintenanceReceipt::new(
+        "job-1".into(),
+        crate::readiness::MaintenanceOperation::ReindexActors,
+        crate::context::JobOrigin::new(
+            &context,
+            crate::context::OriginSource::Native,
+            "reindex-req-1".into(),
+            "2026-11-01T00:00:00Z".into(),
+            4,
+            Vec::new(),
+        ),
+        None,
+        false,
+    ))
+    .unwrap();
+    let (origin, request) = serve_once("200 OK", "", &receipt_body).await;
+    let client = Client::new(&origin, Some("fixture-token"))
+        .unwrap()
+        .with_registered_context(&context)
+        .unwrap();
+    let accepted = client.reindex_actors(&req).await.unwrap();
+    assert_eq!(accepted.job_id, "job-1");
+    assert_eq!(
+        accepted.operation,
+        crate::readiness::MaintenanceOperation::ReindexActors
+    );
+    let seen = request.await.unwrap();
+    assert!(seen.starts_with(&format!(
+        "POST {} HTTP/1.1",
+        crate::search::ACTOR_REINDEX_PATH
+    )));
+}

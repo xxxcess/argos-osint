@@ -257,6 +257,40 @@ impl Client {
         .await
     }
 
+    /// Read authenticated backend readiness and actor-index action permissions.
+    pub async fn workstation_readiness(
+        &self,
+    ) -> Result<crate::readiness::WorkstationReadiness, ClientError> {
+        self.get(crate::readiness::WORKSTATION_READINESS_PATH).await
+    }
+
+    /// Request or replay a durable actor search index rebuild on the registered backend.
+    pub async fn reindex_actors(
+        &self,
+        request: &crate::readiness::MaintenanceRequest,
+    ) -> Result<crate::readiness::MaintenanceReceipt, ClientError> {
+        if self.registration.is_none()
+            || request
+                .validate(crate::readiness::MaintenanceOperation::ReindexActors)
+                .is_err()
+        {
+            return Err(ClientError::InvalidRequest);
+        }
+        self.post(crate::search::ACTOR_REINDEX_PATH, request).await
+    }
+
+    /// Reconcile whether an uncertain request ID was durably accepted by the backend.
+    pub async fn request_detail(
+        &self,
+        query: &crate::context::WorkstationRequestDetailQuery,
+    ) -> Result<crate::context::JobRequestAssociation, ClientError> {
+        if self.registration.is_none() || query.validate().is_err() {
+            return Err(ClientError::InvalidRequest);
+        }
+        self.get_with_query(crate::context::WORKSTATION_REQUEST_DETAIL_PATH, query)
+            .await
+    }
+
     /// Upload an already-open, user-selected CSV with bounded memory.
     ///
     /// The server independently verifies the actual byte count, SHA-256 and CSV

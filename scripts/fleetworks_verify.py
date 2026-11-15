@@ -148,7 +148,12 @@ def raw_path_scopes(path):
         return {"desktop"}
     if path.startswith("apps/web-desktop/__tests__/"):
         return {"web"}
-    if path in {"scripts/fleetworks_native_verify.py", "scripts/test_fleetworks_native_verify.py", ".github/workflows/fleetworks-native.yml"}:
+    if path in {
+        "scripts/fleetworks_native_verify.py",
+        "scripts/test_fleetworks_native_verify.py",
+        ".github/workflows/fleetworks-native.yml",
+        ".github/workflows/fleetworks-native-linux.yml",
+    }:
         return {"desktop"}
     if path in {"scripts/fleetworks_candidate.py", "scripts/test_fleetworks_candidate.py"}:
         return {"desktop"}
@@ -288,13 +293,21 @@ def run_local(scopes, comparison=None):
     if comparison:
         checks.insert(0, ["git", "diff", "--check", comparison])
     if "desktop" in scopes:
-        if platform.system() == "Darwin":
+        host_system = platform.system()
+        host_machine = platform.machine().lower()
+        if host_system == "Darwin":
             checks.extend([
                 ["cargo", "fmt", *DESKTOP_PACKAGES, "--", "--check"],
                 [sys.executable, "scripts/agent_cargo.py", "test", "--locked", *DESKTOP_PACKAGES, "--", "--test-threads=1"],
             ])
+        elif host_system == "Linux" and host_machine in ("x86_64", "amd64"):
+            checks.extend([
+                ["cargo", "fmt", *DESKTOP_PACKAGES, "--", "--check"],
+                [sys.executable, "scripts/agent_cargo.py", "test", "--locked", *DESKTOP_PACKAGES, "--", "--test-threads=1"],
+            ])
+            print("Desktop checks are running for Linux x86_64; macOS desktop lanes remain pending on this host.", flush=True)
         else:
-            print("Desktop checks are pending on the selected macOS lanes; this host cannot provide Mac evidence.", flush=True)
+            print("Desktop checks are pending on the selected macOS and Linux x86_64 lanes; this host cannot provide desktop evidence.", flush=True)
     if "web" in scopes:
         checks.extend(["pnpm", command] for command in ("typecheck", "lint", "test"))
     if scopes:

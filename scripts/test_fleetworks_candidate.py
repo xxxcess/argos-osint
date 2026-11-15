@@ -7,6 +7,7 @@ import plistlib
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import unittest
@@ -17,7 +18,7 @@ from unittest import mock
 
 from fleetworks_candidate import NATIVE_APP, NATIVE_BINARY, NATIVE_MANIFEST
 from fleetworks_candidate import main, native_main, open_native, _run_cargo, apple_versions, cargo_executable, cargo_native_command
-from fleetworks_candidate import artifact_version, checksum_line, extract_native, native_output, package_native, sha256
+from fleetworks_candidate import artifact_version, checksum_line, elf_architecture, extract_native, linux_runtime_preflight, native_output, package_native, sha256
 
 
 class NativeAppTests(unittest.TestCase):
@@ -460,6 +461,204 @@ sys.stdout.write(sys.argv[2]); sys.stdout.flush()
         ), self.assertRaisesRegex(ValueError, "absolute macOS UNIX socket"):
             open_native(self.root / NATIVE_APP, info, target, runner=runner)
         self.assertEqual(commands, [["ps", "-axo", "comm="]])
+
+
+class LinuxNativeCandidateTests(unittest.TestCase):
+    def setUp(self):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name).resolve()
+        self.binary = self.root / "target output" / NATIVE_BINARY
+        self.binary.parent.mkdir()
+        elf_header = (
+            b"\x7fELF"
+            + bytes([2, 1, 1, 0, 0])
+            + b"\x00" * 7
+            + struct.pack("<HHI", 3, 62, 1)
+            + b"\x00" * 40
+        )
+        self.binary.write_bytes(elf_header + b"linux native payload")
+        self.binary.chmod(0o755)
+        self.resources = self.root / "resources"
+        self.resources.mkdir()
+        (self.resources / "fleetworks.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg"/>')
+        self.destination = self.root / "linux bundle out"
+        self.commands = []
+
+    def runner(self, command, **_kwargs):
+        self.commands.append(command)
+        self.assertEqual(command[:2], ["readelf", "-d"])
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            " 0x0000000000000001 (NEEDED)             Shared library: [libc.so.6]\n"
+            " 0x0000000000000001 (NEEDED)             Shared library: [libdbus-1.so.3]\n"
+            " 0x0000000000000001 (NEEDED)             Shared library: [libvulkan.so.1]\n",
+            "",
+        )
+
+    def pack(self, **overrides):
+        kwargs = dict(
+            target="x86_64-unknown-linux-gnu",
+            profile="debug",
+            revision="1" * 40,
+            dirty=True,
+            toolchain="1.95.0",
+            rune_revision="2" * 40,
+            resources=self.resources,
+            runner=self.runner,
+            version="0.2.1",
+            archive=False,
+        )
+        kwargs.update(overrides)
+        return package_native(self.destination, self.binary, **kwargs)
+
+    def test_packages_relocatable_linux_tarball_without_xcode_and_verifies_roundtrip(self):
+        result = self.pack(archive=True)
+        archive = Path(result["archive"])
+        self.assertTrue(archive.name.endswith("-x86_64-unknown-linux-gnu.tar.gz"))
+        bundle = Path(result["app"])
+        self.assertEqual(bundle.name, "Fleetworks-linux-x86_64")
+        desktop = (bundle / "share/applications/fleetworks.desktop").read_text()
+        self.assertIn(f"Exec={NATIVE_BINARY}", desktop)
+        self.assertNotIn(str(self.destination), desktop)
+        manifest = json.loads(Path(result["manifest"]).read_text())
+        self.assertEqual(manifest["platform"], "linux")
+        self.assertEqual(manifest["target"], "x86_64-unknown-linux-gnu")
+        extracted_dir = self.root / "extracted review dir"
+        app, verified = extract_native(
+            archive,
+            extracted_dir,
+            expected_digest=result["sha256"],
+            version="0.2.1",
+            target="x86_64-unknown-linux-gnu",
+            revision="1" * 40,
+            rune_revision="2" * 40,
+            runner=self.runner,
+        )
+        self.assertEqual(verified["revision"], "1" * 40)
+        self.assertEqual((app / "bin" / NATIVE_BINARY).read_bytes(), self.binary.read_bytes())
+
+    def test_rejects_disallowed_linux_shared_libraries_and_unsafe_tar_members(self):
+        def bad_lib(command, **_kwargs):
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                " 0x0000000000000001 (NEEDED)             Shared library: [libssl.so.3]\n",
+                "",
+            )
+
+        with self.assertRaisesRegex(ValueError, "Native Linux binary links disallowed library"):
+            self.pack(runner=bad_lib)
+        result = self.pack(archive=True)
+        archive = Path(result["archive"])
+        with tarfile.open(archive, "w:gz") as output:
+            info = tarfile.TarInfo("../escape")
+            payload = b"bad"
+            info.size = len(payload)
+            output.addfile(info, io.BytesIO(payload))
+        digest = sha256(archive)
+        archive.with_name(archive.name + ".sha256").write_text(checksum_line(archive, digest))
+        with self.assertRaisesRegex(ValueError, "unsafe or unexpected path"):
+            extract_native(
+                archive,
+                self.root / "bad-tar",
+                expected_digest=digest,
+                version="0.2.1",
+                target="x86_64-unknown-linux-gnu",
+                revision="1" * 40,
+                rune_revision="2" * 40,
+                runner=self.runner,
+            )
+
+    def test_elf_arch_and_linux_open_preflight_preserve_running_instance(self):
+        self.assertEqual(elf_architecture(self.binary), 62)
+        empty_icd = self.root / "empty-icd"
+        empty_icd.mkdir()
+        icd_dir = self.root / "vulkan-icd"
+        icd_dir.mkdir()
+        (icd_dir / "lvp_icd.json").write_text("{}")
+        with self.assertRaisesRegex(ValueError, "WAYLAND_DISPLAY or DISPLAY"):
+            linux_runtime_preflight({}, vulkan_icd_dirs=[empty_icd])
+        with self.assertRaisesRegex(ValueError, "Vulkan"):
+            linux_runtime_preflight({"DISPLAY": ":0"}, vulkan_icd_dirs=[empty_icd])
+        self.assertEqual(
+            linux_runtime_preflight({"DISPLAY": ":0", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus"}, vulkan_icd_dirs=[icd_dir]),
+            {"display": "x11", "dbus_session": True, "vulkan": True},
+        )
+
+        target = "x86_64-unknown-linux-gnu"
+        info = SimpleNamespace(system="Linux", native_target=target)
+        bundle = Path(self.pack()["app"])
+        launched = []
+        with mock.patch("sys.stderr", io.StringIO()), \
+             mock.patch.dict(os.environ, {"DISPLAY": ":0"}, clear=True), \
+             mock.patch("fleetworks_candidate.subprocess.Popen", side_effect=lambda cmd, **_kw: launched.append(cmd) or SimpleNamespace(pid=42)):
+            response = open_native(
+                bundle,
+                info,
+                target,
+                runner=lambda cmd, **_: launched.append(cmd) or subprocess.CompletedProcess(cmd, 0, "", ""),
+                preflight=lambda: {"display": "x11", "dbus_session": False, "vulkan": True},
+            )
+        self.assertIn("Launched Linux native executable in an isolated session", response)
+        self.assertEqual(launched, [["ps", "-axo", "comm="], [str(bundle / "bin" / NATIVE_BINARY)]])
+        launched.clear()
+        with mock.patch("sys.stderr", io.StringIO()), \
+             mock.patch.dict(os.environ, {"DISPLAY": ":0"}, clear=True), \
+             mock.patch("fleetworks_candidate._run", return_value=""), \
+             mock.patch("fleetworks_candidate.subprocess.Popen", side_effect=lambda cmd, **_kw: launched.append(cmd) or SimpleNamespace(pid=42)):
+            open_native(
+                bundle,
+                info,
+                target,
+                preflight=lambda: {"display": "x11", "dbus_session": False, "vulkan": True},
+            )
+        self.assertEqual(launched, [[str(bundle / "bin" / NATIVE_BINARY)]])
+        with mock.patch("sys.stderr", io.StringIO()), \
+             mock.patch.dict(os.environ, {"DISPLAY": ":0", "FLEETWORKS_LOCAL_REVIEW_APPROVAL_SOCKET": "/tmp/s.sock"}, clear=True):
+            with self.assertRaisesRegex(ValueError, "macOS-only"):
+                open_native(
+                    bundle,
+                    info,
+                    target,
+                    runner=lambda cmd, **_: subprocess.CompletedProcess(cmd, 0, "", ""),
+                    preflight=lambda: {"display": "x11", "dbus_session": False, "vulkan": True},
+                )
+
+    def test_linux_native_main_skips_xcode_checks(self):
+        (self.root / "version.txt").write_text("0.2.1\n")
+        (self.root / "Cargo.lock").write_text("lock\n")
+        target = "x86_64-unknown-linux-gnu"
+        info = SimpleNamespace(system="Linux", native_target=target)
+        args = SimpleNamespace(
+            command="build-native", target="host", profile="debug", open=False,
+            agent=False, output=None, dry_run=False, revision=None, require_clean=False,
+            resources=self.resources, minimum_macos=None, bundle_version=None,
+            run_id=None, run_attempt="1", workflow="fixture", archive=False,
+        )
+        run_calls = []
+        with mock.patch("sys.stderr", io.StringIO()), mock.patch("sys.stdout", io.StringIO()), \
+             mock.patch.multiple(
+                 "fleetworks_candidate",
+                 ROOT=self.root,
+                 detect=lambda: info,
+                 resolve_native_target=lambda *_: target,
+                 validate_toolchain=lambda *_: "1.95.0",
+                 native_output=lambda *_: self.destination,
+                 repository_identity=lambda **_: ("1" * 40, False),
+                 locked_rune_revision=lambda: "2" * 40,
+                 _run=lambda cmd, **kw: run_calls.append(cmd) or "",
+                 _run_cargo=lambda *_a, **_kw: json.dumps({
+                     "reason": "compiler-artifact",
+                     "target": {"name": NATIVE_BINARY, "kind": ["bin"]},
+                     "package_id": "path+file:///fixture/apps/fleetworks-desktop#0.2.1",
+                     "executable": str(self.binary),
+                 }) + "\n" + json.dumps({"reason": "build-finished", "success": True}),
+                 package_native=lambda *_a, **_kw: {"app": str(self.destination / "Fleetworks-linux-x86_64"), "manifest": str(self.destination / "manifest.json"), "identity": {}},
+             ):
+            self.assertEqual(native_main(args), 0)
+        self.assertEqual(run_calls, [["readelf", "--version"]])
 
 
 if __name__ == "__main__":

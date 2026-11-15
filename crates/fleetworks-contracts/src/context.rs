@@ -317,6 +317,59 @@ impl JobOrigin {
     }
 }
 
+/// Request reconciliation route shared by native clients and the API server.
+pub const WORKSTATION_REQUEST_DETAIL_PATH: &str = "/api/v1/workstation/requests/detail";
+
+/// Bounded query for exact request-to-job reconciliation after an uncertain reply.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct WorkstationRequestDetailQuery {
+    pub request_id: String,
+    pub operation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_registration_id: Option<String>,
+}
+
+impl WorkstationRequestDetailQuery {
+    /// Construct a reconciliation query using validated opaque request identifiers.
+    #[must_use]
+    pub fn new(
+        request_id: String,
+        operation: String,
+        original_registration_id: Option<String>,
+    ) -> Self {
+        Self {
+            request_id,
+            operation,
+            original_registration_id,
+        }
+    }
+
+    /// Reject empty, oversized, or whitespace/control-containing identifier fields.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let valid_id = |value: &str, max_len: usize| -> bool {
+            !value.is_empty()
+                && value.len() <= max_len
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        };
+        if !valid_id(&self.request_id, 128) {
+            return Err("request_id must contain 1–128 identifier characters");
+        }
+        if !valid_id(&self.operation, 64) {
+            return Err("operation must contain 1–64 identifier characters");
+        }
+        if let Some(registration) = self.original_registration_id.as_deref() {
+            if !valid_id(registration, 128) {
+                return Err("original_registration_id must contain 1–128 identifier characters");
+            }
+        }
+        Ok(())
+    }
+}
+
 /// A genuine request associated with a reused job, without rewriting its creator.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[non_exhaustive]

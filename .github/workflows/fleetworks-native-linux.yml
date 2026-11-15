@@ -70,7 +70,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            pkg-config binutils \
+            pkg-config binutils libclang-dev \
             libdbus-1-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libxkbcommon-x11-0 \
             libx11-dev libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libvulkan1 libvulkan-dev vulkan-tools mesa-vulkan-drivers
@@ -85,13 +85,15 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: linux-native-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'apps/fleetworks-desktop/Cargo.toml', 'rust-toolchain.toml') }}
+          key: linux-native-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'apps/fleetworks-desktop/Cargo.toml', 'services/api-host/Cargo.toml', 'services/search-index/Cargo.toml', 'rust-toolchain.toml') }}
           workspaces: . -> target/agents
           cache-on-failure: true
           save-if: ${{ github.event_name != 'pull_request' }}
 
       - name: Verify Linux packaging and scope scripts offline
         run: |
+          mkdir -p "${{ runner.temp }}/linux-native-evidence"
+          python3 scripts/fleetworks_candidate.py verify-engine-free | tee "${{ runner.temp }}/linux-native-evidence/engine-free.json"
           python3 -B -m unittest discover -s scripts -p 'test_fleetworks*.py'
           python3 -B -m unittest discover -s deploy -p 'test_native_review.py'
 
@@ -122,6 +124,7 @@ jobs:
           python3 scripts/fleetworks_verify.py native-ui --agent --require-clean \
             --revision "${{ inputs.expected-head }}" \
             --output "${{ runner.temp }}/linux-native-evidence/ui" \
+            --scene redesign-setup \
             --scene registration-ready \
             --scene workstation-partial-seed \
             --scene pairing-waiting \
@@ -181,6 +184,9 @@ jobs:
               "--require-clean",
           ], check=True)
           PY
+          python3 scripts/fleetworks_local_backend_smoke.py \
+            --app "$extracted/Fleetworks-linux-x86_64" \
+            --output "${{ runner.temp }}/linux-native-evidence/local-backend-smoke-$LINUX_TARGET.json"
 
       - name: Upload Linux native candidate archive
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

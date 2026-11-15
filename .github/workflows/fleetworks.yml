@@ -51,6 +51,7 @@ jobs:
     outputs:
       head: ${{ steps.release.outputs.head }}
       desktop: ${{ steps.release.outputs.desktop }}
+      local_backend: ${{ steps.release.outputs.local_backend }}
       server: ${{ steps.release.outputs.server }}
       compose: ${{ steps.release.outputs.compose }}
       queue: ${{ steps.release.outputs.queue }}
@@ -151,6 +152,7 @@ jobs:
               "compose",
               "desktop",
               "images",
+              "local_backend",
               "queue",
               "server",
               "storage",
@@ -295,7 +297,7 @@ jobs:
   desktop:
     name: Mac app / ${{ matrix.target }}
     needs: scope
-    if: needs.scope.outputs.desktop == 'true'
+    if: needs.scope.outputs.desktop == 'true' || needs.scope.outputs.local_backend == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -314,7 +316,7 @@ jobs:
   desktop_linux:
     name: Linux app / x86_64-unknown-linux-gnu
     needs: scope
-    if: needs.scope.outputs.desktop == 'true'
+    if: needs.scope.outputs.desktop == 'true' || needs.scope.outputs.local_backend == 'true'
     uses: ./.github/workflows/fleetworks-native-linux.yml
     with:
       expected-head: ${{ needs.scope.outputs.head }}
@@ -628,7 +630,8 @@ jobs:
       - name: Require success for every selected scope
         env:
           SCOPE_RESULT: ${{ needs.scope.result }}
-          DESKTOP_SELECTED: ${{ needs.scope.outputs.desktop }}
+          DESKTOP_SELECTED: ${{ needs.scope.outputs.desktop == 'true' || needs.scope.outputs.local_backend == 'true' }}
+          LOCAL_BACKEND_SELECTED: ${{ needs.scope.outputs.local_backend }}
           SERVER_SELECTED: ${{ needs.scope.outputs.server }}
           COMPOSE_SELECTED: ${{ needs.scope.outputs.compose == 'true' && needs.scope.outputs.images != 'true' }}
           BERT_SELECTED: ${{ needs.scope.outputs.bert }}
@@ -683,9 +686,9 @@ jobs:
           verify web "$WEB_SELECTED" "$WEB_RESULT" || failed=1
           verify images "$IMAGES_SELECTED" "$IMAGES_RESULT" || failed=1
           printf 'Server images: %s\n' "${IMAGE_TARGETS:-none}" >> "$GITHUB_STEP_SUMMARY"
-          printf 'Queue selected: %s. Storage selected: %s. Development browser selected: %s.\n' \
+          printf 'Queue selected: %s. Storage selected: %s. Local backend selected: %s. Development browser selected: %s.\n' \
             "${QUEUE_SELECTED:-missing}" "${STORAGE_SELECTED:-missing}" \
-            "${WEB_DEV_SELECTED:-missing}" >> "$GITHUB_STEP_SUMMARY"
+            "${LOCAL_BACKEND_SELECTED:-missing}" "${WEB_DEV_SELECTED:-missing}" >> "$GITHUB_STEP_SUMMARY"
           exit "$failed"
 
   release_images:

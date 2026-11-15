@@ -32,6 +32,8 @@ from fleetworks_platform import DARWIN_NATIVE_TARGETS, LINUX_NATIVE_TARGETS, NAT
 
 ROOT = Path(__file__).resolve().parents[1]
 NATIVE_BINARY = "fleetworks-desktop"
+COMPANION_PACKAGE = "argos-api-host"
+COMPANION_BINARY = "argos-api-host"
 NATIVE_APP = "Fleetworks.app"
 NATIVE_MANIFEST = "Fleetworks.app.manifest.json"
 LINUX_APP = "Fleetworks-linux-x86_64"
@@ -40,6 +42,9 @@ NATIVE_FORMAT = "fleetworks-native-1"
 NATIVE_CPU_TYPES = {"x86_64-apple-darwin": 0x01000007, "aarch64-apple-darwin": 0x0100000C}
 LINUX_ELF_MACHINES = {"x86_64-unknown-linux-gnu": 62}
 DISALLOWED_LINUX_LIBRARIES = ("libssl", "libcrypto", "librocksdb", "libsurreal", "libtorch", "libonnxruntime")
+FORBIDDEN_CLIENT_ENGINE_CRATES = ("surrealdb", "rocksdb", "rusqlite", "tantivy", "lancedb", "argos-osint-core")
+CLIENT_ENGINE_FREE_PACKAGES = ("fleetworks-desktop", "fleetworks-contracts", "fleetworks-workstation")
+ALLOWED_RUSQLITE_PARENTS = ("fleetworks-jobs",)
 VERSION_PATTERN = r"([0-9]+)\.([0-9]+)\.([0-9]+)(?:-[A-Za-z0-9.-]+)?(?:\+[A-Za-z0-9.-]+)?"
 ARTIFACT_VERSION_PATTERN = (
     r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
@@ -188,10 +193,30 @@ def cargo_native_command(target, profile, *, agent=False, root=ROOT, implicit_ho
     return command
 
 
-def cargo_executable(output, *, name=NATIVE_BINARY, kind="bin"):
+def cargo_companion_command(target, profile, *, agent=False, root=ROOT, implicit_host=False,
+                            features=None, no_default_features=False):
+    """Build command for the companion local-IPC backend binary."""
+    if target not in NATIVE_TARGETS or profile not in ("debug", "release"):
+        raise ValueError("Unsupported native target or profile")
+    command = ([sys.executable, str(root / "scripts/agent_cargo.py")] if agent else ["cargo"])
+    command += ["build", "--locked", "-p", COMPANION_PACKAGE, "--bin", COMPANION_BINARY,
+                "--message-format=json-render-diagnostics"]
+    if no_default_features:
+        command.append("--no-default-features")
+    if features:
+        command += ["--features", features]
+    if not implicit_host:
+        command += ["--target", target]
+    if profile == "release":
+        command.append("--release")
+    return command
+
+
+def cargo_executable(output, *, name=NATIVE_BINARY, package=NATIVE_BINARY, kind="bin"):
     """Resolve the scoped executable from successful Cargo JSON output."""
     found = set()
     finished = False
+    package_re = re.compile(rf"(?:#|^){re.escape(package)}(?:@|\s)")
     for line in output.splitlines():
         if not line.strip():
             continue
@@ -203,11 +228,12 @@ def cargo_executable(output, *, name=NATIVE_BINARY, kind="bin"):
             finished = message.get("success") is True
         target = message.get("target", {})
         package_id = message.get("package_id", "")
-        package_matches = bool(re.search(r"(?:#|^)fleetworks-desktop(?:@|\s)", package_id))
+        package_matches = bool(package_re.search(package_id))
         if not package_matches and "#" in package_id:
             location, package_version = package_id.rsplit("#", 1)
+            dir_name = "api-host" if package == COMPANION_PACKAGE else package
             package_matches = bool(re.fullmatch(VERSION_PATTERN, package_version)) and \
-                Path(urllib.parse.unquote(urllib.parse.urlparse(location).path)).name == NATIVE_BINARY
+                Path(urllib.parse.unquote(urllib.parse.urlparse(location).path)).name in (package, dir_name)
         if message.get("reason") == "compiler-artifact" and target.get("name") == name \
                 and kind in target.get("kind", []) and package_matches and message.get("executable"):
             found.add(message["executable"])
@@ -217,6 +243,64 @@ def cargo_executable(output, *, name=NATIVE_BINARY, kind="bin"):
     if not executable.is_absolute():
         raise ValueError("Cargo executable path must be absolute")
     return executable
+
+
+def _parse_cargo_tree_crates(listing):
+    """Extract distinct crate names from `cargo tree --prefix none` output."""
+    crates = set()
+    for line in listing.splitlines():
+        token = line.strip().split(" ", 1)[0]
+        if token and token != "[dev-dependencies]" and token != "[build-dependencies]":
+            crates.add(token)
+    return crates
+
+
+def verify_engine_free(root=ROOT, *, runner=None):
+    """Verify engine-free native client invariants and companion backend DB bounds."""
+    client_command = ["cargo", "tree", "--locked", "--prefix", "none"]
+    for package in CLIENT_ENGINE_FREE_PACKAGES:
+        client_command += ["-p", package]
+    client_crates = _parse_cargo_tree_crates(_run(client_command, runner=runner, root=root, timeout=120))
+    forbidden_client = sorted(crate for crate in FORBIDDEN_CLIENT_ENGINE_CRATES if crate in client_crates)
+    if forbidden_client:
+        raise ValueError(
+            f"Engine-free native crates unexpectedly depend on backend engine crates: {', '.join(forbidden_client)}"
+        )
+
+    backend_variants = (
+        ("default", ["cargo", "tree", "--locked", "--prefix", "none", "-p", COMPANION_PACKAGE]),
+        ("embedded_only", ["cargo", "tree", "--locked", "--prefix", "none", "-p", COMPANION_PACKAGE,
+                           "--no-default-features", "--features", "embedded"]),
+    )
+    for variant, command in backend_variants:
+        crates = _parse_cargo_tree_crates(_run(command, runner=runner, root=root, timeout=120))
+        if "lancedb" in crates:
+            raise ValueError(f"Companion backend ({variant}) must never depend on lancedb")
+
+    rusqlite_tree = _run(
+        ["cargo", "tree", "--locked", "--prefix", "depth", "--invert", "rusqlite",
+         "-p", COMPANION_PACKAGE, "--no-default-features", "--features", "embedded,nlp,classifier"],
+        runner=runner, root=root, timeout=120,
+    )
+    direct_rusqlite_parents = set()
+    for line in rusqlite_tree.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("1"):
+            crate = stripped[1:].strip().split(" ", 1)[0]
+            if crate:
+                direct_rusqlite_parents.add(crate)
+    disallowed_parents = sorted(p for p in direct_rusqlite_parents if p not in ALLOWED_RUSQLITE_PARENTS)
+    if disallowed_parents:
+        raise ValueError(
+            f"Companion backend must only pull rusqlite via fleetworks-jobs, found: {', '.join(disallowed_parents)}"
+        )
+    return {
+        "client_packages": list(CLIENT_ENGINE_FREE_PACKAGES),
+        "client_engine_free": True,
+        "companion_package": COMPANION_PACKAGE,
+        "lancedb_absent": True,
+        "rusqlite_parents": sorted(direct_rusqlite_parents),
+    }
 
 
 def locked_rune_revision(root=ROOT):
@@ -471,7 +555,7 @@ def _atomic_install_stage(destination, stage, outputs, bundle_name, manifest_nam
 def package_native(destination, binary, resources, *, version, target, revision, profile,
                    rune_revision, toolchain, dirty, minimum_os=None, bundle_version=None,
                    run_id=None, attempt="1", workflow="local", archive=False,
-                   cargo_lock_sha256="", runner=None):
+                   cargo_lock_sha256="", companion_binary=None, runner=None):
     """Stage a checked complete app and replace only this helper's outputs.
 
     Packaging/architecture/library checks are not a GUI, signing, notarization
@@ -493,6 +577,26 @@ def package_native(destination, binary, resources, *, version, target, revision,
         raise ValueError("Native binary cannot be a symlink")
     binary = binary.resolve()
     libraries = inspect_native_binary(binary, target, runner=runner)
+    companion_meta = None
+    if companion_binary is not None:
+        companion_binary = Path(companion_binary)
+        if companion_binary.is_symlink():
+            raise ValueError("Companion backend binary cannot be a symlink")
+        companion_binary = companion_binary.resolve()
+        companion_libraries = inspect_native_binary(companion_binary, target, runner=runner)
+        relative_companion = (
+            f"bin/{COMPANION_BINARY}"
+            if target in LINUX_NATIVE_TARGETS
+            else f"Contents/MacOS/{COMPANION_BINARY}"
+        )
+        architecture_map = LINUX_NATIVE_TARGETS if target in LINUX_NATIVE_TARGETS else DARWIN_NATIVE_TARGETS
+        companion_meta = {
+            "name": COMPANION_BINARY,
+            "relative_path": relative_companion,
+            "architecture": architecture_map[target],
+            "sha256": sha256(companion_binary),
+            "libraries": companion_libraries,
+        }
     destination = native_output(destination, target, profile)
     run_id = str(run_id or f"local-{time.time_ns()}")
     archive_file = native_archive_name(version, target, revision, run_id, attempt)
@@ -557,6 +661,8 @@ def package_native(destination, binary, resources, *, version, target, revision,
                              "gui_launch": "not_run", "minimum_os": "not_tested", "product_tests": "not_recorded"},
             "libraries": libraries,
         }
+    if companion_meta is not None:
+        manifest["companion"] = companion_meta
 
     old_app = destination / bundle_name
     old_manifest = destination / manifest_name
@@ -576,6 +682,11 @@ def package_native(destination, binary, resources, *, version, target, revision,
             executable = bin_dir / NATIVE_BINARY
             shutil.copyfile(binary, executable)
             executable.chmod(0o755)
+            staged_companion = None
+            if companion_binary is not None:
+                staged_companion = bin_dir / COMPANION_BINARY
+                shutil.copyfile(companion_binary, staged_companion)
+                staged_companion.chmod(0o755)
             desktop_dir = app / "share/applications"
             desktop_dir.mkdir(parents=True)
             desktop_file = desktop_dir / "fleetworks.desktop"
@@ -604,6 +715,11 @@ def package_native(destination, binary, resources, *, version, target, revision,
             bundled_resources.mkdir()
             shutil.copyfile(binary, executable)
             executable.chmod(0o755)
+            staged_companion = None
+            if companion_binary is not None:
+                staged_companion = contents / "MacOS" / COMPANION_BINARY
+                shutil.copyfile(companion_binary, staged_companion)
+                staged_companion.chmod(0o755)
             for path in resource_files:
                 target_path = bundled_resources / path.relative_to(resources)
                 target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -630,11 +746,38 @@ def package_native(destination, binary, resources, *, version, target, revision,
             (stage / (archive_file + ".sha256")).write_text(checksum_line(stage / archive_file, digest), encoding="utf-8")
             outputs.extend([archive_file, archive_file + ".sha256"])
         _atomic_install_stage(destination, stage, outputs, bundle_name, manifest_name)
-    return {"app": str(destination / bundle_name),
-            "executable": str(destination / bundle_name / ("bin" if target in LINUX_NATIVE_TARGETS else "Contents/MacOS") / NATIVE_BINARY),
-            "manifest": str(destination / manifest_name),
-            "archive": str(destination / archive_file) if archive else None, "sha256": digest,
-            "identity": manifest}
+    summary = {
+        "app": str(destination / bundle_name),
+        "executable": str(destination / bundle_name / ("bin" if target in LINUX_NATIVE_TARGETS else "Contents/MacOS") / NATIVE_BINARY),
+        "manifest": str(destination / manifest_name),
+        "archive": str(destination / archive_file) if archive else None,
+        "sha256": digest,
+        "identity": manifest,
+    }
+    if companion_binary is not None:
+        summary["companion"] = str(
+            destination / bundle_name / ("bin" if target in LINUX_NATIVE_TARGETS else "Contents/MacOS") / COMPANION_BINARY
+        )
+    return summary
+
+
+def _validate_extracted_companion(app, manifest, target, relative_exe, *, runner=None):
+    """Validate bundled companion binary presence/absence and metadata against manifest."""
+    companion_path = app / relative_exe
+    companion_info = manifest.get("companion")
+    if companion_info is None:
+        if companion_path.exists() or companion_path.is_symlink():
+            raise ValueError("Native archive contains undeclared companion executable")
+        return
+    if not isinstance(companion_info, dict) or companion_info.get("relative_path") != relative_exe:
+        raise ValueError("Companion backend manifest metadata is invalid")
+    if companion_path.is_symlink() or not companion_path.is_file() or not os.access(companion_path, os.X_OK):
+        raise ValueError("Native archive is missing its declared companion executable")
+    if sha256(companion_path) != companion_info.get("sha256"):
+        raise ValueError("Companion backend executable digest does not match manifest")
+    libraries = inspect_native_binary(companion_path, target, runner=runner)
+    if libraries != companion_info.get("libraries"):
+        raise ValueError("Companion backend library dependencies do not match manifest")
 
 
 def open_native(app, info, target, *, runner=None, preflight=None):
@@ -683,6 +826,7 @@ def _extract_linux_archive(archive, destination, *, expected_digest, version, ta
                            rune_revision, profile=None, require_clean=False, runner=None):
     embedded_name = f"{LINUX_APP}/share/fleetworks/fleetworks-manifest.json"
     exe_name = f"{LINUX_APP}/bin/{NATIVE_BINARY}"
+    companion_name = f"{LINUX_APP}/bin/{COMPANION_BINARY}"
     with tarfile.open(archive, "r:gz") as tar:
         members = tar.getmembers()
         names = [member.name for member in members]
@@ -699,7 +843,7 @@ def _extract_linux_archive(archive, destination, *, expected_digest, version, ta
                 raise ValueError("Native archive contains an unsafe or unexpected path")
             if member.issym() or member.islnk() or not (member.isdir() or member.isfile()):
                 raise ValueError("Native archive contains forbidden symlinks or special files")
-            expected_mode = 0o755 if (member.isdir() or member.name == exe_name) else 0o644
+            expected_mode = 0o755 if (member.isdir() or member.name in (exe_name, companion_name)) else 0o644
             if (member.mode & 0o777) != expected_mode:
                 raise ValueError("Native archive entry permissions are invalid")
         if embedded_name not in names or tar.getmember(embedded_name).size > 1024 * 1024:
@@ -750,6 +894,7 @@ def _extract_linux_archive(archive, destination, *, expected_digest, version, ta
     libraries = inspect_native_binary(app / "bin" / NATIVE_BINARY, target, runner=runner)
     if libraries != manifest.get("libraries"):
         raise ValueError("Native library dependencies do not match the manifest")
+    _validate_extracted_companion(app, manifest, target, f"bin/{COMPANION_BINARY}", runner=runner)
     return app, manifest
 
 
@@ -797,7 +942,10 @@ def extract_native(archive, destination, *, expected_digest, version, target, re
                 raise ValueError("Native archive contains an unsafe or unexpected path")
             mode = entry.external_attr >> 16
             expected = (stat.S_IFDIR | 0o755) if entry.is_dir() else \
-                (stat.S_IFREG | (0o755 if entry.filename == f"{NATIVE_APP}/Contents/MacOS/{NATIVE_BINARY}" else 0o644))
+                (stat.S_IFREG | (0o755 if entry.filename in (
+                    f"{NATIVE_APP}/Contents/MacOS/{NATIVE_BINARY}",
+                    f"{NATIVE_APP}/Contents/MacOS/{COMPANION_BINARY}",
+                ) else 0o644))
             if mode != expected or entry.flag_bits & 1:
                 raise ValueError("Native archive entry type, permissions or encryption is invalid")
         if embedded_name not in names or zipped.getinfo(embedded_name).file_size > 1024 * 1024:
@@ -856,6 +1004,7 @@ def extract_native(archive, destination, *, expected_digest, version, target, re
     libraries = inspect_native_binary(app / "Contents/MacOS" / NATIVE_BINARY, target, runner=runner)
     if libraries != manifest.get("libraries"):
         raise ValueError("Native library dependencies do not match the manifest")
+    _validate_extracted_companion(app, manifest, target, f"Contents/MacOS/{COMPANION_BINARY}", runner=runner)
     return app, manifest
 
 
@@ -871,13 +1020,26 @@ def native_main(args):
         raise ValueError("--open cannot launch an artifact for the other physical Mac architecture")
     toolchain = validate_toolchain(info)
     destination = native_output(args.output, target, args.profile)
+    with_companion = getattr(args, "with_companion", False)
     command = cargo_native_command(target, args.profile, agent=args.agent, implicit_host=args.target == "host") if args.command == "build-native" else None
+    companion_command = (
+        cargo_companion_command(
+            target, args.profile, agent=args.agent, implicit_host=args.target == "host",
+            features=getattr(args, "companion_features", None),
+            no_default_features=getattr(args, "companion_no_default_features", False),
+        )
+        if args.command == "build-native" and with_companion
+        else None
+    )
     bundle_path = str(destination / native_bundle_name(target))
     if args.dry_run:
-        print(json.dumps({"target": target, "platform": info.as_dict(), "profile": args.profile, "version": version,
-                          "build_command": command, "app": bundle_path,
-                          "archive_requested": args.archive, "open_requested": args.open,
-                          "prerequisites": "SDK/package inputs checked during build/package, not this dry run"}, indent=2))
+        payload = {"target": target, "platform": info.as_dict(), "profile": args.profile, "version": version,
+                   "build_command": command, "app": bundle_path,
+                   "archive_requested": args.archive, "open_requested": args.open,
+                   "prerequisites": "SDK/package inputs checked during build/package, not this dry run"}
+        if companion_command is not None:
+            payload["companion_build_command"] = companion_command
+        print(json.dumps(payload, indent=2))
         return 0
     _progress("Checking source identity and pinned Rune dependencies")
     revision, dirty = repository_identity(revision=args.revision)
@@ -899,15 +1061,29 @@ def native_main(args):
         _progress(f"Building {NATIVE_BINARY} ({target}, {args.profile})")
         _progress(shlex.join(command))
         binary = cargo_executable(_run_cargo(command, environment=environment, timeout=3600))
+        if companion_command:
+            _progress(f"Building {COMPANION_BINARY} ({target}, {args.profile})")
+            _progress(shlex.join(companion_command))
+            companion_binary = cargo_executable(
+                _run_cargo(companion_command, environment=environment, timeout=3600),
+                name=COMPANION_BINARY, package=COMPANION_PACKAGE,
+            )
+        else:
+            companion_binary = None
     else:
         binary = args.binary
+        companion_binary = getattr(args, "companion_binary", None)
     _progress("Packaging and validating the native app bundle")
-    result = package_native(destination, binary, resources, version=version, target=target,
-                            revision=revision, profile=args.profile, rune_revision=rune_revision,
-                            toolchain=toolchain, dirty=dirty, minimum_os=args.minimum_macos,
-                            bundle_version=args.bundle_version, run_id=args.run_id,
-                            attempt=args.run_attempt, workflow=args.workflow, archive=args.archive,
-                            cargo_lock_sha256=sha256(ROOT / "Cargo.lock"))
+    package_kwargs = dict(
+        version=version, target=target, revision=revision, profile=args.profile,
+        rune_revision=rune_revision, toolchain=toolchain, dirty=dirty,
+        minimum_os=args.minimum_macos, bundle_version=args.bundle_version,
+        run_id=args.run_id, attempt=args.run_attempt, workflow=args.workflow,
+        archive=args.archive, cargo_lock_sha256=sha256(ROOT / "Cargo.lock"),
+    )
+    if companion_binary is not None:
+        package_kwargs["companion_binary"] = companion_binary
+    result = package_native(destination, binary, resources, **package_kwargs)
     print(result["app"], flush=True)
     print(json.dumps({key: value for key, value in result.items() if key != "identity"}, indent=2), flush=True)
     if args.open:
@@ -918,7 +1094,11 @@ def native_main(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    build_native = commands.add_parser("build-native", help="Build and package the API-only Mac or Linux x86_64 app; never starts a backend")
+    build_native = commands.add_parser("build-native", help="Build and package the engine-free Mac or Linux x86_64 desktop app and companion local-IPC backend")
+    build_native.add_argument("--with-companion", dest="with_companion", action="store_true", default=True)
+    build_native.add_argument("--without-companion", dest="with_companion", action="store_false")
+    build_native.add_argument("--companion-features", help="Explicit Cargo feature list for argos-api-host")
+    build_native.add_argument("--companion-no-default-features", action="store_true")
     pack_native = commands.add_parser("package-native", help="Package a built native executable using the same checked app packager")
     for command in (build_native, pack_native):
         command.add_argument("--target", choices=("host", *NATIVE_TARGETS), default="host")
@@ -938,6 +1118,8 @@ def main():
         command.add_argument("--require-clean", action="store_true")
         command.add_argument("--agent", action="store_true", help="Use scripts/agent_cargo.py and target/agents for a build")
     pack_native.add_argument("--binary", type=Path, required=True)
+    pack_native.add_argument("--companion-binary", type=Path)
+    commands.add_parser("verify-engine-free", help="Verify fleetworks-desktop/contracts/workstation stay engine-free and backend DB bounds hold")
     verify_native = commands.add_parser("verify-native", help="Verify an exact downloaded app archive; does not install or launch by default")
     verify_native.add_argument("--archive", type=Path, required=True)
     verify_native.add_argument("--sha256", required=True)
@@ -951,6 +1133,9 @@ def main():
     verify_native.add_argument("--open", action="store_true")
     args = parser.parse_args()
     try:
+        if args.command == "verify-engine-free":
+            print(json.dumps(verify_engine_free(ROOT), indent=2))
+            return 0
         if args.command in ("build-native", "package-native"):
             return native_main(args)
         if args.command == "verify-native":

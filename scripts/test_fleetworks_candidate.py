@@ -16,9 +16,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from fleetworks_candidate import NATIVE_APP, NATIVE_BINARY, NATIVE_MANIFEST
-from fleetworks_candidate import main, native_main, open_native, _run_cargo, apple_versions, cargo_executable, cargo_native_command
-from fleetworks_candidate import artifact_version, checksum_line, elf_architecture, extract_native, linux_runtime_preflight, native_output, package_native, sha256
+from fleetworks_candidate import COMPANION_BINARY, COMPANION_PACKAGE, NATIVE_APP, NATIVE_BINARY, NATIVE_MANIFEST
+from fleetworks_candidate import main, native_main, open_native, _run_cargo, apple_versions, cargo_companion_command, cargo_executable, cargo_native_command
+from fleetworks_candidate import artifact_version, checksum_line, elf_architecture, extract_native, linux_runtime_preflight, native_output, package_native, sha256, verify_engine_free
 
 
 class NativeAppTests(unittest.TestCase):
@@ -674,6 +674,98 @@ class LinuxNativeCandidateTests(unittest.TestCase):
              ):
             self.assertEqual(native_main(args), 0)
         self.assertEqual(run_calls, [["readelf", "--version"]])
+
+    def test_companion_packaging_and_extraction_verify_macos_and_linux_archives(self):
+        mac_bin = self.root / "mac-desktop"
+        mac_bin.write_bytes(struct.pack("<8I", 0xFEEDFACF, 0x01000007, 3, 2, 0, 0, 0, 0) + b"native fixture")
+        mac_bin.chmod(0o755)
+        mac_comp = self.root / COMPANION_BINARY
+        mac_comp.write_bytes(mac_bin.read_bytes())
+        mac_comp.chmod(0o755)
+        mac_res = self.root / "mac-resources"
+        mac_res.mkdir()
+        with (mac_res / "Info.plist").open("wb") as output:
+            plistlib.dump({"CFBundleIdentifier": "dev.fleetworks.desktop", "LSMinimumSystemVersion": "13.0"}, output)
+        mac_runner = lambda cmd, **_: subprocess.CompletedProcess(
+            cmd, 0, f"{cmd[2]}:\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n", ""
+        )
+        result = package_native(
+            self.destination / "mac", mac_bin, mac_res,
+            version="0.2.1", target="x86_64-apple-darwin", revision="1" * 40,
+            profile="debug", rune_revision="2" * 40, toolchain="1.95.0", dirty=True,
+            run_id="123", attempt="2", workflow="fixture", archive=True,
+            companion_binary=mac_comp, runner=mac_runner,
+        )
+        manifest = result["identity"]
+        self.assertEqual(manifest["companion"]["name"], COMPANION_BINARY)
+        self.assertEqual(manifest["companion"]["relative_path"], f"Contents/MacOS/{COMPANION_BINARY}")
+        self.assertEqual(manifest["companion"]["sha256"], sha256(mac_comp))
+        app, verified = extract_native(
+            result["archive"], self.root / "extracted-mac", expected_digest=result["sha256"],
+            version="0.2.1", target="x86_64-apple-darwin", revision="1" * 40,
+            rune_revision="2" * 40, profile="debug", runner=mac_runner,
+        )
+        self.assertTrue((app / "Contents/MacOS" / COMPANION_BINARY).is_file())
+        self.assertEqual(verified["companion"]["sha256"], sha256(mac_comp))
+
+        # Verify Linux tar.gz packaging & extraction of companion executable.
+        linux_comp = self.root / "linux-comp"
+        linux_comp.write_bytes(self.binary.read_bytes())
+        linux_comp.chmod(0o755)
+        linux_runner = lambda cmd, **_: subprocess.CompletedProcess(
+            cmd, 0, "  0x0000000000000001 (NEEDED) Shared library: [libc.so.6]\n", ""
+        )
+        linux_res = self.pack(
+            companion_binary=linux_comp, archive=True,
+            runner=linux_runner,
+        )
+        lapp, lmanifest = extract_native(
+            linux_res["archive"], self.root / "extracted-linux", expected_digest=linux_res["sha256"],
+            version="0.2.1", target="x86_64-unknown-linux-gnu", revision="1" * 40,
+            rune_revision="2" * 40, profile="debug", runner=linux_runner,
+        )
+        self.assertTrue((lapp / "bin" / COMPANION_BINARY).is_file())
+        self.assertEqual(lmanifest["companion"]["relative_path"], f"bin/{COMPANION_BINARY}")
+
+    def test_cargo_companion_command_and_verify_engine_free_bounds(self):
+        cmd = cargo_companion_command("aarch64-apple-darwin", "release", agent=True,
+                                      implicit_host=True, features="embedded", no_default_features=True)
+        self.assertIn(COMPANION_PACKAGE, cmd)
+        self.assertIn("--no-default-features", cmd)
+        self.assertEqual(cmd[-3:], ["--features", "embedded", "--release"])
+        fake_msg = json.dumps({
+            "reason": "compiler-artifact",
+            "target": {"name": COMPANION_BINARY, "kind": ["bin"]},
+            "package_id": "path+file:///repo/services/api-host#0.2.1",
+            "executable": "/tmp/argos-api-host",
+        }) + "\n" + json.dumps({"reason": "build-finished", "success": True})
+        self.assertEqual(
+            cargo_executable(fake_msg, name=COMPANION_BINARY, package=COMPANION_PACKAGE),
+            Path("/tmp/argos-api-host"),
+        )
+
+        def clean_runner(command, **_kw):
+            if "--invert" in command:
+                return subprocess.CompletedProcess(command, 0, "0rusqlite v0.41.1\n1fleetworks-jobs v0.2.1\n", "")
+            return subprocess.CompletedProcess(command, 0, "fleetworks-contracts v0.2.1\ntokio v1.53.3\n", "")
+
+        summary = verify_engine_free(self.root, runner=clean_runner)
+        self.assertTrue(summary["client_engine_free"])
+        self.assertEqual(summary["rusqlite_parents"], ["fleetworks-jobs"])
+
+        def leaky_client_runner(command, **_kw):
+            return subprocess.CompletedProcess(command, 0, "fleetworks-desktop v0.2.1\nsurrealdb v3.3.4\n", "")
+
+        with self.assertRaisesRegex(ValueError, "Engine-free native crates"):
+            verify_engine_free(self.root, runner=leaky_client_runner)
+
+        def leaky_sqlite_runner(command, **_kw):
+            if "--invert" in command:
+                return subprocess.CompletedProcess(command, 0, "0rusqlite v0.41.1\n1argos-osint-api v0.2.1\n", "")
+            return subprocess.CompletedProcess(command, 0, "argos-api-host v0.2.1\n", "")
+
+        with self.assertRaisesRegex(ValueError, "fleetworks-jobs"):
+            verify_engine_free(self.root, runner=leaky_sqlite_runner)
 
 
 if __name__ == "__main__":

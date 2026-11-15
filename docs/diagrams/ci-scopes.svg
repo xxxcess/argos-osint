@@ -22,9 +22,9 @@
 <text x="48" y="424" class="note">PR or trusted branch push</text>
 <text x="48" y="448" class="note">Dependencies select lanes</text>
 <rect x="368" y="88" width="512" height="108" rx="6" class="node"/>
-<text x="384" y="120" class="label">Mac desktop · both architectures</text>
-<text x="384" y="148" class="note">PR: debug app, units and Rune PNG/tree</text>
-<text x="384" y="172" class="note">Trusted: release ZIP + downloaded-byte verification</text>
+<text x="384" y="120" class="label">Native desktop · macOS + Linux x86_64</text>
+<text x="384" y="148" class="note">PR: debug apps, units and Rune PNG/tree</text>
+<text x="384" y="172" class="note">Trusted: release Mac ZIP + Linux .tar.gz verify</text>
 <rect x="368" y="220" width="512" height="108" rx="6" class="node"/>
 <text x="384" y="252" class="label">Linux backend + affected storage</text>
 <text x="384" y="280" class="note">Native AMD64 + ARM64; services / queue / storage</text>

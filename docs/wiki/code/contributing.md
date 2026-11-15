@@ -31,7 +31,7 @@ For Fleetworks client, service, deployment or web work, start with the [scope pl
 
 ### Development loops: native app and Docker
 
-Fleetworks has a Rune macOS client, an independently operated Linux backend and Intel Web. The app connects to the gateway; direct Docker Compose operates services. Pick the shortest loop that exercises the changed contract, then widen. The commands below are the fast paths; deployment details stay in the [deployment guide](../../../deploy/README.md).
+Fleetworks has a Rune macOS and Linux x86_64 client, an independently operated Linux backend and Intel Web. The app connects to the gateway; direct Docker Compose operates services. Pick the shortest loop that exercises the changed contract, then widen. The commands below are the fast paths; deployment details stay in the [deployment guide](../../../deploy/README.md).
 
 [![Fleetworks development loops](../../diagrams/dev-loops.svg)](../../diagrams/dev-loops.html)
 
@@ -55,7 +55,7 @@ python3 scripts/fleetworks_candidate.py build-native --agent --target host --pro
 
 Use [selected native verification](native-verification.md) for affected Runtime/PNG/tree/script evidence. The helper streams Cargo progress/diagnostics and stage markers live on stderr, then packages/validates and prints the `.app` path and result metadata. Only `--open` opens the validated app; an already running app is preserved. Native build/fixture commands do not provision a backend. Installed-app, minimum-OS and platform validation stay separate from fixture generation.
 
-**2. Runtime image loop (service changes).** Service roles run from the `runtime` image, so a host build alone does not change them. Run the single helper command to auto-initialize `native-local` if missing, rebuild the backend service images, redeploy the Docker Compose containers, and trigger `fleetworks_candidate.py build-native --target host --profile debug --open` on supported macOS (`x86_64-apple-darwin` or `aarch64-apple-darwin`; pass `--backend-only` or run on Linux to skip the native build):
+**2. Runtime image loop (service changes).** Service roles run from the `runtime` image, so a host build alone does not change them. Run the single helper command to auto-initialize `native-local` if missing, rebuild the backend service images, redeploy the Docker Compose containers, and trigger `fleetworks_candidate.py build-native --target host --profile debug --open` on supported macOS (`x86_64-apple-darwin` or `aarch64-apple-darwin`) and Linux x86_64 (`x86_64-unknown-linux-gnu`) hosts (pass `--backend-only` or run on unsupported architectures such as Linux ARM64 to skip the native build):
 
 ```sh
 python3 deploy/native_review.py up

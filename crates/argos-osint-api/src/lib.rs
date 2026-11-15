@@ -355,7 +355,7 @@ fn router_with_access(
             )
             .route("/api/v1/workstation/readiness", get(workstation::read))
             .route(
-                "/api/v1/workstation/requests/detail",
+                fleetworks_contracts::context::WORKSTATION_REQUEST_DETAIL_PATH,
                 get(request_reconciliation::read),
             )
             .route("/api/v1/workstation/datasets", get(datasets::list))

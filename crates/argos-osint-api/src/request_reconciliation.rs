@@ -5,28 +5,23 @@ use axum::extract::State;
 use axum::Extension;
 use axum::Json;
 use fleetworks_contracts::context::Permission;
-use serde::Deserialize;
+use fleetworks_contracts::context::WorkstationRequestDetailQuery;
 
 use crate::request_context::ContextFailure;
 use crate::request_context::ResolvedRequest;
 use crate::ApiResult;
 use crate::ApiState;
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ReceiptQuery {
-    request_id: String,
-    operation: String,
-    original_registration_id: Option<String>,
-}
-
 pub(crate) async fn read(
     State(state): State<ApiState>,
     Extension(request): Extension<ResolvedRequest>,
-    Query(query): Query<ReceiptQuery>,
+    Query(query): Query<WorkstationRequestDetailQuery>,
 ) -> ApiResult {
     if !request.permits(Permission::ReadWorkstationActivity) {
         return Err(ContextFailure::forbidden().into());
+    }
+    if query.validate().is_err() {
+        return Err(ContextFailure::invalid().into());
     }
     if !matches!(
         query.operation.as_str(),

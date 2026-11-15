@@ -99,11 +99,19 @@ An authorized registered maintenance request to
 `POST /api/v1/search/actors/reindex` creates or associates with a durable shared
 Reindex Job. Its consumer is enabled only with the configured real index pump.
 Status, query and readiness reads do not start work.
-After a correction to optional projection terms, refresh Workstation Status and
-use **Build actor index** to admit a new reindex request. The failed job's
-**Retry job** control has its own permission, ownership and state checks; a new
-readiness action can resume the retained shadow rebuild without weakening those
-checks.
+From Workstation Status's **Actor search** hero card, **Build actor index** /
+**Rebuild actor index** opens an inline confirmation modal (`Escape` cancels and
+restores button focus). Before issuing the HTTP POST, the native client
+persists the pending `reindex_actors` request ID and `original_registration_id`
+so uncertain delivery or network drops reconcile read-only via
+`GET /api/v1/workstation/requests/detail`, clearing the durable journal on
+terminal HTTP 4xx errors (`BadRequest`/`Unauthorized`/`Forbidden`/`NotFound`/
+`Conflict`/`UnprocessableEntity`). When the correlated Jobs row transitions into
+a terminal state (`Completed`, `Failed`, or `Canceled`), the native client
+automatically refreshes `/api/v1/workstation/readiness` without polling timers.
+The failed job's **Retry job** control has its own permission, ownership and state
+checks; a new readiness action can resume the retained shadow rebuild without
+weakening those checks.
 
 The coordinator keeps a separate scan cursor, exact pending shadow batch and
 visible delta checkpoint. It scans canonical keys in bounded pages and gives

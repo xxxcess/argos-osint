@@ -500,8 +500,17 @@ impl State {
 
     /// Isolate data immediately on destination/auth changes and reject old callbacks.
     pub fn disconnect(&mut self) {
-        self.cancel_requests();
         self.clear_session_secrets();
+        self.reset_connection_state();
+    }
+
+    /// Reset transient connection state without wiping RAM-only pending pairing secrets.
+    pub(crate) fn disconnect_keeping_session_secrets(&mut self) {
+        self.reset_connection_state();
+    }
+
+    fn reset_connection_state(&mut self) {
+        self.cancel_requests();
         self.activity_tab = ActivityTab::Jobs;
         self.invalidate_origin();
         self.registration.interfaces = Load::Idle;

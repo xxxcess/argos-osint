@@ -249,8 +249,26 @@ impl State {
     }
 
     fn connect_pairing_with_storage(&mut self, storage_mode: CredentialStorage, restart: bool) {
+        self.start_pairing_request(storage_mode, restart, false);
+    }
+
+    fn resume_paused_pairing(&mut self) {
+        let storage_mode = self.pairing.storage_mode;
+        self.start_pairing_request(storage_mode, false, true);
+    }
+
+    fn start_pairing_request(
+        &mut self,
+        storage_mode: CredentialStorage,
+        restart: bool,
+        preserve_session_secrets: bool,
+    ) {
         self.connection_profiles.initial_selection_applied = true;
-        self.disconnect();
+        if preserve_session_secrets {
+            self.disconnect_keeping_session_secrets();
+        } else {
+            self.disconnect();
+        }
         self.pairing.storage_mode = storage_mode;
         self.connection.status = ConnectionStatus::Connecting;
         self.pairing.stage =
@@ -325,6 +343,15 @@ impl State {
                 self.pairing.stage = PairingStage::Connected;
             }
             Err(error) => {
+                if matches!(
+                    error,
+                    PairingFailure::Denied
+                        | PairingFailure::Expired
+                        | PairingFailure::SessionEnded
+                        | PairingFailure::Authentication
+                ) {
+                    self.clear_session_secrets();
+                }
                 self.connection.status = ConnectionStatus::Failed(error.message().into());
                 self.pairing.stage = PairingStage::Failed(error);
             }
@@ -377,7 +404,7 @@ impl State {
             self.connection.status = ConnectionStatus::Disconnected;
         } else if focused && self.pairing.paused && self.setup_gateway {
             self.pairing.paused = false;
-            self.connect_pairing_with_storage(self.pairing.storage_mode, false);
+            self.resume_paused_pairing();
         }
     }
 }

@@ -46,7 +46,7 @@ pub struct PendingCycleDeletion {
     pub request: DeleteCycleRequest,
 }
 
-/// Bounded non-secret unresolved actor reindex attempt captured before HTTP POST.
+/// Bounded non-secret unresolved or accepted actor reindex attempt captured around HTTP POST.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -54,6 +54,8 @@ pub struct PendingActorReindex {
     pub origin: String,
     pub context: RegisteredContext,
     pub request: MaintenanceRequest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_job_id: Option<String>,
 }
 
 impl NativeContainer {
@@ -232,11 +234,46 @@ impl NativeContainer {
             origin,
             context: context.clone(),
             request: request.clone(),
+            accepted_job_id: None,
         };
         journal.pending_actor_reindexes.push(entry.clone());
         fs::write_json(&self.root_fd, FILE, &journal, object)?;
         self.revalidate_root()?;
         Ok(entry)
+    }
+
+    /// Durably record an authoritative accepted job ID alongside the original request
+    /// before clearing the unresolved pending entry.
+    pub fn record_accepted_actor_reindex(
+        &self,
+        origin: &str,
+        request: &MaintenanceRequest,
+        job_id: &str,
+    ) -> Result<PendingActorReindex> {
+        let origin = Client::canonical_origin(origin).context("invalid gateway origin")?;
+        super::require_operation_id(&request.request_id)?;
+        super::require_operation_id(job_id)?;
+        let _guard = self.locked()?;
+        let (mut journal, object) = self.read_workstation()?;
+        let entry = journal
+            .pending_actor_reindexes
+            .iter_mut()
+            .find(|pending| pending.origin == origin && pending.request == *request)
+            .ok_or_else(|| {
+                anyhow::anyhow!("actor reindex pending attempt missing before receipt persistence")
+            })?;
+        if let Some(existing) = &entry.accepted_job_id {
+            anyhow::ensure!(
+                existing == job_id,
+                "actor reindex pending attempt already recorded a different accepted job"
+            );
+            return Ok(entry.clone());
+        }
+        entry.accepted_job_id = Some(job_id.to_owned());
+        let saved = entry.clone();
+        fs::write_json(&self.root_fd, FILE, &journal, object)?;
+        self.revalidate_root()?;
+        Ok(saved)
     }
 
     /// Read-only lookup of any unresolved actor reindex attempt for one gateway origin.
@@ -325,6 +362,9 @@ impl NativeContainer {
         let mut reindex_origins = std::collections::BTreeSet::new();
         for pending in &journal.pending_actor_reindexes {
             super::require_operation_id(&pending.request.request_id)?;
+            if let Some(job_id) = &pending.accepted_job_id {
+                super::require_operation_id(job_id)?;
+            }
             let mut expected = MutationContext::new(&pending.context);
             if let Some(revision) = pending.request.context.expected_configuration_revision {
                 expected = expected.with_configuration_revision(revision);
@@ -528,14 +568,27 @@ mod tests {
         reopened
             .begin_actor_reindex("http://127.0.0.1:8081", &context, &other)
             .expect("second origin");
-        reopened
+        let accepted = reopened
+            .record_accepted_actor_reindex("http://127.0.0.1:8080", &request, "job-accepted-1")
+            .expect("durably record accepted job ID");
+        assert_eq!(accepted.accepted_job_id.as_deref(), Some("job-accepted-1"));
+        assert!(reopened
+            .record_accepted_actor_reindex("http://127.0.0.1:8080", &request, "job-accepted-2")
+            .is_err());
+        let after_restart = NativeContainer::open_settings(&home).expect("reopen after accept");
+        let recovered = after_restart
+            .pending_actor_reindex("http://127.0.0.1:8080")
+            .expect("read accepted")
+            .expect("accepted entry survives before explicit completion");
+        assert_eq!(recovered.accepted_job_id.as_deref(), Some("job-accepted-1"));
+        after_restart
             .complete_actor_reindex("http://127.0.0.1:8080", &request)
             .expect("complete first");
-        assert!(reopened
+        assert!(after_restart
             .pending_actor_reindex("http://127.0.0.1:8080")
             .expect("read")
             .is_none());
-        assert!(reopened
+        assert!(after_restart
             .pending_actor_reindex("http://127.0.0.1:8081")
             .expect("read second")
             .is_some());

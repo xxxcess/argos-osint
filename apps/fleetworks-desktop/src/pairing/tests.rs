@@ -833,3 +833,201 @@ async fn session_only_mode_stores_secrets_only_in_ram_and_wipes_on_disconnect_an
 
     gateway.finish().await;
 }
+
+#[tokio::test]
+async fn session_only_pairing_resumes_after_focus_loss_and_approval() {
+    let (_temporary, container, durable_store) = installation();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}/", listener.local_addr().unwrap());
+    let approved = Arc::new(AtomicBool::new(false));
+    let start_request_ids = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (polled_tx, polled_rx) = tokio::sync::oneshot::channel();
+    let polled_tx = Arc::new(Mutex::new(Some(polled_tx)));
+    let server_approved = Arc::clone(&approved);
+    let server_starts = Arc::clone(&start_request_ids);
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let server_approved = Arc::clone(&server_approved);
+            let server_starts = Arc::clone(&server_starts);
+            let polled_tx = Arc::clone(&polled_tx);
+            tokio::spawn(async move {
+                let mut header = Vec::new();
+                loop {
+                    let mut byte = [0];
+                    if socket.read_exact(&mut byte).await.is_err() {
+                        return;
+                    }
+                    header.push(byte[0]);
+                    if header.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let head = String::from_utf8_lossy(&header).to_ascii_lowercase();
+                let mut first = head.lines().next().unwrap_or_default().split_whitespace();
+                let _method = first.next().unwrap_or_default();
+                let path = first.next().unwrap_or_default().to_owned();
+                let length = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .map_or(0, |value| value.trim().parse::<usize>().unwrap());
+                let mut body = vec![0; length];
+                if socket.read_exact(&mut body).await.is_err() {
+                    return;
+                }
+                let request_body: Value = if body.is_empty() {
+                    Value::Null
+                } else {
+                    serde_json::from_slice(&body).unwrap()
+                };
+                let body = match path.as_str() {
+                    PAIRING_START_PATH => {
+                        let req_id = request_body["request_id"].as_str().unwrap().to_owned();
+                        server_starts.lock().unwrap().push(req_id.clone());
+                        serde_json::json!({
+                            "pairing_id": req_id,
+                            "approval_code": "b".repeat(32),
+                            "expires_at_ms": 2_000_000_000_000_u64,
+                            "poll_after_ms": 5000
+                        })
+                    }
+                    PAIRING_POLL_PATH if server_approved.load(Ordering::SeqCst) => {
+                        serde_json::json!({
+                            "status": "approved",
+                            "credential_id": "paired-synthetic-credential",
+                            "access_token": ACCESS,
+                            "scope_id": "synthetic-scope",
+                            "access_epoch": "synthetic-access"
+                        })
+                    }
+                    PAIRING_POLL_PATH => {
+                        if let Some(tx) = polled_tx.lock().unwrap().take() {
+                            let _ = tx.send(());
+                        }
+                        serde_json::json!({
+                            "status": "pending",
+                            "retry_after_ms": 5000
+                        })
+                    }
+                    READY_PATH => serde_json::json!({
+                        "service": "fleetworks-api",
+                        "api_version": 1,
+                        "ready": true,
+                        "storage": true,
+                        "instance_id": "fixture"
+                    }),
+                    CAPABILITIES_PATH => serde_json::json!({
+                        "api_version": 1,
+                        "auth": true,
+                        "deployment_id": "synthetic-deployment",
+                        "configuration_epoch": "fixture-config",
+                        "features": [CONNECT_REGISTRY_FEATURE],
+                        "connect": ConnectCapabilities::default(),
+                        "workspace_control": WorkspaceControlCapabilities::default(),
+                        "resource_scopes": ResourceScopes::default()
+                    }),
+                    _ => return,
+                };
+                let bytes = serde_json::to_vec(&body).unwrap();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    bytes.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.write_all(&bytes).await;
+            });
+        }
+    });
+
+    let effects = Arc::new(GatewayEffects::new(tokio::runtime::Handle::current()));
+    let session_store = effects.session_keychain.clone();
+
+    // Begin a session-only pairing and pause after entering Waiting + first pending poll.
+    let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel();
+    let mut waiting_tx = Some(waiting_tx);
+    let container_for_pair = container.clone();
+    let origin_for_pair = origin.clone();
+    let session_for_pair = session_store.clone();
+    let pairing_task = tokio::spawn(async move {
+        connect_or_pair_with_storage(
+            container_for_pair,
+            origin_for_pair,
+            session_for_pair,
+            CredentialStorage::SessionOnly,
+            true,
+            move |stage| {
+                if let PairingStage::Waiting(challenge) = stage {
+                    if let Some(tx) = waiting_tx.take() {
+                        let _ = tx.send(challenge);
+                    }
+                }
+            },
+        )
+        .await
+    });
+
+    let challenge = waiting_rx.await.expect("entered waiting stage");
+    polled_rx.await.expect("first pending poll observed");
+    assert_eq!(start_request_ids.lock().unwrap().len(), 1);
+    assert_eq!(session_store.len(), 1);
+    assert!(durable_store.0.lock().unwrap().items.is_empty());
+
+    // Simulate losing focus while waiting, cancelling the background poll without wiping RAM secrets.
+    let mut state = State::with_services(effects.clone());
+    state.workspaces.container = Some(container.clone());
+    state.connection.origin = rune::TextEdit::new(&origin);
+    state.setup_gateway = true;
+    state.pairing.storage_mode = CredentialStorage::SessionOnly;
+    state.pairing.stage = PairingStage::Waiting(challenge);
+    state.pairing_focus(false);
+    pairing_task.abort();
+    assert!(state.pairing.paused);
+    assert_eq!(state.pairing.storage_mode, CredentialStorage::SessionOnly);
+    assert_eq!(
+        session_store.len(),
+        1,
+        "focus loss must preserve RAM-only session challenge secret"
+    );
+
+    // Operator approves while app is unfocused, then window regains focus.
+    approved.store(true, Ordering::SeqCst);
+    state.pairing_focus(true);
+    assert!(!state.pairing.paused);
+    assert_eq!(state.pairing.storage_mode, CredentialStorage::SessionOnly);
+    assert_eq!(
+        session_store.len(),
+        1,
+        "focus return resume must not wipe RAM-only challenge secret"
+    );
+
+    // Resuming with restart = false replays the same pending pairing request and completes in SessionOnly mode.
+    let connected = connect_or_pair_with_storage(
+        container.clone(),
+        origin.clone(),
+        session_store.clone(),
+        state.pairing.storage_mode,
+        false,
+        |_| {},
+    )
+    .await
+    .expect("session-only pairing resumes cleanly after approval");
+    assert_eq!(
+        connected.capabilities.deployment_id.as_deref(),
+        Some("synthetic-deployment")
+    );
+    let recorded_starts = start_request_ids.lock().unwrap().clone();
+    assert_eq!(recorded_starts.len(), 2);
+    assert_eq!(
+        recorded_starts[0], recorded_starts[1],
+        "resuming after focus return must reuse the exact same pending challenge request_id"
+    );
+    assert_eq!(session_store.len(), 1);
+    assert!(durable_store.0.lock().unwrap().items.is_empty());
+
+    // Terminal failure still clears RAM-only secrets immediately.
+    let failure_epoch = state.connection.epoch;
+    state.complete_pairing_connection(failure_epoch, Err(PairingFailure::Denied));
+    assert_eq!(session_store.len(), 0);
+
+    server.abort();
+}

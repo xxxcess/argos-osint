@@ -56,9 +56,9 @@ Capacity recovery follows [proof-based cache hygiene](contributing.md#build-cach
 
 | Tool | Output |
 | --- | --- |
-| `scripts/fleetworks_candidate.py build-native --agent` | Default `dist/native/<resolved-triple>/<debug-or-release>/Fleetworks.app` and `Fleetworks.app.manifest.json`; `--output <review-dir>` may select task-owned scratch |
-| Same helper, `--archive --version <artifact-version>` | `Fleetworks-<version>-<sha12>-<run>.<attempt>-<triple>.zip` and `.zip.sha256` beside the app; trusted CI supplies the source-derived version. [Packaging/verification](../../../scripts/fleetworks_candidate.py) |
-| App bundle | `Contents/MacOS/fleetworks-desktop`, `Contents/Info.plist`, `Contents/Resources/`, embedded `Contents/Resources/fleetworks-manifest.json`; no service engines |
+| `scripts/fleetworks_candidate.py build-native --agent` | Default `dist/native/<resolved-triple>/<debug-or-release>/Fleetworks.app` (macOS) or `Fleetworks-linux-x86_64` (Linux x86_64) and its `.manifest.json`; `--output <review-dir>` may select task-owned scratch |
+| Same helper, `--archive --version <artifact-version>` | `Fleetworks-<version>-<sha12>-<run>.<attempt>-<triple>.zip` (macOS) or `.tar.gz` (Linux x86_64) and `.sha256` beside the bundle; trusted CI supplies the source-derived version. [Packaging/verification](../../../scripts/fleetworks_candidate.py) |
+| App bundle | macOS: `Contents/MacOS/fleetworks-desktop`, `Contents/Info.plist`, `Contents/Resources/`; Linux: `bin/fleetworks-desktop`, `share/applications/fleetworks.desktop`, `share/icons/hicolor/scalable/apps/fleetworks.svg`, `share/fleetworks/fleetworks-manifest.json`; no service engines |
 | `scripts/fleetworks_verify.py native-ui --agent` | Default `.agent-scratch/native-ui/selected-*/`, or new/empty `--output`; selected `.png`, `.tree.json`, optional `.trace.jsonl`, bounded command logs and `manifest.json` |
 
 Build flow: flushed stage/command markers and live Cargo diagnostics on **stderr** → package/validate → app path and result metadata on **stdout**. `--open` opens only the validated app and preserves an already running app. Building, packaging, fixture generation, inspected captures and installed GUI approval are separate results.
@@ -69,9 +69,9 @@ Build flow: flushed stage/command markers and live Cargo diagnostics on **stderr
 
 | Event / stage | Output |
 | --- | --- |
-| PR opened or updated, targeting `dev`, `nightly` or `main` | Selected debug tests/builds and Rune PNG/tree evidence on both Mac architectures; no app ZIP or publication |
-| Trusted push to `nightly` / `dev` / `main` | Selected release-profile, versioned unsigned Mac ZIPs for Intel and Apple Silicon; manifests/checksums retained as 14-day Actions artifacts |
-| Native verification | Download by immutable artifact ID, require artifact digest, then verify ZIP checksum/source/version/target/bundle identity without installing or launching |
+| PR opened or updated, targeting `dev`, `nightly` or `main` | Selected debug tests/builds and Rune PNG/tree evidence on both Mac architectures and Linux x86_64; no app release publication |
+| Trusted push to `nightly` / `dev` / `main` | Selected release-profile, versioned unsigned Mac ZIPs (Intel/Apple Silicon) and non-release Linux x86_64 `.tar.gz` archives; manifests/checksums retained as 14-day Actions artifacts |
+| Native verification | Download by immutable artifact ID, require artifact digest, then verify ZIP / `.tar.gz` checksum/source/version/target/bundle identity without installing or launching |
 | Selected Linux image verification | Native AMD64 + ARM64 build → exact-image-ID smoke → push verified digests and export `fleetworks-images-linux-{amd64,arm64}.tar.gz` + `.sha256`; `release-images-{amd64,arm64}.json` records source/version/image/archive identity. |
 | Required checks pass | GitHub Release assets for selected native ZIPs, Linux image tarballs and Atlas BERT worker bundles (`atlas-bert-linux-{amd64,arm64}.tar.gz`); selected multiarchitecture GHCR image indexes with immutable version/full-SHA tags and `nightly` or `stable` aliases |
 

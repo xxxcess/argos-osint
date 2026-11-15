@@ -210,6 +210,8 @@ fn maintenance_result(result: Value) -> Option<Value> {
         "state",
         "actor_search_state",
         "index_generation",
+        "original_job_id",
+        "generation",
     ] {
         if let Some(value) = result
             .get(name)
@@ -221,6 +223,7 @@ fn maintenance_result(result: Value) -> Option<Value> {
     }
     for name in [
         "processed",
+        "scanned",
         "total",
         "aliases",
         "visible_checkpoint",
@@ -230,7 +233,7 @@ fn maintenance_result(result: Value) -> Option<Value> {
             safe.insert(name.to_owned(), Value::from(value));
         }
     }
-    for name in ["activation_requested", "database_seeded"] {
+    for name in ["activation_requested", "database_seeded", "reader_visible"] {
         if let Some(value) = result.get(name).and_then(Value::as_bool) {
             safe.insert(name.to_owned(), Value::Bool(value));
         }
@@ -353,6 +356,22 @@ mod tests {
                 && !encoded.contains("raw_report")
         );
         assert!(maintenance_result(json!({"operation":"unknown","state":"complete"})).is_none());
+        let reindex = maintenance_result(json!({
+            "operation": "actor_reindex",
+            "original_job_id": "job-prev",
+            "generation": "gen-2",
+            "visible_checkpoint": 42,
+            "scanned": 120,
+            "reader_visible": true,
+            "server_path": "/private/reindex"
+        }))
+        .expect("actor_reindex result");
+        assert_eq!(reindex["original_job_id"], "job-prev");
+        assert_eq!(reindex["generation"], "gen-2");
+        assert_eq!(reindex["visible_checkpoint"], 42);
+        assert_eq!(reindex["scanned"], 120);
+        assert_eq!(reindex["reader_visible"], true);
+        assert!(reindex.get("server_path").is_none());
     }
 
     #[test]

@@ -12,13 +12,7 @@ test count.
 
 [![Native Runtime, capture inspection and separate acceptance](../../diagrams/native-verification.svg)](../../diagrams/native-verification.html)
 
-This command requires a supported physical Mac and the repository-pinned Rust
-toolchain. It does not install prerequisites, invoke Node/Docker, contact a
-backend, package/install the app or launch a GUI. An explicit execution target
-must match the physical Mac. Default `--target host` rejects an ambiguous Rosetta
-or mismatched Rust host and omits Cargo's `--target` argument so the existing
-implicit host debug graph stays reusable. Explicit matching targets remain
-available when that distinct graph is intentional.
+This command requires a supported physical Mac (`x86_64-apple-darwin` or `aarch64-apple-darwin`) or Linux x86_64 host (`x86_64-unknown-linux-gnu`) with Vulkan (or Mesa Lavapipe) and the repository-pinned Rust toolchain. It does not install prerequisites, invoke Node/Docker, contact a backend, package/install the app or launch a GUI. An explicit execution target must match the physical host. Default `--target host` rejects an ambiguous Rosetta or mismatched Rust host and omits Cargo's `--target` argument so the existing implicit host debug graph stays reusable. On Linux, `HOME` and `XDG_CACHE_HOME` remain isolated and `DBUS_SESSION_BUS_ADDRESS` is excluded from fixture captures. Explicit matching targets remain available when that distinct graph is intentional.
 
 ## Select the affected views
 

@@ -311,6 +311,17 @@ jobs:
       runner: ${{ matrix.runner }}
       release-version: ${{ needs.scope.outputs.publish == 'true' && needs.scope.outputs.release_version || '' }}
 
+  desktop_linux:
+    name: Linux app / x86_64-unknown-linux-gnu
+    needs: scope
+    if: needs.scope.outputs.desktop == 'true'
+    uses: ./.github/workflows/fleetworks-native-linux.yml
+    with:
+      expected-head: ${{ needs.scope.outputs.head }}
+      mode: ${{ needs.scope.outputs.full == 'true' && 'full' || 'pr' }}
+      profile: ${{ needs.scope.outputs.publish == 'true' && 'release' || 'debug' }}
+      release-version: ${{ needs.scope.outputs.publish == 'true' && needs.scope.outputs.release_version || '' }}
+
   embedded:
     name: Affected embedded storage / Linux AMD64 and ARM64
     needs: scope
@@ -609,7 +620,7 @@ jobs:
 
   source_checks:
     name: Fleetworks source checks
-    needs: [scope, desktop, server, embedded, compose, bert, web, images]
+    needs: [scope, desktop, desktop_linux, server, embedded, compose, bert, web, images]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -629,6 +640,7 @@ jobs:
           QUEUE_SELECTED: ${{ needs.scope.outputs.queue }}
           STORAGE_SELECTED: ${{ needs.scope.outputs.storage }}
           DESKTOP_RESULT: ${{ needs.desktop.result }}
+          DESKTOP_LINUX_RESULT: ${{ needs.desktop_linux.result }}
           SERVER_RESULT: ${{ needs.server.result }}
           EMBEDDED_RESULT: ${{ needs.embedded.result }}
           COMPOSE_RESULT: ${{ needs.compose.result }}
@@ -663,6 +675,7 @@ jobs:
             *) echo '::error::Development browser scope needs the web gate'; failed=1 ;;
           esac
           verify desktop "$DESKTOP_SELECTED" "$DESKTOP_RESULT" || failed=1
+          verify desktop_linux "$DESKTOP_SELECTED" "$DESKTOP_LINUX_RESULT" || failed=1
           verify server "$SERVER_SELECTED" "$SERVER_RESULT" || failed=1
           verify embedded "$STORAGE_SELECTED" "$EMBEDDED_RESULT" || failed=1
           verify compose "$COMPOSE_SELECTED" "$COMPOSE_RESULT" || failed=1

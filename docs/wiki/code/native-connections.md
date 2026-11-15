@@ -8,15 +8,15 @@
 
 ## Pairing and Keychain
 
-**Implemented flow:** Gateway URL → operator approval once → macOS Keychain → authenticated reconnect. [Verification status](../../../.planning/2026-11-12-native-pairing-implementation/acceptance.md) records actual checks; implementation does not establish a live Keychain or installed-app pass.
+**Implemented flow:** Gateway URL → operator approval once → macOS Keychain or Linux D-Bus Secret Service (or explicit Linux session-only mode) → authenticated reconnect. [Verification status](../../../.planning/2026-11-12-native-pairing-implementation/acceptance.md) records actual checks; injected secret-store tests do not establish live Keychain/Secret Service or installed-app passes.
 
 | Step | Behavior |
 | --- | --- |
 | Enter URL | Pin one validated origin: remote HTTPS or loopback HTTP. A new installation waits for Connect. A known selected pairing/access reference may reconnect on startup; an explicit URL restores only its own known reference. |
-| Start / approve | Persist the exact request ID and Keychain polling secret before HTTP. The app displays request ID/code; an independently authenticated Operator approves it within the ten-minute challenge window. IDs/codes/installation markers alone grant no API access. |
-| Save / connect | Authenticate the issued scoped Native credential, check compatibility, then save its secret in Keychain before reporting connected. Register/reuse the protected installation. Settings retain only origin/deployment/credential references and recovery state. |
-| Reconnect | Read the exact installation/origin Keychain item, authenticate and verify the saved deployment. Never scan other items or fall back to token files, another origin or unauthenticated access. |
-| Recover | Lost HTTP outcomes and failed Keychain promotion retain the exact ID/secret/issuance intent. Retry replays that request; denied/expired/revoked access requires explicit Pair again. Keychain locked/denied/unavailable and network failures remain separate actionable states. |
+| Start / approve | Persist the exact request ID and pairing polling secret before HTTP (written to macOS Keychain, Linux Secret Service, or held in process memory when Linux session-only mode is active). The app displays request ID/code; an independently authenticated Operator approves it within the ten-minute challenge window. IDs/codes/installation markers alone grant no API access. |
+| Save / connect | Authenticate the issued scoped Native credential, check compatibility, then save its secret in Keychain/Secret Service (or memory in Linux session-only mode) before reporting connected. Register/reuse the protected installation. Settings retain only origin/deployment/credential references (`system_keyring` or `session_only` storage mode) and recovery state. |
+| Reconnect | Read the exact installation/origin keyring item (`system_keyring`) or live session memory, authenticate and verify the saved deployment. Never scan other items or fall back silently to files or unauthenticated access. Missing/locked Linux Secret Service requires either unlocking it and retrying or explicitly choosing session-only mode. |
+| Recover | Lost HTTP outcomes and failed secret-store promotion retain the exact ID/secret/issuance intent. Retry replays that request; denied/expired/revoked access requires explicit Pair again. Keychain/Secret Service locked/denied/unavailable and network failures remain separate actionable states. |
 | Stop / resume | Change gateway URL or leave setup to cancel/fence client callbacks. Focus loss pauses pending transport; focus return in setup resumes the retained request. Local cancellation does not revoke server access or cancel accepted jobs. |
 
 ### Pairing API

@@ -814,87 +814,99 @@ def _redact_diagnostic_text(text):
     return re.sub(r"(?i)((?:api[_-]?token|token|password|secret)\s*[=:]\s*)\S+", r"\1[REDACTED]", redacted)
 
 
-def _diagnostic_foreground_launch(executable, app, *, startup_probe_seconds=DIAGNOSTIC_STARTUP_PROBE_SECONDS, popen=None):
-    """Run the packaged binary directly with `--diagnostic`, draining pipes to avoid blocking.
+def _open_diagnostic_logs(log_dir):
+    """Create retained stdout/stderr log files; return (dir, out, err) or None when unavailable.
 
-    The probe polls the child while continuously draining stdout/stderr into bounded buffers.
-    A process that survives the probe window is reported as "still running", not "healthy".
-    Callers must supervise the returned process for later errors.
+    Log setup is best effort so it never becomes another source of launch failure.
     """
     try:
-        proc = (popen or subprocess.Popen)(
-            [str(executable), "--diagnostic"],
-            cwd=Path(app),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-    except OSError as error:
-        raise ValueError(
-            f"Diagnostic foreground launch failed (process_started=false, window_readiness_observed=false): {error}"
-        ) from error
+        if log_dir is None:
+            log_dir = tempfile.mkdtemp(prefix="fleetworks-diagnostic-")
+        log_dir = Path(log_dir)
+        log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        handles = []
+        for name in ("stdout.log", "stderr.log"):
+            fd = os.open(log_dir / name, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            handles.append(os.fdopen(fd, "wb"))
+        return log_dir, handles[0], handles[1]
+    except OSError:
+        return None
 
-    # Drain pipes continuously to prevent a chatty child from blocking on write.
-    # Bound buffers to avoid unbounded memory growth from a misbehaving process.
-    MAX_DIAGNOSTIC_BUFFER = 64 * 1024  # 64 KiB per stream
-    stdout_chunks = []
-    stderr_chunks = []
-    stdout_done = False
-    stderr_done = False
 
-    def read_available(stream, chunks, done_flag):
-        """Non-blocking read from stream, appending to bounded buffer."""
-        if done_flag[0]:
-            return
+def _diagnostic_log_excerpt(log_dir, limit):
+    """Read a bounded, redacted tail of the retained logs."""
+    parts = []
+    for name in ("stderr.log", "stdout.log"):
         try:
-            import select
-            if hasattr(stream, 'fileno'):
-                ready, _, _ = select.select([stream], [], [], 0)
-                if ready:
-                    chunk = stream.read(4096)
-                    if not chunk:
-                        done_flag[0] = True
-                    elif sum(len(c) for c in chunks) < MAX_DIAGNOSTIC_BUFFER:
-                        chunks.append(chunk)
-        except (OSError, ValueError):
-            done_flag[0] = True
+            with open(log_dir / name, "rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                handle.seek(max(0, handle.tell() - limit))
+                parts.append(handle.read())
+        except OSError:
+            continue
+    return _redact_diagnostic_text(b"\n".join(parts).decode("utf-8", errors="replace")).strip()[-limit:]
+
+
+def _diagnostic_foreground_launch(executable, app, *, startup_probe_seconds=DIAGNOSTIC_STARTUP_PROBE_SECONDS,
+                                  popen=None, log_dir=None):
+    """Run the packaged binary with `--diagnostic` and probe startup.
+
+    The child writes stdout/stderr straight to retained log files, so it can never block on a
+    full pipe, and errors emitted after the probe window remain on disk. A process that
+    survives the probe is reported as "still running", not "healthy", with the log location.
+    """
+    logs = _open_diagnostic_logs(log_dir)
+    if logs is None:
+        log_dir, out_handle, err_handle = None, subprocess.DEVNULL, subprocess.DEVNULL
+        log_note = "diagnostic logs unavailable"
+    else:
+        log_dir, out_handle, err_handle = logs
+        log_note = f"diagnostic logs: {log_dir}"
+    try:
+        try:
+            proc = (popen or subprocess.Popen)(
+                [str(executable), "--diagnostic"],
+                cwd=Path(app),
+                stdin=subprocess.DEVNULL,
+                stdout=out_handle,
+                stderr=err_handle,
+            )
+        except OSError as error:
+            raise ValueError(
+                f"Diagnostic foreground launch failed (process_started=false, window_readiness_observed=false; "
+                f"{log_note}): {error}"
+            ) from error
+    finally:
+        # The child holds its own descriptors; the parent copies are no longer needed.
+        if logs is not None:
+            out_handle.close()
+            err_handle.close()
 
     deadline = time.monotonic() + max(0.0, float(startup_probe_seconds))
     while proc.poll() is None and time.monotonic() < deadline:
-        read_available(proc.stdout, stdout_chunks, [stdout_done])
-        read_available(proc.stderr, stderr_chunks, [stderr_done])
         time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
 
     rc = proc.poll()
     if rc is not None:
-        # Process exited during probe; collect remaining output.
-        remaining_out, remaining_err = proc.communicate(timeout=2)
-        if remaining_out:
-            stdout_chunks.append(remaining_out)
-        if remaining_err:
-            stderr_chunks.append(remaining_err)
-        combined = (b"".join(stderr_chunks) + b"\n" + b"".join(stdout_chunks)).decode("utf-8", errors="replace")
-        excerpt = _redact_diagnostic_text(combined).strip()[-4000:]
+        excerpt = _diagnostic_log_excerpt(log_dir, 4000) if log_dir is not None else ""
         if rc != 0:
             raise ValueError(
                 f"Diagnostic foreground launch exited early ({rc}; process_started=true, pid={proc.pid}, "
-                f"window_readiness_observed=false): {excerpt or 'no stderr captured'}"
+                f"window_readiness_observed=false; {log_note}): {excerpt or 'no output captured'}"
             )
         return (
             f"Diagnostic foreground launch exited cleanly (0; process_started=true, pid={proc.pid}, "
-            f"window_readiness_observed=false: exited before window readiness observation)"
+            f"window_readiness_observed=false: exited before window readiness observation; {log_note})"
             f"{f': {excerpt}' if excerpt else '.'}"
         )
 
-    # Process survived the probe but pipes must continue to be drained by caller.
-    # Return the process handle so the caller can supervise and read later output.
-    excerpt = (b"".join(stderr_chunks) + b"\n" + b"".join(stdout_chunks)).decode("utf-8", errors="replace").strip()[-500:]
+    excerpt = _diagnostic_log_excerpt(log_dir, 500) if log_dir is not None else ""
     return (
         f"Diagnostic foreground launch still running (process_started=true, pid={proc.pid}, "
         f"window_readiness_observed=false: startup probe confirms process survival, not GUI readiness; "
-        f"stdout/stderr pipes are open and must be drained by caller)."
+        f"later output continues in {log_note})."
         f"{f' Early output: {excerpt}' if excerpt else ''}"
-    ), proc
+    )
 
 
 def open_native(app, info, target, *, diagnostic=False, startup_probe_seconds=DIAGNOSTIC_STARTUP_PROBE_SECONDS,

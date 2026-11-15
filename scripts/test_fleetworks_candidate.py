@@ -10,6 +10,7 @@ import sys
 import tarfile
 import tempfile
 import threading
+import time
 import unittest
 import zipfile
 from pathlib import Path
@@ -838,28 +839,35 @@ class LinuxNativeCandidateTests(unittest.TestCase):
     def test_diagnostic_foreground_launch_captures_early_crash_and_healthy_probe(self):
         bundle = Path(self.pack()["app"])
         info = SimpleNamespace(system="Linux", native_target="x86_64-unknown-linux-gnu")
+        log_root = tempfile.TemporaryDirectory()
+        self.addCleanup(log_root.cleanup)
+        tempdir_patch = mock.patch("tempfile.tempdir", log_root.name)
+        tempdir_patch.start()
+        self.addCleanup(tempdir_patch.stop)
 
         class FakeProc:
-            def __init__(self, rc, stderr=b"", stdout=b""):
+            def __init__(self, rc, err_data=b"", out_data=b"", **popen_kwargs):
                 self.pid = 777
                 self._rc = rc
-                self._stderr = stderr
-                self._stdout = stdout
+                # Mimic a child writing to the descriptors the probe hands it.
+                for key, data in (("stdout", out_data), ("stderr", err_data)):
+                    handle = popen_kwargs.get(key)
+                    if data and hasattr(handle, "write"):
+                        handle.write(data)
+                        handle.flush()
 
             def poll(self):
                 return self._rc
 
-            def communicate(self, timeout=None):
-                return self._stdout, self._stderr
-
         popen_cmds = []
 
-        def fail_popen(cmd, **_kwargs):
+        def fail_popen(cmd, **kwargs):
             popen_cmds.append(cmd)
             return FakeProc(
                 101,
-                stderr=b"early_crash_marker: Authorization: Bearer topsecret-abc password=hunter2\n",
-                stdout=b"api_token=tok_xyz_999\n",
+                err_data=b"early_crash_marker: Authorization: Bearer topsecret-abc password=hunter2\n",
+                out_data=b"api_token=tok_xyz_999\n",
+                **kwargs,
             )
 
         with mock.patch("sys.stderr", io.StringIO()), \
@@ -896,7 +904,7 @@ class LinuxNativeCandidateTests(unittest.TestCase):
                 diagnostic=True, startup_probe_seconds=0.01,
                 runner=lambda cmd, **_: subprocess.CompletedProcess(cmd, 0, "", ""),
                 preflight=lambda: {"display": "x11", "dbus_session": False, "vulkan": True},
-                popen=lambda *_a, **_kw: FakeProc(0, stderr=b"diagnostic ok Bearer secret-clean\n"),
+                popen=lambda *_a, **kw: FakeProc(0, err_data=b"diagnostic ok Bearer secret-clean\n", **kw),
             )
             with self.assertRaisesRegex(ValueError, "process_started=false, window_readiness_observed=false"):
                 open_native(
@@ -914,6 +922,59 @@ class LinuxNativeCandidateTests(unittest.TestCase):
         self.assertIn("window_readiness_observed=false", clean_exit)
         self.assertNotIn("secret-clean", clean_exit)
         self.assertIn("[REDACTED]", clean_exit)
+
+    def test_diagnostic_launch_real_child_cannot_block_and_keeps_delayed_errors(self):
+        from fleetworks_candidate import _diagnostic_foreground_launch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            child = tmp / "chatty-child"
+            # Writes ~256 KiB (well past a 64 KiB pipe buffer), then errors after the probe window.
+            child.write_text(
+                f"#!{sys.executable}\n"
+                "import sys, time\n"
+                "sys.stdout.write('x' * 262144)\n"
+                "sys.stdout.flush()\n"
+                "sys.stderr.write('started token=early-secret\\n')\n"
+                "sys.stderr.flush()\n"
+                "time.sleep(0.6)\n"
+                "sys.stderr.write('delayed_error_marker\\n')\n"
+                "sys.stderr.flush()\n"
+                "sys.exit(3)\n"
+            )
+            child.chmod(0o755)
+            log_dir = tmp / "logs"
+            started = time.monotonic()
+            message = _diagnostic_foreground_launch(child, tmp, startup_probe_seconds=0.3, log_dir=log_dir)
+            self.assertLess(time.monotonic() - started, 5)
+            self.assertIn("still running", message)
+            self.assertIn(str(log_dir), message)
+            self.assertNotIn("early-secret", message)
+            deadline = time.monotonic() + 10
+            while "delayed_error_marker" not in (log_dir / "stderr.log").read_text() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertIn("delayed_error_marker", (log_dir / "stderr.log").read_text())
+            self.assertEqual((log_dir / "stdout.log").stat().st_size, 262144)
+
+    def test_diagnostic_launch_survives_unavailable_log_dir(self):
+        from fleetworks_candidate import _diagnostic_foreground_launch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            blocker = Path(tmp) / "not-a-dir"
+            blocker.write_text("")
+
+            class Proc:
+                pid = 42
+
+                def poll(self):
+                    return None
+
+            message = _diagnostic_foreground_launch(
+                Path(tmp) / "bin", tmp, startup_probe_seconds=0.0,
+                popen=lambda *_a, **_kw: Proc(), log_dir=blocker / "logs",
+            )
+        self.assertIn("still running", message)
+        self.assertIn("diagnostic logs unavailable", message)
 
 
 if __name__ == "__main__":

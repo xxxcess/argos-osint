@@ -967,5 +967,45 @@ class LinuxNativeCandidateTests(unittest.TestCase):
         self.assertIn("still running (process_started=true, pid=42", message)
         self.assertIn("not GUI readiness", message)
 
+    def test_redacted_drain_discards_oversized_line_so_split_credential_never_leaks(self):
+        from fleetworks_candidate import DIAGNOSTIC_LINE_LIMIT, _RedactedDrain
+
+        # The label ends just before the read boundary; the value falls in the next fragment.
+        label = "api_token="
+        padding = "x" * (DIAGNOSTIC_LINE_LIMIT - len(label))
+        data = (padding + label + "synthetic-split-cred " + "y" * (2 * DIAGNOSTIC_LINE_LIMIT) + "\n"
+                + "after token=synthetic-next-cred\n").encode()
+        sink = io.StringIO()
+        drain = _RedactedDrain(io.BytesIO(data), "stdout", sink, 10 * DIAGNOSTIC_LINE_LIMIT, 64 * 1024)
+        drain.join(5.0)
+        for text in (sink.getvalue(), drain.tail()):
+            self.assertNotIn("synthetic-split-cred", text)
+            self.assertNotIn("synthetic-next-cred", text)
+            self.assertIn(f"line over {DIAGNOSTIC_LINE_LIMIT} bytes discarded", text)
+            # The line after the oversized one is still read whole and redacted.
+            self.assertIn("after token=[REDACTED]", text)
+
+    def test_redacted_drain_keeps_reading_after_sink_error(self):
+        from fleetworks_candidate import _RedactedDrain
+
+        class BrokenSink:
+            writes = 0
+
+            def write(self, _text):
+                BrokenSink.writes += 1
+                raise BrokenPipeError("sink closed")
+
+            def flush(self):
+                pass
+
+        lines = [f"line {i}\n" for i in range(200)] + ["final_marker\n"]
+        stream = io.BytesIO("".join(lines).encode())
+        drain = _RedactedDrain(stream, "stderr", BrokenSink(), 1 << 20, 1 << 20)
+        drain.join(5.0)
+        self.assertTrue(drain.sink_failed)
+        self.assertEqual(BrokenSink.writes, 1)
+        self.assertEqual(stream.read(), b"")
+        self.assertIn("final_marker", drain.tail())
+
 if __name__ == "__main__":
     unittest.main()

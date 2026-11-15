@@ -833,14 +833,42 @@ class _RedactedDrain:
         self._tail = []
         self._tail_size = 0
         self.truncated = False
+        self.sink_failed = False
         self._lock = threading.Lock()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
+    def _read_line(self):
+        """Return one whole logical line, or a placeholder if it exceeds DIAGNOSTIC_LINE_LIMIT.
+
+        A bounded read can split a line; redacting the fragments separately could expose a
+        credential value without its label. So an oversized line is read and discarded through
+        its newline, and only a fixed placeholder is kept. Returns b"" at EOF.
+        """
+        raw = self._stream.readline(DIAGNOSTIC_LINE_LIMIT)
+        if not raw or raw.endswith(b"\n") or len(raw) < DIAGNOSTIC_LINE_LIMIT:
+            return raw
+        while True:
+            rest = self._stream.readline(DIAGNOSTIC_LINE_LIMIT)
+            if not rest or rest.endswith(b"\n"):
+                break
+        return f"[line over {DIAGNOSTIC_LINE_LIMIT} bytes discarded]\n".encode()
+
+    def _emit(self, text):
+        """Write to the sink; on sink failure, stop echoing but keep draining the pipe."""
+        if self._sink is None:
+            return
+        try:
+            self._sink.write(text)
+            self._sink.flush()
+        except (OSError, ValueError):
+            self._sink = None
+            self.sink_failed = True
+
     def _run(self):
         try:
             while True:
-                raw = self._stream.readline(DIAGNOSTIC_LINE_LIMIT)
+                raw = self._read_line()
                 if not raw:
                     break
                 line = _redact_diagnostic_text(raw.decode("utf-8", errors="replace"))
@@ -853,13 +881,11 @@ class _RedactedDrain:
                     continue
                 if len(line) <= self._echo_left:
                     self._echo_left -= len(line)
-                    self._sink.write(f"[{self.label}] {line if line.endswith(chr(10)) else line + chr(10)}")
-                    self._sink.flush()
+                    self._emit(f"[{self.label}] {line if line.endswith(chr(10)) else line + chr(10)}")
                 elif not self.truncated:
                     self.truncated = True
                     self._echo_left = 0
-                    self._sink.write(f"[{self.label}] output above diagnostic limit; still draining, not shown\n")
-                    self._sink.flush()
+                    self._emit(f"[{self.label}] output above diagnostic limit; still draining, not shown\n")
         except (OSError, ValueError):
             pass
 

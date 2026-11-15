@@ -33,6 +33,17 @@ IPC_PROTOCOL_VERSION = 1
 IPC_MIN_PROTOCOL_VERSION = 1
 MAX_IPC_FRAME_BYTES = 4 * 1024 * 1024
 MAX_STDERR_TAIL_BYTES = 16 * 1024
+NATIVE_CONTRACT_API_VERSION = 1
+CONNECT_CONTRACT_VERSION = 2
+CONNECT_REGISTRY_FEATURE = "connect-registry-v1"
+EXPECTED_RESOURCE_SCOPES = {
+    "atlas": "backend",
+    "brain": "backend",
+    "tools": "backend",
+    "models": "backend",
+    "profile": "backend",
+    "native_jobs_logs": "workstation_triggered_activity",
+}
 
 DEFAULT_CSV = (
     b"actor_id,actor_name,actor_type,aliases,name_normalized\n"
@@ -292,7 +303,85 @@ class LocalIpcSession:
                 pass
 
 
-def run_smoke(binary, *, state_dir=None, check_sockets=True):
+def validate_native_contract(capabilities):
+    """Enforce the same required native capabilities contract as `Capabilities::require_native_contract`."""
+    if not isinstance(capabilities, dict):
+        raise ValueError(f"Companion failed to advertise capabilities: {capabilities!r}")
+    if capabilities.get("api_version") != NATIVE_CONTRACT_API_VERSION:
+        raise ValueError(f"Unsupported native contract api_version: {capabilities.get('api_version')!r}")
+    for key in ("deployment_id", "configuration_epoch"):
+        value = capabilities.get(key)
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"Companion capabilities missing required `{key}`: {capabilities!r}")
+    connect = capabilities.get("connect")
+    if (
+        not isinstance(connect, dict)
+        or connect.get("version") != CONNECT_CONTRACT_VERSION
+        or connect.get("registration_required") is not True
+    ):
+        raise ValueError(f"Companion capabilities missing v{CONNECT_CONTRACT_VERSION} connect contract: {connect!r}")
+    features = capabilities.get("features")
+    if not isinstance(features, list) or CONNECT_REGISTRY_FEATURE not in features:
+        raise ValueError(f"Companion capabilities missing feature `{CONNECT_REGISTRY_FEATURE}`: {features!r}")
+    workspace_control = capabilities.get("workspace_control")
+    if (
+        not isinstance(workspace_control, dict)
+        or workspace_control.get("version") != CONNECT_CONTRACT_VERSION
+        or workspace_control.get("purpose") != "registration_and_activity"
+    ):
+        raise ValueError(f"Companion capabilities invalid workspace_control: {workspace_control!r}")
+    if capabilities.get("resource_scopes") != EXPECTED_RESOURCE_SCOPES:
+        raise ValueError(f"Companion capabilities invalid resource_scopes: {capabilities.get('resource_scopes')!r}")
+
+
+def run_rust_client_probe(binary, state_dir, *, probe_bin=None, repo_root=None, runner=None):
+    """Run the compiled Rust `LocalIpcClient` / `Client::from_local_ipc` probe against `binary`."""
+    state_dir = Path(state_dir).resolve()
+    state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    state_dir.chmod(0o700)
+    root = Path(repo_root).resolve() if repo_root else Path(__file__).resolve().parent.parent
+    if probe_bin is not None:
+        command = [str(Path(probe_bin).resolve()), "--host", str(binary), "--state-dir", str(state_dir)]
+    else:
+        agent_cargo = root / "scripts/agent_cargo.py"
+        if not agent_cargo.is_file():
+            raise ValueError(f"Missing Cargo wrapper for Rust IPC probe: {agent_cargo}")
+        command = [
+            sys.executable,
+            str(agent_cargo),
+            "run",
+            "--locked",
+            "-p",
+            "fleetworks-contracts",
+            "--example",
+            "local_ipc_probe",
+            "--",
+            "--host",
+            str(binary),
+            "--state-dir",
+            str(state_dir),
+        ]
+    completed = (runner or subprocess.run)(
+        command,
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()[-2000:]
+        raise ValueError(f"Rust local-IPC client probe failed ({completed.returncode}): {detail or 'no output'}")
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"Rust local-IPC client probe emitted invalid JSON: {error}") from error
+    if not isinstance(payload, dict) or payload.get("status") != "pass":
+        raise ValueError(f"Rust local-IPC client probe did not pass: {payload!r}")
+    return payload
+
+
+def run_smoke(binary, *, state_dir=None, check_sockets=True, run_rust_probe=True, rust_probe_bin=None):
     """Execute the full Docker-free local-IPC lifecycle smoke suite against `binary`."""
     binary = Path(binary).resolve()
     cleanup_dir = None
@@ -337,9 +426,18 @@ def run_smoke(binary, *, state_dir=None, check_sockets=True):
             cold_start_ms = round((time.monotonic() - t0) * 1000.0, 2)
             if ack1.get("compatible") is not True:
                 raise ValueError(f"Expected compatible hello_ack, got {ack1!r}")
-            capabilities = ack1.get("capabilities") or {}
-            if not capabilities.get("features") and not capabilities.get("categories"):
-                raise ValueError(f"Companion failed to advertise capabilities: {capabilities!r}")
+            capabilities = ack1.get("capabilities")
+            validate_native_contract(capabilities)
+            rpc_caps, lat = session1.request_json({"op": "capabilities"})
+            rpc_latencies_ms.append(lat)
+            validate_native_contract(rpc_caps)
+            if (
+                rpc_caps.get("deployment_id") != capabilities.get("deployment_id")
+                or rpc_caps.get("configuration_epoch") != capabilities.get("configuration_epoch")
+            ):
+                raise ValueError(
+                    f"Capabilities identity mismatch between hello_ack ({capabilities!r}) and RPC ({rpc_caps!r})"
+                )
 
             if check_sockets:
                 socket_check_1 = check_zero_bound_sockets(session1.proc.pid)
@@ -483,6 +581,15 @@ def run_smoke(binary, *, state_dir=None, check_sockets=True):
             ack2 = session2.hello()
             if ack2.get("compatible") is not True:
                 raise ValueError(f"Session 2 rejected compatible handshake: {ack2!r}")
+            caps2 = ack2.get("capabilities")
+            validate_native_contract(caps2)
+            if (
+                caps2.get("deployment_id") != capabilities.get("deployment_id")
+                or caps2.get("configuration_epoch") != capabilities.get("configuration_epoch")
+            ):
+                raise ValueError(
+                    f"Deployment identity drifted across restart: before={capabilities!r}, after={caps2!r}"
+                )
             if check_sockets:
                 check_zero_bound_sockets(session2.proc.pid)
 
@@ -557,6 +664,12 @@ def run_smoke(binary, *, state_dir=None, check_sockets=True):
         finally:
             session2.close_unconditionally()
 
+        if run_rust_probe:
+            probe_dir = root_dir / "rust-probe-state"
+            rust_client_probe = run_rust_client_probe(binary, probe_dir, probe_bin=rust_probe_bin)
+        else:
+            rust_client_probe = {"status": "skipped"}
+
         return {
             "status": "pass",
             "non_gui_synthetic_smoke": True,
@@ -570,6 +683,7 @@ def run_smoke(binary, *, state_dir=None, check_sockets=True):
             "rpc_latency_max_ms": max(rpc_latencies_ms),
             "peak_rss_bytes": peak_rss_bytes,
             "capabilities": capabilities,
+            "rust_client_probe": rust_client_probe,
             "seed_job_id": seed_job_id,
             "restart_resume_job_id": reindex_job_id,
             "shutdown_ack_1": shutdown_ack,
@@ -590,11 +704,18 @@ def main():
     parser.add_argument("--host", type=Path, help="Path to argos-api-host executable")
     parser.add_argument("--app", type=Path, help="Path to packaged Fleetworks.app or Fleetworks-linux-x86_64 bundle")
     parser.add_argument("--state-dir", type=Path, help="Optional scratch directory for local backend state")
+    parser.add_argument("--rust-probe-bin", type=Path, help="Optional prebuilt local_ipc_probe Rust binary")
+    parser.add_argument("--skip-rust-probe", action="store_true", help="Skip the compiled Rust LocalIpcClient probe")
     parser.add_argument("--output", type=Path, help="Optional file path to write JSON smoke summary")
     args = parser.parse_args()
     try:
         binary = resolve_companion_binary(host=args.host, app=args.app)
-        summary = run_smoke(binary, state_dir=args.state_dir)
+        summary = run_smoke(
+            binary,
+            state_dir=args.state_dir,
+            run_rust_probe=not args.skip_rust_probe,
+            rust_probe_bin=args.rust_probe_bin,
+        )
     except (OSError, ValueError, TimeoutError, subprocess.SubprocessError) as error:
         print(f"fleetworks-local-backend-smoke: {error}", file=sys.stderr)
         return 1

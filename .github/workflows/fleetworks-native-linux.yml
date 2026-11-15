@@ -153,7 +153,7 @@ jobs:
             --output "$dist" --archive \
             --workflow "${{ github.workflow }}" --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}" \
             "${version_args[@]}"
-          DIST_DIR="$dist" EXTRACT_DIR="$extracted" python3 - <<'PY'
+          DIST_DIR="$dist" EXTRACT_DIR="$extracted" SIZES_OUT="${{ runner.temp }}/linux-native-evidence/package-sizes-$LINUX_TARGET.json" python3 - <<'PY'
           import json
           import os
           import subprocess
@@ -171,6 +171,32 @@ jobs:
               raise SystemExit(f"Expected 1 Linux manifest, found {len(manifests)}")
           manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
           archive = archives[0]
+          bundle = dist / "Fleetworks-linux-x86_64"
+          exe = bundle / "bin/fleetworks-desktop"
+          companion = bundle / "bin/argos-api-host"
+          unpacked_bytes = sum(path.stat().st_size for path in bundle.rglob("*") if path.is_file())
+          sizes = {
+              "target": os.environ["LINUX_TARGET"],
+              "profile": os.environ["LINUX_PROFILE"],
+              "archive_name": archive.name,
+              "archive_bytes": archive.stat().st_size,
+              "archive_mib": round(archive.stat().st_size / (1024 * 1024), 2),
+              "unpacked_bytes": unpacked_bytes,
+              "unpacked_mib": round(unpacked_bytes / (1024 * 1024), 2),
+              "executable_bytes": exe.stat().st_size,
+              "companion_bytes": companion.stat().st_size if companion.is_file() else None,
+          }
+          Path(os.environ["SIZES_OUT"]).write_text(json.dumps(sizes, indent=2) + "\n", encoding="utf-8")
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as handle:
+                  print(
+                      f"- `{sizes['target']}` (`{sizes['profile']}`): archive `{sizes['archive_name']}` = "
+                      f"`{sizes['archive_mib']} MiB` ({sizes['archive_bytes']} B), unpacked = "
+                      f"`{sizes['unpacked_mib']} MiB` ({sizes['unpacked_bytes']} B), "
+                      f"desktop = `{sizes['executable_bytes']} B`, companion = `{sizes['companion_bytes']} B`",
+                      file=handle,
+                  )
           subprocess.run([
               sys.executable, "scripts/fleetworks_candidate.py", "verify-native",
               "--archive", str(archive),

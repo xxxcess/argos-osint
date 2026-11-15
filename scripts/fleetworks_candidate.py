@@ -45,6 +45,9 @@ DISALLOWED_LINUX_LIBRARIES = ("libssl", "libcrypto", "librocksdb", "libsurreal",
 FORBIDDEN_CLIENT_ENGINE_CRATES = ("surrealdb", "rocksdb", "rusqlite", "tantivy", "lancedb", "argos-osint-core")
 CLIENT_ENGINE_FREE_PACKAGES = ("fleetworks-desktop", "fleetworks-contracts", "fleetworks-workstation")
 ALLOWED_RUSQLITE_PARENTS = ("fleetworks-jobs",)
+MAX_NATIVE_UNPACKED_BYTES = 1024 * 1024 * 1024
+MAX_NATIVE_ARCHIVE_BYTES = 512 * 1024 * 1024
+DIAGNOSTIC_STARTUP_PROBE_SECONDS = 2.0
 VERSION_PATTERN = r"([0-9]+)\.([0-9]+)\.([0-9]+)(?:-[A-Za-z0-9.-]+)?(?:\+[A-Za-z0-9.-]+)?"
 ARTIFACT_VERSION_PATTERN = (
     r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
@@ -552,6 +555,20 @@ def _atomic_install_stage(destination, stage, outputs, bundle_name, manifest_nam
         raise
 
 
+def _strip_debug_symbols(path, target, *, runner=None):
+    """Strip DWARF/Mach-O debug sections from a staged native executable."""
+    flag = "--strip-debug" if target in LINUX_NATIVE_TARGETS else "-S"
+    _run(["strip", flag, str(path)], runner=runner)
+
+
+def _stage_executable(source, destination, target, *, runner=None):
+    """Copy a native binary into staging, mark executable, and strip debug sections."""
+    shutil.copyfile(source, destination)
+    destination.chmod(0o755)
+    _strip_debug_symbols(destination, target, runner=runner)
+    return destination.stat().st_size
+
+
 def package_native(destination, binary, resources, *, version, target, revision, profile,
                    rune_revision, toolchain, dirty, minimum_os=None, bundle_version=None,
                    run_id=None, attempt="1", workflow="local", archive=False,
@@ -676,17 +693,17 @@ def package_native(destination, binary, resources, *, version, target, revision,
     with tempfile.TemporaryDirectory(prefix=".fleetworks-stage-", dir=destination) as temporary:
         stage = Path(temporary)
         app = stage / bundle_name
+        companion_bytes = None
         if target in LINUX_NATIVE_TARGETS:
             bin_dir = app / "bin"
             bin_dir.mkdir(parents=True)
             executable = bin_dir / NATIVE_BINARY
-            shutil.copyfile(binary, executable)
-            executable.chmod(0o755)
+            executable_bytes = _stage_executable(binary, executable, target, runner=runner)
             staged_companion = None
             if companion_binary is not None:
                 staged_companion = bin_dir / COMPANION_BINARY
-                shutil.copyfile(companion_binary, staged_companion)
-                staged_companion.chmod(0o755)
+                companion_bytes = _stage_executable(companion_binary, staged_companion, target, runner=runner)
+                companion_meta["sha256"] = sha256(staged_companion)
             desktop_dir = app / "share/applications"
             desktop_dir.mkdir(parents=True)
             desktop_file = desktop_dir / "fleetworks.desktop"
@@ -713,13 +730,12 @@ def package_native(destination, binary, resources, *, version, target, revision,
             executable.parent.mkdir(parents=True)
             bundled_resources = contents / "Resources"
             bundled_resources.mkdir()
-            shutil.copyfile(binary, executable)
-            executable.chmod(0o755)
+            executable_bytes = _stage_executable(binary, executable, target, runner=runner)
             staged_companion = None
             if companion_binary is not None:
                 staged_companion = contents / "MacOS" / COMPANION_BINARY
-                shutil.copyfile(companion_binary, staged_companion)
-                staged_companion.chmod(0o755)
+                companion_bytes = _stage_executable(companion_binary, staged_companion, target, runner=runner)
+                companion_meta["sha256"] = sha256(staged_companion)
             for path in resource_files:
                 target_path = bundled_resources / path.relative_to(resources)
                 target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -734,14 +750,21 @@ def package_native(destination, binary, resources, *, version, target, revision,
             manifest["files"] = {path.relative_to(app).as_posix(): sha256(path)
                                  for path in sorted(app.rglob("*")) if path.is_file()}
             _write_json(bundled_resources / "fleetworks-manifest.json", manifest)
+        unpacked_bytes = sum(path.stat().st_size for path in app.rglob("*") if path.is_file())
+        if unpacked_bytes > MAX_NATIVE_UNPACKED_BYTES:
+            raise ValueError(f"Native bundle exceeds 1 GiB unpacked limit ({unpacked_bytes} bytes)")
         _write_json(stage / manifest_name, manifest)
         outputs = [bundle_name, manifest_name]
         digest = None
+        archive_bytes = None
         if archive:
             if target in LINUX_NATIVE_TARGETS:
                 _tar_gz_bundle(app, stage / archive_file)
             else:
                 _zip_app(app, stage / archive_file)
+            archive_bytes = (stage / archive_file).stat().st_size
+            if archive_bytes > MAX_NATIVE_ARCHIVE_BYTES:
+                raise ValueError(f"Native archive exceeds 512 MiB compressed limit ({archive_bytes} bytes)")
             digest = sha256(stage / archive_file)
             (stage / (archive_file + ".sha256")).write_text(checksum_line(stage / archive_file, digest), encoding="utf-8")
             outputs.extend([archive_file, archive_file + ".sha256"])
@@ -752,12 +775,16 @@ def package_native(destination, binary, resources, *, version, target, revision,
         "manifest": str(destination / manifest_name),
         "archive": str(destination / archive_file) if archive else None,
         "sha256": digest,
+        "unpacked_bytes": unpacked_bytes,
+        "archive_bytes": archive_bytes,
+        "executable_bytes": executable_bytes,
         "identity": manifest,
     }
     if companion_binary is not None:
         summary["companion"] = str(
             destination / bundle_name / ("bin" if target in LINUX_NATIVE_TARGETS else "Contents/MacOS") / COMPANION_BINARY
         )
+        summary["companion_bytes"] = companion_bytes
     return summary
 
 
@@ -780,7 +807,30 @@ def _validate_extracted_companion(app, manifest, target, relative_exe, *, runner
         raise ValueError("Companion backend library dependencies do not match manifest")
 
 
-def open_native(app, info, target, *, runner=None, preflight=None):
+def _diagnostic_foreground_launch(executable, app, *, startup_probe_seconds=DIAGNOSTIC_STARTUP_PROBE_SECONDS, popen=None):
+    """Run the packaged binary directly with `--diagnostic` and fail closed on early crash."""
+    proc = (popen or subprocess.Popen)(
+        [str(executable), "--diagnostic"],
+        cwd=Path(app),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    deadline = time.monotonic() + max(0.0, float(startup_probe_seconds))
+    while proc.poll() is None and time.monotonic() < deadline:
+        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+    rc = proc.poll()
+    if rc is not None:
+        out, err = proc.communicate(timeout=2)
+        excerpt = ((err or b"") + b"\n" + (out or b"")).decode("utf-8", errors="replace").strip()[-4000:]
+        if rc != 0:
+            raise ValueError(f"Diagnostic foreground launch exited early ({rc}): {excerpt or 'no stderr captured'}")
+        return f"Diagnostic foreground launch exited cleanly (0){f': {excerpt}' if excerpt else '.'}"
+    return f"Launched native executable in foreground diagnostic mode (pid={proc.pid}); startup probe remained healthy."
+
+
+def open_native(app, info, target, *, diagnostic=False, startup_probe_seconds=DIAGNOSTIC_STARTUP_PROBE_SECONDS,
+                runner=None, preflight=None, popen=None):
     if info.system not in ("Darwin", "Linux") or target != info.native_target:
         raise ValueError("--open requires an artifact matching this physical host architecture")
     _progress("Checking whether Fleetworks is already running")
@@ -797,11 +847,16 @@ def open_native(app, info, target, *, runner=None, preflight=None):
         executable = Path(app) / "bin" / NATIVE_BINARY
         if executable.is_symlink() or not executable.is_file() or not os.access(executable, os.X_OK):
             raise ValueError("Linux bundle executable is missing or not executable")
+        if diagnostic:
+            _progress(f"Launching {executable} in foreground diagnostic mode")
+            return _diagnostic_foreground_launch(
+                executable, app, startup_probe_seconds=startup_probe_seconds, popen=popen
+            )
         _progress(f"Launching {executable}")
         if runner is not None:
             _run([str(executable)], runner=runner)
         else:
-            subprocess.Popen(
+            (popen or subprocess.Popen)(
                 [str(executable)],
                 cwd=Path(app),
                 stdin=subprocess.DEVNULL,
@@ -810,12 +865,21 @@ def open_native(app, info, target, *, runner=None, preflight=None):
                 start_new_session=True,
             )
         return "Launched Linux native executable in an isolated session; actual GUI readiness and keyring behavior remain unverified."
-    _progress(f"Opening {app} through Launch Services")
-    command = ["open"]
     review_socket = os.environ.get("FLEETWORKS_LOCAL_REVIEW_APPROVAL_SOCKET")
     if review_socket is not None:
         if not Path(review_socket).is_absolute() or len(os.fsencode(review_socket)) > 103:
             raise ValueError("Local review approval socket must be an absolute macOS UNIX socket path")
+    if diagnostic:
+        executable = Path(app) / "Contents/MacOS" / NATIVE_BINARY
+        if executable.is_symlink() or not executable.is_file() or not os.access(executable, os.X_OK):
+            raise ValueError("macOS bundle executable is missing or not executable")
+        _progress(f"Launching {executable} in foreground diagnostic mode")
+        return _diagnostic_foreground_launch(
+            executable, app, startup_probe_seconds=startup_probe_seconds, popen=popen
+        )
+    _progress(f"Opening {app} through Launch Services")
+    command = ["open"]
+    if review_socket is not None:
         command.extend(["--env", f"FLEETWORKS_LOCAL_REVIEW_APPROVAL_SOCKET={review_socket}"])
     command.append(str(app))
     _run(command, runner=runner)
@@ -832,7 +896,7 @@ def _extract_linux_archive(archive, destination, *, expected_digest, version, ta
         names = [member.name for member in members]
         if not members or len(members) > 10000 or len(set(names)) != len(names):
             raise ValueError("Native archive has missing, duplicate or excessive entries")
-        if sum(member.size for member in members) > 1024 * 1024 * 1024:
+        if sum(member.size for member in members) > MAX_NATIVE_UNPACKED_BYTES:
             raise ValueError("Native archive exceeds its uncompressed size limit")
         for member in members:
             path = PurePosixPath(member.name)
@@ -911,7 +975,7 @@ def extract_native(archive, destination, *, expected_digest, version, target, re
         raise ValueError("A packaging-job SHA-256 is required for native verification")
     if target not in NATIVE_TARGETS or not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise ValueError("An exact native target and source revision are required")
-    if archive.is_symlink() or not archive.is_file() or archive.stat().st_size > 512 * 1024 * 1024:
+    if archive.is_symlink() or not archive.is_file() or archive.stat().st_size > MAX_NATIVE_ARCHIVE_BYTES:
         raise ValueError("Native archive must be a bounded regular file")
     if sha256(archive) != expected_digest:
         raise ValueError("Native archive does not match the packaging job's SHA-256")
@@ -931,7 +995,7 @@ def extract_native(archive, destination, *, expected_digest, version, target, re
         names = [entry.filename for entry in entries]
         if not entries or len(entries) > 10000 or len(set(names)) != len(names):
             raise ValueError("Native archive has missing, duplicate or excessive entries")
-        if sum(entry.file_size for entry in entries) > 1024 * 1024 * 1024:
+        if sum(entry.file_size for entry in entries) > MAX_NATIVE_UNPACKED_BYTES:
             raise ValueError("Native archive exceeds its uncompressed size limit")
         for entry in entries:
             path = PurePosixPath(entry.filename)
@@ -1086,8 +1150,12 @@ def native_main(args):
     result = package_native(destination, binary, resources, **package_kwargs)
     print(result["app"], flush=True)
     print(json.dumps({key: value for key, value in result.items() if key != "identity"}, indent=2), flush=True)
+    diagnostic = getattr(args, "diagnostic", False)
+    if diagnostic and not args.open:
+        raise ValueError("--diagnostic requires --open")
     if args.open:
-        print(open_native(Path(result["app"]), info, target), flush=True)
+        open_kwargs = {"diagnostic": True} if diagnostic else {}
+        print(open_native(Path(result["app"]), info, target, **open_kwargs), flush=True)
     return 0
 
 
@@ -1114,6 +1182,7 @@ def main():
         command.add_argument("--workflow", default=os.environ.get("GITHUB_WORKFLOW", "local"))
         command.add_argument("--archive", action="store_true")
         command.add_argument("--open", action="store_true")
+        command.add_argument("--diagnostic", action="store_true", help="Launch foreground --diagnostic mode with early-crash capture (requires --open)")
         command.add_argument("--dry-run", action="store_true")
         command.add_argument("--require-clean", action="store_true")
         command.add_argument("--agent", action="store_true", help="Use scripts/agent_cargo.py and target/agents for a build")
@@ -1131,6 +1200,7 @@ def main():
     verify_native.add_argument("--directory", type=Path, help="Retain verified extraction in this new/empty review directory")
     verify_native.add_argument("--require-clean", action="store_true")
     verify_native.add_argument("--open", action="store_true")
+    verify_native.add_argument("--diagnostic", action="store_true", help="Launch foreground --diagnostic mode with early-crash capture (requires --open)")
     args = parser.parse_args()
     try:
         if args.command == "verify-engine-free":
@@ -1140,6 +1210,8 @@ def main():
             return native_main(args)
         if args.command == "verify-native":
             version = artifact_version(args.version, root=ROOT)
+            if args.diagnostic and not args.open:
+                raise ValueError("--diagnostic requires --open")
             if args.open and not args.directory:
                 raise ValueError("--open needs --directory so the exact verified app remains available for GUI review")
             options = dict(expected_digest=args.sha256, version=version, target=args.target,
@@ -1152,7 +1224,8 @@ def main():
                 with tempfile.TemporaryDirectory(prefix="fleetworks-native-verify-") as temporary:
                     app, manifest = extract_native(args.archive, Path(temporary), **options)
             if args.open:
-                print(open_native(app, detect(), args.target))
+                open_kwargs = {"diagnostic": True} if args.diagnostic else {}
+                print(open_native(app, detect(), args.target, **open_kwargs))
             print(json.dumps({"archive": str(args.archive.resolve()), "sha256": args.sha256,
                               "version": manifest["version"], "revision": manifest["revision"], "target": manifest["target"],
                               "bundle_checks": "pass", "gui_launch": "not_run",

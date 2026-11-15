@@ -151,18 +151,78 @@ jobs:
             --revision "$FLEETWORKS_HEAD" --output "$RUNNER_TEMP/fleetworks-native-evidence/pairing-local-review" \
             --scene pairing-waiting --local-review-fixture \
             --size 1440x860 --size 640x480 --scale 1
-      - name: Build the debug app for pull-request review
+      - name: Build, archive, extract-verify and smoke-test the debug app for pull-request review
         if: inputs.release-version == ''
         shell: bash
         run: |
           set -euo pipefail
+          dist="$RUNNER_TEMP/fleetworks-native-debug"
+          extracted="$RUNNER_TEMP/fleetworks-native-debug-extracted"
+          evidence="$RUNNER_TEMP/fleetworks-native-evidence"
+          mkdir -p "$evidence"
           python3 scripts/fleetworks_candidate.py build-native --agent \
             --target "$NATIVE_TARGET" --profile debug \
-            --output "$RUNNER_TEMP/fleetworks-native-debug" \
-            --revision "$FLEETWORKS_HEAD" --require-clean
+            --output "$dist" \
+            --revision "$FLEETWORKS_HEAD" \
+            --workflow "${{ github.workflow }}" --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}" \
+            --archive --require-clean | tee "$evidence/build-$NATIVE_TARGET.out"
+          DIST_DIR="$dist" EXTRACT_DIR="$extracted" SIZES_OUT="$evidence/package-sizes-$NATIVE_TARGET.json" python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, "scripts")
+          from fleetworks_candidate import locked_rune_revision, sha256
+
+          dist = Path(os.environ["DIST_DIR"])
+          archives = list(dist.glob("Fleetworks-*.zip"))
+          if len(archives) != 1:
+              raise SystemExit(f"Expected 1 debug macOS archive, found {len(archives)}")
+          archive = archives[0]
+          manifest = json.loads((dist / "Fleetworks.app.manifest.json").read_text(encoding="utf-8"))
+          bundle = dist / "Fleetworks.app"
+          exe = bundle / "Contents/MacOS/fleetworks-desktop"
+          companion = bundle / "Contents/MacOS/argos-api-host"
+          unpacked_bytes = sum(path.stat().st_size for path in bundle.rglob("*") if path.is_file())
+          sizes = {
+              "target": os.environ["NATIVE_TARGET"],
+              "profile": "debug",
+              "archive_name": archive.name,
+              "archive_bytes": archive.stat().st_size,
+              "archive_mib": round(archive.stat().st_size / (1024 * 1024), 2),
+              "unpacked_bytes": unpacked_bytes,
+              "unpacked_mib": round(unpacked_bytes / (1024 * 1024), 2),
+              "executable_bytes": exe.stat().st_size,
+              "companion_bytes": companion.stat().st_size if companion.is_file() else None,
+          }
+          Path(os.environ["SIZES_OUT"]).write_text(json.dumps(sizes, indent=2) + "\n", encoding="utf-8")
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as handle:
+                  print(
+                      f"- `{sizes['target']}` (`debug`): archive `{sizes['archive_name']}` = "
+                      f"`{sizes['archive_mib']} MiB` ({sizes['archive_bytes']} B), unpacked = "
+                      f"`{sizes['unpacked_mib']} MiB` ({sizes['unpacked_bytes']} B), "
+                      f"desktop = `{sizes['executable_bytes']} B`, companion = `{sizes['companion_bytes']} B`",
+                      file=handle,
+                  )
+          subprocess.run([
+              sys.executable, "scripts/fleetworks_candidate.py", "verify-native",
+              "--archive", str(archive),
+              "--sha256", sha256(archive),
+              "--revision", os.environ["FLEETWORKS_HEAD"],
+              "--target", os.environ["NATIVE_TARGET"],
+              "--profile", "debug",
+              "--rune-revision", locked_rune_revision(),
+              "--version", manifest["version"],
+              "--directory", os.environ["EXTRACT_DIR"],
+              "--require-clean",
+          ], check=True)
+          PY
           python3 scripts/fleetworks_local_backend_smoke.py \
-            --app "$RUNNER_TEMP/fleetworks-native-debug/Fleetworks.app" \
-            --output "$RUNNER_TEMP/fleetworks-native-evidence/local-backend-smoke-$NATIVE_TARGET.json"
+            --app "$extracted/Fleetworks.app" \
+            --output "$evidence/local-backend-smoke-$NATIVE_TARGET.json"
       - name: Package the trusted versioned release app
         if: inputs.release-version != ''
         id: package

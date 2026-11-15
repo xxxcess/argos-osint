@@ -120,8 +120,11 @@ local behavior pass.
 The [offline Python fixtures](../../../scripts/test_fleetworks_native_verify.py)
 cover selection/artifact-path fences, implicit debug cache reuse, bounded profiles,
 runtime inventory, missing/corrupt PNG/tree, dimensions, failed renderer exits,
-script final keys, stale output protection and physical target mismatches. Actual
-helper tests/rendering must be executed by the integration owner and recorded in
+script final keys, stale output protection and physical target mismatches. For
+packaged app launch debugging, `fleetworks_candidate.py` `build-native` / `package-native` /
+`verify-native --open --diagnostic` runs the executable directly with `--diagnostic`,
+initializing stderr tracing, non-secret startup preflight, and early non-zero crash
+capture before handoff. Actual helper tests/rendering must be executed by the integration owner and recorded in
 the active acceptance tracker (for the cutover baseline, see
 [cutover acceptance](../../../.planning/2026-11-11-rune-macos-cutover/acceptance.md)).
 

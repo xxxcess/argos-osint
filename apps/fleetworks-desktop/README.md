@@ -12,7 +12,7 @@ Normal setup uses [pairing and macOS Keychain](../../docs/wiki/code/native-conne
 
 Use the complete-app helper; agent builds add `--agent` and reuse the shared debug graph. Opening the app is an explicit action.
 
-Build flow: live Cargo progress/diagnostics and stage markers on stderr → package/validate → artifact paths and result metadata. `--open` opens only after validation and preserves an already running app. [Build loop](../../docs/diagrams/dev-loop-native.html)
+Build flow: live Cargo progress/diagnostics and stage markers on stderr → package/validate → artifact paths and result metadata. `--open` opens only after validation and preserves an already running app; add `--diagnostic` (`fleetworks-desktop --diagnostic`) for foreground stderr startup diagnostics and early-crash capture instead of silent GUI exit. [Build loop](../../docs/diagrams/dev-loop-native.html)
 
 ```sh
 python3 scripts/fleetworks_candidate.py build-native --agent --target host --profile debug

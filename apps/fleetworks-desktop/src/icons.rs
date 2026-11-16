@@ -134,3 +134,17 @@ pub static PLUS: Icon = Icon {
     view: 16.0,
     body: r#"<path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>"#,
 };
+
+/// Inbox bell.
+pub static BELL: Icon = Icon {
+    name: "fw-bell",
+    view: 16.0,
+    body: r#"<path d="M4 11V7.2a4 4 0 0 1 8 0V11l1.2 1.6H2.8L4 11Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" fill="none"/><path d="M6.6 14h2.8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>"#,
+};
+
+/// Assistant dock: a window with a docked right pane.
+pub static ASSISTANT: Icon = Icon {
+    name: "fw-assistant",
+    view: 16.0,
+    body: r#"<rect x="2" y="2.5" width="12" height="11" rx="1.8" stroke="currentColor" stroke-width="1.4" fill="none"/><path d="M10 2.5v11" stroke="currentColor" stroke-width="1.4"/><path d="M12 6.2v1.6M11.2 7h1.6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+};

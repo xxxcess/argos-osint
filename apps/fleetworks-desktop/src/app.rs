@@ -275,6 +275,10 @@ pub struct State {
     pub accessibility: Accessibility,
     /// Cold-launch splash and connection choice. Finished by default so fixtures skip it.
     pub startup: crate::startup::Startup,
+    /// Contextual Assistant dock. It sends nothing until a typed chat capability exists.
+    pub assistant: crate::assistant::Assistant,
+    /// Observed job, readiness and connection transitions for this authority.
+    pub inbox: crate::inbox::Inbox,
     pub page: Page,
     pub setup_gateway: bool,
     pub backend_kind: BackendKind,
@@ -352,6 +356,8 @@ impl Default for State {
         Self {
             accessibility: Accessibility::default(),
             startup: crate::startup::Startup::default(),
+            assistant: crate::assistant::Assistant::default(),
+            inbox: crate::inbox::Inbox::default(),
             page: Page::Workstation,
             setup_gateway: false,
             backend_kind: BackendKind::Remote,
@@ -1181,6 +1187,8 @@ fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
         }
         return true;
     }
+    changed |= state.observe_inbox();
+    changed |= state.sync_assistant();
     changed |= state.poll_scoped_logs();
     changed |= state.sync_jobs_binding();
     if matches!(state.page, Page::Seed | Page::Workstation)
@@ -1446,23 +1454,44 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     } else {
         title_page.title()
     };
+    let setup_button = crate::material::compact_toolbar(
+        ActionButton::new("Setup Gateway")
+            .key("connection-editor")
+            .icon(&icons::KEY)
+            .finish(if state.setup_gateway {
+                MetalFinish::GoldCta
+            } else {
+                MetalFinish::Gunmetal
+            })
+            .on_press(|state: &mut State| {
+                state.setup_gateway = true;
+            })
+            .build(&kit, preferences, pointer_ref),
+        preferences,
+    );
+    // The chat aux panel stays off until the typed chat contract lands. The original context
+    // rail keeps its place meanwhile.
+    let assistant_room = if state.assistant.enabled && state.connected() && !state.setup_gateway {
+        cx.layout_with("main-area", |rect| rect[2])
+    } else {
+        None
+    };
+    let assistant_placement = assistant_room.map_or(crate::assistant::Placement::Hidden, |room| {
+        state.assistant.preference.placement(room)
+    });
+    let mut trailing = rune::row()
+        .gap(8.0)
+        .center_y()
+        .child(crate::inbox::toolbar_item(state, &kit, &mut layers));
+    if state.assistant.enabled && state.connected() && !state.setup_gateway {
+        trailing = trailing.child(crate::assistant::toggle(
+            assistant_placement != crate::assistant::Placement::Hidden,
+            &kit,
+        ));
+    }
     let toolbar = Toolbar::new()
         .title(toolbar_title)
-        .trailing(crate::material::compact_toolbar(
-            ActionButton::new("Setup Gateway")
-                .key("connection-editor")
-                .icon(&icons::KEY)
-                .finish(if state.setup_gateway {
-                    MetalFinish::GoldCta
-                } else {
-                    MetalFinish::Gunmetal
-                })
-                .on_press(|state: &mut State| {
-                    state.setup_gateway = true;
-                })
-                .build(&kit, preferences, pointer_ref),
-            preferences,
-        ));
+        .trailing(trailing.child(setup_button));
 
     let any_busy = state.connection.status == ConnectionStatus::Connecting
         || state.pairing.busy()
@@ -1567,13 +1596,40 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
         main = main.child(compact_icon_rail(state, &kit, connection_tone, preferences));
     }
     main = main.child(content);
-    if state.connected()
+    if !state.assistant.enabled
+        && state.connected()
         && !state.setup_gateway
         && cx
             .layout_with("main-area", |rect| rect[2] >= 1120.0)
             .unwrap_or(false)
     {
         main = main.child(context_rail(state, &kit, connection_tone));
+    }
+    match assistant_placement {
+        crate::assistant::Placement::Docked => {
+            main = main.child(crate::assistant::dock(state, &kit));
+        }
+        crate::assistant::Placement::Overlay => {
+            // Too narrow to share the window: float the dock over the right edge.
+            layers.push(
+                rune::row()
+                    .key("assistant-overlay")
+                    .absolute(0.0, 0.0)
+                    .w_full()
+                    .h_full()
+                    .child(
+                        rune::el()
+                            .key("assistant-scrim")
+                            .grow(1.0)
+                            .h_full()
+                            .on_press(|state: &mut State| {
+                                state.assistant.preference = crate::assistant::Preference::Closed;
+                            }),
+                    )
+                    .child(crate::assistant::dock(state, &kit)),
+            );
+        }
+        crate::assistant::Placement::Hidden => {}
     }
 
     if state.settings_open {

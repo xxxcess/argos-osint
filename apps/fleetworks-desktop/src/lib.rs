@@ -6,6 +6,7 @@
 
 pub mod accessibility;
 pub mod app;
+pub mod assistant;
 pub mod backend;
 mod backend_views;
 pub mod brain;
@@ -15,6 +16,7 @@ mod configuration_views;
 pub mod connection;
 pub mod connection_profiles;
 pub mod icons;
+pub mod inbox;
 pub mod job_actions;
 mod jobs_effects;
 pub mod jobs_query;

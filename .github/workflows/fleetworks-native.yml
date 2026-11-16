@@ -224,6 +224,8 @@ jobs:
             --app "$extracted/Fleetworks.app" \
             --output "$evidence/local-backend-smoke-$NATIVE_TARGET.json"
           ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1 \
+            FLEETWORKS_PARITY_REQUIRE_COMPANION=1 \
+            FLEETWORKS_PARITY_COMPANION_PATH="$extracted/Fleetworks.app/Contents/MacOS/argos-api-host" \
             FLEETWORKS_PARITY_REPORT_PATH="$evidence/http-ipc-parity-$NATIVE_TARGET.json" \
             python3 scripts/agent_cargo.py test --locked --target "$NATIVE_TARGET" \
             -p argos-api-host --features embedded --test http_ipc_parity -- --nocapture --test-threads=1

@@ -289,7 +289,13 @@ fn spawn_local_ipc_command(state_dir: &Path) -> Command {
             );
             Command::new(path)
         }
-        Err(_) => Command::new(env!("CARGO_BIN_EXE_argos-api-host")),
+        Err(_) => {
+            assert!(
+                std::env::var_os("FLEETWORKS_PARITY_REQUIRE_COMPANION").is_none(),
+                "FLEETWORKS_PARITY_REQUIRE_COMPANION is set but FLEETWORKS_PARITY_COMPANION_PATH is not"
+            );
+            Command::new(env!("CARGO_BIN_EXE_argos-api-host"))
+        }
     };
     command
         .arg("--role")

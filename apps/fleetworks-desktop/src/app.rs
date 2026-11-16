@@ -1665,7 +1665,7 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
             .build(&kit, &mut layers);
     }
 
-    crate::command_panel::view(state, &kit, &mut layers);
+    crate::command_panel::view(state, &kit, preferences, &mut layers);
 
     let mut split = SplitView::new(main)
         .toolbar(toolbar)

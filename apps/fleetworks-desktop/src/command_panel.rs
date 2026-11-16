@@ -188,8 +188,15 @@ pub(crate) fn toolbar_button(kit: &Kit) -> El {
         .key("command-open")
 }
 
-/// The panel dialog, pushed to `layers` while it is open.
-pub(crate) fn view(state: &State, kit: &Kit, layers: &mut Vec<El>) {
+/// The command overlay, pushed to `layers` while it is open. It keeps the modal contract of a
+/// dialog (focus trap, inert background, Escape and outside press close it) but draws its own
+/// panel so it can sit on glass.
+pub(crate) fn view(
+    state: &State,
+    kit: &Kit,
+    preferences: crate::accessibility::ViewPreferences,
+    layers: &mut Vec<El>,
+) {
     if !state.commands.open {
         return;
     }
@@ -246,20 +253,72 @@ pub(crate) fn view(state: &State, kit: &Kit, layers: &mut Vec<El>) {
                 .padding(8.0),
         );
     }
-    rune_kit::Dialog::new("command-panel", "Commands")
-        .open(true)
-        .width(460.0)
-        .fit()
-        .click_outside(true)
-        .on_close(|state: &mut State| state.commands.close())
+    let close = rune_kit::IconButton::new(kit.glyph.close)
+        .variant(rune_kit::IconButtonVariant::Ghost)
+        .label("Close")
+        .on_press(|state: &mut State| state.commands.close())
+        .build(kit)
+        .key("close")
+        .size(20.0, 20.0)
+        .mt(-2.0)
+        .mr(-2.0);
+    let header = rune::row()
+        .key("header")
+        .w_full()
+        .padding(16.0)
+        .items_start()
         .child(
-            rune::col()
-                .w_full()
-                .gap(10.0)
-                .child(search)
-                .child(rune_kit::popover::fit_scroll(list)),
+            rune::col().grow(1.0).child(
+                rune::text("Commands")
+                    .font(kit.ty.ui_medium.lh(16.0))
+                    .color(kit.c.text_base),
+            ),
         )
-        .build(kit, layers);
+        .child(close);
+    let body = rune::col()
+        .key("body")
+        .w_full()
+        .px(16.0)
+        .pb(16.0)
+        .gap(10.0)
+        .child(search)
+        .child(rune_kit::popover::fit_scroll(list));
+    let mut panel = rune::col()
+        .key("command-panel-dialog")
+        .role("dialog")
+        .label("Commands")
+        .w_full()
+        .max_w(460.0)
+        .radius(10.0)
+        .child(header)
+        .child(body)
+        .token_motion(kit.motion.overlay);
+    for shadow in kit.shadow_layers(&kit.elevation.overlay) {
+        panel = panel.box_shadow(shadow);
+    }
+    let panel = crate::material::glass(panel, crate::material::GlassSurface::Overlay, preferences)
+        .modal(true, |state: &mut State| state.commands.close())
+        .modal_click_outside(true);
+    layers.push(
+        rune::el()
+            .key("command-panel-scrim")
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h_full()
+            .fill(kit.c.scrim)
+            .token_motion(kit.motion.overlay)
+            .a11y_hidden(),
+    );
+    layers.push(
+        rune::el()
+            .key("command-panel-layer")
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h_full()
+            .padding(16.0)
+            .center()
+            .child(panel),
+    );
 }
 
 #[cfg(test)]
@@ -366,6 +425,9 @@ mod tests {
         runtime.frame(1.0 / 60.0);
         runtime.frame(2.0 / 60.0);
         assert!(runtime.find("command-search").is_some());
+        assert!(runtime.find("command-panel-dialog").is_some());
+        assert!(runtime.find("command-panel-scrim").is_some());
+        assert!(runtime.find("close").is_some());
         assert!(runtime.find("command-0").is_some());
 
         let (x, y) = runtime.find("command-search").expect("search field");

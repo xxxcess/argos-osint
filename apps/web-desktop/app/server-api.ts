@@ -14,6 +14,7 @@ const routes = new Map([
   ["health/ready", "GET"],
   ["capabilities", "GET"],
   ["host/metrics", "GET"],
+  ["workstation/readiness", "GET"],
   ["days", "GET"],
   ["actors/detail", "GET"],
   ["articles", "GET"],

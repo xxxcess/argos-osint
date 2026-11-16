@@ -296,11 +296,11 @@ test("live stages replace retained output until completed and show failures", as
   ).toHaveCount(0);
   await expect(page.getByText("Stored claim", { exact: true })).toBeVisible();
   const server = page.getByRole("button", {
-    name: "macOS 26.0, x86 · 16 cores",
+    name: "Backend",
     exact: true,
   });
   await expect(server).toBeVisible();
-  await expect(page.getByText("x86 · 16 cores", { exact: true })).toBeVisible();
+  await expect(page.getByText("x86 · 16 cores")).toHaveCount(0);
   const sizes = await page.evaluate(() =>
     [
       document.querySelector("#intel-status-api"),

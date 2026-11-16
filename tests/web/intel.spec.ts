@@ -1419,7 +1419,7 @@ test("desktop launcher returns to the retained intelligence bulletin", async ({
   await fixtures(page);
   await gotoBulletin(page);
   await expect(page.getByText(a.title)).toBeVisible();
-  await page.getByRole("button", { name: "server", exact: true }).click();
+  await page.getByRole("button", { name: "Backend", exact: true }).click();
   await page.getByRole("button", { name: "Open Intel", exact: true }).click();
   await expect(page.getByText(a.title)).toBeVisible();
   await page.getByRole("textbox", { name: "Search articles" }).fill("missing");
@@ -1675,7 +1675,7 @@ for (const width of [1536, 1440, 768, 390, 320]) {
     await expect(page.getByText(a.title)).toBeVisible();
     await expectFixedStatusBar(page);
     await page.getByRole("textbox", { name: "Search articles" }).fill("harbor");
-    await page.getByRole("button", { name: "server", exact: true }).click();
+    await page.getByRole("button", { name: "Backend", exact: true }).click();
     const returning = page.getByRole("button", {
       name: "Open Intel",
       exact: true,
@@ -2171,7 +2171,7 @@ test("Home, Bulletin, Brief and inference Topology routes survive reload and his
     .getByRole("button", { name: "Return to Bulletin", exact: true })
     .click();
   await expect(page).toHaveURL(/\/bulletin$/);
-  await page.getByRole("button", { name: "server", exact: true }).click();
+  await page.getByRole("button", { name: "Backend", exact: true }).click();
   await expect(page).toHaveURL(/\/home$/);
   expect(state.requests).toContain("articles/detail");
 });

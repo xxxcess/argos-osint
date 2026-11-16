@@ -46,6 +46,7 @@ export function IntelStatusBar({
   connected,
   activeApp,
   metrics,
+  backendName,
   clock,
   onHome,
   onIntel,
@@ -57,6 +58,8 @@ export function IntelStatusBar({
   connected: boolean;
   activeApp: boolean;
   metrics?: IntelMetrics;
+  /** Operator-chosen backend label; never derived from host OS, chipset or address. */
+  backendName?: string | null;
   clock?: string;
   onHome?: () => void;
   onIntel?: () => void;
@@ -74,12 +77,7 @@ export function IntelStatusBar({
   const navSize = width >= 600 ? 18 : 13;
   const networkValue = metric(metrics?.networkKBps, "");
   const networkAvailable = networkValue !== "—";
-  const platform = metrics?.platform?.trim();
-  const platformShort = platform?.split(/\s+/)[0] || "server";
-  const chipset = metrics?.chipset?.trim() || "";
-  const serverLabel = chipset
-    ? `${platform || "server"}, ${chipset}`
-    : platform || "server";
+  const serverLabel = backendName?.trim() || "Backend";
   return (
     <View nativeID="intel-status-bar" style={s.bar}>
       <View style={[s.cluster, s.navCluster]}>
@@ -103,11 +101,8 @@ export function IntelStatusBar({
             </View>
           </View>
           <Text numberOfLines={1} style={[s.serverName, { fontSize: navSize }]}>
-            {platformShort}
+            {serverLabel}
           </Text>
-          {chipset ? (
-            <Text style={[s.chipBadge, { fontSize: navSize }]}>{chipset}</Text>
-          ) : null}
         </Pressable>
         <View style={s.divider} />
         {activeApp ? (
@@ -131,7 +126,12 @@ export function IntelStatusBar({
           </Pressable>
         ) : null}
       </View>
-      <View nativeID="intel-status-details" style={s.cluster}>
+      <View
+        nativeID="intel-status-details"
+        role="group"
+        aria-label="Backend host"
+        style={s.cluster}
+      >
         {wide ? (
           <>
             <Text nativeID="intel-status-metric-cpu" style={s.telemetry}>
@@ -369,20 +369,6 @@ const s = StyleSheet.create({
     color: c.dim,
     flexShrink: 1,
     maxWidth: 120,
-  },
-  chipBadge: {
-    fontFamily: intelFonts.mono,
-    fontSize: 13,
-    fontWeight: "700",
-    color: c.accent,
-    backgroundColor: c.inset,
-    borderWidth: 1,
-    borderColor: c.borderStrong,
-    borderRadius: 999,
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    overflow: "hidden",
-    flexShrink: 0,
   },
   server: { gap: 4, width: 28 },
   serverUnit: {

@@ -119,6 +119,29 @@ describe("Intel status bar", () => {
     expect(screen.queryByText("KB/s")).not.toBeInTheDocument();
   });
 
+  it("names the Home control from the backend name, never from host details", () => {
+    const { rerender } = render(
+      <IntelStatusBar
+        connected
+        activeApp
+        backendName="  Studio rack  "
+        metrics={{ platform: "macOS 26.0", chipset: "x86 · 16 cores" }}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Studio rack" })).toBeVisible();
+    expect(screen.queryByText(/macOS|x86/)).not.toBeInTheDocument();
+    rerender(
+      <IntelStatusBar
+        connected
+        activeApp
+        backendName="   "
+        metrics={{ platform: "macOS 26.0" }}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Backend" })).toBeVisible();
+    expect(screen.getByRole("group", { name: "Backend host" })).toBeVisible();
+  });
+
   it.each([768, 390, 320])(
     "keeps navigation and connection status at %ipx without metric clutter",
     async (width) => {
@@ -140,7 +163,7 @@ describe("Intel status bar", () => {
       const tab = screen.getByRole("button", { name: "Bulletin" });
       expect(tab).toHaveTextContent(width < 600 ? "Intel" : "intelligence");
       expect(tab).toHaveAttribute("aria-pressed", "true");
-      await user.click(screen.getByRole("button", { name: "server" }));
+      await user.click(screen.getByRole("button", { name: "Backend" }));
       await user.click(screen.getByRole("button", { name: "Bulletin" }));
       expect(home).toHaveBeenCalledOnce();
       expect(intel).toHaveBeenCalledOnce();

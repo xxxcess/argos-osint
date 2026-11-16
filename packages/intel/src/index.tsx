@@ -13,6 +13,7 @@ import {
   ApiError,
   useBackend,
   useHostMetrics,
+  usePlatformIdentity,
   useBriefLive,
   useRead,
   useAction,
@@ -117,6 +118,7 @@ function WorkspaceStatusBar(
   props: Omit<React.ComponentProps<typeof IntelStatusBar>, "clock">,
 ) {
   const metrics = useHostMetrics();
+  const identity = usePlatformIdentity();
   const host = metrics.isError ? undefined : metrics.data;
   const [clock, setClock] = useState("");
   useEffect(() => {
@@ -128,6 +130,7 @@ function WorkspaceStatusBar(
     <IntelStatusBar
       {...props}
       clock={clock}
+      backendName={props.connected ? identity.data : undefined}
       metrics={
         props.connected && host
           ? {
@@ -135,8 +138,6 @@ function WorkspaceStatusBar(
               memoryPercent: host.memory_percent,
               diskPercent: host.disk_percent,
               networkKBps: host.network_kbps,
-              platform: host.platform,
-              chipset: host.chipset,
             }
           : undefined
       }

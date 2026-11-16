@@ -559,6 +559,36 @@ export function useHostMetrics() {
   return query;
 }
 
+/**
+ * The operator-chosen backend name from authorized readiness. Keyed apart from
+ * host metrics and by backend instance, so a backend change never shows the
+ * previous name. Absent or invalid input resolves to null, never a guess.
+ */
+export function usePlatformIdentity() {
+  const b = useBackend();
+  return useQuery({
+    queryKey: [b.base, b.instance, "platform-identity"],
+    queryFn: async ({ signal }) => {
+      const readiness = await request<{
+        platform_identity?: { display_name?: unknown } | null;
+      }>(
+        b.base,
+        "workstation/readiness",
+        undefined,
+        signal,
+        REQUEST_TIMEOUT_MS,
+        b.scope,
+      );
+      const name = readiness.platform_identity?.display_name;
+      return typeof name === "string" && name.trim() ? name.trim() : null;
+    },
+    enabled: b.connected,
+    staleTime: 5 * 60_000,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+}
+
 /** REST remains the brief snapshot. Push updates invalidate only this occurrence. */
 export function useBriefLive(article: Article, watch: string) {
   const { run_id: run, id } = article;

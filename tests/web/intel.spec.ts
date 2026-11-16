@@ -514,7 +514,7 @@ test("browse, search, brief, related, topology and reconnect", async ({
       page.getByRole("button", { name: cat, exact: true }),
     ).toBeVisible();
   const headerSearch = page.getByRole("textbox", {
-    name: "Search article titles and descriptions",
+    name: "Search articles and actors",
   });
   await headerSearch.fill("missing");
   await headerSearch.press("Enter");
@@ -681,7 +681,7 @@ test("selection controls support keyboard activation and visible focus", async (
     page.getByRole("button", { name: /^Open Focus Brief:/ }),
   ).toBeVisible();
   const search = page.getByRole("textbox", {
-    name: "Search article titles and descriptions",
+    name: "Search articles and actors",
   });
   await search.focus();
   await search.press("Tab");
@@ -1436,7 +1436,7 @@ test("desktop launcher returns to the retained intelligence bulletin", async ({
   await page.getByRole("button", { name: "Open Intel", exact: true }).click();
   await expect(page.getByText(a.title)).toBeVisible();
   const search = page.getByRole("textbox", {
-    name: "Search article titles and descriptions",
+    name: "Search articles and actors",
   });
   await search.fill("missing");
   await search.press("Enter");
@@ -1690,7 +1690,7 @@ for (const width of [1536, 1440, 768, 390, 320]) {
     await expect(page.getByText(a.title)).toBeVisible();
     await expectFixedStatusBar(page);
     await page
-      .getByRole("textbox", { name: "Search article titles and descriptions" })
+      .getByRole("textbox", { name: "Search articles and actors" })
       .fill("harbor");
     await page.getByRole("button", { name: "Backend", exact: true }).click();
     const returning = page.getByRole("button", {
@@ -1701,7 +1701,7 @@ for (const width of [1536, 1440, 768, 390, 320]) {
     await returning.press("Space");
     await expect(
       page.getByRole("textbox", {
-        name: "Search article titles and descriptions",
+        name: "Search articles and actors",
       }),
     ).toHaveValue("harbor");
     await expectFixedStatusBar(page);

@@ -172,7 +172,7 @@ describe("Web Desktop App (real IntelApp)", () => {
     await user.click(screen.getByRole("button", { name: "Open Intel" }));
     await user.type(
       screen.getByRole("textbox", {
-        name: "Search article titles and descriptions",
+        name: "Search articles and actors",
       }),
       "shipping",
     );
@@ -192,7 +192,7 @@ describe("Web Desktop App (real IntelApp)", () => {
     ).toBeVisible();
     expect(
       screen.getByRole("textbox", {
-        name: "Search article titles and descriptions",
+        name: "Search articles and actors",
       }),
     ).toHaveValue("shipping");
     expect(

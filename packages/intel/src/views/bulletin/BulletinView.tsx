@@ -80,8 +80,8 @@ export function BulletinView(p: Props) {
         <View style={[s.search, { flex: 1 }, wide && { maxWidth: 512 }]}>
           <View style={s.searchField}>
             <TextInput
-              accessibilityLabel="Search article titles and descriptions"
-              placeholder="Search article titles and descriptions…"
+              accessibilityLabel="Search articles and actors"
+              placeholder="Search articles and actors…"
               placeholderTextColor={c.dim}
               value={p.search}
               onChangeText={p.onSearch}

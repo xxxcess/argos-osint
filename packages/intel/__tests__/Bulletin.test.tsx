@@ -186,7 +186,7 @@ describe("Nexus Desk Bulletin", () => {
     );
     await waitFor(() => expect(requests.at(-1)?.category).toBe("economic"));
     const search = screen.getByRole("textbox", {
-      name: "Search article titles and descriptions",
+      name: "Search articles and actors",
     });
     await user.type(search, "missing");
     expect(searches).toEqual([]);
@@ -237,7 +237,7 @@ describe("Nexus Desk Bulletin", () => {
     render(<App />);
     await user.click(await screen.findByRole("button", { name: "Open Intel" }));
     const search = await screen.findByRole("textbox", {
-      name: "Search article titles and descriptions",
+      name: "Search articles and actors",
     });
     await user.type(search, "harbor{Enter}");
     await screen.findByText("Matched title");
@@ -284,7 +284,7 @@ describe("Nexus Desk Bulletin", () => {
     render(<App />);
     await user.click(await screen.findByRole("button", { name: "Open Intel" }));
     const search = await screen.findByRole("textbox", {
-      name: "Search article titles and descriptions",
+      name: "Search articles and actors",
     });
     await user.type(search, "orion");
     expect(actorSearches).toEqual([]);
@@ -324,7 +324,7 @@ describe("Nexus Desk Bulletin", () => {
     ).toHaveLength(2);
     expect(
       screen.getByRole("textbox", {
-        name: "Search article titles and descriptions",
+        name: "Search articles and actors",
       }),
     ).toHaveValue("orion");
   });
@@ -360,7 +360,7 @@ describe("Nexus Desk Bulletin", () => {
       );
       await user.type(
         await screen.findByRole("textbox", {
-          name: "Search article titles and descriptions",
+          name: "Search articles and actors",
         }),
         "harbor{Enter}",
       );
@@ -389,7 +389,7 @@ describe("Nexus Desk Bulletin", () => {
     render(<App />);
     await user.click(await screen.findByRole("button", { name: "Open Intel" }));
     const search = await screen.findByRole("textbox", {
-      name: "Search article titles and descriptions",
+      name: "Search articles and actors",
     });
     await user.type(search, "harbor{Enter}");
     await screen.findByRole("heading", { name: "NO MATCHING ARTICLES" });

@@ -15,6 +15,7 @@ import {
   type Article,
   type useArticles,
   type ArticleSearchFilters,
+  type useActorSearch,
   type useArticleSearch,
 } from "@argos/api-client";
 import { SearchResults } from "./SearchResults";
@@ -39,6 +40,9 @@ type Props = {
   onSubmitSearch: () => void;
   onClearSearch: () => void;
   searchResults: ReturnType<typeof useArticleSearch>;
+  actorResults: ReturnType<typeof useActorSearch>;
+  /** Opens the dossier for a canonical `actor_id` from a discovery hit. */
+  onActor: (actorId: string) => void;
   searchFilters: ArticleSearchFilters;
   onSearchFilters: (filters: ArticleSearchFilters) => void;
   days: string[];
@@ -114,6 +118,8 @@ export function BulletinView(p: Props) {
             <SearchResults
               query={p.submittedSearch}
               search={p.searchResults}
+              actors={p.actorResults}
+              onActor={p.onActor}
               onArticle={p.onArticle}
               onClear={p.onClearSearch}
               filters={p.searchFilters}

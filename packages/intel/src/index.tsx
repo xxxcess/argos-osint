@@ -14,6 +14,7 @@ import {
   useBackend,
   useHostMetrics,
   usePlatformIdentity,
+  useActorSearch,
   useArticleSearch,
   articleSearchProblem,
   type ArticleSearchFilters,
@@ -58,6 +59,7 @@ import { ScreenTransition } from "./shell/ScreenTransition";
 import { BriefView, RelatedBriefCard } from "./views/BriefView";
 const categories = [...INTEL_CATEGORIES];
 import {
+  actorRouteFor,
   createMemoryNavigation,
   type IntelNavigation,
   type ArticleLocation,
@@ -160,6 +162,7 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
   const [submittedSearch, setSubmittedSearch] = useState("");
   const [searchFilters, setSearchFilters] = useState<ArticleSearchFilters>({});
   const searchResults = useArticleSearch(submittedSearch, searchFilters);
+  const actorResults = useActorSearch(submittedSearch);
   const [retainedArticle, setArticle] = useState<Article | null>(null);
   const location: Partial<ArticleLocation> | undefined =
     route.screen === "brief"
@@ -496,6 +499,8 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
               onSearch={setSearch}
               submittedSearch={submittedSearch}
               searchResults={searchResults}
+              actorResults={actorResults}
+              onActor={(actorId) => navigate(actorRouteFor(actorId))}
               searchFilters={searchFilters}
               onSearchFilters={setSearchFilters}
               onSubmitSearch={() => {

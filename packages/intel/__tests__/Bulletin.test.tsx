@@ -23,6 +23,37 @@ const row: Article = {
   author: "Fixture author",
 };
 const searches: string[] = [];
+const actorSearches: URLSearchParams[] = [];
+const articleHit = {
+  run_id: "run-one",
+  article_id: "article-retained-id",
+  title: "Harbor access report",
+  description: "Retained source description.",
+  excerpt: "Harbor access…",
+  matched_field: "title",
+  categories: ["governance"],
+  taxonomy_version: "v1",
+  admission_state: "admitted",
+  publication_version: "v1",
+  source_name: "Fixture Wire",
+  source_domain: "example.test",
+  published_at: "2026-10-29T08:00:00Z",
+  url: "https://example.test/report",
+};
+const actorHit = (actor_id: string, label: string, extra = {}) => ({
+  actor_id,
+  label,
+  projection_revision: 1,
+  index_generation: "g1",
+  score: 1,
+  ...extra,
+});
+const actorPage = (rows: unknown[], state = "ready") => ({
+  rows,
+  index: { state },
+  truncated: false,
+  continuation: null,
+});
 const requests: {
   category: string | null;
   search: string | null;
@@ -46,6 +77,7 @@ function App() {
 beforeEach(() => {
   requests.length = 0;
   searches.length = 0;
+  actorSearches.length = 0;
   mswServer.use(
     http.get(`${testBase}/api/v1/health/ready`, () =>
       HttpResponse.json({
@@ -62,6 +94,10 @@ beforeEach(() => {
     http.get(`${testBase}/api/v1/articles/search`, ({ request }) => {
       searches.push(new URL(request.url).searchParams.get("query") || "");
       return HttpResponse.json({ hits: [], next_cursor: null, revision: "s" });
+    }),
+    http.get(`${testBase}/api/v1/actors/search`, ({ request }) => {
+      actorSearches.push(new URL(request.url).searchParams);
+      return HttpResponse.json(actorPage([]));
     }),
     http.get(`${testBase}/api/v1/articles`, ({ request }) => {
       const params = new URL(request.url).searchParams;
@@ -211,6 +247,130 @@ describe("Nexus Desk Bulletin", () => {
       ),
     ).toBeVisible();
   });
+
+  it("lists actors apart from articles and opens each by its canonical id, then Back restores the search", async () => {
+    const details: (string | null)[] = [];
+    mswServer.use(
+      http.get(`${testBase}/api/v1/articles/search`, () =>
+        HttpResponse.json({
+          hits: [articleHit],
+          next_cursor: null,
+          revision: "s",
+        }),
+      ),
+      http.get(`${testBase}/api/v1/actors/search`, ({ request }) => {
+        actorSearches.push(new URL(request.url).searchParams);
+        return HttpResponse.json(
+          actorPage([
+            actorHit("actor:one", "Orion Group", {
+              actor_type: "organization",
+              countries: ["NO"],
+            }),
+            actorHit("actor:two", "orion group", {
+              matched_alias: "Orion",
+              countries: ["SE"],
+            }),
+            actorHit("actor:one", "Orion Group (repeat)"),
+            actorHit("", "No identity"),
+          ]),
+        );
+      }),
+      http.get(`${testBase}/api/v1/actors/detail`, ({ request }) => {
+        details.push(new URL(request.url).searchParams.get("id"));
+        return HttpResponse.json({ error: "missing" }, { status: 404 });
+      }),
+    );
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "Open Intel" }));
+    const search = await screen.findByRole("textbox", {
+      name: "Search article titles and descriptions",
+    });
+    await user.type(search, "orion");
+    expect(actorSearches).toEqual([]);
+    await user.keyboard("{Enter}");
+    await screen.findByRole("heading", { name: "Actors" });
+    await waitFor(() => expect(actorSearches).toHaveLength(1));
+    expect(Object.fromEntries(actorSearches[0])).toEqual({
+      mode: "discovery",
+      query: "orion",
+      limit: "10",
+    });
+    expect(screen.getByRole("heading", { name: "Articles" })).toBeVisible();
+    await screen.findByText("Matched title");
+    // Same-name actors stay separate and show the id that tells them apart.
+    const links = await screen.findAllByRole("link", {
+      name: /^Open actor dossier/,
+    });
+    expect(links.map((link) => link.getAttribute("aria-label"))).toEqual([
+      "Open actor dossier: Orion Group (actor:one)",
+      "Open actor dossier: orion group (actor:two)",
+    ]);
+    expect(screen.getByText("Matched alias “Orion”")).toBeVisible();
+    await user.click(links[1]);
+    await screen.findByText(
+      "This identity is missing or is not an active actor.",
+      undefined,
+      { timeout: 5000 },
+    );
+    // The dossier read uses the canonical id (it may retry once), never the label or alias.
+    expect(new Set(details)).toEqual(new Set(["actor:two"]));
+    await user.click(
+      screen.getByRole("button", { name: "Return to Bulletin" }),
+    );
+    await screen.findByRole("heading", { name: "Results for “orion”" });
+    expect(
+      await screen.findAllByRole("link", { name: /^Open actor dossier/ }),
+    ).toHaveLength(2);
+    expect(
+      screen.getByRole("textbox", {
+        name: "Search article titles and descriptions",
+      }),
+    ).toHaveValue("orion");
+  });
+
+  it.each([
+    [
+      "an unavailable route",
+      () => HttpResponse.json({ error: "down" }, { status: 503 }),
+      "Actor search is unavailable on this backend.",
+    ],
+    [
+      "an index that is not built",
+      () => HttpResponse.json(actorPage([], "not_built")),
+      "Actor index is not built. Actor results are not available.",
+    ],
+  ])(
+    "keeps article results when actor search has %s",
+    async (_name, respond, notice) => {
+      mswServer.use(
+        http.get(`${testBase}/api/v1/articles/search`, () =>
+          HttpResponse.json({
+            hits: [articleHit],
+            next_cursor: null,
+            revision: "s",
+          }),
+        ),
+        http.get(`${testBase}/api/v1/actors/search`, respond),
+      );
+      const user = userEvent.setup();
+      render(<App />);
+      await user.click(
+        await screen.findByRole("button", { name: "Open Intel" }),
+      );
+      await user.type(
+        await screen.findByRole("textbox", {
+          name: "Search article titles and descriptions",
+        }),
+        "harbor{Enter}",
+      );
+      await screen.findByText(notice);
+      expect(await screen.findByText("Matched title")).toBeVisible();
+      expect(
+        screen.queryByRole("heading", { name: "NO MATCHING ACTORS" }),
+      ).not.toBeInTheDocument();
+    },
+  );
 
   it("narrows a search by day, category and source domain without making them text fields", async () => {
     const params: Record<string, string>[] = [];

@@ -157,6 +157,13 @@ async function fixtures(
       };
     else if (path === "articles/search")
       body = { hits: [], next_cursor: null, revision: "search-fixture" };
+    else if (path === "actors/search")
+      body = {
+        rows: [],
+        index: { state: "ready" },
+        truncated: false,
+        continuation: null,
+      };
     else if (path === "articles/detail")
       body = {
         article,

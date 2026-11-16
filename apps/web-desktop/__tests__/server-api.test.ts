@@ -341,3 +341,24 @@ it("proxies actor dossier GET and refuses mutations", async () => {
     expect(received[0].url.searchParams.get("id")).toBe("actor /&");
   });
 });
+
+it("relays actor discovery search as a read-only GET with its query intact", async () => {
+  await withUpstream({ rows: [] }, async ({ received }) => {
+    const url = `${next}/api/v1/actors/search?mode=discovery&query=orion%20%26%20co&limit=10`;
+    expect(
+      (await proxyRust(new Request(url), ["actors", "search"])).status,
+    ).toBe(200);
+    expect(
+      (
+        await proxyRust(new Request(url, { method: "POST" }), [
+          "actors",
+          "search",
+        ])
+      ).status,
+    ).toBe(405);
+    expect(received).toHaveLength(1);
+    expect(received[0].url.pathname).toBe("/api/v1/actors/search");
+    expect(received[0].url.searchParams.get("mode")).toBe("discovery");
+    expect(received[0].url.searchParams.get("query")).toBe("orion & co");
+  });
+});

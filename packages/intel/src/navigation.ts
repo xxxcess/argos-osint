@@ -18,6 +18,11 @@ export type IntelRoute =
       focus?: string;
       from?: ArticleLocation;
     };
+/** Dossier route for a discovery hit; only the canonical `actor_id` is ever used, never a label or alias. */
+export const actorRouteFor = (actor_id: string): IntelRoute => ({
+  screen: "actor",
+  id: actor_id,
+});
 export interface IntelNavigation {
   subscribe: (listener: () => void) => () => void;
   getSnapshot: () => IntelRoute;

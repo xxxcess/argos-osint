@@ -3,6 +3,10 @@ import React from "react";
 import { ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { Notice, LoadingState, EmptyState } from "@argos/ui";
 import {
+  actorAvailability,
+  actorHits,
+  actorHitViews,
+  actorSearchProblem,
   ApiError,
   articleFromHit,
   cleanArticleSearchFilters,
@@ -10,17 +14,98 @@ import {
   type Article,
   type ArticleSearchFilters,
   type StrategicDomain,
+  type useActorSearch,
   type useArticleSearch,
 } from "@argos/api-client";
+import { ActorHitCard } from "./ActorHitCard";
 import { ArticleCard } from "./ArticleCard";
 import { DeskButton } from "../desk-ui";
 import { intelColors as c } from "../../shell/intel-theme";
 import { intelFonts } from "../../shell/intel-fonts";
 
-/** Indexed title and description hits for one submitted query. */
+const UNAVAILABLE_STATUS = [404, 405, 501, 503];
+
+/** Actor discovery hits for the submitted query, ranked and reported apart from articles. */
+function ActorResults({
+  query,
+  actors,
+  onActor,
+}: {
+  query: string;
+  actors: ReturnType<typeof useActorSearch>;
+  onActor: (actorId: string) => void;
+}) {
+  const problem = actorSearchProblem(query);
+  const availability = actorAvailability(actors.data);
+  const views = actorHitViews(actorHits(actors.data?.rows));
+  const failed = actors.isError;
+  const missingRoute =
+    failed &&
+    actors.error instanceof ApiError &&
+    UNAVAILABLE_STATUS.includes(actors.error.status);
+  const state = availability.kind === "ready" ? "" : availability.state;
+  return (
+    <View nativeID="intel-actor-results" style={s.group}>
+      <Text accessibilityRole="header" style={s.groupHeading}>
+        Actors
+      </Text>
+      {problem ? (
+        <Notice>Actor search skipped. {problem}</Notice>
+      ) : actors.isLoading ? (
+        <LoadingState label="Searching actors…" compact />
+      ) : missingRoute ? (
+        <Notice>Actor search is unavailable on this backend.</Notice>
+      ) : failed ? (
+        <View style={{ gap: 12 }}>
+          <Notice>{actors.error?.message || "Actor search failed."}</Notice>
+          <DeskButton
+            onPress={() => {
+              void actors.refetch();
+            }}
+          >
+            Retry actor search
+          </DeskButton>
+        </View>
+      ) : actors.isSuccess && availability.kind === "unavailable" ? (
+        <Notice>
+          Actor index is {state.replace("_", " ")}. Actor results are not
+          available.
+        </Notice>
+      ) : actors.isSuccess ? (
+        <>
+          {availability.kind === "partial" ? (
+            <Notice>
+              Actor index is {state}. Results may be incomplete or out of date.
+            </Notice>
+          ) : views.length === 0 ? (
+            <EmptyState title="NO MATCHING ACTORS">
+              No actor name, alias or description matches this search.
+            </EmptyState>
+          ) : null}
+          <View style={s.cards}>
+            {views.map((view) => (
+              <ActorHitCard
+                key={view.hit.actor_id}
+                view={view}
+                onPress={() => onActor(view.hit.actor_id)}
+              />
+            ))}
+          </View>
+          {actors.data?.truncated ? (
+            <Notice>Showing the best actor matches only.</Notice>
+          ) : null}
+        </>
+      ) : null}
+    </View>
+  );
+}
+
+/** Indexed title and description hits, and actor discovery hits, for one submitted query. */
 export function SearchResults({
   query,
   search,
+  actors,
+  onActor,
   onArticle,
   onClear,
   filters,
@@ -30,6 +115,9 @@ export function SearchResults({
 }: {
   query: string;
   search: ReturnType<typeof useArticleSearch>;
+  actors: ReturnType<typeof useActorSearch>;
+  /** Opens the dossier for a canonical `actor_id`. */
+  onActor: (actorId: string) => void;
   onArticle: (article: Article) => void;
   onClear: () => void;
   /** Filters now applied to the search. */
@@ -60,7 +148,7 @@ export function SearchResults({
   const unavailable =
     error &&
     search.error instanceof ApiError &&
-    [404, 405, 501, 503].includes(search.error.status);
+    UNAVAILABLE_STATUS.includes(search.error.status);
   return (
     <ScrollView
       nativeID="intel-search-results"
@@ -73,6 +161,10 @@ export function SearchResults({
         </Text>
         <DeskButton onPress={onClear}>Clear search</DeskButton>
       </View>
+      <ActorResults query={query} actors={actors} onActor={onActor} />
+      <Text accessibilityRole="header" style={s.groupHeading}>
+        Articles
+      </Text>
       <View nativeID="intel-search-filters" style={s.filters}>
         <Text style={s.filterLabel}>Narrow by</Text>
         {day ? (
@@ -196,6 +288,15 @@ const s = StyleSheet.create({
     flexShrink: 1,
   },
   cards: { gap: 12 },
+  group: { gap: 12 },
+  groupHeading: {
+    color: c.dim,
+    fontFamily: intelFonts.mono,
+    fontSize: 13,
+    fontWeight: "700",
+    letterSpacing: 1,
+    textTransform: "uppercase",
+  },
   filters: {
     flexDirection: "row",
     flexWrap: "wrap",

@@ -21,6 +21,12 @@ import type {
   ConnectionRequestScope,
   RegisteredWebContext,
 } from "./connection-scope";
+import {
+  ACTOR_SEARCH_LIMIT,
+  actorSearchProblem,
+  type ActorSearchResponse,
+} from "./actor-search";
+export * from "./actor-search";
 export { connectionNamespace } from "./connection-scope";
 export type {
   ConnectionRequestScope,
@@ -855,6 +861,35 @@ export function useArticleSearch(
         b.scope,
       ),
     getNextPageParam: (last) => last.next_cursor || undefined,
+  });
+}
+/**
+ * Submit-only actor discovery for the same query as article search. It is a
+ * separate read, so a failing actor index never changes the article results.
+ */
+export function useActorSearch(query: string) {
+  const b = useBackend();
+  const text = query.trim();
+  return useQuery({
+    queryKey: [b.base, b.instance, "actor-search", text],
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+    retry: false,
+    enabled: b.connected && !!text && actorSearchProblem(text) === null,
+    queryFn: ({ signal }) =>
+      request<ActorSearchResponse>(
+        b.base,
+        "actors/search?" +
+          new URLSearchParams({
+            mode: "discovery",
+            query: text,
+            limit: String(ACTOR_SEARCH_LIMIT),
+          }),
+        undefined,
+        signal,
+        REQUEST_TIMEOUT_MS,
+        b.scope,
+      ),
   });
 }
 export function keyFor(a: Pick<Article, "run_id" | "id">) {

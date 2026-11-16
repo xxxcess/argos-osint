@@ -74,6 +74,12 @@ pub(crate) fn scroll(body: El, key: &str) -> El {
 }
 
 pub(crate) fn page(state: &State, cx: &mut Cx<State>, kit: &Kit, layers: &mut Vec<El>) -> El {
+    if state.fixture_catalog {
+        let preferences = state
+            .accessibility
+            .for_view(state.fixture, cx.is_reduced_motion());
+        return crate::catalog::view(kit, preferences);
+    }
     if state.setup_gateway {
         return setup_gateway(state, cx, kit);
     }

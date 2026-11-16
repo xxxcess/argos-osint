@@ -645,6 +645,8 @@ mod native {
                     "activation-acceptance-unknown",
                     activation_scenes::acceptance_unknown,
                 ),
+                ("catalog", overhaul_scenes::catalog),
+                ("catalog-opaque", overhaul_scenes::catalog_opaque),
                 ("assistant-open", overhaul_scenes::assistant_open),
                 ("assistant-opaque", overhaul_scenes::assistant_opaque),
                 ("command-panel", overhaul_scenes::command_panel),

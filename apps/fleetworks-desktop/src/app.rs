@@ -277,6 +277,8 @@ pub struct State {
     pub startup: crate::startup::Startup,
     /// Contextual Assistant dock. It sends nothing until a typed chat capability exists.
     pub assistant: crate::assistant::Assistant,
+    /// Fixture only: draw the component catalog in place of the page.
+    pub(crate) fixture_catalog: bool,
     /// Observed job, readiness and connection transitions for this authority.
     pub inbox: crate::inbox::Inbox,
     /// Cmd/Ctrl+K command panel over a fixed list of known actions.
@@ -359,6 +361,7 @@ impl Default for State {
             accessibility: Accessibility::default(),
             startup: crate::startup::Startup::default(),
             assistant: crate::assistant::Assistant::default(),
+            fixture_catalog: false,
             inbox: crate::inbox::Inbox::default(),
             commands: crate::command_panel::CommandPanel::default(),
             page: Page::Workstation,

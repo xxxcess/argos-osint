@@ -401,6 +401,12 @@ impl State {
         ];
     }
 
+    /// Fixture only: draw the component catalog in place of the page.
+    #[doc(hidden)]
+    pub fn fixture_show_catalog(&mut self) {
+        self.fixture_catalog = true;
+    }
+
     /// Fixture only: open the command overlay.
     #[doc(hidden)]
     pub fn fixture_open_command_panel(&mut self) {

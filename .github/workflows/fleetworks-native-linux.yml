@@ -131,6 +131,7 @@ jobs:
             --scene pairing-keychain-denied \
             --scene assistant-open \
             --scene command-panel \
+            --scene catalog \
             --size 1280x800 --size 640x480 --scale 1
 
       - name: Package and verify relocatable Linux x86_64 tarball

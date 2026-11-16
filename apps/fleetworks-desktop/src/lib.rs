@@ -10,6 +10,7 @@ pub mod assistant;
 pub mod backend;
 mod backend_views;
 pub mod brain;
+mod catalog;
 mod chat_ui;
 pub mod classifier_activation;
 pub mod command_panel;

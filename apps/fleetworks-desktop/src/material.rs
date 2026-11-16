@@ -80,6 +80,18 @@ pub(crate) fn glass(el: El, surface: GlassSurface, preferences: ViewPreferences)
     }
 }
 
+/// Paint alpha for clickable obsidian-glass surfaces. The tint is on the paint, never on subtree
+/// opacity, and none of these surfaces blur: only the composer and the overlay do.
+pub(crate) const GLASS_PAINT_ALPHA: f32 = 0.9;
+
+/// The same gradient with every stop partly translucent. Offsets and hues are unchanged.
+pub(crate) fn tint_stops<const N: usize>(
+    stops: [(f32, Color); N],
+    alpha: f32,
+) -> [(f32, Color); N] {
+    stops.map(|(offset, color)| (offset, color.alpha(alpha)))
+}
+
 /// Configure `rune_kit` semantic depth and sheen tokens while honoring `matte()` preferences.
 pub(crate) fn configure_kit(kit: &mut Kit, preferences: ViewPreferences) {
     let functional_edge = Shadow {
@@ -163,6 +175,27 @@ pub(crate) fn luminous_card(
     pointer_offset: Option<&Live<[f32; 2]>>,
     shadow_offset: Option<&Live<[f32; 2]>>,
 ) -> El {
+    luminous_surface(
+        content,
+        tone,
+        selected,
+        false,
+        preferences,
+        pointer_offset,
+        shadow_offset,
+    )
+}
+
+/// `glass` makes the paint partly translucent. Reading panels pass `false` and stay opaque.
+fn luminous_surface(
+    content: El,
+    tone: StatusTone,
+    selected: bool,
+    glass: bool,
+    preferences: ViewPreferences,
+    pointer_offset: Option<&Live<[f32; 2]>>,
+    shadow_offset: Option<&Live<[f32; 2]>>,
+) -> El {
     let base_fill = if selected {
         theme::hex(theme::SURFACE_RAISED)
     } else {
@@ -202,19 +235,25 @@ pub(crate) fn luminous_card(
     } else {
         base_fill
     };
-    let mut card = content
-        .fill(base_fill)
-        .linear_gradient(
-            PI * 0.48,
-            [
-                (0.0, theme::hex(theme::METAL_PANEL_LOW)),
-                (0.06, metal_top),
-                (0.19, metal_middle),
-                (0.48, base_fill),
-                (0.79, metal_middle),
-                (1.0, theme::hex(theme::METAL_PANEL_LOW)),
-            ],
+    let card_stops = [
+        (0.0, theme::hex(theme::METAL_PANEL_LOW)),
+        (0.06, metal_top),
+        (0.19, metal_middle),
+        (0.48, base_fill),
+        (0.79, metal_middle),
+        (1.0, theme::hex(theme::METAL_PANEL_LOW)),
+    ];
+    let (card_fill, card_stops) = if glass {
+        (
+            base_fill.alpha(GLASS_PAINT_ALPHA),
+            tint_stops(card_stops, GLASS_PAINT_ALPHA),
         )
+    } else {
+        (base_fill, card_stops)
+    };
+    let mut card = content
+        .fill(card_fill)
+        .linear_gradient(PI * 0.48, card_stops)
         .border_gradient(1.0, top_rim, bottom_rim)
         .radius(10.0)
         .continuous_corners()
@@ -298,10 +337,11 @@ pub(crate) fn interactive_tile(
     pointer_offset: Option<&Live<[f32; 2]>>,
     shadow_offset: Option<&Live<[f32; 2]>>,
 ) -> El {
-    let mut tile = luminous_card(
+    let mut tile = luminous_surface(
         content,
         tone,
         selected,
+        true,
         preferences,
         pointer_offset,
         shadow_offset,
@@ -453,6 +493,12 @@ pub(crate) fn apply_liquid_metal(
         ),
     };
 
+    // Gold stays solid so the main action reads first; the other finishes are dim glass.
+    let stops = if finish == MetalFinish::GoldCta {
+        stops
+    } else {
+        tint_stops(stops, GLASS_PAINT_ALPHA)
+    };
     button = button
         .fill(stops[2].1)
         .linear_gradient(PI * 0.92, stops)
@@ -669,5 +715,25 @@ mod glass_tests {
             assert!(glass_recipe(GlassSurface::Composer, prefs(reduced, matte)).is_none());
             assert!(glass_recipe(GlassSurface::Overlay, prefs(reduced, matte)).is_none());
         }
+    }
+}
+
+#[cfg(test)]
+mod tint_tests {
+    use super::*;
+
+    #[test]
+    fn tinting_changes_only_the_alpha_of_each_stop() {
+        let stops = [
+            (0.0, theme::hex(theme::SURFACE)),
+            (0.5, theme::hex(theme::SURFACE_RAISED)),
+            (1.0, theme::hex(theme::SURFACE_ELEVATED)),
+        ];
+        let tinted = tint_stops(stops, GLASS_PAINT_ALPHA);
+        for (before, after) in stops.iter().zip(tinted.iter()) {
+            assert_eq!(before.0, after.0);
+            assert_eq!(after.1, before.1.alpha(GLASS_PAINT_ALPHA));
+        }
+        assert!((0.8..1.0).contains(&GLASS_PAINT_ALPHA));
     }
 }

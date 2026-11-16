@@ -21,6 +21,16 @@ pub fn assistant_opaque(state: &mut State) {
     opaque(state);
 }
 
+pub fn catalog(state: &mut State) {
+    super::registered(state);
+    state.fixture_show_catalog();
+}
+
+pub fn catalog_opaque(state: &mut State) {
+    catalog(state);
+    opaque(state);
+}
+
 pub fn command_panel(state: &mut State) {
     super::registered(state);
     state.fixture_open_command_panel();

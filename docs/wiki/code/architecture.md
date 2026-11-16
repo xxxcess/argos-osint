@@ -135,7 +135,7 @@ NLP-off body matching: word-boundary exact pass always runs on cleaned bodies; N
 
 Recon integration: turn-start and material-gap discovery now search BOTH actor and article indexes (recon/orchestrate.rs discover_catalog_articles / replan_discovery); lookup never creates actors or claims; Jev cannot override identity ambiguity.
 
-API: `GET /api/v1/articles/search` → `ArticleSearchPage` {hits with article id/revision, excerpt, matched_field, rank, categories/source, revision fingerprint, next_cursor}; capabilities feature `"article-search"`.
+API: `GET /api/v1/articles/search` → `ArticleSearchPage` {hits with article id/revision, excerpt, matched_field, rank, categories/source, revision fingerprint, next_cursor, `truncated`}; capabilities feature `"article-search"`. `truncated` is true when a field's bounded candidate window (256) was filled, so lower-ranked matches may exist that no page reaches. The same read is available over local IPC as `articles_search`.
 
 Current domain filters use `governance`, `security`, `economic`, `human`, `environmental` and `scientific`. Historical seven-topic tags remain explicitly legacy; a matching string alone does not establish current membership. See [taxonomy](../concepts/strategic-domains-taxonomy.md).
 
@@ -213,6 +213,10 @@ The native app and [Intel Web](intel-web.md) use the versioned gateway. Server-l
 The browser enters through the same-origin web relay, whose purpose credential stays server-side. Connect exchanges a registered context for a server-issued session; subsequent requests and streams enforce current session, Host/Origin, permission and registration checks. A displayed Connect ID selects context and grants no authentication authority. Native Open Intel Web uses that real gate. Topology remains in the browser; native Brain provides discovery and authoritative dossier controls. Direct Compose readiness checks and separately configured web startup are operator actions. [Web lifecycle](../../diagrams/intel-web.html)
 
 The existing [native verifier](../../../scripts/fleetworks_verify.py) selects and renders shared-view PNG/tree fixtures; scoped Cargo tests separately exercise Runtime/state/input assertions. The [candidate helper](../../../scripts/fleetworks_candidate.py) builds/packages a staged macOS `.app`, manifest, ZIP and checksums. The [native CI lane](../../../.github/workflows/fleetworks.yml) selects both architectures through the [shared Mac workflow](../../../.github/workflows/fleetworks-native.yml), with exact source/toolchain/Rune identity and verification of downloaded artifact bytes. These source paths are implemented; complete dual-architecture hosted execution, installed-app GUI/OS integration, tested minimum macOS, signing/notarization and trusted publication retain separate acceptance gates. Generated frames and bundle checks carry their own evidence and cannot establish those later outcomes. [Native verification limits](native-verification.md)
+
+## Assistant chat turn endpoint
+
+`POST /api/v1/workstation/chat/turns` (and IPC `chat_turn_submit`) accepts one typed turn from a native registered caller with `SubmitInteractive`. It checks the turn and the caller's registration and answers `{"status":"ok"}`. It stores nothing, starts no job and never writes an assistant reply. The browser relay does not carry it. The backend advertises `chat` as supported so the native composer can clear its draft on send. The wider typed contract, with threads, messages and events, is described in [assistant-chat-contract.md](assistant-chat-contract.md) and is not served yet.
 
 ## Async runtime safety
 

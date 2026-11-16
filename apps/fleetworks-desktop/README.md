@@ -50,6 +50,8 @@ Backend resources stay shared within caller permissions. New registration/contex
 
 Actor CSVs merge by stable actor ID: add actors, update selected fields on matching actors and keep actors absent from the new CSV. Existing/manual aliases remain; new aliases are upserted without deletions, with full source metadata retained. Each job uses its exact selected dataset/hash/revision.
 
+If the file chooser cannot open (for example a Linux desktop with no chooser service), **Seed Actors** and **Train Classifier** show a **Local CSV path** field. The path stays on this computer, must be an absolute `.csv` file, and goes through the same checks as a picked file.
+
 **Seed Actors** must complete with actors in the database before **Build Search Index** enables; queued/active reseeding keeps it disabled. Confirm the index job, then wait for reader readiness. **Train Classifier — Natural** uses its own CSV picker and produces a candidate without activation; the bundled v2 dataset is synthetic. Confirmation pins the actual configuration revision (fresh **0** is valid). Focused auto-refresh and **Refresh checks** only observe readiness; no seed/training job starts before confirmation. Authentication-bound, single-use upload tickets survive gateway restarts in the shared database until five-minute expiry; HTTP 429 leaves the URL unused. Accepted jobs remain durable. [Capacity and shared-staging requirements](../../deploy/README.md#configured-native-maintenance-inputs)
 
 After updating maintenance code, close an already running Fleetworks app, then run `python3 deploy/native_review.py up --name native-local` to coordinate schema 11 bootstrap/services and rebuild backend and native app. The helper's `--open` preserves an existing running instance, so leaving it open would retain the older app.
@@ -76,3 +78,9 @@ Discover scene names from the current executable; generation alone is not visual
 Selected PR checks build debug apps and Rune evidence on Intel/Apple Silicon, without ZIPs or publication. Trusted branch pushes package versioned release ZIPs, verify downloads by artifact ID/digest/checksum and publish after required checks: `nightly` → nightly prereleases, `dev`/`main` → stable. These automatically published apps remain unsigned; signing/notarization and installed-hardware acceptance are separate evidence. [Release flow](../../docs/diagrams/native-release.html) · [Artifact map](../../docs/wiki/code/build-artifacts.md#hosted-artifacts-and-publication)
 
 Pairing tests use injected Keychain stores. Installed-app launch, real Keychain approval/reconnect and backend integration need separate evidence within the current task's authorized scope. Record actual results and remaining gaps in its acceptance tracker.
+
+## Startup, utilities and materials
+
+A cold launch shows the logo for three seconds, then **Choose your connection**. Choosing Local Embedded or Remote Gateway only opens the existing setup. Launches with `--api-origin` or `--api-token-file`, and fixtures, skip it. The toolbar has a command button (Cmd/Ctrl+K), an inbox bell and an Assistant toggle. The Assistant is off by default and sends a turn to the backend's chat endpoint, which only answers ok; there are no replies yet.
+
+Glass surfaces (the Assistant composer and the command panel) use a same-window blur. They draw opaque, with the same bounds, when macOS Reduce Transparency is on or when `FLEETWORKS_OPAQUE_MATERIALS` is `1`, `true`, `yes` or `on`. Linux no longer forces the opaque mode.

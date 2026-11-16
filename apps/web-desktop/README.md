@@ -37,3 +37,7 @@ Linux execution, public TLS/ingress or installed native behavior.
 The [shared matte design](../../docs/wiki/code/native-design-system.md) changes
 paint/logo within existing web layout and topology/list behavior.
 [Verification status](../../.planning/2026-11-12-native-workstation-redesign/acceptance.md)
+
+## Footer and search
+
+The bottom bar names the **Home** control from the backend's display name (set with `argos-api-host --role bootstrap --platform-display-name`) and shows **Backend** when none is set. It never uses the host OS, chip, hostname or address. The CPU, memory, disk and network readings are labelled **Backend host**. The header search looks only at article titles and descriptions through the indexed `articles/search` route and runs when Enter is pressed. The relay allows `articles/search` and `workstation/readiness`, both read-only.

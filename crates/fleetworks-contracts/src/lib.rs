@@ -4,6 +4,7 @@ mod client;
 
 pub mod actor_index;
 pub mod capabilities;
+pub mod chat;
 pub mod classifier_activation;
 pub mod connect;
 pub mod context;

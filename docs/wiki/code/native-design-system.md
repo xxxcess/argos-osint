@@ -129,7 +129,7 @@ Blur runs inside the window, so no platform forces the opaque mode. Linux no lon
 
 ### Assistant conversation parts (`chat_ui.rs`)
 
-The Assistant pane has the parts for a conversation but no way to fill one yet. `Assistant::messages` stays empty, sending stays gated, and the dock itself stays off by default. Nothing in `chat_ui.rs` touches a network, transport or provider.
+The Assistant pane has the parts for a conversation but no way to fill one yet. `Assistant::messages` stays empty, sending stays gated, and the dock itself stays off by default. Nothing in `chat_ui.rs` touches a network, transport or provider. The wire contract is described in [assistant-chat-contract.md](assistant-chat-contract.md).
 
 | Part | Behavior |
 | --- | --- |

@@ -97,6 +97,9 @@ pub struct Assistant {
     pinned: Option<Context>,
     scope: Option<u64>,
     pub(crate) notice: Option<String>,
+    /// Conversation shown in the pane. Nothing fills it until the chat contract is wired, and a
+    /// new connection authority clears it.
+    pub(crate) messages: Vec<crate::chat_ui::ChatMessage>,
 }
 
 impl Default for Assistant {
@@ -108,6 +111,7 @@ impl Default for Assistant {
             pinned: None,
             scope: None,
             notice: None,
+            messages: Vec::new(),
         }
     }
 }
@@ -126,6 +130,7 @@ impl Assistant {
         self.scope = Some(scope);
         self.pinned = None;
         self.notice = None;
+        self.messages.clear();
         if changed {
             self.draft = TextEdit::new("");
         }
@@ -385,14 +390,7 @@ pub(crate) fn dock(
                 ),
         )
         .child(context)
-        .child(
-            rune::col()
-                .key("assistant-history")
-                .w_full()
-                .grow(1.0)
-                .min_h(0.0)
-                .child(status),
-        )
+        .child(crate::chat_ui::history(&assistant.messages, status, kit))
         .child(composer)
         .child(
             rune::row()
@@ -559,6 +557,47 @@ mod render_tests {
         assert!(asked.find("assistant-dock").is_some());
         let closed = runtime(1600.0, true, Preference::Closed);
         assert!(closed.find("assistant-dock").is_none());
+    }
+
+    #[test]
+    fn history_renders_messages_states_and_sources_and_a_new_authority_clears_it() {
+        use crate::chat_ui::{ChatMessage, Citation, Role, TurnState};
+        let mut rt = runtime(1600.0, true, Preference::Auto);
+        assert!(rt.find("assistant-status").is_some());
+        assert!(rt.find("assistant-history-scroll").is_none());
+        rt.update(|state, _| {
+            state.assistant.messages = vec![
+                ChatMessage {
+                    id: "1".into(),
+                    role: Role::Operator,
+                    state: TurnState::Final,
+                    text: "Why is this job slow?".into(),
+                    citations: Vec::new(),
+                },
+                ChatMessage {
+                    id: "2".into(),
+                    role: Role::Assistant,
+                    state: TurnState::Running,
+                    text: String::new(),
+                    citations: vec![Citation {
+                        kind: "Job",
+                        label: "Job abc".into(),
+                    }],
+                },
+            ];
+        });
+        rt.frame(2.0 / 60.0);
+        assert!(rt.find("assistant-history-scroll").is_some());
+        assert!(rt.find("chat-message-1").is_some());
+        assert!(rt.find("chat-message-2").is_some());
+        assert!(rt.find("chat-state-2").is_some());
+        assert!(rt.find("chat-state-1").is_none());
+        assert!(rt.find("chat-citation-0").is_some());
+        rt.update(|state, _| {
+            state.assistant.sync_scope(1);
+            state.assistant.sync_scope(2);
+        });
+        assert!(rt.state.assistant.messages.is_empty());
     }
 
     #[test]

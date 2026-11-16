@@ -126,3 +126,15 @@ Inspect actual production Rune Runtime PNG/tree/input evidence for all seven sur
 ### Opaque materials preference
 
 Blur runs inside the window, so no platform forces the opaque mode. Linux no longer falls back to matte by default. Opaque drawing is chosen by macOS Reduce Transparency, or on any platform by setting `FLEETWORKS_OPAQUE_MATERIALS` to `1`, `true`, `yes` or `on` before launch. Where Rune cannot copy the frame for a blur, it draws the tint alone, which stays readable. The command panel draws its own panel with the same modal behavior as `rune_kit::Dialog` (focus trap, Escape and outside press close it). Other dialogs, such as Settings, still use `rune_kit::Dialog` and stay opaque.
+
+### Assistant conversation parts (`chat_ui.rs`)
+
+The Assistant pane has the parts for a conversation but no way to fill one yet. `Assistant::messages` stays empty, sending stays gated, and the dock itself stays off by default. Nothing in `chat_ui.rs` touches a network, transport or provider.
+
+| Part | Behavior |
+| --- | --- |
+| Message bubble | Operator messages sit right on an accent tint. Assistant messages sit left on a raised surface. Each has an accessible label such as "Assistant message". |
+| Turn state chip | **Queued**, **Working**, **Retrying, attempt N** and **Failed: reason** are shown as they are. A final answer has no chip. There is no partial or fake streaming text. |
+| Sources | A short list of `kind: label` lines under an answer. Only the label is shown, never raw evidence text. |
+| History | The newest 50 messages scroll and stick to the bottom. A note says how many older messages are not shown. With no messages, the plain status line shows instead. |
+| Authority change | A new connection authority clears the messages with the draft and the pin. |

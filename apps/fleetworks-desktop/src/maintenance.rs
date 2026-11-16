@@ -963,7 +963,7 @@ impl State {
         }
         if self.scoped_jobs.busy() {
             // The read in flight may predate the admission; let the next poll repeat it.
-            self.jobs_refresh_at = 0.0;
+            self.jobs_discovery_at = 0.0;
         } else {
             self.request_jobs(crate::jobs_query::JobsEvent::Poll);
         }

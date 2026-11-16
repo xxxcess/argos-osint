@@ -42,6 +42,9 @@ pub struct Cycles {
     pub confirmation: Option<String>,
     confirmation_configuration_revision: Option<u64>,
     pub message: Option<String>,
+    /// Set when a refresh failed while rows were already loaded: the rows are stale. Kept apart
+    /// from `message`, which also carries deletion feedback. Cleared by the next good read.
+    pub read_error: Option<String>,
     pub deletion: Load<DeleteCycleReceipt>,
     retained_delete: Option<DeleteCycleRequest>,
     retained_context: Option<RegisteredContext>,
@@ -80,6 +83,7 @@ impl Cycles {
         self.delete_request = None;
         self.revision = self.revision.wrapping_add(1);
         self.history = Load::Idle;
+        self.read_error = None;
         self.page_index = 0;
         self.page_cursors.clear();
         self.confirmation = None;
@@ -260,6 +264,7 @@ impl State {
                 if !keep {
                     self.cycles.selected = None;
                 }
+                self.cycles.read_error = None;
                 self.cycles.history = Load::Ready(history);
             }
             Ok(_) => {
@@ -267,13 +272,13 @@ impl State {
                     self.cycles.history =
                         Load::Failed("Gateway cycle history exceeded its requested bound".into());
                 } else {
-                    self.cycles.message =
+                    self.cycles.read_error =
                         Some("Gateway cycle history exceeded its requested bound".into());
                 }
             }
             Err(error) => {
                 if matches!(self.cycles.history, Load::Ready(_)) {
-                    self.cycles.message = Some(error);
+                    self.cycles.read_error = Some(error);
                 } else {
                     self.cycles.history = Load::Failed(error);
                 }
@@ -774,7 +779,7 @@ mod tests {
         assert_eq!(runtime.state.cycles.page_index, 0);
         assert!(runtime.find("cycle-synthetic-cycle-1").is_some());
         assert_eq!(
-            runtime.state.cycles.message.as_deref(),
+            runtime.state.cycles.read_error.as_deref(),
             Some("Synthetic gateway timeout")
         );
         assert!(!runtime.state.cycles.busy());
@@ -991,5 +996,59 @@ mod tests {
         state.apply_host_metrics(Err("unreachable".into()));
         assert!(matches!(&state.host_metrics, Load::Failed(_)));
         assert!(state.host_metrics_stale_notice().is_none());
+    }
+
+    #[test]
+    fn failed_poll_marks_rows_stale_until_a_good_poll_without_touching_deletion_feedback() {
+        let cursor = format!("{:064x}", 2);
+        let mut state = crate::tests::registered_fixture();
+        state.cycles.history = Load::Ready(CycleHistory::new(vec![cycle_row("cycle-3")]));
+        state.cycles.page_index = 1;
+        state.cycles.page_cursors = vec![None, Some(cursor.clone())];
+        state.cycles.selected = Some("cycle-3".into());
+        state.cycles.message = Some("Cycle hidden from this workstation's history.".into());
+
+        state.poll_cycles();
+        let failed = state.cycles.pending_page.clone().expect("poll started");
+        state.complete_cycles_page(failed, Err("gateway timed out".into()));
+        assert_eq!(
+            state.cycles.read_error.as_deref(),
+            Some("gateway timed out")
+        );
+        let Load::Ready(history) = &state.cycles.history else {
+            panic!("rows stay loaded after a failed poll");
+        };
+        assert_eq!(history.rows.len(), 1);
+        assert_eq!(
+            state.cycles.message.as_deref(),
+            Some("Cycle hidden from this workstation's history."),
+            "a read failure never overwrites deletion feedback"
+        );
+
+        state.poll_cycles();
+        let good = state
+            .cycles
+            .pending_page
+            .clone()
+            .expect("next poll started");
+        state.complete_cycles_page(
+            good,
+            Ok(CycleHistory::new(vec![
+                cycle_row("cycle-4"),
+                cycle_row("cycle-3"),
+            ])),
+        );
+        assert_eq!(
+            state.cycles.read_error, None,
+            "a good read clears the stale mark"
+        );
+        assert_eq!(state.cycles.page_index, 1);
+        assert_eq!(state.cycles.page_cursors, vec![None, Some(cursor)]);
+        assert_eq!(state.cycles.selected.as_deref(), Some("cycle-3"));
+        assert_eq!(
+            state.cycles.message.as_deref(),
+            Some("Cycle hidden from this workstation's history."),
+            "deletion feedback survives the recovery"
+        );
     }
 }

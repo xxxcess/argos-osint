@@ -339,6 +339,7 @@ pub struct State {
     pub(crate) readiness_revision: u64,
     pub(crate) readiness_refresh_at: f64,
     pub(crate) jobs_refresh_at: f64,
+    pub(crate) jobs_discovery_at: f64,
     pub(crate) host_metrics_revision: u64,
     pub(crate) host_metrics_refresh_at: f64,
     pub(crate) atlas_refresh_at: f64,
@@ -411,6 +412,7 @@ impl Default for State {
             readiness_revision: 0,
             readiness_refresh_at: 0.0,
             jobs_refresh_at: 0.0,
+            jobs_discovery_at: 0.0,
             host_metrics_revision: 0,
             host_metrics_refresh_at: 0.0,
             atlas_refresh_at: 0.0,
@@ -635,6 +637,7 @@ impl State {
         self.readiness_received_at = None;
         self.readiness_refresh_at = 0.0;
         self.jobs_refresh_at = 0.0;
+        self.jobs_discovery_at = 0.0;
         self.host_metrics = Load::Idle;
         self.host_metrics_observed_at = None;
         self.host_metrics_error = None;
@@ -962,7 +965,7 @@ impl State {
     /// Re-reads the registered workstation's current Jobs page without touching the selection,
     /// the page, or an in-flight read.
     pub(crate) fn discover_registered_jobs(&mut self, now: f64) {
-        self.jobs_refresh_at = now + JOBS_DISCOVERY_SECS;
+        self.jobs_discovery_at = now + JOBS_DISCOVERY_SECS;
         if self.registration.context.is_some() && !self.scoped_jobs.busy() {
             self.request_jobs(crate::jobs_query::JobsEvent::Poll);
         }
@@ -1123,6 +1126,41 @@ impl State {
 /// Seconds between discovery reads when no active job is known.
 const JOBS_DISCOVERY_SECS: f64 = 5.0;
 
+/// Jobs page scheduling. Two independent jobs share the tick:
+/// - follow known active work, or recover unavailable logs of the selected job;
+/// - discover newly admitted work for the registered workstation. Discovery never depends on
+///   the selection or on log recovery, because the selection only narrows what is shown.
+pub(crate) fn poll_jobs(state: &mut State, now: f64, tx: &mut Tx) -> bool {
+    if state.page != Page::Jobs
+        || state.fixture
+        || !state.connected()
+        || !state.scoped_logs.window_focused
+    {
+        return false;
+    }
+    let mut changed = false;
+    if state.job_list_has_active()
+        || state.selected_job_is_active()
+        || (state.backend.selected_job.is_some()
+            && state.scoped_logs.status == crate::logs::LogStatus::Unavailable)
+    {
+        if state.jobs_poll_due(now) {
+            state.refresh_active_job_status(now);
+            changed = true;
+        }
+        tx.wake_after(Duration::from_secs(1));
+    }
+    // A list with active rows is already re-read by the active path above.
+    if state.registration.context.is_some() && !state.job_list_has_active() {
+        if now >= state.jobs_discovery_at {
+            state.discover_registered_jobs(now);
+            changed = true;
+        }
+        tx.wake_after(Duration::from_secs(1));
+    }
+    changed
+}
+
 fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
     state.clock = now;
     let mut changed = false;
@@ -1140,31 +1178,7 @@ fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
         }
         tx.wake_after(Duration::from_secs(2));
     }
-    if state.page == Page::Jobs
-        && !state.fixture
-        && state.connected()
-        && state.scoped_logs.window_focused
-    {
-        if state.job_list_has_active()
-            || state.selected_job_is_active()
-            || (state.backend.selected_job.is_some()
-                && state.scoped_logs.status == crate::logs::LogStatus::Unavailable)
-        {
-            if state.jobs_poll_due(now) {
-                state.refresh_active_job_status(now);
-                changed = true;
-            }
-            tx.wake_after(Duration::from_secs(1));
-        } else if state.registration.context.is_some() {
-            // Nothing known is running. A slow, bounded read still discovers work admitted
-            // after this page loaded; the UI selection only narrows what is shown.
-            if now >= state.jobs_refresh_at {
-                state.discover_registered_jobs(now);
-                changed = true;
-            }
-            tx.wake_after(Duration::from_secs(1));
-        }
-    }
+    changed |= poll_jobs(state, now, tx);
     if state.page == Page::Workstation
         && !state.fixture
         && state.connected()

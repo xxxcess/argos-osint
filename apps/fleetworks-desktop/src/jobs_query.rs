@@ -231,6 +231,11 @@ impl JobsQueryState {
     pub fn busy(&self) -> bool {
         self.active.is_some()
     }
+    /// Number of reads begun so far, polls included.
+    #[cfg(test)]
+    pub(crate) fn reads_begun(&self) -> u64 {
+        self.sequence
+    }
     pub fn revision(&self) -> u64 {
         self.generation
     }

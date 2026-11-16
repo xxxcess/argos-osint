@@ -539,6 +539,15 @@ fn atlas(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
             kit,
         ));
     }
+    if let Some(error) = &state.cycles.read_error {
+        history = history.child(
+            line(
+                format!("Showing the last loaded history. Refresh failed: {error}"),
+                kit,
+            )
+            .role("alert"),
+        );
+    }
     if let Some(message) = &state.cycles.message {
         history = history.child(line(message.clone(), kit).role("status"));
     }

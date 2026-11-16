@@ -1159,13 +1159,22 @@ async fn non_fixture_receipt_persists_accepted_job_and_restores_after_restart_wi
     // Wait for non-fixture persistence task to promote pending guard into accepted association.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
-        let pending = container
-            .pending_actor_reindex(&origin)
-            .expect("read pending");
-        let accepted = container
-            .accepted_actor_reindex(&origin)
-            .expect("read accepted");
-        if pending.is_none() && accepted.is_some() {
+        // The catalog lock is deliberately non-blocking, so a read that overlaps the
+        // persistence task reports "busy". Treat that as "not settled yet" and retry.
+        let settled = match (
+            container.pending_actor_reindex(&origin),
+            container.accepted_actor_reindex(&origin),
+        ) {
+            (Ok(pending), Ok(accepted)) => pending.is_none() && accepted.is_some(),
+            (Err(error), _) | (_, Err(error)) => {
+                assert!(
+                    format!("{error:#}").contains("catalog is busy"),
+                    "unexpected non-fixture persistence read error: {error:#}"
+                );
+                false
+            }
+        };
+        if settled {
             break;
         }
         assert!(

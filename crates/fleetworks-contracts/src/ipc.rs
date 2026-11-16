@@ -113,6 +113,7 @@ const PROFILE_TOOLS_SET_PATH: &str = "/api/v1/profile/tools/set";
 const PROFILE_EXPORT_PATH: &str = "/api/v1/profile/export";
 const PROFILE_IMPORT_PATH: &str = "/api/v1/profile/import";
 const ARTICLES_PATH: &str = "/api/v1/articles";
+const ARTICLES_SEARCH_PATH: &str = "/api/v1/articles/search";
 const LOGS_PATH: &str = "/api/v1/logs";
 const LOGS_FOLLOW_PATH: &str = "/api/v1/logs/follow";
 const LOGS_EXPORT_PATH: &str = "/api/v1/logs/export";
@@ -345,6 +346,25 @@ pub struct ArticlesListQuery {
     #[serde(deserialize_with = "deserialize_num_or_str")]
     pub limit: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+/// Query for `/api/v1/articles/search`: indexed title and description discovery.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
+pub struct ArticlesSearchQuery {
+    pub query: String,
+    pub category: String,
+    pub day: String,
+    pub source: String,
+    pub run: String,
+    #[serde(
+        deserialize_with = "deserialize_opt_num_or_str",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub limit: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
 }
 
@@ -586,6 +606,7 @@ pub enum IpcOperation {
     ActorsSearch(ActorSearchQuery),
     ActorDetail(ActorDetailQuery),
     ArticlesList(ArticlesListQuery),
+    ArticlesSearch(ArticlesSearchQuery),
     JobsList(JobsListQuery),
     JobDetail(JobDetailQuery),
     ToolResult(ToolResultQuery),
@@ -648,6 +669,7 @@ impl fmt::Debug for IpcOperation {
             Self::ActorsSearch(q) => f.debug_tuple("ActorsSearch").field(q).finish(),
             Self::ActorDetail(q) => f.debug_tuple("ActorDetail").field(q).finish(),
             Self::ArticlesList(q) => f.debug_tuple("ArticlesList").field(q).finish(),
+            Self::ArticlesSearch(q) => f.debug_tuple("ArticlesSearch").field(q).finish(),
             Self::JobsList(q) => f.debug_tuple("JobsList").field(q).finish(),
             Self::JobDetail(q) => f.debug_tuple("JobDetail").field(q).finish(),
             Self::ToolResult(q) => f.debug_tuple("ToolResult").field(q).finish(),
@@ -735,6 +757,7 @@ impl IpcOperation {
         "actors_search",
         "actor_detail",
         "articles_list",
+        "articles_search",
         "jobs_list",
         "job_detail",
         "tool_result",
@@ -787,6 +810,7 @@ impl IpcOperation {
             Self::ActorsSearch(_) => "actors_search",
             Self::ActorDetail(_) => "actor_detail",
             Self::ArticlesList(_) => "articles_list",
+            Self::ArticlesSearch(_) => "articles_search",
             Self::JobsList(_) => "jobs_list",
             Self::JobDetail(_) => "job_detail",
             Self::ToolResult(_) => "tool_result",
@@ -840,6 +864,7 @@ impl IpcOperation {
             Self::ActorsSearch(_) => (IpcMethod::Get, ACTOR_SEARCH_PATH),
             Self::ActorDetail(_) => (IpcMethod::Get, ACTOR_DETAIL_PATH),
             Self::ArticlesList(_) => (IpcMethod::Get, ARTICLES_PATH),
+            Self::ArticlesSearch(_) => (IpcMethod::Get, ARTICLES_SEARCH_PATH),
             Self::JobsList(_) => (IpcMethod::Get, JOBS_PATH),
             Self::JobDetail(_) => (IpcMethod::Get, JOB_DETAIL_PATH),
             Self::ToolResult(_) => (IpcMethod::Get, TOOL_RESULT_PATH),
@@ -907,6 +932,7 @@ impl IpcOperation {
             ACTOR_SEARCH_PATH => decode_query(value).map(Self::ActorsSearch),
             ACTOR_DETAIL_PATH => decode_query(value).map(Self::ActorDetail),
             ARTICLES_PATH => decode_query(value).map(Self::ArticlesList),
+            ARTICLES_SEARCH_PATH => decode_query(value).map(Self::ArticlesSearch),
             JOBS_PATH => decode_query(value).map(Self::JobsList),
             JOB_DETAIL_PATH => decode_query(value).map(Self::JobDetail),
             TOOL_RESULT_PATH => decode_query(value).map(Self::ToolResult),

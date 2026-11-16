@@ -285,6 +285,7 @@ impl LocalGateway {
             | IpcOperation::ActorsSearch(_)
             | IpcOperation::ActorDetail(_)
             | IpcOperation::ArticlesList(_)
+            | IpcOperation::ArticlesSearch(_)
             | IpcOperation::JobsList(_)
             | IpcOperation::JobDetail(_)
             | IpcOperation::ToolResult(_)
@@ -386,6 +387,26 @@ impl LocalGateway {
                     .map_err(|_| DispatchError::from(crate::bad()))?;
                 let page =
                     argos_osint_core::intel_service::articles(&self.state.repo, &article_query)
+                        .await
+                        .map_err(crate::internal)?;
+                json_payload(page)
+            }
+            IpcOperation::ArticlesSearch(query) => {
+                self.require_global_read(principal, registration).await?;
+                let search = argos_osint_core::storage::article_discovery::ArticleSearchQuery {
+                    query: query.query,
+                    category: query.category,
+                    day: query.day,
+                    source: query.source,
+                    run: query.run,
+                    limit: query.limit.map(usize::from),
+                    cursor: query.cursor,
+                };
+                search
+                    .validate()
+                    .map_err(|_| DispatchError::from(crate::bad()))?;
+                let page =
+                    argos_osint_core::intel_service::article_search(&self.state.repo, &search)
                         .await
                         .map_err(crate::internal)?;
                 json_payload(page)

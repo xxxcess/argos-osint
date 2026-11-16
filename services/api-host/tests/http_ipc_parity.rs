@@ -134,6 +134,7 @@ const PROFILE_ACCOUNTS_UPSERT_PATH: &str = "/api/v1/profile/accounts/upsert";
 const PROFILE_ACCOUNTS_DELETE_PATH: &str = "/api/v1/profile/accounts/delete";
 const PROFILE_TOOLS_SET_PATH: &str = "/api/v1/profile/tools/set";
 const ARTICLES_PATH: &str = "/api/v1/articles";
+const ARTICLES_SEARCH_PATH: &str = "/api/v1/articles/search";
 const LOGS_PATH: &str = "/api/v1/logs";
 const LOGS_FOLLOW_PATH: &str = "/api/v1/logs/follow";
 const REGISTRATION_CONTEXT_PATH: &str = "/api/v1/connect/registrations/context";
@@ -1144,6 +1145,33 @@ async fn run_shared_flow(
         "articles_list",
         "live_parity",
         "articles read parity",
+    );
+
+    let found = client
+        .get_with_query::<serde_json::Value>(
+            ARTICLES_SEARCH_PATH,
+            &json!({"query": "harbor", "limit": 5}),
+        )
+        .await
+        .expect("articles search");
+    assert!(
+        found["hits"].is_array(),
+        "{transport}: search page has hits"
+    );
+    assert_eq!(found["truncated"], json!(false));
+    assert_eq!(
+        client
+            .get_with_query::<serde_json::Value>(ARTICLES_SEARCH_PATH, &json!({"query": "  "}))
+            .await
+            .unwrap_err(),
+        ClientError::Status(400),
+        "{transport}: blank search returns 400"
+    );
+    record(
+        &mut *report,
+        "articles_search",
+        "live_parity",
+        "indexed article search page and blank-query 400 parity",
     );
 
     let cycles = client

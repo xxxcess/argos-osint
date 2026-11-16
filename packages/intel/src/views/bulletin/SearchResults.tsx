@@ -85,6 +85,11 @@ export function SearchResults({
       {search.isFetchNextPageError ? (
         <Notice>Could not load more results. {search.error?.message}</Notice>
       ) : null}
+      {search.data?.pages.some((page) => page.truncated) ? (
+        <Notice>
+          Showing the best matches only. Narrow the search to see others.
+        </Notice>
+      ) : null}
       {search.hasNextPage || search.isFetchNextPageError ? (
         <DeskButton
           disabled={search.isFetching}

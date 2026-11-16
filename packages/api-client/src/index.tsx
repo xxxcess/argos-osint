@@ -811,6 +811,8 @@ export function useArticleSearch(query: string) {
         hits: ArticleSearchHit[];
         next_cursor: string | null;
         revision: string;
+        /** The bounded candidate window was filled; more matches may exist than any page reaches. */
+        truncated?: boolean;
       }>(
         b.base,
         "articles/search?" +

@@ -169,6 +169,49 @@ describe("Nexus Desk Bulletin", () => {
     ).toHaveAttribute("aria-pressed", "true");
   });
 
+  it("shows hits with their matched field and says when the candidate window was filled", async () => {
+    mswServer.use(
+      http.get(`${testBase}/api/v1/articles/search`, () =>
+        HttpResponse.json({
+          hits: [
+            {
+              run_id: "run-one",
+              article_id: "article-retained-id",
+              title: "Harbor access report",
+              description: "Retained source description.",
+              excerpt: "Harbor access…",
+              matched_field: "title",
+              categories: ["governance"],
+              taxonomy_version: "v1",
+              admission_state: "admitted",
+              publication_version: "v1",
+              source_name: "Fixture Wire",
+              source_domain: "example.test",
+              published_at: "2026-10-29T08:00:00Z",
+              url: "https://example.test/report",
+            },
+          ],
+          next_cursor: null,
+          revision: "s",
+          truncated: true,
+        }),
+      ),
+    );
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "Open Intel" }));
+    const search = await screen.findByRole("textbox", {
+      name: "Search article titles and descriptions",
+    });
+    await user.type(search, "harbor{Enter}");
+    await screen.findByText("Matched title");
+    expect(
+      screen.getByText(
+        "Showing the best matches only. Narrow the search to see others.",
+      ),
+    ).toBeVisible();
+  });
+
   it("moves category focus with arrows, selects with Enter and opens the whole article card", async () => {
     const user = userEvent.setup();
     render(<App />);

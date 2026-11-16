@@ -169,6 +169,9 @@ pub struct ArticleSearchPage {
     pub revision: String,
     /// `""` — the canonical corpus is always searchable once bootstrapped.
     pub diagnostic: String,
+    /// True when a field's bounded candidate window was filled, so lower-ranked matches may
+    /// exist that no page can reach.
+    pub truncated: bool,
     pub coverage: super::classifier_admission::TaxonomyCoverage,
 }
 
@@ -442,6 +445,7 @@ pub async fn search_articles(
             excerpt_for(&row.description, &search_terms(&q.query)),
         ));
     }
+    let truncated = titles.len() >= FETCH_CAP || descriptions.len() >= FETCH_CAP;
     let merged = merge_field_hits(hits, description_hits);
     let offset = q.offset();
     let page: Vec<ArticleSearchHit> = merged
@@ -458,6 +462,7 @@ pub async fn search_articles(
         next_cursor,
         revision,
         diagnostic: String::new(),
+        truncated,
         coverage,
     })
 }

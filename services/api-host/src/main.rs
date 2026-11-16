@@ -6,6 +6,7 @@ mod classifier_train;
 mod execution_service;
 mod fleetworks;
 mod jobs_service;
+mod local_ipc;
 mod native_worker;
 mod nlp_service;
 mod queue_client;
@@ -42,12 +43,23 @@ struct Args {
     /// Activate the synthetic Natural baseline after successful training.
     #[arg(long)]
     activate: bool,
+    /// Private state directory for `--role local-ipc` (enforced `0o700`).
+    #[arg(long, required_if_eq("role", "local-ipc"))]
+    state_dir: Option<std::path::PathBuf>,
+    /// Optional canonical absolute path to a supervised NLP helper command.
+    #[arg(long)]
+    nlp_cmd: Option<std::path::PathBuf>,
+    /// Optional canonical absolute path to a supervised classifier helper command.
+    #[arg(long)]
+    classifier_cmd: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum Role {
     /// Existing local API host with its background workers.
     Combined,
+    /// Run the single-process embedded backend over stdin/stdout IPC without listeners.
+    LocalIpc,
     /// Authenticated Fleetworks API process.
     Api,
     /// Serve retained Brain and Intel HTTP operations on the private network.
@@ -94,9 +106,30 @@ fn init_tracing() {
         .try_init();
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     init_tracing();
+    let args = Args::parse();
+    let runtime = tokio::runtime::Runtime::new()?;
+    if args.role == Role::LocalIpc {
+        ensure!(
+            args.file.is_none() && args.expected_sha256.is_none() && !args.activate,
+            "CSV worker options are incompatible with --role local-ipc"
+        );
+        let result = runtime.block_on(local_ipc::run(
+            args.state_dir.expect("required for local-ipc"),
+            args.nlp_cmd,
+            args.classifier_cmd,
+            shutdown_signal(),
+        ));
+        // `local_ipc::run` drops storage/index/lock/helpers before returning; bound teardown so
+        // an external parent that waits for child exit before closing stdin cannot hang on `read(0)`.
+        runtime.shutdown_timeout(Duration::from_millis(100));
+        return result;
+    }
+    runtime.block_on(run_non_ipc(args))
+}
+
+async fn run_non_ipc(args: Args) -> Result<()> {
     let Args {
         role,
         port,
@@ -104,7 +137,14 @@ async fn main() -> Result<()> {
         file,
         expected_sha256,
         activate,
-    } = Args::parse();
+        state_dir,
+        nlp_cmd,
+        classifier_cmd,
+    } = args;
+    ensure!(
+        state_dir.is_none() && nlp_cmd.is_none() && classifier_cmd.is_none(),
+        "--state-dir, --nlp-cmd, and --classifier-cmd require --role local-ipc"
+    );
     if role == Role::TrainClassifier {
         return classifier_train::run(
             fleetworks::workspace_path()?,
@@ -260,12 +300,12 @@ async fn main() -> Result<()> {
         let listener = tokio::net::TcpListener::bind(SocketAddr::new(bind, port)).await?;
         let listen = listener.local_addr()?;
         let port = listen.port();
-        let owner_state = argos_osint_api::ApiState {
-            repo: repo.clone(),
-            instance_id: format!("execution-{}-{}", std::process::id(), chrono_id()),
+        let owner_state = argos_osint_api::ApiState::new(
+            repo.clone(),
+            format!("execution-{}-{}", std::process::id(), chrono_id()),
             port,
-            origins: Arc::new(Vec::new()),
-        };
+            Arc::new(Vec::new()),
+        );
         let router = argos_osint_api::guard_network(
             execution_service::router(workspace),
             policy.clone(),
@@ -355,12 +395,12 @@ async fn main() -> Result<()> {
     let http = if let Some(api) = access {
         let listener = tokio::net::TcpListener::bind(SocketAddr::new(api.bind, port)).await?;
         let port = listener.local_addr()?.port();
-        let state = argos_osint_api::ApiState {
+        let state = argos_osint_api::ApiState::new(
             repo,
-            instance_id: format!("{}-{}", std::process::id(), chrono_id()),
+            format!("{}-{}", std::process::id(), chrono_id()),
             port,
-            origins: Arc::new(api.origins),
-        };
+            Arc::new(api.origins),
+        );
         let router = if let Some(policy) = api.policy {
             let reset = if role == Role::Api {
                 reset_services::gateway(&state, policy.clone()).await?
@@ -622,5 +662,39 @@ mod tests {
         );
 
         client_handle.abort();
+    }
+
+    #[cfg(feature = "embedded")]
+    pub(crate) static EMBEDDED_LIFECYCLE_TEST_LOCK: tokio::sync::Mutex<()> =
+        tokio::sync::Mutex::const_new(());
+
+    #[test]
+    fn local_ipc_cli_flags_parse_with_required_state_dir() {
+        let parsed = Args::try_parse_from([
+            "argos-api-host",
+            "--role",
+            "local-ipc",
+            "--state-dir",
+            "/tmp/fleetworks-state",
+            "--nlp-cmd",
+            "/usr/local/bin/nlp-helper",
+            "--classifier-cmd",
+            "/usr/local/bin/classifier-helper",
+        ])
+        .expect("local-ipc CLI parses");
+        assert_eq!(parsed.role, Role::LocalIpc);
+        assert_eq!(
+            parsed.state_dir,
+            Some(std::path::PathBuf::from("/tmp/fleetworks-state"))
+        );
+        assert_eq!(
+            parsed.nlp_cmd,
+            Some(std::path::PathBuf::from("/usr/local/bin/nlp-helper"))
+        );
+        assert_eq!(
+            parsed.classifier_cmd,
+            Some(std::path::PathBuf::from("/usr/local/bin/classifier-helper"))
+        );
+        assert!(Args::try_parse_from(["argos-api-host", "--role", "local-ipc"]).is_err());
     }
 }

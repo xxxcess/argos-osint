@@ -1,6 +1,6 @@
 //! Development-only same-view fixtures. No real credentials, home, gateway or browser.
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod native {
     mod activation_scenes;
     mod appearance_scenes;
@@ -774,14 +774,14 @@ mod native {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn main() {
     native::run();
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn main() -> anyhow::Result<()> {
     anyhow::bail!(
-        "The native fixture requires a real macOS Rune renderer; this host cannot provide native fixture evidence."
+        "The native fixture requires a macOS or Linux Rune renderer; this host cannot provide native fixture evidence."
     )
 }

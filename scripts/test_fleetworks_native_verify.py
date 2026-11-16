@@ -214,6 +214,35 @@ class NativeEvidenceTests(unittest.TestCase):
             native.selections(self.arguments("--script", "page-one=late.json"), self.root)
         self.assertFalse(any("--example" in command for command in self.commands))
 
+    def test_linux_fixture_accepts_x86_64_elf_and_isolates_dbus_while_forwarding_display_env(self):
+        elf_header = (
+            b"\x7fELF"
+            + bytes([2, 1, 1, 0, 0])
+            + b"\x00" * 7
+            + struct.pack("<HHI", 3, 62, 1)
+            + b"\x00" * 40
+        )
+        self.binary.write_bytes(elf_header)
+        self.info = PlatformInfo(
+            "Linux", "x86_64", "x86_64", False,
+            "x86_64-unknown-linux-gnu", "1.95.0", "x86_64-unknown-linux-gnu", "linux/amd64",
+        )
+        with mock.patch.dict(os.environ, {
+            "DISPLAY": ":0",
+            "WAYLAND_DISPLAY": "wayland-0",
+            "XDG_RUNTIME_DIR": "/run/user/1000",
+            "VK_ICD_FILENAMES": "/usr/share/vulkan/icd.d/lvp_icd.x86_64.json",
+            "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+        }):
+            self.assertEqual(self.execute(self.arguments()), 0)
+        self.assertEqual(len(self.runtime_environments), 2)
+        for env in self.runtime_environments:
+            self.assertEqual(env["DISPLAY"], ":0")
+            self.assertEqual(env["WAYLAND_DISPLAY"], "wayland-0")
+            self.assertEqual(env["VK_ICD_FILENAMES"], "/usr/share/vulkan/icd.d/lvp_icd.x86_64.json")
+            self.assertNotIn("DBUS_SESSION_BUS_ADDRESS", env)
+            self.assertTrue(env["XDG_CACHE_HOME"].startswith(str(self.root)))
+
     def test_excess_command_output_is_bounded_and_never_passes(self):
         output=self.root / "bounded-logs"
         output.mkdir()

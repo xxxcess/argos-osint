@@ -16,12 +16,12 @@ use crate::request_context::ResolvedRequest;
 use crate::ApiError;
 use crate::ApiState;
 
-async fn admit(
-    state: ApiState,
-    context: ResolvedRequest,
+pub(crate) async fn admit_request(
+    state: &ApiState,
+    context: &ResolvedRequest,
     request: MaintenanceRequest,
     operation: MaintenanceOperation,
-) -> Result<(StatusCode, Json<MaintenanceReceipt>), ApiError> {
+) -> Result<MaintenanceReceipt, ApiError> {
     if !matches!(
         context.purpose(),
         CredentialPurpose::Native | CredentialPurpose::Operator
@@ -33,8 +33,8 @@ async fn admit(
         ));
     }
     let admission = crate::admission::capture_checked(
-        &state.repo,
-        &context,
+        state,
+        context,
         &request.request_id,
         setup_jobs::operation_name(operation),
         Some(&request.context),
@@ -85,7 +85,17 @@ async fn admit(
         ),
         other => crate::internal(other),
     })?;
-    Ok((StatusCode::ACCEPTED, Json(accepted.value)))
+    Ok(accepted.value)
+}
+
+async fn admit(
+    state: ApiState,
+    context: ResolvedRequest,
+    request: MaintenanceRequest,
+    operation: MaintenanceOperation,
+) -> Result<(StatusCode, Json<MaintenanceReceipt>), ApiError> {
+    let receipt = admit_request(&state, &context, request, operation).await?;
+    Ok((StatusCode::ACCEPTED, Json(receipt)))
 }
 
 /// Check and fence both requirements inside the actual acceptance transaction.

@@ -16,20 +16,22 @@ pub(crate) struct ActorQuery {
     id: String,
 }
 
+pub(crate) async fn read_value(state: &ApiState, id: &str) -> Result<Value, ApiError> {
+    if !valid_actor_id(id) {
+        return Err(crate::bad());
+    }
+    let dossier = argos_osint_core::storage::actor_dossier::read(&state.repo, id)
+        .await
+        .map_err(crate::internal)?
+        .ok_or_else(crate::missing)?;
+    serde_json::to_value(dossier).map_err(crate::internal)
+}
+
 pub(crate) async fn read(
     State(state): State<ApiState>,
     Query(query): Query<ActorQuery>,
 ) -> ApiResult {
-    if !valid_actor_id(&query.id) {
-        return Err(crate::bad());
-    }
-    let dossier = argos_osint_core::storage::actor_dossier::read(&state.repo, &query.id)
-        .await
-        .map_err(crate::internal)?
-        .ok_or_else(crate::missing)?;
-    Ok(Json(
-        serde_json::to_value(dossier).map_err(crate::internal)?,
-    ))
+    Ok(Json(read_value(&state, &query.id).await?))
 }
 
 fn valid_actor_id(id: &str) -> bool {
@@ -38,7 +40,7 @@ fn valid_actor_id(id: &str) -> bool {
 
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum SearchMode {
+pub(crate) enum SearchMode {
     #[default]
     Name,
     Alias,
@@ -48,10 +50,10 @@ enum SearchMode {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ActorSearchQuery {
-    query: String,
+    pub(crate) query: String,
     #[serde(default)]
-    mode: SearchMode,
-    limit: Option<usize>,
+    pub(crate) mode: SearchMode,
+    pub(crate) limit: Option<usize>,
 }
 
 impl ActorSearchQuery {
@@ -64,30 +66,22 @@ impl ActorSearchQuery {
     }
 }
 
-pub(crate) async fn search(
-    State(state): State<ApiState>,
-    Query(request): Query<ActorSearchQuery>,
-    search: Option<Extension<crate::actor_search::SearchClient>>,
-    principal: Option<Extension<crate::AuthenticatedPrincipal>>,
-) -> ApiResult {
+pub(crate) async fn search_value(
+    state: &ApiState,
+    request: ActorSearchQuery,
+    search: Option<&crate::actor_search::SearchClient>,
+    principal: Option<&crate::AuthenticatedPrincipal>,
+) -> Result<Value, ApiError> {
     let (query, limit) = request.validate()?;
     if matches!(request.mode, SearchMode::Discovery) {
-        let response = crate::actor_search::discover(
-            &state,
-            search.as_ref().map(|client| &client.0),
-            principal.as_ref().map(|principal| &principal.0),
-            query,
-            limit,
-        )
-        .await?;
-        return Ok(Json(
-            serde_json::to_value(response).map_err(crate::internal)?,
-        ));
+        let response =
+            crate::actor_search::discover(state, search, principal, query, limit).await?;
+        return serde_json::to_value(response).map_err(crate::internal);
     }
     // A small display limit must not turn a shared alias into a unique match.
     // Resolve the bounded candidate window before applying the display limit.
     let window = *actor_catalog::ACTOR_SEARCH_LIMIT.end();
-    let response = match request.mode {
+    Ok(match request.mode {
         SearchMode::Name => {
             let result = actor_catalog::search_actor_names(&state.repo, query, window)
                 .await
@@ -101,8 +95,24 @@ pub(crate) async fn search(
             project_aliases(result, limit)
         }
         SearchMode::Discovery => unreachable!("discovery uses the authenticated canonical path"),
-    };
-    Ok(Json(response))
+    })
+}
+
+pub(crate) async fn search(
+    State(state): State<ApiState>,
+    Query(request): Query<ActorSearchQuery>,
+    search: Option<Extension<crate::actor_search::SearchClient>>,
+    principal: Option<Extension<crate::AuthenticatedPrincipal>>,
+) -> ApiResult {
+    Ok(Json(
+        search_value(
+            &state,
+            request,
+            search.as_ref().map(|client| &client.0),
+            principal.as_ref().map(|principal| &principal.0),
+        )
+        .await?,
+    ))
 }
 
 fn source_id(value: &str) -> Option<&str> {

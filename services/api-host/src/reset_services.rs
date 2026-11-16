@@ -404,16 +404,16 @@ async fn headless_listener(
     let (bind, policy) =
         fleetworks::internal_access_with_token("RESET_OWNER", "FLEETWORKS_RESET_OWNER_TOKEN")?;
     let listener = tokio::net::TcpListener::bind(SocketAddr::new(bind, port)).await?;
-    let state = ApiState {
-        repo: repo.clone(),
-        instance_id: format!(
+    let state = ApiState::new(
+        repo.clone(),
+        format!(
             "reset-owner-{}-{}",
             std::process::id(),
             argos_osint_core::store::new_id()
         ),
         port,
-        origins: Arc::new(Vec::new()),
-    };
+        Arc::new(Vec::new()),
+    );
     let owner = Arc::new(
         ResetOwner::new(
             repo.clone(),

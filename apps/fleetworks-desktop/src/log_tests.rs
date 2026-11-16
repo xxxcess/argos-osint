@@ -1123,3 +1123,262 @@ async fn simulated_backend_logs_reject_malformed_cursor_over_wire() {
     assert!(state.scoped_logs.rows.is_empty() && state.scoped_logs.next_cursor.is_none());
     gateway.await.expect("gateway completed");
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn simulated_actor_reindex_post_reconcile_job_projection_and_readiness_transition() {
+    use fleetworks_contracts::connect::RegistrationReceipt;
+    use fleetworks_contracts::context::{
+        JobOrigin, JobRequestAssociation, MutationContext, OriginSource, RegisteredContext,
+        WorkstationRequestDetailQuery,
+    };
+    use fleetworks_contracts::readiness::{
+        ActorReindexResult, MaintenanceRequest, ReadinessCheck, ReadinessCheckId, ReadinessState,
+        WorkstationReadiness, ACTOR_REINDEX_OPERATION, WORKSTATION_READINESS_PATH,
+    };
+    use fleetworks_contracts::search::ACTOR_REINDEX_PATH;
+
+    let receipt = RegistrationReceipt::new(
+        "fixture-deployment".into(),
+        "fixture-node-reindex".into(),
+        "fixture-registration-reindex".into(),
+        Some("192.0.2.42".parse().unwrap()),
+        1,
+    );
+    let context = RegisteredContext::new(
+        receipt.clone(),
+        1,
+        1,
+        "fixture-config".into(),
+        "fixture-access".into(),
+    )
+    .unwrap();
+    let req = MaintenanceRequest::for_reindex(
+        "sim-reindex-req-1".into(),
+        MutationContext::new(&context).with_configuration_revision(1),
+    )
+    .unwrap();
+    let expected_origin = JobOrigin::new(
+        &context,
+        OriginSource::Native,
+        "sim-reindex-req-1".into(),
+        "2026-11-14T22:10:00Z".into(),
+        1,
+        Vec::new(),
+    );
+
+    let assoc_json = serde_json::to_value(JobRequestAssociation::new(
+        "sim-reindex-job".into(),
+        expected_origin,
+        "2026-11-14T22:10:01Z".into(),
+    ))
+    .unwrap();
+
+    let jobs_json = json!({
+        "rows": [{
+            "id": "sim-reindex-job",
+            "app": "worker",
+            "operation": "actor_reindex",
+            "title": "Build actor index",
+            "state": "running",
+            "phase": "scanning",
+            "progress_done": 64,
+            "progress_total": null,
+            "error_summary": "",
+            "private_details_available": true,
+            "activity_actions_available": false,
+            "status_only": false
+        }],
+        "activity_scope": fleetworks_contracts::context::ActivityScope::for_workstation(&context),
+        "relation_counts_available": false,
+        "activity_actions_available": false,
+        "counts": {
+            "active": 1, "queued": 0, "retrying": 0, "failed": 0, "completed_recent": 0
+        },
+        "dashboard_counts_scope": "unfiltered_top_level_workstation_activity",
+        "matched_total": 1,
+        "observed_at": "2026-11-14T22:10:02Z",
+        "apps": ["worker"],
+        "apps_complete": true,
+        "has_more": false,
+        "page_cursor": cursor(1),
+        "next_cursor": null
+    });
+
+    let typed_result = ActorReindexResult::new(
+        Some("sim-reindex-job".into()),
+        Some("gen-sim-7".into()),
+        Some(512),
+        512,
+        true,
+    );
+    let detail_json = json!({
+        "job": {
+            "id": "sim-reindex-job",
+            "app": "worker",
+            "operation": "actor_reindex",
+            "title": "Build actor index",
+            "state": "completed",
+            "phase": "completed",
+            "progress_done": 512,
+            "progress_total": 512,
+            "error_summary": "",
+            "private_details_available": true,
+            "activity_actions_available": false,
+            "status_only": false
+        },
+        "stages": [],
+        "private_details_available": true,
+        "activity_actions_available": false,
+        "maintenance_result": typed_result
+    });
+
+    let mut state = shell();
+    if let Some(capabilities) = &mut state.connection.capabilities {
+        capabilities.deployment_id = Some("fixture-deployment".into());
+        let mut search = fleetworks_contracts::capabilities::SearchCapabilities::default();
+        search.actors = Some(Default::default());
+        capabilities.search = Some(search);
+    }
+    let deployment_id = state.connection.deployment_label().to_owned();
+    let mut ready_check = ReadinessCheck::new(
+        ReadinessCheckId::ActorSearch,
+        ReadinessState::Ready,
+        "ready".into(),
+        "Actor search index generation gen-sim-7 is serving.".into(),
+        "2026-11-14T22:10:05Z".into(),
+    );
+    ready_check.fresh_for_ms = 30_000;
+    let mut seed_check = ReadinessCheck::new(
+        ReadinessCheckId::ActorCatalog,
+        ReadinessState::Ready,
+        "seeded".into(),
+        "Actor catalog has 512 actors.".into(),
+        "2026-11-14T22:10:05Z".into(),
+    );
+    seed_check.fresh_for_ms = 30_000;
+    let mut readiness = WorkstationReadiness::new(
+        deployment_id,
+        "2026-11-14T22:10:05Z".into(),
+        vec![seed_check, ready_check],
+    );
+    readiness.registration = Some(receipt);
+    let readiness_json = serde_json::to_value(&readiness).unwrap();
+
+    let (origin, gateway) = spawn_simulated_log_gateway(vec![
+        (
+            "503 Service Unavailable",
+            json!({"error": "temporary_backpressure"}),
+        ),
+        ("200 OK", assoc_json),
+        ("200 OK", jobs_json),
+        ("200 OK", detail_json),
+        ("200 OK", readiness_json),
+    ])
+    .await;
+    let client = fleetworks_contracts::Client::new(&origin, Some("fixture-token"))
+        .unwrap()
+        .with_registered_context(&context)
+        .unwrap();
+
+    // 1. Uncertain 503 on POST /api/v1/search/actors/reindex
+    let post_res: Result<fleetworks_contracts::readiness::MaintenanceReceipt, _> =
+        client.post(ACTOR_REINDEX_PATH, &req).await;
+    assert!(post_res.is_err());
+
+    // 2. Reconcile exact request via GET /api/v1/workstation/requests/detail
+    let query = WorkstationRequestDetailQuery::new(
+        req.request_id.clone(),
+        ACTOR_REINDEX_OPERATION.into(),
+        Some(context.registration_id.clone()),
+    );
+    let assoc = client.request_detail(&query).await.expect("reconciled job");
+    assert_eq!(assoc.job_id, "sim-reindex-job");
+
+    // 3. Jobs list + 4. JobDetail with ActorReindexResult + 5. WorkstationReadiness
+    state.page = crate::Page::Jobs;
+    state.connection.status = crate::connection::ConnectionStatus::Connected;
+    state.registration.context = Some(context);
+    state.sync_jobs_binding();
+    state.request_jobs(crate::jobs_query::JobsEvent::Apply);
+    let ticket = state.scoped_jobs.active_ticket().unwrap().clone();
+    let jobs_reply = crate::jobs_query::read(&client, &ticket).await;
+    if let Err(ref err) = jobs_reply {
+        panic!("jobs_reply failed: {err:?}");
+    }
+    let detail_reply: Result<crate::backend::JobDetail, _> = client
+        .get_with_query(
+            "/api/v1/jobs/detail",
+            &serde_json::json!({ "id": "sim-reindex-job", "limit": 100 }),
+        )
+        .await;
+    assert!(
+        detail_reply.is_ok(),
+        "detail_reply failed: {detail_reply:?}"
+    );
+    let readiness_reply: Result<WorkstationReadiness, _> =
+        client.get(WORKSTATION_READINESS_PATH).await;
+    assert!(
+        readiness_reply.is_ok(),
+        "readiness_reply failed: {readiness_reply:?}"
+    );
+
+    let mut runtime = Runtime::new(
+        state,
+        crate::app::view,
+        (1280.0, 800.0),
+        Env {
+            system_dark: true,
+            scale: 1.0,
+        },
+    );
+    let mut clock = 0.0;
+    runtime.frame(clock);
+    runtime.update(move |state, _| {
+        state.complete_scoped_jobs(ticket, jobs_reply);
+        state.backend.selected_job = Some("sim-reindex-job".into());
+        state
+            .backend
+            .revisions
+            .insert(crate::backend::ReadKind::JobDetail, 1);
+        state.complete_backend_read(
+            crate::backend::ReadKind::JobDetail,
+            1,
+            detail_reply
+                .map(|d| crate::backend::ReadResult::JobDetail(Box::new(d)))
+                .map_err(|e| e.to_string()),
+        );
+        state.complete_readiness(readiness_reply.map_err(|e| e.to_string()));
+    });
+    clock += 1.0 / 60.0;
+    runtime.frame(clock);
+    let jobs_tree = runtime.accessibility_json().to_string();
+    for expected in [
+        "Original job",
+        "sim-reindex-job",
+        "Index generation",
+        "gen-sim-7",
+        "Scanned actors",
+        "512",
+        "Reader visible",
+    ] {
+        assert!(
+            jobs_tree.contains(expected),
+            "Job detail must display {expected}"
+        );
+    }
+
+    runtime.update(|state, _| state.page = crate::Page::Workstation);
+    clock += 1.0 / 60.0;
+    runtime.frame(clock);
+    let ws_tree = runtime.accessibility_json().to_string();
+    assert!(ws_tree.contains("Ready"));
+    assert!(runtime.find("workstation-search-actors").is_some());
+
+    let requests = gateway.await.expect("gateway completed");
+    assert_eq!(requests.len(), 5);
+    assert!(requests[0].starts_with("POST "));
+    assert!(requests[1].starts_with("GET "));
+    assert!(requests[2].starts_with("GET "));
+    assert!(requests[3].starts_with("GET "));
+    assert!(requests[4].starts_with("GET "));
+}

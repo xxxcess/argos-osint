@@ -180,12 +180,12 @@ async fn streams_selected_channels_and_settles_the_brief_without_http_polling() 
     // With no private Brain client installed, this gateway uses the actual local
     // Brain handlers. Setup still traverses authenticated public admission.
     let app = network_router(
-        ApiState {
-            repo: repo.clone(),
-            instance_id: "live-fixture".into(),
+        ApiState::new(
+            repo.clone(),
+            "live-fixture".into(),
             port,
-            origins: Arc::new(vec!["http://127.0.0.1:3000".into()]),
-        },
+            Arc::new(vec!["http://127.0.0.1:3000".into()]),
+        ),
         NetworkPolicy::with_credentials(std::slice::from_ref(&host), vec![native])
             .expect("native policy"),
     )

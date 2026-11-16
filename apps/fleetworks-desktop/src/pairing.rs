@@ -20,6 +20,7 @@ pub enum PairingFailure {
     KeychainMissing,
     KeychainDenied,
     KeychainUnavailable,
+    SessionEnded,
     CatalogUnavailable,
     Network,
     GatewayUnavailable,
@@ -32,9 +33,28 @@ impl PairingFailure {
     pub fn message(self) -> &'static str {
         match self {
             Self::InvalidOrigin => "Enter a gateway HTTPS URL or a local loopback HTTP URL.",
-            Self::KeychainMissing => "Gateway access is missing from Keychain. Pair this workstation again.",
-            Self::KeychainDenied => "Unlock Keychain or allow Fleetworks access, then try again.",
-            Self::KeychainUnavailable => "Keychain is unavailable. Your access has not been saved; try again.",
+            Self::KeychainMissing => {
+                if cfg!(target_os = "macos") {
+                    "Gateway access is missing from Keychain. Pair this workstation again."
+                } else {
+                    "Gateway access is missing from the system keyring. Pair this workstation again."
+                }
+            }
+            Self::KeychainDenied => {
+                if cfg!(target_os = "macos") {
+                    "Unlock Keychain or allow Fleetworks access, then try again."
+                } else {
+                    "Unlock your system keyring or allow Fleetworks access, then retry or use session-only mode."
+                }
+            }
+            Self::KeychainUnavailable => {
+                if cfg!(target_os = "macos") {
+                    "Keychain is unavailable. Your access has not been saved; try again or use this session only."
+                } else {
+                    "System keyring (Secret Service) is unavailable. Your access has not been saved; retry or use session-only mode."
+                }
+            }
+            Self::SessionEnded => "Session ended. Pair again.",
             Self::CatalogUnavailable => "Protected pairing settings are unavailable. Restore access to this installation, then retry.",
             Self::Network => "Could not reach the gateway. Check its URL and connection, then retry.",
             Self::GatewayUnavailable => "The gateway could not complete setup. Retry; if this continues, ask your gateway operator to check service configuration and health.",
@@ -49,6 +69,8 @@ impl PairingFailure {
 #[derive(Default)]
 pub struct Pairing {
     pub stage: PairingStage,
+    /// Explicit per-session storage choice (`SystemKeyring` default, or opt-in `SessionOnly`).
+    pub storage_mode: fleetworks_workstation::native::CredentialStorage,
     /// Enables pairing handlers in synthetic Runtime fixtures, without effects.
     pub fixture_enabled: bool,
     pub(crate) request: Option<RequestTask>,
@@ -106,6 +128,7 @@ use fleetworks_contracts::PairingClient;
 use fleetworks_workstation::native::keychain::KeychainError;
 use fleetworks_workstation::native::keychain::KeychainStore;
 use fleetworks_workstation::native::keychain::SecretToken;
+use fleetworks_workstation::native::CredentialStorage;
 use fleetworks_workstation::native::NativeContainer;
 use fleetworks_workstation::native::PairedGateway;
 use fleetworks_workstation::native::PairingError;
@@ -215,12 +238,48 @@ impl State {
         self.connect_pairing(true);
     }
 
+    /// Explicitly opt into RAM-only session storage without saving secrets to disk.
+    /// Any existing durable pairing remains untouched until this pairing authenticates.
+    pub fn use_session_only_pairing(&mut self) {
+        self.connect_pairing_with_storage(CredentialStorage::SessionOnly, true);
+    }
+
     pub(crate) fn connect_pairing(&mut self, restart: bool) {
+        self.connect_pairing_with_storage(CredentialStorage::SystemKeyring, restart);
+    }
+
+    fn connect_pairing_with_storage(&mut self, storage_mode: CredentialStorage, restart: bool) {
+        self.start_pairing_request(storage_mode, restart, false);
+    }
+
+    fn resume_paused_pairing(&mut self) {
+        let storage_mode = self.pairing.storage_mode;
+        self.start_pairing_request(storage_mode, false, true);
+    }
+
+    fn start_pairing_request(
+        &mut self,
+        storage_mode: CredentialStorage,
+        restart: bool,
+        preserve_session_secrets: bool,
+    ) {
         self.connection_profiles.initial_selection_applied = true;
-        self.disconnect();
+        if preserve_session_secrets {
+            self.disconnect_keeping_session_secrets();
+        } else {
+            self.disconnect();
+        }
+        self.pairing.storage_mode = storage_mode;
         self.connection.status = ConnectionStatus::Connecting;
-        self.pairing.stage = PairingStage::Working("Checking saved gateway access…".into());
-        self.record(if restart {
+        self.pairing.stage =
+            PairingStage::Working(if storage_mode == CredentialStorage::SessionOnly {
+                "Starting session-only gateway pairing…".into()
+            } else {
+                "Checking saved gateway access…".into()
+            });
+        self.record(if storage_mode == CredentialStorage::SessionOnly {
+            Intent::PairingSessionOnly
+        } else if restart {
             Intent::PairingRestart
         } else {
             Intent::PairingConnect
@@ -237,6 +296,7 @@ impl State {
             container.clone(),
             self.connection.origin.text.clone(),
             self.connection.epoch,
+            storage_mode,
             restart,
         );
     }
@@ -283,6 +343,15 @@ impl State {
                 self.pairing.stage = PairingStage::Connected;
             }
             Err(error) => {
+                if matches!(
+                    error,
+                    PairingFailure::Denied
+                        | PairingFailure::Expired
+                        | PairingFailure::SessionEnded
+                        | PairingFailure::Authentication
+                ) {
+                    self.clear_session_secrets();
+                }
                 self.connection.status = ConnectionStatus::Failed(error.message().into());
                 self.pairing.stage = PairingStage::Failed(error);
             }
@@ -308,17 +377,21 @@ impl State {
         );
     }
 
-    fn restored_pairing(&mut self, epoch: u64, result: Result<Option<String>, PairingFailure>) {
+    fn restored_pairing(&mut self, epoch: u64, result: Result<RestoreOutcome, PairingFailure>) {
         if self.connection.epoch != epoch {
             return;
         }
         self.pairing.request = None;
         match result {
-            Ok(Some(origin)) => {
+            Ok(RestoreOutcome::DurableOrPending(origin)) => {
                 self.connection.origin = rune::TextEdit::new(origin);
                 self.connect_pairing(false);
             }
-            Ok(None) => {}
+            Ok(RestoreOutcome::SessionEnded(origin)) => {
+                self.connection.origin = rune::TextEdit::new(origin);
+                self.pairing.stage = PairingStage::Failed(PairingFailure::SessionEnded);
+            }
+            Ok(RestoreOutcome::None) => {}
             Err(error) => self.pairing.stage = PairingStage::Failed(error),
         }
     }
@@ -331,9 +404,15 @@ impl State {
             self.connection.status = ConnectionStatus::Disconnected;
         } else if focused && self.pairing.paused && self.setup_gateway {
             self.pairing.paused = false;
-            self.connect_pairing(false);
+            self.resume_paused_pairing();
         }
     }
+}
+
+enum RestoreOutcome {
+    None,
+    DurableOrPending(String),
+    SessionEnded(String),
 }
 
 impl GatewayEffects {
@@ -347,7 +426,7 @@ impl GatewayEffects {
         let task = self.runtime.spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
                 let catalog = container.pairing_catalog()?;
-                if let Some(requested) = requested_origin {
+                let candidate = if let Some(requested) = requested_origin {
                     let requested = Client::canonical_origin(&requested)
                         .map_err(|_| PairingError::InvalidInput)?;
                     let exists = catalog
@@ -358,13 +437,30 @@ impl GatewayEffects {
                             .pending_pairings
                             .iter()
                             .any(|pending| pending.origin == requested);
-                    Ok::<_, PairingError>(exists.then_some(requested))
+                    exists.then_some(requested)
                 } else {
-                    Ok::<_, PairingError>(catalog.selected_origin.or_else(|| {
+                    catalog.selected_origin.clone().or_else(|| {
                         (catalog.pending_pairings.len() == 1)
                             .then(|| catalog.pending_pairings[0].origin.clone())
-                    }))
+                    })
+                };
+                let Some(origin) = candidate else {
+                    return Ok::<_, PairingError>(RestoreOutcome::None);
+                };
+                let has_pending = catalog
+                    .pending_pairings
+                    .iter()
+                    .any(|pending| pending.origin == origin);
+                if !has_pending
+                    && catalog
+                        .paired_gateways
+                        .iter()
+                        .find(|pair| pair.origin == origin)
+                        .is_some_and(|pair| !pair.is_durable())
+                {
+                    return Ok(RestoreOutcome::SessionEnded(origin));
                 }
+                Ok(RestoreOutcome::DurableOrPending(origin))
             })
             .await
             .map_err(|_| PairingFailure::CatalogUnavailable)
@@ -379,17 +475,30 @@ impl GatewayEffects {
         container: Arc<NativeContainer>,
         origin: String,
         epoch: u64,
+        storage_mode: CredentialStorage,
         restart: bool,
     ) -> Option<RequestTask> {
         let ui = self.ui.get()?.clone();
-        let keychain = self.keychain.clone();
+        let store: Arc<dyn KeychainStore> = match storage_mode {
+            CredentialStorage::SystemKeyring => self.keychain.clone(),
+            CredentialStorage::SessionOnly => self.session_keychain.clone(),
+            _ => self.keychain.clone(),
+        };
         let task = self.runtime.spawn(async move {
             let progress_ui = ui.clone();
             let progress_origin = origin.clone();
-            let result = connect_or_pair(container, origin, keychain, restart, move |stage| {
-                let origin = progress_origin.clone();
-                progress_ui.update(move |state, _| state.pairing_progress(epoch, &origin, stage));
-            })
+            let result = connect_or_pair_with_storage(
+                container,
+                origin,
+                store,
+                storage_mode,
+                restart,
+                move |stage| {
+                    let origin = progress_origin.clone();
+                    progress_ui
+                        .update(move |state, _| state.pairing_progress(epoch, &origin, stage));
+                },
+            )
             .await;
             ui.update(move |state, _| state.complete_pairing_connection(epoch, result));
         });
@@ -435,10 +544,30 @@ async fn authenticated(origin: &str, secret: &SecretToken) -> Result<Connected, 
         })
 }
 
+#[cfg(test)]
 async fn connect_or_pair(
     container: Arc<NativeContainer>,
     origin: String,
     store: Arc<dyn KeychainStore>,
+    restart: bool,
+    progress: impl FnMut(PairingStage),
+) -> Result<Connected, PairingFailure> {
+    connect_or_pair_with_storage(
+        container,
+        origin,
+        store,
+        CredentialStorage::SystemKeyring,
+        restart,
+        progress,
+    )
+    .await
+}
+
+async fn connect_or_pair_with_storage(
+    container: Arc<NativeContainer>,
+    origin: String,
+    store: Arc<dyn KeychainStore>,
+    storage_mode: CredentialStorage,
     restart: bool,
     mut progress: impl FnMut(PairingStage),
 ) -> Result<Connected, PairingFailure> {
@@ -468,6 +597,9 @@ async fn connect_or_pair(
             .find(|p| p.origin == origin)
             .cloned()
         {
+            if storage_mode == CredentialStorage::SystemKeyring && !pair.is_durable() {
+                return Err(PairingFailure::SessionEnded);
+            }
             let secret = local.run(|c, o, s| c.paired_credential(o, s)).await?;
             let connected = authenticated(&origin, &secret).await?;
             if connected.capabilities.deployment_id.as_deref() != Some(pair.deployment_id.as_str())
@@ -557,9 +689,15 @@ async fn connect_or_pair(
                 access_token,
                 ..
             } => {
-                progress(PairingStage::Working(
-                    "Saving approved gateway access in Keychain…".into(),
-                ));
+                progress(PairingStage::Working(match storage_mode {
+                    CredentialStorage::SessionOnly => {
+                        "Completing session-only gateway access…".into()
+                    }
+                    _ if cfg!(target_os = "macos") => {
+                        "Saving approved gateway access in Keychain…".into()
+                    }
+                    _ => "Saving approved gateway access in system keyring…".into(),
+                }));
                 let token =
                     SecretToken::new(access_token).map_err(|_| PairingFailure::Authentication)?;
                 let connected = authenticated(&origin, &token).await?;
@@ -568,8 +706,13 @@ async fn connect_or_pair(
                     .deployment_id
                     .clone()
                     .ok_or(PairingFailure::Unsupported)?;
-                let pair = PairedGateway::new(&origin, credential_id, deployment)
-                    .map_err(PairingFailure::from)?;
+                let pair = match storage_mode {
+                    CredentialStorage::SessionOnly => {
+                        PairedGateway::new_session_only(&origin, credential_id, deployment)
+                    }
+                    _ => PairedGateway::new(&origin, credential_id, deployment),
+                }
+                .map_err(PairingFailure::from)?;
                 let request_id = pending.request_id.clone();
                 local
                     .run(move |c, _, s| {

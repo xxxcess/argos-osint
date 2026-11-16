@@ -1,4 +1,5 @@
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::header::{self, HeaderValue};
@@ -9,6 +10,9 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncSeekExt;
 use url::Url;
 
+use crate::ipc::IpcOperation;
+use crate::ipc::LocalIpcClient;
+use crate::ipc::ShutdownAck;
 use crate::{Ready, API_VERSION, READY_PATH};
 
 mod pairing;
@@ -20,17 +24,28 @@ pub use log_transfer::LogExportPage;
 mod configuration_transfer;
 pub use configuration_transfer::ConfigurationTransferReceipt;
 
-const MAX_REQUEST_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_REQUEST_BYTES: usize = 16 * 1024;
 const MAX_QUERY_BYTES: usize = 8 * 1024;
-const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TOKEN_BYTES: usize = 4 * 1024;
 
 /// A validated backend-owned upload. The reference contains no filesystem path.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct DatasetUpload {
     pub dataset: crate::readiness::DatasetRef,
     pub expires_in_seconds: u64,
+}
+
+impl DatasetUpload {
+    /// Construct a validated backend-owned upload receipt.
+    #[must_use]
+    pub fn new(dataset: crate::readiness::DatasetRef, expires_in_seconds: u64) -> Self {
+        Self {
+            dataset,
+            expires_in_seconds,
+        }
+    }
 }
 
 /// Client failures contain neither the API's prose nor request URLs or credentials.
@@ -84,15 +99,68 @@ impl ClientError {
     }
 }
 
-/// A client pinned to one public API origin.
-///
-/// Authorization stays on that origin. Redirects and environment proxies are disabled.
 #[derive(Clone)]
-pub struct Client {
+struct HttpClient {
     origin: Url,
     token: Option<HeaderValue>,
     http: reqwest::Client,
     registration: Option<(HeaderValue, HeaderValue)>,
+}
+
+impl HttpClient {
+    fn request(&self, method: Method, route: &str) -> Result<RequestBuilder, ClientError> {
+        validate_route(route)?;
+        let mut url = self.origin.clone();
+        url.set_path(route);
+        let mut request = self
+            .http
+            .request(method, url)
+            .header(header::ACCEPT, "application/json");
+        if let Some((registration, revision)) = &self.registration {
+            request = request
+                .header("x-fleetworks-registration", registration.clone())
+                .header("x-fleetworks-registration-revision", revision.clone());
+        }
+        Ok(match &self.token {
+            Some(token) => request.header(header::AUTHORIZATION, token.clone()),
+            None => request,
+        })
+    }
+}
+
+#[derive(Clone)]
+enum ClientTransport {
+    Http(Box<HttpClient>),
+    LocalIpc(Arc<LocalIpcClient>),
+}
+
+/// A transport-neutral client pinned to one public API origin or local IPC stream.
+///
+/// For HTTP, authorization stays on that origin and redirects/proxies are disabled.
+#[derive(Clone)]
+pub struct Client {
+    transport: ClientTransport,
+    registered_context: Option<crate::context::RegisteredContext>,
+}
+
+/// Validate a literal versioned API route path without query or traversal segments.
+pub(crate) fn validate_route(route: &str) -> Result<(), ClientError> {
+    let tail = route
+        .strip_prefix("/api/v1/")
+        .ok_or(ClientError::InvalidRoute)?;
+    if route.len() > 128
+        || !tail.split('/').all(|segment| {
+            !segment.is_empty()
+                && segment.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'-' | b'_')
+                })
+        })
+    {
+        return Err(ClientError::InvalidRoute);
+    }
+    Ok(())
 }
 
 /// Parse the shared origin policy without transport or credential side effects.
@@ -119,6 +187,38 @@ fn validated_origin(origin: &str) -> Result<(Url, bool), ClientError> {
 }
 
 impl Client {
+    /// Wrap an already-handshaken local IPC transport without HTTP fallback.
+    #[must_use]
+    pub fn from_local_ipc(transport: Arc<LocalIpcClient>) -> Self {
+        Self {
+            transport: ClientTransport::LocalIpc(transport),
+            registered_context: None,
+        }
+    }
+
+    /// Whether this client communicates over local IPC rather than HTTP.
+    #[must_use]
+    pub fn is_local_ipc(&self) -> bool {
+        matches!(self.transport, ClientTransport::LocalIpc(_))
+    }
+
+    /// Capabilities advertised during a local IPC handshake, if connected over local IPC.
+    #[must_use]
+    pub fn capabilities(&self) -> Option<&crate::capabilities::Capabilities> {
+        match &self.transport {
+            ClientTransport::Http(_) => None,
+            ClientTransport::LocalIpc(ipc) => ipc.capabilities(),
+        }
+    }
+
+    /// Gracefully shut down an attached local IPC backend process.
+    pub async fn shutdown_local(&self, reason: &str) -> Result<ShutdownAck, ClientError> {
+        match &self.transport {
+            ClientTransport::Http(_) => Err(ClientError::InvalidRequest),
+            ClientTransport::LocalIpc(ipc) => ipc.shutdown(reason).await.map_err(ClientError::from),
+        }
+    }
+
     /// Read only this registration's visible cycle associations, newest first.
     pub async fn cycle_history(
         &self,
@@ -184,10 +284,13 @@ impl Client {
             .build()
             .map_err(ClientError::transport)?;
         Ok(Self {
-            origin,
-            token,
-            http,
-            registration: None,
+            transport: ClientTransport::Http(Box::new(HttpClient {
+                origin,
+                token,
+                http,
+                registration: None,
+            })),
+            registered_context: None,
         })
     }
 
@@ -211,7 +314,10 @@ impl Client {
         let revision = HeaderValue::from_str(&context.registration_revision.to_string())
             .map_err(|_| ClientError::InvalidRequest)?;
         let mut client = self.clone();
-        client.registration = Some((registration, revision));
+        client.registered_context = Some(context.clone());
+        if let ClientTransport::Http(http) = &mut client.transport {
+            http.registration = Some((registration, revision));
+        }
         Ok(client)
     }
 
@@ -224,18 +330,32 @@ impl Client {
         Ok(ready)
     }
 
-    /// Send an HTTP GET to a literal versioned route.
+    /// Send a GET to a literal versioned route.
     pub async fn get<T: DeserializeOwned>(&self, route: &str) -> Result<T, ClientError> {
-        Self::send(self.request(Method::GET, route)?).await
+        match &self.transport {
+            ClientTransport::Http(http) => Self::send(http.request(Method::GET, route)?).await,
+            ClientTransport::LocalIpc(ipc) => {
+                let op = IpcOperation::from_get(route)?;
+                ipc.request_json(self.registered_context.clone(), op).await
+            }
+        }
     }
 
-    /// Send an HTTP GET with encoded query fields.
+    /// Send a GET with encoded query fields.
     pub async fn get_with_query<T: DeserializeOwned>(
         &self,
         route: &str,
         query: &(impl Serialize + ?Sized),
     ) -> Result<T, ClientError> {
-        Self::send(self.request(Method::GET, route)?.query(query)).await
+        match &self.transport {
+            ClientTransport::Http(http) => {
+                Self::send(http.request(Method::GET, route)?.query(query)).await
+            }
+            ClientTransport::LocalIpc(ipc) => {
+                let op = IpcOperation::from_get_with_query(route, query)?;
+                ipc.request_json(self.registered_context.clone(), op).await
+            }
+        }
     }
 
     /// Send JSON to a literal versioned route.
@@ -244,23 +364,67 @@ impl Client {
         route: &str,
         body: &(impl Serialize + ?Sized),
     ) -> Result<T, ClientError> {
-        let request = self.request(Method::POST, route)?;
-        let body = serde_json::to_vec(body).map_err(|_| ClientError::InvalidRequest)?;
-        if body.len() > MAX_REQUEST_BYTES {
-            return Err(ClientError::RequestTooLarge);
+        match &self.transport {
+            ClientTransport::Http(http) => {
+                let request = http.request(Method::POST, route)?;
+                let body = serde_json::to_vec(body).map_err(|_| ClientError::InvalidRequest)?;
+                if body.len() > MAX_REQUEST_BYTES {
+                    return Err(ClientError::RequestTooLarge);
+                }
+                Self::send(
+                    request
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(body),
+                )
+                .await
+            }
+            ClientTransport::LocalIpc(ipc) => {
+                validate_route(route)?;
+                let body = serde_json::to_vec(body).map_err(|_| ClientError::InvalidRequest)?;
+                let op = IpcOperation::from_post_bytes(route, &body)?;
+                ipc.request_json(self.registered_context.clone(), op).await
+            }
         }
-        Self::send(
-            request
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(body),
-        )
-        .await
+    }
+
+    /// Read authenticated backend readiness and actor-index action permissions.
+    pub async fn workstation_readiness(
+        &self,
+    ) -> Result<crate::readiness::WorkstationReadiness, ClientError> {
+        self.get(crate::readiness::WORKSTATION_READINESS_PATH).await
+    }
+
+    /// Request or replay a durable actor search index rebuild on the registered backend.
+    pub async fn reindex_actors(
+        &self,
+        request: &crate::readiness::MaintenanceRequest,
+    ) -> Result<crate::readiness::MaintenanceReceipt, ClientError> {
+        if self.registered_context.is_none()
+            || request
+                .validate(crate::readiness::MaintenanceOperation::ReindexActors)
+                .is_err()
+        {
+            return Err(ClientError::InvalidRequest);
+        }
+        self.post(crate::search::ACTOR_REINDEX_PATH, request).await
+    }
+
+    /// Reconcile whether an uncertain request ID was durably accepted by the backend.
+    pub async fn request_detail(
+        &self,
+        query: &crate::context::WorkstationRequestDetailQuery,
+    ) -> Result<crate::context::JobRequestAssociation, ClientError> {
+        if self.registered_context.is_none() || query.validate().is_err() {
+            return Err(ClientError::InvalidRequest);
+        }
+        self.get_with_query(crate::context::WORKSTATION_REQUEST_DETAIL_PATH, query)
+            .await
     }
 
     /// Upload an already-open, user-selected CSV with bounded memory.
     ///
     /// The server independently verifies the actual byte count, SHA-256 and CSV
-    /// kind before publishing a dataset reference. No local path crosses HTTP.
+    /// kind before publishing a dataset reference. No local path crosses transport.
     pub async fn upload_dataset(
         &self,
         kind: crate::readiness::DatasetKind,
@@ -272,7 +436,7 @@ impl Client {
         use crate::dataset_upload::DatasetUploadTicket;
         use crate::dataset_upload::DATASET_UPLOADS_PATH;
 
-        if self.registration.is_none() {
+        if self.registered_context.is_none() {
             return Err(ClientError::InvalidRequest);
         }
         if size == 0 || size > crate::dataset_upload::dataset_upload_limit(kind) {
@@ -290,34 +454,96 @@ impl Client {
         file.rewind()
             .await
             .map_err(|_| ClientError::InvalidRequest)?;
-        let ticket: DatasetUploadTicket = self.post(DATASET_UPLOADS_PATH, &upload).await?;
-        ticket
-            .validate()
-            .map_err(|_| ClientError::InvalidResponse)?;
-        let stream =
-            futures_util::stream::try_unfold((file, 0u64), move |(mut file, read)| async move {
-                let mut chunk = vec![0u8; 64 * 1024];
-                let length = file.read(&mut chunk).await?;
-                if length == 0 {
-                    if read != size {
-                        return Err(std::io::Error::other("dataset length changed"));
+
+        let response: DatasetUpload = match &self.transport {
+            ClientTransport::Http(http) => {
+                let ticket: DatasetUploadTicket = self.post(DATASET_UPLOADS_PATH, &upload).await?;
+                ticket
+                    .validate()
+                    .map_err(|_| ClientError::InvalidResponse)?;
+                let stream = futures_util::stream::try_unfold(
+                    (file, 0u64),
+                    move |(mut file, read)| async move {
+                        let mut chunk = vec![0u8; 64 * 1024];
+                        let length = file.read(&mut chunk).await?;
+                        if length == 0 {
+                            if read != size {
+                                return Err(std::io::Error::other("dataset length changed"));
+                            }
+                            return Ok(None);
+                        }
+                        let read = read + length as u64;
+                        if read > size {
+                            return Err(std::io::Error::other("dataset length changed"));
+                        }
+                        chunk.truncate(length);
+                        Ok(Some((chunk, (file, read))))
+                    },
+                );
+                let request = http
+                    .request(Method::PUT, &ticket.upload_path)?
+                    .header(header::CONTENT_TYPE, "text/csv")
+                    .header(header::CONTENT_LENGTH, size)
+                    .timeout(Duration::from_secs(600))
+                    .body(reqwest::Body::wrap_stream(stream));
+                Self::send(request).await?
+            }
+            ClientTransport::LocalIpc(ipc) => {
+                let ticket: DatasetUploadTicket = ipc
+                    .request_json(
+                        self.registered_context.clone(),
+                        IpcOperation::DatasetUploadStart(upload),
+                    )
+                    .await?;
+                ticket
+                    .validate()
+                    .map_err(|_| ClientError::InvalidResponse)?;
+                let upload_id = ticket
+                    .upload_path
+                    .strip_prefix(DATASET_UPLOADS_PATH)
+                    .and_then(|suffix| suffix.strip_prefix('/'))
+                    .ok_or(ClientError::InvalidResponse)?
+                    .to_owned();
+                let mut offset = 0_u64;
+                let mut buffer = vec![0_u8; crate::ipc::MAX_IPC_CHUNK_BYTES];
+                loop {
+                    let length = file
+                        .read(&mut buffer)
+                        .await
+                        .map_err(|_| ClientError::Transport)?;
+                    if length == 0 {
+                        if offset != size {
+                            return Err(ClientError::InvalidRequest);
+                        }
+                        break;
                     }
-                    return Ok(None);
+                    let next_offset = offset
+                        .checked_add(length as u64)
+                        .ok_or(ClientError::RequestTooLarge)?;
+                    if next_offset > size {
+                        return Err(ClientError::InvalidRequest);
+                    }
+                    let data_b64 = crate::ipc::base64_encode(&buffer[..length]);
+                    let _: serde_json::Value = ipc
+                        .request_json(
+                            self.registered_context.clone(),
+                            IpcOperation::DatasetUploadChunk {
+                                upload_id: upload_id.clone(),
+                                offset,
+                                data_b64,
+                            },
+                        )
+                        .await?;
+                    offset = next_offset;
                 }
-                let read = read + length as u64;
-                if read > size {
-                    return Err(std::io::Error::other("dataset length changed"));
-                }
-                chunk.truncate(length);
-                Ok(Some((chunk, (file, read))))
-            });
-        let request = self
-            .request(Method::PUT, &ticket.upload_path)?
-            .header(header::CONTENT_TYPE, "text/csv")
-            .header(header::CONTENT_LENGTH, size)
-            .timeout(Duration::from_secs(600))
-            .body(reqwest::Body::wrap_stream(stream));
-        let response: DatasetUpload = Self::send(request).await?;
+                ipc.request_json(
+                    self.registered_context.clone(),
+                    IpcOperation::DatasetUploadFinish { upload_id },
+                )
+                .await?
+            }
+        };
+
         response
             .dataset
             .validate()
@@ -329,39 +555,6 @@ impl Client {
             return Err(ClientError::InvalidResponse);
         }
         Ok(response)
-    }
-
-    fn request(&self, method: Method, route: &str) -> Result<RequestBuilder, ClientError> {
-        let tail = route
-            .strip_prefix("/api/v1/")
-            .ok_or(ClientError::InvalidRoute)?;
-        if route.len() > 128
-            || !tail.split('/').all(|segment| {
-                !segment.is_empty()
-                    && segment.bytes().all(|byte| {
-                        byte.is_ascii_lowercase()
-                            || byte.is_ascii_digit()
-                            || matches!(byte, b'-' | b'_')
-                    })
-            })
-        {
-            return Err(ClientError::InvalidRoute);
-        }
-        let mut url = self.origin.clone();
-        url.set_path(route);
-        let mut request = self
-            .http
-            .request(method, url)
-            .header(header::ACCEPT, "application/json");
-        if let Some((registration, revision)) = &self.registration {
-            request = request
-                .header("x-fleetworks-registration", registration.clone())
-                .header("x-fleetworks-registration-revision", revision.clone());
-        }
-        Ok(match &self.token {
-            Some(token) => request.header(header::AUTHORIZATION, token.clone()),
-            None => request,
-        })
     }
 
     async fn send<T: DeserializeOwned>(request: RequestBuilder) -> Result<T, ClientError> {

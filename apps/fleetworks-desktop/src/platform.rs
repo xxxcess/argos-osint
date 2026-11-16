@@ -1,4 +1,4 @@
-//! Bounded macOS integration; no process runner, external IP service or deletion.
+//! Bounded native platform integration; no process runner, external IP service or deletion.
 
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
@@ -10,9 +10,13 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use anyhow::Result;
+#[cfg(target_os = "macos")]
 use objc2_app_kit::NSWorkspace;
+#[cfg(target_os = "macos")]
 use objc2_foundation::NSArray;
+#[cfg(target_os = "macos")]
 use objc2_foundation::NSString;
+#[cfg(target_os = "macos")]
 use objc2_foundation::NSURL;
 use url::Url;
 
@@ -29,6 +33,7 @@ pub struct InterfaceSnapshot {
 }
 
 /// Called on a blocking worker, independently of the shell's working directory.
+#[cfg(target_os = "macos")]
 pub(crate) fn home() -> Result<PathBuf> {
     let path = PathBuf::from(objc2_foundation::NSHomeDirectory().to_string());
     anyhow::ensure!(
@@ -38,13 +43,31 @@ pub(crate) fn home() -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Called on a blocking worker, independently of the shell's working directory.
+#[cfg(target_os = "linux")]
+pub(crate) fn home() -> Result<PathBuf> {
+    let path = dirs::home_dir().context("Linux did not provide a home directory")?;
+    anyhow::ensure!(
+        path.is_absolute(),
+        "Linux did not provide an absolute home directory"
+    );
+    Ok(path)
+}
+
 /// Called after the protected manager revalidates this exact owned child.
+#[cfg(target_os = "macos")]
 pub(crate) fn reveal(path: &Path) -> Result<()> {
     let path = path.to_str().context("workspace path is not valid UTF-8")?;
     let url = NSURL::fileURLWithPath_isDirectory(&NSString::from_str(path), true);
     NSWorkspace::sharedWorkspace()
         .activateFileViewerSelectingURLs(&NSArray::from_slice(&[url.as_ref()]));
     Ok(())
+}
+
+/// Legacy folder reveal remains unavailable on Linux without shelling out.
+#[cfg(target_os = "linux")]
+pub(crate) fn reveal(_path: &Path) -> Result<()> {
+    anyhow::bail!("Revealing legacy folders in a file manager is only available on macOS")
 }
 
 /// Generate opaque idempotency identities without persisting a new secret store.

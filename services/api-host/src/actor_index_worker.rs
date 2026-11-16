@@ -2,6 +2,7 @@
 //! There is no broker, CSV indexer, detached writer or application retry layer.
 //! Source progress advances only after the serving reader's matching receipt.
 
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
@@ -9,17 +10,23 @@ use std::time::SystemTime;
 #[path = "actor_index_rebuild.rs"]
 mod rebuild;
 
+use argos_osint_api::actor_search::ActorSearchBackend;
+use argos_osint_api::actor_search::SearchFuture;
 use argos_osint_core::storage::actor_search_outbox;
 use argos_osint_core::storage::actor_search_outbox::Preparation;
 use argos_osint_core::storage::repo::Repository;
 use argos_osint_core::storage::tx::TxError;
 use chrono::Utc;
 use fleetworks_contracts::actor_index::ActorIndexBatch;
+use fleetworks_contracts::actor_index::ActorIndexQuery;
+use fleetworks_contracts::actor_index::ActorIndexQueryResponse;
 use fleetworks_contracts::actor_index::ActorIndexReceipt;
 use fleetworks_contracts::actor_index::ActorIndexStatus;
 use fleetworks_contracts::actor_index::ACTOR_INDEX_ANALYZER;
 use fleetworks_contracts::actor_index::ACTOR_INDEX_PROTOCOL;
 use fleetworks_contracts::actor_index::ACTOR_INDEX_SCHEMA;
+use fleetworks_search_index::service::SearchService;
+use fleetworks_search_index::service::ServiceError;
 use reqwest::header;
 use reqwest::header::HeaderValue;
 use reqwest::StatusCode;
@@ -35,15 +42,57 @@ pub enum TickReport {
     Deferred { correction_required: bool },
 }
 
+enum IndexTransport {
+    Http {
+        origin: Url,
+        reader: HeaderValue,
+        writer: HeaderValue,
+        http: reqwest::Client,
+    },
+    Local(Arc<SearchService>),
+}
+
+/// In-process [`ActorSearchBackend`] backed directly by a [`SearchService`].
+pub struct LocalActorSearchBackend(pub Arc<SearchService>);
+
+impl ActorSearchBackend for LocalActorSearchBackend {
+    fn status(&self) -> SearchFuture<'_, ActorIndexStatus> {
+        Box::pin(async move {
+            self.0
+                .status()
+                .await
+                .map_err(|error| anyhow::anyhow!("actor index status error: {}", error.code))
+        })
+    }
+
+    fn query<'a>(
+        &'a self,
+        query: &'a ActorIndexQuery,
+    ) -> SearchFuture<'a, ActorIndexQueryResponse> {
+        Box::pin(async move {
+            query.validate()?;
+            self.0
+                .query(query)
+                .await
+                .map_err(|error| anyhow::anyhow!("actor index query error: {}", error.code))
+        })
+    }
+}
+
 /// The host owns this value and calls `tick` sequentially. Replica exclusion,
 /// pacing, retry delay and the exact pending body are durable database state.
 pub struct ActorIndexWorker {
-    origin: Url,
-    reader: HeaderValue,
-    writer: HeaderValue,
-    http: reqwest::Client,
+    transport: IndexTransport,
     owner: String,
     status: Option<(Instant, ActorIndexStatus)>,
+}
+
+fn validate_owner(owner: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !owner.trim().is_empty() && owner.len() <= 256 && !owner.chars().any(char::is_control),
+        "invalid index coordinator identity"
+    );
+    Ok(())
 }
 
 impl ActorIndexWorker {
@@ -54,10 +103,7 @@ impl ActorIndexWorker {
         owner: String,
     ) -> anyhow::Result<Self> {
         let origin = Url::parse(&argos_osint_api::network_origin(origin)?)?;
-        anyhow::ensure!(
-            !owner.trim().is_empty() && owner.len() <= 256 && !owner.chars().any(char::is_control),
-            "invalid index coordinator identity"
-        );
+        validate_owner(&owner)?;
         anyhow::ensure!(
             read_token != write_token,
             "index read and write credentials must differ"
@@ -71,19 +117,30 @@ impl ActorIndexWorker {
             .timeout(Duration::from_secs(35))
             .build()?;
         Ok(Self {
-            origin,
-            reader,
-            writer,
-            http,
+            transport: IndexTransport::Http {
+                origin,
+                reader,
+                writer,
+                http,
+            },
             owner,
             status: None,
         })
     }
 
-    fn endpoint(&self, path: &str) -> Url {
-        let mut endpoint = self.origin.clone();
-        endpoint.set_path(path);
-        endpoint
+    /// Construct a coordinator talking directly to an in-process [`SearchService`].
+    pub fn local(service: Arc<SearchService>, owner: String) -> anyhow::Result<Self> {
+        validate_owner(&owner)?;
+        Ok(Self {
+            transport: IndexTransport::Local(service),
+            owner,
+            status: None,
+        })
+    }
+
+    /// Release any held coordinator lease on clean worker shutdown.
+    pub async fn release(&self, repo: &Repository) -> anyhow::Result<bool> {
+        Ok(actor_search_outbox::release_lease(repo, &self.owner).await?)
     }
 
     async fn status(&mut self) -> Result<ActorIndexStatus, DeliveryFailure> {
@@ -92,15 +149,26 @@ impl ActorIndexWorker {
                 return Ok(status.clone());
             }
         }
-        let response = self
-            .http
-            .get(self.endpoint("/internal/v1/actors/status"))
-            .header(header::AUTHORIZATION, self.reader.clone())
-            .timeout(Duration::from_secs(8))
-            .send()
-            .await
-            .map_err(|_| DeliveryFailure::transient())?;
-        let status: ActorIndexStatus = decode(response).await?;
+        let status: ActorIndexStatus = match &self.transport {
+            IndexTransport::Http {
+                origin,
+                reader,
+                http,
+                ..
+            } => {
+                let mut endpoint = origin.clone();
+                endpoint.set_path("/internal/v1/actors/status");
+                let response = http
+                    .get(endpoint)
+                    .header(header::AUTHORIZATION, reader.clone())
+                    .timeout(Duration::from_secs(8))
+                    .send()
+                    .await
+                    .map_err(|_| DeliveryFailure::transient())?;
+                decode(response).await?
+            }
+            IndexTransport::Local(service) => service.status().await.map_err(map_service_error)?,
+        };
         if status.protocol != ACTOR_INDEX_PROTOCOL
             || status.schema_version != ACTOR_INDEX_SCHEMA
             || status.analyzer_version != ACTOR_INDEX_ANALYZER
@@ -112,15 +180,32 @@ impl ActorIndexWorker {
     }
 
     async fn deliver(&self, batch: &ActorIndexBatch) -> Result<ActorIndexReceipt, DeliveryFailure> {
-        let response = self
-            .http
-            .post(self.endpoint("/internal/v1/actors/batches"))
-            .header(header::AUTHORIZATION, self.writer.clone())
-            .json(batch)
-            .send()
-            .await
-            .map_err(|_| DeliveryFailure::transient())?;
-        decode(response).await
+        match &self.transport {
+            IndexTransport::Http {
+                origin,
+                writer,
+                http,
+                ..
+            } => {
+                let mut endpoint = origin.clone();
+                endpoint.set_path("/internal/v1/actors/batches");
+                let response = http
+                    .post(endpoint)
+                    .header(header::AUTHORIZATION, writer.clone())
+                    .json(batch)
+                    .send()
+                    .await
+                    .map_err(|_| DeliveryFailure::transient())?;
+                decode(response).await
+            }
+            IndexTransport::Local(service) => {
+                let raw_len = serde_json::to_vec(batch).ok().map(|bytes| bytes.len());
+                service
+                    .apply_batch(batch, raw_len)
+                    .await
+                    .map_err(map_service_error)
+            }
+        }
     }
 
     /// At most one source page, one persisted prepared batch and one HTTP write
@@ -276,6 +361,25 @@ impl DeliveryFailure {
     }
 }
 
+fn is_transient_status(status: StatusCode) -> bool {
+    status.is_server_error()
+        || matches!(
+            status,
+            StatusCode::TOO_MANY_REQUESTS | StatusCode::REQUEST_TIMEOUT
+        )
+}
+
+fn map_service_error(error: ServiceError) -> DeliveryFailure {
+    let status = StatusCode::from_u16(error.status).ok();
+    let permanent = !status.is_some_and(is_transient_status);
+    DeliveryFailure {
+        permanent,
+        retry_after: error.retry_after_secs.map(Duration::from_secs),
+        status,
+        code: safe_code(error.code).map(str::to_owned),
+    }
+}
+
 fn safe_code(code: &str) -> Option<&str> {
     (1..=64)
         .contains(&code.len())
@@ -316,11 +420,7 @@ async fn decode<T: DeserializeOwned + Send + 'static>(
             .get(header::RETRY_AFTER)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| retry_after(value, SystemTime::now()));
-        let permanent = !(status.is_server_error()
-            || matches!(
-                status,
-                StatusCode::TOO_MANY_REQUESTS | StatusCode::REQUEST_TIMEOUT
-            ));
+        let permanent = !is_transient_status(status);
         let mut body = Vec::new();
         while let Ok(Some(chunk)) = response.chunk().await {
             if chunk.len() > 1024 - body.len() {
@@ -408,5 +508,31 @@ mod tests {
             Some(Duration::ZERO)
         );
         assert_eq!(retry_after("later", now), None);
+    }
+
+    #[test]
+    fn service_error_mapping_preserves_transient_retry_after_and_permanent_codes() {
+        let busy = map_service_error(ServiceError::busy("writer_busy"));
+        assert!(!busy.permanent);
+        assert_eq!(busy.status, Some(StatusCode::SERVICE_UNAVAILABLE));
+        assert_eq!(busy.retry_after, Some(Duration::from_secs(1)));
+        assert_eq!(busy.code.as_deref(), Some("writer_busy"));
+
+        let paused = map_service_error(ServiceError::pressure_paused("resource_pressure_paused"));
+        assert!(!paused.permanent);
+        assert_eq!(paused.status, Some(StatusCode::SERVICE_UNAVAILABLE));
+        assert_eq!(paused.retry_after, Some(Duration::from_secs(5)));
+
+        let conflict = map_service_error(ServiceError {
+            status: 409,
+            code: "checkpoint_gap_or_expired_receipt",
+            retry_after_secs: None,
+        });
+        assert!(conflict.permanent);
+        assert_eq!(conflict.status, Some(StatusCode::CONFLICT));
+        assert_eq!(
+            conflict.code.as_deref(),
+            Some("checkpoint_gap_or_expired_receipt")
+        );
     }
 }

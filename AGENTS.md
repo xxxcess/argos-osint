@@ -1,6 +1,6 @@
 # Fleetworks agent orientation
 
-Fleetworks has a Rune macOS API client, an independently operated Linux backend, and the React Native Web desktop. Backend deployment uses direct Docker Compose; Venture, the six terminal clients and legacy `argos` are retired. Six native sidebar destinations share deployment resources or registered activity; the gateway header opens Workstation Status. URL-only setup pairs protected installation identity with origin-bound macOS Keychain access.
+Fleetworks has a Rune macOS and Linux x86_64 API client, an independently operated Linux backend, and the React Native Web desktop. Backend deployment uses direct Docker Compose; Venture, the six terminal clients and legacy `argos` are retired. Six native sidebar destinations share deployment resources or registered activity; the gateway header opens Workstation Status. URL-only setup pairs protected installation identity with origin-bound macOS Keychain or Linux D-Bus Secret Service access (with explicit session-only fallback on Linux when Secret Service is unavailable/locked).
 
 Use the [implemented pairing/Keychain flow](docs/wiki/code/native-connections.md#pairing-and-keychain-agreed-target) for normal native setup. Explicit operator/headless token-file mode remains supported; missing Keychain access never falls back to files or unauthenticated access. [Pairing verification](.planning/2026-11-12-native-pairing-implementation/acceptance.md) records pending evidence.
 

@@ -48,13 +48,23 @@ class PlatformTests(unittest.TestCase):
 
     def test_mismatched_toolchain_cannot_silently_choose_host_target(self):
         info = self.detect(host="aarch64-apple-darwin")
-        with self.assertRaisesRegex(ValueError, "does not match physical Mac"):
+        with self.assertRaisesRegex(ValueError, "does not match physical host target"):
             resolve_native_target(info)
 
-    def test_linux_platform_needs_no_host_rust_or_mac_product(self):
+    def test_linux_x86_64_selects_native_target_and_arm64_remains_unsupported(self):
+        linux_x64 = self.detect(system="Linux", machine="x86_64", host="x86_64-unknown-linux-gnu")
+        self.assertEqual(resolve_native_target(linux_x64), "x86_64-unknown-linux-gnu")
+        self.assertEqual(format_platform(linux_x64, "docker"), "linux/amd64")
+        with self.assertRaisesRegex(ValueError, "Unsupported native target"):
+            resolve_native_target(linux_x64, "aarch64-unknown-linux-gnu")
+        with self.assertRaisesRegex(ValueError, "cannot be built on Linux"):
+            resolve_native_target(linux_x64, "aarch64-apple-darwin")
+
+    def test_linux_arm64_platform_needs_no_host_rust_or_native_desktop(self):
         info = self.detect(system="Linux", machine="aarch64", rust_error=True)
         self.assertEqual(format_platform(info, "docker"), "linux/arm64")
         self.assertEqual(info.rust_host, "")
+        self.assertEqual(info.native_target, "")
         self.assertIn("toolchain unavailable", info.rust_error)
         with self.assertRaisesRegex(ValueError, "requires a supported"):
             format_platform(info, "rust")

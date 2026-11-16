@@ -6,31 +6,92 @@ use argos_osint_core::storage::repo::Repository;
 use argos_osint_core::storage::tx::TxError;
 use chrono::Utc;
 use fleetworks_contracts::actor_index::ActorIndexGeneration;
+use fleetworks_contracts::actor_index::ActorIndexPromote;
+use fleetworks_contracts::actor_index::ActorIndexRebuildStart;
+use fleetworks_contracts::actor_index::ActorIndexRepair;
 use fleetworks_contracts::actor_index::ActorIndexStatus;
 use reqwest::header;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use super::decode;
+use super::map_service_error;
 use super::ActorIndexWorker;
 use super::DeliveryFailure;
+use super::IndexTransport;
 use super::TickReport;
 
 impl ActorIndexWorker {
-    async fn command<T: Serialize + ?Sized, R: DeserializeOwned + Send + 'static>(
+    async fn post_http<T: Serialize + ?Sized, R: DeserializeOwned + Send + 'static>(
         &self,
         path: &str,
         request: &T,
     ) -> Result<R, DeliveryFailure> {
-        let response = self
-            .http
-            .post(self.endpoint(path))
-            .header(header::AUTHORIZATION, self.writer.clone())
+        let IndexTransport::Http {
+            origin,
+            writer,
+            http,
+            ..
+        } = &self.transport
+        else {
+            unreachable!("post_http called for local actor index transport");
+        };
+        let mut endpoint = origin.clone();
+        endpoint.set_path(path);
+        let response = http
+            .post(endpoint)
+            .header(header::AUTHORIZATION, writer.clone())
             .json(request)
             .send()
             .await
             .map_err(|_| DeliveryFailure::transient())?;
         decode(response).await
+    }
+
+    async fn start_rebuild(
+        &self,
+        request: &ActorIndexRebuildStart,
+    ) -> Result<ActorIndexGeneration, DeliveryFailure> {
+        match &self.transport {
+            IndexTransport::Http { .. } => {
+                self.post_http("/internal/v1/actors/rebuild/start", request)
+                    .await
+            }
+            IndexTransport::Local(service) => service
+                .start_rebuild(request)
+                .await
+                .map_err(map_service_error),
+        }
+    }
+
+    async fn repair_rebuild(
+        &self,
+        request: &ActorIndexRepair,
+    ) -> Result<ActorIndexStatus, DeliveryFailure> {
+        match &self.transport {
+            IndexTransport::Http { .. } => {
+                self.post_http("/internal/v1/actors/rebuild/repair", request)
+                    .await
+            }
+            IndexTransport::Local(service) => {
+                service.repair(request).await.map_err(map_service_error)
+            }
+        }
+    }
+
+    async fn promote_rebuild(
+        &self,
+        request: &ActorIndexPromote,
+    ) -> Result<ActorIndexGeneration, DeliveryFailure> {
+        match &self.transport {
+            IndexTransport::Http { .. } => {
+                self.post_http("/internal/v1/actors/rebuild/promote", request)
+                    .await
+            }
+            IndexTransport::Local(service) => {
+                service.promote(request).await.map_err(map_service_error)
+            }
+        }
     }
 
     pub(super) async fn rebuild_tick(
@@ -45,27 +106,21 @@ impl ActorIndexWorker {
             let operation = async {
                 match &action {
                     RebuildAction::Waiting => unreachable!("waiting handled before network"),
-                    RebuildAction::Start { request, .. } => {
-                        let generation: ActorIndexGeneration = self
-                            .command("/internal/v1/actors/rebuild/start", request)
-                            .await?;
-                        Ok(RebuildReceipt::Started(generation))
-                    }
-                    RebuildAction::Repair { request, .. } => {
-                        let status: ActorIndexStatus = self
-                            .command("/internal/v1/actors/rebuild/repair", request)
-                            .await?;
-                        Ok(RebuildReceipt::Repaired(Box::new(status)))
-                    }
+                    RebuildAction::Start { request, .. } => self
+                        .start_rebuild(request)
+                        .await
+                        .map(RebuildReceipt::Started),
+                    RebuildAction::Repair { request, .. } => self
+                        .repair_rebuild(request)
+                        .await
+                        .map(|status| RebuildReceipt::Repaired(Box::new(status))),
                     RebuildAction::Deliver { batch, .. } => {
                         self.deliver(batch).await.map(RebuildReceipt::Batch)
                     }
-                    RebuildAction::Promote { request, .. } => {
-                        let generation: ActorIndexGeneration = self
-                            .command("/internal/v1/actors/rebuild/promote", request)
-                            .await?;
-                        Ok(RebuildReceipt::Promoted(generation))
-                    }
+                    RebuildAction::Promote { request, .. } => self
+                        .promote_rebuild(request)
+                        .await
+                        .map(RebuildReceipt::Promoted),
                 }
             };
             tokio::pin!(operation);

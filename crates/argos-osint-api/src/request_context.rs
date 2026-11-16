@@ -247,6 +247,10 @@ impl ContextFailure {
     pub(crate) fn status(&self) -> StatusCode {
         self.status
     }
+    #[allow(dead_code)]
+    pub(crate) fn message(&self) -> &'static str {
+        self.message
+    }
     pub(crate) fn registration_required() -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
@@ -481,6 +485,27 @@ fn delegation_permissions(required: Permission, authority: &RequestAuthority) ->
         permissions.insert(Permission::ReadWorkstationActivity);
     }
     permissions.into_iter().collect()
+}
+
+/// Resolve authority for a direct local IPC peer without HTTP header parsing.
+pub(crate) async fn resolve_local(
+    repo: &Repository,
+    principal: &AuthenticatedPrincipal,
+    proof: AdmissionProof,
+    permission: Permission,
+    requirement: ContextRequirement,
+) -> Result<ResolvedRequest, ContextFailure> {
+    let authority = RequestAuthority::from_principal(principal);
+    if authority.purpose == CredentialPurpose::WebRelay
+        && !matches!(proof, AdmissionProof::None | AdmissionProof::Web { .. })
+    {
+        return Err(ContextFailure::forbidden());
+    }
+    if authority.purpose == CredentialPurpose::Native && matches!(proof, AdmissionProof::Web { .. })
+    {
+        return Err(ContextFailure::forbidden());
+    }
+    resolve_authority(repo, authority, proof, permission, requirement).await
 }
 
 /// Resolve public native/web proof under actual purpose-scoped ingress authority.

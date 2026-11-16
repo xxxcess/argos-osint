@@ -172,12 +172,12 @@ async fn atlas_submission_and_job_controls_use_authenticated_durable_ids() {
     job_dispatch::enable_pool(repo.db(), ATLAS_POOL)
         .await
         .unwrap();
-    let state = ApiState {
-        repo: repo.clone(),
-        instance_id: "dispatch-fixture".into(),
-        port: 8080,
-        origins: Arc::new(vec![]),
-    };
+    let state = ApiState::new(
+        repo.clone(),
+        "dispatch-fixture".into(),
+        8080,
+        Arc::new(vec![]),
+    );
     let legacy_bearer = network_router(
         state.clone(),
         NetworkPolicy::new(&["127.0.0.1:8080".into()], LEGACY_TOKEN).unwrap(),
@@ -504,12 +504,12 @@ async fn storage_api_contracts() {
     )
     .await
     .unwrap();
-    let app = router(ApiState {
-        repo: repo.clone(),
-        instance_id: "fixture-api".into(),
-        port: 8080,
-        origins: Arc::new(vec!["http://localhost:3000".into()]),
-    });
+    let app = router(ApiState::new(
+        repo.clone(),
+        "fixture-api".into(),
+        8080,
+        Arc::new(vec!["http://localhost:3000".into()]),
+    ));
     let (status, tools) = call(&app, "GET", "/api/v1/tools", None, Value::Null).await;
     assert_eq!(status, StatusCode::OK);
     assert!(tools["tools"]
@@ -635,12 +635,12 @@ async fn storage_api_contracts() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(ready["storage"], true);
     assert_eq!(ready["instance_id"], "fixture-api");
-    let default_port = router(ApiState {
-        repo: repo.clone(),
-        instance_id: "port-80".into(),
-        port: 80,
-        origins: Arc::new(Vec::new()),
-    });
+    let default_port = router(ApiState::new(
+        repo.clone(),
+        "port-80".into(),
+        80,
+        Arc::new(Vec::new()),
+    ));
     let response = default_port
         .oneshot(
             Request::builder()
@@ -885,12 +885,12 @@ async fn isolated_api() -> (tempfile::TempDir, Repository, Router) {
     )
     .await
     .expect("embedded contract repository");
-    let app = router(ApiState {
-        repo: repo.clone(),
-        instance_id: "contract-instance".into(),
-        port: 8080,
-        origins: Arc::new(vec!["http://localhost:3000".into()]),
-    });
+    let app = router(ApiState::new(
+        repo.clone(),
+        "contract-instance".into(),
+        8080,
+        Arc::new(vec!["http://localhost:3000".into()]),
+    ));
     (dir, repo, app)
 }
 

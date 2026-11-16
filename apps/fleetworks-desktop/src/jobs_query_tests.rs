@@ -566,3 +566,118 @@ fn background_poll_preserves_ready_page_and_selected_job_while_updating_progress
         "transient poll failure must keep existing validated job rows instead of wiping the list"
     );
 }
+
+#[test]
+fn discovery_poll_finds_new_work_from_an_empty_page_without_a_selection() {
+    let mut state = registered_app();
+    state.request_jobs(JobsEvent::Apply);
+    let ticket = state
+        .scoped_jobs
+        .active_ticket()
+        .expect("apply ticket")
+        .clone();
+    let mut empty = page(&binding("a"), 1, None);
+    empty.rows.clear();
+    state.complete_scoped_jobs(ticket, Ok(empty));
+    assert!(!state.job_list_has_active());
+    assert!(state.backend.selected_job.is_none());
+
+    state.discover_registered_jobs(100.0);
+    assert_eq!(state.jobs_discovery_at, 105.0, "discovery is rate limited");
+    let ticket = state
+        .scoped_jobs
+        .active_ticket()
+        .expect("discovery starts a read from an empty list")
+        .clone();
+    state.discover_registered_jobs(101.0);
+    assert!(
+        state.scoped_jobs.busy(),
+        "a read in flight is never duplicated"
+    );
+    state.complete_scoped_jobs(ticket, Ok(page(&binding("a"), 1, None)));
+
+    assert!(
+        matches!(&state.backend.jobs, Load::Ready(jobs) if jobs.rows.iter().any(|row| row.id == "fixture-job-1")),
+        "newly admitted work appears without any UI selection"
+    );
+    assert!(state.backend.selected_job.is_none());
+}
+
+#[test]
+fn discovery_poll_needs_a_registration_and_drops_replies_from_a_prior_one() {
+    let mut state = registered_app();
+    state.registration.context = None;
+    state.discover_registered_jobs(100.0);
+    assert!(
+        state.scoped_jobs.active_ticket().is_none(),
+        "no registered workstation means no discovery read"
+    );
+
+    let mut state = registered_app();
+    state.discover_registered_jobs(100.0);
+    let ticket = state
+        .scoped_jobs
+        .active_ticket()
+        .expect("discovery read")
+        .clone();
+    state.registration.context = Some(binding("b").context);
+    state.sync_jobs_binding();
+    state.complete_scoped_jobs(ticket, Ok(page(&binding("a"), 1, None)));
+    assert!(
+        !matches!(&state.backend.jobs, Load::Ready(jobs) if jobs.rows.iter().any(|row| row.id == "fixture-job-1")),
+        "a delayed reply from the previous registration must not repopulate Jobs"
+    );
+}
+
+#[test]
+fn scheduler_discovers_new_work_while_a_completed_job_with_unavailable_logs_is_selected() {
+    let mut state = registered_app();
+    state.request_jobs(JobsEvent::Apply);
+    let ticket = state
+        .scoped_jobs
+        .active_ticket()
+        .expect("apply ticket")
+        .clone();
+    let mut finished = page(&binding("a"), 1, None);
+    finished.rows[0].state = "completed".into();
+    state.complete_scoped_jobs(ticket, Ok(finished));
+    state.select_job("fixture-job-1");
+    state.scoped_logs.status = crate::logs::LogStatus::Unavailable;
+    state.scoped_logs.window_focused = true;
+    state.page = crate::app::Page::Jobs;
+    // Production scheduling: the fixture flag only exists to keep scenes offline.
+    state.fixture = false;
+    assert!(!state.job_list_has_active() && !state.selected_job_is_active());
+
+    let mut runtime = Runtime::new(
+        state,
+        crate::app::view,
+        (1180.0, 780.0),
+        Env {
+            system_dark: true,
+            scale: 1.0,
+        },
+    );
+    let before = runtime.state.scoped_jobs.reads_begun();
+    runtime.update(|state, tx| {
+        crate::app::poll_jobs(state, 100.0, tx);
+    });
+    assert_ne!(
+        runtime.state.scoped_jobs.reads_begun(),
+        before,
+        "the list is re-read even though log recovery owns the active path"
+    );
+    assert_eq!(runtime.state.jobs_discovery_at, 105.0);
+    assert_eq!(
+        runtime.state.backend.selected_job.as_deref(),
+        Some("fixture-job-1"),
+        "discovery keeps the selection"
+    );
+
+    // Not due again before the interval ends.
+    let again = runtime.state.scoped_jobs.reads_begun();
+    runtime.update(|state, tx| {
+        crate::app::poll_jobs(state, 102.0, tx);
+    });
+    assert_eq!(runtime.state.scoped_jobs.reads_begun(), again);
+}

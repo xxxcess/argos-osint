@@ -1,5 +1,6 @@
 """Offline fixtures for the Fleetworks exact-revision scope planner."""
 
+import io
 import json
 import os
 import subprocess
@@ -7,15 +8,17 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+import fleetworks_verify
 from fleetworks_verify import ALL_IMAGES, ALL_SCOPES, BACKEND_IMAGES, RUST_IMAGES, component_plan, path_images, path_scopes, select_scopes
 
 PLANNER = Path(__file__).with_name("fleetworks_verify.py").resolve()
 
 
 class PathScopesTests(unittest.TestCase):
-    def test_explicit_native_is_mac_only_and_backend_excludes_web_and_clients(self):
-        self.assertEqual(component_plan("native", ALL_SCOPES, ALL_IMAGES), ({"desktop"}, set()))
+    def test_explicit_native_is_mac_and_local_backend_and_backend_excludes_web_and_clients(self):
+        self.assertEqual(component_plan("native", ALL_SCOPES, ALL_IMAGES), ({"desktop", "local_backend"}, set()))
         scopes, images = component_plan("backend", set(), set())
         self.assertFalse(scopes & {"desktop", "web", "web_dev"})
         self.assertEqual(images, set(BACKEND_IMAGES))
@@ -28,13 +31,16 @@ class PathScopesTests(unittest.TestCase):
             "docs/wiki/code/ci.md": set(),
             "docs/diagrams/stack.svg": set(),
             ".planning/example/task_plan.md": set(),
-            "apps/fleetworks-desktop/src/views/brain.rs": {"desktop"},
-            "apps/fleetworks-desktop/resources/Info.plist": {"desktop"},
+            "apps/fleetworks-desktop/src/views/brain.rs": {"desktop", "local_backend"},
+            "apps/fleetworks-desktop/resources/Info.plist": {"desktop", "local_backend"},
             "scripts/fleetworks_native_verify.py": {"desktop"},
             "scripts/test_fleetworks_native_verify.py": {"desktop"},
-            "scripts/fleetworks_candidate.py": {"desktop"},
-            "scripts/test_fleetworks_candidate.py": {"desktop"},
-            ".github/workflows/fleetworks-native.yml": {"desktop"},
+            "scripts/fleetworks_candidate.py": {"desktop", "local_backend"},
+            "scripts/test_fleetworks_candidate.py": {"desktop", "local_backend"},
+            "scripts/fleetworks_local_backend_smoke.py": {"local_backend"},
+            "scripts/test_fleetworks_local_backend_smoke.py": {"local_backend"},
+            ".github/workflows/fleetworks-native.yml": {"desktop", "local_backend"},
+            ".github/workflows/fleetworks-native-linux.yml": {"desktop", "local_backend"},
             "apps/web-desktop/server.mjs": {"web", "web_dev", "compose", "images"},
             "apps/web-desktop/app/page.tsx": {"web", "images"},
             "apps/web-desktop/app/api/v1/route.ts": {"web", "web_dev", "compose", "images"},
@@ -49,26 +55,26 @@ class PathScopesTests(unittest.TestCase):
             "deploy/compose.native-review.yml": {"server", "compose"},
             "deploy/start-search-index.sh": {"server", "compose", "images"},
             "deploy/compose.atlas.yml": {"server", "compose", "bert"},
-            "crates/argos-osint-core/src/storage/bootstrap.rs": {"server", "storage", "queue", "images"},
-            "services/api-host/src/main.rs": {"server", "storage", "queue", "images"},
-            "services/api-host/src/actor_seed.rs": {"server", "storage", "queue", "images"},
-            "services/api-host/src/atlas_worker.rs": {"server", "storage", "queue", "images"},
-            "services/search-index/src/schema.rs": {"server", "images"},
-            "services/search-index/src/query.rs": {"server", "images"},
-            "services/search-index/tests/index_contract.rs": {"server", "images"},
-            "crates/argos-osint-api/src/lib.rs": {"server", "queue", "images"},
-            "crates/fleetworks-jobs/src/queue.rs": {"server", "storage", "queue", "images"},
+            "crates/argos-osint-core/src/storage/bootstrap.rs": {"server", "storage", "queue", "local_backend", "images"},
+            "services/api-host/src/main.rs": {"server", "storage", "queue", "local_backend", "images"},
+            "services/api-host/src/actor_seed.rs": {"server", "storage", "queue", "local_backend", "images"},
+            "services/api-host/src/atlas_worker.rs": {"server", "storage", "queue", "local_backend", "images"},
+            "services/search-index/src/schema.rs": {"server", "local_backend", "images"},
+            "services/search-index/src/query.rs": {"server", "local_backend", "images"},
+            "services/search-index/tests/index_contract.rs": {"server", "local_backend", "images"},
+            "crates/argos-osint-api/src/lib.rs": {"server", "queue", "local_backend", "images"},
+            "crates/fleetworks-jobs/src/queue.rs": {"server", "storage", "queue", "local_backend", "images"},
             "scripts/fleetworks_atlas_smoke.py": {"server", "queue"},
-            "services/api-host/src/classifier_service.rs": {"server", "queue", "bert", "images"},
-            "crates/argos-osint-core/src/classifier/model.rs": {"server", "queue", "bert", "images"},
+            "services/api-host/src/classifier_service.rs": {"server", "queue", "bert", "local_backend", "images"},
+            "crates/argos-osint-core/src/classifier/model.rs": {"server", "queue", "bert", "local_backend", "images"},
             "tools/atlas-bert/src/main.rs": {"bert"},
             "scripts/fixtures/atlas_bert": {"bert", "server", "queue", "web", "web_dev"},
             ".github/workflows/atlas-bert.yml": {"bert"},
-            "Cargo.lock": {"desktop", "server", "storage", "compose", "queue", "images"},
+            "Cargo.lock": {"desktop", "local_backend", "server", "storage", "compose", "queue", "images"},
             "pnpm-lock.yaml": {"web", "web_dev", "compose", "images"},
-            "crates/fleetworks-contracts/src/lib.rs": {"desktop", "server", "storage", "compose", "queue", "images"},
-            "crates/fleetworks-workstation/src/native/mod.rs": {"desktop"},
-            "crates/fleetworks-workspace/src/native/mod.rs": {"desktop"},
+            "crates/fleetworks-contracts/src/lib.rs": {"desktop", "local_backend", "server", "storage", "compose", "queue", "images"},
+            "crates/fleetworks-workstation/src/native/mod.rs": {"desktop", "local_backend"},
+            "crates/fleetworks-workspace/src/native/mod.rs": {"desktop", "local_backend"},
             "packages/api-client/src/index.ts": {"web", "images"},
             "scripts/surrealdb-release.json": {"server", "storage", "queue"},
             ".github/workflows/fleetworks.yml": set(ALL_SCOPES),
@@ -185,7 +191,7 @@ class GitScopeTests(unittest.TestCase):
         self.git("add", str(uncommitted))
         self.assert_scopes(
             self.plan(self.start, head=head),
-            {"server", "queue", "compose", "images"},
+            {"server", "queue", "local_backend", "compose", "images"},
             images={"runtime"},
         )
 
@@ -194,14 +200,14 @@ class GitScopeTests(unittest.TestCase):
         self.git("checkout", "-qb", "review", self.start)
         head = self.commit("docs/review.md")
         self.assert_scopes(self.plan(base, event="pull_request", head=head), set())
-        self.assert_scopes(self.plan(base, event="push", head=head), {"server", "queue", "images"}, images={"runtime"})
+        self.assert_scopes(self.plan(base, event="push", head=head), {"server", "queue", "local_backend", "images"}, images={"runtime"})
 
     def test_rename_selects_both_paths(self):
         base = self.commit("services/api-host/jobs.rs")
         (self.repo / "deploy").mkdir()
         self.git("mv", "services/api-host/jobs.rs", "deploy/jobs.rs")
         self.git("commit", "-qm", "rename fixture")
-        self.assert_scopes(self.plan(base), {"server", "queue", "compose", "images"}, images={"runtime"})
+        self.assert_scopes(self.plan(base), {"server", "queue", "local_backend", "compose", "images"}, images={"runtime"})
 
     def test_unavailable_comparison_selects_all_scopes(self):
         for base in ("", "0" * 40, "1" * 40, "HEAD^"):
@@ -231,7 +237,7 @@ class GitScopeTests(unittest.TestCase):
 
     def test_search_schema_selects_its_image_without_native_or_web_actions(self):
         head = self.commit("services/search-index/src/schema.rs", "services/search-index/tests/index_contract.rs")
-        self.assert_scopes(self.plan(self.start, head=head), {"server", "images"}, images={"search-index"})
+        self.assert_scopes(self.plan(self.start, head=head), {"server", "local_backend", "images"}, images={"search-index"})
 
     def test_local_selection_adds_worktree_changes(self):
         file = self.repo / "apps/fleetworks-desktop/src/jobs.rs"
@@ -241,7 +247,7 @@ class GitScopeTests(unittest.TestCase):
         try:
             os.chdir(self.repo)
             self.assertEqual(select_scopes("push", self.start, self.start), (set(), None))
-            self.assertEqual(select_scopes("push", self.start, self.start, worktree=True), ({"desktop"}, None))
+            self.assertEqual(select_scopes("push", self.start, self.start, worktree=True), ({"desktop", "local_backend"}, None))
         finally:
             os.chdir(current)
 
@@ -282,6 +288,24 @@ class GitScopeTests(unittest.TestCase):
         self.assertNotEqual(run.returncode, 0)
         self.assertIn("Checkout does not match the requested head", run.stderr)
         self.assertFalse(self.output.exists())
+
+    def test_run_local_schedules_desktop_checks_on_linux_x86_64_but_not_aarch64(self):
+        ran = []
+        with mock.patch("fleetworks_verify.platform.system", return_value="Linux"), \
+             mock.patch("fleetworks_verify.platform.machine", return_value="x86_64"), \
+             mock.patch("fleetworks_verify.run", side_effect=lambda cmd, **_kw: ran.append(cmd) or 0), \
+             mock.patch("sys.stdout", io.StringIO()):
+            self.assertEqual(fleetworks_verify.run_local({"desktop"}), 0)
+        self.assertTrue(any("agent_cargo.py" in " ".join(cmd) for cmd in ran))
+
+        ran.clear()
+        with mock.patch("fleetworks_verify.platform.system", return_value="Linux"), \
+             mock.patch("fleetworks_verify.platform.machine", return_value="aarch64"), \
+             mock.patch("fleetworks_verify.run", side_effect=lambda cmd, **_kw: ran.append(cmd) or 0), \
+             mock.patch("sys.stdout", io.StringIO()) as out:
+            self.assertEqual(fleetworks_verify.run_local({"desktop"}), 0)
+        self.assertFalse(any("agent_cargo.py" in " ".join(cmd) for cmd in ran))
+        self.assertIn("macOS and Linux x86_64", out.getvalue())
 
 
 if __name__ == "__main__":

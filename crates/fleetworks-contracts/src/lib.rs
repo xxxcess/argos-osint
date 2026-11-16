@@ -9,6 +9,7 @@ pub mod connect;
 pub mod context;
 pub mod cycle_history;
 pub mod dataset_upload;
+pub mod ipc;
 pub mod operational_logs;
 pub mod pairing;
 pub mod readiness;
@@ -20,6 +21,17 @@ pub use client::ConfigurationTransferReceipt;
 pub use client::DatasetUpload;
 pub use client::LogExportPage;
 pub use client::PairingClient;
+pub use ipc::IpcEnvelope;
+pub use ipc::IpcError;
+pub use ipc::IpcEvent;
+pub use ipc::IpcHello;
+pub use ipc::IpcHelloAck;
+pub use ipc::IpcOperation;
+pub use ipc::IpcOutcome;
+pub use ipc::IpcPayload;
+pub use ipc::LocalIpcClient;
+pub use ipc::LocalIpcTransport;
+pub use ipc::ShutdownAck;
 
 use serde::{Deserialize, Serialize};
 

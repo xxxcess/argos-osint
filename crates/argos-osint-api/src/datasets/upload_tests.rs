@@ -170,12 +170,12 @@ async fn issued_upload_urls_stream_exact_bytes_once_and_preserve_registration_fe
     );
     let registration = &registrations[0];
     let store = DatasetStore::open(root.join("uploads")).expect("staging store");
-    let state = ApiState {
-        repo: repo.clone(),
-        instance_id: "upload-fixture".into(),
-        port: 8080,
-        origins: Arc::new(Vec::new()),
-    };
+    let state = ApiState::new(
+        repo.clone(),
+        "upload-fixture".into(),
+        8080,
+        Arc::new(Vec::new()),
+    );
     let services = || {
         PrivateServices::new(None, None, None, None).with_workstation(
             crate::workstation::ReadinessOwners::new(deployment.deployment_id.clone(), Vec::new())

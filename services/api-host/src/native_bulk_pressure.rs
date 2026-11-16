@@ -438,7 +438,29 @@ fn resident_bytes() -> Option<u64> {
             .checked_mul(page_size as u64)
             .filter(|value| *value > 0)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        let mut info = std::mem::MaybeUninit::<libc::mach_task_basic_info_data_t>::uninit();
+        let mut count: libc::mach_msg_type_number_t = libc::MACH_TASK_BASIC_INFO_COUNT;
+        // `mach_task_self()` yields the current task port; `task_info` initializes `info`
+        // and writes `count` only when it returns `KERN_SUCCESS`.
+        #[allow(deprecated)]
+        let status = unsafe {
+            libc::task_info(
+                libc::mach_task_self(),
+                libc::MACH_TASK_BASIC_INFO as libc::task_flavor_t,
+                info.as_mut_ptr().cast::<libc::integer_t>(),
+                &mut count,
+            )
+        };
+        if status != libc::KERN_SUCCESS || count < libc::MACH_TASK_BASIC_INFO_COUNT {
+            return None;
+        }
+        let info = unsafe { info.assume_init() };
+        let resident: u64 = info.resident_size;
+        (resident > 0).then_some(resident)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     None
 }
 
@@ -706,5 +728,97 @@ mod tests {
             .expect("bounded pressure cancellation")
             .expect("joined bulk task")
             .is_err());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn resident_bytes_reports_positive_process_rss() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rss = resident_bytes().expect("resident bytes reported on host OS");
+        assert!(rss > 0);
+        let measured = measure(dir.path());
+        assert!(measured.resident_bytes.is_some_and(|value| value > 0));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn combined_backend_rss_budget_coordinates_search_meter_and_bulk_admission() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let live = measure(dir.path());
+        let rss = live.resident_bytes.expect("process RSS available");
+        assert!(rss > 0);
+
+        let headroom_limits = ActorIndexLimits {
+            writer_memory_bytes: 32 * 1024 * 1024,
+            memory_resume_bytes: rss.saturating_add(64 * 1024 * 1024),
+            memory_pause_bytes: rss.saturating_add(128 * 1024 * 1024),
+            ..ActorIndexLimits::default()
+        };
+        headroom_limits
+            .validate()
+            .expect("combined headroom limits valid");
+        let meter = fleetworks_search_index::pressure::Meter::new(
+            dir.path().to_path_buf(),
+            headroom_limits.clone(),
+        )
+        .expect("search pressure meter");
+        let snapshot = meter.snapshot().expect("search meter snapshot");
+        assert!(snapshot.resident_bytes.is_some_and(|value| value > 0));
+
+        let now = Instant::now();
+        let mut admission = Admission::default();
+        if live
+            .workspace_free_bytes
+            .is_some_and(|free| free > headroom_limits.disk_resume_free_bytes)
+        {
+            assert!(
+                !snapshot.paused,
+                "combined budget has RSS and disk headroom"
+            );
+            assert!(meter.admit_write().is_ok());
+            let Decision::Ready(budget) = admission
+                .observe(&headroom_limits, live, now)
+                .expect("bulk admission decision")
+            else {
+                panic!("expected bulk admission Ready under generous combined RSS budget");
+            };
+            assert!(budget.retained_bytes <= 32 * 1024 * 1024);
+        }
+
+        // Combined in-process memory spike hits the shared pause ceiling before bulk or search proceed.
+        assert!(matches!(
+            admission
+                .observe(
+                    &headroom_limits,
+                    Measurement {
+                        resident_bytes: Some(headroom_limits.memory_pause_bytes),
+                        workspace_free_bytes: Some(headroom_limits.disk_resume_free_bytes + 1),
+                    },
+                    now + Duration::from_secs(1),
+                )
+                .expect("pause decision"),
+            Decision::Wait {
+                reason: "worker_memory_pressure",
+                ..
+            }
+        ));
+
+        if rss > 32 * 1024 * 1024 + 4096 {
+            let tight_limits = ActorIndexLimits {
+                writer_memory_bytes: 32 * 1024 * 1024,
+                memory_resume_bytes: 32 * 1024 * 1024,
+                memory_pause_bytes: rss - 1024,
+                ..ActorIndexLimits::default()
+            };
+            tight_limits.validate().expect("tight RSS limits valid");
+            let tight_meter = fleetworks_search_index::pressure::Meter::new(
+                dir.path().to_path_buf(),
+                tight_limits,
+            )
+            .expect("tight search pressure meter");
+            let tight_snapshot = tight_meter.snapshot().expect("tight meter snapshot");
+            assert!(tight_snapshot.paused);
+            assert!(tight_meter.admit_write().is_err());
+        }
     }
 }

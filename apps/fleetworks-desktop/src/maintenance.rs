@@ -6,10 +6,12 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
+use fleetworks_contracts::context::JobRequestAssociation;
 use fleetworks_contracts::context::MutationContext;
 use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::context::RegisteredContext;
 use fleetworks_contracts::context::ResourceScope;
+use fleetworks_contracts::context::WorkstationRequestDetailQuery;
 use fleetworks_contracts::readiness::DatasetKind;
 use fleetworks_contracts::readiness::DatasetRef;
 use fleetworks_contracts::readiness::MaintenanceOperation;
@@ -18,12 +20,18 @@ use fleetworks_contracts::readiness::MaintenanceRequest;
 use fleetworks_contracts::readiness::ReadinessActionId;
 use fleetworks_contracts::readiness::ReadinessCheckId;
 use fleetworks_contracts::readiness::ReadinessState;
+use fleetworks_contracts::readiness::ACTOR_REINDEX_OPERATION;
 use fleetworks_contracts::readiness::ACTOR_SEED_PATH;
 use fleetworks_contracts::readiness::CLASSIFIER_TRAIN_PATH;
 use fleetworks_contracts::search::ACTOR_REINDEX_PATH;
 use fleetworks_contracts::Client;
+use fleetworks_contracts::ClientError;
 use fleetworks_contracts::DatasetUpload;
+use fleetworks_workstation::native::AcceptedActorReindex;
+use fleetworks_workstation::native::NativeContainer;
+use fleetworks_workstation::native::PendingActorReindex;
 use rune::FileDialogOptions;
+use rune::TextEdit;
 use rune::Tx;
 use serde::Deserialize;
 use sha2::Digest;
@@ -57,7 +65,17 @@ pub struct MaintenanceConfirmation {
     pub dataset: Option<DatasetRef>,
 }
 
+/// Typed-path fallback for desktops where the file chooser cannot open (for example Linux
+/// without a chooser service). The path names a file on this computer only. It is read here,
+/// validated and uploaded by the same code as a picked file, and is never sent to the backend.
+pub struct CsvPathPrompt {
+    pub kind: DatasetKind,
+    pub input: TextEdit,
+    pub error: Option<String>,
+}
+
 pub struct Maintenance {
+    pub csv_path_prompt: Option<CsvPathPrompt>,
     pub local_dataset: Option<LocalDataset>,
     pub datasets: Load<DatasetList>,
     pub upload: Load<DatasetUpload>,
@@ -68,17 +86,23 @@ pub struct Maintenance {
     pub(crate) pending_preview: Option<MaintenanceOperation>,
     pub(crate) seed_accepted_at: Option<String>,
     pub(crate) last_request: Option<MaintenanceRequest>,
+    pub(crate) pending_reindex: Option<PendingActorReindex>,
+    pub(crate) reindex_association: Option<JobRequestAssociation>,
+    pub(crate) reindex_details_open: bool,
     pub(crate) upload_revision: u64,
     pub(crate) datasets_revision: u64,
     pub(crate) operation_revision: u64,
     pub(crate) upload_request: Option<RequestTask>,
     pub(crate) datasets_request: Option<RequestTask>,
     pub(crate) operation_request: Option<RequestTask>,
+    pub(crate) reindex_journal_request: Option<RequestTask>,
+    pub(crate) reindex_reconcile_request: Option<RequestTask>,
 }
 
 impl Default for Maintenance {
     fn default() -> Self {
         Self {
+            csv_path_prompt: None,
             local_dataset: None,
             datasets: Load::Idle,
             upload: Load::Idle,
@@ -89,12 +113,17 @@ impl Default for Maintenance {
             pending_preview: None,
             seed_accepted_at: None,
             last_request: None,
+            pending_reindex: None,
+            reindex_association: None,
+            reindex_details_open: false,
             upload_revision: 0,
             datasets_revision: 0,
             operation_revision: 0,
             upload_request: None,
             datasets_request: None,
             operation_request: None,
+            reindex_journal_request: None,
+            reindex_reconcile_request: None,
         }
     }
 }
@@ -104,13 +133,20 @@ impl Maintenance {
         self.upload_request.is_some()
             || self.datasets_request.is_some()
             || self.operation_request.is_some()
+            || self.reindex_reconcile_request.is_some()
     }
     pub(crate) fn invalidate_origin(&mut self) {
+        self.csv_path_prompt = None;
         self.pending_preview = None;
         self.seed_accepted_at = None;
         self.confirmation = None;
         self.last_request = None;
+        self.pending_reindex = None;
+        self.reindex_association = None;
+        self.reindex_details_open = false;
         self.operation_request = None;
+        self.reindex_journal_request = None;
+        self.reindex_reconcile_request = None;
         self.operation_revision = self.operation_revision.wrapping_add(1);
         self.receipt = Load::Idle;
     }
@@ -118,6 +154,8 @@ impl Maintenance {
         self.upload_request = None;
         self.datasets_request = None;
         self.operation_request = None;
+        self.reindex_journal_request = None;
+        self.reindex_reconcile_request = None;
     }
 }
 
@@ -153,13 +191,52 @@ impl State {
                         state.upload_selected_dataset();
                     }
                     Ok(None) => {}
-                    Err(_) => {
-                        state.maintenance.message =
-                            Some("The dataset chooser could not open a file".into())
-                    }
+                    Err(_) => state.open_csv_path_prompt(kind),
                 }
             },
         );
+    }
+
+    /// The chooser is unavailable: let the operator type the path of a local CSV instead.
+    pub(crate) fn open_csv_path_prompt(&mut self, kind: DatasetKind) {
+        self.maintenance.message = Some(
+            "The dataset chooser could not open a file. Enter the path of a local CSV instead."
+                .into(),
+        );
+        self.maintenance.csv_path_prompt = Some(CsvPathPrompt {
+            kind,
+            input: TextEdit::new(String::new()),
+            error: None,
+        });
+    }
+
+    pub fn cancel_csv_path_prompt(&mut self) {
+        self.maintenance.csv_path_prompt = None;
+    }
+
+    /// Reuses the picker's selection, validation, upload and confirmation flow for a typed path.
+    pub fn submit_csv_path(&mut self) {
+        let Some(prompt) = &mut self.maintenance.csv_path_prompt else {
+            return;
+        };
+        let kind = prompt.kind;
+        let operation = match kind {
+            DatasetKind::ActorCatalog => MaintenanceOperation::SeedActors,
+            DatasetKind::ClassifierTraining => MaintenanceOperation::TrainClassifier,
+            _ => return,
+        };
+        match parse_local_csv_path(&prompt.input.text, std::env::var_os("HOME").as_deref()) {
+            Ok(path) => {
+                if let Some(reason) = self.maintenance_disabled_reason(operation) {
+                    self.maintenance.message = Some(reason);
+                    return;
+                }
+                self.maintenance.csv_path_prompt = None;
+                self.select_local_dataset(path, kind);
+                self.upload_selected_dataset();
+            }
+            Err(error) => prompt.error = Some(error),
+        }
     }
 
     pub fn select_local_dataset(&mut self, path: PathBuf, kind: DatasetKind) {
@@ -248,6 +325,22 @@ impl State {
     }
 
     pub fn maintenance_disabled_reason(&self, operation: MaintenanceOperation) -> Option<String> {
+        if operation == MaintenanceOperation::TrainClassifier
+            && self.is_local_backend()
+            && self
+                .connection
+                .capabilities
+                .as_ref()
+                .is_some_and(|capabilities| {
+                    !crate::local_backend::assess_local_capabilities(capabilities)
+                        .classifier_available
+                })
+        {
+            return Some(
+                "Local companion backend was built without the optional classifier capability."
+                    .into(),
+            );
+        }
         if !self.permission(Permission::MaintainBackend) {
             return Some("Backend maintenance permission required".into());
         }
@@ -287,6 +380,12 @@ impl State {
                     );
                 }
                 if operation == MaintenanceOperation::ReindexActors {
+                    if self.maintenance.pending_reindex.is_some() {
+                        return Some(
+                            "An unresolved actor index request exists; check request status or clear stale attempt"
+                                .into(),
+                        );
+                    }
                     let catalog_ready = readiness.checks.iter().any(|check| {
                         check.id == ReadinessCheckId::ActorCatalog
                             && check.state == ReadinessState::Ready
@@ -309,7 +408,9 @@ impl State {
                 if matches!(self.maintenance.upload, Load::Loading) {
                     return Some("Validating and uploading the selected CSV…".into());
                 }
-                if matches!(self.maintenance.receipt, Load::Loading) {
+                if self.maintenance.operation_request.is_some()
+                    || matches!(self.maintenance.receipt, Load::Loading)
+                {
                     return Some("A maintenance request is awaiting its acceptance receipt".into());
                 }
                 return None;
@@ -397,13 +498,29 @@ impl State {
             configuration_revision,
             dataset,
         });
+        if self.page == crate::app::Page::Workstation
+            && operation == MaintenanceOperation::ReindexActors
+        {
+            self.confirm_maintenance_dialog = true;
+        }
         self.reveal_control("maintenance-confirmation");
     }
 
+    pub fn cancel_maintenance_confirmation(&mut self) {
+        self.maintenance.confirmation = None;
+        self.confirm_maintenance_dialog = false;
+    }
+
     pub fn confirm_maintenance(&mut self) {
+        if self.maintenance.operation_request.is_some()
+            || matches!(self.maintenance.receipt, Load::Loading)
+        {
+            return;
+        }
         let Some(confirmation) = self.maintenance.confirmation.take() else {
             return;
         };
+        self.confirm_maintenance_dialog = false;
         if confirmation.origin_revision != self.origin_revision
             || self.registration.context.as_ref() != Some(&confirmation.context)
             || self.configuration_revision() != Some(confirmation.configuration_revision)
@@ -423,6 +540,14 @@ impl State {
             self.maintenance.message = Some(reason);
             return;
         }
+        self.submit_maintenance(confirmation, None);
+    }
+
+    fn submit_maintenance(
+        &mut self,
+        confirmation: MaintenanceConfirmation,
+        replay: Option<MaintenanceRequest>,
+    ) {
         self.record(Intent::Maintenance {
             operation: confirmation.operation,
         });
@@ -432,6 +557,15 @@ impl State {
         let (Some(services), Some(client)) = (&self.services, &self.client) else {
             return;
         };
+        if confirmation.operation == MaintenanceOperation::ReindexActors
+            && self.workspaces.container.is_none()
+        {
+            self.maintenance.message = Some(
+                "Protected workstation storage is unavailable; cannot persist actor index attempt"
+                    .into(),
+            );
+            return;
+        }
         let client = match client.with_registered_context(&confirmation.context) {
             Ok(client) => client,
             Err(error) => {
@@ -439,15 +573,327 @@ impl State {
                 return;
             }
         };
+        self.maintenance.message = None;
+        self.maintenance.reindex_association = None;
         self.maintenance.receipt = Load::Loading;
         self.maintenance.operation_revision = self.maintenance.operation_revision.wrapping_add(1);
         self.maintenance.operation_request = services.maintenance(
             client,
+            self.workspaces.container.clone(),
+            self.connection.origin.text.clone(),
             confirmation,
             self.maintenance.last_request.clone(),
+            replay,
             self.connection.epoch,
             self.maintenance.operation_revision,
         );
+    }
+
+    pub(crate) fn restore_actor_reindex(&mut self) {
+        if self.fixture
+            || self.maintenance.pending_reindex.is_some()
+            || self.maintenance.reindex_association.is_some()
+            || self.maintenance.reindex_journal_request.is_some()
+        {
+            return;
+        }
+        let (Some(services), Some(container), Some(_context)) = (
+            &self.services,
+            self.workspaces.container.clone(),
+            self.registration.context.clone(),
+        ) else {
+            return;
+        };
+        let Some(ui) = services.ui.get().cloned() else {
+            return;
+        };
+        let origin = self.connection.origin.text.clone();
+        let epoch = self.connection.epoch;
+        let origin_revision = self.origin_revision;
+        let revision = self.maintenance.operation_revision;
+        let task = services.runtime.spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                let pending = container.pending_actor_reindex(&origin)?;
+                let accepted = container.accepted_actor_reindex(&origin)?;
+                Ok::<_, anyhow::Error>((pending, accepted))
+            })
+            .await;
+            ui.update(move |state, _| {
+                if state.connection.epoch != epoch
+                    || state.origin_revision != origin_revision
+                    || state.maintenance.operation_revision != revision
+                {
+                    return;
+                }
+                state.maintenance.reindex_journal_request = None;
+                match result {
+                    Ok(Ok((pending, accepted))) => {
+                        state.apply_restored_actor_reindex_journal(pending, accepted);
+                    }
+                    _ => {
+                        state.maintenance.message = Some(
+                            "Could not read protected actor index journal; resolve storage before building the index"
+                                .into(),
+                        );
+                    }
+                }
+            });
+        });
+        self.maintenance.reindex_journal_request = Some(RequestTask(task.abort_handle()));
+    }
+
+    pub(crate) fn apply_restored_actor_reindex_journal(
+        &mut self,
+        pending: Option<PendingActorReindex>,
+        accepted: Option<AcceptedActorReindex>,
+    ) {
+        if let Some(pending) = pending {
+            self.recover_pending_actor_reindex(pending);
+        } else if let Some(accepted) = accepted {
+            self.recover_accepted_actor_reindex(accepted);
+        }
+    }
+
+    pub(crate) fn recover_accepted_actor_reindex(&mut self, accepted: AcceptedActorReindex) {
+        if self.registration.context.as_ref() != Some(&accepted.context) {
+            return;
+        }
+        self.maintenance.pending_reindex = None;
+        self.maintenance.reindex_association = Some(accepted.association.clone());
+        self.maintenance.message = Some(format!(
+            "Recovered accepted job {} for actor index request {}",
+            accepted.association.job_id, accepted.request.request_id
+        ));
+        self.refresh_readiness();
+    }
+
+    pub(crate) fn recover_pending_actor_reindex(&mut self, pending: PendingActorReindex) {
+        if let Some(job_id) = pending.accepted_job_id.clone() {
+            if self.registration.context.as_ref() != Some(&pending.context) {
+                return;
+            }
+            let recovered_origin = fleetworks_contracts::context::JobOrigin::new(
+                &pending.context,
+                fleetworks_contracts::context::OriginSource::Native,
+                pending.request.request_id.clone(),
+                String::new(),
+                pending
+                    .request
+                    .context
+                    .expected_configuration_revision
+                    .unwrap_or_default(),
+                Vec::new(),
+            );
+            let origin = pending.origin;
+            let context = pending.context;
+            let request = pending.request;
+            let association =
+                JobRequestAssociation::new(job_id.clone(), recovered_origin, String::new());
+            self.maintenance.pending_reindex = None;
+            self.maintenance.reindex_association = Some(association.clone());
+            self.maintenance.message = Some(format!(
+                "Recovered accepted job {job_id} for actor index request {}",
+                request.request_id
+            ));
+            self.refresh_readiness();
+            if !self.fixture {
+                if let (Some(services), Some(container)) =
+                    (&self.services, self.workspaces.container.clone())
+                {
+                    services.runtime.spawn(async move {
+                        let _ = tokio::task::spawn_blocking(move || {
+                            container.record_accepted_actor_reindex_association(
+                                &origin,
+                                &context,
+                                &request,
+                                &association,
+                            )
+                        })
+                        .await;
+                    });
+                }
+            }
+            return;
+        }
+        let context_matches = self.registration.context.as_ref() == Some(&pending.context);
+        self.maintenance.pending_reindex = Some(pending);
+        if context_matches {
+            self.reconcile_actor_reindex();
+        }
+    }
+
+    pub(crate) fn pending_actor_reindex_matches_current(&self) -> bool {
+        let Some(pending) = &self.maintenance.pending_reindex else {
+            return false;
+        };
+        let Ok(current_origin) =
+            fleetworks_workstation::native::canonical_target_origin(&self.connection.origin.text)
+        else {
+            return false;
+        };
+        pending.origin == current_origin
+            && self.registration.context.as_ref() == Some(&pending.context)
+            && self.configuration_revision()
+                == pending.request.context.expected_configuration_revision
+    }
+
+    pub fn reconcile_actor_reindex(&mut self) {
+        if self.fixture || self.maintenance.reindex_reconcile_request.is_some() {
+            return;
+        }
+        let Some(pending) = self.maintenance.pending_reindex.clone() else {
+            return;
+        };
+        let (Some(services), Some(client), Some(context)) = (
+            &self.services,
+            &self.client,
+            self.registration.context.clone(),
+        ) else {
+            return;
+        };
+        let Ok(client) = client.with_registered_context(&context) else {
+            return;
+        };
+        let Some(ui) = services.ui.get().cloned() else {
+            return;
+        };
+        let query = WorkstationRequestDetailQuery::new(
+            pending.request.request_id.clone(),
+            ACTOR_REINDEX_OPERATION.to_owned(),
+            Some(pending.context.registration_id.clone()),
+        );
+        if query.validate().is_err() {
+            self.maintenance.message = Some(
+                "Persisted actor index request ID is malformed; clear the stale attempt".into(),
+            );
+            return;
+        }
+        let container = self.workspaces.container.clone();
+        let origin = self.connection.origin.text.clone();
+        let epoch = self.connection.epoch;
+        let origin_revision = self.origin_revision;
+        let revision = self.maintenance.operation_revision;
+        let task = services.runtime.spawn(async move {
+            let outcome = client.request_detail(&query).await;
+            let cleared = if let Ok(association) = &outcome {
+                if valid_reindex_association(&pending, association) {
+                    if let Some(container) = container {
+                        let origin = origin.clone();
+                        let context = pending.context.clone();
+                        let request = pending.request.clone();
+                        let association = association.clone();
+                        tokio::task::spawn_blocking(move || {
+                            container.record_accepted_actor_reindex_association(
+                                &origin,
+                                &context,
+                                &request,
+                                &association,
+                            )
+                        })
+                        .await
+                        .ok()
+                        .and_then(|result| result.ok())
+                        .is_some()
+                    } else {
+                        true
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            ui.update(move |state, _| {
+                if state.connection.epoch != epoch
+                    || state.origin_revision != origin_revision
+                    || state.maintenance.operation_revision != revision
+                {
+                    return;
+                }
+                state.maintenance.reindex_reconcile_request = None;
+                match outcome {
+                    Ok(association) if cleared => {
+                        state.maintenance.pending_reindex = None;
+                        state.maintenance.reindex_association = Some(association.clone());
+                        state.maintenance.message = Some(format!(
+                            "Recovered accepted job {} for actor index request {}",
+                            association.job_id, association.origin.request_id
+                        ));
+                        state.refresh_readiness();
+                    }
+                    Ok(_) => {
+                        state.maintenance.message = Some(
+                            "Gateway returned a mismatched request-detail record".into(),
+                        );
+                    }
+                    Err(ClientError::Status(404)) => {
+                        state.maintenance.message = Some(
+                            "Previous actor index request is not recorded on this gateway. Retry the exact request if current, or clear this stale attempt."
+                                .into(),
+                        );
+                    }
+                    Err(error) => {
+                        state.maintenance.message = Some(format!(
+                            "Could not confirm previous actor index request ({error}). Retry checking or clear the stale attempt."
+                        ));
+                    }
+                }
+            });
+        });
+        self.maintenance.reindex_reconcile_request = Some(RequestTask(task.abort_handle()));
+    }
+
+    pub fn retry_pending_actor_reindex(&mut self) {
+        if self.maintenance.busy() || matches!(self.maintenance.receipt, Load::Loading) {
+            return;
+        }
+        let Some(pending) = self.maintenance.pending_reindex.clone() else {
+            return;
+        };
+        if !self.pending_actor_reindex_matches_current() {
+            self.maintenance.message = Some(
+                "Unresolved attempt came from an earlier registration or configuration; check request status or clear the stale attempt"
+                    .into(),
+            );
+            return;
+        }
+        let Some(config_rev) = pending.request.context.expected_configuration_revision else {
+            return;
+        };
+        let confirmation = MaintenanceConfirmation {
+            operation: MaintenanceOperation::ReindexActors,
+            context: pending.context.clone(),
+            origin_revision: self.origin_revision,
+            configuration_revision: config_rev,
+            dataset: None,
+        };
+        self.submit_maintenance(confirmation, Some(pending.request));
+    }
+
+    pub fn clear_pending_actor_reindex(&mut self) {
+        let Some(pending) = self.maintenance.pending_reindex.take() else {
+            return;
+        };
+        self.maintenance.reindex_association = None;
+        self.maintenance.message = None;
+        if let Load::Failed(_) = self.maintenance.receipt {
+            self.maintenance.receipt = Load::Idle;
+        }
+        if self.fixture {
+            return;
+        }
+        if let (Some(services), Some(container)) =
+            (&self.services, self.workspaces.container.clone())
+        {
+            let origin = pending.origin;
+            let request_id = pending.request.request_id;
+            services.runtime.spawn(async move {
+                let _ = tokio::task::spawn_blocking(move || {
+                    container.clear_stale_actor_reindex(&origin, &request_id)
+                })
+                .await;
+            });
+        }
     }
 }
 
@@ -512,89 +958,31 @@ impl GatewayEffects {
         Some(RequestTask(task.abort_handle()))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn maintenance(
         &self,
         client: Client,
+        container: Option<Arc<NativeContainer>>,
+        origin: String,
         confirmation: MaintenanceConfirmation,
         previous: Option<MaintenanceRequest>,
+        replay: Option<MaintenanceRequest>,
         epoch: u64,
         revision: u64,
     ) -> Option<RequestTask> {
         let ui = self.ui.get()?.clone();
         let task = self.runtime.spawn(async move {
             let origin_revision = confirmation.origin_revision;
-            let prepared = tokio::task::spawn_blocking({
-                let confirmation = confirmation.clone();
-                move || {
-                    let context = MutationContext::new(&confirmation.context)
-                        .with_configuration_revision(confirmation.configuration_revision);
-                    if let Some(previous) = previous {
-                        if previous.context == context
-                            && previous.dataset == confirmation.dataset
-                            && previous.validate(confirmation.operation).is_ok()
-                        {
-                            return Ok(previous);
-                        }
-                    }
-                    let id = platform::request_id().map_err(|error| error.to_string())?;
-                    match confirmation.operation {
-                        MaintenanceOperation::SeedActors => MaintenanceRequest::for_seed(
-                            id,
-                            context,
-                            confirmation
-                                .dataset
-                                .ok_or_else(|| "Actor catalog dataset required".to_owned())?,
-                        )
-                        .map_err(|error| error.to_string()),
-                        MaintenanceOperation::TrainClassifier => MaintenanceRequest::for_training(
-                            id,
-                            context,
-                            confirmation
-                                .dataset
-                                .ok_or_else(|| "Training dataset required".to_owned())?,
-                        )
-                        .map_err(|error| error.to_string()),
-                        MaintenanceOperation::ReindexActors => {
-                            MaintenanceRequest::for_reindex(id, context)
-                                .map_err(|error| error.to_string())
-                        }
-                        _ => Err("Unsupported maintenance operation".into()),
-                    }
-                }
-            })
-            .await
-            .map_err(|_| "Maintenance request worker stopped".to_owned())
-            .and_then(|result| result);
-            let saved_request = prepared.as_ref().ok().cloned();
-            let result = async {
-                let request = prepared?;
-                let route = match confirmation.operation {
-                    MaintenanceOperation::SeedActors => ACTOR_SEED_PATH,
-                    MaintenanceOperation::TrainClassifier => CLASSIFIER_TRAIN_PATH,
-                    MaintenanceOperation::ReindexActors => ACTOR_REINDEX_PATH,
-                    _ => return Err("Unsupported maintenance operation".to_owned()),
-                };
-                let receipt: MaintenanceReceipt = client
-                    .post(route, &request)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                if receipt.job_id.is_empty()
-                    || receipt.operation != confirmation.operation
-                    || receipt.resource_scope != ResourceScope::Backend
-                    || receipt.dataset != request.dataset
-                    || receipt.origin.request_id != request.request_id
-                    || receipt.origin.registration_id != confirmation.context.registration_id
-                    || receipt.origin.workspace_id.is_some()
-                    || receipt.origin.workstation_id != confirmation.context.workstation_id
-                    || receipt.origin.deployment_id != confirmation.context.deployment_id
-                    || receipt.origin.configuration_revision != confirmation.configuration_revision
-                {
-                    return Err(
-                        "Gateway returned an acceptance receipt for a different request".into(),
-                    );
-                }
-                Ok(receipt)
-            }
+            let operation = confirmation.operation;
+            let origin_for_ui = origin.clone();
+            let result = admit_maintenance_request(
+                &client,
+                container.as_ref(),
+                &origin,
+                &confirmation,
+                previous,
+                replay,
+            )
             .await;
             ui.update(move |state, _| {
                 if state.connection.epoch != epoch
@@ -604,24 +992,443 @@ impl GatewayEffects {
                     return;
                 }
                 state.maintenance.operation_request = None;
-                state.maintenance.last_request = saved_request;
-                if let Ok(receipt) = &result {
-                    if receipt.operation == MaintenanceOperation::SeedActors {
-                        state.maintenance.seed_accepted_at =
-                            Some(receipt.origin.submitted_at.clone());
+                match result {
+                    Ok(admitted) => {
+                        state.apply_maintenance_outcome(operation, admitted, &origin_for_ui)
+                    }
+                    Err(error) => {
+                        state.maintenance.receipt = Load::Failed(error);
                     }
                 }
-                state.maintenance.receipt = match result {
-                    Ok(receipt) => {
-                        state.refresh_readiness();
-                        Load::Ready(receipt)
-                    }
-                    Err(error) => Load::Failed(error),
-                };
             });
         });
         Some(RequestTask(task.abort_handle()))
     }
+}
+
+impl State {
+    /// An accepted maintenance job must show up in Jobs without waiting for a UI selection.
+    /// This re-reads the current Jobs page under the same registration.
+    pub(crate) fn refresh_jobs_after_admission(&mut self) {
+        if self.fixture || self.services.is_none() || self.registration.context.is_none() {
+            return;
+        }
+        if self.scoped_jobs.busy() {
+            // The read in flight may predate the admission; let the next poll repeat it.
+            self.jobs_discovery_at = 0.0;
+        } else {
+            self.request_jobs(crate::jobs_query::JobsEvent::Poll);
+        }
+    }
+
+    pub(crate) fn apply_maintenance_outcome(
+        &mut self,
+        operation: MaintenanceOperation,
+        admitted: AdmittedMaintenance,
+        origin: &str,
+    ) {
+        self.maintenance.last_request = admitted.saved_request.clone();
+        if operation == MaintenanceOperation::ReindexActors {
+            self.maintenance.pending_reindex = admitted.pending_entry;
+        }
+        match admitted.outcome {
+            MaintenanceOutcome::Receipt(receipt) => {
+                if receipt.operation == MaintenanceOperation::SeedActors {
+                    self.maintenance.seed_accepted_at = Some(receipt.origin.submitted_at.clone());
+                }
+                let persisted_association =
+                    if receipt.operation == MaintenanceOperation::ReindexActors {
+                        self.maintenance.pending_reindex = None;
+                        let association = JobRequestAssociation::new(
+                            receipt.job_id.clone(),
+                            receipt.origin.clone(),
+                            String::new(),
+                        );
+                        self.maintenance.reindex_association = Some(association.clone());
+                        Some(association)
+                    } else {
+                        None
+                    };
+                self.maintenance.receipt = Load::Ready(receipt.clone());
+                self.refresh_readiness();
+                self.refresh_jobs_after_admission();
+                // Promote the pending guard into the bounded accepted-job record only after UI state holds the receipt.
+                if let (
+                    Some(association),
+                    false,
+                    Some(services),
+                    Some(container),
+                    Some(context),
+                    Some(request),
+                ) = (
+                    persisted_association,
+                    self.fixture,
+                    &self.services,
+                    self.workspaces.container.clone(),
+                    admitted.saved_context,
+                    admitted.saved_request,
+                ) {
+                    let origin = origin.to_owned();
+                    services.runtime.spawn(async move {
+                        let _ = tokio::task::spawn_blocking(move || {
+                            container.record_accepted_actor_reindex_association(
+                                &origin,
+                                &context,
+                                &request,
+                                &association,
+                            )
+                        })
+                        .await;
+                    });
+                }
+            }
+            MaintenanceOutcome::Reconciled(association) => {
+                self.maintenance.reindex_association = Some(association.clone());
+                self.maintenance.message = Some(format!(
+                    "Recovered accepted job {} for actor index request {}",
+                    association.job_id, association.origin.request_id
+                ));
+                self.maintenance.receipt = Load::Idle;
+                self.refresh_readiness();
+            }
+            MaintenanceOutcome::Failed(error) => {
+                self.maintenance.receipt = Load::Failed(error);
+            }
+        }
+    }
+}
+
+pub(crate) struct AdmittedMaintenance {
+    saved_request: Option<MaintenanceRequest>,
+    saved_context: Option<RegisteredContext>,
+    pending_entry: Option<PendingActorReindex>,
+    outcome: MaintenanceOutcome,
+}
+
+async fn admit_maintenance_request(
+    client: &Client,
+    container: Option<&Arc<NativeContainer>>,
+    origin: &str,
+    confirmation: &MaintenanceConfirmation,
+    previous: Option<MaintenanceRequest>,
+    replay: Option<MaintenanceRequest>,
+) -> Result<AdmittedMaintenance, String> {
+    let prepared = tokio::task::spawn_blocking({
+        let confirmation = confirmation.clone();
+        let container = container.cloned();
+        let origin = origin.to_owned();
+        move || {
+            prepare_maintenance_attempt(
+                &confirmation,
+                container.as_deref(),
+                &origin,
+                previous,
+                replay,
+            )
+        }
+    })
+    .await
+    .map_err(|_| "Maintenance request worker stopped".to_owned())
+    .and_then(|result| result);
+    let (saved_request, mut pending_entry, request, exact_retry) = match prepared {
+        Ok(prepared) => (
+            Some(prepared.request.clone()),
+            prepared.pending,
+            prepared.request,
+            prepared.exact_retry,
+        ),
+        Err(error) => return Err(error),
+    };
+    let route = match confirmation.operation {
+        MaintenanceOperation::SeedActors => ACTOR_SEED_PATH,
+        MaintenanceOperation::TrainClassifier => CLASSIFIER_TRAIN_PATH,
+        MaintenanceOperation::ReindexActors => ACTOR_REINDEX_PATH,
+        _ => return Err("Unsupported maintenance operation".into()),
+    };
+    let outcome = match client.post::<MaintenanceReceipt>(route, &request).await {
+        Ok(receipt) if valid_receipt(&receipt, confirmation, &request) => {
+            if confirmation.operation == MaintenanceOperation::ReindexActors {
+                if let Some(container) = container.cloned() {
+                    let origin_for_accept = origin.to_owned();
+                    let req_for_accept = request.clone();
+                    let job_id = receipt.job_id.clone();
+                    if let Ok(Ok(updated)) = tokio::task::spawn_blocking(move || {
+                        container.record_accepted_actor_reindex(
+                            &origin_for_accept,
+                            &req_for_accept,
+                            &job_id,
+                        )
+                    })
+                    .await
+                    {
+                        pending_entry = Some(updated);
+                    } else if let Some(entry) = pending_entry.as_mut() {
+                        entry.accepted_job_id = Some(receipt.job_id.clone());
+                    }
+                } else if let Some(entry) = pending_entry.as_mut() {
+                    entry.accepted_job_id = Some(receipt.job_id.clone());
+                }
+            }
+            MaintenanceOutcome::Receipt(receipt)
+        }
+        Ok(_) => MaintenanceOutcome::Failed(
+            "Gateway returned an acceptance receipt for a different request".into(),
+        ),
+        Err(ClientError::Status(status))
+            if is_definitive_client_rejection(status)
+                && !(confirmation.operation == MaintenanceOperation::ReindexActors
+                    && exact_retry
+                    && matches!(status, 401 | 403)) =>
+        {
+            if confirmation.operation == MaintenanceOperation::ReindexActors {
+                if let Some(container) = container.cloned() {
+                    let origin_for_clear = origin.to_owned();
+                    let req_for_clear = request.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        container.complete_actor_reindex(&origin_for_clear, &req_for_clear)
+                    })
+                    .await;
+                }
+                pending_entry = None;
+            }
+            MaintenanceOutcome::Failed(ClientError::Status(status).to_string())
+        }
+        Err(error) if confirmation.operation == MaintenanceOperation::ReindexActors => {
+            reconcile_uncertain_reindex(client, container, origin, &mut pending_entry, error).await
+        }
+        Err(error) => MaintenanceOutcome::Failed(error.to_string()),
+    };
+    Ok(AdmittedMaintenance {
+        saved_request,
+        saved_context: Some(confirmation.context.clone()),
+        pending_entry,
+        outcome,
+    })
+}
+
+enum MaintenanceOutcome {
+    Receipt(MaintenanceReceipt),
+    Reconciled(JobRequestAssociation),
+    Failed(String),
+}
+
+struct PreparedMaintenance {
+    request: MaintenanceRequest,
+    pending: Option<PendingActorReindex>,
+    exact_retry: bool,
+}
+
+#[cfg(test)]
+fn prepare_maintenance_request(
+    confirmation: &MaintenanceConfirmation,
+    container: Option<&NativeContainer>,
+    origin: &str,
+    previous: Option<MaintenanceRequest>,
+    replay: Option<MaintenanceRequest>,
+) -> Result<(MaintenanceRequest, Option<PendingActorReindex>), String> {
+    prepare_maintenance_attempt(confirmation, container, origin, previous, replay)
+        .map(|prepared| (prepared.request, prepared.pending))
+}
+
+fn prepare_maintenance_attempt(
+    confirmation: &MaintenanceConfirmation,
+    container: Option<&NativeContainer>,
+    origin: &str,
+    previous: Option<MaintenanceRequest>,
+    replay: Option<MaintenanceRequest>,
+) -> Result<PreparedMaintenance, String> {
+    let context = MutationContext::new(&confirmation.context)
+        .with_configuration_revision(confirmation.configuration_revision);
+    if confirmation.operation == MaintenanceOperation::ReindexActors {
+        let container = container.ok_or_else(|| {
+            "Protected workstation storage is unavailable; cannot persist actor index attempt"
+                .to_owned()
+        })?;
+        if let Some(pending) = container
+            .pending_actor_reindex(origin)
+            .map_err(|error| error.to_string())?
+        {
+            if let Some(job_id) = &pending.accepted_job_id {
+                return Err(format!(
+                    "Actor index request {} was already accepted as job {job_id}; recover or clear it before starting another build",
+                    pending.request.request_id
+                ));
+            }
+            if let Some(replay_request) = replay {
+                if pending.request == replay_request && pending.context == confirmation.context {
+                    return Ok(PreparedMaintenance {
+                        request: pending.request.clone(),
+                        pending: Some(pending),
+                        exact_retry: true,
+                    });
+                }
+            }
+            if pending.request.context == context
+                && pending
+                    .request
+                    .validate(MaintenanceOperation::ReindexActors)
+                    .is_ok()
+            {
+                return Ok(PreparedMaintenance {
+                    request: pending.request.clone(),
+                    pending: Some(pending),
+                    exact_retry: true,
+                });
+            }
+            return Err(
+                "Unresolved actor index attempt exists for an earlier registration or configuration; check or clear it first"
+                    .to_owned(),
+            );
+        }
+        let exact_retry = replay.is_some();
+        let request = match replay {
+            Some(request) if request.context == context => {
+                request
+                    .validate(MaintenanceOperation::ReindexActors)
+                    .map_err(|error| error.to_string())?;
+                request
+            }
+            Some(_) => {
+                return Err(
+                    "Replay request does not match current workstation registration or configuration"
+                        .to_owned(),
+                );
+            }
+            None => {
+                let id = platform::request_id().map_err(|error| error.to_string())?;
+                MaintenanceRequest::for_reindex(id, context).map_err(|error| error.to_string())?
+            }
+        };
+        let entry = container
+            .begin_actor_reindex(origin, &confirmation.context, &request)
+            .map_err(|error| error.to_string())?;
+        return Ok(PreparedMaintenance {
+            request,
+            pending: Some(entry),
+            exact_retry,
+        });
+    }
+    if let Some(previous) = previous {
+        if previous.context == context
+            && previous.dataset == confirmation.dataset
+            && previous.validate(confirmation.operation).is_ok()
+        {
+            return Ok(PreparedMaintenance {
+                request: previous,
+                pending: None,
+                exact_retry: replay.is_some(),
+            });
+        }
+    }
+    let id = platform::request_id().map_err(|error| error.to_string())?;
+    let request = match confirmation.operation {
+        MaintenanceOperation::SeedActors => MaintenanceRequest::for_seed(
+            id,
+            context,
+            confirmation
+                .dataset
+                .clone()
+                .ok_or_else(|| "Actor catalog dataset required".to_owned())?,
+        )
+        .map_err(|error| error.to_string())?,
+        MaintenanceOperation::TrainClassifier => MaintenanceRequest::for_training(
+            id,
+            context,
+            confirmation
+                .dataset
+                .clone()
+                .ok_or_else(|| "Training dataset required".to_owned())?,
+        )
+        .map_err(|error| error.to_string())?,
+        _ => return Err("Unsupported maintenance operation".into()),
+    };
+    Ok(PreparedMaintenance {
+        request,
+        pending: None,
+        exact_retry: replay.is_some(),
+    })
+}
+
+fn valid_receipt(
+    receipt: &MaintenanceReceipt,
+    confirmation: &MaintenanceConfirmation,
+    request: &MaintenanceRequest,
+) -> bool {
+    !receipt.job_id.is_empty()
+        && receipt.operation == confirmation.operation
+        && receipt.resource_scope == ResourceScope::Backend
+        && receipt.dataset == request.dataset
+        && receipt.origin.request_id == request.request_id
+        && receipt.origin.registration_id == confirmation.context.registration_id
+        && receipt.origin.workspace_id.is_none()
+        && receipt.origin.workstation_id == confirmation.context.workstation_id
+        && receipt.origin.deployment_id == confirmation.context.deployment_id
+        && receipt.origin.configuration_revision == confirmation.configuration_revision
+}
+
+fn valid_reindex_association(
+    pending: &PendingActorReindex,
+    association: &JobRequestAssociation,
+) -> bool {
+    !association.job_id.is_empty()
+        && association.origin.request_id == pending.request.request_id
+        && association.origin.deployment_id == pending.context.deployment_id
+        && association.origin.workstation_id == pending.context.workstation_id
+        && association.origin.workspace_id.is_none()
+}
+
+fn is_definitive_client_rejection(status: u16) -> bool {
+    (400..500).contains(&status) && !matches!(status, 408 | 409 | 429)
+}
+
+async fn reconcile_uncertain_reindex(
+    client: &Client,
+    container: Option<&Arc<NativeContainer>>,
+    origin: &str,
+    pending_entry: &mut Option<PendingActorReindex>,
+    post_error: ClientError,
+) -> MaintenanceOutcome {
+    let Some(pending) = pending_entry.clone() else {
+        return MaintenanceOutcome::Failed(post_error.to_string());
+    };
+    let query = WorkstationRequestDetailQuery::new(
+        pending.request.request_id.clone(),
+        ACTOR_REINDEX_OPERATION.to_owned(),
+        Some(pending.context.registration_id.clone()),
+    );
+    if query.validate().is_ok() {
+        if let Ok(association) = client.request_detail(&query).await {
+            if valid_reindex_association(&pending, &association) {
+                if let Some(container) = container.cloned() {
+                    let origin = origin.to_owned();
+                    let context = pending.context.clone();
+                    let request = pending.request.clone();
+                    let association_for_journal = association.clone();
+                    let persisted = tokio::task::spawn_blocking(move || {
+                        container.record_accepted_actor_reindex_association(
+                            &origin,
+                            &context,
+                            &request,
+                            &association_for_journal,
+                        )
+                    })
+                    .await
+                    .ok()
+                    .and_then(|result| result.ok())
+                    .is_some();
+                    if persisted {
+                        *pending_entry = None;
+                    }
+                } else {
+                    *pending_entry = None;
+                }
+                return MaintenanceOutcome::Reconciled(association);
+            }
+        }
+    }
+    MaintenanceOutcome::Failed(format!(
+        "Actor index delivery outcome uncertain ({post_error}). Use Check request or retry exact request."
+    ))
 }
 
 async fn upload(client: &Client, selection: LocalDataset) -> Result<DatasetUpload, String> {
@@ -742,6 +1549,49 @@ fn hash_selected_bytes(
     }
     let sha256 = format!("{:x}", sha.finalize());
     Ok((sha256, count))
+}
+
+/// Turns text typed by the operator into the local path of a CSV. This only normalizes and
+/// rejects obviously wrong input. Existence, file type, symbolic links, size and column checks
+/// stay in the shared preparation step, so a typed path gets no weaker treatment than a picked one.
+pub(crate) fn parse_local_csv_path(
+    raw: &str,
+    home: Option<&std::ffi::OsStr>,
+) -> Result<PathBuf, String> {
+    let mut text = raw.trim();
+    for quote in ['"', '\''] {
+        if text.len() >= 2 && text.starts_with(quote) && text.ends_with(quote) {
+            text = text[1..text.len() - 1].trim();
+        }
+    }
+    if text.is_empty() {
+        return Err("Enter the full path of a CSV file on this computer".into());
+    }
+    if text.contains('\0') || text.chars().any(char::is_control) {
+        return Err("The path contains characters that cannot be used".into());
+    }
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("://") || lower.starts_with("file:") || lower.starts_with("data:") {
+        return Err("Enter a path on this computer, not a URL".into());
+    }
+    let path = if let Some(rest) = text.strip_prefix("~/") {
+        match home {
+            Some(home) if !home.is_empty() => PathBuf::from(home).join(rest),
+            _ => return Err("Cannot expand ~ here; enter the full path".into()),
+        }
+    } else {
+        PathBuf::from(text)
+    };
+    if !path.is_absolute() {
+        return Err("Enter the full path, starting with /".into());
+    }
+    let is_csv = path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("csv"));
+    if !is_csv {
+        return Err("The file must end in .csv".into());
+    }
+    Ok(path)
 }
 
 pub fn dataset_kind_label(kind: DatasetKind) -> &'static str {

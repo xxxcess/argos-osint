@@ -12,13 +12,7 @@ test count.
 
 [![Native Runtime, capture inspection and separate acceptance](../../diagrams/native-verification.svg)](../../diagrams/native-verification.html)
 
-This command requires a supported physical Mac and the repository-pinned Rust
-toolchain. It does not install prerequisites, invoke Node/Docker, contact a
-backend, package/install the app or launch a GUI. An explicit execution target
-must match the physical Mac. Default `--target host` rejects an ambiguous Rosetta
-or mismatched Rust host and omits Cargo's `--target` argument so the existing
-implicit host debug graph stays reusable. Explicit matching targets remain
-available when that distinct graph is intentional.
+This command requires a supported physical Mac (`x86_64-apple-darwin` or `aarch64-apple-darwin`) or Linux x86_64 host (`x86_64-unknown-linux-gnu`) with Vulkan (or Mesa Lavapipe) and the repository-pinned Rust toolchain. It does not install prerequisites, invoke Node/Docker, contact a backend, package/install the app or launch a GUI. An explicit execution target must match the physical host. Default `--target host` rejects an ambiguous Rosetta or mismatched Rust host and omits Cargo's `--target` argument so the existing implicit host debug graph stays reusable. On Linux, `HOME` and `XDG_CACHE_HOME` remain isolated and `DBUS_SESSION_BUS_ADDRESS` is excluded from fixture captures. Explicit matching targets remain available when that distinct graph is intentional.
 
 ## Select the affected views
 
@@ -126,8 +120,11 @@ local behavior pass.
 The [offline Python fixtures](../../../scripts/test_fleetworks_native_verify.py)
 cover selection/artifact-path fences, implicit debug cache reuse, bounded profiles,
 runtime inventory, missing/corrupt PNG/tree, dimensions, failed renderer exits,
-script final keys, stale output protection and physical target mismatches. Actual
-helper tests/rendering must be executed by the integration owner and recorded in
+script final keys, stale output protection and physical target mismatches. For
+packaged app launch debugging, `fleetworks_candidate.py` `build-native` / `package-native` /
+`verify-native --open --diagnostic` runs the executable directly with `--diagnostic`,
+initializing stderr tracing, non-secret startup preflight, and early non-zero crash
+capture before handoff. Actual helper tests/rendering must be executed by the integration owner and recorded in
 the active acceptance tracker (for the cutover baseline, see
 [cutover acceptance](../../../.planning/2026-11-11-rune-macos-cutover/acceptance.md)).
 

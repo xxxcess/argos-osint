@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
+use fleetworks_workstation::native::canonical_local_origin;
+use fleetworks_workstation::native::BackendKind;
 use fleetworks_workstation::native::ConnectionProfilesSnapshot;
 use fleetworks_workstation::native::CredentialReference;
 use fleetworks_workstation::native::GatewayProfile;
@@ -174,11 +176,24 @@ impl State {
     }
 
     fn install_profile(&mut self, profile: &GatewayProfile) {
+        self.backend_kind = profile.kind;
         self.connection_profiles.selected_id = Some(profile.id.clone());
         self.connection_profiles.name = TextEdit::new(&profile.name);
         self.connection.origin = TextEdit::new(&profile.origin);
-        self.connection.token_file = TextEdit::new(profile.credential.path().to_string_lossy());
-        self.connection_profiles.credential = Some(profile.credential.clone());
+        match &profile.credential {
+            Some(credential) => {
+                self.connection.token_file = TextEdit::new(credential.path().to_string_lossy());
+                self.connection_profiles.credential = Some(credential.clone());
+            }
+            None => {
+                self.connection.token_file = TextEdit::new("");
+                self.connection_profiles.credential = None;
+            }
+        }
+        self.local_backend.state_dir = profile.local_state_dir.clone();
+        if profile.kind == BackendKind::Local {
+            self.local_backend.refresh_binary_status();
+        }
         self.connection_profiles.editing = false;
         self.connection_profiles.draft_revision =
             self.connection_profiles.draft_revision.wrapping_add(1);
@@ -376,9 +391,11 @@ impl State {
             container.clone(),
             expected,
             id,
+            self.backend_kind,
             self.connection_profiles.name.text.clone(),
             self.connection.origin.text.clone(),
             self.editor_credential(),
+            self.local_backend.state_dir.clone(),
             self.connection_profiles.revision,
         );
     }
@@ -406,9 +423,9 @@ impl State {
                                 .iter()
                                 .find(|profile| &profile.id == id)
                                 .is_none_or(|profile| {
-                                    profile.origin != self.connection.origin.text
-                                        || self.connection_profiles.credential.as_ref()
-                                            != Some(&profile.credential)
+                                    profile.kind != self.backend_kind
+                                        || profile.origin != self.connection.origin.text
+                                        || self.connection_profiles.credential != profile.credential
                                 })
                         });
                 if source_changed {
@@ -484,19 +501,34 @@ impl GatewayEffects {
         container: Arc<NativeContainer>,
         expected: u64,
         id: Option<String>,
+        kind: BackendKind,
         name: String,
         origin: String,
         credential: ConnectionCredential,
+        local_state_dir: Option<PathBuf>,
         revision: u64,
     ) -> Option<RequestTask> {
         let ui = self.ui.get()?.clone();
         let task = self.runtime.spawn(async move {
             let result =
                 tokio::task::spawn_blocking(move || -> Result<ConnectionProfilesSnapshot> {
-                    let credential = credential.reference(&origin)?.ok_or_else(|| {
-                        anyhow::anyhow!("Select a protected credential file before saving")
-                    })?;
-                    let input = GatewayProfileInput::new(name, origin, credential)?;
+                    let input = match kind {
+                        BackendKind::Remote => {
+                            let credential = credential.reference(&origin)?.ok_or_else(|| {
+                                anyhow::anyhow!("Select a protected credential file before saving")
+                            })?;
+                            GatewayProfileInput::new(name, origin, credential)?
+                        }
+                        BackendKind::Local => {
+                            let origin = if origin.trim().is_empty() {
+                                None
+                            } else {
+                                Some(canonical_local_origin(&origin)?)
+                            };
+                            GatewayProfileInput::new_local(name, origin, local_state_dir)?
+                        }
+                        _ => anyhow::bail!("Unsupported connection profile backend kind"),
+                    };
                     container.save_connection_profile(expected, id.as_deref(), input)
                 })
                 .await

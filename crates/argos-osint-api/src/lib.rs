@@ -3,8 +3,9 @@ mod activity;
 mod activity_actions;
 mod activity_paging;
 mod actor_dossier;
-mod actor_search;
+pub mod actor_search;
 mod admission;
+mod base64;
 mod brain;
 pub mod classifier_activation;
 mod configuration;
@@ -17,6 +18,7 @@ pub mod datasets;
 mod host_metrics;
 mod jobs_api;
 mod live;
+pub mod local_dispatch;
 mod maintenance;
 mod network;
 mod operational_logs;
@@ -49,11 +51,14 @@ use fleetworks_contracts::{AtlasCycleReceipt, ATLAS_CYCLES_PATH};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
 
+pub use actor_search::ActorSearchBackend;
 pub use actor_search::SearchClient;
+pub use actor_search::SearchFuture;
 pub use brain::BrainClient;
 pub use control::ControlClient;
 pub use jobs_api::JobsClient;
@@ -77,6 +82,33 @@ pub struct ApiState {
     pub instance_id: String,
     pub port: u16,
     pub origins: Arc<Vec<String>>,
+    pub workspace_root: Option<PathBuf>,
+}
+
+impl ApiState {
+    /// Construct API gateway state without an explicit workspace root override.
+    #[must_use]
+    pub fn new(
+        repo: Repository,
+        instance_id: String,
+        port: u16,
+        origins: Arc<Vec<String>>,
+    ) -> Self {
+        Self {
+            repo,
+            instance_id,
+            port,
+            origins,
+            workspace_root: None,
+        }
+    }
+
+    /// Attach an explicit canonical workspace root override for isolated execution.
+    #[must_use]
+    pub fn with_workspace_root(mut self, root: PathBuf) -> Self {
+        self.workspace_root = Some(root);
+        self
+    }
 }
 
 pub fn loopback_url(raw: &str) -> anyhow::Result<url::Url> {
@@ -128,16 +160,16 @@ pub fn network_router_with_services(
 }
 
 /// Optional private service clients for the authenticated gateway.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct PrivateServices {
-    brain: Option<BrainClient>,
-    tools: Option<ToolsClient>,
-    control: Option<ControlClient>,
-    jobs: Option<JobsClient>,
-    search: Option<SearchClient>,
-    readiness: Option<workstation::ReadinessOwners>,
-    datasets: Option<datasets::DatasetStore>,
-    activation: Option<Arc<classifier_activation::ActivationArtifacts>>,
+    pub(crate) brain: Option<BrainClient>,
+    pub(crate) tools: Option<ToolsClient>,
+    pub(crate) control: Option<ControlClient>,
+    pub(crate) jobs: Option<JobsClient>,
+    pub(crate) search: Option<SearchClient>,
+    pub(crate) readiness: Option<workstation::ReadinessOwners>,
+    pub(crate) datasets: Option<datasets::DatasetStore>,
+    pub(crate) activation: Option<Arc<classifier_activation::ActivationArtifacts>>,
 }
 
 impl PrivateServices {
@@ -180,6 +212,11 @@ impl PrivateServices {
         datasets: datasets::DatasetStore,
     ) -> Self {
         self.readiness = Some(readiness);
+        self.datasets = Some(datasets);
+        self
+    }
+
+    pub fn with_datasets(mut self, datasets: datasets::DatasetStore) -> Self {
         self.datasets = Some(datasets);
         self
     }
@@ -355,7 +392,7 @@ fn router_with_access(
             )
             .route("/api/v1/workstation/readiness", get(workstation::read))
             .route(
-                "/api/v1/workstation/requests/detail",
+                fleetworks_contracts::context::WORKSTATION_REQUEST_DETAIL_PATH,
                 get(request_reconciliation::read),
             )
             .route("/api/v1/workstation/datasets", get(datasets::list))
@@ -476,14 +513,15 @@ async fn request_timeout(request: Request, next: Next) -> Response {
     }
 }
 
-type ApiResult = Result<Json<Value>, ApiError>;
-struct ApiError(StatusCode, &'static str);
+pub(crate) type ApiResult = Result<Json<Value>, ApiError>;
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ApiError(pub(crate) StatusCode, pub(crate) &'static str);
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.0, Json(json!({"error":self.1}))).into_response()
     }
 }
-fn internal(e: impl std::fmt::Display) -> ApiError {
+pub(crate) fn internal(e: impl std::fmt::Display) -> ApiError {
     eprintln!(
         "API operation failed: {}",
         argos_osint_core::provider_diag::sanitize(&e.to_string())
@@ -493,10 +531,10 @@ fn internal(e: impl std::fmt::Display) -> ApiError {
         "Service operation unavailable; inspect API host diagnostics",
     )
 }
-fn bad() -> ApiError {
+pub(crate) fn bad() -> ApiError {
     ApiError(StatusCode::BAD_REQUEST, "Invalid request")
 }
-fn missing() -> ApiError {
+pub(crate) fn missing() -> ApiError {
     ApiError(StatusCode::NOT_FOUND, "Resource not found")
 }
 
@@ -567,7 +605,7 @@ where
     .flatten()
 }
 
-async fn storage_ready(repo: &Repository) -> Result<(), ApiError> {
+pub(crate) async fn storage_ready(repo: &Repository) -> Result<(), ApiError> {
     let repo = repo.clone();
     run_shielded(async move {
         // Each probe reaches storage, including after startup. TCP alone is insufficient.
@@ -586,6 +624,44 @@ async fn storage_ready(repo: &Repository) -> Result<(), ApiError> {
     })
     .await?
 }
+pub(crate) fn base_capabilities(
+    instance_id: &str,
+    features: Vec<String>,
+    include_search: bool,
+    deployment_id: Option<String>,
+    configuration_epoch: Option<String>,
+    permissions: Vec<fleetworks_contracts::context::Permission>,
+) -> Result<fleetworks_contracts::capabilities::Capabilities, ApiError> {
+    use fleetworks_contracts::capabilities;
+    let mut response = capabilities::Capabilities::default();
+    response.categories = intel::CATEGORIES
+        .iter()
+        .map(|category| (*category).to_owned())
+        .collect();
+    response.auth = true;
+    response.features = features;
+    response.instance_id = Some(instance_id.to_owned());
+    response.deployment_id = deployment_id;
+    response.configuration_epoch = configuration_epoch;
+    response.connect = Some(capabilities::ConnectCapabilities::default());
+    response.workspace_control = Some(capabilities::WorkspaceControlCapabilities::default());
+    response.resource_scopes = Some(capabilities::ResourceScopes::default());
+    response.permissions = permissions;
+    response.live = Some(capabilities::LiveCapabilities::new(
+        "/api/v1/live".into(),
+        vec!["metrics".into(), "brief".into()],
+        1,
+    ));
+    if include_search {
+        let mut search = capabilities::SearchCapabilities::default();
+        search.actors = Some(capabilities::ActorSearchCapabilities::default());
+        response.search = Some(search);
+    }
+    let web_url = std::env::var("FLEETWORKS_INTEL_WEB_URL").ok();
+    response.links.intel_web = public_intel_web_links(web_url.as_deref()).map_err(internal)?;
+    Ok(response)
+}
+
 async fn capabilities(
     State(state): State<ApiState>,
     axum::Extension(mode): axum::Extension<AccessMode>,
@@ -642,33 +718,16 @@ async fn capabilities(
                 features.push(feature);
             }
         }
-        let mut response = capabilities::Capabilities::default();
-        response.categories = intel::CATEGORIES
-            .iter()
-            .map(|category| (*category).to_owned())
-            .collect();
-        response.auth = true;
-        response.features = features.into_iter().map(str::to_owned).collect();
-        response.instance_id = Some(state.instance_id);
-        response.deployment_id = Some(deployment.deployment_id);
-        response.configuration_epoch = Some(deployment.configuration_epoch);
-        response.connect = Some(capabilities::ConnectCapabilities::default());
-        response
-            .features
-            .push("workstation-cycle-history-v1".into());
-        response.workspace_control = Some(capabilities::WorkspaceControlCapabilities::default());
-        response.resource_scopes = Some(capabilities::ResourceScopes::default());
-        response.permissions = principal.permissions().collect();
-        response.live = Some(capabilities::LiveCapabilities::new(
-            "/api/v1/live".into(),
-            vec!["metrics".into(), "brief".into()],
-            1,
-        ));
-        let mut search = capabilities::SearchCapabilities::default();
-        search.actors = Some(capabilities::ActorSearchCapabilities::default());
-        response.search = Some(search);
-        let web_url = std::env::var("FLEETWORKS_INTEL_WEB_URL").ok();
-        response.links.intel_web = public_intel_web_links(web_url.as_deref()).map_err(internal)?;
+        let mut features: Vec<String> = features.into_iter().map(str::to_owned).collect();
+        features.push("workstation-cycle-history-v1".into());
+        let response = base_capabilities(
+            &state.instance_id,
+            features,
+            true,
+            Some(deployment.deployment_id),
+            Some(deployment.configuration_epoch),
+            principal.permissions().collect(),
+        )?;
         return Ok(Json(serde_json::to_value(response).map_err(internal)?));
     }
     Ok(Json(
@@ -862,7 +921,7 @@ async fn ensure(
     let job_id = if let Some(axum::Extension(context)) = context {
         let request_id = k.request_id.unwrap_or_else(argos_osint_core::store::new_id);
         let (admission, settings, auth) =
-            admission::capture_with_configuration(&context, &request_id).await?;
+            admission::capture_with_configuration(&s, &context, &request_id).await?;
         if let Some(job) = admission
             .replay_job(&s.repo, "intel_brief")
             .await
@@ -914,7 +973,7 @@ async fn reload(
     .await?;
     let job_id = if let Some(axum::Extension(context)) = context {
         let (admission, settings, auth) =
-            admission::capture_with_configuration(&context, &k.request_id).await?;
+            admission::capture_with_configuration(&s, &context, &k.request_id).await?;
         if let Some(job) = admission
             .replay_job(&s.repo, "intel_brief")
             .await

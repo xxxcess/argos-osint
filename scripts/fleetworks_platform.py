@@ -2,7 +2,8 @@
 """Read-only host detection shared by native packaging and scope planning.
 
 Python 3.9 or newer is supported. Detection never builds, installs a toolchain,
-invokes Docker or contacts a backend. Native targets describe the Mac app;
+invokes Docker or contacts a backend. Native targets cover macOS desktop builds
+and Linux x86_64 desktop builds; Linux ARM64 native desktop is unsupported.
 Docker platforms describe independently built Linux backend images.
 """
 
@@ -13,10 +14,14 @@ import re
 import subprocess
 
 
-NATIVE_TARGETS = {
+DARWIN_NATIVE_TARGETS = {
     "x86_64-apple-darwin": "x86_64",
     "aarch64-apple-darwin": "arm64",
 }
+LINUX_NATIVE_TARGETS = {
+    "x86_64-unknown-linux-gnu": "x86_64",
+}
+NATIVE_TARGETS = {**DARWIN_NATIVE_TARGETS, **LINUX_NATIVE_TARGETS}
 ARCHITECTURES = {"x86_64": "x86_64", "amd64": "x86_64", "arm64": "arm64", "aarch64": "arm64"}
 DOCKER_PLATFORMS = {"x86_64": "linux/amd64", "arm64": "linux/arm64"}
 
@@ -84,32 +89,41 @@ def detect(*, system=None, process_machine=None, runner=None, environment=None):
     rust_release = release.group(1) if release else ""
     if rust and (not rust_host or not rust_release):
         rust_error = "rustc -vV did not report a host and release"
-    native = next((target for target, arch in NATIVE_TARGETS.items()
-                   if system == "Darwin" and arch == physical_arch), "")
+    native = ""
+    if system == "Darwin":
+        native = next((target for target, arch in DARWIN_NATIVE_TARGETS.items()
+                       if arch == physical_arch), "")
+    elif system == "Linux":
+        native = next((target for target, arch in LINUX_NATIVE_TARGETS.items()
+                       if arch == physical_arch), "")
     docker = DOCKER_PLATFORMS.get(physical_arch, "") if system in ("Darwin", "Linux") else ""
     return PlatformInfo(system, physical_arch, process_arch, translated,
                         rust_host, rust_release, native, docker, rust_error)
 
 
 def resolve_native_target(info, requested="host"):
-    """Select an explicit Mac target, refusing an ambiguous host build."""
-    if info.system != "Darwin" or not info.native_target:
-        raise ValueError("The native app requires a supported Intel or Apple Silicon Mac; Linux is a backend target")
+    """Select an explicit native target, refusing ambiguous or unsupported hosts."""
     if requested not in ("host", *NATIVE_TARGETS):
         raise ValueError(f"Unsupported native target: {requested}")
+    if info.system not in ("Darwin", "Linux") or not info.native_target:
+        raise ValueError("The native app requires a supported Mac or Linux x86_64 host; Linux ARM64 native desktop is unsupported")
     if not info.rust_host or not info.rust_release:
         raise ValueError("Rust is unavailable; install/select the repository-pinned toolchain explicitly before building")
     if requested == "host":
         if info.rosetta or info.process_architecture != info.physical_architecture:
             raise ValueError("Host build is running under Rosetta; use a native terminal and matching Rust toolchain, or choose an explicit cross target")
         if info.rust_host != info.native_target:
-            raise ValueError(f"Rust host {info.rust_host} does not match physical Mac target {info.native_target}; select a matching native toolchain or an explicit cross target")
+            raise ValueError(f"Rust host {info.rust_host} does not match physical host target {info.native_target}; select a matching native toolchain or an explicit cross target")
         return info.native_target
+    if info.system == "Darwin" and requested not in DARWIN_NATIVE_TARGETS:
+        raise ValueError(f"Native target {requested} cannot be built on macOS")
+    if info.system == "Linux" and requested not in LINUX_NATIVE_TARGETS:
+        raise ValueError(f"Native target {requested} cannot be built on Linux")
     return requested
 
 
 def format_platform(info, requested_format):
-    """Return one requested target without implying native Linux support."""
+    """Return one requested target without inventing unsupported native architectures."""
     if requested_format == "rust":
         return resolve_native_target(info)
     if requested_format == "docker":

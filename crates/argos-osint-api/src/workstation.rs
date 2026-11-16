@@ -705,50 +705,65 @@ pub(crate) async fn read(
             json!({"error":"Purpose-scoped gateway credential required"}),
         );
     };
-    if !principal.permits(Permission::ReadBackend) {
-        return reply(
-            StatusCode::FORBIDDEN,
-            json!({"error":"Backend diagnostic permission required"}),
-        );
-    }
     let Some(Extension(owners)) = owners else {
         return reply(
             StatusCode::SERVICE_UNAVAILABLE,
             json!({"error":"Backend diagnostic owners are not configured"}),
         );
     };
+    match read_value(
+        &state,
+        &principal,
+        &owners,
+        search.as_ref().map(|Extension(client)| client),
+        context.map(|Extension(context)| context),
+    )
+    .await
+    {
+        Ok(value) => reply(StatusCode::OK, value),
+        Err((status, message)) => reply(status, json!({"error":message})),
+    }
+}
+
+pub(crate) async fn read_value(
+    state: &ApiState,
+    principal: &AuthenticatedPrincipal,
+    owners: &ReadinessOwners,
+    search: Option<&SearchClient>,
+    context: Option<RegisteredContext>,
+) -> Result<serde_json::Value, (StatusCode, &'static str)> {
+    if !principal.permits(Permission::ReadBackend) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Backend diagnostic permission required",
+        ));
+    }
     let mut cache = owners.cache.lock().await;
     if cache
         .as_ref()
         .is_none_or(|cached| cached.captured.elapsed() >= CACHE_AGE)
     {
-        *cache = Some(
-            collect(
-                &state,
-                &owners,
-                search.as_ref().map(|Extension(client)| client),
-            )
-            .await,
-        );
+        *cache = Some(collect(state, owners, search).await);
     }
     let Some(observations) = cache.as_ref() else {
-        return reply(
+        return Err((
             StatusCode::SERVICE_UNAVAILABLE,
-            json!({"error":"Backend observations unavailable"}),
-        );
+            "Backend observations unavailable",
+        ));
     };
     let mut checks = observations.checks.clone();
     let observed_at = observations.at.clone();
     let natural = observations.natural.clone();
     drop(cache);
     let permitted = principal.permits(Permission::MaintainBackend);
-    let context = context.map(|Extension(context)| context).filter(|context| {
+    let context = context.filter(|context| {
         context.deployment_id == owners.deployment_id
             && context.access_epoch == principal.access_epoch()
     });
     let registered = context.is_some();
-    let revision = tokio::task::spawn_blocking(|| {
-        let root = crate::configuration::workspace()?;
+    let state_for_read = state.clone();
+    let revision = tokio::task::spawn_blocking(move || {
+        let root = crate::configuration::workspace_for(&state_for_read)?;
         let lock = argos_osint_core::config_commit::ConfigLock::acquire_at(&root)
             .map_err(|_| crate::internal("configuration unavailable"))?;
         crate::configuration::read_locked(&root, &lock).map(|snapshot| snapshot.revision)
@@ -889,13 +904,12 @@ pub(crate) async fn read(
             check.explanation = "Current registered origin verified at the gateway boundary".into();
         }
     }
-    match serde_json::to_value(response) {
-        Ok(value) => reply(StatusCode::OK, value),
-        Err(_) => reply(
+    serde_json::to_value(response).map_err(|_| {
+        (
             StatusCode::SERVICE_UNAVAILABLE,
-            json!({"error":"Backend observations unavailable"}),
-        ),
-    }
+            "Backend observations unavailable",
+        )
+    })
 }
 
 fn reply(status: StatusCode, value: serde_json::Value) -> Response {

@@ -242,3 +242,126 @@ fn provisioning_is_exact_origin_and_accepts_rotation_only_explicitly() {
         .is_ok());
     assert!(!container.root().join("default").exists());
 }
+
+#[test]
+fn legacy_remote_profiles_deserialize_without_kind_and_roundtrip_local_profile() {
+    let temporary = tempfile::tempdir().expect("isolated fixture home");
+    let home = temporary
+        .path()
+        .canonicalize()
+        .expect("real fixture directory");
+    let token_path = token(&home, "remote-token");
+    let reference = CredentialReference::capture(&token_path, "http://127.0.0.1:8080")
+        .expect("remote reference");
+    let id = "a".repeat(64);
+    let legacy_json = serde_json::json!({
+        "id": id,
+        "revision": 1,
+        "name": "Legacy Remote",
+        "origin": "http://127.0.0.1:8080",
+        "credential": reference,
+    });
+    let legacy_profile: GatewayProfile =
+        serde_json::from_value(legacy_json).expect("legacy profile deserializes without kind");
+    assert_eq!(legacy_profile.kind, BackendKind::Remote);
+    assert!(legacy_profile.credential.is_some());
+    assert!(legacy_profile.local_state_dir.is_none());
+
+    let container = NativeContainer::open_settings(&home).expect("settings container");
+    let saved = container
+        .save_connection_profile(
+            0,
+            None,
+            GatewayProfileInput::new_local("Embedded Mac".into(), None, None)
+                .expect("valid local input"),
+        )
+        .expect("save local profile");
+    assert_eq!(saved.profiles.len(), 1);
+    let local = &saved.profiles[0];
+    assert_eq!(local.kind, BackendKind::Local);
+    assert!(local.credential.is_none());
+    assert_eq!(
+        local.origin,
+        local_origin_for_profile(&local.id).expect("deterministic local origin")
+    );
+    let state_dir = local
+        .local_state_dir
+        .as_ref()
+        .expect("provisioned state dir");
+    assert_eq!(
+        state_dir,
+        &container.root().join(LOCAL_BACKEND_DIR).join(&local.id)
+    );
+    let metadata = std::fs::symlink_metadata(state_dir).expect("state dir metadata");
+    assert!(metadata.is_dir());
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+    let reloaded = container
+        .connection_profiles()
+        .expect("reload local profile");
+    assert_eq!(reloaded, saved);
+}
+
+#[test]
+fn local_backend_state_dir_isolation_rejects_symlinks_and_remote_token_reuse() {
+    let temporary = tempfile::tempdir().expect("isolated fixture home");
+    let home = temporary
+        .path()
+        .canonicalize()
+        .expect("real fixture directory");
+    let token_path = token(&home, "remote-token");
+    let _ = token(&home, "token");
+    let container = NativeContainer::open_settings(&home).expect("settings container");
+    container
+        .provision_credential_binding("http://127.0.0.1:8080", &token_path)
+        .expect("provision remote credential");
+    assert!(container.credential_binding(DEFAULT_LOCAL_ORIGIN).is_err());
+
+    let base_dir = container
+        .ensure_local_backend_state_dir("embedded")
+        .expect("default local backend state dir")
+        .parent()
+        .expect("local-backend dir")
+        .to_path_buf();
+    let real_target = home.join("symlink-target");
+    std::fs::create_dir(&real_target).expect("target dir");
+    std::os::unix::fs::symlink(&real_target, base_dir.join("symlinked"))
+        .expect("create symlinked profile dir");
+    assert!(container
+        .ensure_local_backend_state_dir("symlinked")
+        .is_err());
+
+    let local_snapshot = container
+        .save_connection_profile(
+            1,
+            None,
+            GatewayProfileInput::new_local(
+                "Local Workspace".into(),
+                Some(DEFAULT_LOCAL_ORIGIN.into()),
+                None,
+            )
+            .expect("valid local profile"),
+        )
+        .expect("save local profile");
+    assert!(container
+        .save_connection_profile(
+            local_snapshot.revision,
+            Some(&local_snapshot.profiles[1].id),
+            input(&home, "Cross-kind switch"),
+        )
+        .is_err());
+
+    let reference = CredentialReference::capture(&token_path, "http://127.0.0.1:8080")
+        .expect("remote reference");
+    let mut raw: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(container.root().join(CONNECTIONS_FILE)).expect("catalog bytes"),
+    )
+    .expect("json catalog");
+    raw["snapshot"]["profiles"][1]["credential"] =
+        serde_json::to_value(reference).expect("serialize credential");
+    std::fs::write(
+        container.root().join(CONNECTIONS_FILE),
+        serde_json::to_vec(&raw).expect("corrupt local profile with remote credential"),
+    )
+    .expect("write corrupt catalog");
+    assert!(container.connection_profiles().is_err());
+}

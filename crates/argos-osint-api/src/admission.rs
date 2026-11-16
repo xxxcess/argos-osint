@@ -31,10 +31,11 @@ impl Deref for CapturedAdmission {
 }
 
 pub(crate) async fn capture(
+    state: &crate::ApiState,
     request: &ResolvedRequest,
     request_id: &str,
 ) -> Result<CapturedAdmission, ApiError> {
-    capture_with_configuration(request, request_id)
+    capture_with_configuration(state, request, request_id)
         .await
         .map(|(admission, _, _)| admission)
 }
@@ -43,7 +44,7 @@ pub(crate) async fn capture(
 /// An already accepted exact request may reconcile its first receipt after a
 /// configuration change; the operation owner still checks identical inputs.
 pub(crate) async fn capture_checked(
-    repo: &argos_osint_core::storage::repo::Repository,
+    state: &crate::ApiState,
     request: &ResolvedRequest,
     request_id: &str,
     operation: &str,
@@ -67,10 +68,10 @@ pub(crate) async fn capture_checked(
         axum::http::StatusCode::PRECONDITION_REQUIRED,
         "Configuration revision required",
     ))?;
-    let admission = capture(request, request_id).await?;
+    let admission = capture(state, request, request_id).await?;
     if revision != admission.origin().configuration_revision
         && admission
-            .replay_job(repo, operation)
+            .replay_job(&state.repo, operation)
             .await
             .map_err(crate::internal)?
             .is_none()
@@ -84,6 +85,7 @@ pub(crate) async fn capture_checked(
 }
 
 pub(crate) async fn capture_with_configuration(
+    state: &crate::ApiState,
     request: &ResolvedRequest,
     request_id: &str,
 ) -> Result<
@@ -106,8 +108,9 @@ pub(crate) async fn capture_with_configuration(
         return Err(crate::request_context::ContextFailure::forbidden().into());
     }
     let source = request.source().ok_or_else(crate::bad)?;
-    let (snapshot, lock) = tokio::task::spawn_blocking(|| {
-        let root = configuration::workspace()?;
+    let state_for_capture = state.clone();
+    let (snapshot, lock) = tokio::task::spawn_blocking(move || {
+        let root = configuration::workspace_for(&state_for_capture)?;
         let lock = ConfigLock::acquire_at(&root)
             .map_err(|_| crate::internal("configuration capture unavailable"))?;
         let snapshot = configuration::read_locked(&root, &lock)?;

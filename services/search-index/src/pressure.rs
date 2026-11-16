@@ -249,7 +249,29 @@ fn resident_bytes() -> Option<u64> {
         .filter(|page| *page > 0)?
         .checked_mul(pages)
 }
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn resident_bytes() -> Option<u64> {
+    let mut info = std::mem::MaybeUninit::<libc::mach_task_basic_info_data_t>::uninit();
+    let mut count: libc::mach_msg_type_number_t = libc::MACH_TASK_BASIC_INFO_COUNT;
+    // `mach_task_self()` yields the current task port; `task_info` initializes `info`
+    // and writes `count` only when it returns `KERN_SUCCESS`.
+    #[allow(deprecated)]
+    let status = unsafe {
+        libc::task_info(
+            libc::mach_task_self(),
+            libc::MACH_TASK_BASIC_INFO as libc::task_flavor_t,
+            info.as_mut_ptr().cast::<libc::integer_t>(),
+            &mut count,
+        )
+    };
+    if status != libc::KERN_SUCCESS || count < libc::MACH_TASK_BASIC_INFO_COUNT {
+        return None;
+    }
+    let info = unsafe { info.assume_init() };
+    let resident: u64 = info.resident_size;
+    (resident > 0).then_some(resident)
+}
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn resident_bytes() -> Option<u64> {
     None
 }
@@ -325,6 +347,13 @@ mod tests {
             now
         ));
         assert!(policy.admit(&limits, healthy(&limits), now + Duration::from_secs(302)));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn resident_bytes_reports_positive_process_rss() {
+        let bytes = resident_bytes().expect("supported OS reports resident memory");
+        assert!(bytes > 0, "expected positive RSS, got {bytes}");
     }
 
     #[test]

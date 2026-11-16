@@ -21,6 +21,17 @@ pub struct HostMetrics {
     pub chipset: Option<String>,
 }
 
+fn format_metrics_age(seconds: f64) -> String {
+    let seconds = seconds as u64;
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        format!("{}m {}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{}h {}m", seconds / 3600, (seconds % 3600) / 60)
+    }
+}
+
 #[derive(Default)]
 pub struct Cycles {
     pub history: Load<CycleHistory>,
@@ -31,6 +42,9 @@ pub struct Cycles {
     pub confirmation: Option<String>,
     confirmation_configuration_revision: Option<u64>,
     pub message: Option<String>,
+    /// Set when a refresh failed while rows were already loaded: the rows are stale. Kept apart
+    /// from `message`, which also carries deletion feedback. Cleared by the next good read.
+    pub read_error: Option<String>,
     pub deletion: Load<DeleteCycleReceipt>,
     retained_delete: Option<DeleteCycleRequest>,
     retained_context: Option<RegisteredContext>,
@@ -47,6 +61,9 @@ struct CyclePageRequest {
     epoch: u64,
     origin_revision: u64,
     revision: u64,
+    /// A discovery poll refreshes the viewed page in place. It must not reset the viewed page or
+    /// the selected cycle.
+    keep_selection: bool,
 }
 
 impl Cycles {
@@ -66,6 +83,7 @@ impl Cycles {
         self.delete_request = None;
         self.revision = self.revision.wrapping_add(1);
         self.history = Load::Idle;
+        self.read_error = None;
         self.page_index = 0;
         self.page_cursors.clear();
         self.confirmation = None;
@@ -89,31 +107,33 @@ impl State {
         }
     }
 
-    pub(crate) fn restore_cycle_deletion(&mut self) {
+    /// Restores the protected deletion journal. Returns `true` when a read was started; that read
+    /// then starts the actor index journal restore when it finishes, so the two protected-journal
+    /// reads never contend for the nonblocking catalog lock. Returns `false` when nothing was
+    /// started and the caller must start the next restore itself.
+    pub(crate) fn restore_cycle_deletion(&mut self) -> bool {
         if self.cycles.retained_delete.is_some() || self.cycles.journal_request.is_some() {
-            return;
+            return false;
         }
         let (Some(services), Some(container), Some(context)) = (
             &self.services,
             &self.workspaces.container,
             self.registration.context.clone(),
         ) else {
-            return;
+            return false;
         };
         let Some(ui) = services.ui.get().cloned() else {
-            return;
+            return false;
         };
         let container = container.clone();
         let epoch = self.connection.epoch;
         let origin_revision = self.origin_revision;
-        let revision = self.cycles.revision;
         let task = services.runtime.spawn(async move {
             let result = tokio::task::spawn_blocking(move || container.pending_cycle_deletions()).await;
             ui.update(move |state, _| {
-                if state.connection.epoch != epoch
-                    || state.origin_revision != origin_revision
-                    || state.cycles.revision != revision
-                {
+                // `cycles.revision` also advances on every history page load, so it cannot guard
+                // this read. Invalidation drops the request task, which aborts it.
+                if state.connection.epoch != epoch || state.origin_revision != origin_revision {
                     return;
                 }
                 state.cycles.journal_request = None;
@@ -127,13 +147,23 @@ impl State {
                     }
                     _ => state.cycles.message = Some("Could not read protected deletion journal; resolve local settings before deleting history".into()),
                 }
+                state.restore_actor_reindex();
             });
         });
         self.cycles.journal_request = Some(RequestTask(task.abort_handle()));
+        true
     }
 
     pub fn refresh_cycles(&mut self) {
-        self.load_cycles_page(None, 0);
+        self.load_cycles_page(None, 0, false);
+    }
+
+    /// Discovers new cycles for the registered workstation by re-reading the page being viewed.
+    /// The cursor, page number and selected cycle stay as they are.
+    pub fn poll_cycles(&mut self) {
+        let index = self.cycles.page_index;
+        let cursor = self.cycles.page_cursors.get(index).cloned().flatten();
+        self.load_cycles_page(cursor, index, true);
     }
 
     pub fn next_cycles_page(&mut self) {
@@ -141,7 +171,7 @@ impl State {
             return;
         };
         if let Some(cursor) = history.next_cursor.clone() {
-            self.load_cycles_page(Some(cursor), self.cycles.page_index + 1);
+            self.load_cycles_page(Some(cursor), self.cycles.page_index + 1, false);
         }
     }
 
@@ -149,12 +179,12 @@ impl State {
         if self.cycles.page_index > 0 {
             let previous = self.cycles.page_index - 1;
             if let Some(cursor) = self.cycles.page_cursors.get(previous).cloned() {
-                self.load_cycles_page(cursor, previous);
+                self.load_cycles_page(cursor, previous, false);
             }
         }
     }
 
-    fn load_cycles_page(&mut self, cursor: Option<String>, index: usize) {
+    fn load_cycles_page(&mut self, cursor: Option<String>, index: usize, keep_selection: bool) {
         let Some(context) = self.registration.context.clone() else {
             return;
         };
@@ -181,6 +211,7 @@ impl State {
             epoch: self.connection.epoch,
             origin_revision: self.origin_revision,
             revision: self.cycles.revision,
+            keep_selection,
         };
         self.cycles.pending_page = Some(request.clone());
         if !matches!(self.cycles.history, Load::Ready(_)) {
@@ -224,7 +255,16 @@ impl State {
                 self.cycles.page_index = request.index;
                 self.cycles.page_cursors.truncate(request.index);
                 self.cycles.page_cursors.push(request.cursor);
-                self.cycles.selected = None;
+                let keep = request.keep_selection
+                    && self
+                        .cycles
+                        .selected
+                        .as_ref()
+                        .is_some_and(|id| history.rows.iter().any(|row| &row.job_id == id));
+                if !keep {
+                    self.cycles.selected = None;
+                }
+                self.cycles.read_error = None;
                 self.cycles.history = Load::Ready(history);
             }
             Ok(_) => {
@@ -232,13 +272,13 @@ impl State {
                     self.cycles.history =
                         Load::Failed("Gateway cycle history exceeded its requested bound".into());
                 } else {
-                    self.cycles.message =
+                    self.cycles.read_error =
                         Some("Gateway cycle history exceeded its requested bound".into());
                 }
             }
             Err(error) => {
                 if matches!(self.cycles.history, Load::Ready(_)) {
-                    self.cycles.message = Some(error);
+                    self.cycles.read_error = Some(error);
                 } else {
                     self.cycles.history = Load::Failed(error);
                 }
@@ -500,6 +540,36 @@ impl State {
         self.cycles.delete_request = Some(RequestTask(task.abort_handle()));
     }
 
+    pub(crate) fn apply_host_metrics(&mut self, result: Result<HostMetrics, String>) {
+        match result {
+            Ok(metrics) => {
+                self.host_metrics = Load::Ready(metrics);
+                self.host_metrics_observed_at = Some(self.clock);
+                self.host_metrics_error = None;
+            }
+            Err(error) => {
+                // Keep the last good values, but remember that they are no longer current.
+                if matches!(self.host_metrics, Load::Ready(_)) {
+                    self.host_metrics_error = Some(error);
+                } else {
+                    self.host_metrics = Load::Failed(error);
+                }
+            }
+        }
+    }
+
+    /// Text for the stale marker, or `None` while the tiles are current.
+    pub fn host_metrics_stale_notice(&self) -> Option<String> {
+        let error = self.host_metrics_error.as_ref()?;
+        let age = self
+            .host_metrics_observed_at
+            .map(|at| format_metrics_age((self.clock - at).max(0.0)));
+        Some(match age {
+            Some(age) => format!("Stale: last read {age} ago. Latest refresh failed: {error}"),
+            None => format!("Stale: latest refresh failed: {error}"),
+        })
+    }
+
     pub fn refresh_host_metrics(&mut self) {
         if !self.connected()
             || !self.permission(fleetworks_contracts::context::Permission::ReadBackend)
@@ -527,14 +597,7 @@ impl State {
                     return;
                 }
                 state.host_metrics_request = None;
-                match result {
-                    Ok(metrics) => state.host_metrics = Load::Ready(metrics),
-                    Err(error) => {
-                        if !matches!(state.host_metrics, Load::Ready(_)) {
-                            state.host_metrics = Load::Failed(error.to_string());
-                        }
-                    }
-                }
+                state.apply_host_metrics(result.map_err(|error| error.to_string()));
             });
         });
         self.host_metrics_request = Some(RequestTask(task.abort_handle()));
@@ -716,7 +779,7 @@ mod tests {
         assert_eq!(runtime.state.cycles.page_index, 0);
         assert!(runtime.find("cycle-synthetic-cycle-1").is_some());
         assert_eq!(
-            runtime.state.cycles.message.as_deref(),
+            runtime.state.cycles.read_error.as_deref(),
             Some("Synthetic gateway timeout")
         );
         assert!(!runtime.state.cycles.busy());
@@ -806,6 +869,186 @@ mod tests {
         assert!(
             state.cycles.retained_delete.is_none(),
             "invalid preparation never journals or posts a mutation"
+        );
+    }
+
+    fn cycle_row(job_id: &str) -> fleetworks_contracts::cycle_history::CycleSummary {
+        fleetworks_contracts::cycle_history::CycleSummary::new(
+            job_id.into(),
+            format!("run-{job_id}"),
+            "completed".into(),
+            "2026-11-12T12:00:00Z".into(),
+            None,
+        )
+    }
+
+    #[test]
+    fn discovery_poll_finds_new_cycle_from_an_empty_page() {
+        let mut state = crate::tests::registered_fixture();
+        state.cycles.history = Load::Ready(CycleHistory::new(Vec::new()));
+        state.cycles.page_cursors.push(None);
+
+        state.poll_cycles();
+        let request = state
+            .cycles
+            .pending_page
+            .clone()
+            .expect("an empty registered page still starts a discovery read");
+        assert_eq!((request.index, request.cursor.as_deref()), (0, None));
+        state.complete_cycles_page(request, Ok(cycle_page("new-cycle", None)));
+
+        let Load::Ready(history) = &state.cycles.history else {
+            panic!("discovery read must replace the empty page");
+        };
+        assert_eq!(history.rows.len(), 1);
+        assert_eq!(history.rows[0].job_id, "new-cycle");
+    }
+
+    #[test]
+    fn discovery_poll_keeps_page_two_cursor_and_selection() {
+        let cursor = format!("{:064x}", 2);
+        let mut state = crate::tests::registered_fixture();
+        state.cycles.history = Load::Ready(cycle_page("cycle-3", None));
+        state.cycles.page_index = 1;
+        state.cycles.page_cursors = vec![None, Some(cursor.clone())];
+        state.cycles.selected = Some("cycle-3".into());
+
+        state.poll_cycles();
+        let request = state
+            .cycles
+            .pending_page
+            .clone()
+            .expect("discovery read started on page two");
+        assert_eq!(request.index, 1);
+        assert_eq!(request.cursor.as_deref(), Some(cursor.as_str()));
+        let refreshed = CycleHistory::new(vec![cycle_row("cycle-4"), cycle_row("cycle-3")]);
+        state.complete_cycles_page(request, Ok(refreshed));
+
+        assert_eq!(
+            state.cycles.page_index, 1,
+            "polling must not return to page one"
+        );
+        assert_eq!(state.cycles.page_cursors, vec![None, Some(cursor)]);
+        assert_eq!(state.cycles.selected.as_deref(), Some("cycle-3"));
+        let Load::Ready(history) = &state.cycles.history else {
+            panic!("page two must stay loaded");
+        };
+        assert_eq!(history.rows.len(), 2);
+    }
+
+    #[test]
+    fn discovery_poll_drops_selection_that_left_the_page() {
+        let mut state = crate::tests::registered_fixture();
+        state.cycles.history = Load::Ready(cycle_page("cycle-1", None));
+        state.cycles.page_cursors.push(None);
+        state.cycles.selected = Some("cycle-1".into());
+
+        state.poll_cycles();
+        let request = state.cycles.pending_page.clone().expect("read started");
+        state.complete_cycles_page(request, Ok(cycle_page("cycle-2", None)));
+        assert_eq!(state.cycles.selected, None);
+    }
+
+    #[test]
+    fn discovery_result_from_a_prior_registration_is_dropped() {
+        let mut state = crate::tests::registered_fixture();
+        state.cycles.history = Load::Ready(CycleHistory::new(Vec::new()));
+        state.cycles.page_cursors.push(None);
+        state.poll_cycles();
+        let request = state.cycles.pending_page.clone().expect("read started");
+
+        // A registration change invalidates the Atlas history before the reply arrives.
+        state.cycles.invalidate();
+        state.complete_cycles_page(request, Ok(cycle_page("old-registration-cycle", None)));
+        assert!(matches!(state.cycles.history, Load::Idle));
+    }
+
+    #[test]
+    fn host_metrics_keep_last_values_and_flag_them_stale_until_recovery() {
+        let metrics = || HostMetrics {
+            cpu_percent: Some(10.0),
+            ..HostMetrics::default()
+        };
+        let mut state = State::fixture();
+
+        state.clock = 10.0;
+        state.apply_host_metrics(Ok(metrics()));
+        assert!(state.host_metrics_stale_notice().is_none());
+
+        state.clock = 75.0;
+        state.apply_host_metrics(Err("gateway timed out".into()));
+        assert!(matches!(&state.host_metrics, Load::Ready(m) if m.cpu_percent == Some(10.0)));
+        let notice = state
+            .host_metrics_stale_notice()
+            .expect("stale after failure");
+        assert!(notice.contains("1m 5s"), "{notice}");
+        assert!(notice.contains("gateway timed out"), "{notice}");
+
+        state.clock = 80.0;
+        state.apply_host_metrics(Ok(metrics()));
+        assert!(state.host_metrics_stale_notice().is_none());
+        assert_eq!(state.host_metrics_observed_at, Some(80.0));
+    }
+
+    #[test]
+    fn first_host_metrics_failure_is_a_failed_read_not_stale_values() {
+        let mut state = State::fixture();
+        state.apply_host_metrics(Err("unreachable".into()));
+        assert!(matches!(&state.host_metrics, Load::Failed(_)));
+        assert!(state.host_metrics_stale_notice().is_none());
+    }
+
+    #[test]
+    fn failed_poll_marks_rows_stale_until_a_good_poll_without_touching_deletion_feedback() {
+        let cursor = format!("{:064x}", 2);
+        let mut state = crate::tests::registered_fixture();
+        state.cycles.history = Load::Ready(CycleHistory::new(vec![cycle_row("cycle-3")]));
+        state.cycles.page_index = 1;
+        state.cycles.page_cursors = vec![None, Some(cursor.clone())];
+        state.cycles.selected = Some("cycle-3".into());
+        state.cycles.message = Some("Cycle hidden from this workstation's history.".into());
+
+        state.poll_cycles();
+        let failed = state.cycles.pending_page.clone().expect("poll started");
+        state.complete_cycles_page(failed, Err("gateway timed out".into()));
+        assert_eq!(
+            state.cycles.read_error.as_deref(),
+            Some("gateway timed out")
+        );
+        let Load::Ready(history) = &state.cycles.history else {
+            panic!("rows stay loaded after a failed poll");
+        };
+        assert_eq!(history.rows.len(), 1);
+        assert_eq!(
+            state.cycles.message.as_deref(),
+            Some("Cycle hidden from this workstation's history."),
+            "a read failure never overwrites deletion feedback"
+        );
+
+        state.poll_cycles();
+        let good = state
+            .cycles
+            .pending_page
+            .clone()
+            .expect("next poll started");
+        state.complete_cycles_page(
+            good,
+            Ok(CycleHistory::new(vec![
+                cycle_row("cycle-4"),
+                cycle_row("cycle-3"),
+            ])),
+        );
+        assert_eq!(
+            state.cycles.read_error, None,
+            "a good read clears the stale mark"
+        );
+        assert_eq!(state.cycles.page_index, 1);
+        assert_eq!(state.cycles.page_cursors, vec![None, Some(cursor)]);
+        assert_eq!(state.cycles.selected.as_deref(), Some("cycle-3"));
+        assert_eq!(
+            state.cycles.message.as_deref(),
+            Some("Cycle hidden from this workstation's history."),
+            "deletion feedback survives the recovery"
         );
     }
 }

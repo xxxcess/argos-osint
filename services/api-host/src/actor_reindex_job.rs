@@ -26,11 +26,15 @@ pub(super) async fn execute(
             .await?
             .ok_or_else(|| anyhow::anyhow!("durable actor reindex request missing"))?;
         if progress.phase == "completed" {
-            setup_jobs::record_result(repo,claimed,&serde_json::json!({
-                "operation":"actor_reindex","original_job_id":progress.original_job_id,
-                "generation":progress.replacement_generation,"visible_checkpoint":progress.barrier,
-                "scanned":progress.scanned,"reader_visible":true,
-            })).await?;
+            let result = fleetworks_contracts::readiness::ActorReindexResult::new(
+                (!progress.original_job_id.is_empty()).then(|| progress.original_job_id.clone()),
+                (!progress.replacement_generation.is_empty())
+                    .then(|| progress.replacement_generation.clone()),
+                u64::try_from(progress.barrier).ok(),
+                u64::try_from(progress.scanned).unwrap_or(0),
+                true,
+            );
+            setup_jobs::record_result(repo, claimed, &serde_json::to_value(result)?).await?;
             return Ok(DurableToolOutcome::Complete {
                 result_ref: format!("actor-index:{}", progress.replacement_generation),
             });
@@ -40,12 +44,10 @@ pub(super) async fn execute(
                 reason: "actor_reindex_correction_required",
             });
         }
-        let phase = if progress.reason_code.is_empty() {
-            format!("actor index {}", progress.phase)
-        } else {
-            "actor index paused for correction".into()
-        };
-        let current = (phase, progress.scanned as u64);
+        let current = (
+            format!("actor index {}", progress.phase),
+            u64::try_from(progress.scanned).unwrap_or(0),
+        );
         if reported.as_ref() != Some(&current) {
             setup_jobs::record_progress_unknown_total(repo, claimed, &current.0, current.1).await?;
             reported = Some(current);

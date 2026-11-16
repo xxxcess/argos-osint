@@ -176,12 +176,12 @@ async fn public_pairing_is_durable_scoped_single_issuance_and_installation_bound
     connect_registry::initialize_control(repo.db())
         .await
         .expect("control");
-    let state = ApiState {
-        repo: repo.clone(),
-        instance_id: "pairing-instance".into(),
-        port: 8080,
-        origins: Arc::new(vec!["https://native.example".into()]),
-    };
+    let state = ApiState::new(
+        repo.clone(),
+        "pairing-instance".into(),
+        8080,
+        Arc::new(vec!["https://native.example".into()]),
+    );
     let app = crate::network_router(state.clone(), policy(false));
     let start = "/api/v1/pairing/start";
     let poll = "/api/v1/pairing/poll";

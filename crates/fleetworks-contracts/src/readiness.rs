@@ -23,6 +23,45 @@ pub const ACTOR_SEED_PATH: &str = "/api/v1/workstation/maintenance/seed-actors";
 pub const CLASSIFIER_TRAIN_PATH: &str = "/api/v1/workstation/maintenance/train-classifier";
 /// Explicit candidate activation, separate from successful training.
 pub const CLASSIFIER_ACTIVATE_PATH: &str = "/api/v1/classifier/activate";
+/// Expected `operation` tag for `ActorReindexResult`.
+pub const ACTOR_REINDEX_OPERATION: &str = "actor_reindex";
+
+/// Safe, bounded job result emitted by the actor reindex worker and projected in activity.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct ActorReindexResult {
+    pub operation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_checkpoint: Option<u64>,
+    pub scanned: u64,
+    pub reader_visible: bool,
+}
+
+impl ActorReindexResult {
+    /// Construct a validated actor reindex job result without worker paths or raw reports.
+    #[must_use]
+    pub fn new(
+        original_job_id: Option<String>,
+        generation: Option<String>,
+        visible_checkpoint: Option<u64>,
+        scanned: u64,
+        reader_visible: bool,
+    ) -> Self {
+        Self {
+            operation: ACTOR_REINDEX_OPERATION.to_owned(),
+            original_job_id,
+            generation,
+            visible_checkpoint,
+            scanned,
+            reader_visible,
+        }
+    }
+}
 
 /// Server-owned readiness result, never inferred from the presence of a process.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -607,5 +646,24 @@ mod tests {
             aggregate.checks[0].fresh_for_ms, 0,
             "missing freshness must not manufacture a green result"
         );
+    }
+
+    #[test]
+    fn actor_reindex_result_round_trips_safe_fields_only() {
+        let result = ActorReindexResult::new(
+            Some("job-orig-1".into()),
+            Some("gen-7".into()),
+            Some(99),
+            250,
+            true,
+        );
+        let value = serde_json::to_value(&result).expect("serialize");
+        assert_eq!(value["operation"], ACTOR_REINDEX_OPERATION);
+        let decoded: ActorReindexResult = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(decoded, result);
+
+        let mut forged = serde_json::to_value(&result).expect("serialize");
+        forged["server_path"] = serde_json::json!("/private/index");
+        assert!(serde_json::from_value::<ActorReindexResult>(forged).is_err());
     }
 }

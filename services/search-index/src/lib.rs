@@ -8,6 +8,7 @@ pub mod http;
 pub mod pressure;
 mod query;
 mod schema;
+pub mod service;
 
 use std::fmt;
 

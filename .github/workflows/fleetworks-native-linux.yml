@@ -1,0 +1,243 @@
+name: Fleetworks Linux Native App
+
+on:
+  workflow_call:
+    inputs:
+      expected-head:
+        required: true
+        type: string
+      mode:
+        required: true
+        type: string
+      profile:
+        required: true
+        type: string
+      release-version:
+        required: false
+        type: string
+        default: ""
+  workflow_dispatch:
+    inputs:
+      expected-head:
+        required: false
+        type: string
+        default: ""
+      mode:
+        required: false
+        type: string
+        default: pr
+      profile:
+        required: false
+        type: string
+        default: debug
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fleetworks-native-linux-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native_linux:
+    name: Build, verify and package Linux native (${{ inputs.profile }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+    steps:
+      - name: Reject empty head or dirty dispatch
+        if: inputs.expected-head == ''
+        run: |
+          echo "::error::expected-head input must pin the exact revision being verified"
+          exit 1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.expected-head }}
+          persist-credentials: false
+          lfs: false
+
+      - name: Verify checked-out exact revision
+        run: |
+          actual="$(git rev-parse HEAD)"
+          test "$actual" = "${{ inputs.expected-head }}"
+
+      - name: Install Linux GUI, D-Bus, Vulkan, and ELF inspection dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config binutils libclang-dev \
+            libdbus-1-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libxkbcommon-x11-0 \
+            libx11-dev libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libvulkan1 libvulkan-dev vulkan-tools mesa-vulkan-drivers
+
+      - name: Install pinned Rust toolchain
+        run: |
+          toolchain="$(sed -n 's/^channel = "\([0-9][0-9.]*\)"$/\1/p' rust-toolchain.toml | head -n 1)"
+          test -n "$toolchain"
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt --target ${{ matrix.target }}
+          rustup default "$toolchain"
+          python3 scripts/fleetworks_verify.py platform --format json
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-native-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'apps/fleetworks-desktop/Cargo.toml', 'services/api-host/Cargo.toml', 'services/search-index/Cargo.toml', 'rust-toolchain.toml') }}
+          workspaces: . -> target/agents
+          cache-on-failure: true
+          save-if: ${{ github.event_name != 'pull_request' }}
+
+      - name: Verify Linux packaging and scope scripts offline
+        run: |
+          mkdir -p "${{ runner.temp }}/linux-native-evidence"
+          python3 scripts/fleetworks_candidate.py verify-engine-free | tee "${{ runner.temp }}/linux-native-evidence/engine-free.json"
+          python3 -B -m unittest discover -s scripts -p 'test_fleetworks*.py'
+          python3 -B -m unittest discover -s deploy -p 'test_native_review.py'
+
+      - name: Format and unit test Linux desktop crates
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ runner.temp }}/linux-native-evidence"
+          cargo fmt -p fleetworks-desktop -p fleetworks-workstation -p fleetworks-contracts -- --check
+          python3 scripts/agent_cargo.py test --locked -p fleetworks-contracts -p fleetworks-workstation -p fleetworks-desktop -- --test-threads=1 \
+            | tee "${{ runner.temp }}/linux-native-evidence/unit-tests.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "${{ runner.temp }}/linux-native-evidence/unit-tests.log"
+          ! grep -Eq 'test result: FAILED\.' "${{ runner.temp }}/linux-native-evidence/unit-tests.log"
+
+      - name: Render headless Linux native UI fixture captures (Lavapipe)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ runner.temp }}/linux-native-evidence"
+          ls -la /usr/share/vulkan/icd.d /etc/vulkan/icd.d 2>/dev/null || true
+          icd="$(find /usr/share/vulkan/icd.d /etc/vulkan/icd.d -maxdepth 1 \( -type f -o -type l \) \( -name 'lvp_icd*.json' -o -name 'pipe_icd*.json' \) 2>/dev/null | head -n 1 || true)"
+          echo "Selected Lavapipe ICD: ${icd:-<default>}"
+          if [[ -n "$icd" ]]; then
+            export VK_ICD_FILENAMES="$icd"
+            export VK_DRIVER_FILES="$icd"
+          fi
+          vulkaninfo --summary | tee "${{ runner.temp }}/linux-native-evidence/vulkaninfo-summary.txt"
+          python3 scripts/fleetworks_verify.py native-ui --agent --require-clean \
+            --revision "${{ inputs.expected-head }}" \
+            --output "${{ runner.temp }}/linux-native-evidence/ui" \
+            --scene redesign-setup \
+            --scene registration-ready \
+            --scene workstation-partial-seed \
+            --scene pairing-waiting \
+            --scene pairing-keychain-denied \
+            --size 1280x800 --size 640x480 --scale 1
+
+      - name: Package and verify relocatable Linux x86_64 tarball
+        id: package
+        env:
+          EXPECTED_HEAD: ${{ inputs.expected-head }}
+          LINUX_TARGET: ${{ matrix.target }}
+          LINUX_PROFILE: ${{ inputs.profile }}
+          RELEASE_VERSION: ${{ inputs.release-version }}
+        run: |
+          set -euo pipefail
+          dist="${{ runner.temp }}/linux-native-dist"
+          extracted="${{ runner.temp }}/linux-native-extract"
+          mkdir -p "$dist" "$extracted"
+          version_args=()
+          if [[ -n "$RELEASE_VERSION" ]]; then
+            version_args=(--version "$RELEASE_VERSION")
+          fi
+          python3 scripts/fleetworks_candidate.py build-native --agent \
+            --target "$LINUX_TARGET" --profile "$LINUX_PROFILE" \
+            --revision "$EXPECTED_HEAD" --require-clean \
+            --output "$dist" --archive \
+            --workflow "${{ github.workflow }}" --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}" \
+            "${version_args[@]}"
+          DIST_DIR="$dist" EXTRACT_DIR="$extracted" SIZES_OUT="${{ runner.temp }}/linux-native-evidence/package-sizes-$LINUX_TARGET.json" python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, "scripts")
+          from fleetworks_candidate import locked_rune_revision, sha256
+
+          dist = Path(os.environ["DIST_DIR"])
+          archives = list(dist.glob("Fleetworks-*.tar.gz"))
+          if len(archives) != 1:
+              raise SystemExit(f"Expected 1 Linux archive, found {len(archives)}")
+          manifests = list(dist.glob("*.manifest.json"))
+          if len(manifests) != 1:
+              raise SystemExit(f"Expected 1 Linux manifest, found {len(manifests)}")
+          manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+          archive = archives[0]
+          bundle = dist / "Fleetworks-linux-x86_64"
+          exe = bundle / "bin/fleetworks-desktop"
+          companion = bundle / "bin/argos-api-host"
+          unpacked_bytes = sum(path.stat().st_size for path in bundle.rglob("*") if path.is_file())
+          sizes = {
+              "target": os.environ["LINUX_TARGET"],
+              "profile": os.environ["LINUX_PROFILE"],
+              "archive_name": archive.name,
+              "archive_bytes": archive.stat().st_size,
+              "archive_mib": round(archive.stat().st_size / (1024 * 1024), 2),
+              "unpacked_bytes": unpacked_bytes,
+              "unpacked_mib": round(unpacked_bytes / (1024 * 1024), 2),
+              "executable_bytes": exe.stat().st_size,
+              "companion_bytes": companion.stat().st_size if companion.is_file() else None,
+          }
+          Path(os.environ["SIZES_OUT"]).write_text(json.dumps(sizes, indent=2) + "\n", encoding="utf-8")
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as handle:
+                  print(
+                      f"- `{sizes['target']}` (`{sizes['profile']}`): archive `{sizes['archive_name']}` = "
+                      f"`{sizes['archive_mib']} MiB` ({sizes['archive_bytes']} B), unpacked = "
+                      f"`{sizes['unpacked_mib']} MiB` ({sizes['unpacked_bytes']} B), "
+                      f"desktop = `{sizes['executable_bytes']} B`, companion = `{sizes['companion_bytes']} B`",
+                      file=handle,
+                  )
+          subprocess.run([
+              sys.executable, "scripts/fleetworks_candidate.py", "verify-native",
+              "--archive", str(archive),
+              "--sha256", sha256(archive),
+              "--revision", os.environ["EXPECTED_HEAD"],
+              "--target", os.environ["LINUX_TARGET"],
+              "--profile", os.environ["LINUX_PROFILE"],
+              "--rune-revision", locked_rune_revision(),
+              "--version", manifest["version"],
+              "--directory", os.environ["EXTRACT_DIR"],
+              "--require-clean",
+          ], check=True)
+          PY
+          python3 scripts/fleetworks_local_backend_smoke.py \
+            --app "$extracted/Fleetworks-linux-x86_64" \
+            --output "${{ runner.temp }}/linux-native-evidence/local-backend-smoke-$LINUX_TARGET.json"
+          if [[ "${{ inputs.profile }}" == debug ]]; then
+            ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1 \
+              FLEETWORKS_PARITY_REQUIRE_COMPANION=1 \
+              FLEETWORKS_PARITY_COMPANION_PATH="$extracted/Fleetworks-linux-x86_64/bin/argos-api-host" \
+              FLEETWORKS_PARITY_REPORT_PATH="${{ runner.temp }}/linux-native-evidence/http-ipc-parity-$LINUX_TARGET.json" \
+              python3 scripts/agent_cargo.py test --locked --target "$LINUX_TARGET" \
+              -p argos-api-host --features embedded --test http_ipc_parity -- --nocapture --test-threads=1
+          fi
+
+      - name: Upload Linux native candidate archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: Fleetworks-linux-app-${{ matrix.target }}-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/linux-native-dist/Fleetworks-*.tar.gz
+            ${{ runner.temp }}/linux-native-dist/Fleetworks-*.tar.gz.sha256
+            ${{ runner.temp }}/linux-native-dist/Fleetworks-*.manifest.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Linux native headless fixture evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: Fleetworks-linux-evidence-${{ matrix.target }}-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}
+          path: ${{ runner.temp }}/linux-native-evidence/**
+          if-no-files-found: ignore
+          retention-days: 7

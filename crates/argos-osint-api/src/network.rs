@@ -56,6 +56,42 @@ pub struct AuthenticatedPrincipal {
 }
 
 impl AuthenticatedPrincipal {
+    /// Construct a validated `Native`-purpose principal for an authenticated local IPC peer.
+    ///
+    /// Rejects empty or malformed identities, reserved pairing prefixes, empty or
+    /// duplicate permission lists, and web-only `ResolveWebSession` authority.
+    pub fn for_local_ipc(
+        credential_id: impl Into<String>,
+        scope_id: impl Into<String>,
+        access_epoch: impl Into<String>,
+        permissions: Vec<Permission>,
+    ) -> anyhow::Result<Self> {
+        let credential_id = credential_id.into();
+        let scope_id = scope_id.into();
+        let access_epoch = access_epoch.into();
+        validate_principal_identities(&credential_id, &scope_id, &access_epoch)?;
+        ensure!(
+            !permissions.is_empty(),
+            "local IPC principal requires permissions"
+        );
+        let unique: BTreeSet<Permission> = permissions.iter().copied().collect();
+        ensure!(
+            unique.len() == permissions.len(),
+            "duplicate API credential permission"
+        );
+        ensure!(
+            !unique.contains(&Permission::ResolveWebSession),
+            "local IPC principal cannot hold web session resolution permission"
+        );
+        Ok(Self {
+            credential_id,
+            scope_id,
+            access_epoch,
+            purpose: CredentialPurpose::Native,
+            permissions: unique,
+        })
+    }
+
     /// Non-secret server-assigned credential identifier.
     pub fn credential_id(&self) -> &str {
         &self.credential_id
@@ -85,6 +121,27 @@ impl AuthenticatedPrincipal {
     pub fn permissions(&self) -> impl Iterator<Item = Permission> + '_ {
         self.permissions.iter().copied()
     }
+}
+
+fn validate_principal_identities(
+    credential_id: &str,
+    scope_id: &str,
+    access_epoch: &str,
+) -> anyhow::Result<()> {
+    ensure!(
+        !credential_id.starts_with(native_pairing::CREDENTIAL_PREFIX),
+        "reserved native pairing credential identity"
+    );
+    for identity in [credential_id, scope_id, access_epoch] {
+        ensure!(
+            (1..=128).contains(&identity.len())
+                && identity
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')),
+            "invalid API credential identity"
+        );
+    }
+    Ok(())
 }
 
 /// A purpose-scoped bearer credential. Only a digest is retained in memory.
@@ -163,20 +220,7 @@ impl ScopedCredential {
         token: &str,
     ) -> anyhow::Result<Self> {
         ensure!(valid_token(token.as_bytes()), "invalid scoped API bearer");
-        ensure!(
-            !credential_id.starts_with(native_pairing::CREDENTIAL_PREFIX),
-            "reserved native pairing credential identity"
-        );
-        for identity in [&credential_id, &scope_id, &access_epoch] {
-            ensure!(
-                (1..=128).contains(&identity.len())
-                    && identity
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric()
-                            || matches!(byte, b'-' | b'_' | b'.')),
-                "invalid API credential identity"
-            );
-        }
+        validate_principal_identities(&credential_id, &scope_id, &access_epoch)?;
         ensure!(
             !permissions.is_empty(),
             "scoped API credential requires permissions"

@@ -7,17 +7,22 @@ import plistlib
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
+import time
 import unittest
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from fleetworks_candidate import NATIVE_APP, NATIVE_BINARY, NATIVE_MANIFEST
-from fleetworks_candidate import main, native_main, open_native, _run_cargo, apple_versions, cargo_executable, cargo_native_command
-from fleetworks_candidate import artifact_version, checksum_line, extract_native, native_output, package_native, sha256
+from fleetworks_candidate import (
+    COMPANION_BINARY, COMPANION_PACKAGE, MAX_NATIVE_ARCHIVE_BYTES, MAX_NATIVE_UNPACKED_BYTES,
+    NATIVE_APP, NATIVE_BINARY, NATIVE_MANIFEST,
+)
+from fleetworks_candidate import main, native_main, open_native, _run_cargo, apple_versions, cargo_companion_command, cargo_executable, cargo_native_command
+from fleetworks_candidate import artifact_version, checksum_line, elf_architecture, extract_native, linux_runtime_preflight, native_output, package_native, sha256, verify_engine_free
 
 
 class NativeAppTests(unittest.TestCase):
@@ -41,6 +46,8 @@ class NativeAppTests(unittest.TestCase):
 
     def command_runner(self, command, **_kwargs):
         self.commands.append(command)
+        if command[:2] == ["strip", "-S"]:
+            return subprocess.CompletedProcess(command, 0, "", "")
         self.assertEqual(command[:2], ["otool", "-L"])
         return subprocess.CompletedProcess(command, 0, f"{command[2]}:\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n", "")
 
@@ -84,7 +91,7 @@ class NativeAppTests(unittest.TestCase):
             self.assertTrue(all(name == NATIVE_APP + "/" or name.startswith(NATIVE_APP + "/") for name in zipped.namelist()))
             executable = zipped.getinfo(NATIVE_APP + "/Contents/MacOS/" + NATIVE_BINARY)
             self.assertEqual((executable.external_attr >> 16) & 0o777, 0o755)
-        self.assertEqual(len(self.commands), 1)
+        self.assertEqual([cmd[:2] for cmd in self.commands], [["otool", "-L"], ["strip", "-S"]])
 
     def test_rejects_wrong_architecture_missing_icon_and_symlink_inputs(self):
         with self.assertRaisesRegex(ValueError, "wrong architecture"):
@@ -239,7 +246,7 @@ class NativeAppTests(unittest.TestCase):
         self.assertEqual((app / "Contents/MacOS" / NATIVE_BINARY).read_bytes(), self.binary.read_bytes())
         self.assertEqual(manifest["revision"], "1" * 40)
         self.assertEqual(manifest["verification"]["gui_launch"], "not_run")
-        self.assertEqual(len(self.commands), 2)
+        self.assertEqual([cmd[:2] for cmd in self.commands], [["otool", "-L"], ["strip", "-S"], ["otool", "-L"]])
 
     def test_downloaded_zip_rejects_wrong_digest_pin_and_dirty_release_before_extraction(self):
         result = self.pack(archive=True)
@@ -461,6 +468,544 @@ sys.stdout.write(sys.argv[2]); sys.stdout.flush()
             open_native(self.root / NATIVE_APP, info, target, runner=runner)
         self.assertEqual(commands, [["ps", "-axo", "comm="]])
 
+
+class LinuxNativeCandidateTests(unittest.TestCase):
+    def setUp(self):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name).resolve()
+        self.binary = self.root / "target output" / NATIVE_BINARY
+        self.binary.parent.mkdir()
+        elf_header = (
+            b"\x7fELF"
+            + bytes([2, 1, 1, 0, 0])
+            + b"\x00" * 7
+            + struct.pack("<HHI", 3, 62, 1)
+            + b"\x00" * 40
+        )
+        self.binary.write_bytes(elf_header + b"linux native payload")
+        self.binary.chmod(0o755)
+        self.resources = self.root / "resources"
+        self.resources.mkdir()
+        (self.resources / "fleetworks.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg"/>')
+        self.destination = self.root / "linux bundle out"
+        self.commands = []
+
+    def runner(self, command, **_kwargs):
+        self.commands.append(command)
+        if command[:2] == ["strip", "--strip-debug"]:
+            return subprocess.CompletedProcess(command, 0, "", "")
+        self.assertEqual(command[:2], ["readelf", "-d"])
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            " 0x0000000000000001 (NEEDED)             Shared library: [libc.so.6]\n"
+            " 0x0000000000000001 (NEEDED)             Shared library: [libdbus-1.so.3]\n"
+            " 0x0000000000000001 (NEEDED)             Shared library: [libvulkan.so.1]\n",
+            "",
+        )
+
+    def pack(self, **overrides):
+        kwargs = dict(
+            target="x86_64-unknown-linux-gnu",
+            profile="debug",
+            revision="1" * 40,
+            dirty=True,
+            toolchain="1.95.0",
+            rune_revision="2" * 40,
+            resources=self.resources,
+            runner=self.runner,
+            version="0.2.1",
+            archive=False,
+        )
+        kwargs.update(overrides)
+        return package_native(self.destination, self.binary, **kwargs)
+
+    def test_packages_relocatable_linux_tarball_without_xcode_and_verifies_roundtrip(self):
+        result = self.pack(archive=True)
+        archive = Path(result["archive"])
+        self.assertTrue(archive.name.endswith("-x86_64-unknown-linux-gnu.tar.gz"))
+        bundle = Path(result["app"])
+        self.assertEqual(bundle.name, "Fleetworks-linux-x86_64")
+        desktop = (bundle / "share/applications/fleetworks.desktop").read_text()
+        self.assertIn(f"Exec={NATIVE_BINARY}", desktop)
+        self.assertNotIn(str(self.destination), desktop)
+        manifest = json.loads(Path(result["manifest"]).read_text())
+        self.assertEqual(manifest["platform"], "linux")
+        self.assertEqual(manifest["target"], "x86_64-unknown-linux-gnu")
+        extracted_dir = self.root / "extracted review dir"
+        app, verified = extract_native(
+            archive,
+            extracted_dir,
+            expected_digest=result["sha256"],
+            version="0.2.1",
+            target="x86_64-unknown-linux-gnu",
+            revision="1" * 40,
+            rune_revision="2" * 40,
+            runner=self.runner,
+        )
+        self.assertEqual(verified["revision"], "1" * 40)
+        self.assertEqual((app / "bin" / NATIVE_BINARY).read_bytes(), self.binary.read_bytes())
+
+    def test_rejects_disallowed_linux_shared_libraries_and_unsafe_tar_members(self):
+        def bad_lib(command, **_kwargs):
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                " 0x0000000000000001 (NEEDED)             Shared library: [libssl.so.3]\n",
+                "",
+            )
+
+        with self.assertRaisesRegex(ValueError, "Native Linux binary links disallowed library"):
+            self.pack(runner=bad_lib)
+        result = self.pack(archive=True)
+        archive = Path(result["archive"])
+        with tarfile.open(archive, "w:gz") as output:
+            info = tarfile.TarInfo("../escape")
+            payload = b"bad"
+            info.size = len(payload)
+            output.addfile(info, io.BytesIO(payload))
+        digest = sha256(archive)
+        archive.with_name(archive.name + ".sha256").write_text(checksum_line(archive, digest))
+        with self.assertRaisesRegex(ValueError, "unsafe or unexpected path"):
+            extract_native(
+                archive,
+                self.root / "bad-tar",
+                expected_digest=digest,
+                version="0.2.1",
+                target="x86_64-unknown-linux-gnu",
+                revision="1" * 40,
+                rune_revision="2" * 40,
+                runner=self.runner,
+            )
+
+    def test_elf_arch_and_linux_open_preflight_preserve_running_instance(self):
+        self.assertEqual(elf_architecture(self.binary), 62)
+        empty_icd = self.root / "empty-icd"
+        empty_icd.mkdir()
+        icd_dir = self.root / "vulkan-icd"
+        icd_dir.mkdir()
+        (icd_dir / "lvp_icd.json").write_text("{}")
+        with mock.patch("fleetworks_candidate.shutil.which", return_value=None):
+            with self.assertRaisesRegex(ValueError, "WAYLAND_DISPLAY or DISPLAY"):
+                linux_runtime_preflight({}, vulkan_icd_dirs=[empty_icd])
+            with self.assertRaisesRegex(ValueError, "Vulkan"):
+                linux_runtime_preflight({"DISPLAY": ":0"}, vulkan_icd_dirs=[empty_icd])
+        with self.assertRaisesRegex(ValueError, "Vulkan"):
+            linux_runtime_preflight(
+                {"DISPLAY": ":0"},
+                vulkan_icd_dirs=[empty_icd],
+                runner=lambda cmd, **_: subprocess.CompletedProcess(cmd, 1, "", "vulkaninfo unavailable"),
+            )
+        self.assertEqual(
+            linux_runtime_preflight(
+                {"WAYLAND_DISPLAY": "wayland-0"},
+                vulkan_icd_dirs=[empty_icd],
+                runner=lambda cmd, **_: subprocess.CompletedProcess(cmd, 0, "GPU0: llvmpipe", ""),
+            ),
+            {"display": "wayland", "dbus_session": False, "vulkan": True},
+        )
+        self.assertEqual(
+            linux_runtime_preflight({"DISPLAY": ":0", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus"}, vulkan_icd_dirs=[icd_dir]),
+            {"display": "x11", "dbus_session": True, "vulkan": True},
+        )
+
+        target = "x86_64-unknown-linux-gnu"
+        info = SimpleNamespace(system="Linux", native_target=target)
+        bundle = Path(self.pack()["app"])
+        launched = []
+        with mock.patch("sys.stderr", io.StringIO()), \
+             mock.patch.dict(os.environ, {"DISPLAY": ":0"}, clear=True), \
+             mock.patch("fleetworks_candidate.subprocess.Popen", side_effect=lambda cmd, **_kw: launched.append(cmd) or SimpleNamespace(pid=42)):
+            response = open_native(
+                bundle,
+                info,
+                target,
+                runner=lambda cmd, **_: launched.append(cmd) or subprocess.CompletedProcess(cmd, 0, "", ""),
+                preflight=lambda: {"display": "x11", "dbus_session": False, "vulkan": True},
+            )
+        self.assertIn("Launched Linux native executable in an isolated session", response)
+        self.assertEqual(launched, [["ps", "-axo", "comm="], [str(bundle / "bin" / NATIVE_BINARY)]])
+        launched.clear()
+        with mock.patch("sys.stderr", io.StringIO()), \
+             mock.patch.dict(os.environ, {"DISPLAY": ":0"}, clear=True), \
+             mock.patch("fleetworks_candidate._run", return_value=""), \
+             mock.patch("fleetworks_candidate.subprocess.Popen", side_effect=lambda cmd, **_kw: launched.append(cmd) or SimpleNamespace(pid=42)):
+            open_native(
+                bundle,
+                info,
+                target,
+                preflight=lambda: {"display": "x11", "dbus_session": False, "vulkan": True},
+            )
+        self.assertEqual(launched, [[str(bundle / "bin" / NATIVE_BINARY)]])
+        with mock.patch("sys.stderr", io.StringIO()), \
+             mock.patch.dict(os.environ, {"DISPLAY": ":0", "FLEETWORKS_LOCAL_REVIEW_APPROVAL_SOCKET": "/tmp/s.sock"}, clear=True):
+            with self.assertRaisesRegex(ValueError, "macOS-only"):
+                open_native(
+                    bundle,
+                    info,
+                    target,
+                    runner=lambda cmd, **_: subprocess.CompletedProcess(cmd, 0, "", ""),
+                    preflight=lambda: {"display": "x11", "dbus_session": False, "vulkan": True},
+                )
+
+    def test_linux_native_main_skips_xcode_checks(self):
+        (self.root / "version.txt").write_text("0.2.1\n")
+        (self.root / "Cargo.lock").write_text("lock\n")
+        target = "x86_64-unknown-linux-gnu"
+        info = SimpleNamespace(system="Linux", native_target=target)
+        args = SimpleNamespace(
+            command="build-native", target="host", profile="debug", open=False,
+            agent=False, output=None, dry_run=False, revision=None, require_clean=False,
+            resources=self.resources, minimum_macos=None, bundle_version=None,
+            run_id=None, run_attempt="1", workflow="fixture", archive=False,
+        )
+        run_calls = []
+        with mock.patch("sys.stderr", io.StringIO()), mock.patch("sys.stdout", io.StringIO()), \
+             mock.patch.multiple(
+                 "fleetworks_candidate",
+                 ROOT=self.root,
+                 detect=lambda: info,
+                 resolve_native_target=lambda *_: target,
+                 validate_toolchain=lambda *_: "1.95.0",
+                 native_output=lambda *_: self.destination,
+                 repository_identity=lambda **_: ("1" * 40, False),
+                 locked_rune_revision=lambda: "2" * 40,
+                 _run=lambda cmd, **kw: run_calls.append(cmd) or "",
+                 _run_cargo=lambda *_a, **_kw: json.dumps({
+                     "reason": "compiler-artifact",
+                     "target": {"name": NATIVE_BINARY, "kind": ["bin"]},
+                     "package_id": "path+file:///fixture/apps/fleetworks-desktop#0.2.1",
+                     "executable": str(self.binary),
+                 }) + "\n" + json.dumps({"reason": "build-finished", "success": True}),
+                 package_native=lambda *_a, **_kw: {"app": str(self.destination / "Fleetworks-linux-x86_64"), "manifest": str(self.destination / "manifest.json"), "identity": {}},
+             ):
+            self.assertEqual(native_main(args), 0)
+        self.assertEqual(run_calls, [["readelf", "--version"]])
+
+    def test_companion_packaging_and_extraction_verify_macos_and_linux_archives(self):
+        mac_bin = self.root / "mac-desktop"
+        mac_bin.write_bytes(struct.pack("<8I", 0xFEEDFACF, 0x01000007, 3, 2, 0, 0, 0, 0) + b"native fixture")
+        mac_bin.chmod(0o755)
+        mac_comp = self.root / COMPANION_BINARY
+        mac_comp.write_bytes(mac_bin.read_bytes())
+        mac_comp.chmod(0o755)
+        mac_res = self.root / "mac-resources"
+        mac_res.mkdir()
+        with (mac_res / "Info.plist").open("wb") as output:
+            plistlib.dump({"CFBundleIdentifier": "dev.fleetworks.desktop", "LSMinimumSystemVersion": "13.0"}, output)
+        mac_runner = lambda cmd, **_: subprocess.CompletedProcess(
+            cmd, 0, f"{cmd[2]}:\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n", ""
+        )
+        result = package_native(
+            self.destination / "mac", mac_bin, mac_res,
+            version="0.2.1", target="x86_64-apple-darwin", revision="1" * 40,
+            profile="debug", rune_revision="2" * 40, toolchain="1.95.0", dirty=True,
+            run_id="123", attempt="2", workflow="fixture", archive=True,
+            companion_binary=mac_comp, runner=mac_runner,
+        )
+        manifest = result["identity"]
+        self.assertEqual(manifest["companion"]["name"], COMPANION_BINARY)
+        self.assertEqual(manifest["companion"]["relative_path"], f"Contents/MacOS/{COMPANION_BINARY}")
+        self.assertEqual(manifest["companion"]["sha256"], sha256(mac_comp))
+        app, verified = extract_native(
+            result["archive"], self.root / "extracted-mac", expected_digest=result["sha256"],
+            version="0.2.1", target="x86_64-apple-darwin", revision="1" * 40,
+            rune_revision="2" * 40, profile="debug", runner=mac_runner,
+        )
+        self.assertTrue((app / "Contents/MacOS" / COMPANION_BINARY).is_file())
+        self.assertEqual(verified["companion"]["sha256"], sha256(mac_comp))
+
+        # Verify Linux tar.gz packaging & extraction of companion executable.
+        linux_comp = self.root / "linux-comp"
+        linux_comp.write_bytes(self.binary.read_bytes())
+        linux_comp.chmod(0o755)
+        linux_runner = lambda cmd, **_: subprocess.CompletedProcess(
+            cmd, 0, "  0x0000000000000001 (NEEDED) Shared library: [libc.so.6]\n", ""
+        )
+        linux_res = self.pack(
+            companion_binary=linux_comp, archive=True,
+            runner=linux_runner,
+        )
+        lapp, lmanifest = extract_native(
+            linux_res["archive"], self.root / "extracted-linux", expected_digest=linux_res["sha256"],
+            version="0.2.1", target="x86_64-unknown-linux-gnu", revision="1" * 40,
+            rune_revision="2" * 40, profile="debug", runner=linux_runner,
+        )
+        self.assertTrue((lapp / "bin" / COMPANION_BINARY).is_file())
+        self.assertEqual(lmanifest["companion"]["relative_path"], f"bin/{COMPANION_BINARY}")
+
+    def test_cargo_companion_command_and_verify_engine_free_bounds(self):
+        cmd = cargo_companion_command("aarch64-apple-darwin", "release", agent=True,
+                                      implicit_host=True, features="embedded", no_default_features=True)
+        self.assertIn(COMPANION_PACKAGE, cmd)
+        self.assertIn("--no-default-features", cmd)
+        self.assertEqual(cmd[-3:], ["--features", "embedded", "--release"])
+        fake_msg = json.dumps({
+            "reason": "compiler-artifact",
+            "target": {"name": COMPANION_BINARY, "kind": ["bin"]},
+            "package_id": "path+file:///repo/services/api-host#0.2.1",
+            "executable": "/tmp/argos-api-host",
+        }) + "\n" + json.dumps({"reason": "build-finished", "success": True})
+        self.assertEqual(
+            cargo_executable(fake_msg, name=COMPANION_BINARY, package=COMPANION_PACKAGE),
+            Path("/tmp/argos-api-host"),
+        )
+
+        def clean_runner(command, **_kw):
+            if "--invert" in command:
+                return subprocess.CompletedProcess(command, 0, "0rusqlite v0.41.1\n1fleetworks-jobs v0.2.1\n", "")
+            return subprocess.CompletedProcess(command, 0, "fleetworks-contracts v0.2.1\ntokio v1.53.3\n", "")
+
+        summary = verify_engine_free(self.root, runner=clean_runner)
+        self.assertTrue(summary["client_engine_free"])
+        self.assertEqual(summary["rusqlite_parents"], ["fleetworks-jobs"])
+
+        def leaky_client_runner(command, **_kw):
+            return subprocess.CompletedProcess(command, 0, "fleetworks-desktop v0.2.1\nsurrealdb v3.3.4\n", "")
+
+        with self.assertRaisesRegex(ValueError, "Engine-free native crates"):
+            verify_engine_free(self.root, runner=leaky_client_runner)
+
+        def leaky_sqlite_runner(command, **_kw):
+            if "--invert" in command:
+                return subprocess.CompletedProcess(command, 0, "0rusqlite v0.41.1\n1argos-osint-api v0.2.1\n", "")
+            return subprocess.CompletedProcess(command, 0, "argos-api-host v0.2.1\n", "")
+
+        with self.assertRaisesRegex(ValueError, "fleetworks-jobs"):
+            verify_engine_free(self.root, runner=leaky_sqlite_runner)
+
+    def test_strips_debug_sections_updates_companion_digest_and_enforces_size_limits(self):
+        self.assertEqual(MAX_NATIVE_UNPACKED_BYTES, 1024 * 1024 * 1024)
+        self.assertEqual(MAX_NATIVE_ARCHIVE_BYTES, 512 * 1024 * 1024)
+        mac_bin = self.root / "strip-mac-bin"
+        mac_bin.write_bytes(struct.pack("<8I", 0xFEEDFACF, 0x01000007, 3, 2, 0, 0, 0, 0) + b"payloadDEBUG_DATA")
+        mac_bin.chmod(0o755)
+        mac_comp = self.root / f"{COMPANION_BINARY}-strip"
+        mac_comp.write_bytes(mac_bin.read_bytes() + b"_MORE_DEBUG")
+        mac_comp.chmod(0o755)
+        mac_res = self.root / "strip-mac-res"
+        mac_res.mkdir()
+        with (mac_res / "Info.plist").open("wb") as output:
+            plistlib.dump({"CFBundleIdentifier": "dev.fleetworks.desktop", "LSMinimumSystemVersion": "13.0"}, output)
+
+        strip_calls = []
+
+        def stripping_runner(cmd, **_kwargs):
+            if cmd[:2] == ["strip", "-S"]:
+                strip_calls.append(cmd)
+                staged = Path(cmd[2])
+                staged.write_bytes(staged.read_bytes()[:40])
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            return subprocess.CompletedProcess(
+                cmd, 0, f"{cmd[2]}:\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n", ""
+            )
+
+        res = package_native(
+            self.destination / "stripped-mac", mac_bin, mac_res,
+            version="0.2.1", target="x86_64-apple-darwin", revision="1" * 40,
+            profile="debug", rune_revision="2" * 40, toolchain="1.95.0", dirty=True,
+            archive=True, companion_binary=mac_comp, runner=stripping_runner,
+        )
+        self.assertEqual(len(strip_calls), 2)
+        self.assertEqual(res["executable_bytes"], 40)
+        self.assertEqual(res["companion_bytes"], 40)
+        self.assertLess(res["executable_bytes"], mac_bin.stat().st_size)
+        self.assertLess(res["companion_bytes"], mac_comp.stat().st_size)
+        staged_comp = Path(res["companion"])
+        self.assertEqual(res["identity"]["companion"]["sha256"], sha256(staged_comp))
+        self.assertNotEqual(res["identity"]["companion"]["sha256"], sha256(mac_comp))
+        self.assertGreater(res["unpacked_bytes"], 0)
+        self.assertGreater(res["archive_bytes"], 0)
+
+        with mock.patch("fleetworks_candidate.MAX_NATIVE_UNPACKED_BYTES", 10):
+            with self.assertRaisesRegex(ValueError, "1 GiB unpacked limit"):
+                package_native(
+                    self.destination / "too-big-unpacked", mac_bin, mac_res,
+                    version="0.2.1", target="x86_64-apple-darwin", revision="1" * 40,
+                    profile="debug", rune_revision="2" * 40, toolchain="1.95.0", dirty=True,
+                    runner=stripping_runner,
+                )
+
+        with mock.patch("fleetworks_candidate.MAX_NATIVE_ARCHIVE_BYTES", 10):
+            with self.assertRaisesRegex(ValueError, "512 MiB compressed limit"):
+                package_native(
+                    self.destination / "too-big-archive", mac_bin, mac_res,
+                    version="0.2.1", target="x86_64-apple-darwin", revision="1" * 40,
+                    profile="debug", rune_revision="2" * 40, toolchain="1.95.0", dirty=True,
+                    archive=True, runner=stripping_runner,
+                )
+
+    def test_diagnostic_foreground_launch_captures_early_crash_and_healthy_probe(self):
+        bundle = Path(self.pack()["app"])
+        info = SimpleNamespace(system="Linux", native_target="x86_64-unknown-linux-gnu")
+
+        class FakeProc:
+            def __init__(self, rc, err_data=b"", out_data=b"", exit_after=None, later_rc=None):
+                self.pid = 777
+                self._rc = rc
+                self._later_rc = later_rc
+                self._exit_at = None if exit_after is None else time.monotonic() + exit_after
+                self.stdout = io.BytesIO(out_data)
+                self.stderr = io.BytesIO(err_data)
+
+            def poll(self):
+                if self._exit_at is not None and time.monotonic() >= self._exit_at:
+                    return self._later_rc
+                return self._rc
+
+        popen_cmds = []
+
+        def fail_popen(cmd, **_kwargs):
+            popen_cmds.append(cmd)
+            return FakeProc(
+                101,
+                err_data=b"early_crash_marker: Authorization: Bearer topsecret-abc password=hunter2\n",
+                out_data=b"api_token=tok_xyz_999\n",
+            )
+
+        def launch(popen):
+            return open_native(
+                bundle, info, "x86_64-unknown-linux-gnu",
+                diagnostic=True, startup_probe_seconds=0.01,
+                runner=lambda cmd, **_: subprocess.CompletedProcess(cmd, 0, "", ""),
+                preflight=lambda: {"display": "x11", "dbus_session": False, "vulkan": True},
+                popen=popen,
+            )
+
+        early_stderr = io.StringIO()
+        with mock.patch("sys.stderr", early_stderr), \
+             mock.patch.dict(os.environ, {"DISPLAY": ":0"}, clear=True):
+            with self.assertRaises(ValueError) as early_ctx:
+                launch(fail_popen)
+        err_msg = str(early_ctx.exception)
+        self.assertIn("early_crash_marker", err_msg)
+        self.assertIn("process_started=true", err_msg)
+        self.assertIn("window_readiness_observed=false", err_msg)
+        for secret in ("topsecret-abc", "hunter2", "tok_xyz_999"):
+            self.assertNotIn(secret, err_msg)
+            self.assertNotIn(secret, early_stderr.getvalue())
+        self.assertIn("[REDACTED]", err_msg)
+        self.assertEqual(popen_cmds, [[str(bundle / "bin" / NATIVE_BINARY), "--diagnostic"]])
+
+        healthy_stderr = io.StringIO()
+        with mock.patch("sys.stderr", healthy_stderr), \
+             mock.patch.dict(os.environ, {"DISPLAY": ":0"}, clear=True):
+            healthy = launch(lambda *_a, **_kw: FakeProc(None, exit_after=0.2, later_rc=0))
+            clean_exit = launch(lambda *_a, **_kw: FakeProc(0, err_data=b"diagnostic ok Bearer secret-clean\n"))
+            with self.assertRaisesRegex(ValueError, "process_started=false, window_readiness_observed=false"):
+                launch(mock.Mock(side_effect=OSError("exec format error")))
+        self.assertIn("still running (process_started=true, pid=777", healthy_stderr.getvalue())
+        self.assertIn("exited after startup (0; process_started=true, pid=777", healthy)
+        self.assertIn("window_readiness_observed=false", healthy)
+        self.assertIn("exited cleanly (0", clean_exit)
+        self.assertIn("process_started=true", clean_exit)
+        self.assertIn("window_readiness_observed=false", clean_exit)
+        self.assertNotIn("secret-clean", clean_exit)
+        self.assertNotIn("secret-clean", healthy_stderr.getvalue())
+        self.assertIn("[REDACTED]", clean_exit)
+
+    def test_diagnostic_launch_real_child_cannot_stall_persists_nothing_and_reports_late_failure(self):
+        from fleetworks_candidate import _diagnostic_foreground_launch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            child = tmp / "chatty-child"
+            # ~320 KiB of stdout (past any pipe buffer and the echo limit) carrying a synthetic
+            # credential, then a late error after the startup probe window.
+            child.write_text(
+                f"#!{sys.executable}\n"
+                "import sys, time\n"
+                "for _ in range(4000):\n"
+                "    sys.stdout.write('line api_token=synthetic-cred-123 ' + 'x' * 40 + '\\n')\n"
+                "sys.stdout.flush()\n"
+                "sys.stderr.write('started Authorization: Bearer synthetic-bearer-456\\n')\n"
+                "sys.stderr.flush()\n"
+                "time.sleep(0.6)\n"
+                "sys.stderr.write('late_failure_marker password=synthetic-pass-789\\n')\n"
+                "sys.stderr.flush()\n"
+                "sys.exit(3)\n"
+            )
+            child.chmod(0o755)
+            sink = io.StringIO()
+            started = time.monotonic()
+            with mock.patch("sys.stderr", io.StringIO()) as progress:
+                with self.assertRaises(ValueError) as ctx:
+                    _diagnostic_foreground_launch(
+                        child, tmp, startup_probe_seconds=0.3, sink=sink, echo_limit=4096,
+                        supervise_seconds=20,
+                    )
+            self.assertLess(time.monotonic() - started, 15)
+            message = str(ctx.exception)
+            self.assertIn("failed after startup (3", message)
+            self.assertIn("late_failure_marker", message)
+            self.assertIn("still running", progress.getvalue())
+            self.assertIn("output above diagnostic limit", sink.getvalue())
+            self.assertLessEqual(len(sink.getvalue()), 3 * 4096 + 512)
+            for secret in ("synthetic-cred-123", "synthetic-bearer-456", "synthetic-pass-789"):
+                self.assertNotIn(secret, message)
+                self.assertNotIn(secret, sink.getvalue())
+            # No diagnostic files are written anywhere under the launch directory.
+            self.assertEqual(sorted(p.name for p in tmp.iterdir()), ["chatty-child"])
+
+    def test_diagnostic_launch_reports_still_running_when_supervision_window_ends(self):
+        from fleetworks_candidate import _diagnostic_foreground_launch
+
+        class Proc:
+            pid = 42
+            stdout = io.BytesIO(b"")
+            stderr = io.BytesIO(b"")
+
+            def poll(self):
+                return None
+
+        with mock.patch("sys.stderr", io.StringIO()):
+            message = _diagnostic_foreground_launch(
+                Path("bin"), ".", startup_probe_seconds=0.0, sink=io.StringIO(),
+                popen=lambda *_a, **_kw: Proc(), supervise_seconds=0.0,
+            )
+        self.assertIn("still running (process_started=true, pid=42", message)
+        self.assertIn("not GUI readiness", message)
+
+    def test_redacted_drain_discards_oversized_line_so_split_credential_never_leaks(self):
+        from fleetworks_candidate import DIAGNOSTIC_LINE_LIMIT, _RedactedDrain
+
+        # The label ends just before the read boundary; the value falls in the next fragment.
+        label = "api_token="
+        padding = "x" * (DIAGNOSTIC_LINE_LIMIT - len(label))
+        data = (padding + label + "synthetic-split-cred " + "y" * (2 * DIAGNOSTIC_LINE_LIMIT) + "\n"
+                + "after token=synthetic-next-cred\n").encode()
+        sink = io.StringIO()
+        drain = _RedactedDrain(io.BytesIO(data), "stdout", sink, 10 * DIAGNOSTIC_LINE_LIMIT, 64 * 1024)
+        drain.join(5.0)
+        for text in (sink.getvalue(), drain.tail()):
+            self.assertNotIn("synthetic-split-cred", text)
+            self.assertNotIn("synthetic-next-cred", text)
+            self.assertIn(f"line over {DIAGNOSTIC_LINE_LIMIT} bytes discarded", text)
+            # The line after the oversized one is still read whole and redacted.
+            self.assertIn("after token=[REDACTED]", text)
+
+    def test_redacted_drain_keeps_reading_after_sink_error(self):
+        from fleetworks_candidate import _RedactedDrain
+
+        class BrokenSink:
+            writes = 0
+
+            def write(self, _text):
+                BrokenSink.writes += 1
+                raise BrokenPipeError("sink closed")
+
+            def flush(self):
+                pass
+
+        lines = [f"line {i}\n" for i in range(200)] + ["final_marker\n"]
+        stream = io.BytesIO("".join(lines).encode())
+        drain = _RedactedDrain(stream, "stderr", BrokenSink(), 1 << 20, 1 << 20)
+        drain.join(5.0)
+        self.assertTrue(drain.sink_failed)
+        self.assertEqual(BrokenSink.writes, 1)
+        self.assertEqual(stream.read(), b"")
+        self.assertIn("final_marker", drain.tail())
 
 if __name__ == "__main__":
     unittest.main()

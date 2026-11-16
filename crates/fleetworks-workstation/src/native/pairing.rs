@@ -26,6 +26,24 @@ pub const PAIRING_FILE: &str = ".native-pairing.json";
 const MAX_ENTRIES: usize = 32;
 const MAX_BYTES: u64 = 256 * 1024;
 
+/// Whether an issued credential uses the platform durable keyring or session-only RAM.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CredentialStorage {
+    #[default]
+    SystemKeyring,
+    SessionOnly,
+}
+
+impl CredentialStorage {
+    /// True only when the credential is expected in the persistent platform keyring.
+    #[must_use]
+    pub const fn is_durable(self) -> bool {
+        matches!(self, Self::SystemKeyring)
+    }
+}
+
 /// Current non-secret reference to one credential issued by an exact gateway.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -34,6 +52,8 @@ pub struct PairedGateway {
     pub origin: String,
     pub credential_id: String,
     pub deployment_id: String,
+    #[serde(default)]
+    pub credential_storage: CredentialStorage,
 }
 
 impl PairedGateway {
@@ -47,9 +67,32 @@ impl PairedGateway {
             origin: canonical_origin(origin)?,
             credential_id,
             deployment_id,
+            credential_storage: CredentialStorage::SystemKeyring,
         };
         validate_pair(&pair)?;
         Ok(pair)
+    }
+
+    /// Non-secret metadata marker for a session-only credential kept strictly in RAM.
+    pub fn new_session_only(
+        origin: &str,
+        credential_id: String,
+        deployment_id: String,
+    ) -> Result<Self, PairingError> {
+        let pair = Self {
+            origin: canonical_origin(origin)?,
+            credential_id,
+            deployment_id,
+            credential_storage: CredentialStorage::SessionOnly,
+        };
+        validate_pair(&pair)?;
+        Ok(pair)
+    }
+
+    /// True when the reference expects a durable platform keyring secret.
+    #[must_use]
+    pub const fn is_durable(&self) -> bool {
+        self.credential_storage.is_durable()
     }
 }
 

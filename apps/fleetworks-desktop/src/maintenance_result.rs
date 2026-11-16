@@ -19,14 +19,18 @@ pub struct MaintenanceResult {
     pub dataset_sha256: Option<String>,
     pub state: Option<String>,
     pub actor_search_state: Option<String>,
+    pub generation: Option<String>,
     pub index_generation: Option<String>,
+    pub original_job_id: Option<String>,
     pub processed: Option<u64>,
+    pub scanned: Option<u64>,
     pub total: Option<u64>,
     pub aliases: Option<u64>,
     pub visible_checkpoint: Option<u64>,
     pub activation_generation: Option<u64>,
     pub activation_requested: Option<bool>,
     pub database_seeded: Option<bool>,
+    pub reader_visible: Option<bool>,
 }
 
 impl MaintenanceResult {
@@ -44,19 +48,21 @@ impl MaintenanceResult {
             .gap(5.0)
             .key("maintenance-job-result")
             .child(heading(title, kit));
+        let generation = self.generation.as_ref().or(self.index_generation.as_ref());
         for (label, value) in [
-            ("State", &self.state),
-            ("Training engine", &self.engine),
-            ("Atlas engine", &self.atlas_engine),
-            ("Candidate model", &self.candidate_model_id),
-            ("Active model", &self.active_model_id),
-            ("Dataset SHA-256", &self.dataset_sha256),
-            ("Candidate SHA-256", &self.candidate_sha256),
-            ("Report SHA-256", &self.report_sha256),
-            ("Actor search", &self.actor_search_state),
-            ("Index generation", &self.index_generation),
+            ("State", self.state.as_ref()),
+            ("Original job", self.original_job_id.as_ref()),
+            ("Training engine", self.engine.as_ref()),
+            ("Atlas engine", self.atlas_engine.as_ref()),
+            ("Candidate model", self.candidate_model_id.as_ref()),
+            ("Active model", self.active_model_id.as_ref()),
+            ("Dataset SHA-256", self.dataset_sha256.as_ref()),
+            ("Candidate SHA-256", self.candidate_sha256.as_ref()),
+            ("Report SHA-256", self.report_sha256.as_ref()),
+            ("Actor search", self.actor_search_state.as_ref()),
+            ("Index generation", generation),
         ] {
-            if let Some(value) = value.as_deref().filter(|value| {
+            if let Some(value) = value.map(String::as_str).filter(|value| {
                 !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
             }) {
                 body = body.child(quiet(format!("{label}: {value}"), kit));
@@ -71,6 +77,15 @@ impl MaintenanceResult {
                 kit,
             ));
         }
+        if let Some(scanned) = self.scanned {
+            body = body.child(quiet(
+                self.total.map_or_else(
+                    || format!("Scanned actors: {scanned}"),
+                    |total| format!("Scanned actors: {scanned} / {total}"),
+                ),
+                kit,
+            ));
+        }
         for (label, value) in [
             ("Aliases", self.aliases),
             ("Visible checkpoint", self.visible_checkpoint),
@@ -79,6 +94,15 @@ impl MaintenanceResult {
             if let Some(value) = value {
                 body = body.child(quiet(format!("{label}: {value}"), kit));
             }
+        }
+        if let Some(reader_visible) = self.reader_visible {
+            body = body.child(quiet(
+                format!(
+                    "Reader visible: {}",
+                    if reader_visible { "yes" } else { "no" }
+                ),
+                kit,
+            ));
         }
         if self.operation == "classifier_train" && self.active_model_id.is_none() {
             body = body.child(quiet(

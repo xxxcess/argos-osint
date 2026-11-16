@@ -3,6 +3,8 @@
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -42,6 +44,14 @@ mod lanes;
 #[path = "actor_reindex_job.rs"]
 mod reindex_job;
 
+/// In-process or remote service configuration for [`run_with_config`].
+pub(crate) struct LocalWorkerConfig {
+    pub(crate) broker: Client,
+    pub(crate) store: DatasetStore,
+    pub(crate) index: Option<ActorIndexWorker>,
+    pub(crate) relinquish_on_shutdown: bool,
+}
+
 pub(crate) async fn run(
     repo: Repository,
     workspace: PathBuf,
@@ -76,6 +86,35 @@ pub(crate) async fn run(
         }
     })
     .await??;
+    run_with_config(
+        repo,
+        workspace,
+        LocalWorkerConfig {
+            broker,
+            store,
+            index,
+            relinquish_on_shutdown: false,
+        },
+        signal,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Run the durable native maintenance worker lanes until `signal` resolves,
+/// returning the count of active leases cleanly relinquished on shutdown.
+pub(crate) async fn run_with_config(
+    repo: Repository,
+    workspace: PathBuf,
+    config: LocalWorkerConfig,
+    signal: impl Future<Output = ()>,
+) -> Result<usize> {
+    let LocalWorkerConfig {
+        broker,
+        store,
+        index,
+        relinquish_on_shutdown,
+    } = config;
     let reindex = index.is_some();
     let pools: Vec<&'static str> = lanes::Lane::ALL
         .into_iter()
@@ -98,14 +137,20 @@ pub(crate) async fn run(
     let (stop, receive) = watch::channel(false);
     let (routes, receivers) = lanes::bounded::<Received>(reindex);
     let tools = Arc::new(manual::Tools::default());
+    let relinquished = Arc::new(AtomicUsize::new(0));
     let mut tasks = JoinSet::new();
     tasks.spawn(index_loop(repo.clone(), index, receive.clone()));
+    let runtime = LaneRuntime {
+        repo: repo.clone(),
+        workspace,
+        store: store.clone(),
+        tools,
+        relinquish_on_shutdown,
+        relinquished: Arc::clone(&relinquished),
+    };
     for (lane, receiver) in receivers {
         tasks.spawn(consume_lane(
-            repo.clone(),
-            workspace.clone(),
-            store.clone(),
-            Arc::clone(&tools),
+            runtime.clone(),
             lane,
             receiver,
             receive.clone(),
@@ -114,7 +159,11 @@ pub(crate) async fn run(
     // Queue transport and the actual bounded activation lane are now owned.
     classifier_activation::configure_consumer(&repo, true).await?;
     tracing::info!(
-        role = "native-worker",
+        role = if relinquish_on_shutdown {
+            "local-ipc-worker"
+        } else {
+            "native-worker"
+        },
         worker_pools = pools.len(),
         actor_index_pump = reindex,
         storage = "connected",
@@ -140,7 +189,7 @@ pub(crate) async fn run(
             result = ended;
         }
     }
-    result
+    result.map(|()| relinquished.load(Ordering::Acquire))
 }
 
 async fn index_loop(
@@ -152,19 +201,25 @@ async fn index_loop(
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         tokio::select! {
-            _=stop.changed()=>return Ok(()),
-            _=tick.tick()=>{
-                if let Some(index)=index.as_mut() {
+            _ = stop.changed() => break,
+            _ = tick.tick() => {
+                if let Some(index) = index.as_mut() {
                     // The durable lease and persisted body reconcile an uncertain
-                    // HTTP outcome. Never start another concurrent tick locally.
-                    if index.tick(&repo).await.is_err() {tracing::warn!(code="actor_index_tick_failed","Actor index coordinator will reconcile durable state");}
+                    // outcome. Never start another concurrent tick locally.
+                    if index.tick(&repo).await.is_err() {
+                        tracing::warn!(code = "actor_index_tick_failed", "Actor index coordinator will reconcile durable state");
+                    }
                 }
             }
         }
         if *stop.borrow() {
-            return Ok(());
+            break;
         }
     }
+    if let Some(index) = index.as_ref() {
+        let _ = index.release(&repo).await;
+    }
+    Ok(())
 }
 
 async fn relay(
@@ -232,15 +287,36 @@ async fn relay(
     }
 }
 
-async fn consume_lane(
+async fn wait_stop(stop: &mut watch::Receiver<bool>) {
+    if !*stop.borrow() {
+        let _ = stop.changed().await;
+    }
+}
+
+#[derive(Clone)]
+struct LaneRuntime {
     repo: Repository,
     workspace: PathBuf,
     store: DatasetStore,
     tools: Arc<manual::Tools>,
+    relinquish_on_shutdown: bool,
+    relinquished: Arc<AtomicUsize>,
+}
+
+async fn consume_lane(
+    runtime: LaneRuntime,
     lane: lanes::Lane,
     mut receiver: mpsc::Receiver<lanes::Routed<Received>>,
     mut stop: watch::Receiver<bool>,
 ) -> Result<()> {
+    let LaneRuntime {
+        repo,
+        workspace,
+        store,
+        tools,
+        relinquish_on_shutdown,
+        relinquished,
+    } = runtime;
     let owner = format!(
         "native-{}-{}",
         lane.pool(),
@@ -252,8 +328,11 @@ async fn consume_lane(
         pools: &pools,
     };
     loop {
-        let routed =
-            tokio::select! {biased;_=stop.changed()=>return Ok(()),value=receiver.recv()=>value};
+        let routed = tokio::select! {
+            biased;
+            _ = wait_stop(&mut stop) => break,
+            value = receiver.recv() => value,
+        };
         let Some(routed) = routed else {
             return Err(anyhow::anyhow!("native lane channel closed"));
         };
@@ -261,7 +340,15 @@ async fn consume_lane(
         // Box at the task boundary: seed/train futures retain bounded heap
         // state rather than increasing the executor's normal thread stack.
         if Box::pin(handle(
-            &repo, &workspace, &store, &tools, &dispatch, received, &mut stop,
+            &repo,
+            &workspace,
+            &store,
+            &tools,
+            &dispatch,
+            received,
+            &mut stop,
+            relinquish_on_shutdown,
+            &relinquished,
         ))
         .await
         .is_err()
@@ -273,9 +360,16 @@ async fn consume_lane(
             );
         }
         if *stop.borrow() {
-            return Ok(());
+            break;
         }
     }
+    // Requeue any buffered unstarted deliveries so shutdown never leaves them invisible.
+    receiver.close();
+    while let Ok(routed) = receiver.try_recv() {
+        let (received, _slots) = routed.into_parts();
+        let _ = received.settle(Disposition::Requeue).await;
+    }
+    Ok(())
 }
 
 struct DeliveryLane<'a> {
@@ -283,6 +377,14 @@ struct DeliveryLane<'a> {
     pools: &'a [&'a str],
 }
 
+enum WorkerOutcome {
+    Complete { result_ref: String },
+    Failed { reason: &'static str },
+    Relinquish { reason: &'static str },
+    Stale,
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn handle(
     repo: &Repository,
     workspace: &std::path::Path,
@@ -291,6 +393,8 @@ async fn handle(
     lane: &DeliveryLane<'_>,
     received: Received,
     stop: &mut watch::Receiver<bool>,
+    relinquish_on_shutdown: bool,
+    relinquished: &AtomicUsize,
 ) -> Result<()> {
     let envelope = match Envelope::decode(received.payload()) {
         Ok(envelope) if lane.pools.contains(&envelope.pool.as_str()) => envelope,
@@ -319,98 +423,146 @@ async fn handle(
         }
         DeliveryClaim::Claimed(lease) => lease,
     };
-    crate::setup_jobs::record_job_event(
-        repo,
-        &lease.task,
-        Severity::Info,
-        "task.started",
-        format!(
-            "Worker claimed {} (attempt {})",
-            jobs::job_title(&lease.task.operation),
-            lease.task.attempts
-        ),
-    )
-    .await;
-    let cancel = Arc::new(AtomicBool::new(false));
-    let operation = async {
-        if lease.task.pool == manual::TOOLS_POOL {
-            tools
-                .execute_claimed(repo, &lease.task, cancel.clone())
-                .await
-        } else if lease.task.pool == classifier_activation::POOL {
-            match classifier_activation::execute_claimed(
-                repo,
-                workspace.to_path_buf(),
-                &lease.task,
-                cancel.clone(),
-            )
-            .await?
-            {
-                ActivationWork::Complete { result_ref } => {
-                    Ok(DurableToolOutcome::Complete { result_ref })
-                }
-                ActivationWork::Failed { reason } => Ok(DurableToolOutcome::Failed { reason }),
-                ActivationWork::Stale => Ok(DurableToolOutcome::Stale),
-                _ => Err(anyhow::anyhow!("activation_outcome_unsupported")),
+    let outcome = if *stop.borrow() {
+        if relinquish_on_shutdown {
+            WorkerOutcome::Relinquish {
+                reason: "local_backend_shutdown",
             }
-        } else if lease.task.pool == setup_jobs::REINDEX_POOL {
-            reindex_job::execute(repo, &lease.task, &cancel).await
         } else {
-            match crate::setup_jobs::execute(
-                repo,
-                workspace.to_path_buf(),
-                store,
-                &lease.task,
-                cancel.clone(),
-            )
-            .await?
-            {
-                crate::setup_jobs::SetupOutcome::Complete => Ok(DurableToolOutcome::Complete {
-                    result_ref: format!("setup:{}", lease.task.job_id),
-                }),
-                crate::setup_jobs::SetupOutcome::Interrupted => Ok(DurableToolOutcome::Failed {
-                    reason: "setup_interrupted",
-                }),
+            WorkerOutcome::Failed {
+                reason: "native_worker_shutdown",
             }
         }
-    };
-    tokio::pin!(operation);
-    let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
-    heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    heartbeat.tick().await;
-    let mut last_renewed = tokio::time::Instant::now();
-    let max_renew_gap = Duration::from_secs((LEASE_SECONDS as u64).saturating_sub(10));
-    let outcome = loop {
-        tokio::select! {
-            biased;
-            _=stop.changed()=>{
-                argos_osint_core::cancellation::cancel_with_notify(&cancel);
-                // Retain the operation until its cancellation is observed; a
-                // detached trainer/seed must not outlive its claimed lease.
-                let _=operation.await;
-                break DurableToolOutcome::Failed{reason:"native_worker_shutdown"};
-            }
-            _=heartbeat.tick()=>{
-                let queue_live=received.renew().await;
-                let job_live=job_dispatch::renew_delivery(repo.db(),&lease,LEASE_SECONDS,Utc::now()).await;
-                let lost=matches!(queue_live,Ok(false))||matches!(job_live,Ok(false));
-                let renewed=matches!(queue_live,Ok(true))&&matches!(job_live,Ok(true));
-                if renewed {
-                    last_renewed = tokio::time::Instant::now();
-                } else if lost || last_renewed.elapsed() >= max_renew_gap {
-                    argos_osint_core::cancellation::cancel_with_notify(&cancel);
-                    let _=operation.await;
-                    break DurableToolOutcome::Stale;
+    } else {
+        crate::setup_jobs::record_job_event(
+            repo,
+            &lease.task,
+            Severity::Info,
+            "task.started",
+            format!(
+                "Worker claimed {} (attempt {})",
+                jobs::job_title(&lease.task.operation),
+                lease.task.attempts
+            ),
+        )
+        .await;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let operation = async {
+            if lease.task.pool == manual::TOOLS_POOL {
+                tools
+                    .execute_claimed(repo, &lease.task, cancel.clone())
+                    .await
+            } else if lease.task.pool == classifier_activation::POOL {
+                match classifier_activation::execute_claimed(
+                    repo,
+                    workspace.to_path_buf(),
+                    &lease.task,
+                    cancel.clone(),
+                )
+                .await?
+                {
+                    ActivationWork::Complete { result_ref } => {
+                        Ok(DurableToolOutcome::Complete { result_ref })
+                    }
+                    ActivationWork::Failed { reason } => Ok(DurableToolOutcome::Failed { reason }),
+                    ActivationWork::Stale => Ok(DurableToolOutcome::Stale),
+                    _ => Err(anyhow::anyhow!("activation_outcome_unsupported")),
+                }
+            } else if lease.task.pool == setup_jobs::REINDEX_POOL {
+                reindex_job::execute(repo, &lease.task, &cancel).await
+            } else {
+                match crate::setup_jobs::execute(
+                    repo,
+                    workspace.to_path_buf(),
+                    store,
+                    &lease.task,
+                    cancel.clone(),
+                )
+                .await?
+                {
+                    crate::setup_jobs::SetupOutcome::Complete => Ok(DurableToolOutcome::Complete {
+                        result_ref: format!("setup:{}", lease.task.job_id),
+                    }),
+                    crate::setup_jobs::SetupOutcome::Interrupted => {
+                        Ok(DurableToolOutcome::Failed {
+                            reason: "setup_interrupted",
+                        })
+                    }
                 }
             }
-            result=&mut operation=>break match result {
-                Ok(outcome)=>outcome,
-                Err(error)=>DurableToolOutcome::Failed{reason:crate::setup_jobs::safe_failure_reason(&error)},
-            },
+        };
+        tokio::pin!(operation);
+        let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
+        heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        heartbeat.tick().await;
+        let mut last_renewed = tokio::time::Instant::now();
+        let max_renew_gap = Duration::from_secs((LEASE_SECONDS as u64).saturating_sub(10));
+        loop {
+            tokio::select! {
+                biased;
+                _ = wait_stop(stop) => {
+                    argos_osint_core::cancellation::cancel_with_notify(&cancel);
+                    // Retain the operation until its cancellation is observed; a
+                    // detached trainer/seed must not outlive its claimed lease.
+                    let _ = operation.await;
+                    break if relinquish_on_shutdown {
+                        WorkerOutcome::Relinquish {
+                            reason: "local_backend_shutdown",
+                        }
+                    } else {
+                        WorkerOutcome::Failed {
+                            reason: "native_worker_shutdown",
+                        }
+                    };
+                }
+                _ = heartbeat.tick() => {
+                    let queue_live = received.renew().await;
+                    let job_live =
+                        job_dispatch::renew_delivery(repo.db(), &lease, LEASE_SECONDS, Utc::now())
+                            .await;
+                    let lost = matches!(queue_live, Ok(false)) || matches!(job_live, Ok(false));
+                    let renewed = matches!(queue_live, Ok(true)) && matches!(job_live, Ok(true));
+                    if renewed {
+                        last_renewed = tokio::time::Instant::now();
+                    } else if lost || last_renewed.elapsed() >= max_renew_gap {
+                        argos_osint_core::cancellation::cancel_with_notify(&cancel);
+                        let _ = operation.await;
+                        break WorkerOutcome::Stale;
+                    }
+                }
+                result = &mut operation => {
+                    let durable = match result {
+                        Ok(outcome) => outcome,
+                        Err(error) => DurableToolOutcome::Failed {
+                            reason: crate::setup_jobs::safe_failure_reason(&error),
+                        },
+                    };
+                    break match durable {
+                        DurableToolOutcome::Complete { result_ref } => {
+                            WorkerOutcome::Complete { result_ref }
+                        }
+                        DurableToolOutcome::Failed { reason }
+                            if relinquish_on_shutdown
+                                && (*stop.borrow()
+                                    || matches!(
+                                        reason,
+                                        "setup_interrupted" | "actor_reindex_interrupted"
+                                    )) =>
+                        {
+                            WorkerOutcome::Relinquish {
+                                reason: "local_backend_shutdown",
+                            }
+                        }
+                        DurableToolOutcome::Failed { reason } => WorkerOutcome::Failed { reason },
+                        DurableToolOutcome::Stale => WorkerOutcome::Stale,
+                        _ => return Err(anyhow::anyhow!("native_domain_outcome_unsupported")),
+                    };
+                }
+            }
         }
     };
     let finish = match &outcome {
-        DurableToolOutcome::Complete { result_ref } => {
+        WorkerOutcome::Complete { result_ref } => {
             crate::setup_jobs::record_job_event(
                 repo,
                 &lease.task,
@@ -427,7 +579,7 @@ async fn handle(
             )
             .await?
         }
-        DurableToolOutcome::Failed { reason } => {
+        WorkerOutcome::Failed { reason } => {
             crate::setup_jobs::record_job_event(
                 repo,
                 &lease.task,
@@ -448,7 +600,31 @@ async fn handle(
             )
             .await?
         }
-        DurableToolOutcome::Stale => {
+        WorkerOutcome::Relinquish { reason } => {
+            crate::setup_jobs::record_job_event(
+                repo,
+                &lease.task,
+                Severity::Info,
+                "task.relinquished",
+                format!(
+                    "Relinquished {} on local backend shutdown",
+                    jobs::job_title(&lease.task.operation)
+                ),
+            )
+            .await;
+            let finish = job_dispatch::finish_delivery(
+                repo.db(),
+                &lease,
+                DeliveryOutcome::Relinquish { reason },
+                Utc::now(),
+            )
+            .await?;
+            if finish == DeliveryFinish::Relinquished {
+                relinquished.fetch_add(1, Ordering::AcqRel);
+            }
+            finish
+        }
+        WorkerOutcome::Stale => {
             crate::setup_jobs::record_job_event(
                 repo,
                 &lease.task,
@@ -463,14 +639,305 @@ async fn handle(
             received.settle(Disposition::Ack).await?;
             return Ok(());
         }
-        _ => return Err(anyhow::anyhow!("native_domain_outcome_unsupported")),
     };
     received
-        .settle(if finish == DeliveryFinish::Failed {
-            Disposition::DeadLetter
-        } else {
-            Disposition::Ack
+        .settle(match finish {
+            DeliveryFinish::Failed => Disposition::DeadLetter,
+            DeliveryFinish::Relinquished => Disposition::Requeue,
+            _ => Disposition::Ack,
         })
         .await?;
     Ok(())
+}
+
+#[cfg(all(test, feature = "embedded"))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn relinquish_on_shutdown_preserves_retry_budget_and_resumes_same_job_id() {
+        let _lifecycle_guard = crate::tests::EMBEDDED_LIFECYCLE_TEST_LOCK.lock().await;
+        use argos_osint_core::storage::bootstrap;
+        use argos_osint_core::storage::connect_registry;
+        use argos_osint_core::storage::connect_registry::RegistryAuthority;
+        use argos_osint_core::storage::open::Target;
+        use argos_osint_core::storage::server;
+        use argos_osint_core::storage::tx;
+        use fleetworks_contracts::actor_index::ActorIndexLimits;
+        use fleetworks_contracts::connect::RegistrationEnsureRequest;
+        use fleetworks_contracts::context::JobOrigin;
+        use fleetworks_contracts::context::MutationContext;
+        use fleetworks_contracts::context::OriginSource;
+        use fleetworks_contracts::readiness::MaintenanceRequest;
+        use fleetworks_jobs::queue::Queue;
+        use fleetworks_search_index::config::LocalEngineConfig;
+        use fleetworks_search_index::engine::Engine;
+        use fleetworks_search_index::pressure::Meter;
+        use fleetworks_search_index::service::EngineSlot;
+        use fleetworks_search_index::service::SearchService;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().canonicalize().expect("canonical tempdir");
+        let repo = Repository::connect(
+            &Target::Embedded {
+                path: base.join("surreal"),
+            },
+            server::NS,
+            server::DB,
+        )
+        .await
+        .expect("embedded repo");
+        bootstrap::ensure_network_identity(repo.db())
+            .await
+            .expect("network identity");
+        connect_registry::initialize_control(repo.db())
+            .await
+            .expect("control init");
+
+        let deployment = connect_registry::deployment_state(&repo)
+            .await
+            .expect("deployment state");
+        let queue_handle = Arc::new(Queue::open(base.join("jobs")).await.expect("open queue"));
+        let store = DatasetStore::open(base.join("staged-datasets")).expect("dataset store");
+
+        for pool in [
+            job_dispatch::ATLAS_POOL,
+            manual::TOOLS_POOL,
+            setup_jobs::SEED_POOL,
+            setup_jobs::TRAIN_POOL,
+            setup_jobs::REINDEX_POOL,
+            classifier_activation::POOL,
+        ] {
+            job_dispatch::ensure_queue_transport(repo.db(), pool)
+                .await
+                .expect("transport");
+            job_dispatch::enable_pool(repo.db(), pool)
+                .await
+                .expect("enable pool");
+        }
+        setup_jobs::enable_operation(repo.db(), MaintenanceOperation::ReindexActors, true)
+            .await
+            .expect("enable reindex");
+
+        let authority = RegistryAuthority::new("local-ipc-test", "cred-1", "epoch-1")
+            .expect("registry authority");
+        let ensured = connect_registry::ensure(
+            &repo,
+            &authority,
+            &RegistrationEnsureRequest::new(
+                "reg-relinquish-1".into(),
+                None,
+                "install-relinquish-1".into(),
+            ),
+        )
+        .await
+        .expect("registration");
+        let context = connect_registry::registration_context(
+            &repo,
+            &authority,
+            &ensured.receipt.registration_id,
+            ensured.receipt.revision,
+        )
+        .await
+        .expect("context");
+        let request =
+            MaintenanceRequest::for_reindex("reindex-req-1".into(), MutationContext::new(&context))
+                .expect("reindex request");
+        let origin = JobOrigin::new(
+            &context,
+            OriginSource::Native,
+            "reindex-req-1".into(),
+            Utc::now().to_rfc3339(),
+            ensured.receipt.revision,
+            Vec::new(),
+        );
+        let receipt = tx::run_tx(repo.db(), tx::RetryPolicy::default(), |transaction| {
+            let (authority, context, origin, request) = (&authority, &context, &origin, &request);
+            async move {
+                setup_jobs::admit_in(
+                    &transaction,
+                    authority,
+                    context,
+                    origin,
+                    MaintenanceOperation::ReindexActors,
+                    request,
+                )
+                .await
+            }
+        })
+        .await
+        .expect("admit reindex")
+        .value;
+
+        let search_dir = base.join("search");
+        std::fs::create_dir_all(&search_dir).expect("search dir");
+        // Other unit tests in the shared `argos-api-host` binary keep embedded RocksDB/Tantivy/model
+        // allocations resident; give this lease-relinquishment test headroom above harness RSS.
+        let limits = ActorIndexLimits {
+            memory_resume_bytes: 2 * 1024 * 1024 * 1024,
+            memory_pause_bytes: 4 * 1024 * 1024 * 1024,
+            ..Default::default()
+        };
+        let engine_config = LocalEngineConfig::for_identity(
+            search_dir,
+            deployment.deployment_id.clone(),
+            "source-epoch-1".into(),
+            limits.clone(),
+        )
+        .expect("engine config");
+
+        // Run 1: SearchService runs with a pressure-paused Meter so ReindexActors claims and
+        // waits cleanly until shutdown arrives, exercising clean lease relinquishment without
+        // triggering error deferral.
+        let engine1 = Engine::open(engine_config.engine.clone()).expect("open tantivy engine 1");
+        let paused_meter = Arc::new(
+            Meter::new(engine_config.engine.directory.clone(), limits).expect("paused meter"),
+        );
+        paused_meter
+            .record_query(Duration::from_secs(10))
+            .expect("record slow query pressure");
+        let unready_search = Arc::new(
+            SearchService::new(
+                engine_config.clone(),
+                Arc::new(EngineSlot::new(Some(Arc::new(engine1)))),
+                "index_recovering",
+            )
+            .expect("unready search service")
+            .with_meter(paused_meter),
+        );
+        let (stop1_tx, stop1_rx) = tokio::sync::oneshot::channel::<()>();
+        let worker1 = tokio::spawn(run_with_config(
+            repo.clone(),
+            base.clone(),
+            LocalWorkerConfig {
+                broker: Client::local(Arc::clone(&queue_handle), "fleetworks.native".into()),
+                store: store.clone(),
+                index: Some(
+                    ActorIndexWorker::local(unready_search, "index-owner-1".into())
+                        .expect("local index worker"),
+                ),
+                relinquish_on_shutdown: true,
+            },
+            async move {
+                let _ = stop1_rx.await;
+            },
+        ));
+
+        // Wait until the ReindexActors task is actively running before triggering shutdown.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        let initial_max_attempts: i64 = loop {
+            let mut resp = repo
+                .db()
+                .query(
+                    "SELECT VALUE state FROM ONLY task WHERE job = type::record('job', $job);
+                     SELECT VALUE max_attempts FROM ONLY task WHERE job = type::record('job', $job);",
+                )
+                .bind(("job", receipt.job_id.clone()))
+                .await
+                .expect("query task")
+                .check()
+                .expect("check task");
+            let state: Option<String> = resp.take(0).expect("take state");
+            let max_attempts: Option<i64> = resp.take(1).expect("take max_attempts");
+            if state.as_deref() == Some("running") {
+                if let Some(max_attempts) = max_attempts {
+                    break max_attempts;
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for task to start running"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+
+        let _ = stop1_tx.send(());
+        let relinquished_count = worker1.await.expect("join worker1").expect("worker1 ok");
+        assert_eq!(relinquished_count, 1);
+
+        let mut check_resp = repo
+            .db()
+            .query(
+                "SELECT VALUE state FROM ONLY task WHERE job = type::record('job', $job);
+                 SELECT VALUE max_attempts FROM ONLY task WHERE job = type::record('job', $job);
+                 SELECT VALUE outcome FROM attempt WHERE root = type::record('job', $job);",
+            )
+            .bind(("job", receipt.job_id.clone()))
+            .await
+            .expect("inspect relinquished task")
+            .check()
+            .expect("check relinquished");
+        assert_eq!(
+            check_resp
+                .take::<Option<String>>(0)
+                .expect("state")
+                .as_deref(),
+            Some("queued")
+        );
+        assert_eq!(
+            check_resp.take::<Option<i64>>(1).expect("max_attempts"),
+            Some(initial_max_attempts + 1)
+        );
+        let outcomes: Vec<String> = check_resp.take(2).expect("outcomes");
+        assert_eq!(outcomes, vec!["relinquished".to_owned()]);
+
+        // Run 2: restart with a live Tantivy Engine against the exact same stores and finish.
+        let engine = Engine::open(engine_config.engine.clone()).expect("open tantivy engine");
+        let ready_search = Arc::new(
+            SearchService::new(
+                engine_config,
+                Arc::new(EngineSlot::new(Some(Arc::new(engine)))),
+                "index_recovering",
+            )
+            .expect("ready search service"),
+        );
+        let (stop2_tx, stop2_rx) = tokio::sync::oneshot::channel::<()>();
+        let worker2 = tokio::spawn(run_with_config(
+            repo.clone(),
+            base,
+            LocalWorkerConfig {
+                broker: Client::local(queue_handle, "fleetworks.native".into()),
+                store,
+                index: Some(
+                    ActorIndexWorker::local(ready_search, "index-owner-2".into())
+                        .expect("local index worker 2"),
+                ),
+                relinquish_on_shutdown: true,
+            },
+            async move {
+                let _ = stop2_rx.await;
+            },
+        ));
+
+        let complete_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let mut resp = repo
+                .db()
+                .query("SELECT VALUE state FROM ONLY type::record('job', $job)")
+                .bind(("job", receipt.job_id.clone()))
+                .await
+                .expect("query job")
+                .check()
+                .expect("check job");
+            if resp.take::<Option<String>>(0).expect("state").as_deref() == Some("completed") {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < complete_deadline,
+                "timed out waiting for resumed job to complete"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let _ = stop2_tx.send(());
+        let _ = worker2.await.expect("join worker2").expect("worker2 ok");
+
+        let mut count_resp = repo
+            .db()
+            .query("RETURN count(SELECT VALUE id FROM job);")
+            .await
+            .expect("count jobs")
+            .check()
+            .expect("check count");
+        assert_eq!(count_resp.take::<Option<i64>>(0).expect("count"), Some(1));
+    }
 }

@@ -1,10 +1,21 @@
 //! Authenticated wake-up deliveries from the Jobs-owned RocksDB queue.
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, ensure, Context, Result};
-use fleetworks_jobs::queue::{Delivery, QueueCommand, QueueRequest, QueueResponse};
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
+use anyhow::anyhow;
+use anyhow::ensure;
+use anyhow::Context;
+use anyhow::Result;
+use chrono::Utc;
+use fleetworks_jobs::queue::Delivery;
+use fleetworks_jobs::queue::Queue;
+use fleetworks_jobs::queue::QueueCommand;
+use fleetworks_jobs::queue::QueueRequest;
+use fleetworks_jobs::queue::QueueResponse;
+use reqwest::header::HeaderMap;
+use reqwest::header::HeaderValue;
+use reqwest::header::AUTHORIZATION;
 use url::Url;
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(15);
@@ -12,9 +23,17 @@ const MAX_RESPONSE_BYTES: usize = 128 * 1024;
 const VISIBILITY_MS: i64 = 45_000;
 
 #[derive(Clone)]
+enum Transport {
+    Http {
+        http: reqwest::Client,
+        endpoint: Url,
+    },
+    Local(Arc<Queue>),
+}
+
+#[derive(Clone)]
 pub(crate) struct Client {
-    http: reqwest::Client,
-    endpoint: Url,
+    transport: Transport,
     queue: String,
 }
 
@@ -53,38 +72,52 @@ impl Client {
             .timeout(RPC_TIMEOUT)
             .build()?;
         Ok(Self {
-            http,
-            endpoint,
+            transport: Transport::Http { http, endpoint },
             queue,
         })
     }
 
-    async fn execute(&self, key: String, command: QueueCommand) -> Result<QueueResponse> {
-        let request = QueueRequest::new(key, 0, command);
-        let mut response = self
-            .http
-            .post(self.endpoint.clone())
-            .json(&request)
-            .send()
-            .await
-            .map_err(|_| anyhow!("Jobs queue request failed"))?;
-        ensure!(
-            response.status().is_success(),
-            "Jobs queue rejected the operation"
-        );
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| anyhow!("Jobs queue response failed"))?
-        {
-            ensure!(
-                bytes.len() + chunk.len() <= MAX_RESPONSE_BYTES,
-                "Jobs queue response too large"
-            );
-            bytes.extend_from_slice(&chunk);
+    /// Construct a queue client backed by an in-process [`Queue`] handle.
+    pub(crate) fn local(queue_handle: Arc<Queue>, queue: String) -> Self {
+        Self {
+            transport: Transport::Local(queue_handle),
+            queue,
         }
-        serde_json::from_slice(&bytes).context("invalid Jobs queue response")
+    }
+
+    async fn execute(&self, key: String, command: QueueCommand) -> Result<QueueResponse> {
+        match &self.transport {
+            Transport::Local(queue_handle) => {
+                let request = QueueRequest::new(key, Utc::now().timestamp_millis(), command);
+                queue_handle.execute(request).await
+            }
+            Transport::Http { http, endpoint } => {
+                let request = QueueRequest::new(key, 0, command);
+                let mut response = http
+                    .post(endpoint.clone())
+                    .json(&request)
+                    .send()
+                    .await
+                    .map_err(|_| anyhow!("Jobs queue request failed"))?;
+                ensure!(
+                    response.status().is_success(),
+                    "Jobs queue rejected the operation"
+                );
+                let mut bytes = Vec::new();
+                while let Some(chunk) = response
+                    .chunk()
+                    .await
+                    .map_err(|_| anyhow!("Jobs queue response failed"))?
+                {
+                    ensure!(
+                        bytes.len() + chunk.len() <= MAX_RESPONSE_BYTES,
+                        "Jobs queue response too large"
+                    );
+                    bytes.extend_from_slice(&chunk);
+                }
+                serde_json::from_slice(&bytes).context("invalid Jobs queue response")
+            }
+        }
     }
 
     pub(crate) async fn publish(&self, id: String, payload: Vec<u8>) -> Result<()> {
@@ -180,5 +213,36 @@ impl Received {
             "queue delivery lease was lost before settlement"
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn local_client_publishes_claims_renews_and_settles_in_process() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let queue_handle = Arc::new(
+            Queue::open(dir.path().join("queue"))
+                .await
+                .expect("open local queue"),
+        );
+        let client = Client::local(queue_handle, "fleetworks.native".into());
+        client
+            .publish("delivery-1".into(), b"payload-1".to_vec())
+            .await
+            .expect("publish");
+
+        let received = client
+            .claim("worker-a")
+            .await
+            .expect("claim")
+            .expect("delivery available");
+        assert_eq!(received.payload(), b"payload-1");
+        assert!(received.renew().await.expect("renew"));
+        received.settle(Disposition::Ack).await.expect("ack");
+
+        assert!(client.claim("worker-a").await.expect("empty").is_none());
     }
 }

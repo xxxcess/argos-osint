@@ -44,12 +44,12 @@ async fn summary_action_rejects_unknown_fields_and_untrusted_origin_before_dispa
     )
     .await
     .unwrap();
-    let app = router(ApiState {
-        repo: repo.clone(),
-        instance_id: "summary-fixture".into(),
-        port: 8080,
-        origins: Arc::new(vec!["http://localhost:3000".into()]),
-    });
+    let app = router(ApiState::new(
+        repo.clone(),
+        "summary-fixture".into(),
+        8080,
+        Arc::new(vec!["http://localhost:3000".into()]),
+    ));
     for (method, path) in [
         ("GET", "classifier/status"),
         ("POST", "classifier/train"),

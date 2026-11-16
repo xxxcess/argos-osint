@@ -2,7 +2,7 @@
 //!
 //! Production and development fixtures share this shell, state, views and handlers.
 
-#![cfg(target_os = "macos")]
+#![cfg(any(target_os = "macos", target_os = "linux"))]
 
 pub mod accessibility;
 pub mod app;
@@ -19,6 +19,7 @@ pub mod job_actions;
 mod jobs_effects;
 pub mod jobs_query;
 pub mod launch;
+pub mod local_backend;
 mod log_effects;
 pub mod logs;
 pub mod maintenance;

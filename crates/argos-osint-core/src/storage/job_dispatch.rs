@@ -613,6 +613,7 @@ pub async fn renew_delivery(
 pub enum DeliveryOutcome<'a> {
     Complete { result_ref: &'a str },
     Retry { reason: &'a str, delay_secs: i64 },
+    Relinquish { reason: &'a str },
     Failed { reason: &'a str },
 }
 
@@ -621,6 +622,7 @@ pub enum DeliveryOutcome<'a> {
 pub enum DeliveryFinish {
     Completed,
     Requeued,
+    Relinquished,
     Failed,
     Stale,
 }
@@ -641,6 +643,9 @@ pub async fn finish_delivery(
             if !valid_pool(reason) || !(0..=3600).contains(&delay_secs) =>
         {
             return Err(invalid("invalid_dispatch_retry"));
+        }
+        DeliveryOutcome::Relinquish { reason } if !valid_identity(reason) => {
+            return Err(invalid("invalid_dispatch_relinquish"));
         }
         DeliveryOutcome::Failed { reason } if !valid_pool(reason) => {
             return Err(invalid("invalid_dispatch_failure"));
@@ -672,11 +677,73 @@ pub async fn finish_delivery(
             DeliveryOutcome::Retry { reason, delay_secs } => {
                 finish_error(&tx, task, reason, now, Some(delay_secs)).await
             }
+            DeliveryOutcome::Relinquish { reason } => {
+                finish_relinquish(&tx, task, reason, &at).await
+            }
             DeliveryOutcome::Failed { reason } => finish_error(&tx, task, reason, now, None).await,
         }
     })
     .await?
     .value)
+}
+
+async fn finish_relinquish(
+    tx: &Tx,
+    task: &ClaimedTask,
+    reason: &str,
+    at: &str,
+) -> Result<DeliveryFinish, TxError> {
+    let task_key = jobs::rid("task", &task.id);
+    let job_key = jobs::rid("job", &task.job_id);
+    let mut active = jobs::run(
+        tx,
+        tx.query(
+            "SELECT VALUE (!cancel_requested AND !stopped AND state INSIDE ['queued','running','reconciling'])
+             FROM ONLY $job",
+        )
+        .bind(("job", job_key.clone())),
+    )
+    .await?;
+    if jobs::take::<Option<bool>>(&mut active, 0)? != Some(true) {
+        return Ok(DeliveryFinish::Stale);
+    }
+    // Extend `max_attempts` by one instead of decrementing `attempts` so the
+    // closed `attempt` row keeps its unique `(task, number)` index entry while
+    // clean shutdowns never consume failure retries.
+    jobs::run(
+        tx,
+        tx.query(
+            "UPDATE $task SET state='queued',
+                 lease_epoch+=1, lease_owner='', process_owner='', lease_until=NONE,
+                 finished_at=NONE, next_eligible_at=<datetime>$now, updated_at=<datetime>$now,
+                 max_attempts+=1, error_category='', error_message='' RETURN NONE;
+             LET $open=SELECT VALUE id FROM attempt
+                 WHERE task=$task AND epoch=$epoch AND finished_at=NONE;
+             UPDATE $open SET finished_at=<datetime>$now,
+                 duration_ms=duration::millis(<datetime>$now-started_at),
+                 outcome='relinquished', error_category='', error_message='' RETURN NONE;
+             UPDATE $job SET
+                 state=IF count(SELECT VALUE id FROM task WHERE job=$job AND state='running' AND id!=$task LIMIT 1)>0 {'running'} ELSE {'queued'},
+                 phase='Queued', worker_owner='', error_category='', error_summary='',
+                 finished_at=NONE, updated_at=<datetime>$now
+                 WHERE state IN ['queued','running','reconciling'] AND !cancel_requested AND !stopped RETURN NONE;",
+        )
+        .bind(("task", task_key))
+        .bind(("job", job_key))
+        .bind(("epoch", task.lease_epoch))
+        .bind(("now", at.to_owned())),
+    )
+    .await?;
+    jobs::log_transition_in(
+        tx,
+        &task.job_id,
+        &format!("{}:{}:task.relinquished", task.id, task.lease_epoch),
+        "task.relinquished",
+        reason,
+        at,
+    )
+    .await?;
+    Ok(DeliveryFinish::Relinquished)
 }
 
 async fn finish_error(
@@ -899,3 +966,372 @@ pub async fn recover_expired(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, feature = "embedded"))]
+mod relinquish_tests {
+    use chrono::{Duration, Utc};
+
+    use super::{
+        claim_delivery, claim_ready, enable_pool, finish_delivery, recover_expired, submit,
+        DeliveryClaim, DeliveryFinish, DeliveryOutcome, ATLAS_POOL,
+    };
+    use crate::storage::bootstrap;
+    use crate::storage::jobs::{self, NewJob, NewTask};
+    use crate::storage::jobs_view;
+    use crate::storage::open::Target;
+    use crate::storage::repo::Repository;
+    use crate::storage::tx::TxError;
+
+    #[tokio::test]
+    async fn relinquish_resumes_across_restarts_without_exhausting_max_attempts_or_duplicating_jobs(
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::connect(
+            &Target::Embedded {
+                path: dir.path().join("db"),
+            },
+            "fixture",
+            "fixture",
+        )
+        .await
+        .unwrap();
+        let db = repo.db();
+        bootstrap::ensure_network_identity(db).await.unwrap();
+        enable_pool(db, "actor_seed").await.unwrap();
+
+        let now = Utc::now();
+        let job = NewJob {
+            id: "seed-job-1",
+            kind: "task",
+            operation: "actor_seed",
+            parent: None,
+            created_at: now,
+        };
+        let task = NewTask {
+            id: "seed-task-1",
+            job: job.id,
+            pool: "actor_seed",
+            operation: job.operation,
+            priority: 100,
+            deps: vec![],
+            input_hash: "seed-fingerprint",
+            created_at: now,
+        };
+        assert!(submit(db, &job, &task).await.unwrap());
+        db.query("UPDATE type::record('task', $id) SET max_attempts = 2 RETURN NONE")
+            .bind(("id", task.id))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let mut cursor = now;
+        for restart in 0..4 {
+            let claimed = claim_ready(db, "actor_seed", &format!("relay-{restart}"), cursor)
+                .await
+                .unwrap()
+                .expect("queued outbox entry before shutdown");
+            assert_eq!(claimed.envelope.job_id, job.id);
+            let DeliveryClaim::Claimed(lease) = claim_delivery(
+                db,
+                &claimed.envelope,
+                &format!("worker-{restart}"),
+                30,
+                cursor,
+                &format!("claim-{restart}"),
+            )
+            .await
+            .unwrap() else {
+                panic!("expected claimed delivery on restart {restart}");
+            };
+            assert_eq!(lease.task.job_id, job.id);
+
+            cursor += Duration::seconds(5);
+            if restart == 0 {
+                assert!(matches!(
+                    finish_delivery(
+                        db,
+                        &lease,
+                        DeliveryOutcome::Relinquish { reason: "" },
+                        cursor,
+                    )
+                    .await,
+                    Err(TxError::Abort(ref code)) if code == "invalid_dispatch_relinquish"
+                ));
+            }
+            assert_eq!(
+                finish_delivery(
+                    db,
+                    &lease,
+                    DeliveryOutcome::Relinquish {
+                        reason: "local_shutdown",
+                    },
+                    cursor,
+                )
+                .await
+                .unwrap(),
+                DeliveryFinish::Relinquished
+            );
+
+            let detail = jobs_view::job_detail(db, job.id, 10)
+                .await
+                .unwrap()
+                .expect("job detail after relinquish");
+            assert_eq!(detail.job.id, job.id);
+            assert_eq!(detail.job.state, "queued");
+            assert!(detail.job.finished_at.is_empty());
+            assert!(detail.job.error_category.is_empty());
+            assert!(detail.job.error_summary.is_empty());
+            assert_eq!(detail.tasks.len(), 1);
+            assert_eq!(detail.tasks[0].state, "queued");
+            assert!(detail.tasks[0].attempts < detail.tasks[0].max_attempts);
+            assert_eq!(detail.attempts.len(), restart + 1);
+            let closed = &detail.attempts[0];
+            assert_eq!(closed.outcome, "relinquished");
+            assert!(!closed.finished_at.is_empty());
+            assert_eq!(closed.duration_ms, Some(5000));
+            assert!(closed.error_category.is_empty());
+            assert!(closed.error_message.is_empty());
+
+            let mut count_res = db
+                .query("RETURN count(SELECT VALUE id FROM job)")
+                .await
+                .unwrap()
+                .check()
+                .unwrap();
+            assert_eq!(count_res.take::<Option<i64>>(0).unwrap(), Some(1));
+        }
+
+        let final_claim = claim_ready(db, "actor_seed", "relay-final", cursor)
+            .await
+            .unwrap()
+            .expect("resumable outbox entry after 4 restarts");
+        assert_eq!(final_claim.envelope.job_id, job.id);
+        let DeliveryClaim::Claimed(final_lease) = claim_delivery(
+            db,
+            &final_claim.envelope,
+            "worker-final",
+            30,
+            cursor,
+            "claim-final",
+        )
+        .await
+        .unwrap() else {
+            panic!("expected final reclaim after restarts");
+        };
+        assert_eq!(final_lease.task.job_id, job.id);
+        assert_eq!(
+            finish_delivery(
+                db,
+                &final_lease,
+                DeliveryOutcome::Complete {
+                    result_ref: "seed-done",
+                },
+                cursor + Duration::seconds(2),
+            )
+            .await
+            .unwrap(),
+            DeliveryFinish::Completed
+        );
+
+        let finished = jobs_view::get_job(db, job.id)
+            .await
+            .unwrap()
+            .expect("completed job");
+        assert_eq!(finished.id, job.id);
+        assert_eq!(finished.state, "completed");
+        assert_eq!(finished.result_ref, "seed-done");
+        let mut count_res = db
+            .query("RETURN count(SELECT VALUE id FROM job)")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert_eq!(count_res.take::<Option<i64>>(0).unwrap(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn relinquish_returns_stale_when_lease_lost_or_job_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::connect(
+            &Target::Embedded {
+                path: dir.path().join("db"),
+            },
+            "fixture",
+            "fixture",
+        )
+        .await
+        .unwrap();
+        let db = repo.db();
+        bootstrap::ensure_network_identity(db).await.unwrap();
+        enable_pool(db, ATLAS_POOL).await.unwrap();
+
+        let now = Utc::now();
+        let stale_job = NewJob {
+            id: "stale-job-1",
+            kind: "task",
+            operation: ATLAS_POOL,
+            parent: None,
+            created_at: now,
+        };
+        let stale_task = NewTask {
+            id: "stale-task-1",
+            job: stale_job.id,
+            pool: ATLAS_POOL,
+            operation: ATLAS_POOL,
+            priority: 100,
+            deps: vec![],
+            input_hash: "stale-input",
+            created_at: now,
+        };
+        assert!(submit(db, &stale_job, &stale_task).await.unwrap());
+        let stale_relay = claim_ready(db, ATLAS_POOL, "relay-1", now)
+            .await
+            .unwrap()
+            .unwrap();
+        let DeliveryClaim::Claimed(expired_lease) = claim_delivery(
+            db,
+            &stale_relay.envelope,
+            "worker-1",
+            5,
+            now,
+            "claim-expired",
+        )
+        .await
+        .unwrap() else {
+            panic!("expected initial claim");
+        };
+        let expired = now + Duration::seconds(6);
+        assert_eq!(
+            finish_delivery(
+                db,
+                &expired_lease,
+                DeliveryOutcome::Relinquish {
+                    reason: "local_shutdown",
+                },
+                expired,
+            )
+            .await
+            .unwrap(),
+            DeliveryFinish::Stale
+        );
+        assert_eq!(recover_expired(db, ATLAS_POOL, expired).await.unwrap(), 1);
+        let recovered_relay = claim_ready(db, ATLAS_POOL, "relay-2", expired)
+            .await
+            .unwrap()
+            .unwrap();
+        let DeliveryClaim::Claimed(active_lease) = claim_delivery(
+            db,
+            &recovered_relay.envelope,
+            "worker-2",
+            30,
+            expired,
+            "claim-recovered",
+        )
+        .await
+        .unwrap() else {
+            panic!("expected recovered claim");
+        };
+        assert_eq!(
+            finish_delivery(
+                db,
+                &expired_lease,
+                DeliveryOutcome::Relinquish {
+                    reason: "local_shutdown",
+                },
+                expired,
+            )
+            .await
+            .unwrap(),
+            DeliveryFinish::Stale
+        );
+        assert_eq!(active_lease.task.lease_owner, "worker-2");
+        assert_eq!(
+            finish_delivery(
+                db,
+                &active_lease,
+                DeliveryOutcome::Complete {
+                    result_ref: "recovered-ok",
+                },
+                expired + Duration::seconds(1),
+            )
+            .await
+            .unwrap(),
+            DeliveryFinish::Completed
+        );
+
+        let cancelled_job = NewJob {
+            id: "cancelled-job-1",
+            kind: "task",
+            operation: ATLAS_POOL,
+            parent: None,
+            created_at: expired,
+        };
+        let cancelled_task = NewTask {
+            id: "cancelled-task-1",
+            job: cancelled_job.id,
+            pool: ATLAS_POOL,
+            operation: ATLAS_POOL,
+            priority: 100,
+            deps: vec![],
+            input_hash: "cancel-input",
+            created_at: expired,
+        };
+        assert!(submit(db, &cancelled_job, &cancelled_task).await.unwrap());
+        let cancel_relay = claim_ready(db, ATLAS_POOL, "relay-3", expired)
+            .await
+            .unwrap()
+            .unwrap();
+        let DeliveryClaim::Claimed(cancel_lease) = claim_delivery(
+            db,
+            &cancel_relay.envelope,
+            "worker-3",
+            30,
+            expired,
+            "claim-cancel",
+        )
+        .await
+        .unwrap() else {
+            panic!("expected claim before cancellation");
+        };
+        jobs::stop_job(
+            db,
+            cancelled_job.id,
+            expired + Duration::seconds(1),
+            50,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            finish_delivery(
+                db,
+                &cancel_lease,
+                DeliveryOutcome::Relinquish {
+                    reason: "local_shutdown",
+                },
+                expired + Duration::seconds(2),
+            )
+            .await
+            .unwrap(),
+            DeliveryFinish::Stale
+        );
+        let cancelled_row = jobs_view::get_job(db, cancelled_job.id)
+            .await
+            .unwrap()
+            .expect("cancelled job row");
+        assert_eq!(cancelled_row.state, "cancelled");
+        assert!(!cancelled_row.finished_at.is_empty());
+        let mut task_state = db
+            .query("SELECT VALUE state FROM ONLY type::record('task', $id)")
+            .bind(("id", cancelled_task.id))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert_eq!(
+            task_state.take::<Option<String>>(0).unwrap().as_deref(),
+            Some("cancelled")
+        );
+    }
+}

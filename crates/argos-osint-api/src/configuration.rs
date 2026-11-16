@@ -46,15 +46,12 @@ const PORTABLE_SCHEMA: u16 = 4;
 
 pub(crate) type Snapshot = argos_osint_core::current_configuration::Snapshot;
 
-pub(crate) fn workspace() -> Result<PathBuf, ApiError> {
-    let root = std::env::var_os("FLEETWORKS_WORKSPACE")
-        .map(PathBuf::from)
-        .ok_or_else(|| internal("configuration workspace not provisioned"))?;
-    if !root.is_absolute() || std::env::var_os("ARGOS_HOME").as_deref() != Some(root.as_os_str()) {
+fn verify_workspace_dir(root: &Path) -> Result<PathBuf, ApiError> {
+    if !root.is_absolute() {
         return Err(internal("configuration workspace not provisioned"));
     }
     let metadata =
-        fs::symlink_metadata(&root).map_err(|_| internal("configuration workspace unavailable"))?;
+        fs::symlink_metadata(root).map_err(|_| internal("configuration workspace unavailable"))?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err(internal("configuration workspace unavailable"));
     }
@@ -64,7 +61,24 @@ pub(crate) fn workspace() -> Result<PathBuf, ApiError> {
     if canonical != root {
         return Err(internal("configuration workspace must be canonical"));
     }
-    Ok(root)
+    Ok(root.to_path_buf())
+}
+
+pub(crate) fn workspace() -> Result<PathBuf, ApiError> {
+    let root = std::env::var_os("FLEETWORKS_WORKSPACE")
+        .map(PathBuf::from)
+        .ok_or_else(|| internal("configuration workspace not provisioned"))?;
+    if std::env::var_os("ARGOS_HOME").as_deref() != Some(root.as_os_str()) {
+        return Err(internal("configuration workspace not provisioned"));
+    }
+    verify_workspace_dir(&root)
+}
+
+pub(crate) fn workspace_for(state: &ApiState) -> Result<PathBuf, ApiError> {
+    if let Some(root) = &state.workspace_root {
+        return verify_workspace_dir(root);
+    }
+    workspace()
 }
 
 pub(crate) fn read_locked(root: &Path, lock: &ConfigLock) -> Result<Snapshot, ApiError> {
@@ -134,9 +148,9 @@ async fn blocking<T: Send + 'static>(
 
 async fn write_lock(
     state: &ApiState,
-    context: Option<Extension<ResolvedRequest>>,
+    context: Option<&ResolvedRequest>,
 ) -> Result<(PathBuf, ConfigLock), ApiError> {
-    let Some(Extension(context)) = context else {
+    let Some(context) = context else {
         return Err(ApiError(
             StatusCode::UNAUTHORIZED,
             "Current configuration authority required",
@@ -148,8 +162,9 @@ async fn write_lock(
             "Configuration authority required",
         ));
     }
-    let (root, lock) = blocking(|| {
-        let root = workspace()?;
+    let state_for_lock = state.clone();
+    let (root, lock) = blocking(move || {
+        let root = workspace_for(&state_for_lock)?;
         let lock = ConfigLock::acquire_at(&root)
             .map_err(|_| internal("configuration lock unavailable"))?;
         Ok((root, lock))
@@ -178,9 +193,10 @@ async fn write_lock(
     Ok((root, lock))
 }
 
-pub(crate) async fn profile() -> ApiResult {
-    let value = blocking(|| {
-        let root = workspace()?;
+pub(crate) async fn profile_value(state: &ApiState) -> Result<Value, ApiError> {
+    let state_for_read = state.clone();
+    blocking(move || {
+        let root = workspace_for(&state_for_read)?;
         let lock = ConfigLock::acquire_at(&root).map_err(|_| internal("configuration lock unavailable"))?;
         let snapshot = read_locked(&root, &lock)?;
         let accounts: Vec<Value> = snapshot.auth.accounts.iter().map(|(id, account)| json!({
@@ -195,13 +211,17 @@ pub(crate) async fn profile() -> ApiResult {
         Ok(json!({"configuration_revision":snapshot.revision,"configuration_format":FORMAT,
             "accounts":accounts,"tool_credentials":tools,"setup_required":snapshot.auth.accounts.is_empty(),
             "portable_schema_version":PORTABLE_SCHEMA}))
-    }).await?;
-    Ok(Json(value))
+    }).await
 }
 
-pub(crate) async fn models() -> ApiResult {
-    let value = blocking(|| {
-        let root = workspace()?;
+pub(crate) async fn profile(State(state): State<ApiState>) -> ApiResult {
+    Ok(Json(profile_value(&state).await?))
+}
+
+pub(crate) async fn models_value(state: &ApiState) -> Result<Value, ApiError> {
+    let state_for_read = state.clone();
+    blocking(move || {
+        let root = workspace_for(&state_for_read)?;
         let lock = ConfigLock::acquire_at(&root).map_err(|_| internal("configuration lock unavailable"))?;
         let snapshot = read_locked(&root, &lock)?;
         let roles: BTreeMap<&str, &ModelAssignment> = provider::CANONICAL_ROLE_KEYS.iter()
@@ -231,8 +251,11 @@ pub(crate) async fn models() -> ApiResult {
         Ok(json!({"configuration_revision":snapshot.revision,"roles":provider::CANONICAL_ROLE_KEYS,"defaults":roles,
             "catalog":catalog.into_values().collect::<Vec<_>>(), "catalog_source":"configured_routes",
             "model_variants":snapshot.settings.defaults.model_variants}))
-    }).await?;
-    Ok(Json(value))
+    }).await
+}
+
+pub(crate) async fn models(State(state): State<ApiState>) -> ApiResult {
+    Ok(Json(models_value(&state).await?))
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -402,28 +425,37 @@ fn set_role_locked(root: &Path, lock: &ConfigLock, request: SetRole) -> Result<u
     commit(root, lock, &snapshot)
 }
 
+pub(crate) async fn save_role_request(
+    state: &ApiState,
+    context: Option<&ResolvedRequest>,
+    request: SetRole,
+) -> Result<Value, ApiError> {
+    let (root, lock) = write_lock(state, context).await?;
+    let revision = blocking(move || set_role_locked(&root, &lock, request)).await?;
+    Ok(json!({"saved":true,"configuration_revision":revision}))
+}
+
 pub(crate) async fn save_role(
     State(state): State<ApiState>,
     context: Option<Extension<ResolvedRequest>>,
     Json(request): Json<SetRole>,
 ) -> ApiResult {
-    let (root, lock) = write_lock(&state, context).await?;
-    let revision = blocking(move || set_role_locked(&root, &lock, request)).await?;
+    let context = context.map(|Extension(context)| context);
     Ok(Json(
-        json!({"saved":true,"configuration_revision":revision}),
+        save_role_request(&state, context.as_ref(), request).await?,
     ))
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AccountInput {
-    expected_revision: u64,
-    account_id: String,
-    provider: String,
-    base_url: String,
+    pub(crate) expected_revision: u64,
+    pub(crate) account_id: String,
+    pub(crate) provider: String,
+    pub(crate) base_url: String,
     #[serde(default)]
-    model: Option<String>,
-    api_key: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) api_key: Option<String>,
 }
 
 fn valid_id(id: &str) -> bool {
@@ -509,12 +541,12 @@ fn patched_account(
     Ok(account)
 }
 
-pub(crate) async fn upsert_account(
-    State(state): State<ApiState>,
-    context: Option<Extension<ResolvedRequest>>,
-    Json(request): Json<AccountInput>,
-) -> ApiResult {
-    let (root, lock) = write_lock(&state, context).await?;
+pub(crate) async fn upsert_account_request(
+    state: &ApiState,
+    context: Option<&ResolvedRequest>,
+    request: AccountInput,
+) -> Result<Value, ApiError> {
+    let (root, lock) = write_lock(state, context).await?;
     let revision = blocking(move || {
         let mut snapshot = read_locked(&root, &lock)?;
         expected(&snapshot, request.expected_revision)?;
@@ -528,24 +560,33 @@ pub(crate) async fn upsert_account(
         commit(&root, &lock, &snapshot)
     })
     .await?;
+    Ok(json!({"saved":true,"configuration_revision":revision}))
+}
+
+pub(crate) async fn upsert_account(
+    State(state): State<ApiState>,
+    context: Option<Extension<ResolvedRequest>>,
+    Json(request): Json<AccountInput>,
+) -> ApiResult {
+    let context = context.map(|Extension(context)| context);
     Ok(Json(
-        json!({"saved":true,"configuration_revision":revision}),
+        upsert_account_request(&state, context.as_ref(), request).await?,
     ))
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DeleteAccount {
-    expected_revision: u64,
-    account_id: String,
+    pub(crate) expected_revision: u64,
+    pub(crate) account_id: String,
 }
 
-pub(crate) async fn delete_account(
-    State(state): State<ApiState>,
-    context: Option<Extension<ResolvedRequest>>,
-    Json(request): Json<DeleteAccount>,
-) -> ApiResult {
-    let (root, lock) = write_lock(&state, context).await?;
+pub(crate) async fn delete_account_request(
+    state: &ApiState,
+    context: Option<&ResolvedRequest>,
+    request: DeleteAccount,
+) -> Result<Value, ApiError> {
+    let (root, lock) = write_lock(state, context).await?;
     let revision = blocking(move || {
         let mut snapshot = read_locked(&root, &lock)?;
         expected(&snapshot, request.expected_revision)?;
@@ -571,20 +612,29 @@ pub(crate) async fn delete_account(
         commit(&root, &lock, &snapshot)
     })
     .await?;
+    Ok(json!({"saved":true,"configuration_revision":revision}))
+}
+
+pub(crate) async fn delete_account(
+    State(state): State<ApiState>,
+    context: Option<Extension<ResolvedRequest>>,
+    Json(request): Json<DeleteAccount>,
+) -> ApiResult {
+    let context = context.map(|Extension(context)| context);
     Ok(Json(
-        json!({"saved":true,"configuration_revision":revision}),
+        delete_account_request(&state, context.as_ref(), request).await?,
     ))
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ToolCredential {
-    expected_revision: u64,
-    provider: String,
+    pub(crate) expected_revision: u64,
+    pub(crate) provider: String,
     #[serde(default)]
-    primary: Option<String>,
+    pub(crate) primary: Option<String>,
     #[serde(default)]
-    fallback: Option<String>,
+    pub(crate) fallback: Option<String>,
 }
 
 fn apply_tool_credential(settings: &mut provider::SettingsFile, request: &ToolCredential) {
@@ -596,12 +646,12 @@ fn apply_tool_credential(settings: &mut provider::SettingsFile, request: &ToolCr
     }
 }
 
-pub(crate) async fn save_tool_credential(
-    State(state): State<ApiState>,
-    context: Option<Extension<ResolvedRequest>>,
-    Json(request): Json<ToolCredential>,
-) -> ApiResult {
-    let (root, lock) = write_lock(&state, context).await?;
+pub(crate) async fn save_tool_credential_request(
+    state: &ApiState,
+    context: Option<&ResolvedRequest>,
+    request: ToolCredential,
+) -> Result<Value, ApiError> {
+    let (root, lock) = write_lock(state, context).await?;
     let revision = blocking(move || {
         if !provider::KEY_ENV
             .iter()
@@ -619,8 +669,17 @@ pub(crate) async fn save_tool_credential(
         commit(&root, &lock, &snapshot)
     })
     .await?;
+    Ok(json!({"saved":true,"configuration_revision":revision}))
+}
+
+pub(crate) async fn save_tool_credential(
+    State(state): State<ApiState>,
+    context: Option<Extension<ResolvedRequest>>,
+    Json(request): Json<ToolCredential>,
+) -> ApiResult {
+    let context = context.map(|Extension(context)| context);
     Ok(Json(
-        json!({"saved":true,"configuration_revision":revision}),
+        save_tool_credential_request(&state, context.as_ref(), request).await?,
     ))
 }
 
@@ -660,19 +719,24 @@ pub(crate) struct Export {
     include_credentials: bool,
 }
 
-pub(crate) async fn export(Json(request): Json<Export>) -> Result<Response, ApiError> {
-    let body = blocking(move || {
-        if !request.include_credentials {
+pub(crate) async fn export_bytes(
+    state: &ApiState,
+    expected_revision: u64,
+    include_credentials: bool,
+) -> Result<Vec<u8>, ApiError> {
+    let state_for_read = state.clone();
+    blocking(move || {
+        if !include_credentials {
             return Err(ApiError(
                 StatusCode::BAD_REQUEST,
                 "Explicit credential export consent required",
             ));
         }
-        let root = workspace()?;
+        let root = workspace_for(&state_for_read)?;
         let lock = ConfigLock::acquire_at(&root)
             .map_err(|_| internal("configuration lock unavailable"))?;
         let snapshot = read_locked(&root, &lock)?;
-        expected(&snapshot, request.expected_revision)?;
+        expected(&snapshot, expected_revision)?;
         let route = |route: ModelRoute| Route {
             provider: route.provider,
             model: route.model,
@@ -731,6 +795,18 @@ pub(crate) async fn export(Json(request): Json<Export>) -> Result<Response, ApiE
         })
         .map_err(|_| internal("configuration export failed"))
     })
+    .await
+}
+
+pub(crate) async fn export(
+    State(state): State<ApiState>,
+    Json(request): Json<Export>,
+) -> Result<Response, ApiError> {
+    let body = export_bytes(
+        &state,
+        request.expected_revision,
+        request.include_credentials,
+    )
     .await?;
     let mut response = body.into_response();
     response.headers_mut().insert(
@@ -755,16 +831,17 @@ pub(crate) struct ImportQuery {
     replace: bool,
 }
 
-pub(crate) async fn import(
-    State(state): State<ApiState>,
-    context: Option<Extension<ResolvedRequest>>,
-    axum::extract::Query(query): axum::extract::Query<ImportQuery>,
+pub(crate) async fn import_bytes(
+    state: &ApiState,
+    context: Option<&ResolvedRequest>,
+    expected_revision: u64,
+    replace: bool,
     body: Bytes,
-) -> ApiResult {
-    if body.len() as u64 > LIMIT || !query.replace {
+) -> Result<Value, ApiError> {
+    if body.len() as u64 > LIMIT || !replace {
         return Err(bad());
     }
-    let (root, lock) = write_lock(&state, context).await?;
+    let (root, lock) = write_lock(state, context).await?;
     let revision = blocking(move || {
         let document: Portable = serde_json::from_slice(&body).map_err(|_| bad())?;
         if document.schema_version != PORTABLE_SCHEMA
@@ -775,7 +852,7 @@ pub(crate) async fn import(
             return Err(bad());
         }
         let mut snapshot = read_locked(&root, &lock)?;
-        expected(&snapshot, query.expected_revision)?;
+        expected(&snapshot, expected_revision)?;
         let mut auth = AuthFile::default();
         for (id, account) in document.accounts {
             auth.accounts.insert(
@@ -813,8 +890,25 @@ pub(crate) async fn import(
         commit(&root, &lock, &snapshot)
     })
     .await?;
+    Ok(json!({"saved":true,"configuration_revision":revision}))
+}
+
+pub(crate) async fn import(
+    State(state): State<ApiState>,
+    context: Option<Extension<ResolvedRequest>>,
+    axum::extract::Query(query): axum::extract::Query<ImportQuery>,
+    body: Bytes,
+) -> ApiResult {
+    let context = context.map(|Extension(context)| context);
     Ok(Json(
-        json!({"saved":true,"configuration_revision":revision}),
+        import_bytes(
+            &state,
+            context.as_ref(),
+            query.expected_revision,
+            query.replace,
+            body,
+        )
+        .await?,
     ))
 }
 

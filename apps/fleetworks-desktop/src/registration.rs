@@ -151,7 +151,11 @@ impl State {
                 self.registration.context = Some(registered.context);
                 self.registration.receipt = Load::Ready(registered.receipt);
                 self.registration.message = Some("Workstation registration verified".into());
-                self.restore_cycle_deletion();
+                // The two protected-journal reads run in sequence: the catalog lock is nonblocking,
+                // so concurrent reads can fail with "catalog is busy".
+                if !self.restore_cycle_deletion() {
+                    self.restore_actor_reindex();
+                }
                 self.refresh_readiness();
                 self.refresh_page();
             }
@@ -169,6 +173,12 @@ impl State {
         let Some(capabilities) = &self.connection.capabilities else {
             return;
         };
+        if self.is_local_backend() && capabilities.links.intel_web.is_none() {
+            self.registration.message = Some(
+                "Intel Web handoff is available only when connected to a remote gateway.".into(),
+            );
+            return;
+        }
         let result = capabilities
             .links
             .intel_web

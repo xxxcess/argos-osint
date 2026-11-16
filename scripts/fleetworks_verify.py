@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 PRIMARY_SCOPES = frozenset({"server", "storage", "compose", "queue"})
-ALL_SCOPES = PRIMARY_SCOPES | {"desktop", "bert", "web", "web_dev", "images"}
+ALL_SCOPES = PRIMARY_SCOPES | {"desktop", "local_backend", "bert", "web", "web_dev", "images"}
 BACKEND_IMAGES = frozenset({"runtime", "surrealdb", "search-index"})
 RUST_IMAGES = frozenset({"runtime", "search-index"})
 ALL_IMAGES = BACKEND_IMAGES | {"web"}
@@ -67,7 +67,7 @@ COMPONENTS = ("auto", "native", "backend", "all")
 def component_plan(components, scopes, images):
     """Explicit component selection shares this planner with automatic paths."""
     if components == "native":
-        return {"desktop"}, set()
+        return {"desktop", "local_backend"}, set()
     if components == "backend":
         return set(ALL_SCOPES - {"desktop", "web", "web_dev"}), set(BACKEND_IMAGES)
     if components == "all":
@@ -127,15 +127,17 @@ def raw_path_scopes(path):
     if path.startswith("tools/atlas-bert/") or path in BERT_ONLY_PATHS:
         return {"bert"}
     if path in SHARED_PRIMARY_PATHS or path.startswith(SHARED_PRIMARY_PREFIXES):
-        return PRIMARY_SCOPES | {"desktop"}
+        return PRIMARY_SCOPES | {"desktop", "local_backend"}
     if path.startswith(WORKSTATION_PREFIXES):
-        return {"desktop"}
+        return {"desktop", "local_backend"}
     if path in {"scripts/test_surreal.py", "scripts/test_surreal_release.py", "scripts/surrealdb-release.json"}:
         return {"server", "storage", "queue"}
     if path == "scripts/fixtures/atlas_bert":
         return {"bert", "server", "queue", "web", "web_dev"}
     if path == "scripts/fleetworks_network_smoke.py":
         return {"server"}
+    if path in {"scripts/fleetworks_local_backend_smoke.py", "scripts/test_fleetworks_local_backend_smoke.py"}:
+        return {"local_backend"}
     if path in {"deploy/compose.yml", "deploy/compose.dev.yml", "deploy/check-web.mjs"}:
         return {"web", "web_dev", "compose"}
     if path in WEB_BUILD_PATHS or path.startswith("patches/"):
@@ -145,15 +147,23 @@ def raw_path_scopes(path):
 
     scopes = {"bert"} if path in BERT_SHARED_PATHS or path.startswith(BERT_SHARED_PREFIXES) else set()
     if path.startswith("apps/fleetworks-desktop/"):
-        return {"desktop"}
+        return {"desktop", "local_backend"}
     if path.startswith("apps/web-desktop/__tests__/"):
         return {"web"}
-    if path in {"scripts/fleetworks_native_verify.py", "scripts/test_fleetworks_native_verify.py", ".github/workflows/fleetworks-native.yml"}:
+    if path in {
+        "scripts/fleetworks_native_verify.py",
+        "scripts/test_fleetworks_native_verify.py",
+    }:
         return {"desktop"}
-    if path in {"scripts/fleetworks_candidate.py", "scripts/test_fleetworks_candidate.py"}:
-        return {"desktop"}
+    if path in {
+        ".github/workflows/fleetworks-native.yml",
+        ".github/workflows/fleetworks-native-linux.yml",
+        "scripts/fleetworks_candidate.py",
+        "scripts/test_fleetworks_candidate.py",
+    }:
+        return {"desktop", "local_backend"}
     if path.startswith("services/search-index/"):
-        return {"server"}
+        return {"server", "local_backend"}
     if path.startswith("apps/web-desktop/app/api/"):
         return {"web", "web_dev", "compose"}
     if path.startswith(("apps/web-desktop/app/", "packages/")) and not path.endswith(("/package.json", "/tsconfig.json")):
@@ -169,9 +179,10 @@ def raw_path_scopes(path):
         "crates/argos-osint-core/src/storage/", "crates/argos-osint-core/tests/storage_",
         "crates/argos-osint-core/src/intel_recon/brief_",
     )):
-        return scopes | {"server", "storage", "queue"}
+        return scopes | {"server", "storage", "queue", "local_backend"}
     if path.startswith(SERVER_PREFIXES) or path == "scripts/fleetworks_atlas_smoke.py":
-        return scopes | {"server", "queue"}
+        extra = {"local_backend"} if path.startswith(SERVER_PREFIXES) else set()
+        return scopes | {"server", "queue"} | extra
 
     # A pull request runs only lanes named by its changed paths. Documentation and
     # standalone policy helpers that do not affect build/test workflows return no
@@ -288,13 +299,21 @@ def run_local(scopes, comparison=None):
     if comparison:
         checks.insert(0, ["git", "diff", "--check", comparison])
     if "desktop" in scopes:
-        if platform.system() == "Darwin":
+        host_system = platform.system()
+        host_machine = platform.machine().lower()
+        if host_system == "Darwin":
             checks.extend([
                 ["cargo", "fmt", *DESKTOP_PACKAGES, "--", "--check"],
                 [sys.executable, "scripts/agent_cargo.py", "test", "--locked", *DESKTOP_PACKAGES, "--", "--test-threads=1"],
             ])
+        elif host_system == "Linux" and host_machine in ("x86_64", "amd64"):
+            checks.extend([
+                ["cargo", "fmt", *DESKTOP_PACKAGES, "--", "--check"],
+                [sys.executable, "scripts/agent_cargo.py", "test", "--locked", *DESKTOP_PACKAGES, "--", "--test-threads=1"],
+            ])
+            print("Desktop checks are running for Linux x86_64; macOS desktop lanes remain pending on this host.", flush=True)
         else:
-            print("Desktop checks are pending on the selected macOS lanes; this host cannot provide Mac evidence.", flush=True)
+            print("Desktop checks are pending on the selected macOS and Linux x86_64 lanes; this host cannot provide desktop evidence.", flush=True)
     if "web" in scopes:
         checks.extend(["pnpm", command] for command in ("typecheck", "lint", "test"))
     if scopes:

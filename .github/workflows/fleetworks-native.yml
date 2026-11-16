@@ -96,10 +96,13 @@ jobs:
           test "$(rustc -vV | sed -n 's/^release: //p')" = "$TOOLCHAIN"
           xcode-select -p
           xcrun --sdk macosx --show-sdk-path
+          clang_dir="$(dirname "$(xcrun --find clang)")/../lib"
+          test -f "$clang_dir/libclang.dylib"
+          printf 'LIBCLANG_PATH=%s\n' "$clang_dir" >> "$GITHUB_ENV"
           python3 scripts/fleetworks_verify.py platform --format json
       - uses: Swatinem/rust-cache@v2
         with:
-          key: desktop-${{ inputs.target }}-${{ steps.pin.outputs.version }}-${{ hashFiles('Cargo.lock', 'apps/fleetworks-desktop/Cargo.toml') }}
+          key: desktop-${{ inputs.target }}-${{ steps.pin.outputs.version }}-${{ hashFiles('Cargo.lock', 'apps/fleetworks-desktop/Cargo.toml', 'services/api-host/Cargo.toml', 'services/search-index/Cargo.toml') }}
           workspaces: . -> target/agents
           cache-on-failure: true
           save-if: ${{ github.event_name != 'pull_request' }}
@@ -110,6 +113,7 @@ jobs:
           evidence="$RUNNER_TEMP/fleetworks-native-evidence"
           mkdir -p "$evidence"
           python3 -B -m unittest discover -s .github/scripts -p 'test_ui_visual_review.py'
+          python3 scripts/fleetworks_candidate.py verify-engine-free | tee "$evidence/engine-free.json"
           cargo fmt -p fleetworks-desktop -p fleetworks-workstation -p fleetworks-contracts -- --check
           python3 scripts/agent_cargo.py test --locked -p fleetworks-desktop \
             -p fleetworks-workstation -p fleetworks-contracts -- --test-threads=1 \
@@ -121,7 +125,7 @@ jobs:
           set -euo pipefail
           python3 scripts/fleetworks_verify.py native-ui --agent --require-clean \
             --revision "$FLEETWORKS_HEAD" --output "$RUNNER_TEMP/fleetworks-native-evidence/fixtures" \
-            --scene workstation-offline --scene atlas-offline --scene brain-search-ready \
+            --scene redesign-setup --scene workstation-offline --scene atlas-offline --scene brain-search-ready \
             --scene brain-dossier --scene brain-search-indexing --scene brain-search-error \
             --scene tools-offline --scene models-setup --scene profile-setup \
             --scene workspaces-offline --scene jobs-offline \
@@ -147,15 +151,84 @@ jobs:
             --revision "$FLEETWORKS_HEAD" --output "$RUNNER_TEMP/fleetworks-native-evidence/pairing-local-review" \
             --scene pairing-waiting --local-review-fixture \
             --size 1440x860 --size 640x480 --scale 1
-      - name: Build the debug app for pull-request review
+      - name: Build, archive, extract-verify and smoke-test the debug app for pull-request review
         if: inputs.release-version == ''
         shell: bash
         run: |
           set -euo pipefail
+          dist="$RUNNER_TEMP/fleetworks-native-debug"
+          extracted="$RUNNER_TEMP/fleetworks-native-debug-extracted"
+          evidence="$RUNNER_TEMP/fleetworks-native-evidence"
+          mkdir -p "$evidence"
           python3 scripts/fleetworks_candidate.py build-native --agent \
             --target "$NATIVE_TARGET" --profile debug \
-            --output "$RUNNER_TEMP/fleetworks-native-debug" \
-            --revision "$FLEETWORKS_HEAD" --require-clean
+            --output "$dist" \
+            --revision "$FLEETWORKS_HEAD" \
+            --workflow "${{ github.workflow }}" --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}" \
+            --archive --require-clean | tee "$evidence/build-$NATIVE_TARGET.out"
+          DIST_DIR="$dist" EXTRACT_DIR="$extracted" SIZES_OUT="$evidence/package-sizes-$NATIVE_TARGET.json" python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, "scripts")
+          from fleetworks_candidate import locked_rune_revision, sha256
+
+          dist = Path(os.environ["DIST_DIR"])
+          archives = list(dist.glob("Fleetworks-*.zip"))
+          if len(archives) != 1:
+              raise SystemExit(f"Expected 1 debug macOS archive, found {len(archives)}")
+          archive = archives[0]
+          manifest = json.loads((dist / "Fleetworks.app.manifest.json").read_text(encoding="utf-8"))
+          bundle = dist / "Fleetworks.app"
+          exe = bundle / "Contents/MacOS/fleetworks-desktop"
+          companion = bundle / "Contents/MacOS/argos-api-host"
+          unpacked_bytes = sum(path.stat().st_size for path in bundle.rglob("*") if path.is_file())
+          sizes = {
+              "target": os.environ["NATIVE_TARGET"],
+              "profile": "debug",
+              "archive_name": archive.name,
+              "archive_bytes": archive.stat().st_size,
+              "archive_mib": round(archive.stat().st_size / (1024 * 1024), 2),
+              "unpacked_bytes": unpacked_bytes,
+              "unpacked_mib": round(unpacked_bytes / (1024 * 1024), 2),
+              "executable_bytes": exe.stat().st_size,
+              "companion_bytes": companion.stat().st_size if companion.is_file() else None,
+          }
+          Path(os.environ["SIZES_OUT"]).write_text(json.dumps(sizes, indent=2) + "\n", encoding="utf-8")
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as handle:
+                  print(
+                      f"- `{sizes['target']}` (`debug`): archive `{sizes['archive_name']}` = "
+                      f"`{sizes['archive_mib']} MiB` ({sizes['archive_bytes']} B), unpacked = "
+                      f"`{sizes['unpacked_mib']} MiB` ({sizes['unpacked_bytes']} B), "
+                      f"desktop = `{sizes['executable_bytes']} B`, companion = `{sizes['companion_bytes']} B`",
+                      file=handle,
+                  )
+          subprocess.run([
+              sys.executable, "scripts/fleetworks_candidate.py", "verify-native",
+              "--archive", str(archive),
+              "--sha256", sha256(archive),
+              "--revision", os.environ["FLEETWORKS_HEAD"],
+              "--target", os.environ["NATIVE_TARGET"],
+              "--profile", "debug",
+              "--rune-revision", locked_rune_revision(),
+              "--version", manifest["version"],
+              "--directory", os.environ["EXTRACT_DIR"],
+              "--require-clean",
+          ], check=True)
+          PY
+          python3 scripts/fleetworks_local_backend_smoke.py \
+            --app "$extracted/Fleetworks.app" \
+            --output "$evidence/local-backend-smoke-$NATIVE_TARGET.json"
+          ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1 \
+            FLEETWORKS_PARITY_REQUIRE_COMPANION=1 \
+            FLEETWORKS_PARITY_COMPANION_PATH="$extracted/Fleetworks.app/Contents/MacOS/argos-api-host" \
+            FLEETWORKS_PARITY_REPORT_PATH="$evidence/http-ipc-parity-$NATIVE_TARGET.json" \
+            python3 scripts/agent_cargo.py test --locked --target "$NATIVE_TARGET" \
+            -p argos-api-host --features embedded --test http_ipc_parity -- --nocapture --test-threads=1
       - name: Package the trusted versioned release app
         if: inputs.release-version != ''
         id: package
@@ -248,6 +321,8 @@ jobs:
             --sha256 "$EXPECTED_SHA256" --revision "$FLEETWORKS_HEAD" \
             --target "$NATIVE_TARGET" --profile release --version "$RELEASE_VERSION" --rune-revision "$RUNE_REVISION" \
             --require-clean --directory "$RUNNER_TEMP/fleetworks-native-extracted"
+          python3 scripts/fleetworks_local_backend_smoke.py \
+            --app "$RUNNER_TEMP/fleetworks-native-extracted/Fleetworks.app"
       - name: Record actual review URLs and verification limits
         env:
           APP_URL: ${{ needs.package.outputs.artifact-url }}

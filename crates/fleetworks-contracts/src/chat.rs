@@ -1,7 +1,8 @@
 //! Typed contract for the contextual Assistant chat.
 //!
-//! This module is wire types, bounds and validation only. No server route, storage, job or
-//! transport implements it yet, and no backend advertises it, so clients keep sending gated.
+//! V1 serves only `POST turns`, over HTTP and IPC. It checks the caller and the request, then
+//! answers `ChatTurnAck` ("ok"). It stores nothing and never replies with an assistant message.
+//! The thread, message and event reads below are typed for later and are not served yet.
 //! A caller names a typed source reference. It never supplies evidence: the server resolves
 //! evidence from its own authorized data. Replies are a status, then one final answer. There is
 //! no partial text and no tool execution.
@@ -239,6 +240,28 @@ impl ChatTurnRequest {
             return Err(ChatInputError::ControlCharacter);
         }
         Ok(())
+    }
+}
+
+/// The only reply V1 gives to a turn: the endpoint was reached and the request was valid.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct ChatTurnAck {
+    pub status: String,
+}
+
+impl ChatTurnAck {
+    #[must_use]
+    pub fn ok() -> Self {
+        Self {
+            status: "ok".to_owned(),
+        }
+    }
+
+    #[must_use]
+    pub fn is_ok(&self) -> bool {
+        self.status == "ok"
     }
 }
 
@@ -691,6 +714,16 @@ mod tests {
         let mut bad = event;
         bad.reason = Some("a\nb".into());
         assert_eq!(bad.validate().unwrap_err(), ChatInputError::InvalidLabel);
+    }
+
+    #[test]
+    fn the_acknowledgement_is_a_plain_ok() {
+        let ack = ChatTurnAck::ok();
+        assert!(ack.is_ok());
+        assert_eq!(
+            serde_json::to_value(&ack).expect("json"),
+            serde_json::json!({"status": "ok"})
+        );
     }
 
     #[test]

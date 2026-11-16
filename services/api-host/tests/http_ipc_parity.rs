@@ -51,6 +51,8 @@ use argos_osint_core::storage::server;
 use argos_osint_core::storage::setup_jobs as core_setup_jobs;
 use fleetworks_contracts::actor_index::ActorIndexLimits;
 use fleetworks_contracts::capabilities::Capabilities;
+use fleetworks_contracts::chat::ChatTurnAck;
+use fleetworks_contracts::chat::CHAT_TURNS_PATH;
 use fleetworks_contracts::classifier_activation::ActivationRequest;
 use fleetworks_contracts::classifier_activation::ActiveModelRevision;
 use fleetworks_contracts::classifier_activation::CandidateIdentity;
@@ -1217,6 +1219,34 @@ async fn run_shared_flow(
         "tool_run",
         "live_parity",
         "unknown tool_run 400 parity",
+    );
+
+    let chat_turn = |input: &str| {
+        serde_json::json!({
+            "request_id": format!("parity-chat-{transport}"),
+            "context": MutationContext::new(&registered_context),
+            "source": {"kind": "job", "id": "parity-chat-source"},
+            "input": input,
+        })
+    };
+    let ack: ChatTurnAck = client
+        .post(CHAT_TURNS_PATH, &chat_turn("Is this reachable?"))
+        .await
+        .expect("chat turn acknowledged");
+    assert!(ack.is_ok(), "{transport}: chat turn answers ok");
+    assert_eq!(
+        client
+            .post::<serde_json::Value>(CHAT_TURNS_PATH, &chat_turn("   "))
+            .await
+            .unwrap_err(),
+        ClientError::Status(400),
+        "{transport}: empty chat turn returns 400"
+    );
+    record(
+        &mut *report,
+        "chat_turn_submit",
+        "live_parity",
+        "chat turn ok acknowledgement and empty-input 400 parity",
     );
 
     assert_eq!(

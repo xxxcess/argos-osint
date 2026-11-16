@@ -7,6 +7,7 @@ pub mod actor_search;
 mod admission;
 mod base64;
 mod brain;
+mod chat;
 pub mod classifier_activation;
 mod configuration;
 pub mod configuration_reset;
@@ -382,6 +383,7 @@ fn router_with_access(
             .merge(pairing::routes())
             .merge(configuration_reset::routes())
             .merge(classifier_activation::routes())
+            .merge(chat::routes())
             .route(
                 ATLAS_CYCLES_PATH,
                 get(cycle_history::list).post(operations::submit_atlas_cycle),
@@ -644,6 +646,10 @@ pub(crate) fn base_capabilities(
     response.deployment_id = deployment_id;
     response.configuration_epoch = configuration_epoch;
     response.connect = Some(capabilities::ConnectCapabilities::default());
+    // Turns are acknowledged only; the client clears its draft on "ok".
+    response.chat = Some(fleetworks_contracts::chat::ChatCapabilities::new(
+        fleetworks_contracts::chat::ChatAvailability::Supported,
+    ));
     response.workspace_control = Some(capabilities::WorkspaceControlCapabilities::default());
     response.resource_scopes = Some(capabilities::ResourceScopes::default());
     response.permissions = permissions;

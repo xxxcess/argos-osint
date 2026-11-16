@@ -1,10 +1,17 @@
 //! The native contextual Assistant dock.
 //!
-//! This slice owns the pane, its pinned context and the composer. It sends nothing: the typed chat
-//! contract does not exist yet, so the backend advertises no chat capability and sending stays
-//! gated with a plain reason. Drafts stay inside one authorized context. Changing context is an
+//! This slice owns the pane, its pinned context and the composer. Enter sends the draft to the
+//! backend's chat turn endpoint over the active transport and clears the composer. The backend
+//! only answers "ok"; no assistant reply exists yet. Sending is gated on the backend advertising
+//! a supported chat capability. Drafts stay inside one authorized context. Changing context is an
 //! explicit action, and a new connection authority clears the draft and the pin.
 
+use fleetworks_contracts::chat::ChatSourceKind;
+use fleetworks_contracts::chat::ChatSourceReference;
+use fleetworks_contracts::chat::ChatTurnAck;
+use fleetworks_contracts::chat::ChatTurnRequest;
+use fleetworks_contracts::chat::CHAT_TURNS_PATH;
+use fleetworks_contracts::context::MutationContext;
 use rune::El;
 use rune::Key;
 use rune::KeyEvent;
@@ -25,6 +32,8 @@ pub(crate) const MAX_INPUT_BYTES: usize = 4 * 1024;
 
 pub(crate) const UNAVAILABLE: &str =
     "The Assistant is unavailable: this backend does not advertise chat. Nothing was sent.";
+pub(crate) const NEEDS_SOURCE: &str =
+    "Select a job, cycle or readiness check to ask about. Nothing was sent.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Context {
@@ -100,6 +109,10 @@ pub struct Assistant {
     /// Conversation shown in the pane. Nothing fills it until the chat contract is wired, and a
     /// new connection authority clears it.
     pub(crate) messages: Vec<crate::chat_ui::ChatMessage>,
+    /// The turn in flight. Dropping it aborts the request.
+    pub(crate) sending: Option<crate::connection::RequestTask>,
+    /// Bumped per send so a late reply for an older turn is ignored.
+    pub(crate) send_revision: u64,
 }
 
 impl Default for Assistant {
@@ -112,6 +125,8 @@ impl Default for Assistant {
             scope: None,
             notice: None,
             messages: Vec::new(),
+            sending: None,
+            send_revision: 0,
         }
     }
 }
@@ -131,6 +146,7 @@ impl Assistant {
         self.pinned = None;
         self.notice = None;
         self.messages.clear();
+        self.sending = None;
         if changed {
             self.draft = TextEdit::new("");
         }
@@ -176,9 +192,26 @@ impl Assistant {
     }
 }
 
-/// Whether the connected backend advertises a typed chat capability. None does yet.
-pub(crate) fn chat_available(_state: &State) -> bool {
-    false
+/// Whether the connected backend advertises a supported chat capability at this version.
+pub(crate) fn chat_available(state: &State) -> bool {
+    state
+        .connection
+        .capabilities
+        .as_ref()
+        .and_then(|capabilities| capabilities.chat)
+        .is_some_and(|chat| chat.can_send())
+}
+
+/// The typed source for a pinned context. A plain page has none.
+pub(crate) fn source_for(context: &Context) -> Option<ChatSourceReference> {
+    let (kind, id) = context.key.split_once(':')?;
+    let kind = match kind {
+        "job" => ChatSourceKind::Job,
+        "cycle" => ChatSourceKind::Cycle,
+        "readiness" => ChatSourceKind::Readiness,
+        _ => return None,
+    };
+    ChatSourceReference::new(kind, id.to_owned()).ok()
 }
 
 /// What the Assistant is about right now, from the selection the operator already made.
@@ -235,8 +268,121 @@ impl State {
 
     pub(crate) fn assistant_send(&mut self) {
         let available = chat_available(self);
-        // A ready message has nowhere to go until the chat contract lands.
-        let _ = self.assistant.try_send(available);
+        let source = self.assistant.pinned().and_then(source_for);
+        if available && source.is_none() && !self.assistant.draft.text.trim().is_empty() {
+            self.assistant.notice = Some(NEEDS_SOURCE.to_owned());
+            return;
+        }
+        let Send::Ready(text) = self.assistant.try_send(available) else {
+            return;
+        };
+        let Some(source) = source else {
+            return;
+        };
+        self.assistant.send_revision = self.assistant.send_revision.wrapping_add(1);
+        if self.fixture {
+            return;
+        }
+        let parts = match (&self.services, &self.client, &self.registration.context) {
+            (Some(services), Some(client), Some(context)) => {
+                Some((services.clone(), client.clone(), context.clone()))
+            }
+            _ => None,
+        };
+        let Some((services, client, context)) = parts else {
+            self.complete_chat_turn(
+                self.assistant.send_revision,
+                text,
+                Err("Not connected".to_owned()),
+            );
+            return;
+        };
+        let client = match client.with_registered_context(&context) {
+            Ok(client) => client,
+            Err(error) => {
+                self.complete_chat_turn(self.assistant.send_revision, text, Err(error.to_string()));
+                return;
+            }
+        };
+        let request = crate::platform::request_id()
+            .map_err(|error| error.to_string())
+            .and_then(|request_id| {
+                ChatTurnRequest::new(
+                    request_id,
+                    MutationContext::new(&context),
+                    None,
+                    None,
+                    source,
+                    text.clone(),
+                )
+                .map_err(|error| error.to_string())
+            });
+        let request = match request {
+            Ok(request) => request,
+            Err(error) => {
+                self.complete_chat_turn(self.assistant.send_revision, text, Err(error));
+                return;
+            }
+        };
+        self.assistant.sending = services.chat_turn(
+            client,
+            request,
+            text,
+            self.connection.epoch,
+            self.origin_revision,
+            self.assistant.send_revision,
+        );
+    }
+
+    /// "ok" leaves the composer clear. A failure puts the text back if nothing new was typed.
+    pub(crate) fn complete_chat_turn(
+        &mut self,
+        revision: u64,
+        text: String,
+        result: Result<ChatTurnAck, String>,
+    ) {
+        if self.assistant.send_revision != revision {
+            return;
+        }
+        self.assistant.sending = None;
+        match result {
+            Ok(ack) if ack.is_ok() => self.assistant.notice = None,
+            Ok(_) => self.restore_unsent(text, "The backend did not accept it.".to_owned()),
+            Err(error) => self.restore_unsent(text, error),
+        }
+    }
+
+    fn restore_unsent(&mut self, text: String, reason: String) {
+        if self.assistant.draft.text.is_empty() {
+            self.assistant.draft = TextEdit::new(&text);
+        }
+        self.assistant.notice = Some(format!("Not sent: {reason}"));
+    }
+}
+
+impl crate::connection::GatewayEffects {
+    pub(crate) fn chat_turn(
+        &self,
+        client: fleetworks_contracts::Client,
+        request: ChatTurnRequest,
+        text: String,
+        epoch: u64,
+        origin_revision: u64,
+        revision: u64,
+    ) -> Option<crate::connection::RequestTask> {
+        let ui = self.ui.get()?.clone();
+        let task = self.runtime.spawn(async move {
+            let result = client
+                .post::<ChatTurnAck>(CHAT_TURNS_PATH, &request)
+                .await
+                .map_err(|error| error.to_string());
+            ui.update(move |state, _| {
+                if state.connection.epoch == epoch && state.origin_revision == origin_revision {
+                    state.complete_chat_turn(revision, text, result);
+                }
+            });
+        });
+        Some(crate::connection::RequestTask(task.abort_handle()))
     }
 }
 
@@ -598,6 +744,69 @@ mod render_tests {
             state.assistant.sync_scope(2);
         });
         assert!(rt.state.assistant.messages.is_empty());
+    }
+
+    fn chat_supported(state: &mut State) {
+        let mut capabilities = fleetworks_contracts::capabilities::Capabilities::default();
+        capabilities.chat = Some(fleetworks_contracts::chat::ChatCapabilities::new(
+            fleetworks_contracts::chat::ChatAvailability::Supported,
+        ));
+        state.connection.capabilities = Some(capabilities);
+    }
+
+    #[test]
+    fn sending_on_a_supported_backend_clears_the_composer_and_ok_keeps_it_clear() {
+        let mut rt = runtime(1600.0, true, Preference::Auto);
+        rt.update(|state, _| {
+            chat_supported(state);
+            state.assistant.switch_to(Context {
+                kind: "Job",
+                label: "Job one".into(),
+                key: "job:job-1".into(),
+            });
+            state.assistant.draft = TextEdit::new("Why is this slow?");
+            state.assistant_send();
+        });
+        assert!(chat_available(&rt.state));
+        assert_eq!(rt.state.assistant.draft.text, "");
+        assert_eq!(rt.state.assistant.notice, None);
+        let revision = rt.state.assistant.send_revision;
+        rt.update(move |state, _| {
+            state.complete_chat_turn(revision, "Why is this slow?".into(), Ok(ChatTurnAck::ok()))
+        });
+        assert_eq!(rt.state.assistant.draft.text, "");
+        assert_eq!(rt.state.assistant.notice, None);
+        rt.update(move |state, _| {
+            state.complete_chat_turn(revision, "Why is this slow?".into(), Err("offline".into()))
+        });
+        assert_eq!(rt.state.assistant.draft.text, "Why is this slow?");
+        assert_eq!(
+            rt.state.assistant.notice.as_deref(),
+            Some("Not sent: offline")
+        );
+    }
+
+    #[test]
+    fn a_plain_page_has_no_source_so_the_draft_stays() {
+        let mut rt = runtime(1600.0, true, Preference::Auto);
+        rt.update(|state, _| {
+            chat_supported(state);
+            state.assistant.switch_to(Context {
+                kind: "Page",
+                label: "Workstation".into(),
+                key: "page:workstation".into(),
+            });
+            state.assistant.draft = TextEdit::new("hello");
+            state.assistant_send();
+        });
+        assert_eq!(rt.state.assistant.draft.text, "hello");
+        assert_eq!(rt.state.assistant.notice.as_deref(), Some(NEEDS_SOURCE));
+        assert!(source_for(&Context {
+            kind: "Readiness",
+            label: "r".into(),
+            key: "readiness:actor_search".into(),
+        })
+        .is_some());
     }
 
     #[test]

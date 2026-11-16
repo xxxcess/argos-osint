@@ -34,6 +34,8 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
 use crate::capabilities::Capabilities;
+use crate::chat::ChatTurnRequest;
+use crate::chat::CHAT_TURNS_PATH;
 use crate::classifier_activation::ActivationRequest;
 use crate::classifier_activation::ACTIVATION_PATH;
 use crate::classifier_activation::ACTIVATION_RESULT_PATH;
@@ -618,6 +620,7 @@ pub enum IpcOperation {
     TrainClassifier(MaintenanceRequest),
     ReindexActors(MaintenanceRequest),
     ClassifierActivate(ActivationRequest),
+    ChatTurnSubmit(ChatTurnRequest),
     ModelRoleSet(ModelRoleSetRequest),
     ProfileAccountUpsert(ProfileAccountUpsertRequest),
     ProfileAccountDelete(ProfileAccountDeleteRequest),
@@ -692,6 +695,8 @@ impl fmt::Debug for IpcOperation {
             Self::TrainClassifier(r) => f.debug_tuple("TrainClassifier").field(r).finish(),
             Self::ReindexActors(r) => f.debug_tuple("ReindexActors").field(r).finish(),
             Self::ClassifierActivate(r) => f.debug_tuple("ClassifierActivate").field(r).finish(),
+            // Operator text stays out of debug output.
+            Self::ChatTurnSubmit(_) => f.write_str("ChatTurnSubmit(..)"),
             Self::ModelRoleSet(r) => f.debug_tuple("ModelRoleSet").field(r).finish(),
             Self::ProfileAccountUpsert(r) => {
                 f.debug_tuple("ProfileAccountUpsert").field(r).finish()
@@ -758,6 +763,7 @@ impl IpcOperation {
         "train_classifier",
         "reindex_actors",
         "classifier_activate",
+        "chat_turn_submit",
         "model_role_set",
         "profile_account_upsert",
         "profile_account_delete",
@@ -809,6 +815,7 @@ impl IpcOperation {
             Self::TrainClassifier(_) => "train_classifier",
             Self::ReindexActors(_) => "reindex_actors",
             Self::ClassifierActivate(_) => "classifier_activate",
+            Self::ChatTurnSubmit(_) => "chat_turn_submit",
             Self::ModelRoleSet(_) => "model_role_set",
             Self::ProfileAccountUpsert(_) => "profile_account_upsert",
             Self::ProfileAccountDelete(_) => "profile_account_delete",
@@ -860,6 +867,7 @@ impl IpcOperation {
             Self::TrainClassifier(_) => (IpcMethod::Post, CLASSIFIER_TRAIN_PATH),
             Self::ReindexActors(_) => (IpcMethod::Post, ACTOR_REINDEX_PATH),
             Self::ClassifierActivate(_) => (IpcMethod::Post, ACTIVATION_PATH),
+            Self::ChatTurnSubmit(_) => (IpcMethod::Post, CHAT_TURNS_PATH),
             Self::ModelRoleSet(_) => (IpcMethod::Post, MODELS_DEFAULTS_SET_PATH),
             Self::ProfileAccountUpsert(_) => (IpcMethod::Post, PROFILE_ACCOUNTS_UPSERT_PATH),
             Self::ProfileAccountDelete(_) => (IpcMethod::Post, PROFILE_ACCOUNTS_DELETE_PATH),
@@ -943,6 +951,7 @@ impl IpcOperation {
             CLASSIFIER_TRAIN_PATH => decode_body(body_bytes).map(Self::TrainClassifier),
             ACTOR_REINDEX_PATH => decode_body(body_bytes).map(Self::ReindexActors),
             ACTIVATION_PATH => decode_body(body_bytes).map(Self::ClassifierActivate),
+            CHAT_TURNS_PATH => decode_body(body_bytes).map(Self::ChatTurnSubmit),
             MODELS_DEFAULTS_SET_PATH => decode_body(body_bytes).map(Self::ModelRoleSet),
             PROFILE_ACCOUNTS_UPSERT_PATH => decode_body(body_bytes).map(Self::ProfileAccountUpsert),
             PROFILE_ACCOUNTS_DELETE_PATH => decode_body(body_bytes).map(Self::ProfileAccountDelete),

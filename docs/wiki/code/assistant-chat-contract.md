@@ -1,15 +1,15 @@
 # Assistant chat contract
 
-The typed wire contract for the native contextual Assistant lives in [`chat.rs`](../../../crates/fleetworks-contracts/src/chat.rs). It is **types, bounds and validation only**. No route, storage, job or transport implements it, and no backend advertises it. Clients keep sending gated until a backend advertises `chat` with `availability: supported` at the exact `CHAT_VERSION`, and the endpoints pass over both HTTP and IPC. The view parts are described in [native-design-system.md](native-design-system.md#assistant-conversation-parts-chat_uirs).
+The typed wire contract for the native contextual Assistant lives in [`chat.rs`](../../../crates/fleetworks-contracts/src/chat.rs). V1 serves one endpoint, `POST turns`, over HTTP and over local IPC (`IpcOperation::ChatTurnSubmit`, `chat_turn_submit`). It checks the caller and the request and answers `{"status":"ok"}` (`ChatTurnAck`). It stores nothing, starts no job, and never writes an assistant reply. The backend advertises `chat` as `supported`, and the native composer clears its draft on send. On a failure the text comes back if nothing new was typed. The HTTP and IPC parity test checks the ok reply and a 400 for empty input on both transports. The view parts are described in [native-design-system.md](native-design-system.md#assistant-conversation-parts-chat_uirs).
 
-## Routes (proposed, not served)
+## Routes
 
 | Method | Path | Needs |
 | --- | --- | --- |
-| POST | `/api/v1/workstation/chat/turns` | `SubmitInteractive` and a registration |
-| GET | `/api/v1/workstation/chat/threads` | `ReadWorkstationActivity` and a registration |
-| GET | `/api/v1/workstation/chat/messages` | `ReadWorkstationActivity` and a registration |
-| GET | `/api/v1/workstation/chat/events` | `ReadWorkstationActivity` and a registration |
+| POST | `/api/v1/workstation/chat/turns` | Native credential, `SubmitInteractive` and a registration. **Served**: answers ok. |
+| GET | `/api/v1/workstation/chat/threads` | `ReadWorkstationActivity` and a registration. Not served yet. |
+| GET | `/api/v1/workstation/chat/messages` | `ReadWorkstationActivity` and a registration. Not served yet. |
+| GET | `/api/v1/workstation/chat/events` | `ReadWorkstationActivity` and a registration. Not served yet. |
 
 The server rechecks every permission. Advertising `chat` says what the backend implements, not what a caller may do.
 
@@ -24,7 +24,9 @@ A turn request carries a durable `request_id`, the registered `context`, an opti
 - The caller never sends evidence. The server resolves evidence for the source from its own authorized data. A request with an unknown field, including an `evidence` field, is rejected.
 - A revision needs a thread ID.
 - Input is at most 4 KiB, not empty, and holds no control character other than a newline or tab.
-- The receipt returns the request, thread, turn, message and job IDs, the thread revision, the state and `reused`. A replayed request returns the same IDs with `reused` true and creates nothing new.
+- The request's registration and context revisions must match the caller's current registration, or the reply is 409.
+- The turn source must be a job, cycle or readiness check. The native app does not send from a plain page.
+- V1 replies with `ChatTurnAck` only. `ChatTurnReceipt` (request, thread, turn, message and job IDs, revision, state, `reused`) is typed for the later durable version.
 
 ## Reads
 
@@ -39,4 +41,4 @@ Turn states are `queued`, `running`, `retrying`, `final` and `failed`. V1 is a s
 
 ## Not built yet
 
-The server owns these, and they are not in this change: admission that checks current authority, reconciles the original request before the revision and active-turn checks, and atomically creates one turn, message, job and outbox entry. Also queue leases, resumable events, exact-once application of the final answer, the typed SDK client calls and the IPC operations.
+The server owns these, and they are not in this change: assistant replies, storage of threads and messages, the three reads, and admission that checks current authority, reconciles the original request before the revision and active-turn checks, and atomically creates one turn, message, job and outbox entry. Also queue leases, resumable events, exact-once application of the final answer, the typed SDK client calls and the IPC operations.

@@ -48,6 +48,7 @@ use crate::activity_actions;
 use crate::activity_paging;
 use crate::actor_dossier;
 use crate::base64;
+use crate::chat;
 use crate::classifier_activation;
 use crate::configuration;
 use crate::connect;
@@ -928,6 +929,17 @@ impl LocalGateway {
                     configuration::delete_account_request(&self.state, Some(&context), delete)
                         .await?,
                 ))
+            }
+            IpcOperation::ChatTurnSubmit(request) => {
+                let context = self
+                    .resolve(
+                        principal,
+                        registration,
+                        Permission::SubmitInteractive,
+                        ContextRequirement::Registered,
+                    )
+                    .await?;
+                json_payload(chat::submit_request(&self.state, &context, request).await?)
             }
             IpcOperation::ProfileToolsSet(request) => {
                 let context = self

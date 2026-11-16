@@ -11,6 +11,7 @@ pub mod backend;
 mod backend_views;
 pub mod brain;
 pub mod classifier_activation;
+pub mod command_panel;
 pub mod configuration;
 mod configuration_views;
 pub mod connection;

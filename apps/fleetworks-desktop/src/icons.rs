@@ -148,3 +148,10 @@ pub static ASSISTANT: Icon = Icon {
     view: 16.0,
     body: r#"<rect x="2" y="2.5" width="12" height="11" rx="1.8" stroke="currentColor" stroke-width="1.4" fill="none"/><path d="M10 2.5v11" stroke="currentColor" stroke-width="1.4"/><path d="M12 6.2v1.6M11.2 7h1.6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
 };
+
+/// Command panel magnifier.
+pub static SEARCH: Icon = Icon {
+    name: "fw-search",
+    view: 16.0,
+    body: r#"<circle cx="7" cy="7" r="4.4" stroke="currentColor" stroke-width="1.4" fill="none"/><path d="m10.4 10.4 3.1 3.1" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>"#,
+};

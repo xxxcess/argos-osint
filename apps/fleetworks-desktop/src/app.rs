@@ -279,6 +279,8 @@ pub struct State {
     pub assistant: crate::assistant::Assistant,
     /// Observed job, readiness and connection transitions for this authority.
     pub inbox: crate::inbox::Inbox,
+    /// Cmd/Ctrl+K command panel over a fixed list of known actions.
+    pub commands: crate::command_panel::CommandPanel,
     pub page: Page,
     pub setup_gateway: bool,
     pub backend_kind: BackendKind,
@@ -358,6 +360,7 @@ impl Default for State {
             startup: crate::startup::Startup::default(),
             assistant: crate::assistant::Assistant::default(),
             inbox: crate::inbox::Inbox::default(),
+            commands: crate::command_panel::CommandPanel::default(),
             page: Page::Workstation,
             setup_gateway: false,
             backend_kind: BackendKind::Remote,
@@ -1254,7 +1257,21 @@ fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
 }
 
 fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
+    if event.is_command('k') && !event.mods.shift {
+        if state.commands.open {
+            state.commands.close();
+            tx.focus("command-open", false);
+        } else {
+            state.open_command_panel();
+        }
+        return true;
+    }
     if event.key == Key::Escape {
+        if state.commands.open {
+            state.commands.close();
+            tx.focus("command-open", false);
+            return true;
+        }
         if state.confirm_maintenance_dialog || state.maintenance.confirmation.is_some() {
             let target = if state.page == Page::Workstation {
                 "workstation-build-actor-index"
@@ -1482,6 +1499,7 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     let mut trailing = rune::row()
         .gap(8.0)
         .center_y()
+        .child(crate::command_panel::toolbar_button(&kit))
         .child(crate::inbox::toolbar_item(state, &kit, &mut layers));
     if state.assistant.enabled && state.connected() && !state.setup_gateway {
         trailing = trailing.child(crate::assistant::toggle(
@@ -1646,6 +1664,8 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
             .child(crate::workstation_settings::page(state, cx, &kit))
             .build(&kit, &mut layers);
     }
+
+    crate::command_panel::view(state, &kit, &mut layers);
 
     let mut split = SplitView::new(main)
         .toolbar(toolbar)

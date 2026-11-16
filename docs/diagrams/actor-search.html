@@ -6,12 +6,12 @@
 <p>SurrealDB owns actor identity and dossier data. The private Linux index is a rebuildable projection delivered through a durable, leased outbox. Native and authorized web discovery stay behind the authenticated gateway.</p>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 928" role="img" aria-labelledby="actor-search-title actor-search-desc">
 <title id="actor-search-title">Actor discovery: committed source to authorized dossier</title>
-<desc id="actor-search-desc">Actor and alias changes write projection intent in the same SurrealDB transaction. A database-leased paced worker persists one bounded pending batch and advances only on a matching committed and reader-visible receipt from the private Tantivy service. Native and authorized web clients submit bounded discovery queries through the authenticated gateway. Before returning labels or snippets, the gateway checks current canonical rows, revisions, eligibility and authority. Selecting a canonical actor ID requests an authorized SurrealDB dossier through that same gateway. Delayed, failed, throttled or incompatible delivery retains pending work for exact replay or explicit repair and shadow rebuild. Native clients never receive private search origins, index credentials or database access. Optional topology rendering belongs to the web client.</desc>
+<desc id="actor-search-desc">Actor and alias changes write projection intent in the same SurrealDB transaction. A database-leased paced worker persists one bounded pending batch and advances only on a matching committed and reader-visible receipt from the private Tantivy service (a separate service, or an in-process search service inside the local companion). Native and authorized web clients submit bounded discovery queries through the authenticated gateway. Before returning labels or snippets, the gateway checks current canonical rows, revisions, eligibility and authority. Selecting a canonical actor ID requests an authorized SurrealDB dossier through that same gateway. Delayed, failed, throttled or incompatible delivery retains pending work for exact replay or explicit repair and shadow rebuild. Native clients never receive private search origins, index credentials or database access. Optional topology rendering belongs to the web client.</desc>
 <defs><marker id="actor-search-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker></defs>
 <style>text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}.label{font-size:20px;font-weight:600}.note{font-size:16px}.zone{font-size:13px;font-weight:600;letter-spacing:1px}.node{fill:#fff;stroke:#4f5d75}.accent{fill:#fff6ed;stroke:#eb6c36}.edge{fill:none;stroke:#4f5d75;stroke-width:2;marker-end:url(#actor-search-arrow)}.retry{fill:none;stroke:#4f5d75;stroke-width:2;stroke-dasharray:5 4;marker-end:url(#actor-search-arrow)}.minor{fill:#4f5d75;font-size:14px}</style>
 <rect width="1320" height="928" fill="#f5f5f5"/>
 <rect x="24" y="40" width="1272" height="244" fill="none" stroke="#a0a5b0" stroke-dasharray="6 5"/>
-<text x="48" y="68" class="zone">PRIVATE LINUX BACKEND · SOURCE AUTHORITY AND DISPOSABLE PROJECTION</text>
+<text x="48" y="68" class="zone">PRIVATE BACKEND · SOURCE AUTHORITY AND DISPOSABLE PROJECTION · SERVICE OR LOCAL COMPANION</text>
 <text x="48" y="316" class="zone">AUTHENTICATED DISCOVERY · GLOBAL BACKEND READ</text>
 
 <path d="M408 172H468" class="edge"/>
@@ -77,7 +77,7 @@
 <text x="484" y="776" class="label">Selected canonical dossier · authenticated gateway</text>
 <text x="484" y="806" class="note">Resolve the actor ID against current SurrealDB lifecycle, detail and permissions.</text>
 <text x="484" y="834" class="note">Native shows results and a dossier. Optional topology remains web-only.</text>
-<text x="48" y="892" class="minor">Source committed, index committed, reader visible and dossier authorized are separate observations.</text>
+<text x="48" y="892" class="minor">Source committed, index committed, reader visible and dossier authorized are separate observations. The local companion runs the same search service in-process.</text>
 </svg>
 <p>This figure follows the source outbox, worker, private index and gateway filtering contracts. It does not establish a complete isolated Docker journey, production catalog load, live inference or installed Mac verification.</p>
 <p><a href="../wiki/code/actor-search.md">Actor search</a> · <a href="../wiki/code/actor-catalog.md">Actor catalog</a> · <a href="../diagrams.md">Diagram catalog</a></p>

@@ -1,6 +1,6 @@
 # Build artifacts, paths and tools
 
-[Contributing](contributing.md) · [Native loop](../../diagrams/dev-loop-native.html) · [Deployment](../../../deploy/README.md) · [Verification evidence](native-verification.md)
+[Contributing](contributing.md) · [Native loop](../../diagrams/dev-loop-native.html) · [Local IPC companion](../../diagrams/local-ipc-companion.html) · [Deployment](../../../deploy/README.md) · [Verification evidence](native-verification.md)
 
 [![Tools, build outputs, QA evidence and persistent data](../../diagrams/build-artifacts.svg)](../../diagrams/build-artifacts.html)
 

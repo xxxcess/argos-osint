@@ -62,16 +62,7 @@ export function BulletinView(p: Props) {
     (p.daysPending || (p.list.isLoading && !!p.selectedDay));
   return (
     <View nativeID="intel-bulletin" style={s.shell}>
-      <View
-        style={[
-          s.header,
-          wide && {
-            flexDirection: "row",
-            alignItems: "center",
-          },
-          !wide && { paddingHorizontal: 24 },
-        ]}
-      >
+      <View style={[s.header, !wide && { paddingHorizontal: 24 }]}>
         <View style={s.headingRow}>
           <FleetworksMark size={30} />
           {/* The logo is the visible header. The heading stays for assistive tech and tests. */}
@@ -79,7 +70,7 @@ export function BulletinView(p: Props) {
             Intelligence bulletin
           </Text>
         </View>
-        <View style={[s.search, wide && { flex: 1, maxWidth: 512 }]}>
+        <View style={[s.search, { flex: 1 }, wide && { maxWidth: 512 }]}>
           <View style={s.searchField}>
             <TextInput
               accessibilityLabel="Search article titles and descriptions"
@@ -255,16 +246,17 @@ const s = StyleSheet.create({
     borderBottomWidth: 1,
     borderColor: c.border,
     gap: 16,
+    // The logo and the search share one row at every width.
+    flexDirection: "row",
+    alignItems: "center",
     justifyContent: "space-between",
     flexShrink: 0,
   },
   headingRow: {
     flexDirection: "row",
-    flexWrap: "wrap",
     alignItems: "center",
     gap: 12,
-    minWidth: 0,
-    flexShrink: 1,
+    flexShrink: 0,
   },
   visuallyHidden: {
     position: "absolute",

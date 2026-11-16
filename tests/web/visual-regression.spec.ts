@@ -96,7 +96,7 @@ for (const width of [1440, 768, 390, 320]) {
         () => document.documentElement.scrollWidth <= innerWidth,
       ),
     ).toBe(true);
-    await expect(page).toHaveScreenshot(`bulletin-${width}.png`, {
+    await expect.soft(page).toHaveScreenshot(`bulletin-${width}.png`, {
       fullPage: false,
       animations: "disabled",
       stylePath: screenshotStyle,
@@ -117,7 +117,7 @@ for (const width of [1440, 768, 390, 320]) {
     expect(interactionColors.focus).toBe("rgb(216, 189, 140)");
     expect(interactionColors.selection).toBe("rgb(50, 44, 34)");
     expect(interactionColors.selection).not.toBe(interactionColors.focus);
-    await expect(page).toHaveScreenshot(`bulletin-focus-${width}.png`, {
+    await expect.soft(page).toHaveScreenshot(`bulletin-focus-${width}.png`, {
       fullPage: false,
       animations: "disabled",
       stylePath: screenshotStyle,

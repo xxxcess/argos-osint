@@ -208,7 +208,8 @@ pub(crate) fn view(
         .on_change(|state: &mut State, _| state.commands.active = 0)
         .on_key(|state: &mut State, event: &KeyEvent, _| on_field_key(state, event))
         .build(kit)
-        .key("command-search");
+        .key("command-search")
+        .w_full();
     let mut list = rune::col().key("command-list").w_full().gap(2.0);
     let mut group = "";
     for (index, entry) in entries.iter().enumerate() {

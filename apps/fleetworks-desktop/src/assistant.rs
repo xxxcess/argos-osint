@@ -145,10 +145,11 @@ impl Assistant {
         self.scope = Some(scope);
         self.pinned = None;
         self.notice = None;
-        self.messages.clear();
-        self.sending = None;
+        // The first sync adopts an authority; only a different one drops the conversation.
         if changed {
             self.draft = TextEdit::new("");
+            self.messages.clear();
+            self.sending = None;
         }
         changed
     }
@@ -532,7 +533,8 @@ pub(crate) fn dock(
         })
         .on_submit(|state: &mut State, _| state.assistant_send())
         .build(kit)
-        .key("assistant-composer");
+        .key("assistant-composer")
+        .w_full();
     // The composer sits on tinted glass; the history above stays opaque.
     let composer = crate::material::glass(
         rune::col()
@@ -666,6 +668,22 @@ mod tests {
             assistant.pinned().map(|c| c.key.as_str()),
             Some("page:atlas")
         );
+    }
+
+    #[test]
+    fn the_first_sync_keeps_the_conversation_and_a_new_authority_clears_it() {
+        let mut assistant = Assistant::default();
+        assistant.messages.push(crate::chat_ui::ChatMessage {
+            id: "m".into(),
+            role: crate::chat_ui::Role::Operator,
+            state: crate::chat_ui::TurnState::Final,
+            text: "hi".into(),
+            citations: Vec::new(),
+        });
+        assert!(!assistant.sync_scope(1));
+        assert_eq!(assistant.messages.len(), 1);
+        assert!(assistant.sync_scope(2));
+        assert!(assistant.messages.is_empty());
     }
 
     #[test]

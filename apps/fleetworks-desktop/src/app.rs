@@ -1625,7 +1625,7 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     }
     match assistant_placement {
         crate::assistant::Placement::Docked => {
-            main = main.child(crate::assistant::dock(state, &kit));
+            main = main.child(crate::assistant::dock(state, &kit, preferences));
         }
         crate::assistant::Placement::Overlay => {
             // Too narrow to share the window: float the dock over the right edge.
@@ -1644,7 +1644,7 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
                                 state.assistant.preference = crate::assistant::Preference::Closed;
                             }),
                     )
-                    .child(crate::assistant::dock(state, &kit)),
+                    .child(crate::assistant::dock(state, &kit, preferences)),
             );
         }
         crate::assistant::Placement::Hidden => {}

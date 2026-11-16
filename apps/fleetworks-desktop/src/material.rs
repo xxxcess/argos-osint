@@ -28,6 +28,61 @@ pub(crate) enum MetalFinish {
     ObsidianPill,
 }
 
+/// Surfaces that may blur the window's own content. Buttons and tiles never do.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GlassSurface {
+    Composer,
+    Overlay,
+}
+
+/// Tint alpha and same-window blur for one glass surface.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct GlassRecipe {
+    pub alpha: f32,
+    pub blur: f32,
+}
+
+/// The most blurred surfaces one frame should ask for; rune ignores any past its own cap.
+pub(crate) const MAX_GLASS_BLURS: usize = 3;
+
+/// `None` means opaque: reduced transparency, or the opaque preference, never blurs.
+pub(crate) fn glass_recipe(
+    surface: GlassSurface,
+    preferences: ViewPreferences,
+) -> Option<GlassRecipe> {
+    if preferences.matte() {
+        return None;
+    }
+    Some(match surface {
+        GlassSurface::Composer => GlassRecipe {
+            alpha: 0.84,
+            blur: 10.0,
+        },
+        GlassSurface::Overlay => GlassRecipe {
+            alpha: 0.91,
+            blur: 14.0,
+        },
+    })
+}
+
+/// Dim obsidian glass: tint on the paint rather than subtree opacity, a narrow upper
+/// reflection, and the window itself stays opaque. The opaque form keeps the same bounds.
+pub(crate) fn glass(el: El, surface: GlassSurface, preferences: ViewPreferences) -> El {
+    let raised = theme::hex(theme::SURFACE_RAISED);
+    match glass_recipe(surface, preferences) {
+        Some(recipe) => el
+            .backdrop_blur(recipe.blur)
+            .fill(raised.alpha(recipe.alpha))
+            .border_sides(
+                [1.0, 0.0, 0.0, 0.0],
+                theme::hex(theme::LIGHT_SURFACE_GLOW).alpha(0.08),
+            ),
+        None => el
+            .fill(raised)
+            .border_sides([1.0, 0.0, 0.0, 0.0], theme::hex(theme::BORDER_SUBTLE)),
+    }
+}
+
 /// Configure `rune_kit` semantic depth and sheen tokens while honoring `matte()` preferences.
 pub(crate) fn configure_kit(kit: &mut Kit, preferences: ViewPreferences) {
     let functional_edge = Shadow {
@@ -587,4 +642,36 @@ pub(crate) fn skeleton_block(
 /// Do not wrap the control or change accessibility keys, layout or focus rings.
 pub(crate) fn compact_toolbar(control: El, _preferences: ViewPreferences) -> El {
     control
+}
+
+#[cfg(test)]
+mod glass_tests {
+    use super::*;
+
+    fn prefs(reduced_transparency: bool, matte_fallback: bool) -> ViewPreferences {
+        ViewPreferences {
+            reduced_motion: false,
+            reduced_transparency,
+            matte_fallback,
+        }
+    }
+
+    #[test]
+    fn recipes_stay_inside_the_spec_ranges() {
+        let composer = glass_recipe(GlassSurface::Composer, prefs(false, false)).expect("glass");
+        assert!((0.80..=0.88).contains(&composer.alpha));
+        assert!((8.0..=12.0).contains(&composer.blur));
+        let overlay = glass_recipe(GlassSurface::Overlay, prefs(false, false)).expect("glass");
+        assert!((0.88..=0.94).contains(&overlay.alpha));
+        assert!((12.0..=16.0).contains(&overlay.blur));
+        assert!(MAX_GLASS_BLURS <= 3);
+    }
+
+    #[test]
+    fn reduced_transparency_and_the_opaque_preference_never_blur() {
+        for (reduced, matte) in [(true, false), (false, true), (true, true)] {
+            assert!(glass_recipe(GlassSurface::Composer, prefs(reduced, matte)).is_none());
+            assert!(glass_recipe(GlassSurface::Overlay, prefs(reduced, matte)).is_none());
+        }
+    }
 }

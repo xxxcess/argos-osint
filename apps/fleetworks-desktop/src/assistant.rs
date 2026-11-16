@@ -256,7 +256,11 @@ pub(crate) fn toggle(visible: bool, kit: &Kit) -> El {
 }
 
 /// The dock itself, ~380 pt wide.
-pub(crate) fn dock(state: &State, kit: &Kit) -> El {
+pub(crate) fn dock(
+    state: &State,
+    kit: &Kit,
+    preferences: crate::accessibility::ViewPreferences,
+) -> El {
     let assistant = &state.assistant;
     let current = current_context(state);
     let mut context = rune::col()
@@ -331,6 +335,17 @@ pub(crate) fn dock(state: &State, kit: &Kit) -> El {
         .on_submit(|state: &mut State, _| state.assistant_send())
         .build(kit)
         .key("assistant-composer");
+    // The composer sits on tinted glass; the history above stays opaque.
+    let composer = crate::material::glass(
+        rune::col()
+            .key("assistant-composer-glass")
+            .w_full()
+            .padding(6.0)
+            .radius(8.0)
+            .child(composer),
+        crate::material::GlassSurface::Composer,
+        preferences,
+    );
 
     let send = rune_kit::Button::new("Send")
         .variant(rune_kit::ButtonVariant::Submit)

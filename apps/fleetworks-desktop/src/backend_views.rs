@@ -1152,6 +1152,11 @@ fn job_count_text(count: usize) -> String {
     }
 }
 
+/// Jobs & Logs list width, gap and the page width from which the list sits beside the detail.
+const JOBS_LIST_WIDTH: f32 = 300.0;
+const JOBS_GAP: f32 = 16.0;
+const JOBS_SIDE_BY_SIDE_WIDTH: f32 = 940.0;
+
 fn jobs(
     state: &State,
     preferences: ViewPreferences,
@@ -1197,6 +1202,15 @@ fn jobs(
             "jobs-body",
         );
     }
+    // Wide enough for a ~300 pt list beside a detail pane that still has room for the log table.
+    let side_by_side = log_width >= JOBS_SIDE_BY_SIDE_WIDTH;
+    let detail_width = if side_by_side {
+        log_width - JOBS_LIST_WIDTH - JOBS_GAP
+    } else {
+        log_width
+    };
+    let mut list_col = rune::col().gap(12.0);
+    let mut detail_col = rune::col().gap(12.0);
     let show_list = !narrow || state.backend.selected_job.is_none();
     let show_detail = !narrow || state.backend.selected_job.is_some();
     if show_list {
@@ -1207,11 +1221,12 @@ fn jobs(
             preferences,
             kit,
         ) {
-            body = body.child(message);
+            list_col = list_col.child(message);
         }
         if let Load::Ready(jobs) = &state.backend.jobs {
             if jobs.rows.is_empty() {
-                body = body.child(quiet("No jobs are associated with this workstation.", kit));
+                list_col =
+                    list_col.child(quiet("No jobs are associated with this workstation.", kit));
             }
             for job in jobs.rows.iter().take(100) {
                 let id = job.id.clone();
@@ -1257,7 +1272,7 @@ fn jobs(
                         tone,
                         kit,
                     ));
-                body = body.child(
+                list_col = list_col.child(
                     material::interactive_tile(
                         tile_content,
                         selected,
@@ -1273,7 +1288,7 @@ fn jobs(
                     .on_press(move |state: &mut State| state.select_job(&id)),
                 );
             }
-            body = body.child(
+            list_col = list_col.child(
                 rune::row()
                     .w_full()
                     .gap(8.0)
@@ -1307,7 +1322,7 @@ fn jobs(
     }
     if show_detail {
         if narrow && state.backend.selected_job.is_some() {
-            body = body.child(
+            detail_col = detail_col.child(
                 ActionButton::new("Back to jobs")
                     .key("jobs-back-to-list")
                     .finish(MetalFinish::Gunmetal)
@@ -1325,7 +1340,7 @@ fn jobs(
             preferences,
             kit,
         ) {
-            body = body.child(message);
+            detail_col = detail_col.child(message);
         }
     }
     if show_detail {
@@ -1475,7 +1490,7 @@ fn jobs(
                             state.job_actions.confirmation = None;
                         })
                         .build(kit, preferences, pointer_ref);
-                    let action_buttons = if log_width < 420.0 {
+                    let action_buttons = if detail_width < 420.0 {
                         rune::col()
                             .gap(8.0)
                             .child(confirm_button)
@@ -1659,7 +1674,7 @@ fn jobs(
                         LogStatus::Ready | LogStatus::DisplayLimit
                     )
                 {
-                    details = details.child(safe_log_table(state, kit, log_width));
+                    details = details.child(safe_log_table(state, kit, detail_width));
                     if state.scoped_logs.can_load_older() {
                         details = details.child(
                             ActionButton::new("Load older summaries")
@@ -1673,7 +1688,7 @@ fn jobs(
                     }
                 }
             }
-            body = body.child(card(state, preferences, tone, details));
+            detail_col = detail_col.child(card(state, preferences, tone, details));
 
             if state.selected_job_id.as_deref() == Some(detail.job.id.as_str()) {
                 let modal_body = rune::col()
@@ -1704,6 +1719,19 @@ fn jobs(
             }
         }
     }
+    body = if side_by_side && show_list && show_detail {
+        // A paged list beside the detail keeps the selection in view while it refreshes.
+        body.child(
+            rune::row()
+                .key("jobs-workbench")
+                .w_full()
+                .gap(JOBS_GAP)
+                .child(list_col.w(JOBS_LIST_WIDTH).shrink())
+                .child(detail_col.grow(1.0).min_w(0.0)),
+        )
+    } else {
+        body.child(list_col).child(detail_col)
+    };
     scroll(body, "jobs-body")
 }
 

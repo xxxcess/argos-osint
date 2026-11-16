@@ -1382,3 +1382,28 @@ async fn simulated_actor_reindex_post_reconcile_job_projection_and_readiness_tra
     assert!(requests[3].starts_with("GET "));
     assert!(requests[4].starts_with("GET "));
 }
+
+#[test]
+fn jobs_list_sits_beside_the_detail_only_when_the_page_is_wide_enough() {
+    for (width, side_by_side) in [(1700.0, true), (1100.0, false)] {
+        let mut state = shell();
+        state.fixture_effect = Some(fake_reply);
+        let mut runtime = Runtime::new(
+            state,
+            crate::app::view,
+            (width, 900.0),
+            Env {
+                system_dark: true,
+                scale: 1.0,
+            },
+        );
+        runtime.frame(0.0);
+        runtime.frame(1.0 / 60.0);
+        assert!(runtime.find("activity-job-fixture-job").is_some());
+        assert_eq!(runtime.find("jobs-workbench").is_some(), side_by_side);
+        if side_by_side {
+            let (list_x, _) = runtime.find("activity-job-fixture-job").expect("list row");
+            assert!(list_x < 700.0, "the list stays in the left column");
+        }
+    }
+}

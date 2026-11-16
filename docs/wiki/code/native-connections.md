@@ -114,6 +114,8 @@ Jobs SQLite owns safe summaries, not provider stdout/payloads. Membership/privat
 
 Richer backend APIs retain independent permissions. Opaque cursors bind proof/scope/snapshot, expire and require restart after invalidation. Follow/export stay bounded; partial exports and unavailable counts remain explicit.
 
+**Layout.** When the Jobs page is at least 940 pt wide, the paged list is a 300 pt column beside the selected job's detail. Below that the two stack, and below 660 pt the list and detail alternate with **Back to jobs**. Refreshes keep the selected job and page.
+
 ## Readiness and maintenance
 
 CSV picker → local column check → authenticated gateway upload URL → streamed bytes → backend-validated dataset → confirmed actor/Natural job. No Mac path or local download server enters the handoff. Index build requires completed seeding with actors present; training creates a candidate without activation. Readiness and optional host metrics keep missing/stale observations distinct from success. [Maintenance figure](../../diagrams/workstation-readiness.html) · [Dataset workflow](../../../deploy/README.md#configured-native-maintenance-inputs)

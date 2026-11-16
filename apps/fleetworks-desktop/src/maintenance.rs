@@ -31,6 +31,7 @@ use fleetworks_workstation::native::AcceptedActorReindex;
 use fleetworks_workstation::native::NativeContainer;
 use fleetworks_workstation::native::PendingActorReindex;
 use rune::FileDialogOptions;
+use rune::TextEdit;
 use rune::Tx;
 use serde::Deserialize;
 use sha2::Digest;
@@ -64,7 +65,17 @@ pub struct MaintenanceConfirmation {
     pub dataset: Option<DatasetRef>,
 }
 
+/// Typed-path fallback for desktops where the file chooser cannot open (for example Linux
+/// without a chooser service). The path names a file on this computer only. It is read here,
+/// validated and uploaded by the same code as a picked file, and is never sent to the backend.
+pub struct CsvPathPrompt {
+    pub kind: DatasetKind,
+    pub input: TextEdit,
+    pub error: Option<String>,
+}
+
 pub struct Maintenance {
+    pub csv_path_prompt: Option<CsvPathPrompt>,
     pub local_dataset: Option<LocalDataset>,
     pub datasets: Load<DatasetList>,
     pub upload: Load<DatasetUpload>,
@@ -91,6 +102,7 @@ pub struct Maintenance {
 impl Default for Maintenance {
     fn default() -> Self {
         Self {
+            csv_path_prompt: None,
             local_dataset: None,
             datasets: Load::Idle,
             upload: Load::Idle,
@@ -124,6 +136,7 @@ impl Maintenance {
             || self.reindex_reconcile_request.is_some()
     }
     pub(crate) fn invalidate_origin(&mut self) {
+        self.csv_path_prompt = None;
         self.pending_preview = None;
         self.seed_accepted_at = None;
         self.confirmation = None;
@@ -178,13 +191,52 @@ impl State {
                         state.upload_selected_dataset();
                     }
                     Ok(None) => {}
-                    Err(_) => {
-                        state.maintenance.message =
-                            Some("The dataset chooser could not open a file".into())
-                    }
+                    Err(_) => state.open_csv_path_prompt(kind),
                 }
             },
         );
+    }
+
+    /// The chooser is unavailable: let the operator type the path of a local CSV instead.
+    pub(crate) fn open_csv_path_prompt(&mut self, kind: DatasetKind) {
+        self.maintenance.message = Some(
+            "The dataset chooser could not open a file. Enter the path of a local CSV instead."
+                .into(),
+        );
+        self.maintenance.csv_path_prompt = Some(CsvPathPrompt {
+            kind,
+            input: TextEdit::new(String::new()),
+            error: None,
+        });
+    }
+
+    pub fn cancel_csv_path_prompt(&mut self) {
+        self.maintenance.csv_path_prompt = None;
+    }
+
+    /// Reuses the picker's selection, validation, upload and confirmation flow for a typed path.
+    pub fn submit_csv_path(&mut self) {
+        let Some(prompt) = &mut self.maintenance.csv_path_prompt else {
+            return;
+        };
+        let kind = prompt.kind;
+        let operation = match kind {
+            DatasetKind::ActorCatalog => MaintenanceOperation::SeedActors,
+            DatasetKind::ClassifierTraining => MaintenanceOperation::TrainClassifier,
+            _ => return,
+        };
+        match parse_local_csv_path(&prompt.input.text, std::env::var_os("HOME").as_deref()) {
+            Ok(path) => {
+                if let Some(reason) = self.maintenance_disabled_reason(operation) {
+                    self.maintenance.message = Some(reason);
+                    return;
+                }
+                self.maintenance.csv_path_prompt = None;
+                self.select_local_dataset(path, kind);
+                self.upload_selected_dataset();
+            }
+            Err(error) => prompt.error = Some(error),
+        }
     }
 
     pub fn select_local_dataset(&mut self, path: PathBuf, kind: DatasetKind) {
@@ -1497,6 +1549,49 @@ fn hash_selected_bytes(
     }
     let sha256 = format!("{:x}", sha.finalize());
     Ok((sha256, count))
+}
+
+/// Turns text typed by the operator into the local path of a CSV. This only normalizes and
+/// rejects obviously wrong input. Existence, file type, symbolic links, size and column checks
+/// stay in the shared preparation step, so a typed path gets no weaker treatment than a picked one.
+pub(crate) fn parse_local_csv_path(
+    raw: &str,
+    home: Option<&std::ffi::OsStr>,
+) -> Result<PathBuf, String> {
+    let mut text = raw.trim();
+    for quote in ['"', '\''] {
+        if text.len() >= 2 && text.starts_with(quote) && text.ends_with(quote) {
+            text = text[1..text.len() - 1].trim();
+        }
+    }
+    if text.is_empty() {
+        return Err("Enter the full path of a CSV file on this computer".into());
+    }
+    if text.contains('\0') || text.chars().any(char::is_control) {
+        return Err("The path contains characters that cannot be used".into());
+    }
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("://") || lower.starts_with("file:") || lower.starts_with("data:") {
+        return Err("Enter a path on this computer, not a URL".into());
+    }
+    let path = if let Some(rest) = text.strip_prefix("~/") {
+        match home {
+            Some(home) if !home.is_empty() => PathBuf::from(home).join(rest),
+            _ => return Err("Cannot expand ~ here; enter the full path".into()),
+        }
+    } else {
+        PathBuf::from(text)
+    };
+    if !path.is_absolute() {
+        return Err("Enter the full path, starting with /".into());
+    }
+    let is_csv = path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("csv"));
+    if !is_csv {
+        return Err("The file must end in .csv".into());
+    }
+    Ok(path)
 }
 
 pub fn dataset_kind_label(kind: DatasetKind) -> &'static str {

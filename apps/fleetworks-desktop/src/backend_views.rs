@@ -2033,6 +2033,20 @@ pub(crate) fn maintenance(
                 operation_card = operation_card.child(quiet(reason, kit));
             }
         }
+        if let Some(prompt) = &state.maintenance.csv_path_prompt {
+            let matches_card = matches!(
+                (operation, prompt.kind),
+                (MaintenanceOperation::SeedActors, DatasetKind::ActorCatalog)
+                    | (
+                        MaintenanceOperation::TrainClassifier,
+                        DatasetKind::ClassifierTraining
+                    )
+            );
+            if matches_card {
+                operation_card =
+                    operation_card.child(csv_path_prompt(prompt, preferences, kit, pointer_ref));
+            }
+        }
         body = body.child(material::interactive_tile(
             operation_card,
             focused,
@@ -2071,6 +2085,58 @@ pub(crate) fn maintenance(
     }
     let _ = layers;
     body
+}
+
+fn csv_path_prompt(
+    prompt: &crate::maintenance::CsvPathPrompt,
+    preferences: ViewPreferences,
+    kit: &Kit,
+    pointer_ref: Option<&rune::Live<[f32; 2]>>,
+) -> El {
+    let field = TextInput::new(&prompt.input)
+        .label("Local CSV path")
+        .placeholder("/home/you/actors.csv")
+        .width(None)
+        .on_edit(|state: &mut State| {
+            &mut state
+                .maintenance
+                .csv_path_prompt
+                .as_mut()
+                .expect("path prompt is open while its field is shown")
+                .input
+        })
+        .on_submit(|state: &mut State, _| state.submit_csv_path())
+        .build(kit)
+        .key("maintenance-csv-path");
+    let mut column = rune::col()
+        .gap(8.0)
+        .key("maintenance-csv-path-prompt")
+        .child(quiet(
+            "Local CSV path. The file is read on this computer and checked before upload. The path is not sent to the backend.",
+            kit,
+        ))
+        .child(field);
+    if let Some(error) = &prompt.error {
+        column = column.child(line(error.clone(), kit).role("alert"));
+    }
+    column.child(
+        rune::row()
+            .gap(8.0)
+            .child(
+                ActionButton::new("Use this CSV")
+                    .key("maintenance-csv-path-submit")
+                    .finish(MetalFinish::GoldCta)
+                    .on_press(|state: &mut State| state.submit_csv_path())
+                    .build(kit, preferences, pointer_ref),
+            )
+            .child(
+                ActionButton::new("Cancel")
+                    .key("maintenance-csv-path-cancel")
+                    .finish(MetalFinish::Gunmetal)
+                    .on_press(|state: &mut State| state.cancel_csv_path_prompt())
+                    .build(kit, preferences, pointer_ref),
+            ),
+    )
 }
 
 pub(crate) fn maintenance_confirmation_content(

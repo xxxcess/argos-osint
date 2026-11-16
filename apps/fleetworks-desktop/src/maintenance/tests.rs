@@ -1473,3 +1473,183 @@ async fn exact_retry_auth_rejection_preserves_journal_for_read_only_reconciliati
     let server_request_id = server.await.expect("server completed scripted sequence");
     assert_eq!(server_request_id, original_request.request_id);
 }
+
+mod csv_path_fallback {
+    use std::ffi::OsStr;
+    use std::path::PathBuf;
+
+    use fleetworks_contracts::readiness::DatasetKind;
+
+    use crate::app::Intent;
+    use crate::maintenance::parse_local_csv_path;
+
+    fn home() -> Option<&'static OsStr> {
+        Some(OsStr::new("/home/operator"))
+    }
+
+    #[test]
+    fn typed_paths_are_normalized_and_bad_input_is_rejected_with_a_reason() {
+        let ok = |raw: &str| parse_local_csv_path(raw, home());
+        assert_eq!(
+            ok("/data/actors.csv"),
+            Ok(PathBuf::from("/data/actors.csv"))
+        );
+        assert_eq!(
+            ok("  /data/actors.CSV \n"),
+            Ok(PathBuf::from("/data/actors.CSV"))
+        );
+        assert_eq!(
+            ok("\"/data/my actors.csv\""),
+            Ok(PathBuf::from("/data/my actors.csv"))
+        );
+        assert_eq!(ok("'/data/a.csv'"), Ok(PathBuf::from("/data/a.csv")));
+        assert_eq!(
+            ok("~/imports/a.csv"),
+            Ok(PathBuf::from("/home/operator/imports/a.csv"))
+        );
+
+        for (raw, reason) in [
+            ("", "Enter the full path"),
+            ("   ", "Enter the full path"),
+            ("https://example.test/a.csv", "not a URL"),
+            ("file:///data/a.csv", "not a URL"),
+            ("data:text/csv,a", "not a URL"),
+            ("relative/a.csv", "full path"),
+            ("./a.csv", "full path"),
+            ("/data/a.txt", ".csv"),
+            ("/data/archive", ".csv"),
+            ("/data/a\u{0}.csv", "cannot be used"),
+            ("/data/a\n.csv", "cannot be used"),
+        ] {
+            let error = ok(raw).expect_err(raw);
+            assert!(error.contains(reason), "{raw:?} -> {error}");
+        }
+        assert!(parse_local_csv_path("~/a.csv", None)
+            .expect_err("no home")
+            .contains("Cannot expand"));
+    }
+
+    #[test]
+    fn an_unavailable_chooser_opens_the_prompt_and_a_valid_path_reuses_the_upload_flow() {
+        let mut state = super::state(false);
+        state.open_csv_path_prompt(DatasetKind::ActorCatalog);
+        assert!(state
+            .maintenance
+            .message
+            .as_deref()
+            .is_some_and(|m| m.contains("could not open")));
+        assert!(state.maintenance.csv_path_prompt.is_some());
+
+        // A bad path keeps the prompt open with the reason and starts nothing.
+        state
+            .maintenance
+            .csv_path_prompt
+            .as_mut()
+            .expect("prompt")
+            .input = rune::TextEdit::new("https://example.test/a.csv".to_owned());
+        state.submit_csv_path();
+        let prompt = state
+            .maintenance
+            .csv_path_prompt
+            .as_ref()
+            .expect("still open");
+        assert!(prompt
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("not a URL")));
+        assert!(state.maintenance.local_dataset.is_none());
+
+        // A valid path selects the dataset and asks for the same upload as the picker does.
+        state
+            .maintenance
+            .csv_path_prompt
+            .as_mut()
+            .expect("prompt")
+            .input = rune::TextEdit::new("/data/actors.csv".to_owned());
+        state.submit_csv_path();
+        assert!(state.maintenance.csv_path_prompt.is_none());
+        let selected = state.maintenance.local_dataset.as_ref().expect("selected");
+        assert_eq!(selected.path, PathBuf::from("/data/actors.csv"));
+        assert_eq!(selected.kind, DatasetKind::ActorCatalog);
+        assert!(state.intents.iter().any(|intent| matches!(
+            intent,
+            Intent::UploadDataset {
+                kind: DatasetKind::ActorCatalog
+            }
+        )));
+    }
+
+    #[test]
+    fn the_prompt_is_drawn_in_the_matching_card_and_submits_from_its_button() {
+        let mut runtime = super::runtime(super::state(false));
+        runtime.update(|state, _| state.open_csv_path_prompt(DatasetKind::ActorCatalog));
+        runtime.frame(1.0 / 60.0);
+        assert!(
+            runtime.find("maintenance-csv-path").is_some(),
+            "path field shown"
+        );
+        assert!(runtime.find("maintenance-csv-path-submit").is_some());
+        assert!(runtime.find("maintenance-csv-path-cancel").is_some());
+
+        runtime.update(|state, _| {
+            state
+                .maintenance
+                .csv_path_prompt
+                .as_mut()
+                .expect("prompt")
+                .input = rune::TextEdit::new("/data/actors.csv".to_owned());
+        });
+        let mut clock = 0.1;
+        super::click(&mut runtime, "maintenance-csv-path-submit", &mut clock);
+        assert!(runtime.state.maintenance.csv_path_prompt.is_none());
+        assert_eq!(
+            runtime
+                .state
+                .maintenance
+                .local_dataset
+                .as_ref()
+                .map(|selection| selection.path.clone()),
+            Some(PathBuf::from("/data/actors.csv"))
+        );
+    }
+
+    #[test]
+    fn cancel_and_origin_change_close_the_prompt() {
+        let mut state = crate::tests::registered_fixture();
+        state.open_csv_path_prompt(DatasetKind::ClassifierTraining);
+        state.cancel_csv_path_prompt();
+        assert!(state.maintenance.csv_path_prompt.is_none());
+
+        state.open_csv_path_prompt(DatasetKind::ActorCatalog);
+        state.maintenance.invalidate_origin();
+        assert!(state.maintenance.csv_path_prompt.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_typed_symlink_gets_the_same_rejection_as_a_picked_one() {
+        use crate::maintenance::LocalDataset;
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let real = dir
+            .path()
+            .canonicalize()
+            .expect("canonical")
+            .join("real.csv");
+        std::fs::File::create(&real)
+            .and_then(|mut file| file.write_all(b"id\n1\n"))
+            .expect("write csv");
+        let link = real.with_file_name("link.csv");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        let typed = parse_local_csv_path(link.to_str().expect("utf-8 path"), None)
+            .expect("a symlink path is well formed; the shared preparation rejects it");
+        let error = super::super::open_and_hash(LocalDataset {
+            path: typed,
+            kind: DatasetKind::ActorCatalog,
+        })
+        .expect_err("symlink rejected");
+        assert!(error.contains("symbolic links are rejected"), "{error}");
+    }
+}

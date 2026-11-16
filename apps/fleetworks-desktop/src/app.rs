@@ -273,6 +273,8 @@ pub enum Intent {
 /// One state owns navigation, context, client and asynchronous request guards.
 pub struct State {
     pub accessibility: Accessibility,
+    /// Cold-launch splash and connection choice. Finished by default so fixtures skip it.
+    pub startup: crate::startup::Startup,
     pub page: Page,
     pub setup_gateway: bool,
     pub backend_kind: BackendKind,
@@ -349,6 +351,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             accessibility: Accessibility::default(),
+            startup: crate::startup::Startup::default(),
             page: Page::Workstation,
             setup_gateway: false,
             backend_kind: BackendKind::Remote,
@@ -1164,6 +1167,20 @@ pub(crate) fn poll_jobs(state: &mut State, now: f64, tx: &mut Tx) -> bool {
 fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
     state.clock = now;
     let mut changed = false;
+    if state.startup.active() {
+        // The splash clock starts at the first frame. No backend work runs behind startup.
+        state.startup.begin(now);
+        if let Some(wait) = state.startup.next_wake(
+            now,
+            state
+                .accessibility
+                .for_view(state.fixture, false)
+                .reduced_motion,
+        ) {
+            tx.wake_after(Duration::from_secs_f64(wait));
+        }
+        return true;
+    }
     changed |= state.poll_scoped_logs();
     changed |= state.sync_jobs_binding();
     if matches!(state.page, Page::Seed | Page::Workstation)
@@ -1295,6 +1312,9 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     let mut kit = theme::kit();
     let mut layers = Vec::new();
     crate::material::configure_kit(&mut kit, preferences);
+    if state.startup.active() {
+        return crate::startup::view(state, preferences, &kit);
+    }
     let compact_rail = cx
         .layout_size("app-shell")
         .is_some_and(|size| size[0] < 820.0);

@@ -31,6 +31,7 @@ mod platform_trash;
 mod readiness_cards;
 pub mod rebind;
 pub mod registration;
+pub mod startup;
 pub mod submission;
 pub mod theme;
 pub mod transfer;

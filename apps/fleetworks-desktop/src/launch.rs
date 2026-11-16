@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use clap::Parser;
@@ -160,6 +161,10 @@ pub fn run() -> anyhow::Result<()> {
         .build()?;
     let services = Arc::new(GatewayEffects::new(runtime.handle().clone()));
     let init_services = services.clone();
+    // A scripted launch with an explicit gateway skips the interactive splash and choice.
+    let interactive_startup = options.api_origin.is_none() && options.api_token_file.is_none();
+    let wake_slot: Arc<OnceLock<rune::AppHandle<State>>> = Arc::new(OnceLock::new());
+    let init_wake_slot = wake_slot.clone();
     let app = App::new(app::spec())
         .init(move || {
             let mut state = State::with_services(init_services.clone());
@@ -171,6 +176,16 @@ pub fn run() -> anyhow::Result<()> {
             }
             if let Some(path) = &options.api_token_file {
                 state.connection.token_file = TextEdit::new(path.to_string_lossy());
+            }
+            if interactive_startup {
+                let wake_slot = init_wake_slot.clone();
+                let cache = Arc::new(rune::ImageCache::new(Arc::new(move || {
+                    if let Some(handle) = wake_slot.get() {
+                        handle.wake();
+                    }
+                })));
+                state.startup = crate::startup::Startup::cold_launch();
+                state.startup.install_logo(cache);
             }
             state.local_backend.cli_binary_override = options.local_backend_bin.clone();
             state.local_backend.refresh_binary_status();
@@ -199,6 +214,7 @@ pub fn run() -> anyhow::Result<()> {
         })
         .on_close(|state, _| state.close_window_cleanup())
         .on_quit(|state, _| state.quit_cleanup());
+    let _ = wake_slot.set(app.handle());
     services
         .install_ui(app.handle())
         .map_err(anyhow::Error::msg)?;

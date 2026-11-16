@@ -163,8 +163,9 @@ describe("Nexus Desk Bulletin", () => {
       name: `Open Focus Brief: ${row.title}`,
     });
     expect(search).toHaveValue("");
+    // Clearing the search keeps the chosen category; only Reset filters resets it.
     expect(
-      screen.getByRole("button", { name: /^Politics & Governance$/ }),
+      screen.getByRole("button", { name: /^Economy & Supply Chains$/ }),
     ).toHaveAttribute("aria-pressed", "true");
   });
 

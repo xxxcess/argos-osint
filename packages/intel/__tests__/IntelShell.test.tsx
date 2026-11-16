@@ -89,10 +89,11 @@ describe("Intel status bar", () => {
     expect(paint(screen.getByText("3376 KB/s"), "color")).toBe(
       intelMetricColors.network.toLowerCase(),
     );
-    expect(
-      screen.getByRole("button", { name: "macOS 26.0, x86 · 16 cores" }),
-    ).toHaveTextContent("macOS");
-    expect(screen.getByText("x86 · 16 cores")).toBeVisible();
+    // Host OS and chipset never name the Home control; the fallback does.
+    expect(screen.getByRole("button", { name: "Backend" })).toHaveTextContent(
+      "Backend",
+    );
+    expect(screen.queryByText(/macOS|x86/)).not.toBeInTheDocument();
     expect(screen.getByLabelText("API connected")).toHaveTextContent("API_OK");
     expect(screen.getByText("10:00:54 AM")).toBeVisible();
   });

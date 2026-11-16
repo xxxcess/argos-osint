@@ -741,6 +741,92 @@ export function useArticles(
     getNextPageParam: (last) => last.next_cursor || undefined,
   });
 }
+export const ARTICLE_SEARCH_MAX_BYTES = 256;
+export const ARTICLE_SEARCH_MAX_TERMS = 16;
+/** Mirrors the indexed route's plain-query limits so a bad query never leaves the browser. */
+export function articleSearchProblem(raw: string): string | null {
+  const query = raw.trim();
+  if (!query) return "Enter a word or phrase to search.";
+  if (new TextEncoder().encode(query).length > ARTICLE_SEARCH_MAX_BYTES)
+    return `Use at most ${ARTICLE_SEARCH_MAX_BYTES} bytes.`;
+  const terms = new Set(query.toLowerCase().split(/\s+/));
+  if (terms.size > ARTICLE_SEARCH_MAX_TERMS)
+    return `Use at most ${ARTICLE_SEARCH_MAX_TERMS} different words.`;
+  return null;
+}
+export interface ArticleSearchHit {
+  run_id: string;
+  article_id: string;
+  title: string;
+  description: string;
+  excerpt: string;
+  matched_field: "title" | "description";
+  categories: string[];
+  taxonomy_version: string;
+  admission_state: string;
+  publication_version: string;
+  source_name: string;
+  source_domain: string;
+  published_at: string;
+  url: string;
+}
+/** A search hit carries no image or author; the brief loads those from article detail. */
+export function articleFromHit(hit: ArticleSearchHit): Article {
+  return {
+    id: hit.article_id,
+    run_id: hit.run_id,
+    title: hit.title,
+    description: hit.excerpt || hit.description,
+    source_name: hit.source_name,
+    source_domain: hit.source_domain,
+    published_at: hit.published_at,
+    category: hit.categories[0] || "",
+    categories: hit.categories,
+    taxonomy_version: hit.taxonomy_version,
+    admission_state: hit.admission_state,
+    publication_version: hit.publication_version,
+    image_url: "",
+    url: hit.url,
+    author: "",
+  };
+}
+/**
+ * Explicit-submit search over the indexed titles and descriptions. The caller
+ * passes the submitted query; an empty one disables the read and the default
+ * feed shows. The key carries backend and instance, so results never survive
+ * a scope change. No polling: a page is a snapshot until the user resubmits.
+ */
+export function useArticleSearch(query: string) {
+  const b = useBackend();
+  const text = query.trim();
+  return useInfiniteQuery({
+    queryKey: [b.base, b.instance, "article-search", text],
+    initialPageParam: "",
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+    retry: false,
+    enabled: b.connected && !!text && articleSearchProblem(text) === null,
+    queryFn: ({ pageParam, signal }) =>
+      request<{
+        hits: ArticleSearchHit[];
+        next_cursor: string | null;
+        revision: string;
+      }>(
+        b.base,
+        "articles/search?" +
+          new URLSearchParams({
+            query: text,
+            limit: "20",
+            ...(pageParam ? { cursor: pageParam } : {}),
+          }),
+        undefined,
+        signal,
+        REQUEST_TIMEOUT_MS,
+        b.scope,
+      ),
+    getNextPageParam: (last) => last.next_cursor || undefined,
+  });
+}
 export function keyFor(a: Pick<Article, "run_id" | "id">) {
   return new URLSearchParams({ run: a.run_id, id: a.id }).toString();
 }

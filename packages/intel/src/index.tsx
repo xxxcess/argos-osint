@@ -14,6 +14,8 @@ import {
   useBackend,
   useHostMetrics,
   usePlatformIdentity,
+  useArticleSearch,
+  articleSearchProblem,
   useBriefLive,
   useRead,
   useAction,
@@ -153,13 +155,9 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
   const [category, setCategory] = useState<string>(INTEL_CATEGORIES[0]);
   const [day, setDay] = useState("");
   const [search, setSearch] = useState("");
-  const [debouncedSearch, setDebouncedSearch] = useState("");
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      setDebouncedSearch(search);
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [search]);
+  // Search runs only on submit; clearing it returns to the default feed.
+  const [submittedSearch, setSubmittedSearch] = useState("");
+  const searchResults = useArticleSearch(submittedSearch);
   const [retainedArticle, setArticle] = useState<Article | null>(null);
   const location: Partial<ArticleLocation> | undefined =
     route.screen === "brief"
@@ -258,8 +256,8 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
   const list = useArticles(
     category,
     selectedDay,
-    debouncedSearch,
-    screen === "bulletin",
+    "",
+    screen === "bulletin" && !submittedSearch,
     feedSort,
   );
   const articles = [
@@ -494,6 +492,16 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
               onCategory={setCategory}
               search={search}
               onSearch={setSearch}
+              submittedSearch={submittedSearch}
+              searchResults={searchResults}
+              onSubmitSearch={() => {
+                if (articleSearchProblem(search) === null)
+                  setSubmittedSearch(search.trim());
+              }}
+              onClearSearch={() => {
+                setSearch("");
+                setSubmittedSearch("");
+              }}
               days={days.data?.days || []}
               selectedDay={selectedDay}
               onDay={setDay}
@@ -511,6 +519,7 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
                 setCategory(INTEL_CATEGORIES[0]);
                 setDay("");
                 setSearch("");
+                setSubmittedSearch("");
               }}
             />
           )}

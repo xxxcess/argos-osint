@@ -155,6 +155,8 @@ async function fixtures(
         next_cursor: null,
         revision: "r1",
       };
+    else if (path === "articles/search")
+      body = { hits: [], next_cursor: null, revision: "search-fixture" };
     else if (path === "articles/detail")
       body = {
         article,
@@ -504,15 +506,19 @@ test("browse, search, brief, related, topology and reconnect", async ({
     await expect(
       page.getByRole("button", { name: cat, exact: true }),
     ).toBeVisible();
-  await page.getByRole("textbox", { name: "Search articles" }).fill("missing");
+  const headerSearch = page.getByRole("textbox", {
+    name: "Search article titles and descriptions",
+  });
+  await headerSearch.fill("missing");
+  await headerSearch.press("Enter");
   await expect(
-    page.getByText("No articles match this day, category and search."),
+    page.getByText("No article title or description matches this search."),
   ).toBeVisible();
   await page.screenshot({
     path: `${captureDir}/empty-search.png`,
     fullPage: true,
   });
-  await page.getByRole("textbox", { name: "Search articles" }).fill("");
+  await page.getByRole("button", { name: "Clear search" }).click();
   await page.getByRole("button", { name: /^Open Focus Brief:/ }).click();
   await expect.poll(() => f.admissions).toEqual([]);
   await expect(
@@ -667,7 +673,9 @@ test("selection controls support keyboard activation and visible focus", async (
   await expect(
     page.getByRole("button", { name: /^Open Focus Brief:/ }),
   ).toBeVisible();
-  const search = page.getByRole("textbox", { name: "Search articles" });
+  const search = page.getByRole("textbox", {
+    name: "Search article titles and descriptions",
+  });
   await search.focus();
   await search.press("Tab");
   // Header search precedes the category rail in the reference layout and DOM.
@@ -1012,9 +1020,7 @@ for (const changeCategory of [false, true]) {
       el.scrollTop = el.scrollHeight;
     });
     await expect
-      .poll(
-        () => cursors.filter((c) => c === "governance:opaque-next").length,
-      )
+      .poll(() => cursors.filter((c) => c === "governance:opaque-next").length)
       .toBe(1);
     await expect(
       page.getByRole("progressbar", {
@@ -1024,9 +1030,9 @@ for (const changeCategory of [false, true]) {
     ).toBeVisible();
     for (let i = 0; i < 5; i++)
       await scroller.evaluate((el) => el.dispatchEvent(new Event("scroll")));
-    expect(
-      cursors.filter((c) => c === "governance:opaque-next"),
-    ).toHaveLength(1);
+    expect(cursors.filter((c) => c === "governance:opaque-next")).toHaveLength(
+      1,
+    );
     await page.screenshot({
       path: `${captureDir}/next-page-loading-${changeCategory}.png`,
       fullPage: true,
@@ -1422,7 +1428,11 @@ test("desktop launcher returns to the retained intelligence bulletin", async ({
   await page.getByRole("button", { name: "Backend", exact: true }).click();
   await page.getByRole("button", { name: "Open Intel", exact: true }).click();
   await expect(page.getByText(a.title)).toBeVisible();
-  await page.getByRole("textbox", { name: "Search articles" }).fill("missing");
+  const search = page.getByRole("textbox", {
+    name: "Search article titles and descriptions",
+  });
+  await search.fill("missing");
+  await search.press("Enter");
   await expect(page.getByText(a.title)).toHaveCount(0);
 });
 
@@ -1544,9 +1554,7 @@ test("global All follows one server cursor stream and retains rows across a fail
   ).toBe(true);
   expect(
     reads
-      .filter(
-        (read) => read.category === "governance" && read.cursor !== null,
-      )
+      .filter((read) => read.category === "governance" && read.cursor !== null)
       .every((read) => read.cursor === cursor),
   ).toBe(true);
   await expect(
@@ -1674,7 +1682,9 @@ for (const width of [1536, 1440, 768, 390, 320]) {
     ).toBeVisible();
     await expect(page.getByText(a.title)).toBeVisible();
     await expectFixedStatusBar(page);
-    await page.getByRole("textbox", { name: "Search articles" }).fill("harbor");
+    await page
+      .getByRole("textbox", { name: "Search article titles and descriptions" })
+      .fill("harbor");
     await page.getByRole("button", { name: "Backend", exact: true }).click();
     const returning = page.getByRole("button", {
       name: "Open Intel",
@@ -1683,7 +1693,9 @@ for (const width of [1536, 1440, 768, 390, 320]) {
     await returning.focus();
     await returning.press("Space");
     await expect(
-      page.getByRole("textbox", { name: "Search articles" }),
+      page.getByRole("textbox", {
+        name: "Search article titles and descriptions",
+      }),
     ).toHaveValue("harbor");
     await expectFixedStatusBar(page);
   });

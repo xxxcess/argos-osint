@@ -370,25 +370,21 @@ describe("server-backed global All", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("isolates All cursors by search, day and category instead of reusing another scope's pages", async () => {
+  it("isolates All cursors by day and category instead of reusing another scope's pages", async () => {
     const scoped = { ...d, title: "Scoped October 28 result" };
     mswServer.use(
       http.get(`${testBase}/api/v1/articles`, ({ request }) => {
         const read = record(request);
-        if (read.search === "ports")
-          return page(
-            read.day === "2026-10-28"
-              ? [
-                  {
-                    ...scoped,
-                    category:
-                      read.category === "governance"
-                        ? scoped.category
-                        : read.category || "governance",
-                  },
-                ]
-              : [],
-          );
+        if (read.day === "2026-10-28")
+          return page([
+            {
+              ...scoped,
+              category:
+                read.category === "governance"
+                  ? scoped.category
+                  : read.category || "governance",
+            },
+          ]);
         if (read.category !== "governance") return page([a]);
         return read.cursor ? page([c]) : page([a, b], cursor1);
       }),
@@ -407,17 +403,6 @@ describe("server-backed global All", () => {
         screen.getAllByRole("button", { name: /^Open Focus Brief:/ }),
       ).toHaveLength(3),
     );
-    await user.type(
-      screen.getByRole("textbox", { name: "Search articles" }),
-      "ports",
-    );
-    await screen.findByRole("heading", { name: "NO MATCHING INTELLIGENCE" });
-    expect(reads.at(-1)).toEqual({
-      category: "governance",
-      day: "2026-10-29",
-      search: "ports",
-      cursor: null,
-    });
     await user.click(screen.getByRole("button", { name: /Retained day/ }));
     await user.click(screen.getByRole("button", { name: "Day 2026-10-28" }));
     await screen.findByRole("button", {
@@ -426,7 +411,7 @@ describe("server-backed global All", () => {
     expect(reads.at(-1)).toEqual({
       category: "governance",
       day: "2026-10-28",
-      search: "ports",
+      search: "",
       cursor: null,
     });
     await user.click(
@@ -436,7 +421,7 @@ describe("server-backed global All", () => {
       expect(reads.at(-1)).toEqual({
         category: "economic",
         day: "2026-10-28",
-        search: "ports",
+        search: "",
         cursor: null,
       }),
     );
@@ -445,7 +430,7 @@ describe("server-backed global All", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("cancels obsolete All requests on search change and category navigation without showing failure or empty claims", async () => {
+  it("cancels obsolete All requests on day change and category navigation without showing failure or empty claims", async () => {
     const signals: AbortSignal[] = [];
     const originalFetch = globalThis.fetch;
     vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
@@ -481,10 +466,8 @@ describe("server-backed global All", () => {
       screen.queryByRole("heading", { name: "NO MATCHING INTELLIGENCE" }),
     ).not.toBeInTheDocument();
     await waitFor(() => expect(signals).toHaveLength(1));
-    await user.type(
-      screen.getByRole("textbox", { name: "Search articles" }),
-      "ports",
-    );
+    await user.click(screen.getByRole("button", { name: /Retained day/ }));
+    await user.click(screen.getByRole("button", { name: "Day 2026-10-28" }));
     await waitFor(() => expect(signals).toHaveLength(2));
     expect(signals[0].aborted).toBe(true);
     expect(signals[1].aborted).toBe(false);

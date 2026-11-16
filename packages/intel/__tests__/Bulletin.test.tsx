@@ -22,6 +22,7 @@ const row: Article = {
   image_url: "",
   author: "Fixture author",
 };
+const searches: string[] = [];
 const requests: {
   category: string | null;
   search: string | null;
@@ -44,6 +45,7 @@ function App() {
 }
 beforeEach(() => {
   requests.length = 0;
+  searches.length = 0;
   mswServer.use(
     http.get(`${testBase}/api/v1/health/ready`, () =>
       HttpResponse.json({
@@ -57,6 +59,10 @@ beforeEach(() => {
     http.get(`${testBase}/api/v1/days`, () =>
       HttpResponse.json({ days: ["2026-10-29", "2026-10-28"] }),
     ),
+    http.get(`${testBase}/api/v1/articles/search`, ({ request }) => {
+      searches.push(new URL(request.url).searchParams.get("query") || "");
+      return HttpResponse.json({ hits: [], next_cursor: null, revision: "s" });
+    }),
     http.get(`${testBase}/api/v1/articles`, ({ request }) => {
       const params = new URL(request.url).searchParams;
       requests.push({
@@ -132,7 +138,7 @@ describe("Nexus Desk Bulletin", () => {
     );
   });
 
-  it("selects categories, debounces search and resets a verified empty result", async () => {
+  it("selects categories, searches only on submit and clears back to the feed", async () => {
     const user = userEvent.setup();
     render(<App />);
     await user.click(await screen.findByRole("button", { name: "Open Intel" }));
@@ -143,16 +149,16 @@ describe("Nexus Desk Bulletin", () => {
       screen.getByRole("button", { name: /^Economy & Supply Chains$/ }),
     );
     await waitFor(() => expect(requests.at(-1)?.category).toBe("economic"));
-    const search = screen.getByRole("textbox", { name: "Search articles" });
+    const search = screen.getByRole("textbox", {
+      name: "Search article titles and descriptions",
+    });
     await user.type(search, "missing");
+    expect(searches).toEqual([]);
+    await user.keyboard("{Enter}");
+    await screen.findByRole("heading", { name: "NO MATCHING ARTICLES" });
+    expect(searches).toEqual(["missing"]);
     expect(requests.filter((request) => request.search)).toEqual([]);
-    await screen.findByRole("heading", { name: "NO MATCHING INTELLIGENCE" });
-    expect(
-      requests
-        .filter((request) => request.search)
-        .map((request) => request.search),
-    ).toEqual(["missing"]);
-    await user.click(screen.getByRole("button", { name: "Reset filters" }));
+    await user.click(screen.getByRole("button", { name: "Clear search" }));
     await screen.findByRole("button", {
       name: `Open Focus Brief: ${row.title}`,
     });

@@ -90,8 +90,8 @@ For an open PR with web UI changes, dispatch the [UI visual review](native-verif
 | --- | --- |
 | Shell | Full window, 75% web density, bottom taskbar: backend display name (Home), Bulletin, contextual Jobs, **Backend host** CPU/MEM/DSK/NET and API state, clock; Topology restores scale 1 |
 | Home | Initial launcher; server control returns here while retaining feed/filter/article state |
-| Bulletin | Stationary category/day/sort chrome and a header search over article titles and descriptions that runs on Enter; only records scroll; whole-card open action. Search results page with **Load more results**, show the matched field and say when the candidate window was filled |
-| Brief | Full-width header; 8:4 reading/context split, stacked below 900px; one scrolling shell |
+| Bulletin | Logo header (the heading text stays for assistive tech); stationary category/day/sort chrome and a header search over article titles and descriptions that runs on Enter; only records scroll; whole-card open action. Search results page with **Load more results**, show the matched field and say when the candidate window was filled |
+| Brief | Full-width header; the evidence fills the row beside a fixed 340 column for lifecycle, source and related leads, stacked below 900px; one scrolling shell |
 | Actor | Identity header; 2:1 reading/sidebar at 900px; source previews remain distinct from canonical actors |
 | Topology | Dedicated graph page/list twin; [exact interaction contract](intel-web.md#interactive-topology-graph) |
 

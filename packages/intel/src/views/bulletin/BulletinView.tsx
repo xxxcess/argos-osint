@@ -8,7 +8,7 @@ import {
   StyleSheet,
   useWindowDimensions,
 } from "react-native";
-import { Notice, LoadingState, EmptyState } from "@argos/ui";
+import { Notice, LoadingState, EmptyState, FleetworksMark } from "@argos/ui";
 import {
   articleSearchProblem,
   keyFor,
@@ -73,7 +73,9 @@ export function BulletinView(p: Props) {
         ]}
       >
         <View style={s.headingRow}>
-          <Text accessibilityRole="header" style={s.title}>
+          <FleetworksMark size={30} />
+          {/* The logo is the visible header. The heading stays for assistive tech and tests. */}
+          <Text accessibilityRole="header" style={s.visuallyHidden}>
             Intelligence bulletin
           </Text>
         </View>
@@ -264,13 +266,11 @@ const s = StyleSheet.create({
     minWidth: 0,
     flexShrink: 1,
   },
-  title: {
-    color: c.text,
-    fontFamily: intelFonts.body,
-    fontSize: 21,
-    lineHeight: 27,
-    fontWeight: "700",
-    flexShrink: 1,
+  visuallyHidden: {
+    position: "absolute",
+    width: 1,
+    height: 1,
+    overflow: "hidden",
   },
   search: { gap: 6, minWidth: 0 },
   hint: { color: c.dim, fontFamily: intelFonts.body, fontSize: 13 },

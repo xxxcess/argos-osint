@@ -44,6 +44,8 @@ for (const width of [1440, 768, 390, 320]) {
             instance_id: "visual-instance",
           };
         else if (path === "days") body = { days: ["2026-10-25"] };
+        // The footer reads the backend name from readiness; none is set here.
+        else if (path === "workstation/readiness") body = {};
         else if (path === "articles/counts")
           body = {
             counts: {

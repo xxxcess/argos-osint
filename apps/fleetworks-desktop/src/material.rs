@@ -42,9 +42,6 @@ pub(crate) struct GlassRecipe {
     pub blur: f32,
 }
 
-/// The most blurred surfaces one frame should ask for; rune ignores any past its own cap.
-pub(crate) const MAX_GLASS_BLURS: usize = 3;
-
 /// `None` means opaque: reduced transparency, or the opaque preference, never blurs.
 pub(crate) fn glass_recipe(
     surface: GlassSurface,
@@ -664,7 +661,6 @@ mod glass_tests {
         let overlay = glass_recipe(GlassSurface::Overlay, prefs(false, false)).expect("glass");
         assert!((0.88..=0.94).contains(&overlay.alpha));
         assert!((12.0..=16.0).contains(&overlay.blur));
-        assert!(MAX_GLASS_BLURS <= 3);
     }
 
     #[test]

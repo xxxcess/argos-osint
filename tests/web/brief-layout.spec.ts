@@ -306,7 +306,7 @@ test("live stages replace retained output until completed and show failures", as
       document.querySelector("#intel-status-api"),
       document.querySelector("#intel-status-metric-cpu"),
       [...document.querySelectorAll("#intel-status-bar div")].find(
-        (el) => el.textContent === "x86 · 16 cores",
+        (el) => el.childElementCount === 0 && el.textContent === "Backend",
       ),
     ].map((el) => el && getComputedStyle(el).fontSize),
   );

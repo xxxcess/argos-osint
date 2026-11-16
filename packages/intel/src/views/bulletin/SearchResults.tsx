@@ -1,11 +1,15 @@
 "use client";
 import React from "react";
-import { ScrollView, StyleSheet, Text, View } from "react-native";
+import { ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { Notice, LoadingState, EmptyState } from "@argos/ui";
 import {
   ApiError,
   articleFromHit,
+  cleanArticleSearchFilters,
+  INTEL_DOMAIN_NAMES,
   type Article,
+  type ArticleSearchFilters,
+  type StrategicDomain,
   type useArticleSearch,
 } from "@argos/api-client";
 import { ArticleCard } from "./ArticleCard";
@@ -19,12 +23,30 @@ export function SearchResults({
   search,
   onArticle,
   onClear,
+  filters,
+  onFilters,
+  day,
+  category,
 }: {
   query: string;
   search: ReturnType<typeof useArticleSearch>;
   onArticle: (article: Article) => void;
   onClear: () => void;
+  /** Filters now applied to the search. */
+  filters: ArticleSearchFilters;
+  onFilters: (filters: ArticleSearchFilters) => void;
+  /** The bulletin's selected retained day and category, offered as filters. */
+  day: string;
+  category: string;
 }) {
+  const [sourceDraft, setSourceDraft] = React.useState(filters.source ?? "");
+  const sourceProblem =
+    sourceDraft.trim() &&
+    cleanArticleSearchFilters({ source: sourceDraft }).source === undefined
+      ? "Use a domain such as example.test."
+      : null;
+  const categoryName =
+    INTEL_DOMAIN_NAMES[category as StrategicDomain] ?? category;
   const seen = new Set<string>();
   const hits = (search.data?.pages.flatMap((page) => page.hits) || []).filter(
     (hit) => {
@@ -50,6 +72,54 @@ export function SearchResults({
           Results for “{query}”
         </Text>
         <DeskButton onPress={onClear}>Clear search</DeskButton>
+      </View>
+      <View nativeID="intel-search-filters" style={s.filters}>
+        <Text style={s.filterLabel}>Narrow by</Text>
+        {day ? (
+          <DeskButton
+            active={filters.day === day}
+            label={`Only ${day}`}
+            onPress={() =>
+              onFilters({ ...filters, day: filters.day === day ? "" : day })
+            }
+          >
+            {`Only ${day}`}
+          </DeskButton>
+        ) : null}
+        {category ? (
+          <DeskButton
+            active={filters.category === category}
+            label={`Only ${categoryName}`}
+            onPress={() =>
+              onFilters({
+                ...filters,
+                category: filters.category === category ? "" : category,
+              })
+            }
+          >
+            {`Only ${categoryName}`}
+          </DeskButton>
+        ) : null}
+        <TextInput
+          accessibilityLabel="Source domain"
+          placeholder="Source domain, e.g. example.test"
+          placeholderTextColor={c.dim}
+          value={sourceDraft}
+          onChangeText={setSourceDraft}
+          onSubmitEditing={() => {
+            if (sourceProblem) return;
+            onFilters({ ...filters, source: sourceDraft.trim().toLowerCase() });
+          }}
+          autoCapitalize="none"
+          autoCorrect={false}
+          returnKeyType="search"
+          style={s.sourceInput}
+        />
+        {sourceProblem ? (
+          <Text accessibilityRole="alert" style={s.hint}>
+            {sourceProblem}
+          </Text>
+        ) : null}
       </View>
       {search.isLoading ? <LoadingState label="Searching…" compact /> : null}
       {unavailable ? (
@@ -126,6 +196,31 @@ const s = StyleSheet.create({
     flexShrink: 1,
   },
   cards: { gap: 12 },
+  filters: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    alignItems: "center",
+    gap: 8,
+  },
+  filterLabel: {
+    color: c.dim,
+    fontFamily: intelFonts.mono,
+    fontSize: 12,
+  },
+  sourceInput: {
+    minWidth: 200,
+    flexGrow: 1,
+    maxWidth: 320,
+    color: c.text,
+    fontFamily: intelFonts.body,
+    fontSize: 14,
+    borderWidth: 1,
+    borderColor: c.border,
+    borderRadius: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  hint: { color: c.dim, fontFamily: intelFonts.body, fontSize: 13 },
   match: {
     color: c.dim,
     fontFamily: intelFonts.mono,

@@ -16,6 +16,7 @@ import {
   usePlatformIdentity,
   useArticleSearch,
   articleSearchProblem,
+  type ArticleSearchFilters,
   useBriefLive,
   useRead,
   useAction,
@@ -157,7 +158,8 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
   const [search, setSearch] = useState("");
   // Search runs only on submit; clearing it returns to the default feed.
   const [submittedSearch, setSubmittedSearch] = useState("");
-  const searchResults = useArticleSearch(submittedSearch);
+  const [searchFilters, setSearchFilters] = useState<ArticleSearchFilters>({});
+  const searchResults = useArticleSearch(submittedSearch, searchFilters);
   const [retainedArticle, setArticle] = useState<Article | null>(null);
   const location: Partial<ArticleLocation> | undefined =
     route.screen === "brief"
@@ -494,6 +496,8 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
               onSearch={setSearch}
               submittedSearch={submittedSearch}
               searchResults={searchResults}
+              searchFilters={searchFilters}
+              onSearchFilters={setSearchFilters}
               onSubmitSearch={() => {
                 if (articleSearchProblem(search) === null)
                   setSubmittedSearch(search.trim());
@@ -501,6 +505,7 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
               onClearSearch={() => {
                 setSearch("");
                 setSubmittedSearch("");
+                setSearchFilters({});
               }}
               days={days.data?.days || []}
               selectedDay={selectedDay}
@@ -520,6 +525,7 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
                 setDay("");
                 setSearch("");
                 setSubmittedSearch("");
+                setSearchFilters({});
               }}
             />
           )}

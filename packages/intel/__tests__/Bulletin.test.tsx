@@ -212,6 +212,51 @@ describe("Nexus Desk Bulletin", () => {
     ).toBeVisible();
   });
 
+  it("narrows a search by day, category and source domain without making them text fields", async () => {
+    const params: Record<string, string>[] = [];
+    mswServer.use(
+      http.get(`${testBase}/api/v1/articles/search`, ({ request }) => {
+        params.push(Object.fromEntries(new URL(request.url).searchParams));
+        return HttpResponse.json({
+          hits: [],
+          next_cursor: null,
+          revision: "s",
+          truncated: false,
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "Open Intel" }));
+    const search = await screen.findByRole("textbox", {
+      name: "Search article titles and descriptions",
+    });
+    await user.type(search, "harbor{Enter}");
+    await screen.findByRole("heading", { name: "NO MATCHING ARTICLES" });
+    expect(params.at(-1)).toEqual({ query: "harbor", limit: "20" });
+    await user.click(screen.getByRole("button", { name: "Only 2026-10-29" }));
+    await waitFor(() => expect(params.at(-1)?.day).toBe("2026-10-29"));
+    await user.click(
+      screen.getByRole("button", { name: "Only Politics & Governance" }),
+    );
+    await waitFor(() => expect(params.at(-1)?.category).toBe("governance"));
+    const source = screen.getByRole("textbox", { name: "Source domain" });
+    await user.type(source, "not a domain{Enter}");
+    expect(screen.getByRole("alert")).toHaveTextContent("Use a domain");
+    await user.clear(source);
+    await user.type(source, "Example.Test{Enter}");
+    await waitFor(() => expect(params.at(-1)?.source).toBe("example.test"));
+    expect(params.at(-1)).toEqual({
+      query: "harbor",
+      limit: "20",
+      category: "governance",
+      day: "2026-10-29",
+      source: "example.test",
+    });
+    await user.click(screen.getByRole("button", { name: "Only 2026-10-29" }));
+    await waitFor(() => expect(params.at(-1)?.day).toBeUndefined());
+  });
+
   it("moves category focus with arrows, selects with Enter and opens the whole article card", async () => {
     const user = userEvent.setup();
     render(<App />);

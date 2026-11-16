@@ -796,11 +796,38 @@ export function articleFromHit(hit: ArticleSearchHit): Article {
  * feed shows. The key carries backend and instance, so results never survive
  * a scope change. No polling: a page is a snapshot until the user resubmits.
  */
-export function useArticleSearch(query: string) {
+/** Optional narrowing for article search. These are filters, not full-text fields. */
+export interface ArticleSearchFilters {
+  /** `YYYY-MM-DD` retained day. */
+  day?: string;
+  /** A strategic domain id. */
+  category?: string;
+  /** Exact source domain, such as `example.test`. */
+  source?: string;
+}
+const SOURCE_DOMAIN = /^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$/;
+/** Keep only well-formed, non-empty filters, in a fixed order, so keys and URLs stay stable. */
+export function cleanArticleSearchFilters(
+  filters: ArticleSearchFilters = {},
+): ArticleSearchFilters {
+  const out: ArticleSearchFilters = {};
+  if (filters.category && filters.category !== "all")
+    out.category = filters.category;
+  if (filters.day && /^\d{4}-\d{2}-\d{2}$/.test(filters.day))
+    out.day = filters.day;
+  const source = filters.source?.trim().toLowerCase();
+  if (source && SOURCE_DOMAIN.test(source)) out.source = source;
+  return out;
+}
+export function useArticleSearch(
+  query: string,
+  filters: ArticleSearchFilters = {},
+) {
   const b = useBackend();
   const text = query.trim();
+  const narrow = cleanArticleSearchFilters(filters);
   return useInfiniteQuery({
-    queryKey: [b.base, b.instance, "article-search", text],
+    queryKey: [b.base, b.instance, "article-search", text, narrow],
     initialPageParam: "",
     staleTime: 30_000,
     refetchOnWindowFocus: false,
@@ -819,6 +846,7 @@ export function useArticleSearch(query: string) {
           new URLSearchParams({
             query: text,
             limit: "20",
+            ...narrow,
             ...(pageParam ? { cursor: pageParam } : {}),
           }),
         undefined,

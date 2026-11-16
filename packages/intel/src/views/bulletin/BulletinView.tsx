@@ -14,6 +14,7 @@ import {
   keyFor,
   type Article,
   type useArticles,
+  type ArticleSearchFilters,
   type useArticleSearch,
 } from "@argos/api-client";
 import { SearchResults } from "./SearchResults";
@@ -38,6 +39,8 @@ type Props = {
   onSubmitSearch: () => void;
   onClearSearch: () => void;
   searchResults: ReturnType<typeof useArticleSearch>;
+  searchFilters: ArticleSearchFilters;
+  onSearchFilters: (filters: ArticleSearchFilters) => void;
   days: string[];
   selectedDay: string;
   onDay: (day: string) => void;
@@ -113,6 +116,10 @@ export function BulletinView(p: Props) {
               search={p.searchResults}
               onArticle={p.onArticle}
               onClear={p.onClearSearch}
+              filters={p.searchFilters}
+              onFilters={p.onSearchFilters}
+              day={p.selectedDay}
+              category={p.category}
             />
           ) : (
             <>

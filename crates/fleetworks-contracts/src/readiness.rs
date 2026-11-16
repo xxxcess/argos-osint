@@ -243,6 +243,18 @@ pub struct WorkstationReadiness {
     pub registration: Option<RegistrationReceipt>,
     #[serde(default)]
     pub configured_inputs: Vec<ConfiguredMaintenanceInput>,
+    /// The operator-chosen backend label, present only when one was configured at bootstrap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_identity: Option<PlatformIdentity>,
+}
+
+/// An operator-chosen backend label with the deployment it names. It is never derived from the
+/// host OS, chipset, hostname, IP or Connect ID, and a rename keeps the deployment ID.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlatformIdentity {
+    pub deployment_id: String,
+    pub display_name: String,
 }
 
 impl WorkstationReadiness {
@@ -255,7 +267,18 @@ impl WorkstationReadiness {
             checks,
             registration: None,
             configured_inputs: Vec::new(),
+            platform_identity: None,
         }
+    }
+
+    /// Attach the backend label for this deployment.
+    #[must_use]
+    pub fn with_platform_identity(mut self, display_name: String) -> Self {
+        self.platform_identity = Some(PlatformIdentity {
+            deployment_id: self.deployment_id.clone(),
+            display_name,
+        });
+        self
     }
 }
 
@@ -665,5 +688,30 @@ mod tests {
         let mut forged = serde_json::to_value(&result).expect("serialize");
         forged["server_path"] = serde_json::json!("/private/index");
         assert!(serde_json::from_value::<ActorReindexResult>(forged).is_err());
+    }
+
+    #[test]
+    fn platform_identity_is_omitted_when_unset_and_keeps_the_deployment_id() {
+        let plain = WorkstationReadiness::new(
+            "deployment-a".into(),
+            "2026-11-16T00:00:00Z".into(),
+            Vec::new(),
+        );
+        let value = serde_json::to_value(&plain).expect("serialize");
+        assert!(value.get("platform_identity").is_none());
+        let older: WorkstationReadiness = serde_json::from_value(value).expect("older shape");
+        assert!(older.platform_identity.is_none());
+
+        let named = plain.with_platform_identity("Studio rack".into());
+        let value = serde_json::to_value(&named).expect("serialize");
+        assert_eq!(value["platform_identity"]["deployment_id"], "deployment-a");
+        assert_eq!(value["platform_identity"]["display_name"], "Studio rack");
+        let decoded: WorkstationReadiness =
+            serde_json::from_value(value.clone()).expect("round trip");
+        assert_eq!(decoded, named);
+
+        let mut forged = value;
+        forged["platform_identity"]["hostname"] = serde_json::json!("host.local");
+        assert!(serde_json::from_value::<WorkstationReadiness>(forged).is_err());
     }
 }

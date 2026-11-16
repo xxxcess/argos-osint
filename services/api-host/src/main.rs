@@ -52,6 +52,10 @@ struct Args {
     /// Optional canonical absolute path to a supervised classifier helper command.
     #[arg(long)]
     classifier_cmd: Option<std::path::PathBuf>,
+    /// Operator-chosen label for this backend, shown to operators. Bootstrap only. Leaving it out
+    /// keeps any stored label. Up to 64 printable characters; never derived from the host.
+    #[arg(long)]
+    platform_display_name: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -110,6 +114,10 @@ fn main() -> Result<()> {
     init_tracing();
     let args = Args::parse();
     let runtime = tokio::runtime::Runtime::new()?;
+    ensure!(
+        args.platform_display_name.is_none() || args.role == Role::Bootstrap,
+        "--platform-display-name requires --role bootstrap"
+    );
     if args.role == Role::LocalIpc {
         ensure!(
             args.file.is_none() && args.expected_sha256.is_none() && !args.activate,
@@ -140,6 +148,7 @@ async fn run_non_ipc(args: Args) -> Result<()> {
         state_dir,
         nlp_cmd,
         classifier_cmd,
+        platform_display_name,
     } = args;
     ensure!(
         state_dir.is_none() && nlp_cmd.is_none() && classifier_cmd.is_none(),
@@ -268,6 +277,11 @@ async fn run_non_ipc(args: Args) -> Result<()> {
             atlas_dispatch,
         )
         .await?;
+        if let Some(name) = &platform_display_name {
+            storage::connect_registry::set_platform_display_name(&repo, name)
+                .await
+                .map_err(|_| anyhow::anyhow!("invalid --platform-display-name"))?;
+        }
         fleetworks::export_deployment_identity(&repo).await?;
         tracing::info!(
             role = ?role,

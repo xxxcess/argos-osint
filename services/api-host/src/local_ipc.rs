@@ -246,7 +246,8 @@ mod embedded {
             })
             .await??;
 
-            let readiness = ReadinessOwners::new(deployment.deployment_id.clone(), Vec::new())?;
+            let readiness = ReadinessOwners::new(deployment.deployment_id.clone(), Vec::new())?
+                .with_platform_display_name(deployment.platform_display_name.clone())?;
             let search_backend: Arc<dyn ActorSearchBackend> =
                 Arc::new(LocalActorSearchBackend(Arc::clone(&search_service)));
             let services = PrivateServices::default()

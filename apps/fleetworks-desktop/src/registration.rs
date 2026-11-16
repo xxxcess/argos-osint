@@ -151,8 +151,11 @@ impl State {
                 self.registration.context = Some(registered.context);
                 self.registration.receipt = Load::Ready(registered.receipt);
                 self.registration.message = Some("Workstation registration verified".into());
-                self.restore_cycle_deletion();
-                self.restore_actor_reindex();
+                // The two protected-journal reads run in sequence: the catalog lock is nonblocking,
+                // so concurrent reads can fail with "catalog is busy".
+                if !self.restore_cycle_deletion() {
+                    self.restore_actor_reindex();
+                }
                 self.refresh_readiness();
                 self.refresh_page();
             }

@@ -955,6 +955,20 @@ impl GatewayEffects {
 }
 
 impl State {
+    /// An accepted maintenance job must show up in Jobs without waiting for a UI selection.
+    /// This re-reads the current Jobs page under the same registration.
+    pub(crate) fn refresh_jobs_after_admission(&mut self) {
+        if self.fixture || self.services.is_none() || self.registration.context.is_none() {
+            return;
+        }
+        if self.scoped_jobs.busy() {
+            // The read in flight may predate the admission; let the next poll repeat it.
+            self.jobs_refresh_at = 0.0;
+        } else {
+            self.request_jobs(crate::jobs_query::JobsEvent::Poll);
+        }
+    }
+
     pub(crate) fn apply_maintenance_outcome(
         &mut self,
         operation: MaintenanceOperation,
@@ -985,6 +999,7 @@ impl State {
                     };
                 self.maintenance.receipt = Load::Ready(receipt.clone());
                 self.refresh_readiness();
+                self.refresh_jobs_after_admission();
                 // Promote the pending guard into the bounded accepted-job record only after UI state holds the receipt.
                 if let (
                     Some(association),

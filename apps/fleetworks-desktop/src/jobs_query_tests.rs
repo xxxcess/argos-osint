@@ -566,3 +566,65 @@ fn background_poll_preserves_ready_page_and_selected_job_while_updating_progress
         "transient poll failure must keep existing validated job rows instead of wiping the list"
     );
 }
+
+#[test]
+fn discovery_poll_finds_new_work_from_an_empty_page_without_a_selection() {
+    let mut state = registered_app();
+    state.request_jobs(JobsEvent::Apply);
+    let ticket = state
+        .scoped_jobs
+        .active_ticket()
+        .expect("apply ticket")
+        .clone();
+    let mut empty = page(&binding("a"), 1, None);
+    empty.rows.clear();
+    state.complete_scoped_jobs(ticket, Ok(empty));
+    assert!(!state.job_list_has_active());
+    assert!(state.backend.selected_job.is_none());
+
+    state.discover_registered_jobs(100.0);
+    assert_eq!(state.jobs_refresh_at, 105.0, "discovery is rate limited");
+    let ticket = state
+        .scoped_jobs
+        .active_ticket()
+        .expect("discovery starts a read from an empty list")
+        .clone();
+    state.discover_registered_jobs(101.0);
+    assert!(
+        state.scoped_jobs.busy(),
+        "a read in flight is never duplicated"
+    );
+    state.complete_scoped_jobs(ticket, Ok(page(&binding("a"), 1, None)));
+
+    assert!(
+        matches!(&state.backend.jobs, Load::Ready(jobs) if jobs.rows.iter().any(|row| row.id == "fixture-job-1")),
+        "newly admitted work appears without any UI selection"
+    );
+    assert!(state.backend.selected_job.is_none());
+}
+
+#[test]
+fn discovery_poll_needs_a_registration_and_drops_replies_from_a_prior_one() {
+    let mut state = registered_app();
+    state.registration.context = None;
+    state.discover_registered_jobs(100.0);
+    assert!(
+        state.scoped_jobs.active_ticket().is_none(),
+        "no registered workstation means no discovery read"
+    );
+
+    let mut state = registered_app();
+    state.discover_registered_jobs(100.0);
+    let ticket = state
+        .scoped_jobs
+        .active_ticket()
+        .expect("discovery read")
+        .clone();
+    state.registration.context = Some(binding("b").context);
+    state.sync_jobs_binding();
+    state.complete_scoped_jobs(ticket, Ok(page(&binding("a"), 1, None)));
+    assert!(
+        !matches!(&state.backend.jobs, Load::Ready(jobs) if jobs.rows.iter().any(|row| row.id == "fixture-job-1")),
+        "a delayed reply from the previous registration must not repopulate Jobs"
+    );
+}

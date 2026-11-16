@@ -1625,17 +1625,22 @@ fn jobs(
                         );
                     }
                 }
-                if state.scoped_logs.rows.is_empty()
-                    && !state.scoped_logs.busy()
-                    && matches!(
-                        state.scoped_logs.status,
-                        LogStatus::Ready | LogStatus::DisplayLimit | LogStatus::Idle
-                    )
-                {
-                    details = details.child(quiet(
-                        "No safe operational summaries are available for this job.",
-                        kit,
-                    ));
+                if state.scoped_logs.rows.is_empty() && !state.scoped_logs.busy() {
+                    // Three different states: not read yet, read with no events, and a failed read.
+                    // A failed read shows its own message and Refresh button above.
+                    match state.scoped_logs.status {
+                        LogStatus::Idle => {
+                            details = details
+                                .child(quiet("Logs for this job have not been read yet.", kit));
+                        }
+                        LogStatus::Ready | LogStatus::DisplayLimit => {
+                            details = details.child(quiet(
+                                "No safe operational summaries are available for this job.",
+                                kit,
+                            ));
+                        }
+                        _ => {}
+                    }
                 }
                 if state.scoped_logs.rows.is_empty() && state.scoped_logs.busy() {
                     details = details.child(ui_components::skeleton_log_table(preferences, kit));

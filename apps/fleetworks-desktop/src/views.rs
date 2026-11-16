@@ -1162,6 +1162,21 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
                 resources = resources.child(line(error.clone(), kit).role("alert"));
             }
             Load::Ready(metrics) => {
+                let stale_notice = state.host_metrics_stale_notice();
+                if let Some(notice) = &stale_notice {
+                    resources = resources.child(
+                        ui_components::async_status_strip(
+                            "host-metrics-stale",
+                            "Telemetry unavailable",
+                            notice.clone(),
+                            false,
+                            StatusTone::Warn,
+                            preferences,
+                            kit,
+                        )
+                        .role("alert"),
+                    );
+                }
                 let mut tiles = if narrow_workstation {
                     rune::col().w_full().gap(10.0)
                 } else {
@@ -1199,7 +1214,9 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
                         formatted,
                         valid,
                         valid.map(|v| (v / 100.0) as f32),
-                        if valid.is_some() {
+                        if stale_notice.is_some() {
+                            "Stale"
+                        } else if valid.is_some() {
                             "API host load"
                         } else {
                             "Unavailable"

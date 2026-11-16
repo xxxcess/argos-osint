@@ -297,6 +297,10 @@ pub struct State {
     pub cycles: crate::workstation_dashboard::Cycles,
     pub host_metrics: Load<crate::workstation_dashboard::HostMetrics>,
     pub(crate) host_metrics_request: Option<RequestTask>,
+    /// UI clock reading when `host_metrics` last succeeded.
+    pub(crate) host_metrics_observed_at: Option<f64>,
+    /// Set when a refresh failed after a success. Cleared by the next success.
+    pub(crate) host_metrics_error: Option<String>,
     pub sidebar: PaneState,
     pub connection: Connection,
     pub pairing: crate::pairing::Pairing,
@@ -368,6 +372,8 @@ impl Default for State {
             cycles: crate::workstation_dashboard::Cycles::default(),
             host_metrics: Load::Idle,
             host_metrics_request: None,
+            host_metrics_observed_at: None,
+            host_metrics_error: None,
             sidebar: PaneState::new(220.0).range(180.0, 340.0),
             connection: Connection::default(),
             pairing: crate::pairing::Pairing::default(),
@@ -630,6 +636,8 @@ impl State {
         self.readiness_refresh_at = 0.0;
         self.jobs_refresh_at = 0.0;
         self.host_metrics = Load::Idle;
+        self.host_metrics_observed_at = None;
+        self.host_metrics_error = None;
         self.host_metrics_refresh_at = 0.0;
         self.atlas_refresh_at = 0.0;
         self.brain = Brain::default();
@@ -951,6 +959,15 @@ impl State {
             && now >= self.jobs_refresh_at
     }
 
+    /// Re-reads the registered workstation's current Jobs page without touching the selection,
+    /// the page, or an in-flight read.
+    pub(crate) fn discover_registered_jobs(&mut self, now: f64) {
+        self.jobs_refresh_at = now + JOBS_DISCOVERY_SECS;
+        if self.registration.context.is_some() && !self.scoped_jobs.busy() {
+            self.request_jobs(crate::jobs_query::JobsEvent::Poll);
+        }
+    }
+
     pub(crate) fn refresh_active_job_status(&mut self, now: f64) {
         self.jobs_refresh_at = now + 2.0;
         if let Some(id) = self.backend.selected_job.clone() {
@@ -1103,6 +1120,9 @@ impl State {
     }
 }
 
+/// Seconds between discovery reads when no active job is known.
+const JOBS_DISCOVERY_SECS: f64 = 5.0;
+
 fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
     state.clock = now;
     let mut changed = false;
@@ -1124,16 +1144,26 @@ fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
         && !state.fixture
         && state.connected()
         && state.scoped_logs.window_focused
-        && (state.job_list_has_active()
+    {
+        if state.job_list_has_active()
             || state.selected_job_is_active()
             || (state.backend.selected_job.is_some()
-                && state.scoped_logs.status == crate::logs::LogStatus::Unavailable))
-    {
-        if state.jobs_poll_due(now) {
-            state.refresh_active_job_status(now);
-            changed = true;
+                && state.scoped_logs.status == crate::logs::LogStatus::Unavailable)
+        {
+            if state.jobs_poll_due(now) {
+                state.refresh_active_job_status(now);
+                changed = true;
+            }
+            tx.wake_after(Duration::from_secs(1));
+        } else if state.registration.context.is_some() {
+            // Nothing known is running. A slow, bounded read still discovers work admitted
+            // after this page loaded; the UI selection only narrows what is shown.
+            if now >= state.jobs_refresh_at {
+                state.discover_registered_jobs(now);
+                changed = true;
+            }
+            tx.wake_after(Duration::from_secs(1));
         }
-        tx.wake_after(Duration::from_secs(1));
     }
     if state.page == Page::Workstation
         && !state.fixture
@@ -1153,11 +1183,17 @@ fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
         && state.connected()
         && state.scoped_logs.window_focused
         && state.registration.context.is_some()
-        && state.atlas_poll_active()
     {
+        // Active work is read quickly. Otherwise a slower, bounded read still discovers cycles
+        // admitted after this page loaded, including from an empty or finished-only page.
+        let interval = if state.atlas_poll_active() { 3.0 } else { 10.0 };
         if now >= state.atlas_refresh_at && !state.cycles.busy() {
-            state.atlas_refresh_at = now + 3.0;
-            state.refresh_cycles();
+            state.atlas_refresh_at = now + interval;
+            if matches!(state.cycles.history, Load::Ready(_)) {
+                state.poll_cycles();
+            } else {
+                state.refresh_cycles();
+            }
             changed = true;
         }
         tx.wake_after(Duration::from_secs(1));

@@ -722,3 +722,46 @@ fn seed_button_preflight_status_shimmer_and_progressive_disclosure_reflect_state
     assert!(providers_tree.contains("Provider metadata has not been observed."));
     assert!(!providers_tree.contains("Role assignments have not been observed."));
 }
+
+#[test]
+fn host_resources_show_stale_marker_after_a_failed_refresh() {
+    use crate::workstation_dashboard::HostMetrics;
+
+    let mut state = registered_fixture();
+    state.page = Page::Workstation;
+    state.host_metrics = Load::Ready(HostMetrics {
+        cpu_percent: Some(42.5),
+        ..HostMetrics::default()
+    });
+    state.host_metrics_observed_at = Some(0.0);
+    let mut runtime = Runtime::new(
+        state,
+        app::view,
+        (1180.0, 780.0),
+        Env {
+            system_dark: true,
+            scale: 1.0,
+        },
+    );
+    runtime.frame(0.0);
+    assert!(!runtime
+        .accessibility_json()
+        .to_string()
+        .contains("Telemetry unavailable"));
+
+    runtime.update(|state, _| state.apply_host_metrics(Err("gateway timed out".into())));
+    runtime.frame(1.0 / 60.0);
+    let tree = runtime.accessibility_json().to_string();
+    assert!(
+        tree.contains("Telemetry unavailable"),
+        "stale strip missing"
+    );
+    assert!(tree.contains("gateway timed out"));
+
+    runtime.update(|state, _| state.apply_host_metrics(Ok(HostMetrics::default())));
+    runtime.frame(2.0 / 60.0);
+    assert!(!runtime
+        .accessibility_json()
+        .to_string()
+        .contains("Telemetry unavailable"));
+}

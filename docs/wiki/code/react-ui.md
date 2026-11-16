@@ -88,7 +88,7 @@ For an open PR with web UI changes, dispatch the [UI visual review](native-verif
 
 | Surface | Composition |
 | --- | --- |
-| Shell | Full window, 75% web density, bottom taskbar: backend display name (Home), Bulletin, contextual Jobs, **Backend host** CPU/MEM/DSK/NET and API state, clock; Topology restores scale 1 |
+| Shell | Full window, one web density (`WEB_UI_SCALE`, 75%, written once in `app/style.css` and set inline by the layout; a test keeps the two equal and the Topology inverse zoom is `1 / scale`), bottom taskbar: backend display name (Home), Bulletin, contextual Jobs, **Backend host** CPU/MEM/DSK/NET and API state, clock; Topology restores scale 1 |
 | Home | Initial launcher; server control returns here while retaining feed/filter/article state |
 | Bulletin | Logo and search share one header row at every width (the heading text stays for assistive tech); stationary category/day/sort chrome and a header search over article titles and descriptions that runs on Enter; only records scroll; whole-card open action. Search results page with **Load more results**, show the matched field and say when the candidate window was filled |
 | Brief | Full-width header; the evidence fills the row beside a fixed 340 column for lifecycle, source and related leads, stacked below 900px; one scrolling shell |

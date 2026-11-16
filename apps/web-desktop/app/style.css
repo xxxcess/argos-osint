@@ -3,8 +3,14 @@
 nextjs-portal {
   display: none !important;
 }
+/* One density for the whole browser UI. The layout sets the same value inline from
+   WEB_UI_SCALE; this default only covers pages rendered outside that layout, and a test
+   keeps the two equal. Everything below derives from the variable. */
+:root {
+  --intel-ui-scale: 0.75;
+}
 html {
-  zoom: var(--intel-ui-scale, 0.75);
+  zoom: var(--intel-ui-scale);
 }
 #intel-web-workspace {
   position: fixed;
@@ -12,11 +18,11 @@ html {
   overflow: hidden;
 }
 #intel-content-frame {
-  max-width: calc(1440px / var(--intel-ui-scale, 0.75));
+  max-width: calc(1440px / var(--intel-ui-scale));
 }
 /* Topology uses full-size type, controls and graph tiles inside the compact shell. */
 #intel-topology-workspace {
-  zoom: calc(1 / var(--intel-ui-scale, 0.75));
+  zoom: calc(1 / var(--intel-ui-scale));
   overflow: hidden;
 }
 /* Matte Fleetworks paint; existing geometry and semantic colors are separate. */

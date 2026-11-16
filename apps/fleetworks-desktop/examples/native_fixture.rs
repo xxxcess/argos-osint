@@ -9,6 +9,7 @@ mod native {
     mod jobs_scenes;
     mod lifecycle_scenes;
     mod log_scenes;
+    mod overhaul_scenes;
     mod readiness_scenes;
     mod redesign_scenes;
     mod submission_scenes;
@@ -643,6 +644,13 @@ mod native {
                 (
                     "activation-acceptance-unknown",
                     activation_scenes::acceptance_unknown,
+                ),
+                ("assistant-open", overhaul_scenes::assistant_open),
+                ("assistant-opaque", overhaul_scenes::assistant_opaque),
+                ("command-panel", overhaul_scenes::command_panel),
+                (
+                    "command-panel-opaque",
+                    overhaul_scenes::command_panel_opaque,
                 ),
                 ("appearance-native", appearance_scenes::satin),
                 ("appearance-matte", appearance_scenes::matte),

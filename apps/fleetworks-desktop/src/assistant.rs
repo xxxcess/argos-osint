@@ -360,6 +360,53 @@ impl State {
     }
 }
 
+impl State {
+    /// Fixture only: show the Assistant docked with a synthetic conversation. Nothing is sent.
+    #[doc(hidden)]
+    pub fn fixture_show_assistant(&mut self) {
+        use crate::chat_ui::ChatMessage;
+        use crate::chat_ui::Citation;
+        use crate::chat_ui::Role;
+        use crate::chat_ui::TurnState;
+        self.assistant.enabled = true;
+        self.assistant.preference = Preference::Open;
+        self.assistant.messages = vec![
+            ChatMessage {
+                id: "fixture-1".into(),
+                role: Role::Operator,
+                state: TurnState::Final,
+                text: "Why is this job slow?".into(),
+                citations: Vec::new(),
+            },
+            ChatMessage {
+                id: "fixture-2".into(),
+                role: Role::Assistant,
+                state: TurnState::Running,
+                text: String::new(),
+                citations: vec![Citation {
+                    kind: "Job",
+                    label: "Job synthetic-1".into(),
+                }],
+            },
+            ChatMessage {
+                id: "fixture-3".into(),
+                role: Role::Assistant,
+                state: TurnState::Failed {
+                    reason: "backend restarted".into(),
+                },
+                text: String::new(),
+                citations: Vec::new(),
+            },
+        ];
+    }
+
+    /// Fixture only: open the command overlay.
+    #[doc(hidden)]
+    pub fn fixture_open_command_panel(&mut self) {
+        self.open_command_panel();
+    }
+}
+
 impl crate::connection::GatewayEffects {
     pub(crate) fn chat_turn(
         &self,

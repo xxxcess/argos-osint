@@ -23,6 +23,12 @@ affected by Cargo target-directory overrides. Keep one build owner and freeze th
 selected source before generating final evidence. A dirty checkout is recorded
 as dirty and does not establish immutable commit-only provenance.
 
+Scenes `assistant-open`, `assistant-opaque`, `command-panel` and
+`command-panel-opaque` draw the Assistant dock (with a synthetic conversation)
+and the command overlay in their glass and opaque forms. The Mac lane captures
+all four; the Linux lane captures the glass pair. They send nothing and use no
+backend.
+
 A selected baseline capture:
 
 ```sh

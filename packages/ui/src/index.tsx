@@ -25,9 +25,9 @@ export const colors = {
   onAccent: "#060709",
   selectionSurface: "#10272D",
   accent2: "#c678dd",
-  success: "#23DFA0",
-  warning: "#F1C84B",
-  danger: "#F280A0",
+  success: "#23dfa0",
+  warning: "#f1c84b",
+  danger: "#f280a0",
   // Compatibility names retain existing consumers with opaque matte fills.
   glass: "#0B0F14",
   glassStrong: "#121820",
@@ -344,7 +344,7 @@ const s = StyleSheet.create({
     paddingHorizontal: 16,
     borderLeftWidth: 2,
     borderColor: colors.danger,
-    backgroundColor: "rgba(240, 138, 138, 0.1)",
+    backgroundColor: "rgba(242, 128, 160, 0.1)",
     minWidth: 0,
   },
   noticeText: {

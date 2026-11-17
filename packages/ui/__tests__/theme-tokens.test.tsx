@@ -24,9 +24,9 @@ describe("Theme tokens (imported from @argos/ui source)", () => {
   it("defines accent/accent2 plus the four status hues", () => {
     expect(colors.accent).toBe("#24DCE3");
     expect(colors.accent2).toBe("#c678dd");
-    expect(colors.success).toBe("#23DFA0");
-    expect(colors.warning).toBe("#F1C84B");
-    expect(colors.danger).toBe("#F280A0");
+    expect(colors.success).toBe("#23dfa0");
+    expect(colors.warning).toBe("#f1c84b");
+    expect(colors.danger).toBe("#f280a0");
   });
 
   it("retains compatibility names as opaque matte fills and faint decorative edges", () => {

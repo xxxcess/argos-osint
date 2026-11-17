@@ -16,14 +16,14 @@ describe("Notice (real @argos/ui component)", () => {
     render(<Notice>Graph failed</Notice>);
     const box = screen.getByRole("alert") as HTMLElement;
     expect(applied(box).borderLeftWidth).toBe("2px");
-    expect(applied(box).borderLeftColor).toBe("rgb(240, 138, 138)"); // danger
-    expect(applied(box).backgroundColor).toBe("rgba(240, 138, 138, 0.1)");
+    expect(applied(box).borderLeftColor).toBe("rgb(242, 128, 160)"); // danger
+    expect(applied(box).backgroundColor).toBe("rgba(242, 128, 160, 0.1)");
   });
 
   it("keeps the message in danger-colored body text", () => {
     render(<Notice>Something failed</Notice>);
     const text = screen.getByText("Something failed");
-    expect(applied(text).color).toBe("rgb(240, 138, 138)"); // danger token
+    expect(applied(text).color).toBe("rgb(242, 128, 160)"); // danger token
   });
 
   it("announces error text without hiding sibling content", () => {

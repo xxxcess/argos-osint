@@ -24,10 +24,10 @@ Run a bounded (~1 hour) autonomous monitoring and delivery loop in the active co
 **Priority order on every nightly run:**
 
 1. **Keep the backend suite and its artifacts stable at all times.** Backend checks, embedded storage, release images (Docker), search index, server timings and any other backend artifact jobs must stay green. A backend or artifact failure is fixed first, never deferred.
-2. **Then get a fully featured Linux x86_64 native app with its Linux app CI jobs green.**
-3. **Only then fix the other platform app builds** (Mac aarch64, Mac x86_64 and other OS targets). Scoped web and other remaining checks are fixed after step 2 as well.
+2. **Then get a fully featured Linux x86_64 native app with its Linux app CI jobs green, and keep Scoped web green alongside it.** Scoped web stays required and blocking: it is not a native platform build.
+3. **Only then fix the other platform app builds** (Mac aarch64, Mac x86_64 and other OS targets).
 
-CI enforces the same order in [fleetworks.yml](../../../.github/workflows/fleetworks.yml). Backend, embedded storage, image, search-index, server-timing and Linux x86_64 app jobs block `Fleetworks source checks`, `Fleetworks artifact checks` and **Fleetworks required**. The Mac app jobs wait for the Linux app job (`needs:`), still run and report (a red job stays red, with a warning annotation), and do not block those gates except on a trusted publication run, which attaches the macOS ZIPs. Job names are unchanged.
+CI enforces the same order in [fleetworks.yml](../../../.github/workflows/fleetworks.yml). Backend, embedded storage, image, search-index, server-timing, Scoped web and Linux x86_64 app jobs block `Fleetworks source checks`, `Fleetworks artifact checks` and **Fleetworks required**. The Mac app jobs wait for the Linux app job (`needs:`), still run and report (a red job stays red, with a warning annotation), and do not block those gates except on a trusted publication run, which attaches the macOS ZIPs. Job names are unchanged.
 
 The **backend gate** is every backend and artifact job on the PR head: `Backend suite / Linux amd64` and `/ Linux arm64`, `Affected embedded storage` (x86_64 and aarch64), `Image checks / Linux amd64` and `/ Linux arm64`, and the Atlas BERT runtime jobs when selected ([CI guide](../../../docs/wiki/code/ci.md#fleetworksyml--scoped-branch-checks)). The **Linux gate** is the hosted job `Linux app / x86_64-unknown-linux-gnu / Build, verify and package Linux native (debug)` ([fleetworks-native-linux.yml](../../../.github/workflows/fleetworks-native-linux.yml), scope `desktop_linux`) passing every step: engine-free check, `cargo fmt --check`, scoped unit tests for `fleetworks-desktop`, `fleetworks-workstation` and `fleetworks-contracts`, native UI captures, `build-native` with the companion `argos-api-host`, and the Docker-free local-backend smoke ([native app evidence](../../../docs/wiki/code/ci.md#native-app-review-evidence)). "Fully featured" means every spec item that touches the native app is present in that build, not stubbed. A failure shared by a Linux job and a Mac job (the same test, the same format diff) counts as a Linux failure.
 
@@ -45,8 +45,8 @@ Run these steps in order. The loop sections below keep their detail.
    | Order | Failing jobs | Action |
    | --- | --- | --- |
    | 1 | Backend suite, embedded storage, release images, search index, server timings, other backend artifact jobs | Fix first, push, re-read |
-   | 2 | `Linux app / x86_64-unknown-linux-gnu` | Fix once the backend gate is green on the head |
-   | 3 | Mac app aarch64 and x86_64, other OS targets, Scoped web | Fix last |
+   | 2 | `Linux app / x86_64-unknown-linux-gnu` and `Scoped web` | Fix once the backend gate is green on the head, together |
+   | 3 | Mac app aarch64 and x86_64, other OS targets | Fix last |
 
    A runner-capacity or toolchain failure (lost runner, no capacity, GitHub 5xx, a C build such as `blake3`) is not our code: rerun the failed jobs at most twice per commit with `gh api -X POST repos/xxxcess/argos-osint/actions/runs/<id>/rerun-failed-jobs` once the run has completed, then report it without changing code. Fix real failures at the root cause. Refresh visual-regression baselines only from CI capture artifacts, never from local renders.
 9. **Keep docs and design in sync.** Update affected docs, tags and diagrams in the same change ([conventions](../../../docs/wiki/code/conventions.md)). Keep [docs/design/matte-canvas](../../../docs/design/matte-canvas/README.md) consistent with the code and add reproduction steps for anything generated or derived. Do not touch work the owner put on hold.

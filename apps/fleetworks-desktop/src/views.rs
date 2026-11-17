@@ -779,7 +779,7 @@ fn pairing_status(
                     ActionButton::new("Connect")
                         .key("connect")
                         .icon(&icons::KEY)
-                        .finish(MetalFinish::GoldCta)
+                        .finish(MetalFinish::Fractured)
                         .busy(state.connection.status == ConnectionStatus::Connecting)
                         .disabled(
                             state.connection.status == ConnectionStatus::Connecting

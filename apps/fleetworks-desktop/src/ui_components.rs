@@ -426,7 +426,7 @@ pub(crate) fn stage_stepper(
         } else {
             StatusTone::Neutral
         };
-        let mut pill = row()
+        let pill = row()
             .grow(1.0)
             .h(28.0)
             .px(10.0)
@@ -460,13 +460,6 @@ pub(crate) fn stage_stepper(
                         kit.c.text_faint
                     }),
             );
-        if current && !preferences.matte() {
-            pill = pill.box_shadow(Shadow {
-                blur: 10.0,
-                color: theme::hex(theme::GOLD_GLOW).alpha(0.24),
-                ..Shadow::default()
-            });
-        }
         track = track.child(pill);
     }
     track

@@ -21,11 +21,13 @@ use crate::ui_components::section_header;
 use crate::ui_components::status_pill;
 use crate::ui_components::ActionButton;
 
-const FINISHES: [(&str, MetalFinish); 4] = [
+const FINISHES: [(&str, MetalFinish); 6] = [
     ("gold", MetalFinish::GoldCta),
     ("gunmetal", MetalFinish::Gunmetal),
     ("danger", MetalFinish::CrimsonDanger),
     ("pill", MetalFinish::ObsidianPill),
+    ("fractured", MetalFinish::Fractured),
+    ("fractured-danger", MetalFinish::FracturedDanger),
 ];
 
 const TONES: [(&str, StatusTone); 8] = [

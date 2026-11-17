@@ -675,7 +675,7 @@ fn seed_button_preflight_status_shimmer_and_progressive_disclosure_reflect_state
     assert!(seed_tree.contains("Train Classifier — Natural (Unavailable)"));
     assert!(seed_tree.contains("Choose a CSV to add or update actors."));
     assert!(!seed_tree.contains("Choose a training CSV for a Natural candidate."));
-    assert!(runtime.find("liquid-shimmer").is_none());
+    assert!(runtime.find("loading-shimmer").is_none());
 
     runtime.update(|state, _| state.maintenance.upload = Load::Loading);
     runtime.update(|state, _| {
@@ -687,7 +687,7 @@ fn seed_button_preflight_status_shimmer_and_progressive_disclosure_reflect_state
     runtime.frame(0.5 / 60.0);
     let uploading_tree = runtime.accessibility_json().to_string();
     assert!(uploading_tree.contains("Seed Actors (Uploading…)"));
-    assert!(runtime.find("liquid-shimmer").is_some());
+    assert!(runtime.find("loading-shimmer").is_some());
     runtime.update(|state, _| {
         state.maintenance.upload = Load::Idle;
         state.maintenance.local_dataset = None;

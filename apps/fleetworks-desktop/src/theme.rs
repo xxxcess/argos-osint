@@ -1,4 +1,7 @@
-//! Logo-derived colors shared by the actual views and their fixtures.
+//! Matte deep-space colors shared by the actual views and their fixtures.
+//!
+//! One uninterrupted `#060709` canvas, charcoal tonal steps, cool gray text and seven status
+//! hues that always travel with a label or icon. Sheen belongs to the main logo only.
 
 use rune::color;
 use rune::Color;
@@ -8,37 +11,37 @@ use rune_kit::PaletteSeed;
 use rune_kit::StateColors;
 
 pub const BACKGROUND: &str = "#060709";
-pub const SURFACE: &str = "#0B0C0F";
-pub const SURFACE_RAISED: &str = "#111317";
-pub const SURFACE_ELEVATED: &str = "#181C26";
+pub const SURFACE: &str = "#0B0E13";
+pub const SURFACE_RAISED: &str = "#111720";
+pub const SURFACE_ELEVATED: &str = "#181E28";
 pub const SURFACE_INSET: &str = "#060709";
 /// Decorative framing; essential controls use BORDER_CONTROL.
-pub const BORDER_SUBTLE: &str = "#3A3833";
-pub const BORDER_CONTROL: &str = "#898274";
-pub const TEXT_PRIMARY: &str = "#F3EEE4";
-pub const TEXT_SECONDARY: &str = "#D6D2C4";
-pub const TEXT_MUTED: &str = "#B8B4A8";
-pub const ACCENT: &str = "#C6A56E";
-pub const ACCENT_PRESSED: &str = "#C4A265";
-pub const ACCENT_HOVER: &str = "#D8BD8C";
-pub const ACCENT_HIGHLIGHT: &str = "#F2DFB6";
-pub const ACCENT_DEEP: &str = "#8E6E3B";
+pub const BORDER_SUBTLE: &str = "#262D38";
+pub const BORDER_CONTROL: &str = "#6F7B8D";
+pub const TEXT_PRIMARY: &str = "#E8EDF4";
+pub const TEXT_SECONDARY: &str = "#BEC7D4";
+pub const TEXT_MUTED: &str = "#9AA6B6";
+pub const ACCENT: &str = "#A9B8CC";
+pub const ACCENT_PRESSED: &str = "#8FA1B8";
+pub const ACCENT_HOVER: &str = "#C3CFDF";
+pub const ACCENT_HIGHLIGHT: &str = "#DCE6F3";
+pub const ACCENT_DEEP: &str = "#4F5E73";
 pub const ON_ACCENT: &str = "#060709";
-pub const SELECTION_SURFACE: &str = "#322C22";
+pub const SELECTION_SURFACE: &str = "#1B2533";
 
-/// Gunmetal metallic stops for neutral interactive controls.
+/// Cool dark-metal stops kept for the fractured-obsidian submit texture and the logo mark.
 pub const METAL_DARK_TOP: &str = "#222631";
 pub const METAL_DARK_MID: &str = "#14171F";
 pub const METAL_DARK_BOTTOM: &str = "#0D0F14";
 pub const METAL_PANEL_HIGHLIGHT: &str = "#252A32";
 pub const METAL_PANEL_MID: &str = "#151920";
 pub const METAL_PANEL_LOW: &str = "#0A0C10";
-pub const METAL_EDGE_TOP: &str = "#5A5448";
-pub const METAL_EDGE_BOTTOM: &str = "#24211C";
+pub const METAL_EDGE_TOP: &str = "#4A5262";
+pub const METAL_EDGE_BOTTOM: &str = "#1E232C";
 
-/// Luminous ambient glow and deep cast shadow colors.
-pub const LIGHT_SURFACE_GLOW: &str = "#F7E8C9";
-pub const GOLD_GLOW: &str = "#D8BD8C";
+/// Cool specular and cast-shadow colors. The names predate the matte theme; none is ivory now.
+pub const LIGHT_SURFACE_GLOW: &str = "#D5DCE5";
+pub const GOLD_GLOW: &str = "#9AA6B6";
 pub const CAST_SHADOW: &str = "#020304";
 
 /// Semantic status palette aligned with Fleetworks web tokens.

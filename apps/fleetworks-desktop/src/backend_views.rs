@@ -241,7 +241,7 @@ fn atlas(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
                                 ActionButton::new("Confirm New Cycle")
                                     .key("atlas-submit-confirm")
                                     .icon(&icons::ATLAS)
-                                    .finish(MetalFinish::GoldCta)
+                                    .finish(MetalFinish::Fractured)
                                     .on_press(|state: &mut State| {
                                         state.confirm_submission(SubmissionKind::Atlas)
                                     })
@@ -501,7 +501,7 @@ fn atlas(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
                             ActionButton::new("Delete from history")
                                 .key("cycle-delete-confirm")
                                 .icon(&icons::TRASH)
-                                .finish(MetalFinish::CrimsonDanger)
+                                .finish(MetalFinish::FracturedDanger)
                                 .busy(matches!(state.cycles.deletion, Load::Loading))
                                 .on_press(|state: &mut State| state.confirm_delete_cycle())
                                 .build(kit, preferences, pointer_ref),
@@ -1094,7 +1094,7 @@ fn configuration_status(state: &State, preferences: ViewPreferences, kit: &Kit) 
                         ActionButton::new("Confirm change")
                             .key("configuration-confirm")
                             .icon(&icons::SHIELD_CHECK)
-                            .finish(MetalFinish::GoldCta)
+                            .finish(MetalFinish::Fractured)
                             .on_press(|state: &mut State| state.confirm_configuration())
                             .build(kit, preferences, pointer_ref),
                     )
@@ -1471,7 +1471,7 @@ fn jobs(
                     let confirm_button = ActionButton::new("Confirm retry")
                         .key("job-action-confirm")
                         .icon(&icons::SHIELD_CHECK)
-                        .finish(MetalFinish::GoldCta)
+                        .finish(MetalFinish::Fractured)
                         .status(
                             if confirming { "Queuing…" } else { "Ready" },
                             if confirming {
@@ -2153,7 +2153,7 @@ fn csv_path_prompt(
             .child(
                 ActionButton::new("Use this CSV")
                     .key("maintenance-csv-path-submit")
-                    .finish(MetalFinish::GoldCta)
+                    .finish(MetalFinish::Fractured)
                     .on_press(|state: &mut State| state.submit_csv_path())
                     .build(kit, preferences, pointer_ref),
             )
@@ -2237,7 +2237,7 @@ pub(crate) fn maintenance_confirmation_content(
                     ActionButton::new(confirm_label)
                         .key("maintenance-confirm")
                         .icon(&icons::SHIELD_CHECK)
-                        .finish(MetalFinish::GoldCta)
+                        .finish(MetalFinish::Fractured)
                         .status(
                             if busy { "Queuing…" } else { "Ready" },
                             if busy {

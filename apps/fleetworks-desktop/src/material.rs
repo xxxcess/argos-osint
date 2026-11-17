@@ -14,7 +14,6 @@ use rune::El;
 use rune::Live;
 use rune::LoopSpec;
 use rune::Shadow;
-use rune::Shape;
 use rune_kit::Elevation;
 use rune_kit::Kit;
 
@@ -258,20 +257,10 @@ fn finish_colors(finish: MetalFinish) -> (Color, Color, Color) {
     }
 }
 
-/// The overlay of one shard. It changes a channel by about `50 * opacity * |tone|` levels at
-/// most: matte relief, not gloss. Lighter shards add TEXT_PRIMARY, darker ones CAST_SHADOW.
-fn shard_color(tone: f32, opacity: f32) -> Color {
-    if tone > 0.0 {
-        theme::hex(theme::TEXT_PRIMARY).alpha(0.22 * opacity * tone)
-    } else {
-        theme::hex(theme::CAST_SHADOW).alpha((1.25 * opacity * -tone).min(1.0))
-    }
-}
-
 /// Tiles laid side by side for an action not yet measured (its first frame, or no key).
 const DEFAULT_TILES: usize = 8;
 /// The most tiles under one action (16 384 px). shortcut: a wider action is flat past that, and
-/// one taller than the 90 px tile rows has none below them.
+/// one taller than a tile (256 px) is flat below it.
 const MAX_TILES: usize = 64;
 
 /// Tiles needed to cover an action `width` px wide: the 256 px tile at fixed scale, repeated
@@ -291,34 +280,27 @@ pub(crate) fn texture_tiles(key: Option<&str>) -> usize {
         .unwrap_or(DEFAULT_TILES)
 }
 
-/// The fractured-obsidian texture, one 256 px tile from [`crate::rock`] repeated along x. It is
-/// anchored to the control's top-left corner at a fixed scale, so a label, busy state or width
-/// change never moves it, and it is clipped to the control's rounded corners. It paints over
-/// the fill and under the label.
+/// The approved crescent rock, one 256 px logical tile from [`crate::rock`] repeated along x. It
+/// is anchored to the control's top-left corner at a fixed scale, so a label, busy state or
+/// width change never moves it, and it is clipped to the control's rounded corners. Each tile
+/// is an image whose opacity follows the control's hover group: `rest` normally, `hover` while
+/// hovered. It paints over the fill and under the label.
 fn rock_texture(radius: f32, rest: f32, hover: f32, tiles: usize) -> El {
-    let mut shape = Shape::new();
-    for shard in rock::shards() {
-        shape = shape.fill(shard.points.to_vec(), shard_color(shard.tone, hover));
-    }
-    let tiles = (0..tiles).map(|n| {
+    let tile = rock::pixels();
+    let images = (0..tiles).map(|n| {
         el().absolute(n as f32 * rock::TILE, 0.0)
-            .size(rock::TILE, 90.0)
-            .shape(shape.clone())
+            .size(rock::TILE, rock::TILE)
+            .pixels(&tile)
+            .group_opacity(rest, hover)
+            .a11y_hidden()
     });
-    // The shape is drawn at the hover opacity; at rest the layer's group opacity scales it down.
-    let layer = el()
-        .key("rock-texture")
+    el().key("rock-texture")
         .absolute(0.0, 0.0)
         .w_full()
         .h_full()
         .a11y_hidden()
         .clip_rounded(radius)
-        .children(tiles);
-    if rest < hover {
-        layer.group_opacity(rest / hover, 1.0)
-    } else {
-        layer
-    }
+        .children(images)
 }
 
 /// A color shifted by `levels` 8-bit steps in encoded sRGB, the space the theme's hex values and
@@ -633,14 +615,16 @@ mod finish_tests {
 
     #[test]
     fn the_texture_is_faint_at_rest_and_fainter_when_disabled() {
-        // 0.12 rest opacity: at most 0.22 * 0.12 of white, under 7 levels.
-        let light = shard_color(1.0, TEXTURE_OPACITY);
-        assert!(light.a <= 0.22 * 0.12 + 1e-6, "{}", light.a);
-        assert!(255.0 * light.a <= 7.0);
-        // A neutral shard paints nothing; a dark shard darkens.
-        assert_eq!(shard_color(0.0, TEXTURE_OPACITY).a, 0.0);
-        assert!(shard_color(-1.0, TEXTURE_OPACITY).a > 0.0);
-        assert!(shard_color(1.0, TEXTURE_OPACITY_DISABLED).a < light.a);
+        // The overlay's strongest light pixel is alpha 0.22; at each state opacity it adds
+        // at most this many channel levels (about 50 * opacity): matte relief, not gloss.
+        let levels = |opacity: f32| 0.22 * opacity * 255.0;
+        assert!(
+            levels(TEXTURE_OPACITY) <= 7.0,
+            "{}",
+            levels(TEXTURE_OPACITY)
+        );
+        assert!(levels(TEXTURE_OPACITY_HOVER) <= 8.0);
+        assert!(levels(TEXTURE_OPACITY_DISABLED) < levels(TEXTURE_OPACITY));
     }
 
     #[test]

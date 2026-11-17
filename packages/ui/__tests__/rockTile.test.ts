@@ -1,49 +1,69 @@
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import {
-  ROCK_TILE,
-  rockChecksum,
-  rockShards,
-  rockTileImage,
-} from "../src/rockTile";
+import { ROCK_TILE, rockTileImage } from "../src/rockTile";
+import { ROCK_TILE_DATA_URI } from "../src/rockTileData";
 import { rockTextureStyle, textureOpacity } from "../src";
 
-describe("fractured-obsidian tile", () => {
-  it("matches the checksum pinned by apps/fleetworks-desktop/src/rock.rs", () => {
-    expect(rockShards()).toHaveLength(96);
-    expect(rockChecksum()).toBe(2914555029);
+const root = join(__dirname, "../../..");
+const manifest = JSON.parse(
+  readFileSync(
+    join(root, "assets/brand/rock/fleetworks-rock-tile.manifest.json"),
+    "utf8",
+  ),
+);
+
+describe("approved crescent rock tile", () => {
+  it("embeds exactly the committed PNG that the manifest records", () => {
+    const prefix = "data:image/png;base64,";
+    expect(ROCK_TILE_DATA_URI.startsWith(prefix)).toBe(true);
+    const bytes = Buffer.from(
+      ROCK_TILE_DATA_URI.slice(prefix.length),
+      "base64",
+    );
+    const committed = readFileSync(
+      join(root, "assets/brand/rock/fleetworks-rock-tile.png"),
+    );
+    expect(bytes.equals(committed)).toBe(true);
+    const recorded = manifest.outputs["fleetworks-rock-tile.png"];
+    expect(bytes.length).toBe(recorded.bytes);
+    expect(createHash("sha256").update(bytes).digest("hex")).toBe(
+      recorded.sha256,
+    );
   });
 
-  it("has zero mean tone, bounded tones and 12-28 px fragments", () => {
-    const shards = rockShards();
-    const sum = shards.reduce((acc, s) => acc + s.tone, 0);
-    expect(Math.abs(sum)).toBeLessThan(1e-9);
-    for (const shard of shards) {
-      expect(Math.abs(shard.tone)).toBeGreaterThanOrEqual(0.3);
-      expect(Math.abs(shard.tone)).toBeLessThanOrEqual(1);
-      const xs = shard.points.map((p) => p[0]);
-      const width = Math.max(...xs) - Math.min(...xs);
-      expect(width).toBeGreaterThanOrEqual(12);
-      expect(width).toBeLessThanOrEqual(28);
-    }
+  it("is a 512 px overlay shown at 256 logical px, from the approved source", () => {
+    expect(manifest.tile_size_px).toBe(512);
+    expect(manifest.displayed_logical_px).toBe(ROCK_TILE);
+    expect(manifest.source.sha256).toBe(
+      "1ae553782431da7649a1d88accdacc9076c3a039f1c2b5c0018f5998d7d70112",
+    );
+    // The native overlay is the same pixels: one 512 x 512 RGBA image.
+    const rgba = readFileSync(
+      join(root, "assets/brand/rock/fleetworks-rock-tile.rgba"),
+    );
+    expect(rgba.length).toBe(512 * 512 * 4);
+    expect(
+      Math.abs(manifest.normalization.mean_T_after_quantization),
+    ).toBeLessThan(0.01);
   });
 
-  it("is anchored at the top-left at a fixed scale for every state", () => {
-    const rest = rockTextureStyle(textureOpacity.rest);
-    expect(rest.backgroundPosition).toBe("0 0");
-    expect(rest.backgroundSize).toBe(`${ROCK_TILE}px 90px`);
-    expect(rest.backgroundRepeat).toBe("repeat-x");
+  it("is anchored top-left at a fixed scale and repeated on both axes", () => {
+    expect(rockTextureStyle.backgroundImage).toBe(rockTileImage);
+    expect(rockTextureStyle.backgroundPosition).toBe("0 0");
+    expect(rockTextureStyle.backgroundSize).toBe(
+      `${ROCK_TILE}px ${ROCK_TILE}px`,
+    );
+    expect(rockTextureStyle.backgroundRepeat).toBe("repeat");
   });
 
-  it("draws fainter relief when disabled than at rest, and caches each opacity", () => {
-    const alphas = (image: string) =>
-      [...decodeURIComponent(image).matchAll(/fill-opacity="([\d.]+)"/g)].map(
-        (m) => Number(m[1]),
-      );
-    const rest = alphas(rockTileImage(textureOpacity.rest));
-    const off = alphas(rockTileImage(textureOpacity.disabled));
-    expect(rest).toHaveLength(96);
-    expect(Math.max(...rest)).toBeGreaterThan(Math.max(...off));
-    expect(Math.max(...rest)).toBeLessThan(0.2);
-    expect(rockTileImage(textureOpacity.rest)).toBe(rockTileImage(0.12));
+  it("keeps the state opacities of the recipe, faintest when disabled", () => {
+    expect(textureOpacity).toEqual({
+      rest: 0.12,
+      hover: 0.14,
+      pressed: 0.1,
+      disabled: 0.04,
+    });
   });
 });

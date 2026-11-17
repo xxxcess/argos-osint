@@ -283,4 +283,23 @@ describe("Button token bindings", () => {
     const { container } = render(<Button onPress={() => {}}>Plain</Button>);
     expect(applied(buttonEl(container)).minHeight).toBe("40px");
   });
+
+  it("draws the rock overlay at the state opacity, and none on a smooth button", () => {
+    const layer = (container: HTMLElement) =>
+      container.querySelector('[aria-hidden="true"]') as HTMLElement | null;
+    const { container, rerender } = render(
+      <Button onPress={() => {}} intent="submit">
+        Go
+      </Button>,
+    );
+    expect(applied(layer(container)!).opacity).toBe("0.12");
+    rerender(
+      <Button onPress={() => {}} intent="submit" disabled>
+        Go
+      </Button>,
+    );
+    expect(applied(layer(container)!).opacity).toBe("0.04");
+    rerender(<Button onPress={() => {}}>Go</Button>);
+    expect(layer(container)).toBeNull();
+  });
 });

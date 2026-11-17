@@ -1,6 +1,6 @@
 "use client";
 import React, { useState } from "react";
-import { ROCK_TILE_HEIGHT, ROCK_TILE, rockTileImage } from "./rockTile";
+import { ROCK_TILE, rockTileImage } from "./rockTile";
 import {
   View,
   Text,
@@ -123,15 +123,26 @@ export const textureOpacity = {
   pressed: 0.1,
   disabled: 0.04,
 };
-/** The rock tile as web-only background styles, anchored to the control's top-left corner. */
-export function rockTextureStyle(opacity: number): WebStyle {
-  return {
-    backgroundImage: rockTileImage(opacity),
-    backgroundSize: `${ROCK_TILE}px ${ROCK_TILE_HEIGHT}px`,
-    backgroundPosition: "0 0",
-    backgroundRepeat: "repeat-x",
-    backgroundOrigin: "border-box",
-  };
+/**
+ * The approved crescent rock as a web-only background, anchored to the layer's top-left corner at
+ * a fixed 256 px scale and repeated on both axes. It is drawn on an overlay layer whose own
+ * `opacity` is the state opacity above.
+ */
+export const rockTextureStyle: WebStyle = {
+  backgroundImage: rockTileImage,
+  backgroundSize: `${ROCK_TILE}px ${ROCK_TILE}px`,
+  backgroundPosition: "0 0",
+  backgroundRepeat: "repeat",
+};
+/** The texture layer of an action: fills the control, never takes input, hidden from readers. */
+export function RockTexture({ opacity }: { opacity: number }) {
+  return (
+    <View
+      aria-hidden
+      pointerEvents="none"
+      style={[StyleSheet.absoluteFill, rockTextureStyle as object, { opacity }]}
+    />
+  );
 }
 export type Tone = "accent" | "success" | "warning" | "danger" | "purple";
 export const toneColor: Record<Tone, string> = {
@@ -264,15 +275,6 @@ export function Button({
               : hovered
                 ? tint.hover
                 : tint.rest,
-          ...rockTextureStyle(
-            disabled
-              ? textureOpacity.disabled
-              : pressed
-                ? textureOpacity.pressed
-                : hovered
-                  ? textureOpacity.hover
-                  : textureOpacity.rest,
-          ),
         },
         variant === "quiet" && s.quiet,
         variant === "primary" && s.primary,
@@ -281,25 +283,47 @@ export function Button({
           !pressed &&
           variant === "primary" &&
           s.primaryHover,
-        !disabled && hovered && !pressed && variant !== "primary" && s.hovered,
+        !tint &&
+          !disabled &&
+          hovered &&
+          !pressed &&
+          variant !== "primary" &&
+          s.hovered,
         !disabled && pressed && variant === "primary" && s.primaryPressed,
-        !disabled && pressed && variant !== "primary" && s.pressed,
+        !tint && !disabled && pressed && variant !== "primary" && s.pressed,
         !tint && active && s.active,
         !tint && disabled && s.disabled,
       ]}
     >
-      <Text
-        style={[
-          s.buttonText,
-          variant === "quiet" && s.quietText,
-          variant === "primary" && s.primaryText,
-          tint && { color: disabled ? colors.muted : tint.ink },
-          !tint && active && s.activeText,
-          !tint && disabled && s.disabledText,
-        ]}
-      >
-        {children}
-      </Text>
+      {({ pressed }) => (
+        <>
+          {tint ? (
+            <RockTexture
+              opacity={
+                disabled
+                  ? textureOpacity.disabled
+                  : pressed
+                    ? textureOpacity.pressed
+                    : hovered
+                      ? textureOpacity.hover
+                      : textureOpacity.rest
+              }
+            />
+          ) : null}
+          <Text
+            style={[
+              s.buttonText,
+              variant === "quiet" && s.quietText,
+              variant === "primary" && s.primaryText,
+              tint && { color: disabled ? colors.muted : tint.ink },
+              !tint && active && s.activeText,
+              !tint && disabled && s.disabledText,
+            ]}
+          >
+            {children}
+          </Text>
+        </>
+      )}
     </Pressable>
   );
 }

@@ -126,7 +126,51 @@ pub(crate) fn configure_kit(kit: &mut Kit, _preferences: ViewPreferences) {
     kit.elevation = elevation;
 }
 
-/// A flat group: one tonal step over the canvas with a 20 px radius and no stroke.
+/// The diffuse perimeter of one group, in logical pixels (theme.md section 2).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct GroupEdge {
+    /// Corner radius of the group boundary.
+    pub(crate) radius: f32,
+    /// Width of the alpha ramp inward from the boundary.
+    pub(crate) ramp: f32,
+    /// Content inset from the boundary, past the ramp.
+    pub(crate) inset: f32,
+    /// Spread and blur of the canvas-colored inset shadow that draws the ramp.
+    spread: f32,
+    blur: f32,
+}
+
+impl GroupEdge {
+    /// Standard groups: 20 px radius, 16 px ramp, 24 px inset.
+    pub(crate) const STANDARD: GroupEdge = GroupEdge {
+        radius: 20.0,
+        ramp: 16.0,
+        inset: 24.0,
+        spread: 8.0,
+        blur: 7.5,
+    };
+    /// Compact groups under 160 px high: 16 px radius, 12 px ramp, 20 px inset.
+    pub(crate) const COMPACT: GroupEdge = GroupEdge {
+        radius: 16.0,
+        ramp: 12.0,
+        inset: 20.0,
+        spread: 6.0,
+        blur: 5.6,
+    };
+
+    /// The group's coverage `depth` px inside its boundary: `t*t*(3-2t)` for `t = depth / ramp`.
+    pub(crate) fn alpha(self, depth: f32) -> f32 {
+        let t = (depth / self.ramp).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    }
+}
+
+/// A flat group whose perimeter dissolves into the canvas, with no stroke. The ramp belongs to
+/// the group's own background, so children are never attenuated. A selected item keeps a crisp
+/// functional boundary instead.
+/// shortcut: the renderer has no alpha-mask primitive, so a Gaussian inset shadow fitted to the
+/// smoothstep ramp draws it (within 0.03 alpha everywhere, under one 8-bit level on these
+/// colors). Replace it with a nine-slice alpha asset if a mask primitive lands.
 pub(crate) fn luminous_card(
     content: El,
     tone: StatusTone,
@@ -135,37 +179,38 @@ pub(crate) fn luminous_card(
     _pointer_offset: Option<&Live<[f32; 2]>>,
     _shadow_offset: Option<&Live<[f32; 2]>>,
 ) -> El {
-    // Groups dissolve into the canvas: no decorative stroke. A selected item keeps one tone edge.
-    // shortcut: a flat fill stands in for the 16 px alpha-masked perimeter of the theme; add the
-    // masked group background when the renderer's mask primitive is verified.
+    group_surface(content, tone, selected, GroupEdge::STANDARD)
+}
+
+/// Draw `content` as a group with the perimeter `edge`, inset to clear the ramp.
+fn group_surface(content: El, tone: StatusTone, selected: bool, edge: GroupEdge) -> El {
+    let content = content.padding(edge.inset).radius(edge.radius);
     if selected {
         content
             .fill(theme::hex(theme::SURFACE_RAISED))
             .border(1.0, tone.border())
-            .radius(20.0)
     } else {
-        content.fill(theme::hex(theme::SURFACE)).radius(20.0)
+        content.fill(theme::hex(theme::SURFACE)).box_shadow(Shadow {
+            blur: edge.blur,
+            spread: edge.spread,
+            color: theme::hex(theme::BACKGROUND),
+            inset: true,
+            ..Shadow::default()
+        })
     }
 }
 
-/// A clickable tile: the same flat card with a one-step lift on hover.
+/// A clickable tile: a compact group with a one-step lift on hover.
 pub(crate) fn interactive_tile(
     content: El,
     selected: bool,
     tone: StatusTone,
-    preferences: ViewPreferences,
-    pointer_offset: Option<&Live<[f32; 2]>>,
-    shadow_offset: Option<&Live<[f32; 2]>>,
+    _preferences: ViewPreferences,
+    _pointer_offset: Option<&Live<[f32; 2]>>,
+    _shadow_offset: Option<&Live<[f32; 2]>>,
 ) -> El {
-    luminous_card(
-        content,
-        tone,
-        selected,
-        preferences,
-        pointer_offset,
-        shadow_offset,
-    )
-    .hover(theme::hex(theme::SURFACE_ELEVATED))
+    group_surface(content, tone, selected, GroupEdge::COMPACT)
+        .hover(theme::hex(theme::SURFACE_ELEVATED))
 }
 
 /// Texture opacity at rest, hover-free; disabled controls use [`TEXTURE_OPACITY_DISABLED`].
@@ -424,6 +469,52 @@ mod finish_tests {
         MetalFinish::FracturedConfirm,
         MetalFinish::FracturedDanger,
     ];
+
+    /// Abramowitz and Stegun 7.1.26, absolute error under 1.5e-7.
+    fn erf(x: f32) -> f32 {
+        let t = 1.0 / (1.0 + 0.327_591_1 * x.abs());
+        let poly = t
+            * (0.254_829_6
+                + t * (-0.284_496_74 + t * (1.421_413_7 + t * (-1.453_152_1 + t * 1.061_405_4))));
+        (1.0 - poly * (-x * x).exp()).copysign(x)
+    }
+
+    /// The coverage the renderer draws: an inset shadow of the canvas color with the edge's
+    /// spread and `blur = 2 sigma` leaves the group `Phi((depth - spread) / sigma)`.
+    fn drawn_alpha(edge: GroupEdge, depth: f32) -> f32 {
+        let sigma = edge.blur / 2.0;
+        0.5 * (1.0 + erf((depth - edge.spread) / sigma / std::f32::consts::SQRT_2))
+    }
+
+    #[test]
+    fn the_group_ramp_is_smoothstep_over_the_theme_widths() {
+        for (edge, ramp, radius, inset) in [
+            (GroupEdge::STANDARD, 16.0, 20.0, 24.0),
+            (GroupEdge::COMPACT, 12.0, 16.0, 20.0),
+        ] {
+            assert_eq!((edge.ramp, edge.radius, edge.inset), (ramp, radius, inset));
+            assert_eq!(edge.alpha(0.0), 0.0);
+            assert_eq!(edge.alpha(ramp / 2.0), 0.5);
+            assert_eq!(edge.alpha(ramp), 1.0);
+            assert_eq!(edge.alpha(ramp * 3.0), 1.0);
+            assert_eq!(edge.alpha(-4.0), 0.0, "outside the boundary");
+            // Content never sits in the fading perimeter.
+            assert!(edge.inset >= edge.ramp);
+        }
+    }
+
+    #[test]
+    fn the_drawn_shadow_follows_the_smoothstep_ramp_closely() {
+        for edge in [GroupEdge::STANDARD, GroupEdge::COMPACT] {
+            let mut worst = 0.0f32;
+            let mut depth = 0.0;
+            while depth <= edge.ramp * 2.0 {
+                worst = worst.max((drawn_alpha(edge, depth) - edge.alpha(depth)).abs());
+                depth += 0.25;
+            }
+            assert!(worst < 0.03, "{edge:?} deviates by {worst}");
+        }
+    }
 
     #[test]
     fn only_submit_confirm_and_delete_finishes_carry_texture() {

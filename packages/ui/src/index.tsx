@@ -63,6 +63,32 @@ export const glow = (color: string): WebStyle => ({
   boxShadow: `inset 0 0 0 1px ${color}`,
 });
 /**
+ * The diffuse perimeter of a group (theme.md section 2): a smoothstep alpha ramp of `ramp` px
+ * inward from a `radius` boundary, content inset by `inset`. CSS has no alpha mask for a
+ * background alone, so a canvas-colored inset shadow with `spread` and `blur = 2 sigma` draws a
+ * Gaussian ramp fitted to the smoothstep (within 0.03 alpha, under one 8-bit level on these
+ * colors). The same fit is used by the native `GroupEdge`. Children are never attenuated.
+ */
+export const groupEdge = {
+  standard: { radius: 20, ramp: 16, inset: 24, spread: 8, blur: 7.5 },
+  compact: { radius: 16, ramp: 12, inset: 20, spread: 6, blur: 5.6 },
+};
+export type GroupEdge = (typeof groupEdge)[keyof typeof groupEdge];
+/** The group's coverage `depth` px inside its boundary: `t*t*(3-2t)`, `t = depth / ramp`. */
+export function groupAlpha(edge: GroupEdge, depth: number): number {
+  const t = Math.min(1, Math.max(0, depth / edge.ramp));
+  return t * t * (3 - 2 * t);
+}
+export function groupSurface(edge: GroupEdge): WebStyle {
+  return {
+    backgroundColor: colors.panel,
+    borderWidth: 0,
+    borderRadius: edge.radius,
+    padding: edge.inset,
+    boxShadow: `inset 0 0 ${edge.blur}px ${edge.spread}px ${colors.bg}`,
+  };
+}
+/**
  * Actions that submit, confirm, create or delete (Connect submits) carry the coarse matte rock
  * texture; every other control stays smooth. Fills and ink follow docs/design/matte-canvas/theme.md.
  */
@@ -393,7 +419,11 @@ const s = StyleSheet.create({
     borderColor: colors.glassBorder,
   },
   disabledText: { color: colors.muted },
-  panel: { ...(glass as object), padding: 20, gap: 16, minWidth: 0 },
+  panel: {
+    ...groupSurface(groupEdge.standard),
+    gap: 16,
+    minWidth: 0,
+  },
   frame: { padding: 16, gap: 12, minWidth: 0 },
   tag: {
     fontFamily: fonts.mono,

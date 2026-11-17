@@ -77,8 +77,7 @@ describe("Theme tokens (imported from @argos/ui source)", () => {
     const appliedStyle = sheetStyle(panel);
     expect(paint(panel, "backgroundColor")).toBe(colors.glass.toLowerCase());
     expect(appliedStyle["backdrop-filter"]).toBeUndefined();
-    expect(paint(panel, "borderTopColor")).toBe(colors.cardEdge);
-    expect(appliedStyle["border-top-width"]).toBe("1px");
+    expect(appliedStyle["border-top-width"]).toBe("0px");
     expect(screen.getByText("token consumer")).toBeVisible();
   });
 

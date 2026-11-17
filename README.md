@@ -1,12 +1,16 @@
 # Fleetworks
 
 <p align="center">
-  <img src="assets/brand/fleetworks-logo.jpg" alt="Fleetworks emblem with five gold rays, an ivory disc, and a gold crescent" width="960">
+  <img src="assets/brand/source/fleetworks-liquid-metal-glass.png" alt="Fleetworks symbol: molten glass core, obsidian crescent and five glass satellites" width="560">
 </p>
 
 Fleetworks collects public-source intelligence, connects evidence to actors and articles, and prepares cited Focus Briefs. Fleetworks Desktop is a native Rune macOS control hub connected to an independently operated Linux backend. Intel Web provides the browser desktop. Backend services are deployed directly with Docker Compose.
 
 [Native app](apps/fleetworks-desktop/README.md) · [Connections](docs/wiki/code/native-connections.md) · [Setup and usage](docs/wiki/code/fleetworks.md) · [Deployment](deploy/README.md) · [Wiki](docs/index.md) · [Releases](docs/wiki/code/versioning.md)
+
+## Approved visual direction
+
+The [matte canvas design reference](docs/design/matte-canvas/README.md) defines the approved native/shared-web target, exact reproduction recipes, symbol-only branding, continuous-scroll and stable-loading behavior. It includes four reviewed concept mockups and the [selected Quiet Orbit animation](assets/brand/reference/fleetworks-quiet-orbit.gif). The docs and source assets are available; native/web runtime adoption and verification remain implementation work.
 
 ## Quick start
 

@@ -1,0 +1,57 @@
+{
+  "variant": 1,
+  "geometry": {
+    "radiusRatio": 1.3031175059952038,
+    "inclinationDegrees": 66,
+    "liftAt800": 38,
+    "prismScale": 0.7
+  },
+  "source": "fleetworks-liquid-metal-glass-baseline.png",
+  "width": 800,
+  "height": 450,
+  "fps": 20,
+  "frames": 160,
+  "renderedFrameCount": 160,
+  "duration": 8,
+  "loop": "Full 2π orbit; periodic flow, transforms and lighting; no intro/outro fade.",
+  "fullMaterialsAtFrame1": true,
+  "satelliteCount": 5,
+  "occlusion": "Negative-depth prisms behind opaque planet; positive-depth prisms in front; each set depth-sorted. Crescent is untouched; no crescent mask or collision hiding is used.",
+  "meanFrameMs": 26.1625,
+  "exactly_five_objects_every_frame": true,
+  "depth": [
+    {
+      "id": 1,
+      "min_z": -118.761,
+      "max_z": 118.761,
+      "has_front_and_rear": true
+    },
+    {
+      "id": 2,
+      "min_z": -118.761,
+      "max_z": 118.761,
+      "has_front_and_rear": true
+    },
+    {
+      "id": 3,
+      "min_z": -118.761,
+      "max_z": 118.761,
+      "has_front_and_rear": true
+    },
+    {
+      "id": 4,
+      "min_z": -118.761,
+      "max_z": 118.761,
+      "has_front_and_rear": true
+    },
+    {
+      "id": 5,
+      "min_z": -118.761,
+      "max_z": 118.761,
+      "has_front_and_rear": true
+    }
+  ],
+  "mean_abs_delta_first_to_second": 0.48447,
+  "mean_abs_delta_last_to_first": 0.48366,
+  "loop_note": "Last-to-first change comparable to ordinary adjacent-frame motion; no blank, outline or fade frames."
+}

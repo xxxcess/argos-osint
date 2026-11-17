@@ -1,5 +1,7 @@
 # Fleetworks native client
 
+**Approved visual target:** [matte canvas reproduction](../../docs/design/matte-canvas/README.md) and [implementation handoff](../../.planning/2026-11-16-matte-canvas/handoff.md) supersede earlier gold/ivory, reflective-control and pager-style visual guidance. The new source assets/docs are present; the splash, material/state/scroll changes still need native implementation and actual-view verification.
+
 The Rune/rune-kit macOS and Linux x86_64 API client connects to an independently running gateway. It never starts backend engines, Docker or Intel Web. Its six sidebar destinations are DB Seed & Train, News Cycles, Brain Search, OSINT Tools, Model Assignments and Jobs & Logs. The gateway header opens Workstation Status, featuring the **Actor search** hero card alongside Native Client, Gateway Backend and Host Resources details. Setup Gateway opens URL → operator approval → macOS Keychain / Linux D-Bus Secret Service (or explicit Linux session-only mode) → authenticated checks/registration.
 
 [Design and control allowlist](../../docs/wiki/code/native-design-system.md) · [Connection contracts](../../docs/wiki/code/native-connections.md) · [Protected identity](../../docs/wiki/code/native-workspaces.md) · [Implementation/verification status](../../.planning/2026-11-12-native-pairing-implementation/acceptance.md)

@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "status": "approved design reference; native runtime adoption pending",
+  "source": "../../source/fleetworks-liquid-metal-glass.png",
+  "source_sha256": "1ae553782431da7649a1d88accdacc9076c3a039f1c2b5c0018f5998d7d70112",
+  "source_dimensions": [
+    1672,
+    941
+  ],
+  "reference": {
+    "gif": "../fleetworks-quiet-orbit.gif",
+    "gif_sha256": "22d4e6a281c74aebdcb64d80a8f0cda82b98a580aaf73dbef1b56a85c7103d57",
+    "dimensions": [
+      800,
+      450
+    ],
+    "frames": 160,
+    "fps": 20,
+    "seconds": 8
+  },
+  "canvas": {
+    "color": "#060709",
+    "runtime_alpha": "object coverage with consistent premultiplied alpha; opaque black mineral interiors preserved",
+    "sizing": "uniform contain of the measured full-orbit envelope in logical coordinates; rasterize at device scale"
+  },
+  "startup": {
+    "duration_ms": 3000,
+    "crossfade_start_ms": 2650,
+    "focus_transfer_ms": 3000,
+    "full_materials_from_first_frame": true,
+    "replay_on_navigation": false,
+    "reduced_motion": "complete static logo",
+    "failed_asset": "complete static logo and usable setup",
+    "background": "one persistent canvas"
+  },
+  "orbit": {
+    "satellites": 5,
+    "phase_spacing_degrees": 72,
+    "radius_at_width_800_px": 130,
+    "inclination_degrees": 66,
+    "projected_upward_offset_at_width_800_px": 38,
+    "prism_scale": 0.7,
+    "core_reference_radius_at_width_800_px": 99.76,
+    "clearance": "full painted triangle silhouettes, before occlusion, never intersect the crescent",
+    "sphere_occlusion": "rear objects may be hidden by core; no crescent collision masking"
+  },
+  "evidence": {
+    "report": "orbit-clearance.json",
+    "motion": "motion-validation.json",
+    "trace": "orbital-trace.json",
+    "scope": "carried 2.5D reference evidence; not native runtime evidence"
+  }
+}

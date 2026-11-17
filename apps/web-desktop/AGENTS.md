@@ -12,7 +12,7 @@ Follow the shared [agent workflow](../../docs/wiki/code/agent-workflow.md) for e
 
 Keep work bounded by the shared [scope and finish line](../../docs/wiki/code/agent-workflow.md#scope-and-finish-line).
 
-The workstation redesign uses [matte design requirements](../../docs/wiki/code/native-design-system.md): preserve web structure and topology/list behavior while sharing palette/logo. Connect v2 uses an opaque workstation ID; optional IP metadata never defines identity. Reject old workspace contexts/cookies/query narrowing and retain authoritative session/revision/epoch fences.
+Use the approved [matte-canvas theme](../../docs/design/matte-canvas/theme.md) and [interaction-state contract](../../docs/design/matte-canvas/interaction-state.md) for shared paint and generic loading/continuous-scroll targets. Preserve existing web composition, typography, routes and topology/list behavior; do not graft native setup or service workflows onto Intel. Design targets and mockups are not claims about current runtime behavior. Connect v2 uses an opaque workstation ID; optional IP metadata never defines identity. Reject old workspace contexts/cookies/query narrowing and retain authoritative session/revision/epoch fences.
 
 For React UI changes, load `argos-react-ui` and, for components/state/performance, `argos-react-patterns`. Follow [shared UI rules](../../docs/wiki/code/react-ui.md) and the [Fleetworks look and feel](../../docs/wiki/code/react-ui.md#fleetworks-look-and-feel). Design components creatively inside the Fleetworks theme. Preserve the generated Next guidance above.
 

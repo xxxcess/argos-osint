@@ -2,7 +2,9 @@
 
 [Code route](index.md) · [Intel web contract](intel-web.md) · [Testing](react-ui-testing.md)
 
-Applies to `apps/web-desktop`, `packages/{ui,intel,api-client}`. Shared [matte design](native-design-system.md) changes paint while preserving web structure, typography and product contracts. Rune has a separate native allowlist; retired terminals are [historical](../../archive/cli-retirement.md).
+Applies to `apps/web-desktop`, `packages/{ui,intel,api-client}`. The approved [matte-canvas theme](../../design/matte-canvas/theme.md) and [interaction-state contract](../../design/matte-canvas/interaction-state.md) own shared paint and generic loading/scroll targets. Preserve existing web composition, typography, routes and product contracts; native setup/service mockups do not add Intel destinations. Rune keeps its separate [native control allowlist](native-design-system.md); retired terminals are [historical](../../archive/cli-retirement.md).
+
+**Status:** current web composition and contracts below were audited at nightly `00b700afd77ddac6cba2e2bd7ae91ab3802b7197`. The linked design targets require implementation and verification; this documentation update and its mockups do not establish changed runtime behavior.
 
 <a id="argos-look--feel-reference"></a>
 
@@ -14,10 +16,10 @@ Before building, name the screen type, density and nearest shared primitive.
 | --- | --- |
 | Type | Existing scale; mono for navigation/metadata, body for prose |
 | Space | Visible record gaps; compact only for launchers, palettes, headlines and category bullets |
-| Color | Obsidian/graphite and sparse gold/ivory; semantic hues retain their meanings |
+| Color | Cool-gray text on deep matte charcoal; contextual cyan, blue, violet, mint, amber and rose retain semantic meaning |
 | Components | Extend shared primitives; preserve functional boundaries and independent focus/selection |
-| States | Loading, empty, error, unavailable, disabled, hover, press and keyboard focus |
-| Overflow | Wrap prose, scroll long content and retain usable hit targets |
+| States | Stable headings; distinct pending, retained refresh, authoritative generation, empty, error, unavailable, disabled, hover, press and keyboard focus |
+| Overflow | Wrap prose, continuously load long lists and retain usable hit targets, stable selection and scroll anchors |
 
 No alternate graph library: web topology uses `ForceCanvas` and its accessible list twin.
 
@@ -47,18 +49,15 @@ Compiler optimization is not a correctness proof. Typecheck, Hooks/compiler diag
 
 | Authority | Responsibility |
 | --- | --- |
-| [Shared UI](../../../packages/ui/src/index.tsx) | Palette, fonts, matte recipes and primitives |
+| [Approved theme](../../design/matte-canvas/theme.md) | Canonical materials, semantic palette, symbol-only branding and approved visual references |
+| [Interaction-state contract](../../design/matte-canvas/interaction-state.md) | Stable loading/refresh presentation, reduced motion and continuous-list behavior |
+| [Shared UI](../../../packages/ui/src/index.tsx) | Implementation owner for shared palette, fonts, recipes and primitives |
 | [Intel theme](../../../packages/intel/src/shell/intel-theme.ts) | Evidence, metric and execution-state hues |
 | [Browser CSS](../../../apps/web-desktop/app/style.css) | Opaque canvas, functional focus ring and scrollbars |
-| [Canonical mark](../../../assets/brand/fleetworks-mark.svg) | Five outlined gold rays, ivory disc, gold crescent; transparent knockout |
 
-| Token | Value |
-| --- | --- |
-| Canvas / card / raised | `#060709` / `#0B0C0F` / `#111317` |
-| Primary / supporting / muted text | `#F3EEE4` / `#D6D2C4` / `#B8B4A8` |
-| Accent / pressed | `#C6A56E` / `#C4A265` |
-| Functional boundary | `#898274` |
-| Decorative card / satin control edge | 2% / 3% ivory; never a functional boundary substitute |
+Use the single `#060709` canvas and the canonical theme's token values. Existing source tokens/assets are implementation inputs, not permission to retain superseded ivory/gold primary accents. Brand display areas show the approved symbol without a visible Fleetworks wordmark. The logo alone retains permanent metallic sheen; preserve its molten core, rocky crescent, five prisms and triangle/crescent clearance.
+
+Approved native visual references: [Workstation Status](../../design/matte-canvas/mockups/01-workstation-status.png), [Setup Gateway](../../design/matte-canvas/mockups/02-setup-gateway.png), [Jobs & Logs](../../design/matte-canvas/mockups/03-jobs-logs.png) and [compact Workstation Status](../../design/matte-canvas/mockups/04-compact-workstation.png). These guide shared paint and generic states, not web navigation or native-workflow adoption.
 
 ### Intel matte desk
 
@@ -66,15 +65,15 @@ Compiler optimization is not a correctness proof. Typecheck, Hooks/compiler diag
 
 | Surface/state | Recipe |
 | --- | --- |
-| Read-only card | Opaque matte body, faint static edge; no implied hover/focus action |
-| Default control | Graphite body and functional border; hover accent wash, pressed raised fill |
-| Quiet control | Transparent fill, retained functional border and supporting text |
-| Primary | Flat gold with dark text; hover gold and pressed crescent-gold fills |
-| Selected | Stable fill/border plus `aria-pressed`; separate from keyboard focus |
-| Disabled | Readable muted label/boundary and semantic disabled state |
-| Compatibility exports | `glass` now supplies matte-card paint; `glow()` supplies a static inset rim |
+| Reading, metrics and readiness | Smooth matte charcoal, diffuse edges blending into the canvas; group by spacing/type without card strokes or grid dividers |
+| Navigation and utility controls | Smooth matte; Settings, Cancel, filter, refresh, pop-out and read Retry never use rock texture; use a flat contextual selection marker |
+| Submit / Confirm / Create / Delete | Coarse matte fractured crescent-rock on the button face only; Connect qualifies as form submission; contextual color without metallic reflection |
+| Selected | Stable semantic treatment plus the appropriate accessible state; distinct from keyboard focus |
+| Disabled | Readable muted label and semantic disabled state; material eligibility still follows the action's intent |
+| Pending placeholder | Constant matte skeleton base with restrained cool translated sheen; localized to unresolved content and static for reduced motion |
+| Compatibility exports | Retain shared APIs such as `glass`/`glow()` while implementing the approved paint; names do not authorize glossy surfaces |
 
-No backdrop blur, gloss, broad reflections, shimmer or decorative card-entry animation. Opaque preferences retain readable static states. Existing view/camera motion remains preference-aware; it introduces no renderer or animation library. Gold is branding, not severity or confidence.
+Outside the approved logo and localized pending shimmer, use no metallic sheen, broad reflections, backdrop blur or decorative card-entry animation. Functional focus/selection cues remain visible even though decorative panel outlines are removed. Opaque preferences retain readable states. Existing view/camera motion stays preference-aware; this target introduces no renderer or animation-library requirement.
 
 ## UI/UX guidance
 
@@ -111,9 +110,13 @@ Canvas is not the sole content path: expose the same entities, relationships, se
 
 Use RN `View`, `Text`, `Pressable`, `Image` and `StyleSheet`; keep DOM styles/globals, persistence and UUIDs in app adapters. Strings belong in `Text`; zero-valued conditions cannot leak bare `0`. Labels are independent of placeholders. Preserve entered values after errors, native keyboard semantics, logical focus order and usable touch targets. Keep wrapping/`minWidth: 0`, reserve image geometry and retain safe URL/error fallback. Refresh keeps readable data; duplicate pending mutations stay disabled.
 
-## Async data and pagination
+<a id="async-data-and-pagination"></a>
+
+## Async data and continuous lists
 
 @tag:abort-signal
+
+Follow the [interaction-state contract](../../design/matte-canvas/interaction-state.md). Keep section headings concise and stable instead of swapping in Latest/Loading/Updating text. Resolve visible state from request identity and authoritative domain status; never extend loading for a minimum shimmer/spinner duration or delay a real failure/completion.
 
 | Observation | Presentation |
 | --- | --- |
@@ -127,7 +130,7 @@ Use RN `View`, `Text`, `Pressable`, `Image` and `StyleSheet`; keep DOM styles/gl
 
 First-load Brief skeleton matches header, summary, three evidence regions and context rail at the same 900px breakpoint. Later reads use section-sized placeholders, never duplicate whole-view skeletons. Bulletin has one initial feed skeleton despite overlapping day/feed reads; loaded/skeleton rows retain 154px minimum height, 16px padding, 6px gaps and a 120px thumbnail. Longer text can expand rows.
 
-Pagination uses opaque cursors, occurrence deduplication and category/day/search/sort/backend/instance keys. Near-end reads require a next page, no active fetch and no unresolved page error; `cancelRefetch: false` deduplicates scroll events. Keep Load more/retry reachable. Empty categories show verified zero; no days prompt collection.
+Long lists use continuous near-end loading without Prev/Next controls or page-number chrome. Keep cursor APIs opaque, occurrence deduplication and category/day/search/sort/backend/instance keys. Near-end reads require a next page, no active fetch and no unresolved page error; `cancelRefetch: false` deduplicates scroll events. Append stable rows while preserving selection, focus and scroll anchors; loading uses a small tail skeleton, and continuation failures retain settled rows with a local reachable Retry. Support keyboard/assistive continuation rather than requiring pointer scrolling. Empty categories show verified zero; no days prompt collection.
 
 REST owns snapshots/actions. One app-supplied live transport updates Query for metrics/pending brief progress; meaningful changes invalidate only active detail. General/Related reads do not poll; inactive Bulletin observers stop; visible feed refreshes once per minute. [Live contract](intel-web.md#rest-snapshots-and-live-updates)
 
@@ -172,3 +175,4 @@ Current landing behavior is linked from [feature composition](#feature-compositi
 Related leads in the Brief sidebar form a single full-width stack. RelatedBriefCard takes the width of its actual container, including dossier grid wrappers, rather than a viewport-based maximum; text wraps within that width and descriptions retain two-line previews.
 
 Brief actor states preserve available metadata chips during Full article cleanup and append clean-body actors by canonical ID. An initially empty collection uses the actor skeleton until cleanup/matching finishes. Failure remains incomplete detection; an empty result appears only after the pending state ends. The compact progress indicator sits after already available actors, without replacing them or disturbing keyboard order.
+

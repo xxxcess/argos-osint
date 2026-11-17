@@ -23,6 +23,9 @@ The parent owns shared plans, assigns disjoint paths and appoints one build owne
 
 ## Quick reference
 
+- **Visual authority:** use the [approved matte canvas reproduction guide](../docs/design/matte-canvas/README.md), current native control allowlist and shared React guidance. Earlier gold/ivory accents, reflective ordinary controls and pager chrome are superseded; retain workflow and authority rules.
+
+
 - **Build and CI:** Follow [contributor commands](../docs/wiki/code/contributing.md) and [cache hygiene](../docs/wiki/code/contributing.md#build-cache-hygiene). Use affected [Fleetworks scopes](../docs/wiki/code/ci.md#fleetworksyml--scoped-branch-checks) and the embedded gate for affected compatibility paths. Local Rust uses the host and embedded storage. Dispatch `embedded.yml` for hosted platform compatibility and `mutation.yml` for mutation evidence; do not run mutation locally.
 - **Testing and design:** Load [repository testing guidelines](skills/argos-testing/SKILL.md). Rune app work uses [fleetworks-rune-verify](skills/fleetworks-rune-verify/SKILL.md) and [native verification](../docs/wiki/code/native-verification.md). The terminal executables and TUI workflow are retired; historical records are not current verification instructions. Preserve Rust conventions, React Compiler/Hooks, shared primitives and web `ForceCanvas` with its list twin. Inspect actual affected figures and fixtures; native views do not own backend lifecycle or topology.
 - **Plan and handoff:** Use the [named planning format](../docs/wiki/code/planning-artifacts.md#working-format). Record checks and Next Step. Scratch and worktrees belong in `.agent-scratch/`. Commit only with authorization and exact staging.

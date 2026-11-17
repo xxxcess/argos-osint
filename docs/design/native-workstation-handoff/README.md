@@ -2,15 +2,15 @@
 
 ## Start here
 
-This package accompanies the Argos OSINT / Fleetworks native-app redesign.
+This package preserves the earlier native-app redesign and its historical structural mockups. Start new visual work at the approved [matte canvas reference](../matte-canvas/README.md) and [current implementation handoff](../../../.planning/2026-11-16-matte-canvas/handoff.md).
 
 1. Read [the implementation handoff](argos_workstation_identity_implementation_spec.md) for execution order, verified edit locations, workstation identity migration, credential provisioning, API work and acceptance.
 2. Read [the design-system guide](argos_native_design_system_guide.md) for the native control allowlist, screen composition, matte material recipes, brand palette and interaction states.
 3. Consult [the original structural reference](argos_osint_workstation_ui_specification.md) for the source layout.
-4. Review the seven mockups below for visual composition.
+4. Review the [four approved current mockups](../matte-canvas/README.md#approved-screens). The seven images below preserve earlier composition studies; their colors, surfaces, brand labels and paging chrome are not current targets.
 5. Follow the pinned repository links for the relevant implementation and verification rules.
 
-**Precedence:** Latest explicit user decisions govern this package. The current handoff owns execution and API migration; the current guide owns the target UI. The original structural reference's workspace identity, Tauri/Linux-client assumptions, hardware examples, Rust-BERT training and glossy finishes are superseded. The target is the Rune macOS API client, workstation-only identity, matte obsidian black, dim satin graphite, and restrained canonical gold/ivory.
+**Precedence:** Latest explicit user decisions govern this package. The current handoff owns execution and API migration; the current guide owns the target UI. The original structural reference's workspace identity, Tauri/Linux-client assumptions, hardware examples, Rust-BERT training and glossy finishes are superseded. The current target is the Rune API client with workstation-only identity and the [matte canvas theme](../matte-canvas/theme.md): cool-neutral text, softly blended smooth layers, symbol-only metallic logo, loading-only shimmer and coarse matte texture limited to Submit/Confirm/Create/Delete actions. Earlier satin, gold/ivory, hard-rim and paginated-presentation directions are superseded.
 
 Mockups use synthetic data and illustrate composition. They do not establish API capabilities, exact runtime values, accessibility compliance or completed implementation. Written controls and contracts take precedence over incidental details in an image.
 
@@ -30,7 +30,7 @@ Mockups use synthetic data and illustrate composition. They do not establish API
 | `mockups/06_model_assignments.png` | Provider and role tables. |
 | `mockups/07_jobs_logs.png` | Job list and selected operational logs. |
 
-Only the latest seven matte concepts are included. The first glossy overview and earlier working audit notes are omitted because they predate the final design decisions.
+These seven matte concepts are historical; the current approved set is linked above. The first glossy overview and earlier working audit notes are omitted because they predate the final design decisions.
 
 ## Pinned repository documentation
 

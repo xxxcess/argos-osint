@@ -1,0 +1,54 @@
+# Logo, Quiet Orbit and canvas continuity
+
+[Design index](README.md) · [Theme](theme.md) · [Asset inventory](../../../assets/brand/README.md)
+
+## Source and appearance
+
+Use the approved [material source](../../../assets/brand/source/fleetworks-liquid-metal-glass.png), SHA-256 `1ae553782431da7649a1d88accdacc9076c3a039f1c2b5c0018f5998d7d70112`. Its smoky glass sphere contains a molten ivory/amber core; the crescent contains coarse fractured obsidian. Five glass triangular satellites preserve the brand geometry. Retain the sparse faint stars within the crescent. Warm metallic highlights belong to this symbol, never to ordinary controls or reading surfaces.
+
+Brand display areas contain the symbol alone. Remove the visible wordmark in the splash, navigation header and setup brand region; preserve the product name in accessibility labels, window titles, package metadata and documentation. This is not a repository, API, package or application-identity rename. Screen titles such as Setup Gateway remain functional headings outside the brand region.
+
+All materials are visible in the first frame. There is no flat-shape, outline-only, assembly or shape-to-glass introduction. Use the selected [Quiet Orbit GIF](../../../assets/brand/reference/fleetworks-quiet-orbit.gif), SHA-256 `22d4e6a281c74aebdcb64d80a8f0cda82b98a580aaf73dbef1b56a85c7103d57`. The [MP4](../../../assets/brand/reference/fleetworks-quiet-orbit.mp4) retains smoother tonal detail; the [poster](../../../assets/brand/reference/fleetworks-quiet-orbit.png) supplies a static reference. These are 2.5D texture-backed design studies, not volumetric simulation or application recordings.
+
+The [playback manifest](../../../assets/brand/reference/quiet-orbit/playback.json) records these design constants and source identities; it is not an implemented native runtime manifest.
+
+## Timing and placement
+
+| Item | Contract |
+| --- | --- |
+| Review loop | 800×450, 160 frames, 20 fps, 8 seconds; seamless periodic orbit and core flow |
+| Native startup | 3 seconds at the quiet orbital pace; do not accelerate a full revolution into that interval |
+| Transition | Setup appears beneath the scene at 2.65 seconds; opacity handoff and input/focus transfer finish by 3.00 seconds |
+| Scope | One startup presentation; no replay on navigation, dialog close, refresh or in-app reconnect |
+| Reduced motion / asset failure | Complete static logo; accessible setup remains available; no initial flat reveal or blank blocked screen |
+| After startup | Ordinary pages are static apart from useful local activity; no full-canvas decorative motion loop |
+
+Measure the complete scene envelope, including every satellite pose, before sizing. Use a centered contain transform with uniform scale: `s = min(availableWidth / envelopeWidth, availableHeight / envelopeHeight)`. Calculate available dimensions after page insets, keep the envelope inside the measured native window, and convert logical points to physical pixels only at rasterization. Do not size by the sphere alone or stretch an 800×450 rectangle. Recheck at minimum 640×480, compact 800×1100, baseline 1180×780 and wide 1440×900, with 1×/2× scale and enlarged text. Logo scaling must not push the setup form outside the available viewport.
+
+Use the same opaque `#060709` root clear color for native window, splash host, setup, content shell and web page. Scene transparency uses object coverage, with premultiplied alpha consistently applied through interpolation/compositing; black mineral interiors remain opaque. Do not use brightness/chroma keying to remove exterior black. The baked reference GIF stays unchanged and is not a production background layer. Derive supported RGBA layers or a bounded native scene for runtime; any exterior space/stars belong to a separate persistent canvas layer rather than the logo rectangle. Working screens use the theme's uniform canvas; settle exterior star opacity to zero by service content, without an exposure step or image-backing boundary. Missing textures fall back to the complete static mark, not a new loading screen.
+
+## Collision and orbital geometry
+
+At 800 pixels scene width, use orbital radius **130 px**, inclination **66°**, upward projected offset **38 px**, satellite scale **0.70**, and five persistent identities separated by **72°**. Scale the geometry uniformly with the scene. The core reference radius is approximately 99.76 px. Keep the coherent fixed orbit and smooth front/rear depth ordering; the sphere may naturally occlude a rear prism. The crescent must remain separate from the full painted satellite silhouettes, including bevel and antialias coverage, before sphere occlusion is applied.
+
+Do not hide a collision with a crescent mask, crop, disappearing satellite, per-frame position correction or discontinuous orbit. Preserve the crown-like arrangement during the upper pass while keeping all five satellites on the selected continuous route. A center-point-only clearance check is insufficient.
+
+The carried [clearance report](../../../assets/brand/reference/quiet-orbit/orbit-clearance.json) records 1,440 sampled phases and 7,200 triangle poses with zero painted-crescent overlaps for the approved 800×450 reference. The faint-fringe pixel-edge gap is 8.435 px; a further 0.6 px finite-sampling reserve leaves roughly 8 px. This is prior finite-sweep evidence with an engineering margin, not a continuous-time proof or native-runtime result. [Motion validation](../../../assets/brand/reference/quiet-orbit/motion-validation.json) and [orbital trace](../../../assets/brand/reference/quiet-orbit/orbital-trace.json) preserve the original provenance. Repeat clearance after changing mesh, alpha coverage, projection, timing interpolation or output scale.
+
+## Offline reproduction
+
+The preserved renderer and exporter are authoring tools under `assets/brand/reference/quiet-orbit/source/`; they are not app dependencies. From the repository root, with Node.js, Python 3 and FFmpeg available:
+
+```sh
+npm install --prefix assets/brand/reference/quiet-orbit/source
+node assets/brand/reference/quiet-orbit/source/animate.cjs --source assets/brand/source/fleetworks-liquid-metal-glass.png --width 800 --frames 160 --out .agent-scratch/quiet-orbit/frames
+python3 assets/brand/reference/quiet-orbit/source/export_previews.py export .agent-scratch/quiet-orbit/frames --name fleetworks-quiet-orbit --output .agent-scratch/quiet-orbit/rendered --input-fps 20 --fps 20
+python3 -m pip install -r assets/brand/reference/quiet-orbit/source/clearance/requirements.txt
+python3 assets/brand/reference/quiet-orbit/source/clearance/verify_clearance.py --reference-frame assets/brand/reference/fleetworks-quiet-orbit.png --output .agent-scratch/quiet-orbit/clearance.json
+```
+
+The [verifier notes](../../../assets/brand/reference/quiet-orbit/source/clearance/README.md) explain threshold, alpha-fringe and prism-depth assumptions. Keep generated frames, dependency directories and new reports in ignored scratch. Preserve source reference bytes and record deliberate derivatives separately. Production packaging must use formats supported by the native resource pipeline, bounded decoded memory and an asset-failure fallback; a GIF in documentation does not establish native GIF support. Web assets retain exact URL allowlisting and configured base-path handling.
+
+## Acceptance
+
+Compare actual splash → setup → services captures on one canvas. Inspect the full orbit, transition midpoint and final setup frame for clipped satellites, moon intersection, background rectangles, black/gray flashes and wordmarks. Verify focus transfers once, setup can proceed offline, reduced-motion behavior is static, and hidden/unfocused windows stop unnecessary animation. Record actual decode time, startup impact, frame pacing and decoded memory against the current app baseline before adopting runtime derivatives. The documentation change only imports the selected references and the existing authoring evidence.

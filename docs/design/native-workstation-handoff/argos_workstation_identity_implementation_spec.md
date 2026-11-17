@@ -1,12 +1,14 @@
 # ARGOS_NATIVE_WORKSTATION_IMPLEMENTATION_HANDOFF
 
+> Historical identity-migration handoff. Its baseline and execution evidence remain dated. The approved [matte canvas theme](../matte-canvas/theme.md), [live-state/continuous-scroll contract](../matte-canvas/interaction-state.md) and [current handoff](../../../.planning/2026-11-16-matte-canvas/handoff.md) supersede its former styling and pager presentation. Current credential/control authority is in the maintained [native contract](../../wiki/code/native-design-system.md).
+
 Baseline: `xxxcess/argos-osint` · `feat/atlas-zero-shot` · `d219d5964a29d50fa99de4cdcf2b228391576b4a` · revalidated November 13, 2026. Remote ref and comparison confirm the branch is unchanged from the earlier audit; latest commit: November 12, 20:21 UTC. Read-only source audit; no checked-out repository changes or product tests. [Branch baseline][baseline]
 
 Proposed repository location: `.planning/2026-11-13-native-workstation-redesign/handoff.md` (new curated handoff). Standing design authority: `docs/wiki/code/native-design-system.md` (new, supplied as `argos_native_design_system_guide.md`).
 
 ## Outcome and audit conclusions
 
-Deliver the reference's focused native workstation UI, use a stable workstation identity throughout native/API/web Connect, and apply **matte obsidian with dim satin graphite accents and canonical gold/ivory**. Native structure is native-only; Intel Web receives the theme/logo and Connect changes while retaining its layout and controls.
+Deliver the reference's focused native workstation UI, use a stable workstation identity throughout native/API/web Connect, and apply the current [matte canvas theme](../matte-canvas/theme.md). Native structure is native-only; Intel Web receives the theme/logo and Connect changes while retaining its layout and controls.
 
 - Recent pushes retired Venture/terminal executables, retained independent Linux services, and added direct-Compose provisioning with private root `compose.env`. Preserve that completed cutover and existing dual-Mac build lanes. Do not restart it. [Current orientation][orientation] · [Recent deployment commit][deployment]
 - `app.rs::Page` still contains eight destinations; `views.rs::workstation` and `backend_views.rs` stack administration and maintenance. Recompose the existing Rune shell and effects. The URL-only wizard and six-destination layout are new work. [Native views][views]
@@ -83,11 +85,11 @@ Start at 1180×780, minimum 640×480, with the current 220-point sidebar default
 
 ### 5. Apply matte brand styling and update maintained documentation
 
-Canvas `#060709`; matte card/control bodies `#0B0C0F`/`#111317`; primary ivory `#F3EEE4`; supporting `#D6D2C4`/`#B8B4A8`; muted gold `#C6A56E`, pressed `#C4A265`. Use one compact flat gold primary action at most.
+Use the [canonical theme recipe](../matte-canvas/theme.md), [interaction/state contract](../matte-canvas/interaction-state.md) and [logo/motion guide](../matte-canvas/motion.md). The canvas remains `#060709`; cool gray replaces ivory UI text, cyan replaces gold action emphasis, and content groups blend without decorative strokes. Preserve the logo's own molten highlights; brand display areas contain the symbol only.
 
-Create reusable matte-card, graphite-control and gold-primary recipes. Remove broad gradients, chrome rims, glossy sweeps, backdrop sheen and decorative animation. Static decorative card edges start at 1–2% ivory and control accents at 2–3%; **these never replace contrast-checked functional boundaries or focus tokens**. Hover/press use small fill/border changes without layout movement. Keep read-only cards noninteractive, reduced motion static and surfaces opaque.
+Apply coarse matte crescent texture only to Submit/Confirm/Create/Delete action faces. Navigation, Settings, Cancel, filters, utility actions, selected rows, metrics and readiness stay smooth matte. Only unresolved loading placeholders may carry a restrained cool translated sheen over a constant base; retained refresh content remains visible. Long lists use continuous scrolling over existing bounded opaque cursor APIs, with stable identities, scroll anchors and local tail loading/error recovery. Preserve permission, revision and idempotency checks.
 
-Use the canonical five outlined rays, ivory disc and gold crescent; preserve size/accessibility and base-path-safe assets. Make the old charcoal knockout transparent where needed; intentionally opaque icon backgrounds use obsidian. Apply the same theme to existing Intel Web cards/controls while preserving its typography, navigation, responsive layouts, semantic colors, ForceCanvas and list twin. Layout names such as DOM `#intel-web-workspace` do not establish workspace identity.
+Preserve Intel Web's routes, evidence composition, semantic metrics, ForceCanvas/list twin and platform ownership while updating shared paint/loading primitives. Remove active wordmarks without renaming packages, API identifiers or accessible application identity. The current handoff owns implementation order and actual-view acceptance.
 
 Add the standing design guide and update affected native/web AGENTS/README, `native-connections.md`, `native-workspaces.md`, interfaces/Fleetworks docs and linked workspace/scope/lifecycle HTML+SVG diagrams. Replace active workspace instructions with workstation ownership and clearly bounded legacy-history notes. Update affected links/tags only; keep historical cutover evidence and existing CI lanes. Track work in the named plan with one integration/build owner.
 

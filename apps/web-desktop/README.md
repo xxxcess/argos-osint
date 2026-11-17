@@ -34,8 +34,8 @@ for synthetic gateway credentials/cookies. Repository Playwright uses
 `ARGOS_WEB_TEST_DEV=1` isolation. Fixtures do not prove datastore persistence,
 Linux execution, public TLS/ingress or installed native behavior.
 
-The [shared matte design](../../docs/wiki/code/native-design-system.md) changes
-paint/logo within existing web layout and topology/list behavior.
+The [approved matte canvas design](../../docs/design/matte-canvas/README.md) changes
+paint/logo, shared loading treatment and continuous-list presentation within existing web routes, evidence layout and topology/list behavior. Smooth matte utility controls, cool text and symbol-only branding replace gold/ivory primary accents; the crescent texture is limited to submitting, confirming, creating and deleting actions. Runtime adoption is pending.
 [Verification status](../../.planning/2026-11-12-native-workstation-redesign/acceptance.md)
 
 ## Footer and search

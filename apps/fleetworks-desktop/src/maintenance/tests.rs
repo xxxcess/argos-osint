@@ -1657,3 +1657,39 @@ mod csv_path_fallback {
         assert!(error.contains("symbolic links are rejected"), "{error}");
     }
 }
+
+#[test]
+fn a_failed_readiness_refresh_keeps_same_scope_checks_as_stale_and_recovery_clears_it() {
+    let mut state = state(true);
+    let Load::Ready(ready) = state.readiness.clone() else {
+        panic!("synthetic readiness must start available")
+    };
+    state.readiness_received_at = Some(state.clock);
+    state.complete_readiness(Err("synthetic outage".into()));
+    let Load::Ready(kept) = &state.readiness else {
+        panic!("a transient failure keeps the last checks")
+    };
+    assert_eq!(state.readiness_error.as_deref(), Some("synthetic outage"));
+    assert!(!kept.checks.is_empty());
+    assert!(kept.checks.iter().all(|c| !state.readiness_check_fresh(c)));
+
+    state.complete_readiness(Ok(ready.clone()));
+    assert!(matches!(state.readiness, Load::Ready(_)));
+    assert!(state.readiness_error.is_none() && state.readiness_received_at.is_some());
+
+    // Checks for another deployment are an error, never kept.
+    let mut other = ready;
+    other.deployment_id = "another-deployment".into();
+    state.complete_readiness(Ok(other));
+    assert!(matches!(state.readiness, Load::Failed(_)));
+    assert!(state.readiness_error.is_none() && state.readiness_received_at.is_none());
+}
+
+#[test]
+fn a_first_readiness_failure_shows_an_error_with_nothing_to_keep() {
+    let mut state = state(true);
+    state.readiness = Load::Idle;
+    state.complete_readiness(Err("synthetic outage".into()));
+    assert!(matches!(state.readiness, Load::Failed(_)));
+    assert!(state.readiness_error.is_none());
+}

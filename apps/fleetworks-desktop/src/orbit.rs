@@ -30,6 +30,7 @@ pub(crate) const ENVELOPE: [f32; 2] = [144.0, 176.0];
 pub(crate) const LOOP_SECONDS: f32 = 8.0;
 /// Closest any prism edge may come to the crescent polygon, in scene units. The reference scene
 /// keeps about 5.3 units at this scale; the geometry below measures about 8.
+#[cfg(test)]
 pub(crate) const MIN_CLEARANCE: f32 = 5.3;
 /// The moment the static, reduced-motion pose is taken from.
 const STILL_SECONDS: f32 = 1.5;
@@ -197,6 +198,7 @@ pub(crate) fn lobes(seconds: f32) -> [Lobe; 5] {
 }
 
 /// Smallest distance from `point` to the closed polygon's edges.
+#[cfg(test)]
 pub(crate) fn distance_to_polygon(point: [f32; 2], polygon: &[[f32; 2]]) -> f32 {
     let mut best = f32::MAX;
     for (i, a) in polygon.iter().enumerate() {

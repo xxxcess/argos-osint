@@ -2407,7 +2407,17 @@ fn jobs_tail(
         .w_full()
         .gap(8.0)
         .center_y()
-        .child(quiet(format!("{loaded} jobs loaded"), kit));
+        .child(quiet(
+            format!(
+                "{loaded} {}",
+                if loaded == 1 {
+                    "job loaded"
+                } else {
+                    "jobs loaded"
+                }
+            ),
+            kit,
+        ));
     if jobs.loading_more() {
         footer = footer.child(
             more("Loading more")

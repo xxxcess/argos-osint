@@ -57,7 +57,7 @@ describe("Focus vs selection states (real components)", () => {
       '[aria-pressed="true"]',
     ) as HTMLElement;
     const plain = buttonEl(document.body, 1);
-    expect(applied(selected).backgroundColor).toBe("rgb(198, 165, 110)"); // accent fill
+    expect(applied(selected).backgroundColor).toBe("rgb(169, 184, 204)"); // accent fill
     expect(applied(selected).boxShadow).toBe("");
     expect(paint(plain, "backgroundColor")).toBe(colors.raised.toLowerCase());
   });

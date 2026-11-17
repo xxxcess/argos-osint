@@ -70,6 +70,9 @@ pub(crate) fn scroll(body: El, key: &str) -> El {
         .scroll(ScrollSpec {
             stick_bottom: false,
         })
+        // Keep the row at the top of the view where it is when rows are inserted above it, so a
+        // continuation, refresh or eviction never moves a reader who has scrolled down.
+        .scroll_anchor()
         .child(body.w_full().padding(20.0).gap(14.0))
 }
 

@@ -268,21 +268,39 @@ fn shard_color(tone: f32, opacity: f32) -> Color {
     }
 }
 
-/// Tiles laid side by side under one action; the 256 px tile repeats to 768 px. Shortcut: a
-/// wider action shows no texture past that, and one taller than the 90 px tile rows has none
-/// below them. Raise the count if a wider textured action appears.
-const TILE_COPIES: usize = 3;
+/// Tiles laid side by side for an action not yet measured (its first frame, or no key).
+const DEFAULT_TILES: usize = 8;
+/// The most tiles under one action (16 384 px). shortcut: a wider action is flat past that, and
+/// one taller than the 90 px tile rows has none below them.
+const MAX_TILES: usize = 64;
+
+/// Tiles needed to cover an action `width` px wide: the 256 px tile at fixed scale, repeated
+/// from the left edge until the whole control is covered, never fewer than one.
+pub(crate) fn tiles_for_width(width: f32) -> usize {
+    if !width.is_finite() || width <= 0.0 {
+        return 1;
+    }
+    ((width / rock::TILE).ceil() as usize).clamp(1, MAX_TILES)
+}
+
+/// The tile count for the action keyed `key`, from its laid-out width in the last frame. The read
+/// is projected to the count, so the view reruns only when the count changes. A control that is
+/// unkeyed or not measured yet gets [`DEFAULT_TILES`].
+pub(crate) fn texture_tiles(key: Option<&str>) -> usize {
+    key.and_then(|key| rune::memo::layout_with(key, |rect| tiles_for_width(rect[2])))
+        .unwrap_or(DEFAULT_TILES)
+}
 
 /// The fractured-obsidian texture, one 256 px tile from [`crate::rock`] repeated along x. It is
 /// anchored to the control's top-left corner at a fixed scale, so a label, busy state or width
 /// change never moves it, and it is clipped to the control's rounded corners. It paints over
 /// the fill and under the label.
-fn rock_texture(radius: f32, rest: f32, hover: f32) -> El {
+fn rock_texture(radius: f32, rest: f32, hover: f32, tiles: usize) -> El {
     let mut shape = Shape::new();
     for shard in rock::shards() {
         shape = shape.fill(shard.points.to_vec(), shard_color(shard.tone, hover));
     }
-    let tiles = (0..TILE_COPIES).map(|n| {
+    let tiles = (0..tiles).map(|n| {
         el().absolute(n as f32 * rock::TILE, 0.0)
             .size(rock::TILE, 90.0)
             .shape(shape.clone())
@@ -331,6 +349,7 @@ pub(crate) fn apply_liquid_metal(
     shimmer: bool,
     preferences: ViewPreferences,
     _pointer_offset: Option<&Live<[f32; 2]>>,
+    tiles: usize,
 ) -> El {
     let radius = match finish {
         MetalFinish::ObsidianPill => 14.0,
@@ -351,7 +370,7 @@ pub(crate) fn apply_liquid_metal(
         };
         styled = styled
             .hover_group()
-            .child(rock_texture(radius, rest, hover));
+            .child(rock_texture(radius, rest, hover, tiles));
     }
     if shimmer {
         if preferences.reduced_motion {
@@ -622,9 +641,29 @@ mod finish_tests {
         assert_eq!(shard_color(0.0, TEXTURE_OPACITY).a, 0.0);
         assert!(shard_color(-1.0, TEXTURE_OPACITY).a > 0.0);
         assert!(shard_color(1.0, TEXTURE_OPACITY_DISABLED).a < light.a);
-        // Three 256 px tiles cover the widest textured action.
-        let covered = TILE_COPIES as f32 * rock::TILE;
-        assert!(covered >= 768.0, "{covered}");
+    }
+
+    #[test]
+    fn tiles_cover_the_full_control_width_at_any_width() {
+        for width in [
+            1.0, 120.0, 256.0, 257.0, 768.0, 769.0, 1090.0, 1440.0, 3840.0,
+        ] {
+            let covered = tiles_for_width(width) as f32 * rock::TILE;
+            assert!(covered >= width, "{width} px is covered to {covered} px");
+            assert!(
+                covered - width < rock::TILE,
+                "{width} px gets no spare whole tile"
+            );
+        }
+        // The old three-tile limit left the right end of a wide Connect control flat.
+        assert!(tiles_for_width(1090.0) * 256 >= 1090 && tiles_for_width(1090.0) > 3);
+        assert_eq!(tiles_for_width(0.0), 1);
+        assert_eq!(tiles_for_width(f32::NAN), 1);
+        assert_eq!(tiles_for_width(1.0e9), MAX_TILES);
+        // An unmeasured control still covers a wide window.
+        assert!(DEFAULT_TILES as f32 * rock::TILE >= 1440.0);
+        assert_eq!(texture_tiles(None), DEFAULT_TILES);
+        assert_eq!(texture_tiles(Some("never-laid-out")), DEFAULT_TILES);
     }
 
     #[test]

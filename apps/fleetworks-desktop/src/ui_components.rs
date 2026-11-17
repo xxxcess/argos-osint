@@ -179,6 +179,11 @@ impl ActionButton {
             );
         }
 
+        let tiles = if self.finish.fractured() {
+            material::texture_tiles(self.key.as_deref())
+        } else {
+            0
+        };
         let mut styled = material::apply_liquid_metal(
             content,
             self.finish,
@@ -186,6 +191,7 @@ impl ActionButton {
             active_shimmer,
             preferences,
             pointer_offset,
+            tiles,
         );
         if let Some(key) = self.key {
             styled = styled.key(key);

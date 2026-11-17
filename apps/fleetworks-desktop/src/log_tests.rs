@@ -1409,6 +1409,37 @@ fn jobs_list_sits_beside_the_detail_only_when_the_page_is_wide_enough() {
 }
 
 #[test]
+fn older_logs_load_by_themselves_only_while_nothing_pauses_them() {
+    let mut logs = ready();
+    assert!(logs.auto_load_older(), "a continuation and no message");
+    let ticket = logs.older().expect("older read");
+    assert!(
+        !logs.auto_load_older(),
+        "no second read while one is in flight"
+    );
+    assert!(logs.complete(
+        &ticket,
+        Ok(LogReply::Page(page(
+            1,
+            1,
+            10,
+            Some(cursor(3)),
+            Some(cursor(4))
+        )))
+    ));
+    assert!(logs.auto_load_older(), "the next page is eligible");
+    logs.message = Some("Operational log follow was interrupted.".into());
+    assert!(!logs.auto_load_older(), "a message keeps loading manual");
+    logs.message = None;
+    let last = logs.older().expect("last older read");
+    assert!(logs.complete(
+        &last,
+        Ok(LogReply::Page(page(2, 1, 10, None, Some(cursor(5)))))
+    ));
+    assert!(!logs.auto_load_older(), "no continuation, no auto-load");
+}
+
+#[test]
 fn only_a_fresh_read_is_unresolved_while_follow_and_older_keep_the_resolved_status() {
     let mut logs = ready();
     logs.set_following(true);

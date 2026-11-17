@@ -64,6 +64,16 @@ impl State {
         self.request_jobs(event);
     }
 
+    /// The list's end sentinel changed visibility. Coming on screen continues once through the
+    /// same single-flight path as Load more; a failed tail waits for its explicit Retry, so an
+    /// auto-load never loops on an error.
+    pub fn jobs_near_end(&mut self, on_screen: bool) {
+        if on_screen && self.scoped_jobs.tail_error().is_none() && self.scoped_jobs.can_load_more()
+        {
+            self.request_jobs(JobsEvent::More);
+        }
+    }
+
     pub fn request_jobs(&mut self, event: JobsEvent) {
         self.sync_jobs_binding();
         let now = if self.fixture {

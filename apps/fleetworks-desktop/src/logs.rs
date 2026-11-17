@@ -202,6 +202,11 @@ impl LogState {
             && self.rows.len() < DISPLAY_LIMIT
             && self.next_cursor.is_some()
     }
+    /// Whether reaching the end of the loaded rows loads older ones by itself. Any message (an
+    /// interruption or a bound) keeps the load manual, so a failure never loops.
+    pub fn auto_load_older(&self) -> bool {
+        self.message.is_none() && self.can_load_older()
+    }
     pub fn can_export(&self) -> bool {
         self.available && !self.busy()
     }

@@ -825,3 +825,50 @@ fn a_failed_poll_keeps_same_scope_rows_and_a_selection_survives_load_more() {
     assert_eq!(state.scoped_jobs.rows().len(), 2);
     assert!(state.scoped_jobs.message.is_some(), "stale reason is kept");
 }
+
+fn state_with_jobs_head(next: Option<usize>) -> crate::app::State {
+    let mut state = registered_app();
+    state.request_jobs(JobsEvent::Apply);
+    let head = state
+        .scoped_jobs
+        .active_ticket()
+        .expect("newest read")
+        .clone();
+    state.complete_scoped_jobs(head.clone(), Ok(page(&head.binding, 1, next)));
+    state
+}
+
+#[test]
+fn near_end_loads_one_tail_only_when_the_sentinel_comes_on_screen() {
+    let mut state = state_with_jobs_head(Some(2));
+    state.jobs_near_end(false);
+    assert!(state.scoped_jobs.active_ticket().is_none(), "off screen");
+    state.jobs_near_end(true);
+    assert!(state.scoped_jobs.loading_more(), "on screen loads the tail");
+    let tail = state.scoped_jobs.active_ticket().expect("tail").clone();
+    // Repeated visibility reports while the read is in flight add no second read.
+    state.jobs_near_end(true);
+    let still = state.scoped_jobs.active_ticket().expect("same read");
+    assert_eq!(still.query.cursor, tail.query.cursor);
+    state.complete_scoped_jobs(tail.clone(), Ok(page(&tail.binding, 2, None)));
+    assert_eq!(state.scoped_jobs.rows().len(), 2);
+    // The server's end stops it: no continuation, no read.
+    state.jobs_near_end(true);
+    assert!(state.scoped_jobs.active_ticket().is_none());
+}
+
+#[test]
+fn near_end_pauses_after_a_failed_tail_until_the_explicit_retry() {
+    let mut state = state_with_jobs_head(Some(2));
+    state.jobs_near_end(true);
+    let tail = state.scoped_jobs.active_ticket().expect("tail").clone();
+    state.complete_scoped_jobs(tail, Err(ClientError::Transport));
+    assert!(state.scoped_jobs.tail_error().is_some());
+    state.jobs_near_end(true);
+    assert!(
+        state.scoped_jobs.active_ticket().is_none(),
+        "a failed tail is not retried by scrolling"
+    );
+    state.request_jobs(JobsEvent::More);
+    assert!(state.scoped_jobs.loading_more(), "Retry still works");
+}

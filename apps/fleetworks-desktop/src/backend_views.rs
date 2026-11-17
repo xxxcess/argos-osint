@@ -412,29 +412,13 @@ fn atlas(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
                 .key(format!("cycle-{}", cycle.job_id)),
             );
         }
-        history = history.child(
-            rune::row()
-                .w_full()
-                .gap(8.0)
-                .center_y()
-                .child(
-                    ActionButton::new("Previous page")
-                        .key("cycles-page-previous")
-                        .finish(MetalFinish::ObsidianPill)
-                        .disabled(state.cycles.page_index == 0 || state.cycles.busy())
-                        .on_press(|state: &mut State| state.previous_cycles_page())
-                        .build(kit, preferences, pointer_ref),
-                )
-                .child(quiet(format!("Page {}", state.cycles.page_index + 1), kit))
-                .child(
-                    ActionButton::new("Next page")
-                        .key("cycles-page-next")
-                        .finish(MetalFinish::ObsidianPill)
-                        .disabled(cycles.next_cursor.is_none() || state.cycles.busy())
-                        .on_press(|state: &mut State| state.next_cycles_page())
-                        .build(kit, preferences, pointer_ref),
-                ),
-        );
+        history = history.child(cycles_tail(
+            state,
+            cycles.rows.len(),
+            kit,
+            preferences,
+            pointer_ref,
+        ));
 
         if let Some(active_id) = &state.selected_cycle_id {
             if let Some(cycle) = cycles.rows.iter().find(|c| c.job_id == *active_id) {
@@ -1663,6 +1647,20 @@ fn jobs(
                                 })
                                 .build(kit, preferences, pointer_ref),
                         );
+                        if state.scoped_logs.auto_load_older() {
+                            // A one-pixel sentinel, new for every loaded count: coming on screen
+                            // loads one older page, and a page that leaves it on screen loads
+                            // another.
+                            details = details.child(
+                                rune::el()
+                                    .key(format!("logs-near-end-{}", state.scoped_logs.rows.len()))
+                                    .size(1.0, 1.0)
+                                    .a11y_hidden()
+                                    .on_visible(|state: &mut State, on_screen, tx| {
+                                        state.logs_near_end(on_screen, tx)
+                                    }),
+                            );
+                        }
                     }
                 }
             }
@@ -2386,6 +2384,71 @@ pub(crate) fn unresolved_actor_reindex_banner(
     ))
 }
 
+/// The one footer under the cycle history: a count, then a single local control for continuous
+/// loading, as under the Jobs list. Rows and selection stay put while it changes.
+fn cycles_tail(
+    state: &State,
+    loaded: usize,
+    kit: &Kit,
+    preferences: ViewPreferences,
+    pointer_ref: Option<&rune::Live<[f32; 2]>>,
+) -> El {
+    let more = |label: &'static str| {
+        ActionButton::new(label)
+            .key("cycles-load-more")
+            .finish(MetalFinish::ObsidianPill)
+            .on_press(|state: &mut State| state.more_cycles())
+    };
+    let mut footer = rune::row()
+        .key("cycles-tail")
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .child(quiet(
+            format!(
+                "{loaded} {}",
+                if loaded == 1 {
+                    "cycle loaded"
+                } else {
+                    "cycles loaded"
+                }
+            ),
+            kit,
+        ));
+    if state.cycles.loading_more() {
+        footer = footer.child(
+            more("Loading more")
+                .busy(true)
+                .build(kit, preferences, pointer_ref),
+        );
+    } else if state.cycles_can_load_more() {
+        let label = if state.cycles.read_error.is_some() {
+            "Retry"
+        } else {
+            "Load more"
+        };
+        footer = footer.child(more(label).build(kit, preferences, pointer_ref));
+        if state.cycles.read_error.is_none() {
+            // A one-pixel sentinel, new for every loaded count: coming on screen loads the next
+            // segment, and a segment that leaves it on screen loads another.
+            footer = footer.child(
+                rune::el()
+                    .key(format!("cycles-near-end-{loaded}"))
+                    .size(1.0, 1.0)
+                    .a11y_hidden()
+                    .on_visible(|state: &mut State, on_screen, _| state.cycles_near_end(on_screen)),
+            );
+        }
+    } else if matches!(&state.cycles.history, Load::Ready(history) if history.next_cursor.is_some())
+    {
+        footer = footer.child(quiet(
+            "View limit reached. Newer cycles load as they arrive.",
+            kit,
+        ));
+    }
+    footer
+}
+
 /// The one footer under the Jobs list: a count, then a single local control for continuous
 /// loading. Rows, selection and scroll position stay put while it changes.
 fn jobs_tail(
@@ -2435,7 +2498,17 @@ fn jobs_tail(
             .child(more("Retry").build(kit, preferences, pointer_ref))
             .child(quiet(reason.to_owned(), kit));
     } else if jobs.can_load_more() {
-        footer = footer.child(more("Load more").build(kit, preferences, pointer_ref));
+        footer = footer
+            .child(more("Load more").build(kit, preferences, pointer_ref))
+            // A one-pixel sentinel, new for every loaded count: when it comes on screen the next
+            // segment loads, and a segment that leaves it on screen loads another.
+            .child(
+                rune::el()
+                    .key(format!("jobs-near-end-{loaded}"))
+                    .size(1.0, 1.0)
+                    .a11y_hidden()
+                    .on_visible(|state: &mut State, on_screen, _| state.jobs_near_end(on_screen)),
+            );
     } else if jobs.at_bound() {
         footer = footer.child(quiet(
             "Showing the newest jobs. Narrow the filters to see others.",

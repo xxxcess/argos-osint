@@ -37,6 +37,9 @@ pub struct Cycles {
     pub history: Load<CycleHistory>,
     pub page_index: usize,
     page_cursors: Vec<Option<String>>,
+    /// Row index where each loaded segment after the first begins, so a discovery poll can
+    /// refresh the last segment in place without dropping the segments before it.
+    segment_starts: Vec<usize>,
     pending_page: Option<CyclePageRequest>,
     pub selected: Option<String>,
     pub confirmation: Option<String>,
@@ -64,9 +67,23 @@ struct CyclePageRequest {
     /// A discovery poll refreshes the viewed page in place. It must not reset the viewed page or
     /// the selected cycle.
     keep_selection: bool,
+    /// A continuation: its rows join the loaded window instead of replacing a segment.
+    append: bool,
 }
 
+/// Cycle segments (of up to 40 rows) kept loaded at once. A reached bound is shown as such, not
+/// as the server's end. shortcut: a count cap, not a measured byte budget; revisit with
+/// measurements.
+const MAX_CYCLE_SEGMENTS: usize = 8;
+
 impl Cycles {
+    /// A continuation read is in flight; the loaded rows stay as they are.
+    pub(crate) fn loading_more(&self) -> bool {
+        self.pending_page
+            .as_ref()
+            .is_some_and(|request| request.append)
+    }
+
     pub(crate) fn busy(&self) -> bool {
         self.pending_page.is_some()
             || self.read_request.is_some()
@@ -86,6 +103,7 @@ impl Cycles {
         self.read_error = None;
         self.page_index = 0;
         self.page_cursors.clear();
+        self.segment_starts.clear();
         self.confirmation = None;
         self.confirmation_configuration_revision = None;
         self.selected = None;
@@ -155,36 +173,63 @@ impl State {
     }
 
     pub fn refresh_cycles(&mut self) {
-        self.load_cycles_page(None, 0, false);
+        self.load_cycles_page(None, 0, false, false);
     }
 
-    /// Discovers new cycles for the registered workstation by re-reading the page being viewed.
-    /// The cursor, page number and selected cycle stay as they are.
+    /// Discovers new cycles for the registered workstation by re-reading the last loaded
+    /// segment. The loaded window, its cursors and the selected cycle stay as they are.
     pub fn poll_cycles(&mut self) {
         let index = self.cycles.page_index;
         let cursor = self.cycles.page_cursors.get(index).cloned().flatten();
-        self.load_cycles_page(cursor, index, true);
+        self.load_cycles_page(cursor, index, true, false);
     }
 
-    pub fn next_cycles_page(&mut self) {
+    /// Whether another segment can be requested: the server named a cursor not yet visited, no
+    /// cycle read is in flight and the window is under its bound.
+    pub fn cycles_can_load_more(&self) -> bool {
+        let Load::Ready(history) = &self.cycles.history else {
+            return false;
+        };
+        self.cycles.pending_page.is_none()
+            && self.cycles.page_cursors.len() < MAX_CYCLE_SEGMENTS
+            && history.next_cursor.as_ref().is_some_and(|next| {
+                !self
+                    .cycles
+                    .page_cursors
+                    .iter()
+                    .any(|seen| seen.as_ref() == Some(next))
+            })
+    }
+
+    /// Appends the next segment to the loaded window.
+    pub fn more_cycles(&mut self) {
+        if !self.cycles_can_load_more() {
+            return;
+        }
         let Load::Ready(history) = &self.cycles.history else {
             return;
         };
         if let Some(cursor) = history.next_cursor.clone() {
-            self.load_cycles_page(Some(cursor), self.cycles.page_index + 1, false);
+            let index = self.cycles.page_cursors.len();
+            self.load_cycles_page(Some(cursor), index, false, true);
         }
     }
 
-    pub fn previous_cycles_page(&mut self) {
-        if self.cycles.page_index > 0 {
-            let previous = self.cycles.page_index - 1;
-            if let Some(cursor) = self.cycles.page_cursors.get(previous).cloned() {
-                self.load_cycles_page(cursor, previous, false);
-            }
+    /// The history's end sentinel changed visibility. Coming on screen loads one segment through
+    /// the same single-flight path as Load more. A failed read waits for its explicit Retry.
+    pub fn cycles_near_end(&mut self, on_screen: bool) {
+        if on_screen && self.cycles.read_error.is_none() {
+            self.more_cycles();
         }
     }
 
-    fn load_cycles_page(&mut self, cursor: Option<String>, index: usize, keep_selection: bool) {
+    fn load_cycles_page(
+        &mut self,
+        cursor: Option<String>,
+        index: usize,
+        keep_selection: bool,
+        append: bool,
+    ) {
         let Some(context) = self.registration.context.clone() else {
             return;
         };
@@ -212,6 +257,7 @@ impl State {
             origin_revision: self.origin_revision,
             revision: self.cycles.revision,
             keep_selection,
+            append,
         };
         self.cycles.pending_page = Some(request.clone());
         if !matches!(self.cycles.history, Load::Ready(_)) {
@@ -252,20 +298,52 @@ impl State {
                         .as_deref()
                         .is_none_or(|next| !next.is_empty() && next.len() <= 256) =>
             {
+                let existing = match &self.cycles.history {
+                    Load::Ready(loaded) => loaded.rows.clone(),
+                    _ => Vec::new(),
+                };
+                // A continuation keeps every loaded row; a read of segment `n` replaces the rows
+                // from where that segment began. Rows already loaded are never duplicated.
+                let start = if request.append {
+                    existing.len()
+                } else if request.index == 0 {
+                    0
+                } else {
+                    self.cycles
+                        .segment_starts
+                        .get(request.index - 1)
+                        .copied()
+                        .unwrap_or(0)
+                        .min(existing.len())
+                };
+                let mut rows = existing[..start].to_vec();
+                for row in history.rows {
+                    if !rows.iter().any(|seen| seen.job_id == row.job_id) {
+                        rows.push(row);
+                    }
+                }
+                let mut merged = CycleHistory::new(rows);
+                merged.next_cursor = history.next_cursor;
                 self.cycles.page_index = request.index;
                 self.cycles.page_cursors.truncate(request.index);
                 self.cycles.page_cursors.push(request.cursor);
-                let keep = request.keep_selection
+                if request.index == 0 {
+                    self.cycles.segment_starts.clear();
+                } else {
+                    self.cycles.segment_starts.truncate(request.index - 1);
+                    self.cycles.segment_starts.push(start);
+                }
+                let keep = (request.keep_selection || request.append)
                     && self
                         .cycles
                         .selected
                         .as_ref()
-                        .is_some_and(|id| history.rows.iter().any(|row| &row.job_id == id));
+                        .is_some_and(|id| merged.rows.iter().any(|row| &row.job_id == id));
                 if !keep {
                     self.cycles.selected = None;
                 }
                 self.cycles.read_error = None;
-                self.cycles.history = Load::Ready(history);
+                self.cycles.history = Load::Ready(merged);
             }
             Ok(_) => {
                 if !matches!(self.cycles.history, Load::Ready(_)) {
@@ -673,15 +751,15 @@ mod tests {
         runtime.frame(clock);
         assert!(runtime.find("cycle-synthetic-cycle-1").is_some());
 
-        runtime.update(|_, tx| tx.scroll_into_view("cycles-page-next"));
+        runtime.update(|_, tx| tx.scroll_into_view("cycles-load-more"));
         clock += 1.0 / 60.0;
         runtime.frame(clock);
         let (x, y) = runtime
-            .find("cycles-page-next")
-            .expect("visible next-page button");
+            .find("cycles-load-more")
+            .expect("visible load-more button");
         assert!(
             (0.0..1180.0).contains(&x) && (50.0..780.0).contains(&y),
-            "next-page button must be inside the cycle scroll viewport"
+            "load-more button must be inside the cycle scroll viewport"
         );
         runtime.pointer_down(x, y);
         runtime.pointer_up(x, y);
@@ -692,9 +770,10 @@ mod tests {
             .cycles
             .pending_page
             .clone()
-            .expect("real Next page control started a request");
+            .expect("real Load more control started a request");
         assert_eq!(next.cursor.as_deref(), Some(cursor.as_str()));
         assert_eq!(next.index, 1);
+        assert!(next.append);
         assert!(runtime.state.cycles.busy());
         assert!(runtime.find("cycle-synthetic-cycle-1").is_some());
         assert!(runtime.find("cycle-synthetic-cycle-2").is_none());
@@ -702,60 +781,40 @@ mod tests {
             !runtime
                 .elements()
                 .iter()
-                .find(|element| element.key.as_deref() == Some("cycles-page-next"))
-                .expect("next-page control remains visible")
+                .find(|element| element.key.as_deref() == Some("cycles-load-more"))
+                .expect("load-more control remains visible")
                 .focusable
         );
 
+        let later = format!("{:064x}", 3);
         let (release, response) = tokio::sync::oneshot::channel();
         let mock_gateway =
             tokio::spawn(async move { response.await.expect("mock cycle page released") });
-        assert!(release.send(cycle_page("synthetic-cycle-2", None)).is_ok());
+        assert!(release
+            .send(cycle_page("synthetic-cycle-2", Some(later)))
+            .is_ok());
         let second = mock_gateway.await.expect("mock cycle gateway task");
         runtime.update(move |state, _| state.complete_cycles_page(next, Ok(second)));
         clock += 1.0 / 60.0;
         runtime.frame(clock);
         assert_eq!(runtime.state.cycles.page_index, 1);
-        assert!(runtime.find("cycle-synthetic-cycle-2").is_some());
-        assert!(runtime.find("cycle-synthetic-cycle-1").is_none());
+        assert!(
+            runtime.find("cycle-synthetic-cycle-2").is_some(),
+            "the new segment is appended"
+        );
+        assert!(
+            runtime.find("cycle-synthetic-cycle-1").is_some(),
+            "the loaded rows stay in the window"
+        );
+        assert!(runtime.find("cycles-page-previous").is_none());
+        assert!(runtime.find("cycles-page-next").is_none());
 
-        runtime.update(|_, tx| tx.scroll_into_view("cycles-page-previous"));
+        runtime.update(|_, tx| tx.scroll_into_view("cycles-load-more"));
         clock += 1.0 / 60.0;
         runtime.frame(clock);
         let (x, y) = runtime
-            .find("cycles-page-previous")
-            .expect("visible previous-page button");
-        runtime.pointer_down(x, y);
-        runtime.pointer_up(x, y);
-        clock += 1.0 / 60.0;
-        runtime.frame(clock);
-        let previous = runtime
-            .state
-            .cycles
-            .pending_page
-            .clone()
-            .expect("real Previous page control started a request");
-        assert_eq!(previous.cursor, None);
-        assert_eq!(previous.index, 0);
-        assert!(runtime.state.cycles.busy());
-        let (release, response) = tokio::sync::oneshot::channel();
-        let mock_gateway =
-            tokio::spawn(async move { response.await.expect("mock first page released") });
-        assert!(release.send(first).is_ok());
-        let first = mock_gateway.await.expect("mock cycle gateway task");
-        runtime.update(move |state, _| state.complete_cycles_page(previous, Ok(first)));
-        clock += 1.0 / 60.0;
-        runtime.frame(clock);
-        assert_eq!(runtime.state.cycles.page_index, 0);
-        assert!(runtime.find("cycle-synthetic-cycle-1").is_some());
-        assert!(runtime.find("cycle-synthetic-cycle-2").is_none());
-
-        runtime.update(|_, tx| tx.scroll_into_view("cycles-page-next"));
-        clock += 1.0 / 60.0;
-        runtime.frame(clock);
-        let (x, y) = runtime
-            .find("cycles-page-next")
-            .expect("visible retry button");
+            .find("cycles-load-more")
+            .expect("visible load-more button");
         runtime.pointer_down(x, y);
         runtime.pointer_up(x, y);
         clock += 1.0 / 60.0;
@@ -765,7 +824,7 @@ mod tests {
             .cycles
             .pending_page
             .clone()
-            .expect("next page retry started");
+            .expect("load-more retry started");
         let (release, response) = tokio::sync::oneshot::channel();
         let mock_gateway =
             tokio::spawn(async move { response.await.expect("mock error released") });
@@ -776,20 +835,21 @@ mod tests {
         runtime.update(move |state, _| state.complete_cycles_page(failed, error));
         clock += 1.0 / 60.0;
         runtime.frame(clock);
-        assert_eq!(runtime.state.cycles.page_index, 0);
+        assert_eq!(runtime.state.cycles.page_index, 1);
         assert!(runtime.find("cycle-synthetic-cycle-1").is_some());
+        assert!(runtime.find("cycle-synthetic-cycle-2").is_some());
         assert_eq!(
             runtime.state.cycles.read_error.as_deref(),
             Some("Synthetic gateway timeout")
         );
         assert!(!runtime.state.cycles.busy());
 
-        runtime.update(|_, tx| tx.scroll_into_view("cycles-page-next"));
+        runtime.update(|_, tx| tx.scroll_into_view("cycles-load-more"));
         clock += 1.0 / 60.0;
         runtime.frame(clock);
         let (x, y) = runtime
-            .find("cycles-page-next")
-            .expect("visible next-page button");
+            .find("cycles-load-more")
+            .expect("visible retry button");
         runtime.pointer_down(x, y);
         runtime.pointer_up(x, y);
         clock += 1.0 / 60.0;
@@ -934,6 +994,100 @@ mod tests {
             panic!("page two must stay loaded");
         };
         assert_eq!(history.rows.len(), 2);
+    }
+
+    #[test]
+    fn continuation_appends_dedupes_and_a_poll_refreshes_only_the_last_segment() {
+        let first = format!("{:064x}", 2);
+        let second = format!("{:064x}", 3);
+        let mut state = crate::tests::registered_fixture();
+        state.cycles.history = Load::Ready(cycle_page("cycle-1", Some(first.clone())));
+        state.cycles.page_cursors.push(None);
+        state.cycles.selected = Some("cycle-1".into());
+
+        state.more_cycles();
+        let request = state.cycles.pending_page.clone().expect("continuation");
+        assert!(request.append && request.index == 1);
+        assert!(state.cycles.loading_more());
+        state.more_cycles();
+        assert_eq!(
+            state.cycles.pending_page.as_ref(),
+            Some(&request),
+            "a second request is not started while one is in flight"
+        );
+        let mut tail = CycleHistory::new(vec![cycle_row("cycle-1"), cycle_row("cycle-2")]);
+        tail.next_cursor = Some(second.clone());
+        state.complete_cycles_page(request, Ok(tail));
+        let Load::Ready(history) = &state.cycles.history else {
+            panic!("window stays loaded");
+        };
+        let ids: Vec<_> = history.rows.iter().map(|row| row.job_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["cycle-1", "cycle-2"],
+            "duplicate ids are not repeated"
+        );
+        assert_eq!(history.next_cursor.as_deref(), Some(second.as_str()));
+        assert_eq!(state.cycles.page_cursors, vec![None, Some(first.clone())]);
+        assert_eq!(
+            state.cycles.selected.as_deref(),
+            Some("cycle-1"),
+            "a continuation keeps the selected cycle"
+        );
+
+        // A discovery poll re-reads the last segment and keeps the rows before it.
+        state.poll_cycles();
+        let poll = state.cycles.pending_page.clone().expect("poll");
+        assert_eq!(
+            (poll.index, poll.cursor.as_deref()),
+            (1, Some(first.as_str()))
+        );
+        let refreshed = CycleHistory::new(vec![cycle_row("cycle-2"), cycle_row("cycle-9")]);
+        state.complete_cycles_page(poll, Ok(refreshed));
+        let Load::Ready(history) = &state.cycles.history else {
+            panic!("window stays loaded");
+        };
+        let ids: Vec<_> = history.rows.iter().map(|row| row.job_id.as_str()).collect();
+        assert_eq!(ids, ["cycle-1", "cycle-2", "cycle-9"]);
+        assert_eq!(state.cycles.page_index, 1);
+    }
+
+    #[test]
+    fn continuation_stops_at_a_visited_cursor_the_segment_bound_and_a_failed_read() {
+        let cursor = |n: usize| format!("{n:064x}");
+        let mut state = crate::tests::registered_fixture();
+        state.cycles.history = Load::Ready(cycle_page("cycle-1", Some(cursor(2))));
+        state.cycles.page_cursors = vec![None, Some(cursor(2))];
+        assert!(
+            !state.cycles_can_load_more(),
+            "a cursor already visited is a repeat, not progress"
+        );
+
+        state.cycles.history = Load::Ready(cycle_page("cycle-1", Some(cursor(3))));
+        assert!(state.cycles_can_load_more());
+        state.cycles.page_cursors = (0..MAX_CYCLE_SEGMENTS)
+            .map(|n| (n > 0).then(|| cursor(n + 10)))
+            .collect();
+        assert!(!state.cycles_can_load_more(), "the window is at its bound");
+
+        state.cycles.page_cursors = vec![None];
+        state.cycles_near_end(false);
+        assert!(
+            state.cycles.pending_page.is_none(),
+            "off screen loads nothing"
+        );
+        state.cycles_near_end(true);
+        let request = state.cycles.pending_page.clone().expect("near the end");
+        assert!(request.append);
+        state.complete_cycles_page(request, Err("gateway timed out".into()));
+        assert!(state.cycles.read_error.is_some());
+        state.cycles_near_end(true);
+        assert!(
+            state.cycles.pending_page.is_none(),
+            "a failed read waits for its explicit Retry"
+        );
+        state.more_cycles();
+        assert!(state.cycles.pending_page.is_some(), "Retry still works");
     }
 
     #[test]

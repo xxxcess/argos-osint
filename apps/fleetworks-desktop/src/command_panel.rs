@@ -487,7 +487,7 @@ mod tests {
     }
 
     #[test]
-    fn typing_immediately_after_toolbar_and_ctrl_k_open_filters_without_a_click() {
+    fn typing_in_the_same_frame_as_toolbar_and_ctrl_k_open_is_preserved() {
         let mut state = crate::tests::registered_fixture();
         state.page = Page::Workstation;
         let mut runtime = rune::Runtime::new(
@@ -505,7 +505,6 @@ mod tests {
         let (x, y) = runtime.find("command-open").expect("toolbar button");
         runtime.pointer_down(x, y);
         runtime.pointer_up(x, y);
-        runtime.frame(1.0 / 60.0);
         runtime.key(KeyEvent {
             key: Key::Text("jobs".into()),
             mods: rune::Mods::default(),
@@ -529,9 +528,16 @@ mod tests {
                 ..rune::Mods::default()
             },
         });
-        runtime.frame(4.0 / 60.0);
+        // Rune must route the first character to the newly opened editor,
+        // even when the shortcut and that character arrive in one frame.
         runtime.key(KeyEvent {
-            key: Key::Text("brain".into()),
+            key: Key::Text("b".into()),
+            mods: rune::Mods::default(),
+        });
+        runtime.frame(4.0 / 60.0);
+        assert_eq!(runtime.state.commands.query.text, "b");
+        runtime.key(KeyEvent {
+            key: Key::Text("rain".into()),
             mods: rune::Mods::default(),
         });
         runtime.frame(5.0 / 60.0);

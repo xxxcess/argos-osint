@@ -27,7 +27,7 @@ No alternate graph library: web topology uses `ForceCanvas` and its accessible l
 
 | Concern                            | Authority                                                                                                                                                    |
 | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Shared palette and primitives      | [packages/ui](../../../packages/ui/src/index.tsx): `colors`, `fonts`, `Label`, `Copy`, `Button`, `Panel`, `Notice`, `LoadingState`, `EmptyState`, `Skeleton` |
+| Shared palette and primitives      | [packages/ui](../../../packages/ui/src/index.tsx): `colors`, `fonts`, `Label`, `Copy`, `Button`, `Panel`, `Notice`, `LoadingState`, `EmptyState`, `Skeleton` (steady base, one cool sheen on a 1.6 s cycle; static under reduced motion and paused while the page is hidden) |
 | Screens and responsive composition | [packages/intel](../../../packages/intel/src/index.tsx): Bulletin, Focus Brief, Topology                                                                     |
 | Remote state and connection        | [packages/api-client](../../../packages/api-client/src/index.tsx): Context, TanStack Query v5, readiness and backend/instance keys                           |
 | Platform settings                  | [web adapter](../../../apps/web-desktop/app/backend-settings.ts): persisted endpoint, hydration-safe snapshots and request IDs through `BackendSettings`     |

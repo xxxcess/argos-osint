@@ -35,11 +35,15 @@ export function Skeleton({
   const [regionWidth, setRegionWidth] = useState(0);
   useEffect(() => {
     let active = true;
+    let reduced = true; // until the preference is known, stay still
     let animation: Animated.CompositeAnimation | undefined;
-    const update = (reduced: boolean) => {
+    const hidden = () =>
+      typeof document !== "undefined" && document.visibilityState === "hidden";
+    // Decoration runs only while it can be seen and motion is allowed.
+    const sync = () => {
       animation?.stop();
       progress.setValue(0);
-      if (!reduced && active) {
+      if (!reduced && !hidden() && active) {
         animation = Animated.loop(
           Animated.sequence([
             Animated.timing(progress, {
@@ -54,6 +58,10 @@ export function Skeleton({
         animation.start();
       }
     };
+    const update = (value: boolean) => {
+      reduced = value;
+      sync();
+    };
     void AccessibilityInfo.isReduceMotionEnabled().then((value) => {
       if (active) update(value);
     });
@@ -61,10 +69,16 @@ export function Skeleton({
       "reduceMotionChanged",
       update,
     );
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", sync);
+    }
     return () => {
       active = false;
       animation?.stop();
       subscription.remove();
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", sync);
+      }
     };
   }, [progress]);
   const bandWidth = regionWidth * SHEEN_WIDTH;

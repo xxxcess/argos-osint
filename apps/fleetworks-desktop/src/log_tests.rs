@@ -835,6 +835,42 @@ fn unavailable_logs_hide_empty_summary_and_render_worker_sync_status() {
 }
 
 #[test]
+fn brain_debounce_and_first_fetch_share_one_results_skeleton() {
+    let mut runtime = Runtime::new(
+        shell(),
+        crate::app::view,
+        (1180.0, 800.0),
+        Env {
+            system_dark: true,
+            scale: 1.0,
+        },
+    );
+    runtime.update(|state, _| {
+        state.navigate(crate::app::Page::Brain);
+        state.brain.results = Load::Pending;
+    });
+    runtime.frame(0.0);
+    assert!(
+        runtime.find("search-loading").is_some(),
+        "debounce shows the skeleton"
+    );
+    assert!(
+        runtime.find("search-pending").is_none(),
+        "no debounce narration strip"
+    );
+    let debounce_size = runtime.find("search-loading");
+
+    runtime.update(|state, _| state.brain.results = Load::Loading);
+    runtime.frame(1.0 / 60.0);
+    assert!(runtime.find("search-loading").is_some());
+    assert_eq!(
+        runtime.find("search-loading"),
+        debounce_size,
+        "the first fetch does not move or replace the skeleton"
+    );
+}
+
+#[test]
 fn loading_list_areas_render_shape_accurate_shimmering_skeletons_with_reduced_motion_fallback() {
     let mut state = shell();
     state.host_metrics = Load::Loading;

@@ -1751,18 +1751,9 @@ fn brain(state: &State, cx: &mut Cx<State>, kit: &Kit) -> El {
                 .key("search-prompt"),
             );
         }
-        Load::Pending => {
-            list = list.child(ui_components::async_status_strip(
-                "search-pending",
-                "Preparing query",
-                "Debouncing catalog lookup…",
-                true,
-                StatusTone::Neutral,
-                preferences,
-                kit,
-            ));
-        }
-        Load::Loading => {
+        Load::Pending | Load::Loading => {
+            // Debounce and the first fetch share one results-shaped skeleton: no narration, no
+            // layout change when the request starts.
             list = list.child(ui_components::skeleton_actor_results(preferences, kit));
         }
         Load::Failed(error) => {

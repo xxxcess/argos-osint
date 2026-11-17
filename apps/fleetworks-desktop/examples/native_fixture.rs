@@ -574,6 +574,7 @@ mod native {
         rune::run(AppSpec {
             init,
             scenes: &[
+                ("backend-choice", State::fixture_show_backend_choice),
                 ("redesign-status", redesign_scenes::status),
                 ("redesign-seed", redesign_scenes::seed),
                 ("redesign-seed-ready", redesign_scenes::seed_ready),

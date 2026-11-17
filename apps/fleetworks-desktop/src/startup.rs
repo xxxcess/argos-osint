@@ -28,7 +28,7 @@ pub(crate) enum StartupPhase {
     Splash(f32),
     /// The scene fades out as the choice fades in; `progress` runs 0 to 1.
     Crossfade { seconds: f32, progress: f32 },
-    /// Waiting for an explicit Local Embedded or Remote Gateway choice.
+    /// Waiting for an explicit Embedded or Distributed backend choice.
     Choose,
     /// The normal shell.
     Done,
@@ -157,7 +157,7 @@ fn choose(kit: &rune_kit::Kit) -> El {
         .max_w(520.0)
         .gap(16.0)
         .child(
-            rune::text("Choose your connection")
+            rune::text("Choose a backend")
                 .font(kit.ty.body_medium)
                 .color(theme::hex(theme::TEXT_PRIMARY)),
         )
@@ -169,15 +169,15 @@ fn choose(kit: &rune_kit::Kit) -> El {
         .child(destination(
             kit,
             "startup-local",
-            "Local Embedded",
-            "Run the Fleetworks backend on this computer. You start it from setup.",
+            "Embedded",
+            "Run the backend on this workstation.",
             BackendKind::Local,
         ))
         .child(destination(
             kit,
             "startup-remote",
-            "Remote Gateway",
-            "Connect to a gateway by URL with operator pairing.",
+            "Distributed",
+            "Pair with a deployment by gateway URL.",
             BackendKind::Remote,
         ))
 }
@@ -189,15 +189,33 @@ fn destination(
     detail: &'static str,
     kind: BackendKind,
 ) -> El {
-    rune_kit::Button::new(title)
-        .variant(rune_kit::ButtonVariant::Outline)
-        .on_press(move |state: &mut State| state.choose_startup_destination(kind))
-        .build(kit)
-        .key(key)
-        .label(format!("{title}. {detail}"))
+    rune::col()
+        .gap(4.0)
+        .child(
+            rune_kit::Button::new(title)
+                .variant(rune_kit::ButtonVariant::Outline)
+                .on_press(move |state: &mut State| state.choose_startup_destination(kind))
+                .build(kit)
+                .key(key)
+                .label(format!("{title}. {detail}")),
+        )
+        .child(
+            rune::text(detail)
+                .font(kit.ty.small)
+                .color(theme::hex(theme::TEXT_MUTED))
+                .a11y_hidden(),
+        )
 }
 
 impl State {
+    /// Render the settled backend choice through the production startup view in a fixture.
+    pub fn fixture_show_backend_choice(&mut self) {
+        if self.fixture {
+            self.startup = Startup::cold_launch();
+            self.startup.begin(self.clock - CHOOSE_AT);
+        }
+    }
+
     /// Select the existing setup flow for a destination. This never starts or connects.
     pub(crate) fn choose_startup_destination(&mut self, kind: BackendKind) {
         if !self.startup.active() {
@@ -318,6 +336,20 @@ mod tests {
         assert!(runtime.find("startup-orbit").is_none());
         assert!(runtime.find("startup-local").is_some());
         assert!(runtime.find("startup-remote").is_some());
+        let elements = runtime.elements();
+        for (key, name) in [
+            ("startup-local", "Embedded"),
+            ("startup-remote", "Distributed"),
+        ] {
+            let choice = elements
+                .iter()
+                .find(|element| element.key.as_deref() == Some(key))
+                .unwrap();
+            assert!(choice
+                .label
+                .as_deref()
+                .is_some_and(|label| label.starts_with(name)));
+        }
         assert!(runtime.find("nav-workstation").is_none());
 
         let (x, y) = runtime.find("startup-remote").expect("remote choice");

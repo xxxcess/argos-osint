@@ -228,9 +228,9 @@ fn section_content(state: &State, preferences: ViewPreferences, kit: &Kit) -> El
         SettingsSection::Gateway => {
             let mut rows = rune::col().child(setting_row(
                 if state.is_local_backend() {
-                    "Local Embedded Backend"
+                    "Embedded backend"
                 } else {
-                    "Gateway URL"
+                    "Distributed gateway URL"
                 },
                 if state.is_local_backend() {
                     format!(
@@ -259,10 +259,10 @@ fn section_content(state: &State, preferences: ViewPreferences, kit: &Kit) -> El
             ));
             if state.local_backend.active() {
                 rows = rows.child(setting_row(
-                    "Local companion process",
+                    "Embedded companion process",
                     "Gracefully shut down the embedded companion backend.",
                     Some(
-                        ActionButton::new("Stop Local Backend")
+                        ActionButton::new("Stop Embedded Backend")
                             .key("settings-stop-local-backend")
                             .finish(MetalFinish::Gunmetal)
                             .disabled(state.local_backend.stopping)
@@ -273,8 +273,8 @@ fn section_content(state: &State, preferences: ViewPreferences, kit: &Kit) -> El
                 ));
             }
             rows = rows.child(setting_row(
-                "Pairing and access",
-                "Switch between Remote Gateway and Local Embedded, or inspect connection status.",
+                "Backend and access",
+                "Select Embedded or Distributed, or inspect connection status.",
                 Some(
                     ActionButton::new("Setup Gateway")
                         .key("settings-gateway-open")

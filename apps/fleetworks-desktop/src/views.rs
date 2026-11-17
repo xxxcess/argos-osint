@@ -110,23 +110,23 @@ fn connection_status(state: &State) -> String {
     match &state.connection.status {
         ConnectionStatus::Disconnected => {
             if state.is_local_backend() {
-                "Local companion backend is stopped".into()
+                "Embedded backend is stopped".into()
             } else {
-                "No gateway connection".into()
+                "Distributed gateway is disconnected".into()
             }
         }
         ConnectionStatus::Connecting => {
             if state.is_local_backend() {
-                "Starting local companion backend over stdio IPC…".into()
+                "Starting the embedded backend over stdio IPC…".into()
             } else {
-                "Checking gateway authentication and compatibility…".into()
+                "Checking distributed gateway authentication and compatibility…".into()
             }
         }
         ConnectionStatus::Connected => {
             if state.is_local_backend() {
-                "Connected to local embedded companion backend (stdio IPC)".into()
+                "Connected to the embedded backend over stdio IPC".into()
             } else {
-                "Connected to a compatible gateway".into()
+                "Connected to a compatible distributed gateway".into()
             }
         }
         ConnectionStatus::Failed(error) => error.clone(),
@@ -142,7 +142,7 @@ fn backend_mode_card(
     kit: &Kit,
     pointer_ref: Option<&rune::Live<[f32; 2]>>,
 ) -> El {
-    let remote_btn = ActionButton::new("Remote Gateway")
+    let remote_btn = ActionButton::new("Distributed")
         .key("backend-mode-remote")
         .icon(&icons::SERVER)
         .finish(if !state.is_local_backend() {
@@ -153,7 +153,7 @@ fn backend_mode_card(
         .disabled(busy)
         .on_press(|state: &mut State| state.set_backend_kind(BackendKind::Remote))
         .build(kit, preferences, pointer_ref);
-    let local_btn = ActionButton::new("Local Embedded")
+    let local_btn = ActionButton::new("Embedded")
         .key("backend-mode-local")
         .icon(&icons::WORKSTATION)
         .finish(if state.is_local_backend() {
@@ -169,15 +169,15 @@ fn backend_mode_card(
             .key("backend-mode")
             .w_full()
             .gap(8.0)
-            .child(remote_btn)
             .child(local_btn)
+            .child(remote_btn)
     } else {
         rune::row()
             .key("backend-mode")
             .w_full()
             .gap(8.0)
-            .child(remote_btn)
             .child(local_btn)
+            .child(remote_btn)
     };
     material::responsive_card(
         rune::col()
@@ -185,11 +185,11 @@ fn backend_mode_card(
             .gap(10.0)
             .child(ui_components::section_header(
                 &icons::SERVER,
-                "Backend Mode",
+                "Backend type",
                 Some(if state.is_local_backend() {
-                    "Supervise a private local companion backend on this workstation via framed stdio IPC"
+                    "Run the backend on this workstation through its bundled companion process."
                 } else {
-                    "Connect over HTTPS or loopback HTTP to a paired Fleetworks gateway"
+                    "Connect to a distributed deployment through its HTTPS or loopback HTTP gateway."
                 }),
                 None,
                 None,
@@ -304,7 +304,7 @@ fn local_runtime_diagnostics(
         diagnostics = diagnostics.child(
             ui_components::async_status_strip(
                 "local-pipe-closed-alert",
-                "Local IPC disconnected",
+                "Embedded IPC disconnected",
                 error.clone(),
                 false,
                 StatusTone::Err,
@@ -319,7 +319,7 @@ fn local_runtime_diagnostics(
         diagnostics = diagnostics.child(
             ui_components::async_status_strip(
                 "local-pressure-paused-alert",
-                "Local backend paused under resource pressure",
+                "Embedded backend paused under resource pressure",
                 format!(
                     "Reason code: {reason_code}. Active work paused safely until pressure clears."
                 ),
@@ -349,7 +349,7 @@ fn local_runtime_diagnostics(
         diagnostics = diagnostics.child(
             ui_components::async_status_strip(
                 "local-shutdown-status",
-                "Local companion lifecycle",
+                "Embedded companion lifecycle",
                 message.clone(),
                 state.local_backend.stopping,
                 StatusTone::Neutral,
@@ -386,7 +386,7 @@ fn local_backend_setup_card(
         .key("local-backend-card")
         .child(ui_components::section_header(
             &icons::WORKSTATION,
-            "Local Embedded Backend",
+            "Embedded backend",
             Some(&state.connection.origin.text),
             Some(ui_components::status_pill(
                 if state.connected() {
@@ -462,7 +462,7 @@ fn local_backend_setup_card(
         body = body
             .child(ui_components::async_status_strip(
                 "connection-status",
-                "Connected to local embedded backend",
+                "Connected to the embedded backend",
                 "Framed stdio IPC verified (no HTTP fallback)",
                 false,
                 StatusTone::Ok,
@@ -476,7 +476,7 @@ fn local_backend_setup_card(
         body = body.child(ui_components::inline_toggle_row(
             "setup-advanced-toggle",
             state.setup_advanced_open,
-            "Inspect local readiness checks",
+            "Inspect embedded readiness checks",
             Some("Reveal per-service probes and observation freshness"),
             false,
             kit,
@@ -485,13 +485,13 @@ fn local_backend_setup_card(
         if state.setup_advanced_open {
             body = body.child(crate::readiness_cards::checks(state, preferences, kit));
         }
-        let stop_btn = ActionButton::new("Stop Local Backend")
+        let stop_btn = ActionButton::new("Stop Embedded Backend")
             .key("stop-local-backend")
             .finish(MetalFinish::Gunmetal)
             .disabled(state.local_backend.stopping)
             .on_press(|state: &mut State| state.stop_local_backend())
             .build(kit, preferences, pointer_ref);
-        let switch_btn = ActionButton::new("Open Gateway")
+        let switch_btn = ActionButton::new("Switch to Distributed")
             .key("switch-remote-gateway")
             .finish(MetalFinish::Gunmetal)
             .on_press(|state: &mut State| state.set_backend_kind(BackendKind::Remote))
@@ -518,7 +518,7 @@ fn local_backend_setup_card(
             body = body.child(
                 ui_components::async_status_strip(
                     "local-connection-error",
-                    "Local companion backend failed to start",
+                    "Embedded backend failed to start",
                     error.clone(),
                     false,
                     StatusTone::Err,
@@ -529,7 +529,7 @@ fn local_backend_setup_card(
             );
         }
         let connecting = state.connection.status == ConnectionStatus::Connecting;
-        let start_btn = ActionButton::new("Start Local Backend")
+        let start_btn = ActionButton::new("Start Embedded Backend")
             .key("connect-local")
             .icon(&icons::WORKSTATION)
             .finish(MetalFinish::GoldCta)
@@ -537,7 +537,7 @@ fn local_backend_setup_card(
             .disabled(connecting)
             .on_press(|state: &mut State| state.connect_local())
             .build(kit, preferences, pointer_ref);
-        let switch_btn = ActionButton::new("Open Gateway")
+        let switch_btn = ActionButton::new("Switch to Distributed")
             .key("switch-remote-gateway")
             .finish(MetalFinish::Gunmetal)
             .disabled(connecting)
@@ -597,7 +597,7 @@ fn setup_gateway(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
         &icons::KEY,
         "Setup Gateway",
         Some(if state.is_local_backend() {
-            "Start and supervise the local companion backend over framed stdio IPC."
+            "Start the embedded backend on this workstation."
         } else if cfg!(target_os = "macos") {
             "Pair once via macOS Keychain. Accepted jobs persist independently."
         } else {
@@ -607,7 +607,7 @@ fn setup_gateway(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
             match active_step {
                 2 => {
                     if state.is_local_backend() {
-                        "Local Ready"
+                        "Ready"
                     } else {
                         "Paired"
                     }
@@ -621,7 +621,7 @@ fn setup_gateway(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
                 }
                 _ => {
                     if state.is_local_backend() {
-                        "Local Setup"
+                        "Embedded setup"
                     } else {
                         "Origin Setup"
                     }
@@ -645,7 +645,7 @@ fn setup_gateway(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
         .child(ui_components::stage_stepper(
             "gateway-setup-stepper",
             if state.is_local_backend() {
-                &["Local Backend", "IPC Handshake", "Backend Ready"]
+                &["Embedded backend", "IPC handshake", "Backend ready"]
             } else {
                 &["Origin URL", "Workstation Pair", "Gateway Ready"]
             },
@@ -1039,7 +1039,7 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
             &icons::SERVER,
             "Gateway Backend",
             Some(if state.is_local_backend() {
-                "Local Embedded (framed stdio IPC)"
+                "Embedded (framed stdio IPC)"
             } else {
                 &state.connection.origin.text
             }),
@@ -1084,7 +1084,7 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
                     gateway_body.child(local_capabilities_summary(capabilities, preferences, kit));
             }
             gateway_body = gateway_body.child(
-                ActionButton::new("Stop Local Backend")
+                ActionButton::new("Stop Embedded Backend")
                     .key("workstation-stop-local-backend")
                     .finish(MetalFinish::Gunmetal)
                     .disabled(state.local_backend.stopping)
@@ -2824,8 +2824,19 @@ mod tests {
             let mut clock = 0.0;
             rt.frame(clock);
             assert!(rt.find("backend-mode").is_some());
-            assert!(rt.find("backend-mode-remote").is_some());
-            assert!(rt.find("backend-mode-local").is_some());
+            let elements = rt.elements();
+            for (key, label) in [
+                ("backend-mode-local", "Embedded"),
+                ("backend-mode-remote", "Distributed"),
+            ] {
+                assert!(
+                    elements.iter().any(|element| {
+                        element.key.as_deref() == Some(key)
+                            && element.label.as_deref() == Some(label)
+                    }),
+                    "missing {label} backend option at {size:?}"
+                );
+            }
             assert!(rt.find("gateway-origin").is_some());
             assert!(rt.find("connect").is_some());
             assert!(rt.find("local-backend-card").is_none());
@@ -2872,7 +2883,7 @@ mod tests {
         caps.features = vec![CONNECT_REGISTRY_FEATURE.into()];
         base.connection.capabilities = Some(caps);
 
-        // Setup Gateway view in connected Local Embedded mode.
+        // Setup Gateway view with the embedded backend connected.
         base.setup_gateway = true;
         let mut setup_rt = Runtime::new(
             base,
@@ -2893,7 +2904,7 @@ mod tests {
         assert!(setup_tree.contains("Optional capabilities unavailable"));
         assert!(setup_tree.contains("memory_pressure"));
 
-        // Workstation Status view in connected Local Embedded mode.
+        // Workstation Status view with the embedded backend connected.
         setup_rt.update(|state, _| state.setup_gateway = false);
         setup_rt.frame(1.0 / 60.0);
         assert!(setup_rt.find("gateway-backend-card").is_some());

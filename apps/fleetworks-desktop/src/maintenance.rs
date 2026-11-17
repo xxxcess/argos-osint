@@ -349,7 +349,7 @@ impl State {
                 })
         {
             return Some(
-                "Natural classifier training is unavailable on this local backend.".into(),
+                "Natural classifier training is unavailable on this embedded backend.".into(),
             );
         }
         if !self.permission(Permission::MaintainBackend) {

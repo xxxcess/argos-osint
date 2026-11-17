@@ -577,7 +577,7 @@ impl State {
             .unwrap_or_else(|| "embedded".to_owned())
     }
 
-    /// Switch destination mode between Remote Gateway and Local Embedded without leaking tokens or URLs.
+    /// Switch between Distributed and Embedded without carrying credentials or URLs across.
     pub fn set_backend_kind(&mut self, kind: BackendKind) {
         if self.backend_kind == kind {
             return;
@@ -620,7 +620,7 @@ impl State {
         self.client = None;
         self.local_backend.stopping = true;
         self.local_backend.shutdown_message =
-            Some(format!("Stopping local companion backend ({reason})…"));
+            Some(format!("Stopping the embedded backend ({reason})…"));
         if let Some(services) = &self.services {
             self.local_shutdown_request =
                 services.shutdown_local_backend(process, reason.to_owned(), wait_for_quit);
@@ -794,7 +794,7 @@ impl State {
                 relinquished_leases,
             } => {
                 self.local_backend.shutdown_message = Some(format!(
-                    "Local companion backend shutdown notice (checkpointed={checkpointed}, relinquished_leases={relinquished_leases})."
+                    "Embedded backend shutdown notice (checkpointed={checkpointed}, relinquished_leases={relinquished_leases})."
                 ));
             }
             _ => {}
@@ -817,7 +817,7 @@ impl State {
             return;
         }
         self.local_backend.shutdown_message = Some(format!(
-            "Local IPC event stream skipped {skipped} notifications; refreshing readiness."
+            "Embedded IPC event stream skipped {skipped} notifications; refreshing readiness."
         ));
         if self.connected() {
             self.refresh_readiness();
@@ -841,11 +841,10 @@ impl State {
             self.local_backend.event_task = None;
             self.client = None;
             let detail = if stderr.is_empty() {
-                "Local companion backend IPC pipe closed unexpectedly (HTTP fallback disabled)."
-                    .to_owned()
+                "Embedded backend IPC pipe closed unexpectedly (HTTP fallback disabled).".to_owned()
             } else {
                 format!(
-                    "Local companion backend IPC pipe closed unexpectedly (HTTP fallback disabled): {stderr}"
+                    "Embedded backend IPC pipe closed unexpectedly (HTTP fallback disabled): {stderr}"
                 )
             };
             self.local_backend.pipe_closed_error = Some(detail.clone());
@@ -866,14 +865,14 @@ impl State {
         match outcome {
             Ok(ack) => {
                 self.local_backend.shutdown_message = Some(format!(
-                    "Local companion backend stopped cleanly (checkpointed={}, relinquished_leases={}).",
+                    "Embedded backend stopped cleanly (checkpointed={}, relinquished_leases={}).",
                     ack.checkpointed, ack.relinquished_leases
                 ));
                 self.local_backend.last_shutdown_ack = Some(ack);
             }
             Err(error) => {
                 self.local_backend.shutdown_message =
-                    Some(format!("Local companion backend shutdown notice: {error}"));
+                    Some(format!("Embedded backend shutdown notice: {error}"));
             }
         }
     }

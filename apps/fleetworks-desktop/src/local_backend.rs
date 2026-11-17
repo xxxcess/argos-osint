@@ -79,16 +79,17 @@ pub fn assess_local_capabilities(capabilities: &Capabilities) -> LocalCapability
 
     let mut warnings = Vec::new();
     if !nlp_available {
-        warnings.push("The local backend is not advertising NLP support.".into());
+        warnings.push("The embedded backend is not advertising NLP support.".into());
     }
     if !classifier_available {
         warnings.push(
-            "The local backend is not advertising Natural classifier support. Training and activation are unavailable.".into(),
+            "The embedded backend is not advertising Natural classifier support. Training and activation are unavailable.".into(),
         );
     }
     if !actor_search_available {
         warnings.push(
-            "Actor search capability (`tantivy`) is absent in this local companion binary.".into(),
+            "Actor search capability (`tantivy`) is absent in this embedded companion binary."
+                .into(),
         );
     }
     LocalCapabilityAssessment {
@@ -179,7 +180,7 @@ impl LocalBackendProcess {
             .await
             .map_err(|error| {
                 LocalBackendError::Transport(format!(
-                    "failed to start local companion backend over stdio IPC: {error}"
+                    "failed to start embedded backend over stdio IPC: {error}"
                 ))
             })?,
         );
@@ -204,8 +205,7 @@ impl LocalBackendProcess {
             None => {
                 let _ = ipc.shutdown("missing_capabilities").await;
                 return Err(LocalBackendError::IncompatibleCapabilities(
-                    "local companion backend did not advertise capabilities during IPC handshake"
-                        .into(),
+                    "embedded backend did not advertise capabilities during IPC handshake".into(),
                 ));
             }
         };
@@ -221,7 +221,7 @@ impl LocalBackendProcess {
                 if ready.api_version != fleetworks_contracts::API_VERSION {
                     let _ = ipc.shutdown("unsupported_api_version").await;
                     return Err(LocalBackendError::IncompatibleCapabilities(format!(
-                        "unsupported local backend API version {}",
+                        "unsupported embedded backend API version {}",
                         ready.api_version
                     )));
                 }
@@ -231,11 +231,11 @@ impl LocalBackendProcess {
                 let stderr = sanitize_stderr_excerpt(&ipc.captured_stderr());
                 if stderr.is_empty() {
                     LocalBackendError::Transport(format!(
-                        "local backend readiness handshake failed: {error}"
+                        "embedded backend readiness handshake failed: {error}"
                     ))
                 } else {
                     LocalBackendError::Transport(format!(
-                        "local backend readiness handshake failed: {error} ({stderr})"
+                        "embedded backend readiness handshake failed: {error} ({stderr})"
                     ))
                 }
             })?,
@@ -481,37 +481,37 @@ fn verify_executable_metadata(
 pub fn validate_private_state_dir(path: &Path) -> Result<PathBuf, LocalBackendError> {
     let text = path.to_str().ok_or_else(|| {
         LocalBackendError::InvalidStateDir(
-            "local backend state directory must be valid UTF-8".into(),
+            "embedded backend state directory must be valid UTF-8".into(),
         )
     })?;
     if !path.is_absolute() || text.chars().any(char::is_control) {
         return Err(LocalBackendError::InvalidStateDir(
-            "local backend state directory must be an absolute path".into(),
+            "embedded backend state directory must be an absolute path".into(),
         ));
     }
     let meta = std::fs::symlink_metadata(path).map_err(|error| {
         LocalBackendError::InvalidStateDir(format!(
-            "local backend state directory `{}` is missing or inaccessible: {error}",
+            "embedded backend state directory `{}` is missing or inaccessible: {error}",
             path.display()
         ))
     })?;
     if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
         return Err(LocalBackendError::InvalidStateDir(format!(
-            "local backend state directory `{}` must be a real directory without symlinks",
+            "embedded backend state directory `{}` must be a real directory without symlinks",
             path.display()
         )));
     }
     let mode = meta.permissions().mode();
     if mode & 0o077 != 0 {
         return Err(LocalBackendError::InvalidStateDir(format!(
-            "local backend state directory `{}` must use private 0700 permissions",
+            "embedded backend state directory `{}` must use private 0700 permissions",
             path.display()
         )));
     }
     let current_euid = unsafe { libc::geteuid() };
     if meta.uid() != current_euid {
         return Err(LocalBackendError::InvalidStateDir(format!(
-            "local backend state directory `{}` owner does not match the current user",
+            "embedded backend state directory `{}` owner does not match the current user",
             path.display()
         )));
     }

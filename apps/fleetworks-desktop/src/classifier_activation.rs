@@ -184,7 +184,7 @@ impl State {
                 })
         {
             return Some(
-                "Natural classifier activation is unavailable on this local backend.".into(),
+                "Natural classifier activation is unavailable on this embedded backend.".into(),
             );
         }
         let context = match self.activation_read_context() {

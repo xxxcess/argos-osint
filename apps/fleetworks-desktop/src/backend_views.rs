@@ -2235,6 +2235,13 @@ pub(crate) fn maintenance_confirmation_content(
 ) -> El {
     let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
     let busy = state.maintenance.busy() || matches!(state.maintenance.receipt, Load::Loading);
+    let current = state.maintenance_confirmation_matches(confirmation);
+    let blocked = if current {
+        state.maintenance_confirmation_preflight(confirmation.operation)
+    } else {
+        Some("The backend context or selected dataset changed. Cancel and review again.".into())
+    };
+    let refreshing = state.readiness_request.is_some() || state.configuration_read_pending();
     let is_reindex = confirmation.operation == MaintenanceOperation::ReindexActors;
     let title = if is_reindex {
         "Build actor search index".to_owned()
@@ -2251,7 +2258,7 @@ pub(crate) fn maintenance_confirmation_content(
     } else {
         "Keep current backend state"
     };
-    rune::col()
+    let mut content = rune::col()
         .gap(8.0)
         .key("maintenance-confirmation")
         .child(heading(title, kit))
@@ -2289,36 +2296,59 @@ pub(crate) fn maintenance_confirmation_content(
                 },
             ),
             kit,
-        ))
-        .child(
-            rune::row()
-                .gap(8.0)
-                .child(
-                    ActionButton::new(confirm_label)
-                        .key("maintenance-confirm")
-                        .icon(&icons::SHIELD_CHECK)
-                        .finish(MetalFinish::FracturedConfirm)
-                        .status(
-                            if busy { "Queuing…" } else { "Ready" },
-                            if busy {
-                                StatusTone::Accent
-                            } else {
-                                StatusTone::Ok
-                            },
-                        )
-                        .busy(busy)
-                        .disabled(busy)
-                        .on_press(|state: &mut State| state.confirm_maintenance())
-                        .build(kit, preferences, pointer_ref),
-                )
-                .child(
-                    ActionButton::new(cancel_label)
-                        .key("maintenance-cancel")
-                        .finish(MetalFinish::Gunmetal)
-                        .on_press(|state: &mut State| state.cancel_maintenance_confirmation())
-                        .build(kit, preferences, pointer_ref),
-                ),
-        )
+        ));
+    if let Some(reason) = &blocked {
+        content = content.child(line(reason.clone(), kit).role("status"));
+    }
+    if blocked.is_some() && current && !busy {
+        content = content.child(
+            ActionButton::new("Refresh checks")
+                .key("maintenance-confirm-refresh")
+                .icon(&icons::REFRESH)
+                .finish(MetalFinish::Gunmetal)
+                .busy(refreshing)
+                .disabled(!state.connected() || refreshing)
+                .on_press(|state: &mut State| state.refresh_page())
+                .build(kit, preferences, pointer_ref),
+        );
+    }
+    content.child(
+        rune::row()
+            .gap(8.0)
+            .child(
+                ActionButton::new(confirm_label)
+                    .key("maintenance-confirm")
+                    .icon(&icons::SHIELD_CHECK)
+                    .finish(MetalFinish::FracturedConfirm)
+                    .status(
+                        if busy {
+                            "Working…"
+                        } else if blocked.is_some() {
+                            "Blocked"
+                        } else {
+                            "Ready"
+                        },
+                        if busy {
+                            StatusTone::Accent
+                        } else if blocked.is_some() {
+                            StatusTone::Warn
+                        } else {
+                            StatusTone::Ok
+                        },
+                    )
+                    .busy(busy)
+                    .disabled(busy || blocked.is_some())
+                    .on_press(|state: &mut State| state.confirm_maintenance())
+                    .build(kit, preferences, pointer_ref),
+            )
+            .child(
+                ActionButton::new(cancel_label)
+                    .key("maintenance-cancel")
+                    .finish(MetalFinish::Gunmetal)
+                    .on_press(|state: &mut State| state.cancel_maintenance_confirmation())
+                    .build(kit, preferences, pointer_ref),
+            ),
+    )
 }
 
 pub(crate) fn actor_index_receipt_banner(

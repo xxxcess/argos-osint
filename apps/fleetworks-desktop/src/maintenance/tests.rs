@@ -174,6 +174,88 @@ fn uploaded_csv_requires_confirmation_and_keeps_initial_configuration_revision()
 }
 
 #[test]
+fn expired_training_review_survives_refresh_and_requires_explicit_confirmation() {
+    let kind = DatasetKind::ClassifierTraining;
+    let operation = MaintenanceOperation::TrainClassifier;
+    let upload = uploaded(kind);
+    let mut state = state(false);
+    let Load::Ready(readiness) = state.readiness.clone() else {
+        panic!("fixture readiness");
+    };
+    state.complete_dataset_upload(
+        state.connection.epoch,
+        0,
+        state.origin_revision,
+        kind,
+        Ok(upload.clone()),
+    );
+    assert!(state.maintenance.confirmation.is_some());
+
+    let mut runtime = runtime(state);
+    let mut clock = 6.0;
+    runtime.update(|state, _| state.clock = 6.0);
+    runtime.frame(clock);
+    click(&mut runtime, "maintenance-confirm", &mut clock);
+    click(&mut runtime, "maintenance-confirm-refresh", &mut clock);
+    runtime.update(|state, _| {
+        state.confirm_maintenance();
+        state.complete_readiness(Err("temporary failure".into()));
+        state.confirm_maintenance();
+
+        let mut wrong_registration = readiness.clone();
+        wrong_registration.registration.as_mut().unwrap().revision += 1;
+        state.complete_readiness(Ok(wrong_registration));
+        state.confirm_maintenance();
+        assert!(state.maintenance.confirmation.is_some());
+        assert_eq!(
+            state.maintenance.selected_dataset.as_ref(),
+            Some(&upload.dataset)
+        );
+        assert!(!state.intents.contains(&Intent::Maintenance { operation }));
+
+        state.complete_readiness(Ok(readiness));
+        assert!(!state.intents.contains(&Intent::Maintenance { operation }));
+    });
+    clock += 1.0 / 60.0;
+    runtime.frame(clock);
+    assert!(runtime.find("maintenance-confirm-refresh").is_none());
+    click(&mut runtime, "maintenance-confirm", &mut clock);
+    assert!(runtime.state.maintenance.confirmation.is_none());
+    assert_eq!(
+        runtime
+            .state
+            .intents
+            .iter()
+            .filter(|intent| *intent == &Intent::Maintenance { operation })
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn changed_configuration_requires_a_new_training_review() {
+    let kind = DatasetKind::ClassifierTraining;
+    let operation = MaintenanceOperation::TrainClassifier;
+    let mut state = state(false);
+    state.complete_dataset_upload(
+        state.connection.epoch,
+        0,
+        state.origin_revision,
+        kind,
+        Ok(uploaded(kind)),
+    );
+    assert!(state.maintenance.confirmation.is_some());
+    let Load::Ready(profile) = &mut state.backend.profile else {
+        panic!("fixture profile");
+    };
+    profile.configuration_revision += 1;
+
+    state.confirm_maintenance();
+    assert!(state.maintenance.confirmation.is_none());
+    assert!(!state.intents.contains(&Intent::Maintenance { operation }));
+}
+
+#[test]
 fn index_control_stays_disabled_until_completed_nonempty_catalog_is_observed() {
     let mut runtime = runtime(state(false));
     let mut clock = 0.0;

@@ -137,6 +137,13 @@ impl Maintenance {
     }
     pub(crate) fn invalidate_origin(&mut self) {
         self.csv_path_prompt = None;
+        self.local_dataset = None;
+        self.selected_dataset = None;
+        self.datasets = Load::Idle;
+        self.upload = Load::Idle;
+        self.upload_request = None;
+        self.datasets_request = None;
+        self.datasets_revision = self.datasets_revision.wrapping_add(1);
         self.pending_preview = None;
         self.seed_accepted_at = None;
         self.confirmation = None;
@@ -216,7 +223,7 @@ impl State {
 
     /// Reuses the picker's selection, validation, upload and confirmation flow for a typed path.
     pub fn submit_csv_path(&mut self) {
-        let Some(prompt) = &mut self.maintenance.csv_path_prompt else {
+        let Some(prompt) = &self.maintenance.csv_path_prompt else {
             return;
         };
         let kind = prompt.kind;
@@ -225,17 +232,22 @@ impl State {
             DatasetKind::ClassifierTraining => MaintenanceOperation::TrainClassifier,
             _ => return,
         };
-        match parse_local_csv_path(&prompt.input.text, std::env::var_os("HOME").as_deref()) {
+        let path = parse_local_csv_path(&prompt.input.text, std::env::var_os("HOME").as_deref())
+            .and_then(|path| match self.maintenance_disabled_reason(operation) {
+                Some(reason) => Err(reason),
+                None => Ok(path),
+            });
+        match path {
             Ok(path) => {
-                if let Some(reason) = self.maintenance_disabled_reason(operation) {
-                    self.maintenance.message = Some(reason);
-                    return;
-                }
                 self.maintenance.csv_path_prompt = None;
                 self.select_local_dataset(path, kind);
                 self.upload_selected_dataset();
             }
-            Err(error) => prompt.error = Some(error),
+            Err(error) => {
+                if let Some(prompt) = &mut self.maintenance.csv_path_prompt {
+                    prompt.error = Some(error);
+                }
+            }
         }
     }
 
@@ -510,35 +522,55 @@ impl State {
         self.confirm_maintenance_dialog = false;
     }
 
+    pub(crate) fn maintenance_confirmation_matches(
+        &self,
+        confirmation: &MaintenanceConfirmation,
+    ) -> bool {
+        confirmation.origin_revision == self.origin_revision
+            && self.registration.context.as_ref() == Some(&confirmation.context)
+            && self
+                .configuration_revision()
+                .is_none_or(|revision| revision == confirmation.configuration_revision)
+            && confirmation.dataset.as_ref().map(|dataset| dataset.kind)
+                == dataset_kind(confirmation.operation)
+            && confirmation.dataset.as_ref().is_none_or(|dataset| {
+                self.maintenance.selected_dataset.as_ref() == Some(dataset)
+                    && dataset.validate().is_ok()
+            })
+    }
+
+    pub(crate) fn maintenance_confirmation_preflight(
+        &self,
+        operation: MaintenanceOperation,
+    ) -> Option<String> {
+        if self.configuration_read_pending() {
+            return Some("Checking the backend configuration revision…".into());
+        }
+        self.maintenance_disabled_reason(operation)
+    }
+
     pub fn confirm_maintenance(&mut self) {
         if self.maintenance.operation_request.is_some()
             || matches!(self.maintenance.receipt, Load::Loading)
         {
             return;
         }
-        let Some(confirmation) = self.maintenance.confirmation.take() else {
+        let Some(confirmation) = self.maintenance.confirmation.as_ref() else {
             return;
         };
-        self.confirm_maintenance_dialog = false;
-        if confirmation.origin_revision != self.origin_revision
-            || self.registration.context.as_ref() != Some(&confirmation.context)
-            || self.configuration_revision() != Some(confirmation.configuration_revision)
-            || confirmation.dataset.as_ref().map(|dataset| dataset.kind)
-                != dataset_kind(confirmation.operation)
-            || confirmation.dataset.as_ref().is_some_and(|dataset| {
-                self.maintenance.selected_dataset.as_ref() != Some(dataset)
-                    || Some(dataset.kind) != dataset_kind(confirmation.operation)
-                    || dataset.validate().is_err()
-            })
-        {
+        if !self.maintenance_confirmation_matches(confirmation) {
+            self.cancel_maintenance_confirmation();
             self.maintenance.message =
                 Some("Origin or backend configuration changed; review the operation again".into());
             return;
         }
-        if let Some(reason) = self.maintenance_disabled_reason(confirmation.operation) {
+        if let Some(reason) = self.maintenance_confirmation_preflight(confirmation.operation) {
             self.maintenance.message = Some(reason);
             return;
         }
+        let confirmation = confirmation.clone();
+        self.cancel_maintenance_confirmation();
+        self.maintenance.message = None;
         self.submit_maintenance(confirmation, None);
     }
 

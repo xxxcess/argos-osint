@@ -393,6 +393,11 @@ impl Backend {
 }
 
 impl State {
+    pub(crate) fn configuration_read_pending(&self) -> bool {
+        self.backend.requests.contains_key(&ReadKind::Profile)
+            || self.backend.requests.contains_key(&ReadKind::Models)
+    }
+
     pub fn configuration_revision(&self) -> Option<u64> {
         let models = match &self.backend.models {
             Load::Ready(models) => Some(models.configuration_revision),
@@ -651,7 +656,16 @@ impl State {
         if self.configuration_revision() != previous_configuration_revision {
             self.classifier_activation.invalidate_confirmation();
             self.submissions.invalidate_confirmations();
-            self.maintenance.confirmation = None;
+            if self
+                .maintenance
+                .confirmation
+                .as_ref()
+                .is_some_and(|confirmation| !self.maintenance_confirmation_matches(confirmation))
+            {
+                self.cancel_maintenance_confirmation();
+                self.maintenance.message =
+                    Some("Backend configuration changed. Review the operation again.".into());
+            }
             self.configuration.confirmation = None;
             self.transfer.confirmation = None;
         }

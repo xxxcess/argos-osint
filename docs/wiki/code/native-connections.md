@@ -14,6 +14,8 @@ A launch with `--api-origin` or `--api-token-file` skips the splash and choice, 
 
 On **Start Local Backend**, the embedded companion warms its bundled Compromise NLP engine when built with NLP support. This is local engine readiness, not proof that remote Atlas or Focus Brief services are configured. The bundled Natural classifier supports explicitly confirmed, candidate-only training through **DB Seed & Train**. Starting the backend never trains or activates a model. Natural training availability does not establish readiness for Atlas's separate Rust-BERT classifier. The base local connection can still work when an optional engine is unavailable.
 
+If readiness expires while you review a validated CSV in **DB Seed & Train**, the app keeps the dataset and review visible. Use **Refresh checks** in the review and confirm explicitly once the operation is available for the same registration and configuration revision. Changes to the backend context or configuration require a new review.
+
 ## Inbox and Assistant dock
 
 The toolbar **Inbox** bell opens a popover with **All** and **Unread**, a list, and expandable detail. It lists only changes this app already observed: a visible job that stops being active, a readiness check that enters or leaves ready, not ready, degraded or unavailable, and the connection becoming ready or failing. Item text is fixed wording plus a job title or check name, never error text, URLs or credentials. It keeps at most 50 items, records one transition per job once, and clears when the connection authority changes. It sends nothing and makes no claim about device-wide alerts.

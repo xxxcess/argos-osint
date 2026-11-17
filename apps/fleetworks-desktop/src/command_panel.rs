@@ -96,15 +96,11 @@ pub struct CommandPanel {
     pub(crate) open: bool,
     pub(crate) query: TextEdit,
     pub(crate) active: usize,
-    /// Set when the panel opens; the panel's first layout moves keyboard focus into the filter
-    /// and clears it, so typing works without a click and resizing never steals focus again.
-    pub(crate) focus_pending: bool,
 }
 
 impl CommandPanel {
     pub(crate) fn close(&mut self) {
         self.open = false;
-        self.focus_pending = false;
         self.query = TextEdit::new("");
         self.active = 0;
     }
@@ -136,10 +132,11 @@ impl State {
         self.settings_open = false;
         self.inbox.open = false;
         self.inbox.selected = None;
-        self.commands.query = TextEdit::new("");
+        let mut query = TextEdit::new("");
+        query.focused = true;
+        self.commands.query = query;
         self.commands.active = 0;
         self.commands.open = true;
-        self.commands.focus_pending = true;
     }
 
     pub(crate) fn run_command(&mut self, command: Command) {
@@ -298,16 +295,7 @@ pub(crate) fn view(
         .radius(10.0)
         .child(header)
         .child(body)
-        .token_motion(kit.motion.overlay)
-        // Keyboard focus goes to the filter as soon as the panel is laid out, once per opening.
-        .on_layout_tx(|state: &mut State, _rect: [f32; 4], tx| {
-            if state.commands.focus_pending {
-                state.commands.focus_pending = false;
-                tx.focus("command-search/input", true);
-            } else {
-                tx.live_only();
-            }
-        });
+        .token_motion(kit.motion.overlay);
     for shadow in kit.shadow_layers(&kit.elevation.overlay) {
         panel = panel.box_shadow(shadow);
     }
@@ -491,9 +479,71 @@ mod tests {
                 focused_filter(&runtime),
                 "the filter has focus after opening {opening}"
             );
-            assert!(!runtime.state.commands.focus_pending, "requested once");
+            assert!(runtime.state.commands.query.focused);
             runtime.update(|state, _| state.commands.close());
             runtime.frame(f64::from(opening * 10 + 6) / 60.0);
+            assert!(!runtime.state.commands.query.focused);
         }
+    }
+
+    #[test]
+    fn typing_immediately_after_toolbar_and_ctrl_k_open_filters_without_a_click() {
+        let mut state = crate::tests::registered_fixture();
+        state.page = Page::Workstation;
+        let mut runtime = rune::Runtime::new(
+            state,
+            crate::app::view,
+            (1280.0, 800.0),
+            rune::Env {
+                system_dark: true,
+                scale: 1.0,
+            },
+        );
+        runtime.on_key = crate::app::spec().on_key;
+        runtime.frame(0.0);
+
+        let (x, y) = runtime.find("command-open").expect("toolbar button");
+        runtime.pointer_down(x, y);
+        runtime.pointer_up(x, y);
+        runtime.frame(1.0 / 60.0);
+        runtime.key(KeyEvent {
+            key: Key::Text("jobs".into()),
+            mods: rune::Mods::default(),
+        });
+        runtime.frame(2.0 / 60.0);
+        assert_eq!(runtime.state.commands.query.text, "jobs");
+        assert!(runtime.find("command-0").is_some());
+        assert!(runtime.find("command-1").is_none());
+        runtime.key(KeyEvent {
+            key: Key::Enter,
+            mods: rune::Mods::default(),
+        });
+        runtime.frame(3.0 / 60.0);
+        assert!(!runtime.state.commands.open);
+        assert_eq!(runtime.state.page, Page::Jobs);
+
+        runtime.key(KeyEvent {
+            key: Key::Command('k'),
+            mods: rune::Mods {
+                ctrl: true,
+                ..rune::Mods::default()
+            },
+        });
+        runtime.frame(4.0 / 60.0);
+        runtime.key(KeyEvent {
+            key: Key::Text("brain".into()),
+            mods: rune::Mods::default(),
+        });
+        runtime.frame(5.0 / 60.0);
+        assert_eq!(runtime.state.commands.query.text, "brain");
+        assert!(runtime.find("command-0").is_some());
+        assert!(runtime.find("command-1").is_none());
+        runtime.key(KeyEvent {
+            key: Key::Enter,
+            mods: rune::Mods::default(),
+        });
+        runtime.frame(6.0 / 60.0);
+        assert!(!runtime.state.commands.open);
+        assert_eq!(runtime.state.page, Page::Brain);
     }
 }

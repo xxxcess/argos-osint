@@ -1574,38 +1574,34 @@ fn jobs(
                             kit,
                         )),
                 );
-                if state.scoped_logs.busy() {
-                    let (strip_title, strip_detail, strip_tone) = if state.scoped_logs.following {
-                        (
-                            "Live operational stream active",
-                            format!("Synced with worker: {worker_summary}"),
-                            tone,
-                        )
-                    } else {
-                        (
-                            "Reading safe operational summaries…",
-                            format!("Worker status: {worker_summary}"),
-                            StatusTone::Info,
-                        )
-                    };
+                // One status strip with one key. Its title follows the job and the live toggle, never
+                // the individual request, so follow polls do not swap text or resize the section.
+                let job_active = crate::backend::job_is_active(&detail.job.state)
+                    && state.scoped_logs.status != LogStatus::Unavailable;
+                let strip = if state.scoped_logs.following {
+                    Some(("Live", format!("Worker: {worker_summary}"), tone))
+                } else if job_active {
+                    Some((
+                        "Job active",
+                        format!("Phase: {worker_summary}"),
+                        StatusTone::Info,
+                    ))
+                } else if state.scoped_logs.busy() {
+                    Some((
+                        "Reading summaries",
+                        format!("Worker: {worker_summary}"),
+                        StatusTone::Info,
+                    ))
+                } else {
+                    None
+                };
+                if let Some((strip_title, strip_detail, strip_tone)) = strip {
                     details = details.child(ui_components::async_status_strip(
-                        "logs-loading",
+                        "logs-status",
                         strip_title,
                         strip_detail,
                         true,
                         strip_tone,
-                        preferences,
-                        kit,
-                    ));
-                } else if crate::backend::job_is_active(&detail.job.state)
-                    && state.scoped_logs.status != LogStatus::Unavailable
-                {
-                    details = details.child(ui_components::async_status_strip(
-                        "logs-synced",
-                        "Worker job active",
-                        format!("Phase: {worker_summary}"),
-                        true,
-                        StatusTone::Info,
                         preferences,
                         kit,
                     ));
@@ -1626,7 +1622,12 @@ fn jobs(
                         );
                     }
                 }
-                if state.scoped_logs.rows.is_empty() && !state.scoped_logs.busy() {
+                // A read that already resolved stays resolved while a follow or older read runs.
+                let resolved = matches!(
+                    state.scoped_logs.status,
+                    LogStatus::Ready | LogStatus::DisplayLimit
+                );
+                if state.scoped_logs.rows.is_empty() && (!state.scoped_logs.busy() || resolved) {
                     // Three different states: not read yet, read with no events, and a failed read.
                     // A failed read shows its own message and Refresh button above.
                     match state.scoped_logs.status {
@@ -1643,7 +1644,7 @@ fn jobs(
                         _ => {}
                     }
                 }
-                if state.scoped_logs.rows.is_empty() && state.scoped_logs.busy() {
+                if state.scoped_logs.rows.is_empty() && state.scoped_logs.busy() && !resolved {
                     details = details.child(ui_components::skeleton_log_table(preferences, kit));
                 } else if !state.scoped_logs.rows.is_empty()
                     || matches!(

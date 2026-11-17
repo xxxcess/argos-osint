@@ -328,6 +328,8 @@ pub struct State {
     pub activity_tab: ActivityTab,
     pub readiness: Load<WorkstationReadiness>,
     pub readiness_received_at: Option<f64>,
+    /// The last refresh failed while earlier same-scope checks are still shown as stale.
+    pub readiness_error: Option<String>,
     pub(crate) clock: f64,
     pub(crate) reveal: Option<String>,
     pub selected_workspace: Option<PathBuf>,
@@ -407,6 +409,7 @@ impl Default for State {
             activity_tab: ActivityTab::Jobs,
             readiness: Load::Idle,
             readiness_received_at: None,
+            readiness_error: None,
             clock: 0.0,
             reveal: None,
             selected_workspace: None,
@@ -650,6 +653,7 @@ impl State {
         self.page = Page::Workstation;
         self.readiness = Load::Idle;
         self.readiness_received_at = None;
+        self.readiness_error = None;
         self.readiness_refresh_at = 0.0;
         self.jobs_refresh_at = 0.0;
         self.jobs_discovery_at = 0.0;
@@ -905,14 +909,31 @@ impl State {
 
     pub(crate) fn complete_readiness(&mut self, result: Result<WorkstationReadiness, String>) {
         self.readiness_request = None;
-        self.readiness = match result {
+        let kept = matches!(self.readiness, Load::Ready(_));
+        match result {
             Ok(readiness) if readiness.deployment_id == self.connection.deployment_label() => {
                 self.readiness_received_at = Some(self.clock);
-                Load::Ready(readiness)
+                self.readiness_error = None;
+                self.readiness = Load::Ready(readiness);
             }
-            Ok(_) => Load::Failed("Gateway returned readiness for a different deployment".into()),
-            Err(error) => Load::Failed(error),
-        };
+            Ok(_) => {
+                // Another deployment's checks are never kept.
+                self.readiness_received_at = None;
+                self.readiness_error = None;
+                self.readiness =
+                    Load::Failed("Gateway returned readiness for a different deployment".into());
+            }
+            Err(error) if kept => {
+                // A transient failure keeps the last same-scope checks, now marked stale: with no
+                // fresh observation every check reads as stale and repairs stay restricted.
+                self.readiness_received_at = None;
+                self.readiness_error = Some(error);
+            }
+            Err(error) => {
+                self.readiness_error = None;
+                self.readiness = Load::Failed(error);
+            }
+        }
         self.finish_dataset_preview();
     }
 
@@ -1554,25 +1575,26 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
             );
         }
         scope_bar = scope_bar.child(rune::spacer());
-        if any_busy {
-            scope_bar = scope_bar.child(
-                rune::row()
-                    .gap(6.0)
-                    .center_y()
-                    .child(
-                        rune_kit::Spinner::new()
-                            .size(13.0)
-                            .color(theme::hex(theme::ACCENT_HOVER))
-                            .build(&kit),
-                    )
-                    .child(
-                        rune::text("Syncing")
-                            .font(kit.ty.small_medium)
-                            .color(theme::hex(theme::ACCENT_HOVER)),
-                    ),
-            );
+        // Connection health never changes with request activity. A reserved slot holds a small
+        // spinner while any read is in flight, so the pill and the bar keep their size.
+        let activity = if any_busy {
+            rune_kit::Spinner::new()
+                .size(13.0)
+                .color(theme::hex(theme::TEXT_MUTED))
+                .build(&kit)
         } else {
-            scope_bar = scope_bar.child(ui_components::status_pill(
+            rune::el()
+        };
+        scope_bar = scope_bar
+            .child(
+                rune::row()
+                    .key("activity-slot")
+                    .w(13.0)
+                    .h(13.0)
+                    .a11y_hidden()
+                    .child(activity),
+            )
+            .child(ui_components::status_pill(
                 match &state.connection.status {
                     ConnectionStatus::Connected => "Online",
                     ConnectionStatus::Connecting => "Connecting",
@@ -1583,7 +1605,6 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
                 connection_tone,
                 &kit,
             ));
-        }
         content = content.child(scope_bar);
     }
 

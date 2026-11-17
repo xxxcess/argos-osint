@@ -345,10 +345,14 @@ async fn delayed_readiness_reply_controls_reindex_confirmation_and_failure() {
         .state
         .maintenance_disabled_reason(MaintenanceOperation::ReindexActors)
         .is_some());
-    assert!(matches!(
-        runtime.state.readiness,
-        Load::Failed(ref message) if message == "synthetic readiness outage"
-    ));
+    assert!(
+        matches!(runtime.state.readiness, Load::Ready(_)),
+        "a transient failure keeps the last same-scope checks as stale"
+    );
+    assert_eq!(
+        runtime.state.readiness_error.as_deref(),
+        Some("synthetic readiness outage")
+    );
     click(&mut runtime, "maintenance-reindex", &mut clock);
     assert!(runtime.state.maintenance.confirmation.is_none());
     assert_eq!(

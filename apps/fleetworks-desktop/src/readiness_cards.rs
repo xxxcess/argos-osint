@@ -80,6 +80,29 @@ pub(crate) fn checks(state: &State, preferences: ViewPreferences, kit: &Kit) -> 
                     ))
                     .child(quiet(format!("Observed {}", readiness.observed_at), kit)),
             );
+            if let Some(error) = &state.readiness_error {
+                body = body.child(
+                    rune::row()
+                        .key("readiness-update-failed")
+                        .w_full()
+                        .center_y()
+                        .gap(8.0)
+                        .child(ui_components::status_pill(
+                            "Update failed",
+                            None,
+                            StatusTone::Warn,
+                            kit,
+                        ))
+                        .child(quiet(format!("Showing the last checks. {error}"), kit))
+                        .child(
+                            ActionButton::new("Retry")
+                                .key("readiness-retry")
+                                .finish(MetalFinish::Gunmetal)
+                                .on_press(|state: &mut State| state.refresh_readiness())
+                                .build(kit, preferences, None),
+                        ),
+                );
+            }
             if readiness.checks.is_empty() {
                 body = body.child(quiet(
                     "The backend returned no check observations. Readiness is unknown.",
@@ -236,5 +259,47 @@ fn title(check: ReadinessCheckId) -> &'static str {
         ReadinessCheckId::ClassifierInference => "Classifier inference",
         ReadinessCheckId::ClassifierTraining => "Classifier training",
         _ => "Backend check",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_refresh_keeps_same_scope_checks_as_stale_and_recovery_clears_it() {
+        let mut state = State::fixture();
+        let Load::Ready(mut ready) = state.readiness.clone() else {
+            panic!("the fixture starts with observed checks")
+        };
+        ready.deployment_id = state.connection.deployment_label().to_owned();
+        state.readiness_received_at = Some(state.clock);
+        state.complete_readiness(Err("synthetic outage".into()));
+        let Load::Ready(kept) = &state.readiness else {
+            panic!("a transient failure keeps the last checks")
+        };
+        assert_eq!(state.readiness_error.as_deref(), Some("synthetic outage"));
+        assert!(kept.checks.iter().all(|c| !state.readiness_check_fresh(c)));
+
+        state.complete_readiness(Ok(ready));
+        assert!(matches!(state.readiness, Load::Ready(_)));
+        assert!(state.readiness_error.is_none() && state.readiness_received_at.is_some());
+    }
+
+    #[test]
+    fn a_first_failure_or_another_deployment_shows_an_error_instead_of_old_checks() {
+        let mut state = State::fixture();
+        state.readiness = Load::Idle;
+        state.complete_readiness(Err("synthetic outage".into()));
+        assert!(matches!(state.readiness, Load::Failed(_)));
+        assert!(state.readiness_error.is_none());
+
+        let mut state = State::fixture();
+        let Load::Ready(mut other) = state.readiness.clone() else {
+            panic!("the fixture starts with observed checks")
+        };
+        other.deployment_id = format!("{}-other", state.connection.deployment_label());
+        state.complete_readiness(Ok(other));
+        assert!(matches!(state.readiness, Load::Failed(_)));
     }
 }

@@ -1407,3 +1407,28 @@ fn jobs_list_sits_beside_the_detail_only_when_the_page_is_wide_enough() {
         }
     }
 }
+
+#[test]
+fn only_a_fresh_read_is_unresolved_while_follow_and_older_keep_the_resolved_status() {
+    let mut logs = ready();
+    logs.set_following(true);
+    let follow = logs.follow().expect("follow read");
+    assert!(logs.busy());
+    assert_eq!(
+        logs.status,
+        LogStatus::Ready,
+        "a follow poll must not turn resolved rows or a resolved empty result back into loading"
+    );
+    logs.cancel_requests();
+    assert_eq!(logs.status, LogStatus::Ready);
+    assert!(!logs.complete(&follow, Ok(LogReply::Page(page(1, 0, 10, None, None)))));
+
+    let refresh = logs.refresh().expect("explicit refresh");
+    assert_eq!(
+        logs.status,
+        LogStatus::Loading,
+        "a fresh read is unresolved"
+    );
+    assert!(logs.busy());
+    drop(refresh);
+}

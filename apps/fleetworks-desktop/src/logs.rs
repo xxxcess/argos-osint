@@ -394,7 +394,11 @@ impl LogState {
             query,
         };
         self.active = Some(ticket.clone());
-        self.status = LogStatus::Loading;
+        // Only a fresh read is unresolved. Follow, older and export keep the resolved status,
+        // so a verified empty result or loaded rows never fall back to a skeleton.
+        if action == LogAction::Refresh {
+            self.status = LogStatus::Loading;
+        }
         Some(ticket)
     }
 

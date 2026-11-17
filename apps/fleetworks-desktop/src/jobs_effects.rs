@@ -81,7 +81,7 @@ impl State {
             self.project_jobs_page();
             return;
         };
-        let keep_ready_jobs = matches!(event, JobsEvent::Poll)
+        let keep_ready_jobs = matches!(event, JobsEvent::Poll | JobsEvent::More)
             && !effect.clear_selection
             && matches!(self.backend.jobs, Load::Ready(_));
         if !keep_ready_jobs {
@@ -157,11 +157,11 @@ impl State {
     }
 
     /// The existing bounded detail/action consumers see only this validated
-    /// current-page projection. This is never a fallback legacy list request.
+    /// head-plus-tail projection. This is never a fallback legacy list request.
     fn project_jobs_page(&mut self) {
         self.backend.jobs = match (&self.scoped_jobs.page, self.scoped_jobs.status) {
             (Some(page), JobsLoad::Ready) => Load::Ready(ActivityJobs {
-                rows: page.rows.clone(),
+                rows: self.scoped_jobs.rows(),
                 activity_scope: page.activity_scope.clone(),
                 relation_counts_available: page.relation_counts_available,
                 activity_actions_available: page.activity_actions_available,

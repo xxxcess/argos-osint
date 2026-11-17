@@ -1,4 +1,9 @@
-//! Applied Jobs filters and bounded server-owned page navigation.
+//! Applied Jobs filters and bounded, continuous cursor loading.
+//!
+//! The first page is the head and is the only part a background poll refreshes. Later pages are
+//! appended at the tail through the server's opaque cursor, so rows, selection and scroll
+//! position survive both fetches and refreshes. Work is bounded by [`HISTORY_LIMIT`] pages and
+//! [`MAX_ROWS`] rows.
 //!
 //! Draft edits never rewrite an in-flight request. Read cancellation affects
 //! local reads only; accepted backend work and the separate Logs state survive.
@@ -19,7 +24,10 @@ use crate::backend::ActivityJob;
 use crate::connection::RequestTask;
 
 pub const PAGE_SIZE: u16 = 50;
+/// Most pages one scope will load: the head plus appended tail pages.
 pub const HISTORY_LIMIT: usize = 64;
+/// Most rows kept for one applied query, so memory and the list stay bounded.
+pub const MAX_ROWS: usize = 500;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -183,8 +191,8 @@ pub enum JobsLoad {
 pub enum JobsEvent {
     Apply,
     Clear,
-    Next,
-    Previous,
+    /// Append the next page at the tail.
+    More,
     Poll,
 }
 
@@ -202,8 +210,8 @@ pub struct JobsTicket {
     pub query: JobsQuery,
     generation: u64,
     sequence: u64,
-    page_index: usize,
     is_poll: bool,
+    is_tail: bool,
 }
 
 #[derive(Default)]
@@ -216,8 +224,14 @@ pub struct JobsQueryState {
     binding: Option<JobsBinding>,
     blocked_binding: Option<JobsBinding>,
     applied: Option<JobsQuery>,
-    history: Vec<String>,
-    page_index: usize,
+    /// Rows appended after the head page, oldest page last.
+    more: Vec<ActivityJob>,
+    /// Opaque cursor for the next tail page, when the server has more.
+    tail_cursor: Option<String>,
+    /// Tail pages appended so far.
+    tail_pages: usize,
+    /// A tail fetch failed; every loaded row stays and the user can retry.
+    tail_error: Option<String>,
     generation: u64,
     sequence: u64,
     active: Option<JobsTicket>,
@@ -239,23 +253,53 @@ impl JobsQueryState {
     pub fn revision(&self) -> u64 {
         self.generation
     }
-    pub fn page_number(&self) -> usize {
-        self.page_index + 1
+    fn row_iter(&self) -> impl Iterator<Item = &ActivityJob> {
+        let mut seen = std::collections::HashSet::new();
+        self.page
+            .iter()
+            .flat_map(|page| page.rows.iter())
+            .chain(self.more.iter())
+            .filter(move |row| seen.insert(row.id.as_str()))
+            .take(MAX_ROWS)
+    }
+    /// Head rows followed by appended rows, without duplicates, at most [`MAX_ROWS`].
+    pub fn rows(&self) -> Vec<ActivityJob> {
+        self.row_iter().cloned().collect()
+    }
+    /// How many rows [`rows`](Self::rows) holds, without copying them.
+    pub fn row_count(&self) -> usize {
+        self.row_iter().count()
+    }
+    /// Pages loaded for the applied query: the head plus the tail.
+    pub fn loaded_pages(&self) -> usize {
+        usize::from(self.page.is_some()) + self.tail_pages
+    }
+    /// Whether the user can ask for more rows right now.
+    pub fn can_load_more(&self) -> bool {
+        self.status == JobsLoad::Ready
+            && !self.busy()
+            && !self.dirty
+            && self.tail_cursor.is_some()
+            && self.loaded_pages() < HISTORY_LIMIT
+            && self.row_count() < MAX_ROWS
+    }
+    /// A tail fetch is in flight; the list stays as it is.
+    pub fn loading_more(&self) -> bool {
+        self.active.as_ref().is_some_and(|ticket| ticket.is_tail)
+    }
+    /// The last tail fetch failed, with its short reason.
+    pub fn tail_error(&self) -> Option<&str> {
+        self.tail_error.as_deref()
+    }
+    /// The server has more rows but this scope has reached its bound.
+    pub fn at_bound(&self) -> bool {
+        self.tail_cursor.is_some()
+            && (self.loaded_pages() >= HISTORY_LIMIT || self.row_count() >= MAX_ROWS)
     }
     pub fn origin_label(&self) -> Option<String> {
         self.binding
             .as_ref()
             .map(|binding| binding.context.connect_id.to_string())
-    }
-    pub fn can_next(&self) -> bool {
-        self.status == JobsLoad::Ready
-            && !self.busy()
-            && !self.dirty
-            && self.page_index + 1 < HISTORY_LIMIT
-            && self.page.as_ref().is_some_and(|page| page.has_more)
-    }
-    pub fn can_previous(&self) -> bool {
-        self.status == JobsLoad::Ready && !self.busy() && !self.dirty && self.page_index > 0
     }
     pub fn active_ticket(&self) -> Option<&JobsTicket> {
         self.active.as_ref()
@@ -313,7 +357,7 @@ impl JobsQueryState {
                     Ok(query) => {
                         self.applied = Some(query.clone());
                         self.dirty = false;
-                        self.begin(query, 0)
+                        self.begin_ticket(query, true, false)
                     }
                     Err(message) => {
                         self.status = JobsLoad::Failed;
@@ -326,22 +370,15 @@ impl JobsQueryState {
                     clear_selection: true,
                 }
             }
-            JobsEvent::Next if self.can_next() => {
-                let cursor = self.page.as_ref().and_then(|page| page.next_cursor.clone());
+            JobsEvent::More if self.can_load_more() => {
+                // A tail fetch keeps every row, the selection and the scroll position.
+                let read = self
+                    .tail_cursor
+                    .clone()
+                    .and_then(|cursor| self.begin_tail(cursor));
                 JobsEffect {
-                    read: cursor.and_then(|cursor| self.begin_cursor(cursor, self.page_index + 1)),
-                    clear_selection: true,
-                }
-            }
-            JobsEvent::Previous if self.can_previous() => {
-                let index = self.page_index - 1;
-                JobsEffect {
-                    read: self
-                        .history
-                        .get(index)
-                        .cloned()
-                        .and_then(|cursor| self.begin_cursor(cursor, index)),
-                    clear_selection: true,
+                    read,
+                    clear_selection: false,
                 }
             }
             JobsEvent::Poll => {
@@ -351,7 +388,7 @@ impl JobsQueryState {
                         Ok(query) => {
                             self.applied = Some(query.clone());
                             self.dirty = false;
-                            self.begin_ticket(query, 0, true, false)
+                            self.begin_ticket(query, true, false)
                         }
                         Err(message) => {
                             self.status = JobsLoad::Failed;
@@ -364,19 +401,8 @@ impl JobsQueryState {
                         clear_selection: false,
                     }
                 } else {
-                    let query = if self.page_index > 0 {
-                        self.history
-                            .get(self.page_index)
-                            .cloned()
-                            .map(|cursor| JobsQuery {
-                                cursor: Some(cursor),
-                                ..Default::default()
-                            })
-                    } else {
-                        self.applied.clone().or_else(|| self.first_query(now).ok())
-                    };
-                    let read =
-                        query.and_then(|q| self.begin_ticket(q, self.page_index, false, true));
+                    let query = self.applied.clone().or_else(|| self.first_query(now).ok());
+                    let read = query.and_then(|q| self.begin_ticket(q, false, true));
                     JobsEffect {
                         read,
                         clear_selection: false,
@@ -419,24 +445,24 @@ impl JobsQueryState {
         })
     }
 
-    fn begin_cursor(&mut self, cursor: String, index: usize) -> Option<JobsTicket> {
-        self.begin(
+    fn begin_tail(&mut self, cursor: String) -> Option<JobsTicket> {
+        let mut ticket = self.begin_ticket(
             JobsQuery {
                 cursor: Some(cursor),
                 ..Default::default()
             },
-            index,
-        )
-    }
-
-    fn begin(&mut self, query: JobsQuery, index: usize) -> Option<JobsTicket> {
-        self.begin_ticket(query, index, true, false)
+            false,
+            false,
+        )?;
+        ticket.is_tail = true;
+        self.active = Some(ticket.clone());
+        self.tail_error = None;
+        Some(ticket)
     }
 
     fn begin_ticket(
         &mut self,
         query: JobsQuery,
-        index: usize,
         clear_page: bool,
         is_poll: bool,
     ) -> Option<JobsTicket> {
@@ -448,8 +474,8 @@ impl JobsQueryState {
             query,
             generation: self.generation,
             sequence: self.sequence,
-            page_index: index,
             is_poll,
+            is_tail: false,
         };
         self.active = Some(ticket.clone());
         if clear_page {
@@ -474,14 +500,20 @@ impl JobsQueryState {
         self.active = None;
         self.request = None;
         match result {
+            Ok(page) if self.valid_page(&page, ticket) && ticket.is_tail => {
+                // Append at the tail; the head page and its totals stay as observed.
+                let room = MAX_ROWS.saturating_sub(self.row_count());
+                self.more.extend(page.rows.into_iter().take(room));
+                self.tail_cursor = page.next_cursor;
+                self.tail_pages += 1;
+                self.tail_error = None;
+            }
             Ok(page) if self.valid_page(&page, ticket) => {
-                self.history.truncate(ticket.page_index + 1);
-                if ticket.page_index == self.history.len() {
-                    self.history.push(page.page_cursor.clone());
-                } else {
-                    self.history[ticket.page_index] = page.page_cursor.clone();
+                // A head refresh keeps appended rows. Before any tail exists it also
+                // refreshes the cursor for the next page.
+                if self.tail_pages == 0 {
+                    self.tail_cursor = page.next_cursor.clone();
                 }
-                self.page_index = ticket.page_index;
                 self.page = Some(page);
                 self.status = JobsLoad::Ready;
                 self.message = None;
@@ -491,6 +523,11 @@ impl JobsQueryState {
                 self.status = JobsLoad::Failed;
                 self.message =
                     Some("The gateway returned an invalid or different scoped Jobs page.".into());
+            }
+            Err(error)
+                if ticket.is_tail && !matches!(error, ClientError::Status(401 | 403 | 409)) =>
+            {
+                self.tail_error = Some(error.to_string());
             }
             Err(error)
                 if ticket.is_poll
@@ -535,8 +572,6 @@ impl JobsQueryState {
             && page.next_cursor.as_deref().is_none_or(cursor_valid)
             && page.has_more == page.next_cursor.is_some()
             && DateTime::parse_from_rfc3339(&page.observed_at).is_ok()
-            && ticket.page_index < HISTORY_LIMIT
-            && ticket.page_index <= self.history.len()
             && page.rows.iter().all(|row| {
                 row.private_details_available != row.status_only
                     && (!(row.can_cancel || row.can_retry)
@@ -554,8 +589,10 @@ impl JobsQueryState {
     fn reset(&mut self) {
         self.cancel_reads();
         self.page = None;
-        self.history.clear();
-        self.page_index = 0;
+        self.more.clear();
+        self.tail_cursor = None;
+        self.tail_pages = 0;
+        self.tail_error = None;
         self.applied = None;
         self.status = JobsLoad::Idle;
         self.message = None;

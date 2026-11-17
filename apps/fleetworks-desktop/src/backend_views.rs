@@ -1228,7 +1228,7 @@ fn jobs(
                 list_col =
                     list_col.child(quiet("No jobs are associated with this workstation.", kit));
             }
-            for job in jobs.rows.iter().take(100) {
+            for job in jobs.rows.iter() {
                 let id = job.id.clone();
                 let selected = state.backend.selected_job.as_deref() == Some(job.id.as_str());
                 let tone = state_tone(&job.state);
@@ -1288,36 +1288,13 @@ fn jobs(
                     .on_press(move |state: &mut State| state.select_job(&id)),
                 );
             }
-            list_col = list_col.child(
-                rune::row()
-                    .w_full()
-                    .gap(8.0)
-                    .center_y()
-                    .child(
-                        ActionButton::new("Previous page")
-                            .key("jobs-page-previous")
-                            .finish(MetalFinish::ObsidianPill)
-                            .disabled(!state.scoped_jobs.can_previous())
-                            .on_press(|state: &mut State| {
-                                state.request_jobs(crate::jobs_query::JobsEvent::Previous)
-                            })
-                            .build(kit, preferences, pointer_ref),
-                    )
-                    .child(quiet(
-                        format!("Page {}", state.scoped_jobs.page_number()),
-                        kit,
-                    ))
-                    .child(
-                        ActionButton::new("Next page")
-                            .key("jobs-page-next")
-                            .finish(MetalFinish::ObsidianPill)
-                            .disabled(!state.scoped_jobs.can_next())
-                            .on_press(|state: &mut State| {
-                                state.request_jobs(crate::jobs_query::JobsEvent::Next)
-                            })
-                            .build(kit, preferences, pointer_ref),
-                    ),
-            );
+            list_col = list_col.child(jobs_tail(
+                state,
+                jobs.rows.len(),
+                kit,
+                preferences,
+                pointer_ref,
+            ));
         }
     }
     if show_detail {
@@ -2406,4 +2383,53 @@ pub(crate) fn unresolved_actor_reindex_banner(
                     ),
             ),
     ))
+}
+
+/// The one footer under the Jobs list: a count, then a single local control for continuous
+/// loading. Rows, selection and scroll position stay put while it changes.
+fn jobs_tail(
+    state: &State,
+    loaded: usize,
+    kit: &Kit,
+    preferences: ViewPreferences,
+    pointer_ref: Option<&rune::Live<[f32; 2]>>,
+) -> El {
+    let jobs = &state.scoped_jobs;
+    let more = |label: &'static str| {
+        ActionButton::new(label)
+            .key("jobs-load-more")
+            .finish(MetalFinish::ObsidianPill)
+            .on_press(|state: &mut State| state.request_jobs(crate::jobs_query::JobsEvent::More))
+    };
+    let mut footer = rune::row()
+        .key("jobs-tail")
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .child(quiet(format!("{loaded} jobs loaded"), kit));
+    if jobs.loading_more() {
+        footer = footer.child(
+            more("Loading more")
+                .busy(true)
+                .build(kit, preferences, pointer_ref),
+        );
+    } else if let Some(reason) = jobs.tail_error() {
+        footer = footer
+            .child(ui_components::status_pill(
+                "Could not load more",
+                None,
+                StatusTone::Warn,
+                kit,
+            ))
+            .child(more("Retry").build(kit, preferences, pointer_ref))
+            .child(quiet(reason.to_owned(), kit));
+    } else if jobs.can_load_more() {
+        footer = footer.child(more("Load more").build(kit, preferences, pointer_ref));
+    } else if jobs.at_bound() {
+        footer = footer.child(quiet(
+            "Showing the newest jobs. Narrow the filters to see others.",
+            kit,
+        ));
+    }
+    footer
 }

@@ -90,6 +90,10 @@ Policy/helper tests run in the lightweight scope job. The backend resolves `ARGO
 
 Only trusted integration pushes get publication writes, with packages permissions confined to image staging/promotion and contents writes confined to the publisher. All selected artifacts must verify before channel aliases move. Retries preserve existing immutable assets. [Artifact identities, channels and recovery](versioning.md#release-automation)
 
+## Nightly gsd order
+
+The [gsd skill](../../../.agents/skills/gsd/SKILL.md#nightly-workflow-canonical) defines the nightly workflow. Fix hosted failures in its order: first the backend and artifact jobs above (backend suite, embedded storage, release images, search index, server timings), then the Linux x86_64 native app job in [Native app review evidence](#native-app-review-evidence), and only then the Mac and other platform app builds.
+
 ## Local verification before CI
 
 Follow the [scope/freeze policy](agent-workflow.md#scope-and-finish-line). Use one build owner, the reusable debug graph and only affected checks. Source, fixture, downloaded-artifact and real deployment results prove different things; report skips and blockers explicitly.

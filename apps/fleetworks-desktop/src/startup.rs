@@ -1,36 +1,33 @@
-//! Cold-launch startup: the canonical logo splash, then an explicit connection choice.
+//! Cold-launch startup: the Quiet Orbit splash, then an explicit connection choice.
 //!
 //! The splash runs once per cold launch, never on reconnect. Nothing here starts a companion,
 //! opens a connection or falls back from one transport to another. Choosing a destination only
 //! selects the existing setup flow; connecting stays an explicit action there.
-
-use std::sync::Arc;
+//!
+//! Timeline, from the first visible frame: the complete scene plays at its reference pace until
+//! [`CROSSFADE_AT`], crossfades into the connection choice until [`CHOOSE_AT`], then hands over.
+//! The scene is vector geometry drawn over the shared `#060709` canvas, so no asset can fail to
+//! load and no media rectangle can flash. Reduced motion shows one complete still for the same
+//! three seconds, then the choice.
 
 use fleetworks_workstation::native::BackendKind;
 use rune::El;
-use rune::Image;
-use rune::ImageCache;
-use rune::SurfaceFit;
 
 use crate::accessibility::ViewPreferences;
+use crate::orbit;
 use crate::theme;
 use crate::State;
 
-/// The packaged 1024x571 canonical logo.
-const LOGO_JPG: &[u8] = include_bytes!("../../../assets/brand/fleetworks-logo.jpg");
-/// Logo aspect ratio, so layout is stable before the decoder finishes.
-const LOGO_WIDTH: f32 = 1024.0;
-const LOGO_HEIGHT: f32 = 571.0;
-
 /// Seconds, from the first visible frame.
-pub(crate) const FADE_IN: f64 = 0.25;
-pub(crate) const HOLD_UNTIL: f64 = 2.75;
+pub(crate) const CROSSFADE_AT: f64 = 2.65;
 pub(crate) const CHOOSE_AT: f64 = 3.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum StartupPhase {
-    /// The logo is showing at this opacity.
+    /// The scene is playing, this many seconds in.
     Splash(f32),
+    /// The scene fades out as the choice fades in; `progress` runs 0 to 1.
+    Crossfade { seconds: f32, progress: f32 },
     /// Waiting for an explicit Local Embedded or Remote Gateway choice.
     Choose,
     /// The normal shell.
@@ -43,9 +40,6 @@ pub struct Startup {
     required: bool,
     started_at: Option<f64>,
     chosen: Option<BackendKind>,
-    logo: Option<Image>,
-    /// Keeps the decoder worker alive while the logo is pending.
-    cache: Option<Arc<ImageCache>>,
 }
 
 impl Startup {
@@ -81,8 +75,8 @@ impl Startup {
             return StartupPhase::Done;
         }
         let Some(started) = self.started_at else {
-            // Before the first poll the mark is not yet visible.
-            return StartupPhase::Splash(if reduced_motion { 1.0 } else { 0.0 });
+            // Before the first poll the clock has not started; show the first frame.
+            return StartupPhase::Splash(0.0);
         };
         phase_at((now - started).max(0.0), reduced_motion)
     }
@@ -100,75 +94,60 @@ impl Startup {
         let frame = 1.0 / 60.0;
         let wait = if reduced_motion {
             CHOOSE_AT - elapsed
-        } else if (FADE_IN..HOLD_UNTIL).contains(&elapsed) {
-            HOLD_UNTIL - elapsed
         } else {
-            // Fading: ask for a frame at about 60 Hz.
             frame
         };
         Some(wait.max(frame))
     }
-
-    pub(crate) fn logo(&self) -> Option<&Image> {
-        self.logo.as_ref()
-    }
-
-    /// Decode the packaged logo once. The cache decodes off the UI thread and wakes the app.
-    pub fn install_logo(&mut self, cache: Arc<ImageCache>) {
-        if self.required && self.logo.is_none() {
-            self.logo = Some(cache.load(LOGO_JPG));
-            self.cache = Some(cache);
-        }
-    }
 }
 
-/// Splash opacity over elapsed seconds: 250 ms in, hold, 250 ms out, then choose at 3 s.
-/// Reduced motion holds the mark static for the same 3 s.
+/// The phase `elapsed` seconds after the first frame. Reduced motion holds one still for the
+/// whole three seconds and then hands over without a crossfade.
 pub(crate) fn phase_at(elapsed: f64, reduced_motion: bool) -> StartupPhase {
     if elapsed >= CHOOSE_AT {
         return StartupPhase::Choose;
     }
-    if reduced_motion {
-        return StartupPhase::Splash(1.0);
+    if reduced_motion || elapsed < CROSSFADE_AT {
+        return StartupPhase::Splash(elapsed as f32);
     }
-    let opacity = if elapsed < FADE_IN {
-        elapsed / FADE_IN
-    } else if elapsed < HOLD_UNTIL {
-        1.0
-    } else {
-        1.0 - (elapsed - HOLD_UNTIL) / (CHOOSE_AT - HOLD_UNTIL)
-    };
-    StartupPhase::Splash(opacity.clamp(0.0, 1.0) as f32)
+    StartupPhase::Crossfade {
+        seconds: elapsed as f32,
+        progress: ((elapsed - CROSSFADE_AT) / (CHOOSE_AT - CROSSFADE_AT)).clamp(0.0, 1.0) as f32,
+    }
 }
 
 /// The full-window startup view, shown instead of the shell while startup is active.
-pub(crate) fn view(state: &State, preferences: ViewPreferences, kit: &rune_kit::Kit) -> El {
-    let phase = state.startup.phase(state.clock, preferences.reduced_motion);
-    let body = match phase {
-        StartupPhase::Splash(opacity) => splash(state, opacity),
-        StartupPhase::Choose | StartupPhase::Done => choose(kit),
-    };
-    rune::col()
+/// `window` is the previous frame's size of this view, `None` on the first frame.
+pub(crate) fn view(
+    state: &State,
+    preferences: ViewPreferences,
+    kit: &rune_kit::Kit,
+    window: Option<[f32; 2]>,
+) -> El {
+    let animated = !preferences.reduced_motion;
+    let root = rune::col()
         .key("startup")
         .w_full()
         .h_full()
         .center()
-        .fill(theme::hex(theme::BACKGROUND))
-        .child(body)
-}
-
-fn splash(state: &State, opacity: f32) -> El {
-    // The logo carries the brand, so no wordmark is drawn beside it.
-    let mut logo = rune::col()
-        .key("startup-logo")
-        .w(560.0)
-        .aspect_ratio(LOGO_WIDTH / LOGO_HEIGHT)
-        .opacity(opacity)
-        .label("Fleetworks");
-    if let Some(image) = state.startup.logo() {
-        logo = logo.pixels_fit(image.pixels(), SurfaceFit::Fit);
+        .fill(theme::hex(theme::BACKGROUND));
+    match state.startup.phase(state.clock, preferences.reduced_motion) {
+        StartupPhase::Splash(seconds) => root.child(orbit::view(seconds, animated, window)),
+        StartupPhase::Crossfade { seconds, progress } => root
+            // The choice appears under the fading scene and takes no input until the hand-over.
+            .child(choose(kit).opacity(progress).inert())
+            .child(
+                rune::col()
+                    .key("startup-fade")
+                    .absolute(0.0, 0.0)
+                    .w_full()
+                    .h_full()
+                    .center()
+                    .opacity(1.0 - progress)
+                    .child(orbit::view(seconds, animated, window)),
+            ),
+        StartupPhase::Choose | StartupPhase::Done => root.child(choose(kit)),
     }
-    logo
 }
 
 fn choose(kit: &rune_kit::Kit) -> El {
@@ -242,22 +221,30 @@ mod tests {
     }
 
     #[test]
-    fn splash_fades_in_holds_fades_out_then_asks_for_a_choice() {
+    fn the_scene_is_complete_from_the_first_frame_then_crossfades_then_asks_for_a_choice() {
         assert_eq!(phase_at(0.0, false), StartupPhase::Splash(0.0));
-        assert_eq!(phase_at(0.125, false), StartupPhase::Splash(0.5));
-        assert_eq!(phase_at(0.25, false), StartupPhase::Splash(1.0));
-        assert_eq!(phase_at(2.0, false), StartupPhase::Splash(1.0));
-        assert_eq!(phase_at(2.75, false), StartupPhase::Splash(1.0));
-        assert_eq!(phase_at(2.875, false), StartupPhase::Splash(0.5));
+        assert_eq!(phase_at(1.5, false), StartupPhase::Splash(1.5));
+        assert_eq!(phase_at(2.6, false), StartupPhase::Splash(2.6));
+        assert_eq!(
+            phase_at(CROSSFADE_AT, false),
+            StartupPhase::Crossfade {
+                seconds: CROSSFADE_AT as f32,
+                progress: 0.0
+            }
+        );
+        match phase_at(2.825, false) {
+            StartupPhase::Crossfade { progress, .. } => assert!((progress - 0.5).abs() < 1e-3),
+            other => panic!("expected a crossfade, got {other:?}"),
+        }
         assert_eq!(phase_at(3.0, false), StartupPhase::Choose);
         assert_eq!(phase_at(60.0, false), StartupPhase::Choose);
     }
 
     #[test]
-    fn reduced_motion_shows_a_static_mark_for_the_same_three_seconds() {
-        assert_eq!(phase_at(0.0, true), StartupPhase::Splash(1.0));
-        assert_eq!(phase_at(1.5, true), StartupPhase::Splash(1.0));
-        assert_eq!(phase_at(2.99, true), StartupPhase::Splash(1.0));
+    fn reduced_motion_holds_a_still_for_the_same_three_seconds_without_a_crossfade() {
+        assert_eq!(phase_at(0.0, true), StartupPhase::Splash(0.0));
+        assert_eq!(phase_at(2.8, true), StartupPhase::Splash(2.8));
+        assert_eq!(phase_at(2.99, true), StartupPhase::Splash(2.99));
         assert_eq!(phase_at(3.0, true), StartupPhase::Choose);
     }
 
@@ -267,8 +254,16 @@ mod tests {
         assert_eq!(startup.phase(100.0, false), StartupPhase::Splash(0.0));
         startup.begin(10.0);
         startup.begin(50.0);
-        assert_eq!(startup.phase(10.125, false), StartupPhase::Splash(0.5));
+        assert_eq!(startup.phase(10.5, false), StartupPhase::Splash(0.5));
         assert_eq!(startup.phase(13.0, false), StartupPhase::Choose);
+    }
+
+    #[test]
+    fn a_late_wake_goes_straight_to_the_choice_and_never_replays() {
+        let mut startup = Startup::cold_launch();
+        startup.begin(0.0);
+        assert_eq!(startup.phase(30.0, false), StartupPhase::Choose);
+        assert_eq!(startup.phase(30.0, true), StartupPhase::Choose);
     }
 
     #[test]
@@ -288,26 +283,30 @@ mod tests {
         assert_eq!(startup.next_wake(0.0, false), None);
         startup.begin(0.0);
         assert!(startup.next_wake(0.1, false).is_some());
-        assert!(startup.next_wake(1.0, false).is_some_and(|wait| wait > 1.0));
+        assert!(startup.next_wake(1.0, true).is_some_and(|wait| wait > 1.0));
         assert_eq!(startup.next_wake(3.0, false), None);
         assert_eq!(startup.next_wake(3.0, true), None);
     }
 
-    #[test]
-    fn real_view_shows_splash_then_choice_then_the_shell_without_connecting() {
+    fn runtime(size: (f32, f32), scale: f32) -> rune::Runtime<State> {
         let mut state = State::default();
         state.startup = Startup::cold_launch();
-        let mut runtime = rune::Runtime::new(
+        rune::Runtime::new(
             state,
             crate::app::view,
-            (1180.0, 780.0),
+            size,
             rune::Env {
                 system_dark: true,
-                scale: 1.0,
+                scale,
             },
-        );
+        )
+    }
+
+    #[test]
+    fn real_view_shows_the_orbit_then_the_choice_then_the_shell_without_connecting() {
+        let mut runtime = runtime((1180.0, 780.0), 1.0);
         runtime.frame(0.0);
-        assert!(runtime.find("startup-logo").is_some());
+        assert!(runtime.find("startup-orbit").is_some());
         assert!(runtime.find("startup-choose").is_none());
         assert!(runtime.find("nav-workstation").is_none());
 
@@ -316,7 +315,7 @@ mod tests {
             state.clock = 3.5;
         });
         runtime.frame(1.0 / 60.0);
-        assert!(runtime.find("startup-logo").is_none());
+        assert!(runtime.find("startup-orbit").is_none());
         assert!(runtime.find("startup-local").is_some());
         assert!(runtime.find("startup-remote").is_some());
         assert!(runtime.find("nav-workstation").is_none());
@@ -330,6 +329,21 @@ mod tests {
         assert!(runtime.state.setup_gateway);
         assert!(!runtime.state.connected());
         assert!(runtime.find("nav-setup").is_some());
+    }
+
+    #[test]
+    fn the_crossfade_shows_both_layers_and_the_orbit_fits_a_compact_window() {
+        let mut runtime = runtime((640.0, 480.0), 2.0);
+        runtime.update(|state, _| {
+            state.startup.begin(0.0);
+            state.clock = 2.8;
+        });
+        runtime.frame(0.0);
+        assert!(runtime.find("startup-orbit").is_some());
+        assert!(runtime.find("startup-local").is_some());
+        let (rect, _) = runtime.presented("startup-orbit").expect("orbit drawn");
+        assert!(rect[2] <= 640.0 && rect[3] <= 480.0, "{rect:?}");
+        assert!(rect[2] > 0.0 && rect[3] > 0.0);
     }
 
     #[test]

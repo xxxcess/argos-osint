@@ -30,6 +30,7 @@ pub mod logs;
 pub mod maintenance;
 pub mod maintenance_result;
 mod material;
+mod orbit;
 pub mod pairing;
 mod platform;
 mod platform_trash;

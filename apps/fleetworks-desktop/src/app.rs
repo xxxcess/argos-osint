@@ -1341,7 +1341,7 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     let mut layers = Vec::new();
     crate::material::configure_kit(&mut kit, preferences);
     if state.startup.active() {
-        return crate::startup::view(state, preferences, &kit);
+        return crate::startup::view(state, preferences, &kit, cx.layout_size("startup"));
     }
     let compact_rail = cx
         .layout_size("app-shell")

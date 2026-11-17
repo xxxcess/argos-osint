@@ -1,7 +1,7 @@
 # Fleetworks
 
 <p align="center">
-  <img src="assets/brand/fleetworks-logo.jpg" alt="Fleetworks emblem with five gold rays, an ivory disc, and a gold crescent" width="960">
+  <img src="assets/brand/fleetworks-material-logo.png" alt="Fleetworks emblem: a smoky glass sphere of molten ivory and amber, an obsidian crescent, and five obsidian-glass satellites" width="960">
 </p>
 
 Fleetworks collects public-source intelligence, connects evidence to actors and articles, and prepares cited Focus Briefs. Fleetworks Desktop is a native Rune macOS control hub connected to an independently operated Linux backend. Intel Web provides the browser desktop. Backend services are deployed directly with Docker Compose.

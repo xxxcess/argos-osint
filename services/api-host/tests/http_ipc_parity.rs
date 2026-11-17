@@ -83,6 +83,7 @@ use fleetworks_contracts::readiness::DatasetRef;
 use fleetworks_contracts::readiness::MaintenanceOperation;
 use fleetworks_contracts::readiness::MaintenanceReceipt;
 use fleetworks_contracts::readiness::MaintenanceRequest;
+use fleetworks_contracts::readiness::ReadinessActionId;
 use fleetworks_contracts::readiness::ReadinessCheckId;
 use fleetworks_contracts::readiness::ReadinessState;
 use fleetworks_contracts::readiness::WorkstationReadiness;
@@ -543,18 +544,19 @@ async fn run_shared_flow(
     assert!(caps.features.iter().any(|f| f == "workstation-readiness"));
     assert!(caps.features.iter().any(|f| f == "jobs"));
     assert!(caps.features.iter().any(|f| f == "logs"));
-    assert!(
-        !caps
-            .features
-            .iter()
-            .any(|f| f == "nlp" || f == "classifier"),
-        "{transport}: optional nlp/classifier features must be omitted when engines are absent"
+    let local = transport == "ipc";
+    let local_nlp = local && cfg!(feature = "nlp");
+    let local_classifier = local && cfg!(feature = "classifier");
+    assert_eq!(caps.features.iter().any(|f| f == "nlp"), local_nlp);
+    assert_eq!(
+        caps.features.iter().any(|f| f == "classifier"),
+        local_classifier
     );
     record(
         &mut *report,
         "capabilities",
-        "live_parity",
-        "native contract features without optional nlp/classifier engines",
+        "intentional_exception",
+        "shared native contract and transport-specific optional engines",
     );
 
     if let Some(unauth) = unauthenticated_http_client {
@@ -1119,6 +1121,25 @@ async fn run_shared_flow(
         .checks
         .iter()
         .any(|c| c.id == ReadinessCheckId::ActorCatalog && c.state == ReadinessState::Ready));
+    assert_eq!(
+        readiness
+            .checks
+            .iter()
+            .any(|check| check.id == ReadinessCheckId::Nlp && check.state == ReadinessState::Ready),
+        local_nlp,
+        "{transport}: readiness must reflect the bundled NLP startup probe"
+    );
+    if local {
+        assert_eq!(
+            readiness
+                .checks
+                .iter()
+                .flat_map(|check| &check.actions)
+                .any(|action| action.id == ReadinessActionId::TrainClassifier && action.allowed),
+            local_classifier,
+            "IPC training preflight must agree with the bundled classifier capability"
+        );
+    }
     record(
         &mut *report,
         "workstation_readiness",
@@ -1330,7 +1351,9 @@ async fn run_shared_flow(
         "missing job_cancel 404 parity",
     );
 
-    // Unavailable optional classifier surface: explicit 503 capability errors on both transports.
+    // The HTTP fixture has no activation artifacts. A bundled IPC engine
+    // reaches the scoped lookup, where the synthetic candidate does not exist.
+    let candidate_status = if local_classifier { 404 } else { 503 };
     let candidate = CandidateIdentity::new(
         "candidate-1".to_owned(),
         "train-job-1".to_owned(),
@@ -1353,14 +1376,14 @@ async fn run_shared_flow(
             .post::<serde_json::Value>(ACTIVATION_PATH, &activate_req)
             .await
             .unwrap_err(),
-        ClientError::Status(503),
-        "{transport}: unavailable classifier activation returns explicit 503"
+        ClientError::Status(candidate_status),
+        "{transport}: activation rejects an absent candidate or unavailable engine"
     );
     record(
         &mut *report,
         "classifier_activate",
         "intentional_exception",
-        "unavailable optional classifier returns explicit 503 capability error",
+        "activation rejects the missing candidate or unavailable service",
     );
 
     assert_eq!(
@@ -1371,38 +1394,30 @@ async fn run_shared_flow(
             )
             .await
             .unwrap_err(),
-        ClientError::Status(503),
-        "{transport}: unavailable classifier candidate preview returns explicit 503"
+        ClientError::Status(candidate_status),
+        "{transport}: candidate preview rejects an absent candidate or unavailable engine"
     );
     record(
         &mut *report,
         "classifier_candidate_detail",
         "intentional_exception",
-        "unavailable optional classifier candidate preview returns explicit 503",
+        "preview rejects the missing candidate or unavailable service",
     );
 
     let act_result_err = client
         .get_with_query::<serde_json::Value>(ACTIVATION_RESULT_PATH, &[("job_id", "missing-job")])
         .await
         .unwrap_err();
-    if transport == "ipc" {
-        assert_eq!(
-            act_result_err,
-            ClientError::Status(503),
-            "IPC returns explicit 503 when classifier capability is disabled"
-        );
-    } else {
-        assert_eq!(
-            act_result_err,
-            ClientError::Status(404),
-            "HTTP activation result checks durable repository state when activation artifacts are absent"
-        );
-    }
+    assert_eq!(
+        act_result_err,
+        ClientError::Status(if local && !local_classifier { 503 } else { 404 }),
+        "{transport}: activation result requires an enabled IPC engine and an existing job"
+    );
     record(
         &mut *report,
         "classifier_activation_result",
         "intentional_exception",
-        "IPC capability gate returns 503 while HTTP returns 404 for absent activation job",
+        "disabled IPC engine returns 503; missing activation job returns 404",
     );
 
     let train_dataset = DatasetRef::new(
@@ -1422,24 +1437,16 @@ async fn run_shared_flow(
         .post::<serde_json::Value>(CLASSIFIER_TRAIN_PATH, &train_req)
         .await
         .unwrap_err();
-    if transport == "ipc" {
-        assert_eq!(
-            train_err,
-            ClientError::Status(503),
-            "IPC returns explicit 503 when classifier training engine is absent"
-        );
-    } else {
-        assert_eq!(
-            train_err,
-            ClientError::Status(409),
-            "HTTP rejects unconfigured/missing classifier training dataset cleanly with 409"
-        );
-    }
+    assert_eq!(
+        train_err,
+        ClientError::Status(if local && !local_classifier { 503 } else { 409 }),
+        "{transport}: training requires an enabled IPC engine and a valid dataset"
+    );
     record(
         &mut *report,
         "train_classifier",
         "intentional_exception",
-        "unavailable optional classifier training surfaces explicit capability/configuration rejection",
+        "disabled IPC engine returns 503; missing training dataset returns 409",
     );
 
     let logs_follow_op = IpcOperation::from_get_with_query(LOGS_FOLLOW_PATH, &LogQuery::default())
@@ -1677,18 +1684,20 @@ async fn http_and_local_ipc_backends_satisfy_parity_and_intentional_exceptions()
         verified: true,
     });
     report.record_exception(IntentionalExceptionRecord {
-        id: "optional_classifier_and_nlp_unavailable".to_owned(),
+        id: "optional_classifier_and_nlp_capabilities".to_owned(),
         operations: vec![
+            "capabilities".to_owned(),
+            "workstation_readiness".to_owned(),
             "train_classifier".to_owned(),
             "classifier_candidate_detail".to_owned(),
             "classifier_activate".to_owned(),
             "classifier_activation_result".to_owned(),
         ],
-        reason: "Local embedded companions run without optional Python NLP or classifier engines unless explicitly enabled; HTTP servers without ActivationArtifacts also disable activation endpoints."
+        reason: "Local IPC advertises bundled engines after startup probes; the HTTP fixture has no NLP probe or activation artifacts."
             .to_owned(),
         http_behavior: "Capabilities omit nlp/classifier; activation & preview return 503."
             .to_owned(),
-        ipc_behavior: "Capabilities omit nlp/classifier; all classifier operations fail closed with explicit 503 capability-disabled errors."
+        ipc_behavior: "Enabled builds report NLP Ready, allow training preflight, and reject missing jobs and datasets. Disabled classifier builds reject classifier operations with 503."
             .to_owned(),
         verified: true,
     });

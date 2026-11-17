@@ -1762,12 +1762,6 @@ fn safe_log_table(
     }
     let table = table
         .column(
-            TableColumn::new("newest", "")
-                .width(1.0)
-                .min(0.0)
-                .resizable(false),
-        )
-        .column(
             TableColumn::new("message", "Safe summary")
                 .flex(1.0)
                 .min(0.0)
@@ -1776,27 +1770,33 @@ fn safe_log_table(
         .cell(move |state: &State, index, column| {
             let row = &state.scoped_logs.rows[index];
             match column {
-                "newest" if index == 0 => Cell::el(
-                    rune::el()
-                        .key("logs-newest-marker")
-                        .size(1.0, 1.0)
-                        .a11y_hidden()
+                // The newest row's own text reports where it is drawn. It repeats the kit's text
+                // cell (font, color, truncation) so the row looks as every other row does, and
+                // adds no column or hidden element for assistive technology to meet.
+                "message" if index == 0 => Cell::el(
+                    rune::text(row.message.clone())
+                        .font(style.font)
+                        .color(style.text)
+                        .truncate()
+                        .shrink()
+                        .min_w(0.0)
+                        .help_when_truncated(row.message.clone())
                         .on_drawn_layout_tx({
                             let table_rect = newest_rect.clone();
                             move |state: &mut State, rect: [f32; 4], tx| {
                                 // The newest row's centre when the reader is at the top.
-                                let centre = table_rect.get()[1]
+                                let at_top = table_rect.get()[1]
                                     + style.header_height
                                     + style.row_height * 0.5;
                                 // Away once it has moved up by half a row.
-                                let away = rect[1] < centre - style.row_height * 0.5;
+                                let away =
+                                    rect[1] + rect[3] * 0.5 < at_top - style.row_height * 0.5;
                                 if !state.scoped_logs.set_away(away) {
                                     tx.live_only();
                                 }
                             }
                         }),
                 ),
-                "newest" => Cell::text(""),
                 "timestamp" => Cell::text(row.ts.clone()).mono().muted(),
                 "severity" => Cell::text(row.severity.clone()),
                 _ => Cell::text(row.message.clone()),
@@ -1811,38 +1811,40 @@ fn safe_log_table(
         .drawn_rect_into(&table_rect);
     let mut body = rune::col().gap(8.0);
     let unread = state.scoped_logs.unread();
+    // The marker row is always present, empty at zero, so the table never shifts when the count
+    // first rises. The count is text and the control a labelled button, so nothing depends on
+    // color. The jump is the runtime's own scroll request, which lands at once under reduced
+    // motion.
+    let mut marker = rune::row()
+        .key("logs-unread")
+        .w_full()
+        .min_h(44.0)
+        .gap(8.0)
+        .center_y();
     if unread > 0 {
-        // A quiet marker above the table: the count is text, the control is a labelled button, so
-        // nothing depends on color. Reduced motion needs no change: the jump is the runtime's
-        // own scroll request, which lands at once under that preference.
-        body = body.child(
-            rune::row()
-                .key("logs-unread")
-                .w_full()
-                .gap(8.0)
-                .center_y()
-                .child(ui_components::status_pill(
-                    format!(
-                        "{unread} new log {}",
-                        if unread == 1 { "line" } else { "lines" }
-                    ),
-                    None,
-                    StatusTone::Info,
-                    kit,
-                ))
-                .child(
-                    ActionButton::new("Jump to newest")
-                        .key("logs-jump-newest")
-                        .finish(MetalFinish::ObsidianPill)
-                        .on_press_tx(|state: &mut State, tx| {
-                            if let Some(id) = state.scoped_logs.jump_to_newest() {
-                                tx.scroll_into_view_in(crate::logs::TABLE_KEY, id);
-                            }
-                        })
-                        .build(kit, preferences, pointer_ref),
+        marker = marker
+            .child(ui_components::status_pill(
+                format!(
+                    "{unread} new log {}",
+                    if unread == 1 { "line" } else { "lines" }
                 ),
-        );
+                None,
+                StatusTone::Info,
+                kit,
+            ))
+            .child(
+                ActionButton::new("Jump to newest")
+                    .key("logs-jump-newest")
+                    .finish(MetalFinish::ObsidianPill)
+                    .on_press_tx(|state: &mut State, tx| {
+                        if let Some(id) = state.scoped_logs.jump_to_newest() {
+                            tx.scroll_into_view_in(crate::logs::TABLE_KEY, id);
+                        }
+                    })
+                    .build(kit, preferences, pointer_ref),
+            );
     }
+    body = body.child(marker);
     body = body.child(table);
     if let Some(selected) = state
         .scoped_logs

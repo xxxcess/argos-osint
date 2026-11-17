@@ -130,7 +130,7 @@ describe("Button focus/selection lanes (hover + pressed)", () => {
     const button = buttonEl(container)!;
     await user.hover(button);
     expect(applied(button).backgroundColor).toBe(
-      "rgba(198, 165, 110, 0.1)", // accentSoft
+      "rgba(169, 184, 204, 0.1)", // accentSoft
     );
     expect(applied(button).borderTopColor).toBe("rgb(198, 165, 110)"); // accent
     await user.unhover(button);
@@ -184,7 +184,7 @@ describe("Button focus/selection lanes (hover + pressed)", () => {
     await waitFor(
       () =>
         expect(applied(button).backgroundColor).toBe(
-          "rgba(198, 165, 110, 0.1)",
+          "rgba(169, 184, 204, 0.1)",
         ), // accentSoft
     );
     await user.unhover(button);
@@ -223,10 +223,10 @@ describe("Button focus/selection lanes (hover + pressed)", () => {
 // Token sanity: the button palette stays on the terminal-desk neutrals.
 describe("Button token bindings", () => {
   it("binds the glass, glassStrong, accentSoft and border tokens", () => {
-    expect(colors.accent).toBe("#C6A56E");
-    expect(colors.glass).toBe("#0B0C0F");
-    expect(colors.glassStrong).toBe("#111317");
-    expect(colors.accentSoft).toBe("rgba(198, 165, 110, 0.1)");
-    expect(colors.border).toBe("#898274");
+    expect(colors.accent).toBe("#A9B8CC");
+    expect(colors.glass).toBe("#0B0E13");
+    expect(colors.glassStrong).toBe("#111720");
+    expect(colors.accentSoft).toBe("rgba(169, 184, 204, 0.1)");
+    expect(colors.border).toBe("#6F7B8D");
   });
 });

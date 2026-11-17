@@ -1,34 +1,39 @@
-/** Matte Fleetworks paint; layout, typography and semantic colors stay separate. */
+/**
+ * Matte deep-space paint: one #060709 canvas, charcoal tonal steps, cool gray text.
+ * Mirrors native theme.rs; palette-contrast.test.ts keeps the two in step.
+ * Status colors (always paired with a label or icon): cyan live/running, blue info,
+ * mint healthy, amber warning/stale, rose error, violet queued/paused, slate unknown.
+ */
 export const intelColors = {
   bg: "#060709",
-  panel: "#0B0C0F",
-  panelRaised: "#111317",
+  panel: "#0B0E13",
+  panelRaised: "#111720",
   inset: "#060709",
   scrim: "rgba(6,7,9,0.9)",
-  border: "rgba(243,238,228,0.02)",
-  borderDecorative: "#3A3833",
-  satinControlEdge: "rgba(243,238,228,0.03)",
-  borderStrong: "#898274",
-  divider: "#3A3833",
-  text: "#F3EEE4",
-  dim: "#D6D2C4",
-  muted: "#B8B4A8",
-  faint: "#B8B4A8",
-  accent: "#C6A56E",
-  accentPressed: "#C4A265",
-  accentHover: "#D8BD8C",
+  border: "rgba(232,237,244,0.02)",
+  borderDecorative: "#262D38",
+  satinControlEdge: "rgba(232,237,244,0.03)",
+  borderStrong: "#6F7B8D",
+  divider: "#262D38",
+  text: "#E8EDF4",
+  dim: "#BEC7D4",
+  muted: "#9AA6B6",
+  faint: "#9AA6B6",
+  accent: "#A9B8CC",
+  accentPressed: "#8FA1B8",
+  accentHover: "#C3CFDF",
   onAccent: "#060709",
-  selectionSurface: "#322C22",
-  accentSoft: "rgba(198,165,110,0.10)",
-  accentBorder: "rgba(198,165,110,0.75)",
-  select: "#D8BD8C",
-  textSelection: "#322C22",
+  selectionSurface: "#1B2533",
+  accentSoft: "rgba(169,184,204,0.10)",
+  accentBorder: "rgba(169,184,204,0.75)",
+  select: "#C3CFDF",
+  textSelection: "#1B2533",
   success: "#5FD39A",
   danger: "#F06A8A",
   dangerSoft: "rgba(240,106,138,0.12)",
   cool: "#5AB8F0",
   warning: "#E5B45B",
-  fab: "#111317",
+  fab: "#111720",
 };
 /** Channel identifiers, not severity, confidence or API-health indicators. */
 export const intelMetricColors = {
@@ -81,13 +86,13 @@ export const intelType = {
 /** Graph-only treatments, matching the evidence topology reference. */
 export const topologyColors = {
   bg: "#060709",
-  panel: "#0B0C0F",
-  grid: "rgba(137,130,116,0.09)",
-  axis: "rgba(137,130,116,0.18)",
-  accent: "#C6A56E",
-  edge: "#A79B80",
+  panel: "#0B0E13",
+  grid: "rgba(111,123,141,0.09)",
+  axis: "rgba(111,123,141,0.18)",
+  accent: "#A9B8CC",
+  edge: "#8E9BB0",
   labelBg: "#060709",
-  ghost: "#0B0C0F",
+  ghost: "#0B0E13",
 };
 
 export const intelMotion = {
@@ -103,11 +108,11 @@ export const intelMotion = {
 export const intelStatus = Object.fromEntries(
   Object.entries({
     idle: intelColors.muted,
-    queued: intelColors.warning,
-    running: intelColors.cool,
+    queued: "#B48EFF",
+    running: "#21D9EE",
     succeeded: intelColors.success,
     failed: intelColors.danger,
-    stale: "#C08CF5",
+    stale: intelColors.warning,
   }).map(([state, color]) => [state, { color, glow: "none" }]),
 ) as Record<
   "idle" | "queued" | "running" | "succeeded" | "failed" | "stale",

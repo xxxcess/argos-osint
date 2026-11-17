@@ -13,16 +13,16 @@ import { paint, sheetProp, sheetStyle } from "../../../vitest.test-support";
 describe("Theme tokens (imported from @argos/ui source)", () => {
   it("defines the matte obsidian/ivory and graphite surfaces", () => {
     expect(colors.bg).toBe("#060709");
-    expect(colors.panel).toBe("#0B0C0F");
-    expect(colors.raised).toBe("#111317");
-    expect(colors.border).toBe("#898274");
-    expect(colors.text).toBe("#F3EEE4");
-    expect(colors.dim).toBe("#D6D2C4");
-    expect(colors.muted).toBe("#B8B4A8");
+    expect(colors.panel).toBe("#0B0E13");
+    expect(colors.raised).toBe("#111720");
+    expect(colors.border).toBe("#6F7B8D");
+    expect(colors.text).toBe("#E8EDF4");
+    expect(colors.dim).toBe("#BEC7D4");
+    expect(colors.muted).toBe("#9AA6B6");
   });
 
   it("defines accent/accent2 plus the four status hues", () => {
-    expect(colors.accent).toBe("#C6A56E");
+    expect(colors.accent).toBe("#A9B8CC");
     expect(colors.accent2).toBe("#c678dd");
     expect(colors.success).toBe("#98c379");
     expect(colors.warning).toBe("#e5c07b");
@@ -30,12 +30,12 @@ describe("Theme tokens (imported from @argos/ui source)", () => {
   });
 
   it("retains compatibility names as opaque matte fills and faint decorative edges", () => {
-    expect(colors.glass).toBe("#0B0C0F");
-    expect(colors.glassStrong).toBe("#111317");
-    expect(colors.glassBorder).toBe("#898274");
-    expect(colors.cardEdge).toBe("rgba(243, 238, 228, 0.02)");
-    expect(colors.satinControlEdge).toBe("rgba(243, 238, 228, 0.03)");
-    expect(colors.accentSoft).toBe("rgba(198, 165, 110, 0.1)");
+    expect(colors.glass).toBe("#0B0E13");
+    expect(colors.glassStrong).toBe("#111720");
+    expect(colors.glassBorder).toBe("#6F7B8D");
+    expect(colors.cardEdge).toBe("rgba(232, 237, 244, 0.02)");
+    expect(colors.satinControlEdge).toBe("rgba(232, 237, 244, 0.03)");
+    expect(colors.accentSoft).toBe("rgba(169, 184, 204, 0.1)");
   });
 
   it("keeps mono for telemetry and body for prose", () => {

@@ -133,11 +133,11 @@ fn connection_status(state: &State) -> String {
 fn backend_mode_card(
     state: &State,
     narrow: bool,
+    compact: bool,
     busy: bool,
     preferences: crate::accessibility::ViewPreferences,
     kit: &Kit,
     pointer_ref: Option<&rune::Live<[f32; 2]>>,
-    _shadow_ref: Option<&rune::Live<[f32; 2]>>,
 ) -> El {
     let remote_btn = ActionButton::new("Remote Gateway")
         .key("backend-mode-remote")
@@ -195,7 +195,7 @@ fn backend_mode_card(
             .child(buttons),
         StatusTone::Neutral,
         false,
-        narrow,
+        compact,
     )
 }
 
@@ -371,6 +371,7 @@ fn local_runtime_diagnostics(
 fn local_backend_setup_card(
     state: &State,
     narrow: bool,
+    compact: bool,
     preferences: crate::accessibility::ViewPreferences,
     kit: &Kit,
     pointer_ref: Option<&rune::Live<[f32; 2]>>,
@@ -556,7 +557,7 @@ fn local_backend_setup_card(
     } else {
         StatusTone::Accent
     };
-    material::responsive_card(body, tone, false, narrow)
+    material::responsive_card(body, tone, false, compact)
 }
 
 fn setup_gateway(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
@@ -568,6 +569,11 @@ fn setup_gateway(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
     let narrow = cx
         .layout_size("page-content")
         .is_some_and(|size| size[0] < 520.0);
+    // A short window also takes the compact group edge so every setup control stays reachable.
+    let compact = narrow
+        || cx
+            .layout_size("page-content")
+            .is_some_and(|size| size[1] < 560.0);
     let busy = state.pairing.busy()
         || state.connection.status == ConnectionStatus::Connecting
         || state.local_backend.stopping;
@@ -647,17 +653,18 @@ fn setup_gateway(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
         .child(backend_mode_card(
             state,
             narrow,
+            compact,
             busy,
             preferences,
             kit,
             pointer_ref,
-            shadow_ref,
         ));
 
     if state.is_local_backend() {
         body = body.child(local_backend_setup_card(
             state,
             narrow,
+            compact,
             preferences,
             kit,
             pointer_ref,

@@ -20,6 +20,24 @@ use fleetworks_contracts::context::RegisteredContext;
 use fleetworks_workstation::native::WorkspaceState;
 
 #[test]
+fn the_sidebar_header_shows_the_symbol_alone_and_the_compact_rail_keeps_none() {
+    let env = Env {
+        system_dark: true,
+        scale: 1.0,
+    };
+    let mut wide = Runtime::new(State::fixture(), app::view, (1180.0, 800.0), env);
+    wide.frame(0.0);
+    assert!(
+        wide.find("brand-mark").is_some(),
+        "the approved symbol, named Fleetworks, heads the sidebar"
+    );
+    let mut narrow = Runtime::new(State::fixture(), app::view, (640.0, 480.0), env);
+    narrow.frame(0.0);
+    assert!(narrow.find("compact-icon-rail").is_some());
+    assert!(narrow.find("brand-mark").is_none());
+}
+
+#[test]
 fn real_shell_navigation_works_offline_without_boundary_effects() {
     let default_state = State::default();
     assert_eq!(default_state.page, Page::Workstation);

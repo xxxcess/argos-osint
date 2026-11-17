@@ -2,13 +2,6 @@
 
 use rune::Icon;
 
-/// Fleetworks interlocking diamond emblem.
-pub static BRAND_MARK: Icon = Icon {
-    name: "fw-brand-mark",
-    view: 16.0,
-    body: r#"<path d="M8 1.5 14 5v6l-6 3.5L2 11V5l6-3.5Z" stroke="currentColor" stroke-width="1.4" fill="none"/><path d="M8 5 11.2 6.8v3.6L8 12.2 4.8 10.4V6.8L8 5Z" fill="currentColor" opacity="0.88"/><path d="M8 1.5V5M14 5l-2.8 1.8M2 5l2.8 1.8M8 12.2v2.3" stroke="currentColor" stroke-width="1.2"/>"#,
-};
-
 /// Workstation telemetry chassis.
 pub static WORKSTATION: Icon = Icon {
     name: "fw-workstation",

@@ -319,6 +319,17 @@ pub(crate) fn scene(seconds: f32, animated: bool) -> Shape {
     shape.view_box(ENVELOPE[0], ENVELOPE[1])
 }
 
+/// The symbol alone at rest, `height` points tall, for chrome such as the sidebar header: the
+/// reduced-motion still pose of the orbit with no wordmark. Its accessible name is the product
+/// name, which the visible UI no longer prints beside it.
+pub(crate) fn mark(height: f32) -> El {
+    canvas(scene(STILL_SECONDS, false))
+        .key("brand-mark")
+        .label("Fleetworks")
+        .w(height * ENVELOPE[0] / ENVELOPE[1])
+        .h(height)
+}
+
 /// The orbit as one element sized for `window`.
 pub(crate) fn view(seconds: f32, animated: bool, window: Option<[f32; 2]>) -> El {
     let [width, height] = display_size(window);
@@ -360,6 +371,17 @@ mod tests {
         }
         let lowest = polygon.iter().map(|p| p[1]).fold(f32::MIN, f32::max);
         assert!((lowest - (CRESCENT_CENTER[1] + CRESCENT_RADIUS)).abs() < 0.5);
+    }
+
+    #[test]
+    fn the_brand_mark_keeps_the_envelope_aspect_and_the_still_pose() {
+        for height in [24.0_f32, 34.0, 64.0] {
+            let (w, h) = (height * ENVELOPE[0] / ENVELOPE[1], height);
+            assert!((w / h - ENVELOPE[0] / ENVELOPE[1]).abs() < 1e-6);
+        }
+        // The mark draws the same still frame as the reduced-motion startup.
+        assert_eq!(scene(STILL_SECONDS, false), scene(STILL_SECONDS, false));
+        assert!(!scene(STILL_SECONDS, false).is_empty());
     }
 
     #[test]

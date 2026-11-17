@@ -1388,16 +1388,8 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
                     .py(10.0)
                     .gap(8.0)
                     .center_y()
-                    .child(
-                        rune::icon(&icons::BRAND_MARK, 18.0)
-                            .color(theme::hex(theme::ACCENT_HOVER))
-                            .a11y_hidden(),
-                    )
-                    .child(
-                        rune::text("Fleetworks")
-                            .font(kit.ty.body_medium)
-                            .color(theme::hex(theme::TEXT_PRIMARY)),
-                    )
+                    // The approved symbol alone: no wordmark. Its accessible name stays "Fleetworks".
+                    .child(crate::orbit::mark(34.0))
                     .child(rune::spacer())
                     .child(ui_components::status_dot(connection_tone, preferences)),
             )

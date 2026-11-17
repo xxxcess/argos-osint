@@ -35,6 +35,28 @@ Do not hide a collision with a crescent mask, crop, disappearing satellite, per-
 
 The carried [clearance report](../../../assets/brand/reference/quiet-orbit/orbit-clearance.json) records 1,440 sampled phases and 7,200 triangle poses with zero painted-crescent overlaps for the approved 800×450 reference. The faint-fringe pixel-edge gap is 8.435 px; a further 0.6 px finite-sampling reserve leaves roughly 8 px. This is prior finite-sweep evidence with an engineering margin, not a continuous-time proof or native-runtime result. [Motion validation](../../../assets/brand/reference/quiet-orbit/motion-validation.json) and [orbital trace](../../../assets/brand/reference/quiet-orbit/orbital-trace.json) preserve the original provenance. Repeat clearance after changing mesh, alpha coverage, projection, timing interpolation or output scale.
 
+## Native materials
+
+The native scene is a bounded vector render with one gradient element, not the baked GIF: `orbit.rs` draws a back layer (rear prisms, crescent), the sphere's glass body, then a front layer (molten flow, glass highlights, front prisms). Compared with the reference poster, the aim is:
+
+| Part | Reference | Native render |
+| --- | --- | --- |
+| Core | Continuous molten flow through smoky glass; ivory and amber swirls, dark smoke at the rim | Radial-gradient body (warm lower left, dark rim) under twelve tilted, translucent amber/ivory/umber ribbons whose phases are whole turns of the eight-second loop, then an inner shadow ring, rim light, soft highlight and one specular arc |
+| Crescent | Coarse fractured obsidian with faint flecks and a polished edge | About eighty angular facets cut from a jittered grid with the shared `rock::noise` hash, tone 0 to 1 per facet, a lit edge on a third of them, warm and cool flecks, a polished outline |
+| Prisms | Dark glass triangles with bright edges and depth | Smoky body, lit and shaded facet, inner bevel, bright lit edge, faint rim and a warm reflection near the base |
+
+Compared on the matching still pose (1.5 s, which is also the reduced-motion pose), the 2.65 s handoff pose and the loop start: the core fills with continuous swirling flow instead of a flat disk with circles; the crescent reads as angular rock with a polished edge; the prisms show facets and depth; the front and back passes, the 5.3 unit clearance and the three-second startup are unchanged. Remaining differences are visible and left for visual review: the swirls are layered bands rather than a fluid simulation, the facets are flatter than the photographic rock, and the core's reflections are one soft highlight.
+
+Clearance after the material change: the geometry and its test are unchanged (about 8 scene units at the closest approach), and a new test subtracts 1.3 units for the painted reach (prism rim 0.3, crescent edge 0.5, one antialiasing step 0.5) and still requires 5.3. The authoring clearance scripts need numpy, scipy and Pillow and were not run, so no new raster measurement is claimed.
+
+To compare a pose without building the app, run the preview port of the scene (an authoring aid that mirrors `orbit.rs` by hand and does not use the Rune renderer), then rasterize the SVG with any browser:
+
+```sh
+python3 assets/brand/reference/quiet-orbit/source/native_preview.py 1.5 .agent-scratch/quiet-orbit/native-1.5.svg 5
+```
+
+Use `1.5` for the still pose, `2.65` for the handoff and `0` for the loop start. The real check remains the native fixture captures in [native verification](../../wiki/code/native-verification.md).
+
 ## Offline reproduction
 
 The preserved renderer and exporter are authoring tools under `assets/brand/reference/quiet-orbit/source/`; they are not app dependencies. From the repository root, with Node.js, Python 3 and FFmpeg available:

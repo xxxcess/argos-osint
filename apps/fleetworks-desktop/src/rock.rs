@@ -37,8 +37,8 @@ fn mix(mut x: u32) -> u32 {
     x ^ (x >> 16)
 }
 
-/// A hash of grid position `(i, j)` for one purpose `salt`.
-fn noise(i: u32, j: u32, salt: u32) -> u32 {
+/// A hash of grid position `(i, j)` for one purpose `salt`. Also seeds the crescent facets.
+pub(crate) fn noise(i: u32, j: u32, salt: u32) -> u32 {
     mix(mix(SEED ^ salt.wrapping_mul(0x9E37_79B1)) ^ (j * 16 + i))
 }
 

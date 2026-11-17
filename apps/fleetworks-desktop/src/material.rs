@@ -303,15 +303,23 @@ fn rock_texture(radius: f32, rest: f32, hover: f32) -> El {
     }
 }
 
-/// A color shifted by `levels` 8-bit channel levels (negative darkens).
-fn shade(color: Color, levels: f32) -> Color {
-    let shift = |channel: f32| (channel + levels / 255.0).clamp(0.0, 1.0);
-    Color {
-        r: shift(color.r),
-        g: shift(color.g),
-        b: shift(color.b),
-        a: color.a,
-    }
+/// A color shifted by `levels` 8-bit steps in encoded sRGB, the space the theme's hex values and
+/// "add or subtract 2 levels" are written in. Rune keeps channels linear, where two 8-bit steps
+/// are far larger at the dark end and would clip red, so the shift is made on the encoded bytes
+/// and converted back. Alpha is kept exactly.
+fn shade(color: Color, levels: i16) -> Color {
+    let encoded = color.hex();
+    let shifted = |at: usize| {
+        let byte = i16::from(u8::from_str_radix(&encoded[at..at + 2], 16).unwrap_or(0));
+        (byte + levels).clamp(0, 255)
+    };
+    theme::hex(&format!(
+        "#{:02x}{:02x}{:02x}",
+        shifted(1),
+        shifted(3),
+        shifted(5)
+    ))
+    .alpha(color.a)
 }
 
 /// Apply a finish to a button. Everything is a flat matte fill; the fractured finishes add the
@@ -379,7 +387,7 @@ pub(crate) fn apply_liquid_metal(
     let styled = styled.hover(hover_fill);
     if finish.fractured() {
         // Pressed subtracts 2 levels from the base, as hover adds 2.
-        styled.press(shade(fill, -2.0))
+        styled.press(shade(fill, -2))
     } else {
         styled
     }
@@ -571,17 +579,37 @@ mod finish_tests {
     }
 
     #[test]
-    fn hover_adds_texture_and_pressed_subtracts_two_levels_from_the_base() {
-        assert!(TEXTURE_OPACITY < TEXTURE_OPACITY_HOVER);
-        assert_eq!(TEXTURE_OPACITY_HOVER, 0.14);
-        let base = theme::hex("#10262C");
-        let pressed = shade(base, -2.0);
-        assert!((base.r - pressed.r - 2.0 / 255.0).abs() < 1e-6);
-        assert!((base.b - pressed.b - 2.0 / 255.0).abs() < 1e-6);
-        assert_eq!(pressed.a, base.a);
-        // Darkening never leaves the channel range.
-        assert_eq!(shade(theme::hex("#000000"), -2.0).r, 0.0);
-        assert_eq!(shade(theme::hex("#FFFFFF"), 2.0).g, 1.0);
+    fn pressed_subtracts_two_encoded_levels_and_keeps_alpha() {
+        // The submit base #10262C becomes #0E242A, the encoded two-step change, not a two-step
+        // change of Rune's linear channels (which would clip the red channel).
+        let pressed = shade(theme::hex("#10262C"), -2);
+        assert_eq!(pressed.hex(), "#0e242aff");
+        assert_eq!(pressed, theme::hex("#0E242A"));
+        // Confirm and Delete bases follow the same rule.
+        assert_eq!(shade(theme::hex("#10281F"), -2).hex(), "#0e261dff");
+        assert_eq!(shade(theme::hex("#2B1823"), -2).hex(), "#291621ff");
+        // Alpha is preserved exactly, including a non-opaque fill.
+        let faint = theme::hex("#10262C").alpha(0.4);
+        let shaded = shade(faint, -2);
+        assert_eq!(shaded.a, 0.4);
+        assert_eq!(shaded.hex(), "#0e242a66");
+        // Darkening or lightening never leaves the 8-bit range.
+        assert_eq!(shade(theme::hex("#000000"), -2).hex(), "#000000ff");
+        assert_eq!(shade(theme::hex("#010101"), -2).hex(), "#000000ff");
+        assert_eq!(shade(theme::hex("#FFFFFF"), 2).hex(), "#ffffffff");
+        assert_eq!(shade(theme::hex("#10262C"), 2).hex(), "#12282eff");
+    }
+
+    #[test]
+    fn textured_hover_fills_are_the_encoded_two_step_lift_of_their_bases() {
+        for finish in [
+            MetalFinish::Fractured,
+            MetalFinish::FracturedConfirm,
+            MetalFinish::FracturedDanger,
+        ] {
+            let (fill, _, hover) = finish_colors(finish);
+            assert_eq!(hover.hex(), shade(fill, 2).hex(), "{finish:?}");
+        }
     }
 
     #[test]
@@ -595,7 +623,8 @@ mod finish_tests {
         assert!(shard_color(-1.0, TEXTURE_OPACITY).a > 0.0);
         assert!(shard_color(1.0, TEXTURE_OPACITY_DISABLED).a < light.a);
         // Three 256 px tiles cover the widest textured action.
-        assert!(TILE_COPIES as f32 * rock::TILE >= 768.0);
+        let covered = TILE_COPIES as f32 * rock::TILE;
+        assert!(covered >= 768.0, "{covered}");
     }
 
     #[test]

@@ -135,21 +135,6 @@ capture before handoff. Actual helper tests/rendering must be executed by the in
 the active acceptance tracker (for the cutover baseline, see
 [cutover acceptance](../../../.planning/2026-11-11-rune-macos-cutover/acceptance.md)).
 
-## Splash, theme and live-state review
-
-Use this for changes to `orbit.rs`, `startup.rs`, `theme.rs`, `material.rs`, Jobs or the live-state paths. Verify on Linux x86-64 first. Rebuild instructions for each part are in [Quiet Orbit, matte theme and live states](../../design/native-workstation-handoff/brand-space-ui/README.md).
-
-| Check | How | Pass |
-| --- | --- | --- |
-| Orbit clearance and scale | `python3 scripts/agent_cargo.py test --locked -p fleetworks-desktop --lib orbit` | No prism edge within 5.3 scene units of the crescent over two loops; five prisms persist with front and rear passes; envelope fits at 640x480, 1600x900, 320x568 |
-| Startup timeline | `... --lib startup` | Scene to 2.65 s, crossfade to 3.00 s, no replay after a late wake, Reduced Motion has no crossfade, no backend started |
-| Cold launch, by eye | Launch the production app once on a clean profile at `640x480` and `1600x900`, scales 1 and 2 | Full scene on frame one over `#060709` with no rectangle or flash, same exposure into the connection choice, orbit scales as one unit |
-| Matte theme | `... --lib material`, plus `pnpm test packages/ui/__tests__/palette-contrast.test.ts packages/ui/__tests__/theme-tokens.test.tsx` | Only Fractured finishes carry texture; no ivory or gold fill; contrast contract passes |
-| Jobs | `... --lib jobs_query` | Append, dedupe, 64-page and 500-row bounds, failure plus Retry, stale reply dropped, scope switch clears, selection survives |
-| Live states | `... --lib readiness_cards`, `... --lib log_tests`, `... --lib maintenance` | Failed refresh keeps same-scope checks as stale; follow never returns resolved logs to a skeleton |
-
-Capture `jobs-*` and readiness fixtures with `native-ui` at `1280x800` and `640x480`, scales 1 and 2, with and without Reduced Motion, and inspect the PNGs. Tests do not replace inspecting a real launch. There is no registered splash fixture scene yet, so the splash needs a real launch or a Runtime test; report which you did.
-
 ## Dispatchable UI visual review
 
 After an agent freezes a native or web UI PR revision, dispatch

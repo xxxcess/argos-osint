@@ -10,8 +10,6 @@ This package accompanies the Argos OSINT / Fleetworks native-app redesign.
 4. Review the seven mockups below for visual composition.
 5. Follow the pinned repository links for the relevant implementation and verification rules.
 
-**Quiet Orbit addendum:** the later [Quiet Orbit, matte theme and live-state package](brand-space-ui/README.md) supersedes the gold and ivory palette, the static JPG splash, reflective controls and page-button lists in the documents below, with step-by-step reproduction. The seven mockups predate it and need regenerating.
-
 **Precedence:** Latest explicit user decisions govern this package. The current handoff owns execution and API migration; the current guide owns the target UI. The original structural reference's workspace identity, Tauri/Linux-client assumptions, hardware examples, Rust-BERT training and glossy finishes are superseded. The target is the Rune macOS API client, workstation-only identity, matte obsidian black, dim satin graphite, and restrained canonical gold/ivory.
 
 Mockups use synthetic data and illustrate composition. They do not establish API capabilities, exact runtime values, accessibility compliance or completed implementation. Written controls and contracts take precedence over incidental details in an image.
@@ -24,7 +22,6 @@ Mockups use synthetic data and illustrate composition. They do not establish API
 | `argos_native_design_system_guide.md` | Standing design and native interaction requirements. |
 | `argos_osint_workstation_ui_specification.md` | Original user-supplied structural reference, preserved unchanged. |
 | `README.md` | This reading order, precedence note and repository-reference index. |
-| `brand-space-ui/` | Quiet Orbit splash, matte deep-space theme, live-state contract and motion reference, each with a Reproduce section. |
 | `mockups/01_workstation_status.png` | Connected workstation identity and backend/resource status. |
 | `mockups/02_db_seed_train.png` | Seed/index/training operation cards. |
 | `mockups/03_news_cycles.png` | New-cycle action and cycle-history cards. |

@@ -39,14 +39,14 @@ Posted by the repository owner on this PR. Where it conflicts with the sections 
 
 Verify on Linux x86-64 first: cold startup through gateway and service screens, full-orbit clearance and scale, Reduced Motion, compact layout, and Jobs scrolling and selection over append, refresh and failure. Typed local CSV stays the primary Linux import path.
 
-How to rebuild and check each part: [Quiet Orbit, matte theme and live states](../design/native-workstation-handoff/brand-space-ui/README.md).
+The canonical theme, state and Quiet Orbit reproduction docs live in the matte canvas design reference (`docs/design/matte-canvas/README.md`, added by PR 70). This spec only records the decisions.
 
 ## Edit map
 
 | Surface | Existing owners and required edits |
 |---|---|
 | Native shell and startup | `apps/fleetworks-desktop/src/app.rs::view/context_rail`, `launch.rs`, `icons.rs`, `views.rs`, `pairing.rs`, `connection_profiles.rs`, `local_backend.rs`. Replace the right rail with the collapsible Assistant; add `startup.rs` (new); preserve existing gateway states and credential stores. |
-| Materials and brand | Native `theme.rs`, `material.rs`, `ui_components.rs`, `accessibility.rs`; web `packages/ui/src/index.tsx`, `FleetworksMark.tsx`, `packages/intel/src/shell/intel-theme.ts`, `apps/web-desktop/app/style.css`. Assets: `assets/brand/fleetworks-material-logo.png`, `assets/brand/fleetworks-quiet-orbit.gif` (reference) and `assets/brand/fleetworks-mark.svg` (small sizes). The old `fleetworks-logo.jpg` is historical. See the [addendum](#addendum-quiet-orbit-matte-theme-and-stable-live-states). |
+| Materials and brand | Native `theme.rs`, `material.rs`, `ui_components.rs`, `accessibility.rs`; web `packages/ui/src/index.tsx`, `FleetworksMark.tsx`, `packages/intel/src/shell/intel-theme.ts`, `apps/web-desktop/app/style.css`. Assets: `assets/brand/source/fleetworks-liquid-metal-glass.png` and `assets/brand/reference/fleetworks-quiet-orbit.*` (PR 70) are the approved references; `assets/brand/fleetworks-mark.svg` serves small sizes. The old `fleetworks-logo.jpg` is historical. See the [addendum](#addendum-quiet-orbit-matte-theme-and-stable-live-states). |
 | Native operations and new utilities | Native `backend_views.rs::jobs/safe_log_table`, `jobs_query.rs`, `jobs_effects.rs`, `logs.rs`, `log_effects.rs`, `job_actions.rs`, `workstation_dashboard.rs`, `maintenance.rs`, `configuration_views.rs`, `workstation_settings.rs`; new `context_chat.rs`, `context_chat_views.rs`, `inbox.rs`, `command_panel.rs`. |
 | Native Assistant contracts | `crates/fleetworks-contracts/src/{client,ipc,capabilities,readiness}.rs`, `crates/argos-osint-api/src/{context_boundary,local_dispatch,admission,request_reconciliation}.rs`, `crates/argos-osint-core/src/storage/{job_context,job_dispatch,bootstrap}.rs`, `services/api-host/src/{local_ipc,native_worker,native_pool,queue_client}.rs`. Add scoped chat DTO, dispatch, storage and execution modules; **no** browser chat relay. |
 | Web shell and footer | `apps/web-desktop/app/workspace.tsx`, `apps/web-desktop/app/{navigation,ui-scale}.ts`, `apps/web-desktop/app/connect/connect-form.tsx`; `packages/intel/src/index.tsx::IntelApp/WorkspaceStatusBar/PageJobs`, `shell/IntelShell.tsx::IntelStatusBar/JobDropUp`, `views/bulletin/*`, `views/brief/*`, `topology/ForceCanvas.tsx`. |
@@ -56,7 +56,7 @@ How to rebuild and check each part: [Quiet Orbit, matte theme and live states](.
 
 ### 1. Shared production component catalog
 
-- **Superseded by the [addendum](#addendum-quiet-orbit-matte-theme-and-stable-live-states).** Use the matte deep-space tokens in the [theme contract](../design/native-workstation-handoff/brand-space-ui/fleetworks-deep-space-theme.md): canvas `#060709`, charcoal steps `#0B0E13` / `#111720` / `#181E28`, cool gray text, a cool neutral accent and the seven status colors. Keep ~8-unit rhythm, 20–24 page gutters, and monospace only where it aids scanning. Reading panels stay opaque.
+- **Superseded by the [addendum](#addendum-quiet-orbit-matte-theme-and-stable-live-states).** Use the tokens in the matte canvas theme (`docs/design/matte-canvas/theme.md`, PR 70): canvas `#060709`, cool group bodies and text, cyan interactive accent and flat semantic colors. Keep ~8-unit rhythm, 20–24 page gutters, and monospace only where it aids scanning. Reading panels stay opaque.
 - Buttons, tiles, segmented controls, fields, overlays and the composer are flat and matte: no reflective finish, glow, drop shadow or pointer lighting. Only real Submit, Confirm, Create, Delete and Connect actions carry the fractured-obsidian texture. The composer and the command overlay may keep a same-window blur with an opaque fallback; Linux does not need a blanket matte fallback for that. Web uses the same tokens with an opaque fallback.
 - Rebuild the catalog from production components in Rune fixtures and web visual tests: navigation/status, buttons/fields, tiles, job cards, disclosure, evidence context and native-only overlays/composer/splash. Cover default, hover, keyboard focus, pressed, selected, busy, disabled and reduced preference states. No second component system or public catalog route.
 

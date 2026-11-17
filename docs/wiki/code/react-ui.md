@@ -14,7 +14,7 @@ Before building, name the screen type, density and nearest shared primitive.
 | --- | --- |
 | Type | Existing scale; mono for navigation/metadata, body for prose |
 | Space | Visible record gaps; compact only for launchers, palettes, headlines and category bullets |
-| Color | Matte deep space: cool charcoal steps, cool gray text, a cool neutral accent; the seven status colors always pair with a label or icon |
+| Color | Obsidian/graphite and sparse gold/ivory; semantic hues retain their meanings |
 | Components | Extend shared primitives; preserve functional boundaries and independent focus/selection |
 | States | Loading, empty, error, unavailable, disabled, hover, press and keyboard focus |
 | Overflow | Wrap prose, scroll long content and retain usable hit targets |
@@ -50,16 +50,15 @@ Compiler optimization is not a correctness proof. Typecheck, Hooks/compiler diag
 | [Shared UI](../../../packages/ui/src/index.tsx) | Palette, fonts, matte recipes and primitives |
 | [Intel theme](../../../packages/intel/src/shell/intel-theme.ts) | Evidence, metric and execution-state hues |
 | [Browser CSS](../../../apps/web-desktop/app/style.css) | Opaque canvas, functional focus ring and scrollbars |
-| [Canonical mark](../../../assets/brand/fleetworks-mark.svg) | Five outlined gold rays, ivory disc, gold crescent; transparent knockout. The logo is the only place brand gold, ivory and sheen remain; the rich logo and Quiet Orbit are in [brand assets](../../../assets/brand/README.md) |
+| [Canonical mark](../../../assets/brand/fleetworks-mark.svg) | Five outlined gold rays, ivory disc, gold crescent; transparent knockout |
 
 | Token | Value |
 | --- | --- |
-| Canvas / card / raised | `#060709` / `#0B0E13` / `#111720` |
-| Primary / supporting / muted text | `#E8EDF4` / `#BEC7D4` / `#9AA6B6` |
-| Accent / pressed / hover | `#A9B8CC` / `#8FA1B8` / `#C3CFDF` |
-| Functional boundary / decorative divider | `#6F7B8D` / `#262D38` |
-| Decorative card / satin control edge | 2% / 3% cool white; never a functional boundary substitute |
-| Status | Cyan `#21D9EE` live, blue `#5AB8F0` info, mint `#5FD39A` healthy, amber `#E5B45B` warning or stale, rose `#F06A8A` error, violet `#B48EFF` queued, slate `#9AA6B6` unknown |
+| Canvas / card / raised | `#060709` / `#0B0C0F` / `#111317` |
+| Primary / supporting / muted text | `#F3EEE4` / `#D6D2C4` / `#B8B4A8` |
+| Accent / pressed | `#C6A56E` / `#C4A265` |
+| Functional boundary | `#898274` |
+| Decorative card / satin control edge | 2% / 3% ivory; never a functional boundary substitute |
 
 ### Intel matte desk
 
@@ -70,12 +69,12 @@ Compiler optimization is not a correctness proof. Typecheck, Hooks/compiler diag
 | Read-only card | Opaque matte body, faint static edge; no implied hover/focus action |
 | Default control | Graphite body and functional border; hover accent wash, pressed raised fill |
 | Quiet control | Transparent fill, retained functional border and supporting text |
-| Primary | Flat cool accent with dark text; hover and pressed step along the accent ramp |
+| Primary | Flat gold with dark text; hover gold and pressed crescent-gold fills |
 | Selected | Stable fill/border plus `aria-pressed`; separate from keyboard focus |
 | Disabled | Readable muted label/boundary and semantic disabled state |
 | Compatibility exports | `glass` now supplies matte-card paint; `glow()` supplies a static inset rim |
 
-No backdrop blur, gloss, broad reflections, shimmer or decorative card-entry animation. Opaque preferences retain readable static states. Existing view/camera motion remains preference-aware; it introduces no renderer or animation library. The brand gold lives only in the logo; accent is never severity or confidence. Native adds a fractured-obsidian texture on Submit, Confirm, Create, Delete and Connect only ([theme](../../design/native-workstation-handoff/brand-space-ui/fleetworks-deep-space-theme.md)); web has not drawn it yet.
+No backdrop blur, gloss, broad reflections, shimmer or decorative card-entry animation. Opaque preferences retain readable static states. Existing view/camera motion remains preference-aware; it introduces no renderer or animation library. Gold is branding, not severity or confidence.
 
 ## UI/UX guidance
 

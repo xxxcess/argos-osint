@@ -36,7 +36,7 @@ UI creation and review follow the [React UI design rules](react-ui.md), includin
 
 ## Web presentation
 
-Shared [matte deep-space](react-ui.md#visual-language) paint (cool charcoal steps, cool gray text, status colors; see the [theme contract](../../design/native-workstation-handoff/brand-space-ui/fleetworks-deep-space-theme.md)) preserves web typography, controls, responsive navigation and topology/list behavior. Native has a separate control allowlist.
+Shared [matte obsidian/graphite and canonical gold/ivory](react-ui.md#visual-language) paint preserves web typography, controls, responsive navigation and topology/list behavior. Native has a separate control allowlist.
 
 | Surface | Presentation |
 | --- | --- |

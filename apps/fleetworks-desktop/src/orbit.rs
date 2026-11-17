@@ -1,6 +1,6 @@
 //! Quiet Orbit: the native startup scene, drawn as vector layers over the shared `#060709` canvas.
 //!
-//! The orbit follows the owner's reference geometry (`assets/brand/brand-manifest.json`): five
+//! The orbit follows the owner's reference geometry (`assets/brand/reference/quiet-orbit/playback.json` once the matte canvas docs land): five
 //! persistent obsidian-glass prisms on one inclined, lifted ring around a smoky glass sphere of
 //! flowing molten liquid, above a fixed obsidian crescent. Orbit radius is 1.303 core radii, the
 //! inclination is 66 degrees, the ring is lifted 0.381 core radii, prisms are 0.70 scale, phases
@@ -10,9 +10,10 @@
 //! The scene is one 144 x 176 envelope that scales as a unit. Everything here is vector geometry
 //! with no raster, so there is no media rectangle to flash and nothing to decode at launch.
 //!
-//! shortcut: a vector approximation of the reference materials. The reference rasters are kept as
-//! canonical references and are not shipped at runtime; replace [`scene`] with bounded RGBA
-//! layers if the derived layer pack is added to `assets/brand/splash/`.
+//! shortcut: a bounded native vector scene, which the matte canvas motion doc allows in place of
+//! derived RGBA layers. The reference GIF, MP4 and PNG are not loaded at runtime (the native
+//! resource pipeline has no GIF support), so there is no asset to miss and nothing to fall back
+//! from; if derived layers are added later, a failed load must show the still from [`scene`].
 
 use std::f32::consts::PI;
 use std::f32::consts::TAU;

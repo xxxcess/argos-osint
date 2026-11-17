@@ -5,8 +5,6 @@
 **Proposed repository location:** `docs/wiki/code/native-design-system.md` (new, following the existing wiki structure).  
 **Companion:** `argos_workstation_identity_implementation_spec.md` defines the contract migration and adoption work.
 
-> **Updated for Quiet Orbit and the matte deep-space theme.** The repository owner's addendum on the overhaul PR supersedes the gold and ivory palette values, the gold primary action, the static JPG startup logo and page-button lists described below. Current rules: [matte deep-space theme](brand-space-ui/fleetworks-deep-space-theme.md) (tokens, status colors, fractured-obsidian texture on Submit, Confirm, Create, Delete and Connect only, shimmer only while loading), [Quiet Orbit splash](brand-space-ui/fleetworks-splash-handoff.md) and [live-state contract](brand-space-ui/fleetworks-realtime-state-contract.md). Section 5 below is rewritten to match. Mockups in `mockups/` were drawn before this change; their colors and Previous/Next controls are historical and need regenerating.
-
 ## 1. Purpose and scope
 
 Make the native application understandable at an initial glance. Each destination has one clear purpose, a short status summary and only the controls specified in `argos_osint_workstation_ui_specification.md`. The supplied reference governs the application structure and allowed interaction points. Existing source determines reusable components, real operations and contracts that require migration.
@@ -76,32 +74,32 @@ The collapsed sidebar retains accessible navigation and tooltips as in the refer
 
 Use matte obsidian-black canvas and card bodies, with the **canonical logo's muted gold and ivory as the brand palette**. Make the satin-metal finish dim and low-sheen: graphite controls have faint edges and barely perceptible depth, while cards receive only a very subtle static edge. Bright silver/chrome borders, broad glossy reflections, shiny surface gradients and sweeping sheen are excluded. The current native and web palettes are the audited starting point; the values below are target design tokens to implement in both clients. [S4][S12][S14]
 
-### Target palette: matte deep space
+### Target palette from the brand logo
 
 | Target token | Value | Use |
 | --- | --- | --- |
-| `BACKGROUND` | `#060709` | One uninterrupted window canvas, shared with the splash |
-| `SURFACE` | `#0B0E13` | Charcoal step 1: cards and ordinary controls |
-| `SURFACE_RAISED` | `#111720` | Charcoal step 2: raised controls, rows and panels |
-| `SURFACE_ELEVATED` | `#181E28` | Charcoal step 3: hover and dialogs |
+| `BACKGROUND` | `#060709` | Flat matte obsidian window/page canvas |
+| `SURFACE` | `#0B0C0F` | Matte black base for cards and ordinary controls |
+| `SURFACE_RAISED` | `#111317` | Solid tonal separation for raised controls and panels |
 | `SURFACE_INSET` | `#060709` | Quiet inner beds for long text, tables and logs |
-| `TEXT_PRIMARY` | `#E8EDF4` | Values and titles |
-| `TEXT_SECONDARY` | `#BEC7D4` | Supporting text |
-| `TEXT_MUTED` | `#9AA6B6` | Readable lower-priority metadata |
-| `ACCENT` | `#A9B8CC` | Neutral cool accent: selection and links; pressed `#8FA1B8`, hover `#C3CFDF`, focus ring `#DCE6F3` |
-| `CARD_EDGE` | `rgba(232,237,244,0.02)` | Very faint static card edge |
-| `BORDER_DECORATIVE` | `#262D38` | Quiet framing where the edge does not identify an essential control |
-| `BORDER_CONTROL` | `#6F7B8D` | Functional boundary; contrast is checked independently of decorative edges |
-| `SATIN_CONTROL_EDGE` | `rgba(232,237,244,0.03)` | Faint static edge on interactive controls |
+| `TEXT_PRIMARY` | `#F3EEE4` | Main text and the canonical logo's ivory disc |
+| `TEXT_SECONDARY` | `#D6D2C4` | Supporting text |
+| `TEXT_MUTED` | `#B8B4A8` | Readable lower-priority metadata |
+| `ACCENT` | `#C6A56E` | Canonical ray gold; primary action, selection and focus emphasis |
+| `ACCENT_PRESSED` | `#C4A265` | Canonical crescent gold; solid pressed-state color |
+| `CARD_EDGE` (new) | `rgba(243,238,228,0.02)` | Very faint static card edge derived from logo ivory |
+| `BORDER_DECORATIVE` (new) | `#3A3833` | Dim warm-graphite framing where the edge does not identify an essential control |
+| `BORDER_CONTROL` | `#898274` | Functional boundary where needed to identify a control; preserve actual contrast checks independently of decorative satin edges |
+| `SATIN_CONTROL_EDGE` (new) | `rgba(243,238,228,0.03)` | Faint, static satin edge on interactive controls; never a bright border or broad reflection |
 
-Seven status colors, always paired with a label or icon: cyan `#21D9EE` live or running, blue `#5AB8F0` info, mint `#5FD39A` healthy or complete, amber `#E5B45B` warning or stale, rose `#F06A8A` error or destructive, violet `#B48EFF` queued or paused, slate `#9AA6B6` unknown or unavailable. Brand gold and ivory live in the logo only.
+Keep the Kit's distinct success, warning, danger and information roles, plus the web's evidence-kind and metric colors. Pair state colors with text or icons. Gold identifies the brand and interaction emphasis; status meanings retain their own colors.
 
 ### Minimalism rules
 
-- Let obsidian and charcoal occupy most of the interface. Use the cool accent for selected navigation and links, a clear focus ring, and one compact primary action in the active view.
+- Let obsidian and charcoal occupy most of the interface. Use the logo's gold for selected navigation, focus and one compact primary action in the active view.
 - Use solid matte bodies and, at most, one faint static edge per card/control. Depth should be barely perceptible; add a small shadow only when elevation needs to be explained. Avoid bright silver/chrome outlines, broad reflections, shiny gradients, stacked decorative borders, heavy glow and ornamental card nesting.
 - Use aligned content, consistent spacing and a short type hierarchy. Keep labels and necessary status information clear; avoid repeated explanatory blocks and decorative icons.
-- Keep the canonical logo in its existing branding position, at a restrained size. Preserve its five-ray geometry and exact gold/ivory colors; do not repeat it on cards. Only the startup splash animates it (Quiet Orbit); the main logo is the one place metallic sheen is allowed.
+- Keep the canonical logo in its existing branding position, at a restrained size. Preserve its five-ray geometry and exact gold/ivory colors; do not repeat it on cards or animate the emblem.
 - Keep surfaces stable at rest and during interaction. Hover changes only a control's border or solid fill; it never launches a sheen sweep. Read-only cards remain matte and static.
 
 The intended appearance is a clean intelligence workstation dominated by matte black, muted brand colors and minimal satin graphite detail. Tonal separation and spacing establish hierarchy; the dim finish should be barely perceptible and never become reflective focal content.
@@ -113,10 +111,7 @@ The intended appearance is a clean intelligence workstation dominated by matte b
 | Window/page canvas | Uniform, opaque matte obsidian black with minimal decoration. |
 | All card surfaces | Solid matte black/charcoal fill with a very faint static logo-ivory edge, initially about 1–2% opacity. Use a minimal shadow only for meaningful elevation. No broad reflective overlay or glossy gradient. |
 | Interactive dark controls | Matte graphite body, dim satin edge initially about 2–3% opacity, a functional boundary and barely perceptible depth. Apply to the permitted buttons, fields, selectors, navigation items and selectable cards/rows. Keep text-entry areas quiet while typing. |
-| Primary action | One compact control with a flat cool body (`#172233`, edge `#2B5E80`) and primary text. Secondary controls remain matte graphite. |
-| Submit, Confirm, Create, Delete, Connect | The only controls with the fractured-obsidian texture (faceted shards and fine cracks, painted under the label), tinted cool or rose. Navigation, Settings, filters, toggles and utilities stay smooth and matte. |
-| Loading | Layout-matched skeletons only for unresolved regions, with one cool sheen band while motion is allowed; static under Reduced Motion. Resolved content stays visible on refresh. |
-| Long lists | Jobs & Logs loads continuously through a bounded cursor with one Load more control. No Previous, Next or page numbers. |
+| Primary action | One compact, muted gold control with a solid `#C6A56E` body, `#C4A265` pressed state and dark `#060709` text. Keep its finish flat and low-sheen; secondary controls remain matte graphite. |
 | Long text, table and log interiors | Solid obsidian/inset fill within the matte container, with stable foreground contrast and no reflective overlays. |
 
 These edge-opacity ranges are starting design values to verify in actual rendered views. The 1–3% satin edges and dim decorative border never replace functional control boundaries or keyboard-focus tokens. Preserve the existing numeric contrast checks after alpha compositing; adjust the appropriate functional token when a control needs a clearer boundary instead of weakening those checks. Use solid tonal separation, a faint decorative edge and minimal shadow to establish depth; do not add noisy textures, glossy gradients, reflective sweeps or shimmer. A card's finish does not create an action: read-only cards have no pointer cursor, interactive focus or hover treatment.
@@ -236,7 +231,7 @@ Keep these mechanics in shared state/effects and service contracts. The screen s
 - Native and Intel Web resolve the same workstation ID. IP changes preserve that identity. Different workstations and deployments remain isolated.
 - Every action reaches a supported typed API contract with actual authorization and capability gates. No static example data is presented as live state.
 - Native and Intel Web use matte obsidian-black canvas and card bodies. Controls use dim, low-sheen satin graphite edges and barely perceptible depth; bright silver/chrome borders, broad reflections, glossy gradients and sheen sweeps are absent.
-- The logo keeps its gold and ivory; the clients use the cool matte palette. The active view has one compact primary action, and ordinary cards use a very subtle static edge without repeated logos or heavy decorative framing.
+- The logo's exact gold/ivory colors inform both clients. Gold is used sparingly, the active view has one compact primary action, and ordinary cards use a very subtle static edge without repeated logos or heavy decorative framing.
 - Read-only cards do not imply clickability. Reduced-motion and reduced-transparency modes retain the opaque matte finish and readable static focus/state cues.
 - The native app retains its API-only architecture. Setup does not launch backend processes.
 - Intel Web uses the canonical five-ray logo without a mismatched background patch. Its existing controls, layout and topology behavior remain intact; the native allowlist applies only to native screens.

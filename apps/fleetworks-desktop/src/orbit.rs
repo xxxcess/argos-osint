@@ -131,7 +131,7 @@ pub(crate) fn facets() -> &'static [Facet] {
                         out.push(Facet {
                             points,
                             tone: (rock::noise(i, j, 24 + n as u32) % 1000) as f32 / 1000.0,
-                            lit: rock::noise(i, j, 26) % 3 == 0,
+                            lit: rock::noise(i, j, 26).is_multiple_of(3),
                         });
                     }
                 }

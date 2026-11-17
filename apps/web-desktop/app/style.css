@@ -29,7 +29,7 @@ html {
 * {
   box-sizing: border-box;
   scrollbar-width: thin;
-  scrollbar-color: #6F7B8D transparent;
+  scrollbar-color: #647587 transparent;
 }
 html,
 body {
@@ -37,7 +37,7 @@ body {
   height: 100%;
   min-height: 100%;
   background-color: #060709;
-  color: #e8edf4;
+  color: #d5dce5;
   font-family:
     var(--intel-body, Inter),
     system-ui,
@@ -68,7 +68,7 @@ body {
 #intel-topology-node-scroll,
 #intel-topology-connection-scroll {
   scrollbar-width: thin;
-  scrollbar-color: #6F7B8D transparent;
+  scrollbar-color: #647587 transparent;
 }
 #intel-topology-node-scroll::-webkit-scrollbar,
 #intel-topology-connection-scroll::-webkit-scrollbar {
@@ -78,7 +78,7 @@ body {
 }
 #intel-topology-node-scroll::-webkit-scrollbar-thumb,
 #intel-topology-connection-scroll::-webkit-scrollbar-thumb {
-  background: #6F7B8D;
+  background: #647587;
 }
 /* Keep list wheel/trackpad scrolling inside its panel at either boundary. */
 #intel-topology-node-scroll,
@@ -159,26 +159,26 @@ select {
   font: inherit;
 }
 a {
-  color: #a9b8cc;
+  color: #24dce3;
   text-decoration: underline;
 }
 input,
 select {
   background: #060709;
-  border: 1px solid #6F7B8D;
+  border: 1px solid #647587;
   border-radius: 8px;
-  color: #e8edf4;
+  color: #d5dce5;
   min-width: 0;
 }
 :focus-visible {
-  outline: 2px solid #c3cfdf;
+  outline: 2px solid #72e9ff;
   outline-offset: 2px;
   /* A dark gap keeps the focus ring distinct even on a gold primary body. */
   box-shadow: 0 0 0 2px #060709;
 }
 ::selection {
-  background: #1b2533;
-  color: #e8edf4;
+  background: #10272d;
+  color: #d5dce5;
 }
 /* Existing view geometry stays fixed; surface finishes remain static. */
 #intel-home {
@@ -197,16 +197,16 @@ select {
 #intel-home-launcher:is(:hover, :focus-visible)
   [data-testid="intel-launcher-tile"] {
   box-shadow: none;
-  border-color: #a9b8cc;
+  border-color: #24dce3;
 }
 [data-testid^="article-card-"] {
   transition: border-color 120ms;
 }
 #intel-bulletin input:focus-visible {
-  border-color: #c3cfdf;
+  border-color: #68e7eb;
 }
 [data-testid="bulletin-skeleton"] {
-  background-color: #111720;
+  background-color: #121820;
   background-image: none;
 }
 @media (prefers-reduced-motion: reduce) {
@@ -302,7 +302,7 @@ select {
 }
 
 [data-testid="skeleton-line"] {
-  background-color: #111720;
+  background-color: #27313b;
   background-image: none;
 }
 

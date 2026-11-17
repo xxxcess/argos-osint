@@ -33,16 +33,21 @@ pub(crate) enum MetalFinish {
     /// Matte destructive entry point, such as an action that opens a confirmation.
     CrimsonDanger,
     ObsidianPill,
-    /// Submit, Confirm, Create or Connect: fractured obsidian, cool tint.
+    /// Submit, Create or Connect: matte rock texture, cyan tint.
     Fractured,
-    /// The destructive confirmation itself, such as Delete: fractured obsidian, rose tint.
+    /// Confirm: matte rock texture, mint tint.
+    FracturedConfirm,
+    /// The destructive confirmation itself, such as Delete: matte rock texture, rose tint.
     FracturedDanger,
 }
 
 impl MetalFinish {
     /// Whether this finish carries the fractured-obsidian texture.
     pub(crate) fn fractured(self) -> bool {
-        matches!(self, Self::Fractured | Self::FracturedDanger)
+        matches!(
+            self,
+            Self::Fractured | Self::FracturedConfirm | Self::FracturedDanger
+        )
     }
 }
 
@@ -120,8 +125,7 @@ pub(crate) fn configure_kit(kit: &mut Kit, _preferences: ViewPreferences) {
     kit.elevation = elevation;
 }
 
-/// A flat card: one tonal step over the canvas, a quiet edge that blends in, and a tone-tinted
-/// edge only when selected.
+/// A flat group: one tonal step over the canvas with a 20 px radius and no stroke.
 pub(crate) fn luminous_card(
     content: El,
     tone: StatusTone,
@@ -130,12 +134,17 @@ pub(crate) fn luminous_card(
     _pointer_offset: Option<&Live<[f32; 2]>>,
     _shadow_offset: Option<&Live<[f32; 2]>>,
 ) -> El {
-    let (fill, edge) = if selected {
-        (theme::hex(theme::SURFACE_RAISED), tone.border())
+    // Groups dissolve into the canvas: no decorative stroke. A selected item keeps one tone edge.
+    // shortcut: a flat fill stands in for the 16 px alpha-masked perimeter of the theme; add the
+    // masked group background when the renderer's mask primitive is verified.
+    if selected {
+        content
+            .fill(theme::hex(theme::SURFACE_RAISED))
+            .border(1.0, tone.border())
+            .radius(20.0)
     } else {
-        (theme::hex(theme::SURFACE), theme::hex(theme::BORDER_SUBTLE))
-    };
-    content.fill(fill).border(1.0, edge).radius(10.0)
+        content.fill(theme::hex(theme::SURFACE)).radius(20.0)
+    }
 }
 
 /// A clickable tile: the same flat card with a one-step lift on hover.
@@ -158,41 +167,49 @@ pub(crate) fn interactive_tile(
     .hover(theme::hex(theme::SURFACE_ELEVATED))
 }
 
-/// Fill, border and hover fill for one finish. Every finish is a flat fill.
+/// Texture opacity at rest, hover-free; disabled controls use [`TEXTURE_OPACITY_DISABLED`].
+pub(crate) const TEXTURE_OPACITY: f32 = 0.12;
+pub(crate) const TEXTURE_OPACITY_DISABLED: f32 = 0.04;
+
+/// Fill, border and hover fill for one finish. Hover adds 2 to each base channel. Every finish is
+/// a flat fill; the textured ones sit on the theme's action bases.
 fn finish_colors(finish: MetalFinish) -> (Color, Color, Color) {
+    let control = theme::hex(theme::BORDER_CONTROL);
     match finish {
         MetalFinish::GoldCta => (
-            theme::hex("#172233"),
-            theme::hex(theme::STATUS_INFO_BORDER),
-            theme::hex("#1E2D44"),
+            theme::hex(theme::SELECTION_SURFACE),
+            control,
+            theme::hex("#12292F"),
         ),
         MetalFinish::Gunmetal | MetalFinish::ObsidianPill => (
             theme::hex(theme::SURFACE_RAISED),
-            theme::hex(theme::BORDER_CONTROL),
-            theme::hex(theme::SURFACE_ELEVATED),
+            control,
+            theme::hex("#141A22"),
         ),
         MetalFinish::CrimsonDanger => (
             theme::hex(theme::STATUS_ERR_BG),
             theme::hex(theme::STATUS_ERR_BORDER),
-            theme::hex("#34161F"),
+            theme::hex("#241C24"),
         ),
-        MetalFinish::Fractured => (
-            theme::hex("#0A0D12"),
-            theme::hex(theme::STATUS_INFO_BORDER),
-            theme::hex("#0F141C"),
-        ),
-        MetalFinish::FracturedDanger => (
-            theme::hex("#150A0E"),
-            theme::hex(theme::STATUS_ERR_BORDER),
-            theme::hex("#1D0E14"),
-        ),
+        MetalFinish::Fractured => (theme::hex("#10262C"), control, theme::hex("#12282E")),
+        MetalFinish::FracturedConfirm => (theme::hex("#10281F"), control, theme::hex("#122A21")),
+        MetalFinish::FracturedDanger => (theme::hex("#2B1823"), control, theme::hex("#2D1A25")),
+    }
+}
+
+/// The context tint of a textured finish.
+fn finish_tint(finish: MetalFinish) -> Color {
+    match finish {
+        MetalFinish::FracturedConfirm => theme::hex(theme::STATUS_OK),
+        MetalFinish::FracturedDanger => theme::hex(theme::STATUS_ERR),
+        _ => theme::hex(theme::ACCENT),
     }
 }
 
 /// The fractured-obsidian texture: faceted shards alternating faint light and dark, with a few
 /// cool cracks in the tint. Coordinates span a 100 x 32 box that stretches to the control, inset
 /// so no facet pokes outside the rounded corners. It paints over the fill and under the label.
-pub(crate) fn fracture_shape(tint: Color) -> Shape {
+pub(crate) fn fracture_shape(tint: Color, opacity: f32) -> Shape {
     let a = [3.0, 2.0];
     let b = [40.0, 2.0];
     let c = [97.0, 2.0];
@@ -219,15 +236,16 @@ pub(crate) fn fracture_shape(tint: Color) -> Shape {
     ];
     let mut shape = Shape::new();
     for (index, facet) in facets.iter().enumerate() {
+        // At most about 6 channel levels of relief at the rest opacity of 0.12: matte, not gloss.
         let color = if index % 2 == 0 {
-            theme::hex(theme::TEXT_PRIMARY).alpha(0.045)
+            theme::hex(theme::TEXT_PRIMARY).alpha(0.22 * opacity)
         } else {
-            theme::hex(theme::CAST_SHADOW).alpha(0.24)
+            theme::hex(theme::CAST_SHADOW).alpha(1.25 * opacity)
         };
         shape = shape.fill(facet.to_vec(), color);
     }
     for (from, to) in [(p, q), (q, r), (p, e), (q, e), (b, p), (b, q), (r, e)] {
-        shape = shape.line(from, to, 0.6, rune::LineCap::Butt, tint.alpha(0.22));
+        shape = shape.line(from, to, 0.6, rune::LineCap::Butt, tint.alpha(opacity));
     }
     shape.view_box(100.0, 32.0)
 }
@@ -244,12 +262,22 @@ pub(crate) fn apply_liquid_metal(
 ) -> El {
     let radius = match finish {
         MetalFinish::ObsidianPill => 14.0,
+        finish if finish.fractured() => 10.0,
         _ => 7.0,
     };
-    let (fill, border, hover_fill) = finish_colors(finish);
+    let (mut fill, border, hover_fill) = finish_colors(finish);
+    if disabled && !shimmer && finish.fractured() {
+        // A disabled textured action returns to the raised-control base with a faint texture.
+        fill = theme::hex(theme::SURFACE_RAISED);
+    }
     let mut styled = button.fill(fill).border(1.0, border).radius(radius);
     if finish.fractured() {
-        styled = styled.shape(fracture_shape(border));
+        let opacity = if disabled && !shimmer {
+            TEXTURE_OPACITY_DISABLED
+        } else {
+            TEXTURE_OPACITY
+        };
+        styled = styled.shape(fracture_shape(finish_tint(finish), opacity));
     }
     if shimmer {
         if preferences.reduced_motion {
@@ -258,17 +286,17 @@ pub(crate) fn apply_liquid_metal(
         let sweep = el()
             .key("loading-shimmer-band")
             .absolute(0.0, 0.0)
-            .w_frac(0.42)
+            .w_frac(SHEEN_WIDTH)
             .h_full()
             .linear_gradient(
-                PI * 0.42,
+                PI * 0.5,
                 [
                     (0.0, Color::TRANSPARENT),
-                    (0.5, theme::hex(theme::TEXT_MUTED).alpha(0.16)),
+                    (0.5, theme::hex(SHEEN).alpha(SHEEN_PEAK)),
                     (1.0, Color::TRANSPARENT),
                 ],
             )
-            .looping(LoopSpec::slide(1.5, [-1.2, 0.0], [3.2, 0.0]).easing(Easing::LINEAR));
+            .looping(sheen_loop());
         return styled.child(
             el().key("loading-shimmer")
                 .absolute(0.0, 0.0)
@@ -289,8 +317,23 @@ pub(crate) fn apply_liquid_metal(
 pub(crate) fn finish_ink(finish: MetalFinish) -> Color {
     match finish {
         MetalFinish::FracturedDanger | MetalFinish::CrimsonDanger => theme::hex(theme::STATUS_ERR),
-        _ => theme::hex(theme::TEXT_PRIMARY),
+        MetalFinish::FracturedConfirm => theme::hex(theme::STATUS_OK),
+        MetalFinish::Fractured | MetalFinish::GoldCta => theme::hex(theme::ACCENT),
+        MetalFinish::Gunmetal | MetalFinish::ObsidianPill => theme::hex(theme::TEXT_PRIMARY),
     }
+}
+
+/// Steady skeleton base, constant opacity.
+pub(crate) const SKELETON_BASE: &str = "#27313B";
+/// The one cool loading sheen: color, peak alpha and width as a fraction of its region.
+const SHEEN: &str = "#A9C8D9";
+const SHEEN_PEAK: f32 = 0.06;
+const SHEEN_WIDTH: f32 = 0.20;
+/// One 1.6 s cycle: 1.2 s sweep across the region, then 0.4 s outside it. Offsets are in band
+/// widths: the region is five bands wide, so the sweep runs from -1 to 5 and rests until 7.
+pub(crate) const SHEEN_CYCLE_SECONDS: f64 = 1.6;
+fn sheen_loop() -> LoopSpec {
+    LoopSpec::slide(SHEEN_CYCLE_SECONDS, [-1.0, 0.0], [7.0, 0.0]).easing(Easing::LINEAR)
 }
 
 /// Skeleton block: a steady base with one broad dim cool sheen while motion is allowed. The
@@ -303,16 +346,10 @@ pub(crate) fn skeleton_block(
     tone: StatusTone,
     preferences: ViewPreferences,
 ) -> El {
-    let edge = if tone == StatusTone::Neutral {
-        theme::hex(theme::BORDER_SUBTLE).alpha(0.55)
-    } else {
-        tone.border().alpha(0.45)
-    };
     let mut block = el()
         .h(height)
         .radius(radius)
-        .fill(theme::hex(theme::SURFACE_RAISED))
-        .border(1.0, edge)
+        .fill(theme::hex(SKELETON_BASE))
         .a11y_hidden();
     if let Some(frac) = width_frac {
         block = block.w_frac(frac);
@@ -324,25 +361,22 @@ pub(crate) fn skeleton_block(
     if preferences.reduced_motion {
         return block;
     }
-    let shimmer_tint = if tone == StatusTone::Neutral {
-        theme::hex(theme::TEXT_MUTED).alpha(0.10)
-    } else {
-        tone.fg().alpha(0.14)
-    };
+    // One sheen color for every tone: loading is not a status.
+    let _ = tone;
     let sweep = el()
         .key("skeleton-shimmer-band")
         .absolute(0.0, 0.0)
-        .w_frac(0.45)
+        .w_frac(SHEEN_WIDTH)
         .h_full()
         .linear_gradient(
-            PI * 0.42,
+            PI * 0.5,
             [
                 (0.0, Color::TRANSPARENT),
-                (0.5, shimmer_tint),
+                (0.5, theme::hex(SHEEN).alpha(SHEEN_PEAK)),
                 (1.0, Color::TRANSPARENT),
             ],
         )
-        .looping(LoopSpec::slide(1.5, [-1.2, 0.0], [3.2, 0.0]).easing(Easing::LINEAR));
+        .looping(sheen_loop());
     block.child(
         el().key("skeleton-shimmer")
             .absolute(0.0, 0.0)
@@ -395,41 +429,80 @@ mod glass_tests {
 mod finish_tests {
     use super::*;
 
+    const ALL: [MetalFinish; 7] = [
+        MetalFinish::GoldCta,
+        MetalFinish::Gunmetal,
+        MetalFinish::CrimsonDanger,
+        MetalFinish::ObsidianPill,
+        MetalFinish::Fractured,
+        MetalFinish::FracturedConfirm,
+        MetalFinish::FracturedDanger,
+    ];
+
     #[test]
-    fn only_the_two_submit_finishes_carry_texture() {
-        for finish in [
-            MetalFinish::GoldCta,
-            MetalFinish::Gunmetal,
-            MetalFinish::CrimsonDanger,
-            MetalFinish::ObsidianPill,
-        ] {
-            assert!(!finish.fractured(), "{finish:?}");
+    fn only_submit_confirm_and_delete_finishes_carry_texture() {
+        for finish in ALL {
+            let textured = matches!(
+                finish,
+                MetalFinish::Fractured
+                    | MetalFinish::FracturedConfirm
+                    | MetalFinish::FracturedDanger
+            );
+            assert_eq!(finish.fractured(), textured, "{finish:?}");
         }
-        assert!(MetalFinish::Fractured.fractured());
-        assert!(MetalFinish::FracturedDanger.fractured());
     }
 
     #[test]
-    fn the_texture_has_facets_and_cracks() {
-        let shape = fracture_shape(theme::hex(theme::STATUS_INFO_BORDER));
-        assert!(!shape.is_empty());
+    fn the_texture_has_facets_and_cracks_at_every_opacity() {
+        for opacity in [TEXTURE_OPACITY, TEXTURE_OPACITY_DISABLED] {
+            assert!(!fracture_shape(theme::hex(theme::ACCENT), opacity).is_empty());
+        }
+    }
+
+    #[test]
+    fn textured_actions_use_the_theme_bases_and_hover_adds_two_levels() {
+        let bases = [
+            (MetalFinish::Fractured, "#10262C", "#12282E"),
+            (MetalFinish::FracturedConfirm, "#10281F", "#122A21"),
+            (MetalFinish::FracturedDanger, "#2B1823", "#2D1A25"),
+        ];
+        for (finish, base, hover) in bases {
+            let (fill, border, hovered) = finish_colors(finish);
+            assert_eq!(fill, theme::hex(base), "{finish:?}");
+            assert_eq!(hovered, theme::hex(hover), "{finish:?}");
+            assert_eq!(border, theme::hex("#647587"), "functional boundary");
+        }
+        assert_eq!(finish_tint(MetalFinish::Fractured), theme::hex("#24DCE3"));
+        assert_eq!(
+            finish_tint(MetalFinish::FracturedConfirm),
+            theme::hex("#23DFA0")
+        );
+        assert_eq!(
+            finish_tint(MetalFinish::FracturedDanger),
+            theme::hex("#F280A0")
+        );
     }
 
     #[test]
     fn no_finish_paints_an_ivory_or_gold_fill() {
-        for finish in [
-            MetalFinish::GoldCta,
-            MetalFinish::Gunmetal,
-            MetalFinish::CrimsonDanger,
-            MetalFinish::ObsidianPill,
-            MetalFinish::Fractured,
-            MetalFinish::FracturedDanger,
-        ] {
+        for finish in ALL {
             let (fill, _, hover) = finish_colors(finish);
             for color in [fill, hover] {
                 // Cool or neutral: blue is never the weakest channel.
                 assert!(color.b + 0.02 >= color.r.min(color.g), "{finish:?}");
             }
         }
+    }
+
+    #[test]
+    fn the_loading_sheen_is_one_steady_base_and_a_1_6_second_cycle() {
+        assert_eq!(SKELETON_BASE, "#27313B");
+        assert_eq!(SHEEN_CYCLE_SECONDS, 1.6);
+        assert_eq!(SHEEN_WIDTH, 0.20);
+        assert_eq!(SHEEN_PEAK, 0.06);
+        // Band widths: it enters at -1 and clears the five-band region at 5, which is 1.2 s of
+        // a 1.6 s cycle when the path runs to 7.
+        let sweep = (5.0 - -1.0) / (7.0 - -1.0) * SHEEN_CYCLE_SECONDS;
+        assert!((sweep - 1.2).abs() < 1e-9);
     }
 }

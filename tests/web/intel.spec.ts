@@ -1674,7 +1674,7 @@ for (const width of [1536, 1440, 768, 390, 320]) {
         .poll(() =>
           tile.evaluate((element) => getComputedStyle(element).borderTopColor),
         )
-        .toContain("198, 165, 110");
+        .toContain("36, 220, 227");
       await page.mouse.move(0, 0);
     }
     await launcher.focus();
@@ -1682,7 +1682,7 @@ for (const width of [1536, 1440, 768, 390, 320]) {
       .poll(() =>
         tile.evaluate((element) => getComputedStyle(element).borderTopColor),
       )
-      .toContain("198, 165, 110");
+      .toContain("36, 220, 227");
     await page.keyboard.press("Enter");
     await expect(
       page.getByRole("heading", { name: "Intelligence bulletin" }),

@@ -368,7 +368,7 @@ pub(crate) fn page(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
                 .role("button")
                 .label(section.title())
                 .focusable(true)
-                .focus_ring(2.0, 1.0, theme::hex(theme::ACCENT_HIGHLIGHT))
+                .focus_ring(2.0, 2.0, theme::hex(theme::ACCENT_HIGHLIGHT))
                 .w_full()
                 .h(31.0)
                 .px(9.0)

@@ -48,3 +48,13 @@ it("never starts animation after a delayed accessibility response outlives the c
   await act(async () => resolve(false));
   expect(loop).not.toHaveBeenCalled();
 });
+
+it("paints a steady cool base with no opacity pulse", async () => {
+  vi.spyOn(AccessibilityInfo, "isReduceMotionEnabled").mockResolvedValue(true);
+  render(<Skeleton lines={2} />);
+  await act(async () => {});
+  for (const line of screen.getAllByTestId("skeleton-line")) {
+    expect(getComputedStyle(line).backgroundColor).toBe("rgb(39, 49, 59)");
+    expect(getComputedStyle(line).opacity).not.toBe("0.55");
+  }
+});

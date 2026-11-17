@@ -241,7 +241,7 @@ fn atlas(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
                                 ActionButton::new("Confirm New Cycle")
                                     .key("atlas-submit-confirm")
                                     .icon(&icons::ATLAS)
-                                    .finish(MetalFinish::Fractured)
+                                    .finish(MetalFinish::FracturedConfirm)
                                     .on_press(|state: &mut State| {
                                         state.confirm_submission(SubmissionKind::Atlas)
                                     })
@@ -1094,7 +1094,7 @@ fn configuration_status(state: &State, preferences: ViewPreferences, kit: &Kit) 
                         ActionButton::new("Confirm change")
                             .key("configuration-confirm")
                             .icon(&icons::SHIELD_CHECK)
-                            .finish(MetalFinish::Fractured)
+                            .finish(MetalFinish::FracturedConfirm)
                             .on_press(|state: &mut State| state.confirm_configuration())
                             .build(kit, preferences, pointer_ref),
                     )
@@ -1448,7 +1448,7 @@ fn jobs(
                     let confirm_button = ActionButton::new("Confirm retry")
                         .key("job-action-confirm")
                         .icon(&icons::SHIELD_CHECK)
-                        .finish(MetalFinish::Fractured)
+                        .finish(MetalFinish::FracturedConfirm)
                         .status(
                             if confirming { "Queuing…" } else { "Ready" },
                             if confirming {
@@ -2215,7 +2215,7 @@ pub(crate) fn maintenance_confirmation_content(
                     ActionButton::new(confirm_label)
                         .key("maintenance-confirm")
                         .icon(&icons::SHIELD_CHECK)
-                        .finish(MetalFinish::Fractured)
+                        .finish(MetalFinish::FracturedConfirm)
                         .status(
                             if busy { "Queuing…" } else { "Ready" },
                             if busy {

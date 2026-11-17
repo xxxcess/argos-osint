@@ -102,15 +102,22 @@ impl ActionButton {
         preferences: ViewPreferences,
         pointer_offset: Option<&Live<[f32; 2]>>,
     ) -> El {
-        let ink = material::finish_ink(self.finish);
+        let ink = if self.disabled {
+            theme::hex(theme::TEXT_DISABLED)
+        } else {
+            material::finish_ink(self.finish)
+        };
         let active_shimmer = self.shimmer || self.busy;
         let disabled = self.disabled || self.busy;
+        // Textured actions use the theme's 44 px control height and 16 px padding.
         let height = match self.finish {
             MetalFinish::ObsidianPill => 28.0,
+            finish if finish.fractured() => 44.0,
             _ => 32.0,
         };
         let px = match self.finish {
             MetalFinish::ObsidianPill => 11.0,
+            finish if finish.fractured() => 16.0,
             _ => 14.0,
         };
         let a11y_label = match &self.status {
@@ -127,7 +134,7 @@ impl ActionButton {
             .center()
             .focusable(!disabled)
             .disabled(disabled)
-            .focus_ring(2.0, 1.0, theme::hex(theme::ACCENT_HIGHLIGHT));
+            .focus_ring(2.0, 2.0, theme::hex(theme::ACCENT_HIGHLIGHT));
 
         if self.busy {
             content = content.child(
@@ -368,7 +375,7 @@ pub(crate) fn metric_ring_tile(
     .role("button")
     .label(format!("{label}: {value_text}"))
     .focusable(true)
-    .focus_ring(2.0, 0.0, theme::hex(theme::ACCENT_HIGHLIGHT))
+    .focus_ring(2.0, 2.0, theme::hex(theme::ACCENT_HIGHLIGHT))
 }
 
 /// Inline configuration toggle row backed by `rune_kit::Switch`.

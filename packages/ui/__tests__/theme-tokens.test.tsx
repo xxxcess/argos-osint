@@ -11,31 +11,31 @@ import { paint, sheetProp, sheetStyle } from "../../../vitest.test-support";
  * prove real components consume them rather than redeclaring values.
  */
 describe("Theme tokens (imported from @argos/ui source)", () => {
-  it("defines the matte obsidian/ivory and graphite surfaces", () => {
+  it("defines the matte canvas and cool charcoal surfaces", () => {
     expect(colors.bg).toBe("#060709");
-    expect(colors.panel).toBe("#0B0E13");
-    expect(colors.raised).toBe("#111720");
-    expect(colors.border).toBe("#6F7B8D");
-    expect(colors.text).toBe("#E8EDF4");
-    expect(colors.dim).toBe("#BEC7D4");
-    expect(colors.muted).toBe("#9AA6B6");
+    expect(colors.panel).toBe("#0B0F14");
+    expect(colors.raised).toBe("#121820");
+    expect(colors.border).toBe("#647587");
+    expect(colors.text).toBe("#D5DCE5");
+    expect(colors.dim).toBe("#A8B6C5");
+    expect(colors.muted).toBe("#8192A4");
   });
 
   it("defines accent/accent2 plus the four status hues", () => {
-    expect(colors.accent).toBe("#A9B8CC");
+    expect(colors.accent).toBe("#24DCE3");
     expect(colors.accent2).toBe("#c678dd");
-    expect(colors.success).toBe("#98c379");
-    expect(colors.warning).toBe("#e5c07b");
-    expect(colors.danger).toBe("#f08a8a");
+    expect(colors.success).toBe("#23DFA0");
+    expect(colors.warning).toBe("#F1C84B");
+    expect(colors.danger).toBe("#F280A0");
   });
 
   it("retains compatibility names as opaque matte fills and faint decorative edges", () => {
-    expect(colors.glass).toBe("#0B0E13");
-    expect(colors.glassStrong).toBe("#111720");
-    expect(colors.glassBorder).toBe("#6F7B8D");
-    expect(colors.cardEdge).toBe("rgba(232, 237, 244, 0.02)");
-    expect(colors.satinControlEdge).toBe("rgba(232, 237, 244, 0.03)");
-    expect(colors.accentSoft).toBe("rgba(169, 184, 204, 0.1)");
+    expect(colors.glass).toBe("#0B0F14");
+    expect(colors.glassStrong).toBe("#121820");
+    expect(colors.glassBorder).toBe("#647587");
+    expect(colors.cardEdge).toBe("rgba(213, 220, 229, 0.02)");
+    expect(colors.satinControlEdge).toBe("rgba(213, 220, 229, 0.03)");
+    expect(colors.accentSoft).toBe("rgba(36, 220, 227, 0.1)");
   });
 
   it("keeps mono for telemetry and body for prose", () => {

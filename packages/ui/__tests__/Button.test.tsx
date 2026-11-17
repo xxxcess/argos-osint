@@ -50,8 +50,8 @@ describe("Button (real @argos/ui component)", () => {
     const button = buttonEl(container)!;
     // minHeight 40 keeps the default touch target; default surface is matte graphite.
     expect(applied(button).minHeight).toBe("40px");
-    expect(applied(button).backgroundColor).toBe("rgb(17, 23, 32)");
-    expect(applied(button).borderTopColor).toBe("rgb(111, 123, 141)");
+    expect(applied(button).backgroundColor).toBe("rgb(18, 24, 32)");
+    expect(applied(button).borderTopColor).toBe("rgb(100, 117, 135)");
   });
 
   it("applies the primary variant with accent tokens", () => {
@@ -62,9 +62,9 @@ describe("Button (real @argos/ui component)", () => {
     );
     const button = buttonEl(container)!;
     expect(applied(button).backgroundColor).toBe(
-      "rgb(169, 184, 204)", // flat accent body
+      "rgb(36, 220, 227)", // flat accent body
     );
-    expect(applied(button).borderTopColor).toBe("rgb(169, 184, 204)");
+    expect(applied(button).borderTopColor).toBe("rgb(36, 220, 227)");
     expect(applied(screen.getByText("Primary")).color).toBe("rgb(6, 7, 9)");
   });
 
@@ -77,8 +77,8 @@ describe("Button (real @argos/ui component)", () => {
     const button = buttonEl(container)!;
     // jsdom serializes `transparent` as rgba(0, 0, 0, 0).
     expect(applied(button).backgroundColor).toBe("rgba(0, 0, 0, 0)");
-    expect(applied(button).borderTopColor).toBe("rgb(111, 123, 141)"); // border, not accent
-    expect(applied(screen.getByText("Quiet")).color).toBe("rgb(190, 199, 212)"); // dim
+    expect(applied(button).borderTopColor).toBe("rgb(100, 117, 135)"); // border, not accent
+    expect(applied(screen.getByText("Quiet")).color).toBe("rgb(168, 182, 197)"); // dim
   });
 
   it("applies the active (selection) state: accent surface and contrasting text without glow", () => {
@@ -88,7 +88,7 @@ describe("Button (real @argos/ui component)", () => {
       </Button>,
     );
     const button = buttonEl(container)!;
-    expect(applied(button).backgroundColor).toBe("rgb(169, 184, 204)"); // accent
+    expect(applied(button).backgroundColor).toBe("rgb(36, 220, 227)"); // accent
     expect(applied(button).boxShadow).toBe("");
     // Selection uses the bg token against the accent surface for contrast.
     expect(applied(screen.getByText("Active")).color).toBe("rgb(6, 7, 9)");
@@ -130,11 +130,11 @@ describe("Button focus/selection lanes (hover + pressed)", () => {
     const button = buttonEl(container)!;
     await user.hover(button);
     expect(applied(button).backgroundColor).toBe(
-      "rgba(169, 184, 204, 0.1)", // accentSoft
+      "rgba(36, 220, 227, 0.1)", // accentSoft
     );
-    expect(applied(button).borderTopColor).toBe("rgb(169, 184, 204)"); // accent
+    expect(applied(button).borderTopColor).toBe("rgb(36, 220, 227)"); // accent
     await user.unhover(button);
-    expect(applied(button).backgroundColor).toBe("rgb(17, 23, 32)");
+    expect(applied(button).backgroundColor).toBe("rgb(18, 24, 32)");
   });
 
   it("changes the flat primary fill on hover without a glow", async () => {
@@ -146,7 +146,7 @@ describe("Button focus/selection lanes (hover + pressed)", () => {
     );
     const button = buttonEl(container)!;
     await user.hover(button);
-    expect(applied(button).backgroundColor).toBe("rgb(195, 207, 223)");
+    expect(applied(button).backgroundColor).toBe("rgb(104, 231, 235)");
     expect(applied(button).boxShadow).toBe("");
     await user.unhover(button);
     expect(applied(button).boxShadow).toBe("");
@@ -169,7 +169,7 @@ describe("Button focus/selection lanes (hover + pressed)", () => {
     });
     // React/pressability flushes after the event loop turns, so wait for it.
     await waitFor(
-      () => expect(applied(button).backgroundColor).toBe("rgb(17, 23, 32)"), // glassStrong
+      () => expect(applied(button).backgroundColor).toBe("rgb(18, 24, 32)"), // glassStrong
     );
     await act(async () => {
       button.dispatchEvent(
@@ -183,13 +183,11 @@ describe("Button focus/selection lanes (hover + pressed)", () => {
     // Releasing press returns to the active hover lane (still hovered).
     await waitFor(
       () =>
-        expect(applied(button).backgroundColor).toBe(
-          "rgba(169, 184, 204, 0.1)",
-        ), // accentSoft
+        expect(applied(button).backgroundColor).toBe("rgba(36, 220, 227, 0.1)"), // accentSoft
     );
     await user.unhover(button);
     await waitFor(() =>
-      expect(applied(button).backgroundColor).toBe("rgb(17, 23, 32)"),
+      expect(applied(button).backgroundColor).toBe("rgb(18, 24, 32)"),
     );
   });
 
@@ -223,10 +221,10 @@ describe("Button focus/selection lanes (hover + pressed)", () => {
 // Token sanity: the button palette stays on the terminal-desk neutrals.
 describe("Button token bindings", () => {
   it("binds the glass, glassStrong, accentSoft and border tokens", () => {
-    expect(colors.accent).toBe("#A9B8CC");
-    expect(colors.glass).toBe("#0B0E13");
-    expect(colors.glassStrong).toBe("#111720");
-    expect(colors.accentSoft).toBe("rgba(169, 184, 204, 0.1)");
-    expect(colors.border).toBe("#6F7B8D");
+    expect(colors.accent).toBe("#24DCE3");
+    expect(colors.glass).toBe("#0B0F14");
+    expect(colors.glassStrong).toBe("#121820");
+    expect(colors.accentSoft).toBe("rgba(36, 220, 227, 0.1)");
+    expect(colors.border).toBe("#647587");
   });
 });

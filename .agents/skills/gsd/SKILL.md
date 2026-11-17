@@ -5,9 +5,9 @@ description: >-
   autonomously implement specifications from PRs titled "spec implementation:
   <feature name>" by dispatching per-PR subagents on a ~1-hour scheduled loop
   until all triggered implementations, security fixes, and checks complete.
-  Every nightly run keeps backend and artifact jobs green first, then builds a
-  fully featured Linux x86_64 native app with its Linux CI jobs green, and only
-  then fixes the other platform app builds.
+  Each PR update runs an affected Linux x86_64 native and backend first pass.
+  After exact-head Linux review, an explicit second pass checks the remaining
+  affected platforms and web.
 ---
 
 # GSD — PR Babysitter, Security Responder & Spec Implementer
@@ -21,22 +21,18 @@ Run a bounded (~1 hour) autonomous monitoring and delivery loop in the active co
 
 ## Nightly workflow (canonical)
 
-**Priority order on every nightly run:**
+Each push to an open integration PR runs the [scoped first pass](../../../docs/wiki/code/ci.md#nightly-gsd-order). Keep the affected Linux x86_64 native app and backend checks green together. Native review uses the real debug package and Rune evidence on that commit. Shared native behavior must work on **Embedded** and **Distributed** with equivalent capability and authority. Record any intentional transport difference in the [parity contract](../../../docs/wiki/code/native-connections.md#backend-types-and-parity).
 
-1. **Keep the backend suite and its artifacts stable at all times.** Backend checks, embedded storage, release images (Docker), search index, server timings and any other backend artifact jobs must stay green. A backend or artifact failure is fixed first, never deferred.
-2. **Then get a fully featured Linux x86_64 native app with its Linux app CI jobs green, and keep Scoped web green alongside it.** Scoped web stays required and blocking: it is not a native platform build.
-3. **Only then fix the other platform app builds** (Mac aarch64, Mac x86_64 and other OS targets).
+Once **Fleetworks required** and Linux review are green for that head, dispatch the second pass against the same PR and SHA. It runs the deferred affected Mac, backend arm64 and web lanes. New commits restart the first pass and need their own review. Trusted integration pushes retain their release verification.
 
-CI enforces the same order in [fleetworks.yml](../../../.github/workflows/fleetworks.yml). Backend, embedded storage, image, search-index, server-timing, Scoped web and Linux x86_64 app jobs block `Fleetworks source checks`, `Fleetworks artifact checks` and **Fleetworks required**. The Mac app jobs wait for the Linux app job (`needs:`), still run and report (a red job stays red, with a warning annotation), and do not block those gates except on a trusted publication run, which attaches the macOS ZIPs. Job names are unchanged.
-
-The **backend gate** is every backend and artifact job on the PR head: `Backend suite / Linux amd64` and `/ Linux arm64`, `Affected embedded storage` (x86_64 and aarch64), `Image checks / Linux amd64` and `/ Linux arm64`, and the Atlas BERT runtime jobs when selected ([CI guide](../../../docs/wiki/code/ci.md#fleetworksyml--scoped-branch-checks)). The **Linux gate** is the hosted job `Linux app / x86_64-unknown-linux-gnu / Build, verify and package Linux native (debug)` ([fleetworks-native-linux.yml](../../../.github/workflows/fleetworks-native-linux.yml), scope `desktop_linux`) passing every step: engine-free check, `cargo fmt --check`, scoped unit tests for `fleetworks-desktop`, `fleetworks-workstation` and `fleetworks-contracts`, native UI captures, `build-native` with the companion `argos-api-host`, and the Docker-free local-backend smoke ([native app evidence](../../../docs/wiki/code/ci.md#native-app-review-evidence)). "Fully featured" means every spec item that touches the native app is present in that build, not stubbed. A failure shared by a Linux job and a Mac job (the same test, the same format diff) counts as a Linux failure.
+The **first-pass backend gate** includes only the affected Linux AMD64 service, embedded storage, backend image/Compose and Atlas BERT jobs. The **Linux gate** is [`Linux app / x86_64-unknown-linux-gnu`](../../../.github/workflows/fleetworks-native-linux.yml) when selected. It runs the engine-free check, format and focused unit tests, Rune PNG/tree captures, debug package with the companion, Docker-free Embedded smoke and HTTP/IPC parity. An intentionally unselected lane is recorded as skipped. A native app feature stays incomplete until the applicable Linux review, including a visual verdict when the UI changes, is recorded for the exact revision.
 
 Run these steps in order. The loop sections below keep their detail.
 
 1. **Poll.** Run `gsd_poll.py` ([Routine Loop](#routine-loop-per-poll-cycle) step 1). Skip release-bot and fork (`isCrossRepository`) PRs. Never merge.
 2. **Work in the PR worktree.** For each actionable PR use `.agent-scratch/worktrees/pr-<n>`, checked out to the PR head. Do not touch the main checkout, `main` or `nightly`.
 3. **Read owner comments as requirements.** New owner comments on the PR (and in the session) are new requirements. Track each one in `.agent-scratch/gsd-state.json` under `prs.<n>.requirements` with its comment id and `open | done`; mark one done only with the pushed sha that satisfies it.
-4. **Build from the spec in priority order.** Never leave a backend or artifact job red to work on the Linux app, and never spend a push on a Mac or other-OS failure while the backend gate or the Linux gate is red, unless the same fix clears them.
+4. **Iterate on the Linux first pass.** Fix regressions in affected backend, parity and Linux native jobs. Defer other-platform or web checks to the second pass.
 5. **Cheap local checks only.** CI is the test runner. Run locally only: `rustfmt --check --edition 2021 apps/fleetworks-desktop/src/lib.rs` (it follows the module tree) or `cargo fmt --check`, `prettier --check` on changed web and Markdown files, `python3 scripts/fleetworks_doc_links.py` (0 broken), and `node scripts/release_check.mjs message --file <msg>` with `node scripts/release_check.mjs versions`. No full builds, no full test suites and no mutation runs ([root rules](../../../AGENTS.md)).
 6. **Commit and push.** Stage exact paths, use Conventional Commits and one small commit per slice. Before the first push of a run, check `git merge-tree --write-tree origin/<base> HEAD`. Push with the full branch name and a literal sha: `git push origin <sha>:refs/heads/<headRefName>`, with no shell variables, substitutions or brace expansion. Never force-push.
 7. **Read failed CI once.** After a push, read each failed job log once (`gh api --allow-escape-sequences repos/xxxcess/argos-osint/actions/jobs/<id>/logs`) instead of waiting in a loop; the owner or the next scheduled wake reports CI events. Plain `gh pr view` can fail, so read PRs through `gh api repos/xxxcess/argos-osint/pulls/<n>`.
@@ -44,15 +40,15 @@ Run these steps in order. The loop sections below keep their detail.
 
    | Order | Failing jobs | Action |
    | --- | --- | --- |
-   | 1 | Backend suite, embedded storage, release images, search index, server timings, other backend artifact jobs | Fix first, push, re-read |
-   | 2 | `Linux app / x86_64-unknown-linux-gnu` and `Scoped web` | Fix once the backend gate is green on the head, together |
-   | 3 | Mac app aarch64 and x86_64, other OS targets | Fix last |
+   | 1 | Affected AMD64 backend, embedded, backend images and other selected backend checks | Fix in the first pass |
+   | 1 | `Linux app / x86_64-unknown-linux-gnu` | Fix in the first pass and collect the exact-head reviewer verdict |
+   | 2 | Affected Mac apps, remaining backend architectures, `Scoped web` and web images | Dispatch the second pass after Linux review |
 
    A runner-capacity or toolchain failure (lost runner, no capacity, GitHub 5xx, a C build such as `blake3`) is not our code: rerun the failed jobs at most twice per commit with `gh api -X POST repos/xxxcess/argos-osint/actions/runs/<id>/rerun-failed-jobs` once the run has completed, then report it without changing code. Fix real failures at the root cause. Refresh visual-regression baselines only from CI capture artifacts, never from local renders.
 9. **Keep docs and design in sync.** Update affected docs, tags and diagrams in the same change ([conventions](../../../docs/wiki/code/conventions.md)). Keep [docs/design/matte-canvas](../../../docs/design/matte-canvas/README.md) consistent with the code and add reproduction steps for anything generated or derived. Do not touch work the owner put on hold.
-10. **Update state.** After each push and each CI read, write `head_sha`, `status`, `backend_gate` and `linux_gate` (each `pending | failing | green`), `requirements`, `addressed_cursor_comments`, `worktree` and `notes` to `.agent-scratch/gsd-state.json`.
-11. **One status comment.** Post or update a single PR comment that starts with `<!-- gsd-status -->`: head sha, backend gate, Linux gate, other job results, open requirements. Create it with `gh api repos/xxxcess/argos-osint/issues/<n>/comments -f body='...'` and update it with `gh api -X PATCH repos/xxxcess/argos-osint/issues/comments/<id> -f body='...'`. Always pass the body inline, never read from a file.
-12. **Leave visual verification to reviewers.** Other agents and reviewers inspect screenshots; a nightly run only refreshes baselines from CI artifacts. Report and end the turn; do not wait on CI.
+10. **Update state.** After each push and each CI read, write `head_sha`, `status`, `backend_gate` and `linux_gate` (each `pending | failing | green`), the Linux review verdict and second-pass run/result, `requirements`, `addressed_cursor_comments`, `worktree` and `notes` to `.agent-scratch/gsd-state.json`.
+11. **One status comment.** Post or update a single PR comment that starts with `<!-- gsd-status -->`: head SHA, first-pass backend and Linux gates, Linux review, second-pass result and open requirements. Create it with `gh api repos/xxxcess/argos-osint/issues/<n>/comments -f body='...'` and update it with `gh api -X PATCH repos/xxxcess/argos-osint/issues/comments/<id> -f body='...'`. Always pass the body inline, never read from a file.
+12. **Collect Linux review before widening checks.** Record the first-pass job, exact package and fixture links, what was inspected and the reviewer verdict or outstanding feedback. Use the [second-pass dispatch](../../../docs/wiki/code/ci.md#nightly-gsd-order) after the applicable Linux checks and review pass. Keep first-pass and second-pass results separate. Refresh baselines only from CI captures.
 
 ---
 
@@ -78,7 +74,7 @@ Every implementation and fix produced by GSD or its subagents must satisfy all t
   - Keep `apps/fleetworks-desktop` engine-free (no Docker/backend dependency inside native Cargo tests) while verifying log-consuming, readiness, job-streaming, and backpressure/error UI behaviors against **simulated backend log streams**:
     1. **Loopback mock gateway (`TcpListener` + `fleetworks_contracts::operational_logs` over `127.0.0.1:0` driving `rune::Runtime`)**: Mirror the `TcpListener` + delayed-response seams in [maintenance tests](../../../apps/fleetworks-desktop/src/maintenance/tests.rs) and [jobs query tests](../../../apps/fleetworks-desktop/src/jobs_query_tests.rs) alongside [log tests](../../../apps/fleetworks-desktop/src/log_tests.rs) so actual native HTTP/JSON transport, follow cursors, stale-epoch/cancel races, and Rune UI state/tree transitions run end-to-end offline.
     2. **Semantic log scenario replay**: Drive sequences of synthetic `info`, recoverable `warn` (e.g. `status=429` `write_paced`, `correction_required=false`), fatal `error` (`correction_required=true`, truncated/malformed pages, HTTP `503`), and high-volume `DISPLAY_LIMIT` bursts; assert bounded memory/table size, intact cursor continuation, secret/token redaction, and accurate UI surfacing.
-    3. **Review & test gate**: When implementing or reviewing changes affecting operational logs, jobs/cycle progress, readiness diagnostics, or retry/error handling, require simulated backend-log `Runtime` tests in `cargo test --locked -p fleetworks-desktop` (which executes in CI via [fleetworks-native.yml](../../../.github/workflows/fleetworks-native.yml)).
+    3. **Review & test gate**: When implementing or reviewing changes affecting operational logs, jobs/cycle progress, readiness diagnostics, or retry/error handling, require simulated backend-log `Runtime` tests in `cargo test --locked -p fleetworks-desktop` (which executes in the first pass via [fleetworks-native-linux.yml](../../../.github/workflows/fleetworks-native-linux.yml)).
 
 ---
 
@@ -173,7 +169,7 @@ For each tracked open PR (both regular open PRs and pushed `spec implementation:
    - Distinguish **transient runner/infra issues** (e.g. runner lost communication, macOS capacity timeout, GitHub API 502/rate limit) from **real code/lint/test/service-log failures**.
    - For transient failures: rerun failed jobs with `gh api -X POST repos/xxxcess/argos-osint/actions/runs/<run_id>/rerun-failed-jobs` after the run completes (at most twice per commit SHA before flagging as blocked; do not change code for a runner or toolchain problem).
    - For real failures or backend container errors / actionable semantic warnings: dispatch or wake that PR's subagent in `.agent-scratch/worktrees/pr-<num>` to fix the root cause cleanly, verify with the affected local test, validate commit message & versions, and push back by full branch name and literal sha. Fix in the [priority order](#nightly-workflow-canonical).
-4. **All checks green and `unaddressed_cursor_count == 0` and no unresolved container errors/actionable warnings**:
+4. **Selected checks in both passes green, applicable Linux review recorded, and no unresolved findings**:
    - Mark the PR's current `headRefOid` as `"complete"` in `.agent-scratch/gsd-state.json`.
    - **Do NOT merge the PR.** Leave merging to the user and note that the PR is green and ready for review/merge.
 

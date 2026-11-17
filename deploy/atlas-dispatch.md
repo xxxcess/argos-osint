@@ -1,6 +1,6 @@
 # Atlas dispatch with an embedded queue
 
-Add `compose.atlas.yml` to the [standalone native-review base](README.md) to start the Atlas worker and separate warm NLP and classifier services. Jobs owns the disk-backed RocksDB queue and exposes authenticated private delivery operations. SurrealDB currently owns job/task revisions, execution leases and domain results; the queue carries wake-ups and retains dead letters. Only the gateway and explicitly selected Web overlay publish host ports. The [job persistence contract](../docs/wiki/code/jobs-persistence.md) distinguishes the implemented transport foundation from the planned SQLite scheduler cutover.
+Add `compose.atlas.yml` to the [Distributed native-review base](README.md) to start the Atlas worker and separate warm NLP and classifier services. Jobs owns the disk-backed RocksDB queue and exposes authenticated private delivery operations. SurrealDB currently owns job/task revisions, execution leases and domain results; the queue carries wake-ups and retains dead letters. Only the gateway and explicitly selected Web overlay publish host ports. The [job persistence contract](../docs/wiki/code/jobs-persistence.md) distinguishes the implemented transport foundation from the planned SQLite scheduler cutover.
 
 ## Start directly with Compose
 
@@ -24,7 +24,7 @@ Switching back to the base stack disables new Atlas dispatch at bootstrap and pr
 
 Once the real worker and required provider/model configuration are ready, submit a collection cycle from native Atlas. Its durable job/request receipt is the acceptance authority. After an uncertain response, reconcile the same request before attempting new work; use Jobs to inspect authorized progress. Neither a healthy HTTP listener nor a returned receipt proves successful inference.
 
-Atlas sends metadata cache misses to the warm NLP service in bounded batches. Its classifier sends exact model pins and batches to the private Rust-BERT service. The services bind only to the Compose network.
+Atlas sends metadata cache misses to the warm NLP service in bounded batches. Its classifier sends exact model pins and batches to the private Rust-BERT service. The services bind only to the Compose network. The overlay also configures the Distributed API to probe them with its private internal credential. Workstation Status can then report the selected backend’s observed NLP and classifier readiness. The API receives the private origins and token file paths through Compose. The native app receives the typed readiness observations. Embedded probes its own bundled engines through IPC.
 
 A live cycle needs GNews and NewsData.io keys plus a compatible Rust-BERT worker and pinned model. The standard image hosts the service and loads operator-supplied assets. Put a worker built for the container's Linux architecture and the MNLI checkpoint under the workspace's `models/atlas-bert/`. If the worker uses shared LibTorch libraries, make them available under `models/atlas-bert/lib/`. Set the worker executable and model directory in `classifier/zero-shot.json` using absolute container paths. For example
 
@@ -35,4 +35,4 @@ A live cycle needs GNews and NewsData.io keys plus a compatible Rust-BERT worker
 }
 ```
 
-The classifier readiness endpoint reports transport availability and a separate model state. The first successful Atlas pin verifies the model assets. If a pin fails, the Atlas job reports the failure reason in Jobs.
+The classifier readiness endpoint reports transport availability and a separate Rust-BERT model state. Natural candidate training still depends on its own advertised durable worker and explicit confirmation. The first successful Atlas pin verifies the model assets. If a pin fails, the Atlas job reports the failure reason in Jobs.

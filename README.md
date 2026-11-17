@@ -4,7 +4,7 @@
   <img src="assets/brand/source/fleetworks-liquid-metal-glass.png" alt="Fleetworks symbol: molten glass core, obsidian crescent and five glass satellites" width="560">
 </p>
 
-Fleetworks collects public-source intelligence, connects evidence to actors and articles, and prepares cited Focus Briefs. Fleetworks Desktop is a native Rune macOS control hub connected to an independently operated Linux backend. Intel Web provides the browser desktop. Backend services are deployed directly with Docker Compose.
+Fleetworks collects public-source intelligence, connects evidence to actors and articles, and prepares cited Focus Briefs. Fleetworks Desktop is a native Rune control hub for macOS and Linux x86_64. It can start an Embedded companion or connect to a Distributed gateway. Intel Web provides the browser desktop. Distributed services are deployed directly with Docker Compose.
 
 [Native app](apps/fleetworks-desktop/README.md) · [Connections](docs/wiki/code/native-connections.md) · [Setup and usage](docs/wiki/code/fleetworks.md) · [Deployment](deploy/README.md) · [Wiki](docs/index.md) · [Releases](docs/wiki/code/versioning.md)
 
@@ -14,9 +14,9 @@ The [matte canvas design reference](docs/design/matte-canvas/README.md) defines 
 
 ## Quick start
 
-### Native macOS app
+### Native app
 
-Install the pinned Rust **1.95.0** toolchain and Xcode or its Command Line Tools. Run from the repository root to build and package a debug `.app` for the physical Mac:
+Install the pinned Rust **1.95.0** toolchain and the [host build prerequisites](apps/fleetworks-desktop/README.md#build-and-provision). Build a debug app for the physical macOS or Linux x86_64 host from the repository root:
 
 ```sh
 python3 scripts/fleetworks_candidate.py build-native --target host --profile debug
@@ -24,19 +24,23 @@ python3 scripts/fleetworks_candidate.py build-native --target host --profile deb
 
 [![Provision and connect](docs/diagrams/native-connections.svg)](docs/diagrams/native-connections.html)
 
-The helper prints the app and manifest paths. Add `--open` to launch it. The app opens offline setup and connects to an existing gateway; backend and Intel Web startup are separate operator actions.
+The helper prints the app and manifest paths. Add `--open` to launch it. The startup choice opens **Setup Gateway** for the selected backend type.
 
-**Native setup:** Gateway URL → operator approval once → macOS Keychain → authenticated reconnect. No user-managed token file is needed. [Pairing and recovery](docs/wiki/code/native-connections.md#pairing-and-keychain-agreed-target) · [Verification status](.planning/2026-11-12-native-pairing-implementation/acceptance.md)
+**Embedded:** Choose **Embedded** and click **Start Embedded Backend** to start the bundled companion.
+
+**Distributed:** Enter the gateway URL and obtain operator approval. macOS Keychain or Linux Secret Service retains the scoped credential for reconnect, with explicit Linux session-only mode also available. [Pairing and recovery](docs/wiki/code/native-connections.md#pairing-and-keychain-agreed-target) · [Verification status](.planning/2026-11-12-native-pairing-implementation/acceptance.md)
 
 1. Start the backend with the [Docker Compose quick start below](#backend-for-the-native-app). Backend deployment requires Docker and Docker Compose **v2.20 or newer**.
-2. Open **Setup Gateway**, enter the gateway URL and choose **Connect**. Give its pairing request ID and approval code to the gateway operator for [approval](docs/wiki/code/native-connections.md#operator-approval-and-revocation).
-3. The app authenticates the approved access, saves it in macOS Keychain and registers the installation. Workstation Status shows its stable opaque Connect ID; later connections reuse saved access.
+2. Open **Setup Gateway**, select **Distributed**, enter the gateway URL and choose **Connect**. Give its pairing request ID and approval code to the gateway operator for [approval](docs/wiki/code/native-connections.md#operator-approval-and-revocation).
+3. The app authenticates the approved access, retains it using the selected credential storage mode and registers the installation. Workstation Status shows its stable opaque Connect ID; later connections reuse saved access.
 
 Normal startup initializes protected settings in `~/.fleetworks` without creating a default child. IP is optional metadata; folders do not select identity or partition shared actors, model defaults and provider accounts. Existing folders and historical receipts remain preserved. See [workstation identity](docs/wiki/code/native-workspaces.md).
 
 Enter the selectable Connect ID from **Workstation Status** into Intel Web's existing Connect form. The browser uses its separately provisioned WebRelay credential and session; the Connect ID alone grants no authority. See [connection and browser handoff](docs/wiki/code/native-connections.md#browser-handoff).
 
-### Backend for the native app
+### Distributed backend for the native app
+
+<a id="backend-for-the-native-app"></a>
 
 Start Docker Desktop or your local Docker engine, then run these commands from the repository root. The backend includes the gateway, private services, workers, SurrealDB, Jobs storage and actor search.
 
@@ -58,7 +62,7 @@ docker compose --env-file compose.env \
   up --no-build --pull never --detach --wait
 ```
 
-Enter `http://127.0.0.1:18091` in **Setup Gateway** and have the operator approve the displayed pairing request. Existing stacks need an independently provisioned Operator credential; see [operator setup](deploy/README.md#credentials). This backend runs independently of the app. Atlas collection uses the [additional overlay below](#collect-articles-with-atlas); Intel Web is an optional separate deployment.
+Select **Distributed** in **Setup Gateway**, enter `http://127.0.0.1:18091` and have the operator approve the displayed pairing request. Existing stacks need an independently provisioned Operator credential; see [operator setup](deploy/README.md#credentials). This backend runs independently of the app. Atlas collection uses the [additional overlay below](#collect-articles-with-atlas); Intel Web is an optional separate deployment.
 
 Rerun the start command to apply edited Compose settings. To inspect or stop the backend, use the same command prefix with `ps`, `logs --follow` or `down` in place of `up --no-build --pull never --detach --wait`. Stop preserves backend data. For concurrent deployments, run `up --name <other> --api-port <port>` (an existing repo-root `compose.env` stays untouched) and use that deployment's matching env file and project. [Full deployment guide](deploy/README.md#isolated-native-backend-review)
 
@@ -75,7 +79,7 @@ Provision provider credentials, the Atlas worker, private NLP and a Rust-BERT mo
 | DB Seed & Train | Trigger configured actor seed, search-index build and Natural candidate training; acceptance is distinct from completion. |
 | News Cycles and Brain Search | Queue cycles, inspect workstation cycle history, discover actors and read dossiers. |
 | OSINT Tools and Model Assignments | Read service/provider cards, provision keys and edit supported model routing with confirmed revisions. |
-| Workstation Status and Setup Gateway | Inspect identity/readiness/API-host resources; pair this Mac and reconnect with saved Keychain access. |
+| Workstation Status and Setup Gateway | Inspect identity, readiness and backend resources. Start Embedded or pair and reconnect to Distributed. |
 | Jobs & Logs | Read the bounded workstation queue and selected-job safe operational summaries. |
 | Intel Web | Browse the Bulletin, Focus Briefs, Related articles, actor dossiers and topology behind the Connect/session gate. |
 
@@ -107,7 +111,7 @@ Choose the shortest loop for the changed surface. The native app/fixture graph i
 | Dependencies, Dockerfile, Compose or private search | Build the affected image with `docker buildx bake -f deploy/docker-bake.hcl <target>`, then use its isolated deployment checks. |
 | Packaging or release | Push and read the hosted CI results for that revision. |
 
-PRs targeting `dev`, `nightly` or `main` automatically run scoped checks when opened or updated; pure RN Web UI selects web work only. Trusted pushes publish selected verified unsigned Mac ZIPs and dual-architecture GHCR images: `nightly` → nightly, `dev`/`main` → stable. [Visual checks/publication flow](docs/diagrams/native-release.html) · [Artifact identities and limits](docs/wiki/code/build-artifacts.md#hosted-artifacts-and-publication)
+PRs targeting `dev`, `nightly` or `main` automatically run affected Linux x86_64 native and AMD64 backend checks when opened or updated. After Linux review, dispatch the remaining affected platforms and web checks for the same commit. [CI review passes](docs/wiki/code/ci.md#nightly-gsd-order) Trusted pushes publish selected verified unsigned Mac ZIPs and dual-architecture GHCR images: `nightly` → nightly, `dev`/`main` → stable. [Visual checks/publication flow](docs/diagrams/native-release.html) · [Artifact identities and limits](docs/wiki/code/build-artifacts.md#hosted-artifacts-and-publication)
 
 Run host checks first, then the affected container loop, then hosted CI. [Full loop guide](docs/wiki/code/contributing.md#development-loops-local-cli-and-docker)
 

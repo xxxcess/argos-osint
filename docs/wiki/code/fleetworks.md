@@ -2,9 +2,9 @@
 
 [Code route](index.md) · [Architecture](architecture.md) · [Deployment guide](../../../deploy/README.md)
 
-Fleetworks Desktop is the API-only macOS and Linux x86_64 control hub. Its six operations destinations are DB Seed & Train, News Cycles, Brain Search, OSINT Tools, Model Assignments and Jobs & Logs. The compact sidebar also opens Workstation Status and a category-based Workstation Settings dialog. Wide windows show selected operational content with a read-only context rail; there is no chat transcript. The gateway header opens Workstation Status (featuring the **Actor search** hero card); Setup Gateway opens a URL-only connectivity flow. Backend resources remain shared within permissions, while activity is attributed to the registered workstation. Start with [native connections](native-connections.md), [protected identity](native-workspaces.md), the [design system](native-design-system.md) and [native build/fixture guide](../../../apps/fleetworks-desktop/README.md). App launch never launches the backend or Intel Web.
+Fleetworks Desktop is the API-only macOS and Linux x86_64 control hub. Its six operations destinations are DB Seed & Train, News Cycles, Brain Search, OSINT Tools, Model Assignments and Jobs & Logs. The compact sidebar also opens Workstation Status and a category-based Workstation Settings dialog. Wide windows show selected operational content with a read-only context rail; there is no chat transcript. The gateway header opens Workstation Status (featuring the **Actor search** hero card); Setup Gateway switches between Embedded and Distributed backend setup. Backend resources remain shared within permissions, while activity is attributed to the registered workstation. Start with [native connections](native-connections.md), [protected identity](native-workspaces.md), the [design system](native-design-system.md) and [native build/fixture guide](../../../apps/fleetworks-desktop/README.md). App launch never launches the backend or Intel Web.
 
-Linux domain services share the network datastore. Jobs exclusively owns its SQLite operational logs and embedded RocksDB queue; [actor discovery](actor-search.md) has a separate private Tantivy service. The [isolated native-review deployment](../../../deploy/README.md) builds backend-only images and leaves web/client launch independent. Backend network readers accept explicit current-format configuration and saved credentials; they do not migrate historical files or revive environment provider keys during ordinary reads.
+Distributed Linux domain services share the network datastore. Jobs exclusively owns its SQLite operational logs and embedded RocksDB queue; [actor discovery](actor-search.md) has a separate private Tantivy service. The [isolated native-review deployment](../../../deploy/README.md) builds backend-only images and leaves web/client launch independent. Backend network readers accept explicit current-format configuration and saved credentials; they do not migrate historical files or revive environment provider keys during ordinary reads.
 
 Venture, the six Fleetworks terminal clients and the legacy `argos` executable are retired. Use the native app, Intel Web and direct Docker deployment. Historical terminal evidence is retained under the [retirement disposition](../../archive/cli-retirement.md); it is not a current startup recipe.
 
@@ -12,17 +12,19 @@ Venture, the six Fleetworks terminal clients and the legacy `argos` executable a
 
 ## Build and connect the native app
 
-Normal setup uses [operator-approved pairing and Keychain / Secret Service](native-connections.md#pairing-and-keychain-agreed-target) (plus explicit Linux session-only mode when Secret Service is unavailable or locked). [Verification status](../../../.planning/2026-11-12-native-pairing-implementation/acceptance.md) distinguishes implemented behavior from pending runtime/platform evidence.
+The [native connection guide](native-connections.md#backend-types-and-parity) describes both backend types and their shared contracts. [Verification status](../../../.planning/2026-11-12-native-pairing-implementation/acceptance.md) distinguishes implemented behavior from pending runtime/platform evidence.
 
 ```sh
 python3 scripts/fleetworks_candidate.py build-native --target host --profile debug
 ```
 
-The helper prints the complete `.app` (macOS) or bundle directory (Linux) and manifest paths. Add `--open` only for an intended GUI launch. In Setup Gateway enter the gateway URL and choose Connect; the operator approves its displayed request/code. The app authenticates, saves access in Keychain or Secret Service (or process memory in session-only mode) and registers the installation. Saved access reconnects to that exact origin/deployment. Explicit `--api-origin` + `--api-token-file` retains operator/headless file mode. [Connection flow](native-connections.md)
+The helper prints the complete `.app` (macOS) or bundle directory (Linux) and manifest paths. Add `--open` only for an intended GUI launch. In **Setup Gateway**, select **Embedded** and choose **Start Embedded Backend** for the bundled companion. For a managed gateway, select **Distributed**, enter its URL and choose **Connect**. The operator approves the displayed request and code. The app authenticates, saves access in Keychain or Secret Service (or process memory in session-only mode) and registers the installation. Saved access reconnects to that exact origin/deployment. Explicit `--api-origin` + `--api-token-file` retains operator/headless file mode. [Connection flow](native-connections.md)
 
 Protected settings initialize without creating a default child. The opaque backend workstation ID is the Connect ID; optional mutable IP metadata does not define identity. New contexts and activity queries contain no workspace narrowing. Existing folders and immutable historical origins remain preserved. [Identity ownership](native-workspaces.md)
 
-## Launch the Compose stack
+<a id="launch-the-compose-stack"></a>
+
+## Launch a Distributed backend with Compose
 
 Use the [standalone backend recipe](../../../deploy/README.md#isolated-native-backend-review): one command auto-detects host platform / initializes `native-local` on port `18091` when missing, builds the backend service images, redeploys the Docker Compose containers, and triggers the native app build on supported macOS (`x86_64-apple-darwin` or `aarch64-apple-darwin`) and Linux x86_64 (`x86_64-unknown-linux-gnu`) hosts:
 

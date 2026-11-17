@@ -2,7 +2,7 @@
 
 **Approved visual target:** [matte canvas reproduction](../../docs/design/matte-canvas/README.md) and [implementation handoff](../../.planning/2026-11-16-matte-canvas/handoff.md) supersede earlier gold/ivory, reflective-control and pager-style visual guidance. The new source assets/docs are present; the splash, material/state/scroll changes still need native implementation and actual-view verification.
 
-The Rune/rune-kit macOS and Linux x86_64 API client connects to an independently running gateway. It never starts backend engines, Docker or Intel Web. Its six sidebar destinations are DB Seed & Train, News Cycles, Brain Search, OSINT Tools, Model Assignments and Jobs & Logs. The gateway header opens Workstation Status, featuring the **Actor search** hero card alongside Native Client, Gateway Backend and Host Resources details. Setup Gateway opens URL → operator approval → macOS Keychain / Linux D-Bus Secret Service (or explicit Linux session-only mode) → authenticated checks/registration.
+The Rune/rune-kit macOS and Linux x86_64 API client supports **Embedded** and **Distributed** backends. Embedded uses a bundled stdio companion started explicitly by the user. Distributed connects to an operator-managed gateway. Backend engines run outside the desktop process. Its six sidebar destinations are DB Seed & Train, News Cycles, Brain Search, OSINT Tools, Model Assignments and Jobs & Logs. The gateway header opens Workstation Status, featuring the **Actor search** hero card alongside Native Client, Gateway Backend and Host Resources details. Setup Gateway selects the backend type. Distributed setup uses a gateway URL, operator approval and macOS Keychain or Linux D-Bus Secret Service, with explicit Linux session-only mode also available.
 
 [Design and control allowlist](../../docs/wiki/code/native-design-system.md) · [Connection contracts](../../docs/wiki/code/native-connections.md) · [Protected identity](../../docs/wiki/code/native-workspaces.md) · [Implementation/verification status](../../.planning/2026-11-12-native-pairing-implementation/acceptance.md)
 
@@ -10,7 +10,7 @@ The Rune/rune-kit macOS and Linux x86_64 API client connects to an independently
 
 ## Build and provision
 
-Normal setup uses [pairing and macOS Keychain](../../docs/wiki/code/native-connections.md#pairing-and-keychain-agreed-target); no token file is needed. Verification remains separately tracked.
+Distributed setup uses [operator pairing and the system keyring](../../docs/wiki/code/native-connections.md#pairing-and-keychain-agreed-target). Embedded setup uses **Start Embedded Backend** and a private companion state directory. See the [backend type and parity contract](../../docs/wiki/code/native-connections.md#backend-types-and-parity).
 
 Use the complete-app helper; agent builds add `--agent` and reuse the shared debug graph. Opening the app is an explicit action.
 
@@ -20,7 +20,7 @@ Build flow: live Cargo progress/diagnostics and stage markers on stderr → pack
 python3 scripts/fleetworks_candidate.py build-native --agent --target host --profile debug
 ```
 
-For a fresh or existing local review, run:
+For a fresh or existing Distributed review using a loopback gateway, run:
 
 ```sh
 python3 deploy/native_review.py up
@@ -28,7 +28,7 @@ python3 deploy/native_review.py up
 
 This command auto-detects host platform and initializes `native-local` on port `18091` if needed (without overwriting an existing root `compose.env`), preserves existing credentials/data, adds missing Operator provisioning, validates local Docker/configuration, builds the configured images with live output, then restarts only that review after a successful build and waits for readiness. On supported macOS and Linux x86_64 hosts it then builds/opens the app using `build-native --target host --profile debug --open`; native build failure leaves the healthy backend running. Add `--backend-only` to skip the app step; unsupported hosts (such as Linux ARM64) skip it automatically. It prints the actual gateway URL and approval command. Use `prepare --name native-local` for an offline provisioning/command preview or [`init`](../../deploy/README.md#initialize-a-fresh-review) for offline setup. [Backend review workflow](../../deploy/README.md#prepare-an-existing-review)
 
-Open Setup Gateway, enter the helper's gateway URL and choose Connect. Share the displayed pairing request ID/code with the [gateway operator](../../docs/wiki/code/native-connections.md#operator-approval-and-revocation). The app authenticates approved access, saves it in macOS Keychain or Linux D-Bus Secret Service (or keeps it in process memory when explicit Linux session-only mode is selected) and registers the installation. Later connections use that exact origin/deployment; missing/denied access has no silent file fallback. Retry preserves an uncertain request; Pair again explicitly replaces it.
+Open **Setup Gateway**, select **Distributed**, enter the helper's gateway URL and choose **Connect**. Share the displayed pairing request ID/code with the [gateway operator](../../docs/wiki/code/native-connections.md#operator-approval-and-revocation). The app authenticates approved access, saves it in macOS Keychain or Linux D-Bus Secret Service (or keeps it in process memory when explicit Linux session-only mode is selected) and registers the installation. Later connections use that exact origin/deployment; missing/denied access has no silent file fallback. Retry preserves an uncertain request; Pair again explicitly replaces it.
 
 Protected settings create no default child and contain no polling/access secrets. The opaque workstation ID is the browser Connect ID, not a credential. Optional IP metadata never defines identity; WebRelay remains independent.
 
@@ -48,13 +48,13 @@ Backend resources stay shared within caller permissions. New registration/contex
 
 [![Readiness and confirmed maintenance flow](../../docs/diagrams/workstation-readiness.svg)](../../docs/diagrams/workstation-readiness.html)
 
-**DB Seed & Train:** each CSV picker first checks required columns locally, before any network request or backend worker. A valid file proceeds through a gateway-issued upload URL → streamed bytes → backend schema/hash/size validation and immutable staging → explicit job confirmation. Progress/errors stay visible; an invalid header stops locally. [Required columns, upload rules and sample files](../../deploy/README.md#configured-native-maintenance-inputs)
+**DB Seed & Train:** each CSV picker first checks required columns locally, before any network request or backend worker. The app streams a valid file to the selected backend for schema, hash and size validation and immutable staging. The operator then confirms the job. Progress/errors stay visible; an invalid header stops locally. [Required columns, upload rules and sample files](../../deploy/README.md#configured-native-maintenance-inputs)
 
 Actor CSVs merge by stable actor ID: add actors, update selected fields on matching actors and keep actors absent from the new CSV. Existing/manual aliases remain; new aliases are upserted without deletions, with full source metadata retained. Each job uses its exact selected dataset/hash/revision.
 
 If the file chooser cannot open (for example a Linux desktop with no chooser service), **Seed Actors** and **Train Classifier** show a **Local CSV path** field. The path stays on this computer, must be an absolute `.csv` file, and goes through the same checks as a picked file.
 
-**Seed Actors** must complete with actors in the database before **Build Search Index** enables; queued/active reseeding keeps it disabled. Confirm the index job, then wait for reader readiness. **Train Classifier — Natural** uses its own CSV picker and produces a candidate without activation; the bundled v2 dataset is synthetic. Confirmation pins the actual configuration revision (fresh **0** is valid). Focused auto-refresh and **Refresh checks** only observe readiness; no seed/training job starts before confirmation. Authentication-bound, single-use upload tickets survive gateway restarts in the shared database until five-minute expiry; HTTP 429 leaves the URL unused. Accepted jobs remain durable. [Capacity and shared-staging requirements](../../deploy/README.md#configured-native-maintenance-inputs)
+**Seed Actors** must complete with actors in the database before **Build Search Index** enables; queued/active reseeding keeps it disabled. Confirm the index job, then wait for reader readiness. **Train Classifier — Natural** uses its own CSV picker and produces a candidate without activation; the bundled v2 dataset is synthetic. Confirmation pins the actual configuration revision (fresh **0** is valid). Focused auto-refresh and **Refresh checks** only observe readiness; no seed/training job starts before confirmation. Distributed HTTP uses authentication-bound, single-use upload tickets retained in the shared database until five-minute expiry. HTTP 429 leaves the URL unused. Embedded IPC transfers the same dataset bytes through bounded frames. Accepted jobs remain durable. [Capacity and shared-staging requirements](../../deploy/README.md#configured-native-maintenance-inputs)
 
 After updating maintenance code, close an already running Fleetworks app, then run `python3 deploy/native_review.py up --name native-local` to coordinate schema 11 bootstrap/services and rebuild backend and native app. The helper's `--open` preserves an existing running instance, so leaving it open would retain the older app.
 
@@ -75,14 +75,14 @@ python3 scripts/fleetworks_verify.py native-ui --agent \
   --scale 2 --output .agent-scratch/native-ui/brain-review
 ```
 
-Discover scene names from the current executable; generation alone is not visual approval. [Native verification](../../docs/wiki/code/native-verification.md) records build/cache isolation and inspection requirements. Hosted evidence retains both Mac architectures; minimum OS, installed GUI/input/accessibility, signing/notarization and real backend integration remain separate. Read the acceptance tracker for actual pass/fail/skip results rather than treating these command examples as executed checks.
+Discover scene names from the current executable; generation alone is not visual approval. [Native verification](../../docs/wiki/code/native-verification.md) records build/cache isolation and inspection requirements. Hosted first-pass evidence covers Linux x86_64. The second pass retains both Mac architectures; minimum OS, installed GUI/input/accessibility, signing/notarization and real backend integration remain separate. Read the acceptance tracker for actual pass/fail/skip results rather than treating these command examples as executed checks.
 
-Selected PR checks build debug apps and Rune evidence on Intel/Apple Silicon, without ZIPs or publication. Trusted branch pushes package versioned release ZIPs, verify downloads by artifact ID/digest/checksum and publish after required checks: `nightly` → nightly prereleases, `dev`/`main` → stable. These automatically published apps remain unsigned; signing/notarization and installed-hardware acceptance are separate evidence. [Release flow](../../docs/diagrams/native-release.html) · [Artifact map](../../docs/wiki/code/build-artifacts.md#hosted-artifacts-and-publication)
+Selected first-pass PR checks build the Linux x86_64 debug package and Rune evidence. After Linux review, dispatch the same head for affected Intel and Apple Silicon checks. [CI review passes](../../docs/wiki/code/ci.md#nightly-gsd-order) Trusted branch pushes package versioned release ZIPs, verify downloads by artifact ID/digest/checksum and publish after required checks: `nightly` → nightly prereleases, `dev`/`main` → stable. These automatically published apps remain unsigned; signing/notarization and installed-hardware acceptance are separate evidence. [Release flow](../../docs/diagrams/native-release.html) · [Artifact map](../../docs/wiki/code/build-artifacts.md#hosted-artifacts-and-publication)
 
 Pairing tests use injected Keychain stores. Installed-app launch, real Keychain approval/reconnect and backend integration need separate evidence within the current task's authorized scope. Record actual results and remaining gaps in its acceptance tracker.
 
 ## Startup, utilities and materials
 
-A cold launch shows the logo for three seconds, then **Choose your connection**. Choosing Local Embedded or Remote Gateway only opens the existing setup. Launches with `--api-origin` or `--api-token-file`, and fixtures, skip it. The toolbar has a command button (Cmd/Ctrl+K), an inbox bell and an Assistant toggle. The Assistant is off by default and sends a turn to the backend's chat endpoint, which only answers ok; there are no replies yet.
+A cold launch shows the logo for three seconds, then **Choose a backend**. Choosing Embedded or Distributed only opens the existing setup. Launches with `--api-origin` or `--api-token-file` skip it. The `backend-choice` fixture shows the chooser; other fixtures bypass startup. The toolbar has a command button (Cmd/Ctrl+K), an inbox bell and an Assistant toggle. The Assistant is off by default and sends a turn to the backend's chat endpoint, which only answers ok; there are no replies yet.
 
 Glass surfaces (the Assistant composer and the command panel) use a same-window blur. They draw opaque, with the same bounds, when macOS Reduce Transparency is on or when `FLEETWORKS_OPAQUE_MATERIALS` is `1`, `true`, `yes` or `on`. Linux no longer forces the opaque mode.

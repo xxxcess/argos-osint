@@ -105,7 +105,9 @@ free of backend Docker engines.
 | Unit tests | `not_run_by_this_command`; retain scoped test results separately |
 | Backend/inference | Not exercised; source-to-visible search and real model/checkpoint gates remain separate |
 
-The [dual-Mac workflow](../../../.github/workflows/fleetworks-native.yml) (`package`
+The [Linux x86_64 workflow](../../../.github/workflows/fleetworks-native-linux.yml) supplies the first-pass debug package, scoped tests and Rune artifacts, including the `backend-choice` fixture. Review the package as soon as it is available for the exact head and record the verdict before [dispatching the second pass](ci.md#nightly-gsd-order). For a shared backend change, exercise the same affected native operation with Embedded IPC and Distributed HTTP under equivalent capabilities and authority.
+
+The second-pass [dual-Mac workflow](../../../.github/workflows/fleetworks-native.yml) (`package`
 and `verify` jobs on `macos-15-intel` and `macos-15`) runs `cargo fmt --check`,
 scoped `fleetworks-desktop`, `fleetworks-workstation` and `fleetworks-contracts`
 unit tests, and then invokes this same `native-ui --agent --require-clean`
@@ -117,12 +119,7 @@ exit does not supply either result. Adding or renaming native scenes or
 interaction scripts requires coordinating `.github/workflows/fleetworks-native.yml`
 updates with Code Architect.
 
-When the user is available for interactive review, a passing app artifact for the
-local Mac architecture starts native review before the remaining hosted matrix
-finishes. Record the artifact's exact revision, close the running app, rebuild the
-isolated backend and native app locally, and open the app. Track unfinished Linux,
-storage and installed-app checks separately; artifact creation alone is not a
-local behavior pass.
+For the Linux first pass, use the matching artifact on the review Linux host and record exact revision, backend type, interaction results and remaining gaps. The second pass can add matching-hardware Mac review using its own artifact. Fixture review, live behavior and installed-app evidence remain separate.
 
 The [offline Python fixtures](../../../scripts/test_fleetworks_native_verify.py)
 cover selection/artifact-path fences, implicit debug cache reuse, bounded profiles,
@@ -188,7 +185,7 @@ target-review addition records no new product test, capture or GUI pass.
 
 ## Dispatchable UI visual review
 
-After an agent freezes a native or web UI PR revision, dispatch
+Use the normal Linux CI artifacts for first-pass native review. For additional Mac or web capture after the first pass, dispatch
 [`ui-visual-review.yml`](../../../.github/workflows/ui-visual-review.yml) with the
 open PR number, full head SHA and the smallest affected capture selection. The
 workflow checks out the exact revision, generates Rune/Playwright images, retains

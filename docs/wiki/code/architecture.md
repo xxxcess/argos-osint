@@ -4,17 +4,18 @@
 
 ## Fleetworks service boundaries
 
-[![Fleetworks service boundaries](../../diagrams/fleetworks.svg)](../../diagrams/fleetworks.html)
+[![Fleetworks Distributed backend and clients](../../diagrams/fleetworks.svg)](../../diagrams/fleetworks.html)
 
 | Component | Owns |
 | --- | --- |
-| [Rune macOS desktop](../../../apps/fleetworks-desktop) | Native pages, input and accessibility; protected installation identity and origin-bound Keychain references through the [workstation library](../../../crates/fleetworks-workstation); bounded gateway requests through shared [contracts](../../../crates/fleetworks-contracts). Connects to independently running services. |
+| [Rune macOS and Linux x86_64 desktop](../../../apps/fleetworks-desktop) | Native pages, input and accessibility; protected installation identity and origin-bound Keychain references through the [workstation library](../../../crates/fleetworks-workstation); bounded gateway requests through shared [contracts](../../../crates/fleetworks-contracts). Selects the Embedded companion or Distributed gateway. |
 | [Intel Web](../../../apps/web-desktop) | React Native Web presentation, topology and its accessible list, Connect/session gate, and a same-origin server relay using its separately provisioned gateway credential. |
-| Linux backend: [API](../../../crates/argos-osint-api), [service host](../../../services/api-host) and [Core](../../../crates/argos-osint-core) | Authenticated gateway/live streams, private services, durable workers, shared configuration and domain storage. Linux owns [classifier/NLP execution](classifier.md), [Tantivy discovery](actor-search.md), SurrealDB and [Jobs persistence](../../../crates/fleetworks-jobs). |
+| Distributed Linux backend: [API](../../../crates/argos-osint-api), [service host](../../../services/api-host) and [Core](../../../crates/argos-osint-core) | Authenticated gateway/live streams, private services, durable workers, shared configuration and domain storage. Linux owns [classifier/NLP execution](classifier.md), [Tantivy discovery](actor-search.md), SurrealDB and [Jobs persistence](../../../crates/fleetworks-jobs). |
+| [Embedded companion](../../diagrams/local-ipc-companion.html) | Private in-process SurrealDB, Jobs persistence and actor search behind framed stdio IPC. Uses the same registered native contracts and advertises available engines. |
 
-External operator tooling owns deployment origins, service processes, images and volumes. The Compose recipes publish their selected gateway/web ports on loopback; the isolated backend-only review recipe omits the web app. The gateway reaches private Brain, Tools, Control, Jobs and execution roles, plus configured Linux NLP, classifier and search services. Actor discovery uses private Tantivy behind the gateway's current canonical eligibility checks; selected dossiers come from authoritative SurrealDB. The Mac app receives bounded gateway projections and keeps engine, index and deployment ownership on Linux. [Actor discovery ownership](actor-search.md)
+External operator tooling owns Distributed origins, service processes, images and volumes. The Compose recipes publish their selected gateway/web ports on loopback; the isolated backend-only review recipe omits the web app. The gateway reaches private Brain, Tools, Control, Jobs and execution roles, plus configured Linux NLP, classifier and search services. Actor discovery uses private Tantivy behind the gateway's current canonical eligibility checks; selected dossiers come from authoritative SurrealDB. The native app receives bounded projections. The selected backend owns engines and indexes. [Actor discovery ownership](actor-search.md)
 
-Direct [Docker Compose](../../../deploy/README.md) operates backend services and optional Intel Web. Venture, the six terminal clients and legacy `argos` are retired. The Rune app connects to the gateway and never starts a backend, web server or container. [Service startup and roles](fleetworks.md)
+Direct [Docker Compose](../../../deploy/README.md) operates backend services and optional Intel Web. Venture, the six terminal clients and legacy `argos` are retired. The Rune app manages the Embedded companion only after explicit start or stop. Operators manage Distributed services and optional Intel Web separately. [Backend types and parity](native-connections.md#backend-types-and-parity) · [Service startup and roles](fleetworks.md)
 
 Native [pairing and Keychain](native-connections.md#pairing-and-keychain-agreed-target) separates public challenge start/poll from Operator approval and authenticated APIs. Settings contain non-secret recovery references; macOS Keychain holds polling/access secrets. Explicit operator/headless token-file mode is independent. [Verification](../../../.planning/2026-11-12-native-pairing-implementation/acceptance.md) remains separately recorded.
 
@@ -24,7 +25,7 @@ The brief worker runs stages and publication. Atlas uses a Jobs-owned embedded d
 
 `@tag:surreal-storage`
 
-Service processes share the explicitly configured private SurrealDB endpoint. The standalone Compose recipe provisions a persistent authenticated database; independently managed deployments supply their own endpoint and credentials. [Storage map](storage.md) · [Planned Jobs ownership and rollout scopes](jobs-persistence.md)
+Distributed service processes share the explicitly configured private SurrealDB endpoint. Embedded opens a private in-process store under its own state directory. The standalone Compose recipe provisions a persistent authenticated database; independently managed deployments supply their own endpoint and credentials. [Storage map](storage.md) · [Planned Jobs ownership and rollout scopes](jobs-persistence.md)
 
 [![Persistence stack](../../diagrams/persistence.svg)](../../diagrams/persistence.html)
 

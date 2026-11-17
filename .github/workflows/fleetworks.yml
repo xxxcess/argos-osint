@@ -295,8 +295,10 @@ jobs:
           rm -rf "$RUNNER_TEMP/trusted-planner" "$RUNNER_TEMP/trusted-planner-ready"
 
   desktop:
+    # Other platform app builds start after the Linux app succeeds so runner time goes to Linux
+    # first. Their result is reported but only blocks trusted publication (see source_checks).
     name: Mac app / ${{ matrix.target }}
-    needs: scope
+    needs: [scope, desktop_linux]
     if: needs.scope.outputs.desktop == 'true' || needs.scope.outputs.local_backend == 'true'
     strategy:
       fail-fast: false
@@ -630,6 +632,7 @@ jobs:
       - name: Require success for every selected scope
         env:
           SCOPE_RESULT: ${{ needs.scope.result }}
+          PUBLISH_SELECTED: ${{ needs.scope.outputs.publish }}
           DESKTOP_SELECTED: ${{ needs.scope.outputs.desktop == 'true' || needs.scope.outputs.local_backend == 'true' }}
           LOCAL_BACKEND_SELECTED: ${{ needs.scope.outputs.local_backend }}
           SERVER_SELECTED: ${{ needs.scope.outputs.server }}
@@ -666,6 +669,16 @@ jobs:
               *) echo "::error::$1 selected=${2:-missing} result=${3:-missing}"; return 1 ;;
             esac
           }
+          # Other platform app builds always report, but only block trusted publication, whose
+          # release plan attaches their archives. A red build stays red in its own check.
+          report() {
+            printf '%s (reported, not required): selected=%s result=%s\n' "$1" "${2:-missing}" "${3:-missing}" >> "$GITHUB_STEP_SUMMARY"
+            case "$2:$3" in
+              true:success|false:skipped) ;;
+              true:failure) echo "::warning::$1 failed; it does not block this gate" ;;
+              *) echo "::notice::$1 selected=${2:-missing} result=${3:-missing}; it does not block this gate" ;;
+            esac
+          }
           failed=0
           for value in "$QUEUE_SELECTED" "$STORAGE_SELECTED"; do
             case "$value:$SERVER_SELECTED" in
@@ -677,7 +690,11 @@ jobs:
             true:true|false:true|false:false) ;;
             *) echo '::error::Development browser scope needs the web gate'; failed=1 ;;
           esac
-          verify desktop "$DESKTOP_SELECTED" "$DESKTOP_RESULT" || failed=1
+          if [[ "$PUBLISH_SELECTED" == true ]]; then
+            verify desktop "$DESKTOP_SELECTED" "$DESKTOP_RESULT" || failed=1
+          else
+            report desktop "$DESKTOP_SELECTED" "$DESKTOP_RESULT"
+          fi
           verify desktop_linux "$DESKTOP_SELECTED" "$DESKTOP_LINUX_RESULT" || failed=1
           verify server "$SERVER_SELECTED" "$SERVER_RESULT" || failed=1
           verify embedded "$STORAGE_SELECTED" "$EMBEDDED_RESULT" || failed=1

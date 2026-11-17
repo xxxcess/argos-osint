@@ -337,8 +337,7 @@ impl State {
                 })
         {
             return Some(
-                "Local companion backend was built without the optional classifier capability."
-                    .into(),
+                "Natural classifier training is unavailable on this local backend.".into(),
             );
         }
         if !self.permission(Permission::MaintainBackend) {

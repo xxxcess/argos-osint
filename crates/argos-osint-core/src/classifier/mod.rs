@@ -48,6 +48,21 @@ pub(crate) mod runtime_proof;
 pub mod similarity;
 pub mod training;
 
+/// Validate the optional Natural runtime without fitting data or loading/activating a model.
+/// Rust-BERT inference readiness is separate from this training-runtime check.
+pub fn training_runtime_ready() -> Result<(), ClassifierError> {
+    #[cfg(feature = "classifier")]
+    {
+        let model_id = ModelId::parse("local-runtime-probe").ok_or(ClassifierError::Unavailable)?;
+        let _engine = engine::QuickJsEngine::new(model_id, None)?;
+        Ok(())
+    }
+    #[cfg(not(feature = "classifier"))]
+    {
+        Err(ClassifierError::Unavailable)
+    }
+}
+
 pub use crate::atlas_taxonomy::{DomainId, TAXONOMY_VERSION};
 pub use artifact::{
     ActivatedModelIndex, ActivationAuthorization, ActivationAuthorizationDecision,

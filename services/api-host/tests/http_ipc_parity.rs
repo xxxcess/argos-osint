@@ -459,6 +459,7 @@ impl HttpHarness {
             store: dataset_store,
             index: Some(index_worker),
             relinquish_on_shutdown: false,
+            classifier_enabled: true,
         };
         let worker_repo = repo.clone();
         let worker_root = root.clone();

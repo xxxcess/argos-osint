@@ -12,6 +12,8 @@ Choosing a destination only opens the existing setup for it. Nothing starts a co
 
 A launch with `--api-origin` or `--api-token-file` skips the splash and choice, so scripted and CI launches are unchanged. Fixtures skip it too. The timeline is `apps/fleetworks-desktop/src/startup.rs` and the scene is `apps/fleetworks-desktop/src/orbit.rs`.
 
+On **Start Local Backend**, the embedded companion warms its bundled Compromise NLP engine when built with NLP support. This is local engine readiness, not proof that remote Atlas or Focus Brief services are configured. The bundled Natural classifier supports explicitly confirmed, candidate-only training through **DB Seed & Train**. Starting the backend never trains or activates a model. Natural training availability does not establish readiness for Atlas's separate Rust-BERT classifier. The base local connection can still work when an optional engine is unavailable.
+
 ## Inbox and Assistant dock
 
 The toolbar **Inbox** bell opens a popover with **All** and **Unread**, a list, and expandable detail. It lists only changes this app already observed: a visible job that stops being active, a readiness check that enters or leaves ready, not ready, degraded or unavailable, and the connection becoming ready or failing. Item text is fixed wording plus a job title or check name, never error text, URLs or credentials. It keeps at most 50 items, records one transition per job once, and clears when the connection authority changes. It sends nothing and makes no claim about device-wide alerts.

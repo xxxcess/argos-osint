@@ -79,13 +79,11 @@ pub fn assess_local_capabilities(capabilities: &Capabilities) -> LocalCapability
 
     let mut warnings = Vec::new();
     if !nlp_available {
-        warnings.push(
-            "Optional `nlp` capability is absent in this local companion binary; language-processing features are disabled.".into(),
-        );
+        warnings.push("The local backend is not advertising NLP support.".into());
     }
     if !classifier_available {
         warnings.push(
-            "Optional `classifier` capability is absent in this local companion binary; classifier training and activation are disabled.".into(),
+            "The local backend is not advertising Natural classifier support. Training and activation are unavailable.".into(),
         );
     }
     if !actor_search_available {

@@ -246,8 +246,11 @@ mod embedded {
             })
             .await??;
 
+            let (nlp_enabled, classifier_enabled) = warm_local_engines().await;
+
             let readiness = ReadinessOwners::new(deployment.deployment_id.clone(), Vec::new())?
-                .with_platform_display_name(deployment.platform_display_name.clone())?;
+                .with_platform_display_name(deployment.platform_display_name.clone())?
+                .with_local_nlp(nlp_enabled);
             let search_backend: Arc<dyn ActorSearchBackend> =
                 Arc::new(LocalActorSearchBackend(Arc::clone(&search_service)));
             let services = PrivateServices::default()
@@ -264,8 +267,8 @@ mod embedded {
             .with_workspace_root(layout.root.clone());
 
             let capability_config = LocalCapabilityConfig {
-                nlp_enabled: helpers.nlp.is_some(),
-                classifier_enabled: helpers.classifier.is_some(),
+                nlp_enabled,
+                classifier_enabled,
                 search_enabled: true,
                 jobs_enabled: true,
             };
@@ -287,12 +290,13 @@ mod embedded {
                 store: dataset_store,
                 index: Some(index_worker),
                 relinquish_on_shutdown: true,
+                classifier_enabled,
             };
 
             tracing::info!(
                 role = "local-ipc",
-                nlp = helpers.nlp.is_some(),
-                classifier = helpers.classifier.is_some(),
+                nlp = nlp_enabled,
+                classifier = classifier_enabled,
                 search = true,
                 jobs = true,
                 "Fleetworks startup summary: embedded local-ipc backend ready"
@@ -342,6 +346,64 @@ mod embedded {
             }
             result
         }
+    }
+
+    /// Warm only optional in-process engines. Failure never prevents base IPC startup.
+    /// Helper process presence is not proof of either capability.
+    async fn warm_local_engines() -> (bool, bool) {
+        let nlp = async {
+            if !cfg!(feature = "nlp") {
+                return false;
+            }
+            let service =
+                match tokio::task::spawn_blocking(argos_osint_core::nlp::Service::shared).await {
+                    Ok(service) if service.readiness.is_ok() => service,
+                    _ => return false,
+                };
+            let source = argos_osint_core::nlp::Source::derived(
+                "local-startup-probe",
+                "1",
+                "A synthetic organization published a report.",
+            );
+            let context = source.context();
+            let result = service
+                .annotate(
+                    source.clone(),
+                    context,
+                    Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                )
+                .await;
+            result.status == argos_osint_core::nlp::Status::Complete
+                && result.validate(&source)
+                && !result.sentences.is_empty()
+        };
+        let classifier = async {
+            if !cfg!(feature = "classifier") {
+                return false;
+            }
+            matches!(
+                tokio::task::spawn_blocking(argos_osint_core::classifier::training_runtime_ready,)
+                    .await,
+                Ok(Ok(()))
+            )
+        };
+        let deadline = std::time::Duration::from_secs(10);
+        let (nlp, classifier) = tokio::join!(
+            tokio::time::timeout(deadline, nlp),
+            tokio::time::timeout(deadline, classifier),
+        );
+        let nlp = nlp.unwrap_or(false);
+        let classifier = classifier.unwrap_or(false);
+        if !nlp {
+            tracing::warn!(component = "nlp", "Optional local NLP engine unavailable");
+        }
+        if !classifier {
+            tracing::warn!(
+                component = "natural-training",
+                "Optional Natural training runtime unavailable"
+            );
+        }
+        (nlp, classifier)
     }
 
     fn native_ipc_permissions() -> Vec<Permission> {
@@ -840,6 +902,13 @@ mod embedded {
 
         use super::*;
 
+        #[tokio::test]
+        async fn local_engines_warm_without_helpers_or_training() {
+            let (nlp, classifier) = warm_local_engines().await;
+            assert_eq!(nlp, cfg!(feature = "nlp"));
+            assert_eq!(classifier, cfg!(feature = "classifier"));
+        }
+
         fn test_base64_encode(input: &[u8]) -> String {
             const ALPHABET: &[u8; 64] =
                 b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -954,7 +1023,7 @@ mod embedded {
             }
             server_task.await.expect("join").expect("clean reject");
 
-            // Compatible handshake advertises accurate local capabilities without faking NLP/Classifier.
+            // Compatible handshake advertises warmed in-process engines without helper commands.
             let context2 = LocalBackendContext::open(state_dir, None, None, false)
                 .await
                 .expect("reopen context");
@@ -987,6 +1056,16 @@ mod embedded {
                 .configuration_epoch
                 .as_deref()
                 .is_some_and(|epoch| !epoch.is_empty()));
+            assert_eq!(
+                caps.features.iter().any(|feature| feature == "nlp"),
+                cfg!(feature = "nlp")
+            );
+            assert_eq!(
+                caps.features.iter().any(|feature| feature == "classifier"),
+                cfg!(feature = "classifier")
+            );
+            assert!(!dir.path().join("state/classifier/active.json").exists());
+            assert!(!dir.path().join("state/classifier/models").exists());
             assert!(caps.auth);
             assert!(ready.ready);
             assert!(ready.storage);

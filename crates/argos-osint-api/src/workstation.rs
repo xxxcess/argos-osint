@@ -197,6 +197,7 @@ pub struct ReadinessOwners {
     deployment_id: String,
     platform_display_name: Option<String>,
     probes: Vec<ReadinessProbe>,
+    local_nlp: Option<bool>,
     configured_inputs: Vec<fleetworks_contracts::readiness::ConfiguredMaintenanceInput>,
     cache: Arc<Mutex<Option<Observations>>>,
 }
@@ -221,9 +222,15 @@ impl ReadinessOwners {
             deployment_id,
             platform_display_name: None,
             probes,
+            local_nlp: None,
             configured_inputs: Vec::new(),
             cache: Arc::new(Mutex::new(None)),
         })
+    }
+    /// Record the in-process Compromise startup probe, not an HTTP service or model inference.
+    pub fn with_local_nlp(mut self, ready: bool) -> Self {
+        self.local_nlp = Some(ready);
+        self
     }
     /// Set the operator-chosen backend label read from deployment metadata at startup.
     /// An invalid stored label is an error, so a corrupt value is never shown.
@@ -604,6 +611,28 @@ async fn collect(
     checks.push(catalog);
     for service in services {
         checks.extend(service);
+    }
+    if let Some(ready) = owners.local_nlp {
+        checks.retain(|check| check.id != ReadinessCheckId::Nlp);
+        checks.push(check(
+            ReadinessCheckId::Nlp,
+            if ready {
+                ReadinessState::Ready
+            } else {
+                ReadinessState::Unavailable
+            },
+            if ready {
+                "local_compromise_ready"
+            } else {
+                "local_compromise_unavailable"
+            },
+            if ready {
+                "In-process Compromise completed its startup annotation probe"
+            } else {
+                "Optional in-process Compromise engine is unavailable; base IPC remains available"
+            },
+            &at,
+        ));
     }
     for id in [
         ReadinessCheckId::Brain,

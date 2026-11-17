@@ -248,9 +248,9 @@ fn local_capabilities_summary(
                 ))
                 .child(ui_components::status_pill(
                     if assessment.classifier_available {
-                        "Classifier ready"
+                        "Natural classifier available"
                     } else {
-                        "Classifier absent"
+                        "Natural classifier unavailable"
                     },
                     None,
                     if assessment.classifier_available {

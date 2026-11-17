@@ -89,3 +89,18 @@ it("pauses the sheen while the page is hidden and resumes when it is visible", a
   });
   expect(loop).toHaveBeenCalledTimes(calls);
 });
+
+it("shares one loop across skeletons and stops it with the last one", async () => {
+  vi.spyOn(AccessibilityInfo, "isReduceMotionEnabled").mockResolvedValue(false);
+  const animation = { start: vi.fn(), stop: vi.fn(), reset: vi.fn() };
+  const loop = vi.spyOn(Animated, "loop").mockReturnValue(animation);
+  const first = render(<Skeleton />);
+  const second = render(<Skeleton lines={2} />);
+  await act(async () => {});
+  expect(loop).toHaveBeenCalledTimes(1);
+  expect(animation.start).toHaveBeenCalledTimes(1);
+  first.unmount();
+  expect(animation.stop).not.toHaveBeenCalled();
+  second.unmount();
+  expect(animation.stop).toHaveBeenCalled();
+});

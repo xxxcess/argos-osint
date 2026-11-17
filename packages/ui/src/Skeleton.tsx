@@ -14,6 +14,74 @@ const SHEEN_WIDTH = 0.2;
 const SWEEP_MS = 1200;
 const PAUSE_MS = 400;
 const SHEEN = "169,200,217";
+// One phase drives every mounted skeleton, so bands sweep together instead of flashing
+// independently. The loop runs while any skeleton is mounted, motion is allowed and the page
+// is visible; the last skeleton to unmount stops it.
+const phase = {
+  progress: new Animated.Value(0),
+  users: 0,
+  reduced: true, // until the preference is known, stay still
+  animation: undefined as Animated.CompositeAnimation | undefined,
+  stop: undefined as (() => void) | undefined,
+};
+const pageHidden = () =>
+  typeof document !== "undefined" && document.visibilityState === "hidden";
+function syncPhase() {
+  phase.animation?.stop();
+  phase.animation = undefined;
+  phase.progress.setValue(0);
+  if (phase.users > 0 && !phase.reduced && !pageHidden()) {
+    phase.animation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(phase.progress, {
+          toValue: 1,
+          duration: SWEEP_MS,
+          easing: Easing.linear,
+          useNativeDriver: true,
+        }),
+        Animated.delay(PAUSE_MS),
+      ]),
+    );
+    phase.animation.start();
+  }
+}
+function acquirePhase(): () => void {
+  if (phase.users++ === 0) {
+    let live = true;
+    phase.reduced = true;
+    void AccessibilityInfo.isReduceMotionEnabled().then((value) => {
+      if (live) {
+        phase.reduced = value;
+        syncPhase();
+      }
+    });
+    const subscription = AccessibilityInfo.addEventListener(
+      "reduceMotionChanged",
+      (value: boolean) => {
+        phase.reduced = value;
+        syncPhase();
+      },
+    );
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", syncPhase);
+    }
+    phase.stop = () => {
+      live = false;
+      phase.animation?.stop();
+      phase.animation = undefined;
+      subscription.remove();
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", syncPhase);
+      }
+    };
+  }
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    if (--phase.users === 0) phase.stop?.();
+  };
+}
 /** Decorative loading geometry. The caller owns the labeled status region. */
 export function Skeleton({
   lines = 1,
@@ -31,56 +99,9 @@ export function Skeleton({
 }) {
   // Steady base, constant opacity. One cool sheen band crosses the clipped region in a shared
   // 1.6 s cycle: a 1.2 s linear sweep, then 0.4 s outside the region. Nothing pulses.
-  const [progress] = useState(() => new Animated.Value(0));
+  const progress = phase.progress;
   const [regionWidth, setRegionWidth] = useState(0);
-  useEffect(() => {
-    let active = true;
-    let reduced = true; // until the preference is known, stay still
-    let animation: Animated.CompositeAnimation | undefined;
-    const hidden = () =>
-      typeof document !== "undefined" && document.visibilityState === "hidden";
-    // Decoration runs only while it can be seen and motion is allowed.
-    const sync = () => {
-      animation?.stop();
-      progress.setValue(0);
-      if (!reduced && !hidden() && active) {
-        animation = Animated.loop(
-          Animated.sequence([
-            Animated.timing(progress, {
-              toValue: 1,
-              duration: SWEEP_MS,
-              easing: Easing.linear,
-              useNativeDriver: true,
-            }),
-            Animated.delay(PAUSE_MS),
-          ]),
-        );
-        animation.start();
-      }
-    };
-    const update = (value: boolean) => {
-      reduced = value;
-      sync();
-    };
-    void AccessibilityInfo.isReduceMotionEnabled().then((value) => {
-      if (active) update(value);
-    });
-    const subscription = AccessibilityInfo.addEventListener(
-      "reduceMotionChanged",
-      update,
-    );
-    if (typeof document !== "undefined") {
-      document.addEventListener("visibilitychange", sync);
-    }
-    return () => {
-      active = false;
-      animation?.stop();
-      subscription.remove();
-      if (typeof document !== "undefined") {
-        document.removeEventListener("visibilitychange", sync);
-      }
-    };
-  }, [progress]);
+  useEffect(() => acquirePhase(), []);
   const bandWidth = regionWidth * SHEEN_WIDTH;
   const translateX = progress.interpolate({
     inputRange: [0, 1],

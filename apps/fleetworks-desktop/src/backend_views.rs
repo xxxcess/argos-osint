@@ -1636,7 +1636,13 @@ fn jobs(
                         LogStatus::Ready | LogStatus::DisplayLimit
                     )
                 {
-                    details = details.child(safe_log_table(state, kit, detail_width));
+                    details = details.child(safe_log_table(
+                        state,
+                        kit,
+                        detail_width,
+                        preferences,
+                        pointer_ref,
+                    ));
                     if state.scoped_logs.can_load_older() {
                         details = details.child(
                             ActionButton::new("Load older summaries")
@@ -1711,7 +1717,21 @@ fn jobs(
     scroll(body, "jobs-body")
 }
 
-fn safe_log_table(state: &State, kit: &Kit, available_width: f32) -> El {
+/// The newest log row is at the top of the table. Its drawn position against the table's own
+/// top tells whether the reader has scrolled away from it, from the same layout the renderer
+/// draws, with no view commit while the answer is unchanged. shortcut: the signal comes from the
+/// newest row's own drawn rect, so a jump that unmounts it without it first moving off the top
+/// (dragging the scroll bar far) keeps the previous answer until it mounts again.
+fn safe_log_table(
+    state: &State,
+    kit: &Kit,
+    available_width: f32,
+    preferences: ViewPreferences,
+    pointer_ref: Option<&rune::Live<[f32; 2]>>,
+) -> El {
+    let style = rune_kit::TableStyle::from_kit(kit);
+    let table_rect = rune::Live::new([0.0_f32; 4]);
+    let newest_rect = table_rect.clone();
     let mut table = Table::new(
         |state: &State| &state.scoped_logs.table,
         |state: &mut State| &mut state.scoped_logs.table,
@@ -1742,14 +1762,41 @@ fn safe_log_table(state: &State, kit: &Kit, available_width: f32) -> El {
     }
     let table = table
         .column(
+            TableColumn::new("newest", "")
+                .width(1.0)
+                .min(0.0)
+                .resizable(false),
+        )
+        .column(
             TableColumn::new("message", "Safe summary")
                 .flex(1.0)
                 .min(0.0)
                 .resizable(false),
         )
-        .cell(|state: &State, index, column| {
+        .cell(move |state: &State, index, column| {
             let row = &state.scoped_logs.rows[index];
             match column {
+                "newest" if index == 0 => Cell::el(
+                    rune::el()
+                        .key("logs-newest-marker")
+                        .size(1.0, 1.0)
+                        .a11y_hidden()
+                        .on_drawn_layout_tx({
+                            let table_rect = newest_rect.clone();
+                            move |state: &mut State, rect: [f32; 4], tx| {
+                                // The newest row's centre when the reader is at the top.
+                                let centre = table_rect.get()[1]
+                                    + style.header_height
+                                    + style.row_height * 0.5;
+                                // Away once it has moved up by half a row.
+                                let away = rect[1] < centre - style.row_height * 0.5;
+                                if !state.scoped_logs.set_away(away) {
+                                    tx.live_only();
+                                }
+                            }
+                        }),
+                ),
+                "newest" => Cell::text(""),
                 "timestamp" => Cell::text(row.ts.clone()).mono().muted(),
                 "severity" => Cell::text(row.severity.clone()),
                 _ => Cell::text(row.message.clone()),
@@ -1760,8 +1807,43 @@ fn safe_log_table(state: &State, kit: &Kit, available_width: f32) -> El {
         .h(320.0)
         .min_h(320.0)
         .grow(0.0)
-        .fill(kit.c.surface_base);
-    let mut body = rune::col().gap(8.0).child(table);
+        .fill(kit.c.surface_base)
+        .drawn_rect_into(&table_rect);
+    let mut body = rune::col().gap(8.0);
+    let unread = state.scoped_logs.unread();
+    if unread > 0 {
+        // A quiet marker above the table: the count is text, the control is a labelled button, so
+        // nothing depends on color. Reduced motion needs no change: the jump is the runtime's
+        // own scroll request, which lands at once under that preference.
+        body = body.child(
+            rune::row()
+                .key("logs-unread")
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(ui_components::status_pill(
+                    format!(
+                        "{unread} new log {}",
+                        if unread == 1 { "line" } else { "lines" }
+                    ),
+                    None,
+                    StatusTone::Info,
+                    kit,
+                ))
+                .child(
+                    ActionButton::new("Jump to newest")
+                        .key("logs-jump-newest")
+                        .finish(MetalFinish::ObsidianPill)
+                        .on_press_tx(|state: &mut State, tx| {
+                            if let Some(id) = state.scoped_logs.jump_to_newest() {
+                                tx.scroll_into_view_in(crate::logs::TABLE_KEY, id);
+                            }
+                        })
+                        .build(kit, preferences, pointer_ref),
+                ),
+        );
+    }
+    body = body.child(table);
     if let Some(selected) = state
         .scoped_logs
         .table

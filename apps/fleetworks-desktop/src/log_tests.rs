@@ -1499,3 +1499,105 @@ fn only_a_fresh_read_is_unresolved_while_follow_and_older_keep_the_resolved_stat
     assert!(logs.busy());
     drop(refresh);
 }
+
+fn follow_with(logs: &mut LogState, start: usize, length: usize, next: usize) {
+    logs.set_following(true);
+    let ticket = logs.follow().expect("follow read");
+    assert!(logs.complete(
+        &ticket,
+        Ok(LogReply::Page(page(
+            start,
+            length,
+            30,
+            Some(cursor(next)),
+            None
+        )))
+    ));
+}
+
+#[test]
+fn unread_counts_followed_rows_only_while_the_reader_is_away_from_the_newest() {
+    let mut logs = ready();
+    follow_with(&mut logs, 10, 2, 3);
+    assert_eq!(logs.unread(), 0, "at the newest rows nothing is unread");
+
+    assert!(logs.set_away(true), "scrolling away is a change");
+    assert!(!logs.set_away(true), "a repeated frame changes nothing");
+    follow_with(&mut logs, 20, 3, 4);
+    assert_eq!(logs.unread(), 3);
+    follow_with(&mut logs, 30, 1, 5);
+    assert_eq!(logs.unread(), 4, "arrivals accumulate");
+    assert_eq!(
+        logs.rows[0].id, "event-30",
+        "newest first; rows were prepended"
+    );
+}
+
+#[test]
+fn unread_clears_on_reaching_the_newest_rows_and_on_the_jump_control() {
+    let mut logs = ready();
+    logs.set_away(true);
+    follow_with(&mut logs, 10, 2, 3);
+    assert_eq!(logs.unread(), 2);
+    assert!(logs.set_away(false), "reaching the newest rows");
+    assert_eq!(logs.unread(), 0);
+    follow_with(&mut logs, 20, 1, 4);
+    assert_eq!(logs.unread(), 0, "following at the newest rows stays read");
+
+    logs.set_away(true);
+    follow_with(&mut logs, 30, 2, 5);
+    assert_eq!(logs.unread(), 2);
+    assert_eq!(logs.jump_to_newest().as_deref(), Some("event-31"));
+    assert_eq!(logs.unread(), 0, "the jump control clears the count");
+    assert!(
+        logs.set_away(true),
+        "the jump left the away state, so a later scroll counts again"
+    );
+}
+
+#[test]
+fn unread_never_counts_a_row_twice_or_a_refresh() {
+    let mut logs = ready();
+    logs.set_away(true);
+    // The follow reply repeats the row already loaded and adds one new row.
+    follow_with(&mut logs, 0, 2, 3);
+    assert_eq!(
+        logs.unread(),
+        1,
+        "only the row new to the loaded set counts"
+    );
+
+    // A refresh of the same scope re-reads rows; it is not an arrival.
+    let refresh = logs.refresh().expect("refresh read");
+    assert!(logs.complete(
+        &refresh,
+        Ok(LogReply::Page(page(
+            0,
+            3,
+            30,
+            Some(cursor(4)),
+            Some(cursor(5))
+        )))
+    ));
+    assert_eq!(
+        logs.unread(),
+        0,
+        "a refresh resets the view and adds nothing"
+    );
+}
+
+#[test]
+fn unread_resets_on_a_scope_or_backend_switch() {
+    let mut logs = ready();
+    logs.set_away(true);
+    follow_with(&mut logs, 10, 2, 3);
+    assert_eq!(logs.unread(), 2);
+    logs.bind(Some(binding("b")), true);
+    assert_eq!(logs.unread(), 0, "another scope starts with nothing unread");
+    assert!(
+        logs.set_away(true),
+        "and the away state was reset with it, so scrolling away is a change again"
+    );
+    logs.bind(None, false);
+    assert_eq!(logs.unread(), 0, "a backend switch keeps nothing");
+}

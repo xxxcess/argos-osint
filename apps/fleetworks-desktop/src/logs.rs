@@ -145,6 +145,9 @@ pub struct LogCopy {
     pub excludes_shared_private: bool,
 }
 
+/// The log table's element key, for scroll requests.
+pub const TABLE_KEY: &str = "scoped-logs-table";
+
 #[derive(Default)]
 pub struct LogState {
     pub draft: LogDraft,
@@ -158,6 +161,10 @@ pub struct LogState {
     pub shared_private_logs_available: bool,
     pub message: Option<String>,
     pub following: bool,
+    /// The reader has scrolled off the newest rows at the top of the table.
+    away: bool,
+    /// Followed rows that arrived while the reader was away and that they have not seen.
+    unread: usize,
     pub visible: bool,
     pub window_focused: bool,
     pub export: LogExport,
@@ -206,6 +213,35 @@ impl LogState {
     /// interruption or a bound) keeps the load manual, so a failure never loops.
     pub fn auto_load_older(&self) -> bool {
         self.message.is_none() && self.can_load_older()
+    }
+    /// Records whether the reader is off the newest rows. Reaching them again clears the unread
+    /// count. Returns whether anything changed, so a scroll frame that changes nothing commits
+    /// no view.
+    pub fn set_away(&mut self, away: bool) -> bool {
+        if self.away == away {
+            return false;
+        }
+        self.away = away;
+        if !away {
+            self.unread = 0;
+        }
+        true
+    }
+    /// Newest rows that arrived while the reader was away from them.
+    pub fn unread(&self) -> usize {
+        self.unread
+    }
+    /// The jump control: clears the count and returns the newest row to scroll to.
+    pub fn jump_to_newest(&mut self) -> Option<String> {
+        self.unread = 0;
+        self.away = false;
+        self.rows.first().map(|row| row.id.clone())
+    }
+    /// Counts rows that were new to the loaded set, and only while the reader is away.
+    fn note_arrivals(&mut self, added: usize) {
+        if self.away && added > 0 {
+            self.unread = self.unread.saturating_add(added).min(DISPLAY_LIMIT);
+        }
     }
     pub fn can_export(&self) -> bool {
         self.available && !self.busy()
@@ -265,7 +301,9 @@ impl LogState {
     fn reset(&mut self) {
         self.cancel_requests();
         self.rows.clear();
-        self.table = TableState::new().key("scoped-logs-table");
+        self.table = TableState::new().key(TABLE_KEY);
+        self.away = false;
+        self.unread = 0;
         self.counts = None;
         self.apps.clear();
         self.apps_complete = false;
@@ -582,10 +620,12 @@ impl LogState {
         }
         match action {
             LogAction::Follow => {
+                let added = fresh.len();
                 fresh.reverse();
                 fresh.append(&mut self.rows);
                 self.rows = fresh;
                 self.follow_cursor = page.next_cursor;
+                self.note_arrivals(added);
             }
             LogAction::Refresh | LogAction::Older => {
                 self.rows.extend(fresh);

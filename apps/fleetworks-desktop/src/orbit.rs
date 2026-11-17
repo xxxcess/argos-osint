@@ -1,6 +1,6 @@
 //! Quiet Orbit: the native startup scene, drawn as vector layers over the shared `#060709` canvas.
 //!
-//! The orbit follows the owner's reference geometry (`assets/brand/reference/quiet-orbit/playback.json` once the matte canvas docs land): five
+//! The orbit follows the owner's reference geometry (`assets/brand/reference/quiet-orbit/playback.json`, checked by a test below): five
 //! persistent obsidian-glass prisms on one inclined, lifted ring around a smoky glass sphere of
 //! flowing molten liquid, above a fixed obsidian crescent. Orbit radius is 1.303 core radii, the
 //! inclination is 66 degrees, the ring is lifted 0.381 core radii, prisms are 0.70 scale, phases
@@ -10,10 +10,12 @@
 //! The scene is one 144 x 176 envelope that scales as a unit. Everything here is vector geometry
 //! with no raster, so there is no media rectangle to flash and nothing to decode at launch.
 //!
-//! shortcut: a bounded native vector scene, which the matte canvas motion doc allows in place of
-//! derived RGBA layers. The reference GIF, MP4 and PNG are not loaded at runtime (the native
-//! resource pipeline has no GIF support), so there is no asset to miss and nothing to fall back
-//! from; if derived layers are added later, a failed load must show the still from [`scene`].
+//! shortcut: a bounded native vector scene, which `docs/design/matte-canvas/motion.md` allows in
+//! place of derived RGBA layers. The reference GIF, MP4 and PNG under `assets/brand/reference/`
+//! are not loaded at runtime (the playback manifest says native adoption is pending and the
+//! native resource pipeline has no GIF support), so there is no asset to miss and nothing to
+//! fall back from. If derived layers are added later, a failed load must show the still from
+//! [`scene`] and keep setup usable.
 
 use std::f32::consts::PI;
 use std::f32::consts::TAU;
@@ -476,6 +478,38 @@ mod tests {
         let [large, _] = display_size(Some([1600.0, 900.0]));
         assert!(small < large);
         assert_eq!(display_size(None), display_size(Some([1180.0, 780.0])));
+    }
+
+    #[test]
+    fn geometry_and_timing_match_the_playback_manifest() {
+        let manifest: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../assets/brand/reference/quiet-orbit/playback.json"
+        ))
+        .expect("playback manifest");
+        let orbit = &manifest["orbit"];
+        let core = orbit["core_reference_radius_at_width_800_px"]
+            .as_f64()
+            .unwrap() as f32;
+        let at_800 = |key: &str| orbit[key].as_f64().unwrap() as f32;
+        assert!((at_800("radius_at_width_800_px") / core - RADIUS_RATIO).abs() < 1e-3);
+        assert!(
+            (at_800("projected_upward_offset_at_width_800_px") / core * CORE_RADIUS - LIFT).abs()
+                < 1e-2
+        );
+        assert!((at_800("inclination_degrees").to_radians() - INCLINATION).abs() < 1e-4);
+        assert!((at_800("prism_scale") - PRISM_SCALE).abs() < 1e-6);
+        assert_eq!(orbit["satellites"].as_u64(), Some(SATELLITE_COUNT as u64));
+        assert!((at_800("phase_spacing_degrees") - 360.0 / SATELLITE_COUNT as f32).abs() < 1e-4);
+        assert_eq!(
+            manifest["reference"]["seconds"].as_f64(),
+            Some(f64::from(LOOP_SECONDS))
+        );
+        let startup = &manifest["startup"];
+        let ms = |key: &str| startup[key].as_f64().unwrap();
+        assert!((ms("duration_ms") - crate::startup::CHOOSE_AT * 1000.0).abs() < 1e-6);
+        assert!((ms("crossfade_start_ms") - crate::startup::CROSSFADE_AT * 1000.0).abs() < 1e-6);
+        assert_eq!(manifest["canvas"]["color"].as_str(), Some("#060709"));
+        assert_eq!(crate::theme::BACKGROUND, "#060709");
     }
 
     #[test]

@@ -1,15 +1,23 @@
 name: Fleetworks
 
-# Scoped checks share one event-head planner. Backend engines stay in Linux
-# lanes; Rune Mac lanes build only the native client.
+# Pull request updates run the Linux first pass. Dispatch the second pass
+# for a reviewed head. Branch publication keeps the complete release gates.
 on:
   push:
     branches: [dev, nightly, main]
   pull_request:
     branches: [dev, nightly, main]
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
     inputs:
+      stage:
+        description: Standard verification or second pass after Linux review
+        type: choice
+        options: [standard, second]
+        default: standard
+      pr:
+        description: Open pull request number for second pass
+        type: string
       mode:
         description: Run every hosted check or compare an exact base
         type: choice
@@ -22,7 +30,7 @@ on:
         description: Expected checked-out commit for an exact dispatch
         type: string
       components:
-        description: Explicit native selects both Mac apps; auto uses the shared change planner
+        description: Standard dispatch component selection
         type: choice
         options: [auto, native, backend, all]
         default: auto
@@ -32,10 +40,11 @@ permissions:
   actions: read
 
 concurrency:
-  group: fleetworks-${{ github.event_name }}-${{ github.event_name == 'push' && github.ref != 'refs/heads/nightly' && 'stable' || github.event.pull_request.number || github.ref }}
+  group: fleetworks-${{ github.event_name }}-${{ github.event_name == 'push' && github.ref != 'refs/heads/nightly' && 'stable' || github.event.pull_request.number || github.ref }}-${{ inputs.stage || 'standard' }}
   cancel-in-progress: ${{ github.event_name != 'push' }}
 
 env:
+  FLEETWORKS_STAGE: ${{ github.event_name == 'pull_request' && 'first' || inputs.stage == 'second' && 'second' || 'standard' }}
   FLEETWORKS_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   CARGO_TERM_COLOR: always
@@ -48,21 +57,28 @@ jobs:
     name: Select verification scopes
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
     outputs:
       head: ${{ steps.release.outputs.head }}
-      desktop: ${{ steps.release.outputs.desktop }}
-      local_backend: ${{ steps.release.outputs.local_backend }}
-      server: ${{ steps.release.outputs.server }}
-      compose: ${{ steps.release.outputs.compose }}
-      queue: ${{ steps.release.outputs.queue }}
-      storage: ${{ steps.release.outputs.storage }}
-      bert: ${{ steps.release.outputs.bert }}
-      web: ${{ steps.release.outputs.web }}
-      web_dev: ${{ steps.release.outputs.web_dev }}
-      images: ${{ steps.release.outputs.images }}
-      image_targets: ${{ steps.release.outputs.image_targets }}
-      image_arch_json: ${{ steps.release.outputs.image_arch_json }}
-      full: ${{ steps.release.outputs.full }}
+      desktop_linux: ${{ steps.verification.outputs.desktop_linux }}
+      desktop_macos: ${{ steps.verification.outputs.desktop_macos }}
+      backend_matrix: ${{ steps.verification.outputs.backend_matrix }}
+      backend_arch: ${{ steps.verification.outputs.backend_arch }}
+      image_matrix: ${{ steps.verification.outputs.image_matrix }}
+      local_backend: ${{ steps.verification.outputs.local_backend }}
+      server: ${{ steps.verification.outputs.server }}
+      compose: ${{ steps.verification.outputs.compose }}
+      queue: ${{ steps.verification.outputs.queue }}
+      storage: ${{ steps.verification.outputs.storage }}
+      bert: ${{ steps.verification.outputs.bert }}
+      web: ${{ steps.verification.outputs.web }}
+      web_dev: ${{ steps.verification.outputs.web_dev }}
+      images: ${{ steps.verification.outputs.images }}
+      image_targets: ${{ steps.verification.outputs.image_targets }}
+      full: ${{ steps.verification.outputs.full }}
       publish: ${{ steps.release.outputs.publish }}
       release_version: ${{ steps.release.outputs.version }}
       release_tag: ${{ steps.release.outputs.tag }}
@@ -74,6 +90,17 @@ jobs:
           ref: ${{ env.FLEETWORKS_HEAD }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Validate second pass against the open PR and green first pass
+        if: inputs.stage == 'second'
+        id: promotion
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr }}
+          EXPECTED_HEAD: ${{ inputs.head }}
+          STANDARD_BASE: ${{ inputs.base }}
+          COMPONENTS: ${{ inputs.components }}
+        run: python3 .github/scripts/fleetworks_ci.py promote --output "$GITHUB_OUTPUT"
+
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version-file: .node-version
@@ -82,13 +109,15 @@ jobs:
         run: |
           python3 scripts/fleetworks_doc_links.py
           node scripts/release_check.mjs versions
-          node scripts/release_check.mjs event
+          if [[ "$GITHUB_EVENT_NAME" == push || "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            node scripts/release_check.mjs event
+          fi
           node --test .opencode/tests/*.test.mjs
           python3 -B -m unittest discover -s .github/scripts -p 'test_*.py'
       - name: Classify changes at the event head
         id: plan
         env:
-          FLEETWORKS_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          FLEETWORKS_BASE: ${{ steps.promotion.outputs.base || github.event.pull_request.base.sha || github.event.before }}
           DISPATCH_MODE: ${{ inputs.mode }}
           DISPATCH_BASE: ${{ inputs.base }}
           DISPATCH_HEAD: ${{ inputs.head }}
@@ -112,7 +141,7 @@ jobs:
           event="$GITHUB_EVENT_NAME"
           base="$FLEETWORKS_BASE"
           components="${DISPATCH_COMPONENTS:-auto}"
-          if [[ "$event" == pull_request ]]; then
+          if [[ "$FLEETWORKS_STAGE" != standard ]]; then
             if [[ ! "$base" =~ ^[0-9a-f]{40}$ || "$base" =~ ^0+$ ]]; then
               echo '::error::Pull request comparison requires a valid base SHA'
               exit 1
@@ -128,19 +157,8 @@ jobs:
               mkdir -p "$planner_root"
               git archive "$base" scripts | tar -x -C "$planner_root"
               touch "$RUNNER_TEMP/trusted-planner-ready"
-              if git merge-base "$base" "$FLEETWORKS_HEAD" >/dev/null 2>&1; then
-                changed_files="$(git diff --name-only --no-renames "$base...$FLEETWORKS_HEAD")"
-              else
-                changed_files="$(git diff --name-only --no-renames "$base" "$FLEETWORKS_HEAD")"
-              fi
-              if printf '%s\n' "$changed_files" | grep -Eq '^(\.github/workflows/(fleetworks|embedded)\.yml|\.github/scripts/|scripts/(fleetworks_(verify|native_verify|release)|test_fleetworks_(verify|release))\.py$)'; then
-                mode=full
-                components=all
-              fi
-              PYTHONPATH="$planner_root/scripts" python3 "$planner_root/scripts/fleetworks_verify.py" "$mode" \
-                --event "$event" --base "$base" \
-                --head "$FLEETWORKS_HEAD" --components "$components" \
-                --github-output "$GITHUB_OUTPUT" --json-output "$RUNNER_TEMP/scope.json"
+              PYTHONPATH="$planner_root/scripts" python3 .github/scripts/fleetworks_ci.py compare \
+                --base "$base" --head "$FLEETWORKS_HEAD" --output "$RUNNER_TEMP/scope.json"
             else
               BASE="$base" HEAD_SHA="$FLEETWORKS_HEAD" python3 - <<'PY'
           import json
@@ -166,22 +184,17 @@ jobs:
               "components": "all",
               "event": "pull_request",
               "format": 1,
-              "full": True,
+              "full": False,
               "head": os.environ["HEAD_SHA"],
               "image_arches": image_arches,
               "image_targets": image_targets,
-              "reason": "Trusted base ref does not include fleetworks planner; running full matrix",
+              "reason": "Trusted base does not include the planner; selecting all scopes for this pass",
               "scopes": scopes,
           }
           Path(os.environ["RUNNER_TEMP"], "scope.json").write_text(
               json.dumps(scope, indent=2, sort_keys=True) + "\n"
           )
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              for key in scopes:
-                  print(f"{key}=true", file=output)
-              print("full=true", file=output)
-              print(f"image_targets={','.join(image_targets)}", file=output)
-              print(f"image_arch_json={json.dumps(image_arches)}", file=output)
+
           PY
             fi
           else
@@ -217,13 +230,14 @@ jobs:
           scope["event"] = event
           (temporary / "release-scope.json").write_text(json.dumps(scope))
           trusted_marker = temporary / "trusted-planner-ready"
-          if event == "pull_request" and not trusted_marker.exists():
+          staged = os.environ["FLEETWORKS_STAGE"] != "standard"
+          if staged and not trusted_marker.exists():
               plan = {
                   "backend": True,
                   "base": scope["base"] or "",
                   "bert": True,
                   "channel": "",
-                  "event": "pull_request",
+                  "event": event,
                   "format": 1,
                   "head": os.environ["FLEETWORKS_HEAD"],
                   "image_tag": "",
@@ -257,7 +271,7 @@ jobs:
                   print("untyped_commits=0", file=output)
                   print("release_web=true", file=output)
           else:
-              if event == "pull_request":
+              if staged:
                   planner_scripts = str(temporary / "trusted-planner" / "scripts")
                   env = dict(os.environ, PYTHONPATH=planner_scripts)
                   args = [
@@ -288,6 +302,12 @@ jobs:
               print("plan=" + json.dumps(plan, separators=(",", ":")), file=output)
           PY
 
+      - name: Select jobs for the current pass
+        id: verification
+        run: |
+          python3 .github/scripts/fleetworks_ci.py select --stage "$FLEETWORKS_STAGE" \
+            --plan "$RUNNER_TEMP/release.json" --output "$GITHUB_OUTPUT"
+
       - name: Clean up trusted planner checkout
         if: always()
         shell: bash
@@ -295,11 +315,9 @@ jobs:
           rm -rf "$RUNNER_TEMP/trusted-planner" "$RUNNER_TEMP/trusted-planner-ready"
 
   desktop:
-    # Other platform app builds start after the Linux app succeeds so runner time goes to Linux
-    # first. Their result is reported but only blocks trusted publication (see source_checks).
     name: Mac app / ${{ matrix.target }}
     needs: [scope, desktop_linux]
-    if: needs.scope.outputs.desktop == 'true' || needs.scope.outputs.local_backend == 'true'
+    if: always() && needs.scope.result == 'success' && needs.scope.outputs.desktop_macos == 'true' && (needs.desktop_linux.result == 'success' || needs.desktop_linux.result == 'skipped')
     strategy:
       fail-fast: false
       matrix:
@@ -318,7 +336,7 @@ jobs:
   desktop_linux:
     name: Linux app / x86_64-unknown-linux-gnu
     needs: scope
-    if: needs.scope.outputs.desktop == 'true' || needs.scope.outputs.local_backend == 'true'
+    if: needs.scope.outputs.desktop_linux == 'true'
     uses: ./.github/workflows/fleetworks-native-linux.yml
     with:
       expected-head: ${{ needs.scope.outputs.head }}
@@ -327,12 +345,14 @@ jobs:
       release-version: ${{ needs.scope.outputs.publish == 'true' && needs.scope.outputs.release_version || '' }}
 
   embedded:
-    name: Affected embedded storage / Linux AMD64 and ARM64
+    name: Affected embedded storage
     needs: scope
     if: needs.scope.outputs.storage == 'true'
     uses: ./.github/workflows/embedded.yml
     with:
       head: ${{ needs.scope.outputs.head }}
+      arch: ${{ needs.scope.outputs.backend_arch }}
+      scoped: ${{ github.event_name == 'pull_request' }}
 
   server:
     name: Backend suite / Linux ${{ matrix.arch }}
@@ -341,17 +361,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - arch: amd64
-            runner: ubuntu-24.04
-            machine: x86_64
-            target: x86_64-unknown-linux-gnu
-            executable: 'ELF 64-bit.*x86-64'
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-            machine: aarch64
-            target: aarch64-unknown-linux-gnu
-            executable: 'ELF 64-bit.*(aarch64|ARM aarch64)'
+        include: ${{ fromJson(needs.scope.outputs.backend_matrix) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     env:
@@ -369,6 +379,11 @@ jobs:
           components: rustfmt
       - name: Install libclang for the embedded delivery queue
         run: sudo apt-get update && sudo apt-get install -y libclang-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: distributed-backend-${{ matrix.arch }}
+          workspaces: . -> target/agents
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Resolve pinned isolated datastore before API tests
         id: surreal
         shell: bash
@@ -504,9 +519,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - {arch: amd64, runner: ubuntu-24.04}
-          - {arch: arm64, runner: ubuntu-24.04-arm}
+        include: ${{ fromJson(needs.scope.outputs.image_matrix) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     steps:
@@ -516,16 +529,16 @@ jobs:
           persist-credentials: false
           lfs: false
       - name: Test selected private search contracts
-        if: contains(needs.scope.outputs.image_targets, 'search-index')
+        if: contains(matrix.targets, 'search-index')
         run: |
           rustup toolchain install 1.95.0 --profile minimal
           python3 scripts/agent_cargo.py test --locked --no-default-features -p fleetworks-search-index
       - name: Build selected image closure and smoke exact container IDs
         env:
-          IMAGE_TARGETS: ${{ needs.scope.outputs.image_targets }}
+          IMAGE_TARGETS: ${{ matrix.targets }}
           IMAGE_ARCH: ${{ matrix.arch }}
           OWNER: ${{ github.repository_owner }}
-          COMPOSE_SELECTED: ${{ needs.scope.outputs.compose }}
+          COMPOSE_SELECTED: ${{ matrix.compose }}
         shell: bash
         run: |
           set -euo pipefail
@@ -554,17 +567,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: Linux AMD64
-            runner: ubuntu-24.04
-            arch: amd64
-            machine: x86_64
-            executable: 'ELF 64-bit.*x86-64'
-          - name: Linux ARM64
-            runner: ubuntu-24.04-arm
-            arch: arm64
-            machine: aarch64
-            executable: 'ELF 64-bit.*(aarch64|ARM aarch64)'
+        include: ${{ fromJson(needs.scope.outputs.backend_matrix) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 65
     steps:
@@ -606,12 +609,13 @@ jobs:
           retention-days: 7
 
   bert:
-    name: Atlas BERT runtime / Linux AMD64 and ARM64
+    name: Atlas BERT runtime
     needs: scope
     if: needs.scope.outputs.bert == 'true'
     uses: ./.github/workflows/atlas-bert.yml
     with:
-      head: ${{ github.event.pull_request.head.sha || github.sha }}
+      head: ${{ needs.scope.outputs.head }}
+      arch: ${{ needs.scope.outputs.backend_arch }}
 
   web:
     name: Scoped web
@@ -623,7 +627,7 @@ jobs:
       development: ${{ needs.scope.outputs.web_dev == 'true' }}
 
   source_checks:
-    name: Fleetworks source checks
+    name: ${{ inputs.stage == 'second' && 'Fleetworks second pass source checks' || github.event_name == 'workflow_dispatch' && 'Fleetworks manual source checks' || 'Fleetworks source checks' }}
     needs: [scope, desktop, desktop_linux, server, embedded, compose, bert, web, images]
     if: always()
     runs-on: ubuntu-24.04
@@ -633,7 +637,8 @@ jobs:
         env:
           SCOPE_RESULT: ${{ needs.scope.result }}
           PUBLISH_SELECTED: ${{ needs.scope.outputs.publish }}
-          DESKTOP_SELECTED: ${{ needs.scope.outputs.desktop == 'true' || needs.scope.outputs.local_backend == 'true' }}
+          MAC_SELECTED: ${{ needs.scope.outputs.desktop_macos }}
+          LINUX_SELECTED: ${{ needs.scope.outputs.desktop_linux }}
           LOCAL_BACKEND_SELECTED: ${{ needs.scope.outputs.local_backend }}
           SERVER_SELECTED: ${{ needs.scope.outputs.server }}
           COMPOSE_SELECTED: ${{ needs.scope.outputs.compose == 'true' && needs.scope.outputs.images != 'true' }}
@@ -690,12 +695,12 @@ jobs:
             true:true|false:true|false:false) ;;
             *) echo '::error::Development browser scope needs the web gate'; failed=1 ;;
           esac
-          if [[ "$PUBLISH_SELECTED" == true ]]; then
-            verify desktop "$DESKTOP_SELECTED" "$DESKTOP_RESULT" || failed=1
+          if [[ "$PUBLISH_SELECTED" == true || "$FLEETWORKS_STAGE" != standard ]]; then
+            verify desktop "$MAC_SELECTED" "$DESKTOP_RESULT" || failed=1
           else
-            report desktop "$DESKTOP_SELECTED" "$DESKTOP_RESULT"
+            report desktop "$MAC_SELECTED" "$DESKTOP_RESULT"
           fi
-          verify desktop_linux "$DESKTOP_SELECTED" "$DESKTOP_LINUX_RESULT" || failed=1
+          verify desktop_linux "$LINUX_SELECTED" "$DESKTOP_LINUX_RESULT" || failed=1
           verify server "$SERVER_SELECTED" "$SERVER_RESULT" || failed=1
           verify embedded "$STORAGE_SELECTED" "$EMBEDDED_RESULT" || failed=1
           verify compose "$COMPOSE_SELECTED" "$COMPOSE_RESULT" || failed=1
@@ -777,7 +782,7 @@ jobs:
           retention-days: 7
 
   prepublish:
-    name: Fleetworks artifact checks
+    name: ${{ inputs.stage == 'second' && 'Fleetworks second pass artifact checks' || github.event_name == 'workflow_dispatch' && 'Fleetworks manual artifact checks' || 'Fleetworks artifact checks' }}
     needs: [scope, source_checks, release_images]
     if: always()
     runs-on: ubuntu-24.04
@@ -844,7 +849,7 @@ jobs:
             --directory "$RUNNER_TEMP/release"
 
   required:
-    name: Fleetworks required
+    name: ${{ inputs.stage == 'second' && 'Fleetworks second pass' || github.event_name == 'workflow_dispatch' && 'Fleetworks manual verification' || 'Fleetworks required' }}
     needs: [scope, prepublish, publish]
     if: always()
     runs-on: ubuntu-24.04

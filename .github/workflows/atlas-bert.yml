@@ -13,6 +13,10 @@ on:
         description: Exact full source SHA
         type: string
         required: true
+      arch:
+        description: Linux architecture selected by Fleetworks (amd64, arm64 or both)
+        type: string
+        default: both
 
 permissions:
   contents: read
@@ -38,13 +42,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - arch: amd64
-            runner: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
+        include: ${{ fromJson(
+          inputs.arch == 'amd64' && '[{"arch":"amd64","runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu"}]'
+          || inputs.arch == 'arm64' && '[{"arch":"arm64","runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu"}]'
+          || '[{"arch":"amd64","runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu"},{"arch":"arm64","runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu"}]') }}
     runs-on: ${{ matrix.runner }}
     # Match deploy/Dockerfile's Debian bookworm/glibc2.36 runtime. No QEMU or
     # Ubuntu24/glibc2.39 host binary is accepted as deployment-compatible.
@@ -164,7 +165,7 @@ jobs:
     if: always()
     runs-on: ubuntu-24.04
     steps:
-      - name: Require both native runtime legs
+      - name: Require selected native runtime legs
         env:
           RUNTIME_RESULT: ${{ needs.runtime.result }}
         run: test "$RUNTIME_RESULT" = success
@@ -175,22 +176,26 @@ jobs:
       - name: Reject missing mismatched or failed runtime evidence
         env:
           EXPECTED_HEAD: ${{ env.ATLAS_BERT_HEAD }}
+          EXPECTED_ARCH: ${{ inputs.arch || 'both' }}
         run: |
           python3 - <<'PY'
           import json
           import os
           from pathlib import Path
           manifests = sorted(Path("evidence").rglob("evidence.json"))
+          expected = {
+              "amd64": {"amd64"}, "arm64": {"arm64"}, "both": {"amd64", "arm64"}
+          }[os.environ["EXPECTED_ARCH"]]
           found = set()
           for path in manifests:
               value = json.loads(path.read_text())
               arch = value["arch"]
-              if arch in found or arch not in ("amd64", "arm64") or value["source_sha"] != os.environ["EXPECTED_HEAD"] or value["status"] != "passed" or not value.get("actions_artifact", {}).get("id"):
+              if arch in found or arch not in expected or value["source_sha"] != os.environ["EXPECTED_HEAD"] or value["status"] != "passed" or not value.get("actions_artifact", {}).get("id"):
                   raise SystemExit("Mismatched or failed Linux runtime evidence")
               if value["dirty"] or value["unit_tests_passed"] < 1 or any(value[key]["status"] != "passed" for key in ("build_inference", "extracted_inference")):
                   raise SystemExit("Missing real runtime checks")
               found.add(arch)
-          if found != {"amd64", "arm64"} or len(manifests) != 2:
-              raise SystemExit("Both native Linux architectures must supply evidence")
-          print("Both native Linux classifier runtimes verified for " + os.environ["EXPECTED_HEAD"])
+          if found != expected or len(manifests) != len(expected):
+              raise SystemExit("Every selected native Linux architecture must supply evidence")
+          print("Verified native Linux classifier runtimes: " + ", ".join(sorted(found)))
           PY

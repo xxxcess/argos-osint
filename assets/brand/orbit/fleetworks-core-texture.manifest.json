@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "role": "Quiet Orbit core: the approved smoky glass sphere with molten flow, drawn clipped to a circle",
+  "source": {
+    "path": "assets/brand/source/fleetworks-liquid-metal-glass.png",
+    "sha256": "1ae553782431da7649a1d88accdacc9076c3a039f1c2b5c0018f5998d7d70112"
+  },
+  "sphere_in_source_px": {
+    "centre": [
+      835.5,
+      434.5
+    ],
+    "radius": 209.0
+  },
+  "texture": {
+    "size_px": 384,
+    "covers_sphere_diameters": 1.12,
+    "resampling": "bilinear",
+    "alpha": "opaque"
+  },
+  "outputs": {
+    "fleetworks-core-texture.png": {
+      "bytes": 301705,
+      "sha256": "9d96af4eba5605acf8eacd6206a9e3765ba976e5a860a0d1808a19856b9f2a98"
+    },
+    "fleetworks-core-texture.rgba": {
+      "bytes": 589824,
+      "sha256": "d3e4c5f48389bd22a5853167ed02bdb3caf6c7cead80e4270e201e37b90e3bee",
+      "fnv1a32": 1864096320
+    }
+  }
+}

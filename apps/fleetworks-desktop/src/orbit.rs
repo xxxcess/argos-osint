@@ -7,16 +7,16 @@
 //! are 72 degrees apart and one revolution takes eight seconds. The three-second startup samples
 //! the first part of that same loop; it never speeds up to finish a turn.
 //!
-//! The scene is one 144 x 176 envelope that scales as a unit. Everything is vector geometry plus
-//! one radial gradient on the sphere's round body, with no raster, so there is no media rectangle
-//! to flash and nothing to decode at launch.
+//! The scene is one 144 x 176 envelope that scales as a unit. It is vector geometry for the
+//! crescent and prisms plus one derived texture for the core, with no decoder and no media
+//! rectangle to flash: the texture's bytes go straight into a Rune `Pixels`.
 //!
-//! Materials: the core is a smoky glass body (radial gradient) under twelve overlapping,
-//! translucent amber, ivory and umber ribbons that flow continuously and loop seamlessly with
-//! the orbit; the crescent is coarse fractured obsidian (about eighty angular facets from the
-//! shared [`rock::noise`] hash) with a polished edge and faint flecks; each prism is glass with a
-//! lit and a shaded facet, an inner bevel, a lit edge and a warm reflection. See
-//! `docs/design/matte-canvas/motion.md` for the comparison and reproduction steps.
+//! Materials: the core is the approved smoky glass sphere with its molten ivory and amber flow,
+//! cropped from the approved source (`assets/brand/orbit/`) and drawn in a circle as two layers
+//! that drift against each other (whole turns of the eight-second loop); the crescent is coarse
+//! fractured obsidian (about eighty angular facets from the shared [`rock::noise`] hash) with a
+//! polished edge and faint flecks; each prism is glass with a lit and a shaded facet, an inner
+//! bevel, a lit edge and a warm reflection. See `docs/design/matte-canvas/motion.md`.
 //!
 //! shortcut: a bounded native vector scene, which `docs/design/matte-canvas/motion.md` allows in
 //! place of derived RGBA layers. The reference GIF, MP4 and PNG under `assets/brand/reference/`
@@ -150,40 +150,41 @@ pub(crate) struct Satellite {
     pub depth: f32,
 }
 
-/// One ribbon of the molten flow: where it sits in the sphere and how it moves. `turns` is a
-/// whole number so every ribbon returns to its start at the end of the eight-second loop.
-struct Ribbon {
-    lift: f32,
-    sway: f32,
-    waves: f32,
-    offset: f32,
-    turns: f32,
-    width: f32,
-    color: &'static str,
-    alpha: f32,
+/// The core's photographic texture: the approved smoky glass sphere with its molten ivory and
+/// amber flow, cropped from the approved source by `assets/brand/source/derive_core_texture.py`
+/// (384 x 384 opaque RGBA, covering [`CORE_TEXTURE_MARGIN`] sphere diameters). It is drawn as two
+/// layers that drift against each other inside a circle, so the flow moves without the baked GIF.
+static CORE_RGBA: &[u8] =
+    include_bytes!("../../../assets/brand/orbit/fleetworks-core-texture.rgba");
+const CORE_TEXTURE_SIZE: u32 = 384;
+/// The texture covers this multiple of the sphere diameter.
+const CORE_TEXTURE_MARGIN: f32 = 1.12;
+/// Drift of the front layer, as a fraction of the sphere diameter. The margin keeps every
+/// corner of the source image outside the circle at this amplitude.
+const CORE_DRIFT: f32 = 0.035;
+
+thread_local! {
+    static CORE_PIXELS: rune::Pixels = {
+        let pixels = rune::Pixels::new();
+        pixels.set(CORE_TEXTURE_SIZE, CORE_TEXTURE_SIZE, CORE_RGBA.to_vec());
+        pixels
+    };
 }
 
-const RIBBON_STEPS: usize = 24;
-/// Ribbon centre lines stay inside this fraction of the core radius.
-const FLOW_REACH: f32 = 0.74;
-/// Radians the flow is turned by, so it sweeps diagonally across the sphere.
-const FLOW_TILT: f32 = -0.38;
-/// Amber, ivory and smoky-umber ribbons: the reference's continuous molten flow.
-#[rustfmt::skip]
-const RIBBONS: [Ribbon; 12] = [
-    Ribbon { lift: -0.28, sway: 0.22, waves: 1.0, offset: 0.0, turns: 1.0, width: 0.16, color: "#E6D6AE", alpha: 0.38 },
-    Ribbon { lift: -0.08, sway: 0.26, waves: 1.1, offset: 1.1, turns: -1.0, width: 0.18, color: "#C98A3E", alpha: 0.4 },
-    Ribbon { lift: 0.1, sway: 0.22, waves: 0.9, offset: 2.0, turns: 1.0, width: 0.17, color: "#F2E6C6", alpha: 0.34 },
-    Ribbon { lift: 0.26, sway: 0.2, waves: 1.2, offset: 0.6, turns: -1.0, width: 0.14, color: "#8A5A22", alpha: 0.42 },
-    Ribbon { lift: -0.4, sway: 0.14, waves: 1.5, offset: 2.8, turns: 2.0, width: 0.08, color: "#FFF3D2", alpha: 0.3 },
-    Ribbon { lift: 0.38, sway: 0.14, waves: 1.0, offset: 1.7, turns: 1.0, width: 0.1, color: "#C98A3E", alpha: 0.34 },
-    Ribbon { lift: -0.02, sway: 0.3, waves: 0.8, offset: 3.6, turns: 2.0, width: 0.07, color: "#FFF6DC", alpha: 0.42 },
-    Ribbon { lift: 0.16, sway: 0.12, waves: 1.6, offset: 4.4, turns: -2.0, width: 0.07, color: "#3B2814", alpha: 0.45 },
-    Ribbon { lift: -0.2, sway: 0.18, waves: 1.1, offset: 5.0, turns: -1.0, width: 0.1, color: "#2A1C0E", alpha: 0.38 },
-    Ribbon { lift: 0.0, sway: 0.34, waves: 0.7, offset: 0.4, turns: 1.0, width: 0.22, color: "#F5EAD0", alpha: 0.2 },
-    Ribbon { lift: -0.34, sway: 0.16, waves: 1.3, offset: 3.1, turns: -2.0, width: 0.09, color: "#B8823A", alpha: 0.34 },
-    Ribbon { lift: 0.3, sway: 0.18, waves: 1.4, offset: 5.6, turns: 2.0, width: 0.08, color: "#EFE0B8", alpha: 0.3 },
-];
+/// Where the two core layers sit `seconds` into the loop, as fractions of the sphere diameter
+/// from the centred rest position: `[front, back]`, each `[x, y]`. Both are whole turns of the
+/// eight-second loop, so the flow repeats seamlessly, and the layers move in opposite senses at
+/// different rates so the texture shears like liquid.
+pub(crate) fn core_drift(seconds: f32) -> [[f32; 2]; 2] {
+    let turn = phase(seconds);
+    [
+        [CORE_DRIFT * turn.sin(), CORE_DRIFT * turn.cos()],
+        [
+            -0.8 * CORE_DRIFT * (2.0 * turn).sin(),
+            0.8 * CORE_DRIFT * (2.0 * turn + 1.0).cos(),
+        ],
+    ]
+}
 
 fn circle(center: [f32; 2], radius: f32, steps: usize) -> Vec<[f32; 2]> {
     (0..steps)
@@ -271,55 +272,6 @@ pub(crate) fn satellites(seconds: f32) -> [Satellite; SATELLITE_COUNT] {
             depth: z,
         }
     })
-}
-
-/// The molten flow `seconds` into the loop: each ribbon as one filled outline (a tapered band
-/// along a sine path) with its translucent color. Ribbons drift, cross and overlap, so the core
-/// reads as continuous liquid through smoky glass rather than separate shapes.
-pub(crate) fn flow(seconds: f32) -> Vec<(Vec<[f32; 2]>, rune::Color)> {
-    let turn = phase(seconds);
-    RIBBONS
-        .iter()
-        .map(|ribbon| {
-            let u_at = |i: usize| -1.0 + 2.0 * i as f32 / RIBBON_STEPS as f32;
-            let centre: Vec<[f32; 2]> = (0..=RIBBON_STEPS)
-                .map(|i| {
-                    let u = u_at(i);
-                    let x = 0.80 * u * CORE_RADIUS;
-                    let wave = PI * ribbon.waves * u + ribbon.offset + ribbon.turns * turn;
-                    let y = (ribbon.lift + ribbon.sway * wave.sin()) * CORE_RADIUS;
-                    // Tilt the whole flow so the swirl sweeps diagonally, as in the reference.
-                    let (x, y) = (
-                        x * FLOW_TILT.cos() - y * FLOW_TILT.sin(),
-                        x * FLOW_TILT.sin() + y * FLOW_TILT.cos(),
-                    );
-                    let reach = x.hypot(y);
-                    let k = if reach > FLOW_REACH * CORE_RADIUS {
-                        FLOW_REACH * CORE_RADIUS / reach
-                    } else {
-                        1.0
-                    };
-                    [CORE[0] + x * k, CORE[1] + y * k]
-                })
-                .collect();
-            let (mut left, mut right) = (Vec::new(), Vec::new());
-            for i in 0..=RIBBON_STEPS {
-                let before = centre[i.saturating_sub(1)];
-                let after = centre[(i + 1).min(RIBBON_STEPS)];
-                let (dx, dy) = (after[0] - before[0], after[1] - before[1]);
-                let length = dx.hypot(dy).max(1e-4);
-                let u = u_at(i);
-                let taper = (1.0 - u * u).max(0.0).powf(0.7);
-                let half = (0.5 * ribbon.width * CORE_RADIUS * taper).max(0.15);
-                let (nx, ny) = (-dy / length, dx / length);
-                left.push([centre[i][0] + nx * half, centre[i][1] + ny * half]);
-                right.push([centre[i][0] - nx * half, centre[i][1] - ny * half]);
-            }
-            right.reverse();
-            left.extend(right);
-            (left, theme::hex(ribbon.color).alpha(ribbon.alpha))
-        })
-        .collect()
 }
 
 /// Smallest distance from `point` to the closed polygon's edges.
@@ -446,39 +398,15 @@ pub(crate) fn layers(seconds: f32, animated: bool) -> (Shape, Shape) {
         );
     }
 
-    // Over the sphere's body: continuous molten flow, then the smoky glass shell.
-    let mut front = Shape::new();
-    for (outline, color) in flow(seconds) {
-        front = front.fill(outline, color);
-    }
-    front = front
-        .fill(
-            circle(
-                [CORE[0] - 0.30 * CORE_RADIUS, CORE[1] - 0.34 * CORE_RADIUS],
-                0.46 * CORE_RADIUS,
-                36,
-            ),
-            theme::hex("#FFFFFF").alpha(0.045),
-        )
-        .stroke_with(
-            circle(CORE, CORE_RADIUS - 1.8, 72),
-            true,
-            3.0,
-            LineCap::Butt,
-            theme::hex("#050403").alpha(0.45),
-        )
-        .stroke_with(
-            circle(CORE, CORE_RADIUS - 0.5, 72),
-            true,
-            1.0,
-            LineCap::Butt,
-            theme::hex("#CFC5AA").alpha(0.45),
-        )
-        .stroke(
-            arc(CORE, CORE_RADIUS - 4.0, PI * 1.12, PI * 1.45, 12),
-            1.2,
-            theme::hex("#F3EEE4").alpha(0.40),
-        );
+    // Over the sphere's photographic body: only a faint rim line, since the texture already
+    // carries the glass edge, its reflections and the molten flow.
+    let mut front = Shape::new().stroke_with(
+        circle(CORE, CORE_RADIUS - 0.5, 72),
+        true,
+        0.8,
+        LineCap::Butt,
+        theme::hex("#CFC5AA").alpha(0.30),
+    );
     for satellite in prisms.iter().filter(|s| s.depth >= 0.0) {
         front = prism(front, satellite);
     }
@@ -495,22 +423,30 @@ fn stack(seconds: f32, animated: bool, width: f32, height: f32) -> El {
     let (back, front) = layers(seconds, animated);
     let k = width / ENVELOPE[0];
     let diameter = 2.0 * CORE_RADIUS * k;
+    let at = if animated { seconds } else { STILL_SECONDS };
+    let tile = CORE_PIXELS.with(rune::Pixels::clone);
+    // Two copies of the photographic sphere inside a circle: the front one drifts, the back one
+    // drifts against it at a different rate and shows through at half strength.
+    let image = diameter * CORE_TEXTURE_MARGIN;
+    let inset = (diameter - image) / 2.0;
+    let [front_drift, back_drift] = core_drift(at);
+    let layer = |drift: [f32; 2], opacity: f32, key: &'static str| {
+        el().key(key)
+            .absolute(inset + drift[0] * diameter, inset + drift[1] * diameter)
+            .size(image, image)
+            .pixels(&tile)
+            .opacity(opacity)
+            .a11y_hidden()
+    };
     let body = el()
         .key("orbit-core")
         .absolute((CORE[0] - CORE_RADIUS) * k, (CORE[1] - CORE_RADIUS) * k)
         .size(diameter, diameter)
         .radius(diameter / 2.0)
-        .fill(theme::hex("#0F0C09"))
-        .radial_gradient(
-            [0.40, 0.60],
-            diameter * 0.62,
-            [
-                (0.0, theme::hex("#C9A66A")),
-                (0.35, theme::hex("#8A6A3E")),
-                (0.70, theme::hex("#3A2A18")),
-                (1.0, theme::hex("#120E0A")),
-            ],
-        )
+        .clip_rounded(diameter / 2.0)
+        .fill(theme::hex("#0B0907"))
+        .child(layer(back_drift, 1.0, "orbit-core-back"))
+        .child(layer(front_drift, 0.55, "orbit-core-front"))
         .a11y_hidden();
     el().w(width)
         .h(height)
@@ -691,41 +627,61 @@ mod tests {
     }
 
     #[test]
-    fn the_molten_flow_moves_loops_and_stays_inside_the_sphere() {
-        let first = flow(0.0);
-        let later = flow(2.0);
-        assert_eq!(first.len(), RIBBONS.len());
+    fn the_core_layers_drift_loop_and_never_expose_the_texture_corners() {
+        let at_start = core_drift(0.0);
+        assert_ne!(at_start, core_drift(2.0), "the flow moves");
+        // The loop is seamless: the drift at the loop's end is the drift at its start.
+        let wrapped = core_drift(LOOP_SECONDS);
+        for (a, b) in at_start.iter().zip(wrapped.iter()) {
+            assert!((a[0] - b[0]).abs() < 1e-4 && (a[1] - b[1]).abs() < 1e-4);
+        }
+        // The two layers move differently, so the texture shears instead of sliding.
+        assert_ne!(core_drift(1.0)[0], core_drift(1.0)[1]);
+        // At the largest shift the circle (radius 0.5 diameter) stays inside the texture
+        // (half width 0.5 * margin diameters), so the source's corners never show.
+        let mut farthest = 0.0_f32;
+        for seconds in samples() {
+            for [x, y] in core_drift(seconds) {
+                farthest = farthest.max(x.hypot(y));
+            }
+        }
         assert!(
-            first.iter().zip(later.iter()).any(|(a, b)| a.0 != b.0),
-            "the flow moves"
+            0.5 + farthest < 0.5 * CORE_TEXTURE_MARGIN,
+            "reach {}",
+            0.5 + farthest
         );
-        // The loop is seamless: the flow at the loop's end is the flow at its start.
-        let wrapped = flow(LOOP_SECONDS);
-        for (a, b) in first.iter().zip(wrapped.iter()) {
-            for (p, q) in a.0.iter().zip(b.0.iter()) {
-                assert!((p[0] - q[0]).abs() < 1e-3 && (p[1] - q[1]).abs() < 1e-3);
-            }
-        }
-        for seconds in samples().step_by(7) {
-            for (outline, color) in flow(seconds) {
-                assert!(outline.len() >= 4 && color.a > 0.0 && color.a < 0.5);
-                for [x, y] in outline {
-                    let reach = (x - CORE[0]).hypot(y - CORE[1]);
-                    assert!(reach < CORE_RADIUS * 0.9, "{reach} at {seconds}s");
-                }
-            }
-        }
     }
 
     #[test]
-    fn the_flow_is_amber_ivory_and_umber_translucent_layers() {
-        // Warm and cool ends of the reference's molten range, all translucent.
-        let colors: Vec<_> = RIBBONS.iter().map(|r| r.color).collect();
-        assert!(colors.contains(&"#C98A3E") && colors.contains(&"#F2E6C6"));
-        assert!(colors.contains(&"#3B2814"));
-        assert!(RIBBONS
-            .iter()
-            .all(|r| r.turns.fract() == 0.0 && r.alpha < 0.5));
+    fn the_core_texture_is_the_committed_approved_sphere() {
+        let size = CORE_TEXTURE_SIZE as usize;
+        assert_eq!(CORE_RGBA.len(), size * size * 4);
+        let mut hash = 0x811C_9DC5_u32;
+        for byte in CORE_RGBA {
+            hash = (hash ^ u32::from(*byte)).wrapping_mul(0x0100_0193);
+        }
+        // The same hash is recorded in assets/brand/orbit/fleetworks-core-texture.manifest.json.
+        assert_eq!(hash, 1_864_096_320);
+        assert!(CORE_RGBA.chunks(4).all(|px| px[3] == 255), "opaque");
+        let luma = |x: usize, y: usize| {
+            let at = (y * size + x) * 4;
+            0.2126 * f32::from(CORE_RGBA[at])
+                + 0.7152 * f32::from(CORE_RGBA[at + 1])
+                + 0.0722 * f32::from(CORE_RGBA[at + 2])
+        };
+        let mean = |x0: usize, y0: usize, n: usize| {
+            let mut sum = 0.0;
+            for y in y0..y0 + n {
+                for x in x0..x0 + n {
+                    sum += luma(x, y);
+                }
+            }
+            sum / (n * n) as f32
+        };
+        // A lit molten sphere in the middle, dark space and glass at the edges.
+        let centre = mean(size / 2 - 40, size / 2 - 40, 80);
+        let edge = mean(0, size / 2 - 40, 8);
+        assert!(centre > 3.0 * edge.max(1.0), "centre {centre}, edge {edge}");
     }
 
     #[test]

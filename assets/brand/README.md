@@ -9,3 +9,5 @@ The older `fleetworks-mark.svg`, `fleetworks-logo.svg` and `fleetworks-logo.jpg`
 Brand display areas use the symbol without a visible wordmark. Product identity remains available in accessible names, native/window metadata and documentation. Only the logo has a permanent metallic finish. Coarse matte crescent texture is reserved for Submit/Confirm/Create/Delete action faces; ordinary controls and content remain smooth matte. Runtime alpha, sizing, platform icon derivatives and packaging remain implementation work under the handoff.
 
 The action-button rock tile lives in `rock/` (derived from the approved source by `source/derive_rock_tile.py`; PNG for web, raw RGBA for native, and a manifest with the source hash, crop and output hashes). See the [recipe](../../docs/design/matte-canvas/theme.md#the-committed-crescent-tile-implemented).
+
+The Quiet Orbit core texture lives in `orbit/` (the approved sphere cropped from the source by `source/derive_core_texture.py`, as PNG and raw RGBA with a manifest). Verify it with `python3 assets/brand/source/derive_core_texture.py --check`.

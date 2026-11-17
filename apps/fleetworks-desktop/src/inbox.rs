@@ -384,7 +384,6 @@ pub(crate) fn toolbar_item(state: &State, kit: &Kit, layers: &mut Vec<El>) -> El
         .trigger(bell(inbox, kit))
         .title("Inbox")
         .label("Inbox")
-        .description("Changes this app observed. Nothing is sent to your device.")
         .placement(rune_kit::Placement::BottomEnd)
         .open(inbox.open)
         .padding(0.0)
@@ -443,14 +442,24 @@ fn body(state: &State, kit: &Kit) -> El {
         .w(320.0)
         .min_h(0.0)
         .child(
-            rune::row()
+            // The helper wraps inside the popover instead of running past its edge.
+            rune::col().w_full().px(12.0).pt(10.0).child(
+                rune::text("Changes this app observed. Nothing is sent to your device.")
+                    .key("inbox-helper")
+                    .font(kit.ty.small)
+                    .color(theme::hex(theme::TEXT_MUTED))
+                    .wrap()
+                    .min_w(0.0),
+            ),
+        )
+        .child(
+            // Filter and action stack, so the action stays inside the popover at any text width.
+            rune::col()
                 .w_full()
                 .px(12.0)
                 .py(8.0)
-                .gap(8.0)
-                .center_y()
+                .gap(6.0)
                 .child(filter)
-                .child(rune::spacer())
                 .child(mark),
         )
         .child(rune_kit::popover::fit_scroll(rows))
@@ -697,5 +706,58 @@ mod tests {
         runtime.frame(3.0 / 60.0);
         assert!(runtime.find(&format!("inbox-item-{id}-detail")).is_some());
         assert_eq!(runtime.state.inbox.unread(), 0);
+    }
+
+    #[test]
+    fn the_popover_helper_and_mark_all_read_stay_inside_it_at_wide_and_compact_sizes() {
+        for size in [(1280.0, 800.0), (640.0, 480.0)] {
+            let mut state = crate::tests::registered_fixture();
+            state.inbox.observe(0.0, obs(1, Link::Connecting));
+            state.inbox.observe(1.0, obs(1, Link::Connected));
+            state.inbox.open = true;
+            let mut runtime = rune::Runtime::new(
+                state,
+                crate::app::view,
+                size,
+                rune::Env {
+                    system_dark: true,
+                    scale: 1.0,
+                },
+            );
+            for frame in 0..4 {
+                runtime.frame(f64::from(frame) / 60.0);
+            }
+            let rect = |key: &str| {
+                runtime
+                    .elements()
+                    .into_iter()
+                    .find(|element| element.key.as_deref() == Some(key))
+                    .unwrap_or_else(|| panic!("{key} at {size:?}"))
+                    .rect
+            };
+            let (body, helper, mark) = (
+                rect("inbox-body"),
+                rect("inbox-helper"),
+                rect("inbox-mark-all-read"),
+            );
+            let inside = |inner: [f32; 4]| {
+                inner[0] >= body[0] - 0.5
+                    && inner[0] + inner[2] <= body[0] + body[2] + 0.5
+                    && inner[1] >= body[1] - 0.5
+                    && inner[1] + inner[3] <= body[1] + body[3] + 0.5
+            };
+            assert!(
+                inside(helper),
+                "helper {helper:?} outside body {body:?} at {size:?}"
+            );
+            assert!(
+                inside(mark),
+                "action {mark:?} outside body {body:?} at {size:?}"
+            );
+            assert!(
+                body[0] >= 0.0 && body[0] + body[2] <= size.0,
+                "popover {body:?} leaves the {size:?} window"
+            );
+        }
     }
 }

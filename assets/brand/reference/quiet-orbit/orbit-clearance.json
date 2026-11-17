@@ -1,0 +1,113 @@
+{
+  "status": "PASS",
+  "reference_frame": "fleetworks-01-quiet-orbit.png",
+  "reference_frame_sha256": "35c13debc012a6bb40fc9d377af46f6085a45561ac29d5d3c39e2993d18c7e03",
+  "dimensions": [
+    800,
+    450
+  ],
+  "geometry": {
+    "radius_px_at_800": 130.0,
+    "radius_ratio": 1.3031175059952038,
+    "inclination_degrees": 66.0,
+    "lift_px_at_800": 38.0,
+    "prism_scale": 0.7
+  },
+  "phase_samples": 1440,
+  "phase_step_degrees": 0.25,
+  "tested_triangles": 7200,
+  "scope": "All complete projected filled triangle silhouettes and alpha fringes, including rear/occluded sprites; no credit for draw-order hiding.",
+  "bezier_polygon_clearance": {
+    "minimum_px": 13.323367691219723,
+    "worst_phase_degrees": 114.5,
+    "worst_satellite_id": 1,
+    "per_satellite_minimum_px": [
+      13.323367691219723,
+      14.195371888390747,
+      15.17268044040067,
+      15.334334290599726,
+      13.761789014078067
+    ]
+  },
+  "actual_painted_mask_clearance": {
+    "8": {
+      "painted_moon_pixels": 19903,
+      "minimum_pixel_center_distance_px": 10.63014581273465,
+      "footprint_pixel_samples": 6022018,
+      "overlap_pixel_samples": 0,
+      "worst": {
+        "phase_degrees": 116.5,
+        "satellite_id": 1,
+        "satellite_alpha_pixel_center": [
+          266,
+          199
+        ]
+      },
+      "pixel_square_edge_gap_lower_bound_px": 9.215932250361554,
+      "gap_after_additional_0_6px_sampling_reserve_px": 8.615932250361555
+    },
+    "4": {
+      "painted_moon_pixels": 23442,
+      "minimum_pixel_center_distance_px": 9.848857801796104,
+      "footprint_pixel_samples": 6022018,
+      "overlap_pixel_samples": 0,
+      "worst": {
+        "phase_degrees": 244.25,
+        "satellite_id": 1,
+        "satellite_alpha_pixel_center": [
+          534,
+          198
+        ]
+      },
+      "pixel_square_edge_gap_lower_bound_px": 8.434644239423008,
+      "gap_after_additional_0_6px_sampling_reserve_px": 7.8346442394230085
+    }
+  },
+  "temporal_sampling": {
+    "maximum_adjacent_phase_vertex_displacement_px": 1.0324086461476902,
+    "additional_reported_reserve_px": 0.6,
+    "note": "Dense finite sweep; 0.6px is an additional engineering allowance, not a formal continuous-time interval proof."
+  },
+  "orbital_motion": {
+    "winding_turns_around_actual_core_per_satellite": [
+      -0.9999999999999991,
+      -1.000000000000003,
+      -1.0000000000000018,
+      -1.0,
+      -1.0000000000000009
+    ],
+    "rear_center_maximum_below_actual_core_px": 7.632608667459294,
+    "all_have_front_and_rear_depth": true
+  },
+  "implied_prism_volume_model": {
+    "core_radius_scene_units": 99.76076555023923,
+    "camera_distance_scene_units": 748.2057416267942,
+    "projection": "p=1/(1-z/D); world_x=(screen_x-cx)/p; world_y=(screen_y-cy)/p; world_z=z. Thus the fixed screen lift is included exactly in world_y.",
+    "solid": "Filled transformed triangle at assigned depth z, conservatively extruded parallel to the depth axis by \u00b1half_depth.",
+    "measure": "Closest point on the complete triangular prism to the core origin, minus the spherical core radius.",
+    "results": [
+      {
+        "assumed_prism_half_depth_scene_units": 0,
+        "minimum_distance_to_core_origin_scene_units": 110.60963760381483,
+        "minimum_clearance_above_core_radius_scene_units": 10.848872053575604
+      },
+      {
+        "assumed_prism_half_depth_scene_units": 4,
+        "minimum_distance_to_core_origin_scene_units": 107.38745916384872,
+        "minimum_clearance_above_core_radius_scene_units": 7.62669361360949
+      },
+      {
+        "assumed_prism_half_depth_scene_units": 6,
+        "minimum_distance_to_core_origin_scene_units": 105.72495348526905,
+        "minimum_clearance_above_core_radius_scene_units": 5.964187935029827
+      },
+      {
+        "assumed_prism_half_depth_scene_units": 8,
+        "minimum_distance_to_core_origin_scene_units": 104.03394058408766,
+        "minimum_clearance_above_core_radius_scene_units": 4.273175033848432
+      }
+    ],
+    "limitation": "This is the stated bounding model for 2.5D artwork. It is not a measured mesh thickness or volumetric 3D simulation."
+  },
+  "conclusion": "No crescent overlap. Visible painted-rim gap remains above8px with the stated reserves; the extremely faint4/255 fringe remains approximately8px away. All five satellites retain full orbits and lie outside the core in the stated volume model."
+}

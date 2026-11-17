@@ -7,9 +7,11 @@ Use the canonical [agent workflow](../../../docs/wiki/code/agent-workflow.md) wi
 
 # Argos React UI
 
-Read `docs/wiki/code/react-ui.md` for the design baseline and evidence workflow; follow `docs/wiki/code/intel-web.md` for product semantics. Paths are relative to the repository root.
+Read `docs/wiki/code/react-ui.md` for the audited web composition and evidence workflow; follow `docs/wiki/code/intel-web.md` for product semantics. The approved [matte-canvas theme](../../../docs/design/matte-canvas/theme.md) and [interaction-state contract](../../../docs/design/matte-canvas/interaction-state.md) own future paint/loading/scroll targets; mockups are not runtime evidence. Paths are relative to the repository root.
 
-- Before editing, run the design process in `docs/wiki/code/react-ui.md#argos-look--feel-reference`: screen type, density (default or compact), nearest primitive, then type, space, accent, component treatment, and states. Use the Fleetworks matte obsidian/graphite and gold/ivory tokens while preserving the existing terminal-desk/HUD structure. Follow the shared native design guide for paint/branding; keep web layout and topology behavior. Design the component creatively inside that theme; do not switch palette, typeface, or brand.
+- Before editing, run the design process in `docs/wiki/code/react-ui.md#argos-look--feel-reference`: screen type, density (default or compact), nearest primitive, then type, space, semantic accent, component treatment and states. Preserve existing web composition, typography, routes and topology/list behavior; share paint and generic interaction contracts without importing native setup/service workflows.
+- Use symbol-only branding, cool-gray text and smooth matte surfaces that blend into the canvas. Only the logo retains permanent metallic sheen; coarse matte crescent-rock texture is restricted to Submit/Confirm/Create/Delete actions (Connect qualifies). Utility/navigation controls stay smooth. The canonical theme owns exact treatments and semantic colors; do not restore primary ivory/gold accents.
+- Keep headings and resolved content steady. Pending regions use layout-matched, constant-base skeletons with localized cool translated shimmer and static reduced-motion alternatives. Long data lists use continuous near-end loading, stable rows/scroll anchors and local tail error/Retry, without Prev/Next or page-number chrome; preserve opaque cursor and request-identity contracts.
 - Use React Native primitives and keep the Next React Compiler pipeline and Hooks/compiler lint enabled; fix diagnostics and verify compiled-build behavior.
 - Reuse `@argos/ui`; keep feature composition in `@argos/intel` and browser-only behavior in the web app. For component APIs, remote state or render performance also load `argos-react-patterns`.
 - Cover wide/narrow layouts, long content and relevant loading/empty/error/offline states. Preserve source attribution, evidence distinctions, image fallback and ready-gated actions.
@@ -19,3 +21,4 @@ Read `docs/wiki/code/react-ui.md` for the design baseline and evidence workflow;
 
 This skill adapts selected Vercel ideas; provenance and exclusions are in the design baseline. No upstream fetch or dependency installation is required to use it.
 - Topology graphs use the force-graph canvas (`ForceCanvas` / `react-force-graph-3d`) with an accessible list twin and tokens passed into draw code; load it lazily client-only and honor reduced motion (see react-ui.md#canvas-visualizations). Do not add another graph renderer.
+

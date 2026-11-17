@@ -1,5 +1,7 @@
 # Fleetworks — Native client cutover implementation spec
 
+> Visual supersession: this dated record retains its original implementation/evidence context. New work follows the approved [matte canvas theme](../../docs/design/matte-canvas/README.md) and [current implementation handoff](../2026-11-16-matte-canvas/handoff.md). Earlier gold/ivory primary accents, pointer reflections, blanket textured controls, decorative panel rims and routine page controls are not the current visual target.
+
 **Consolidated revision · November 12, 2026.** Replaces v12 and superseded interim scope proposals. Inputs: the supplied v12 handoff and the latest global-page, workspace-container, workstation-only activity, and indexing-pace decisions. This is the implementation contract, not evidence that code, CI, a credential reset, or runnable artifacts exist.
 
 **Recorded source baseline:** `xxxcess/argos-osint`, `feat/atlas-zero-shot` at `f8bc447c86f59c369a9259c6d0739681fadd1e94`. **Recorded Rune candidate:** `anomalyco/rune` at `205b8d4f7e60fa6248b83bfbbb4c6a06096c59ff`. These are prior review pins, not a fresh HEAD check or proof of compatibility. Reconcile changed source before implementation; proposed routes/packages/scripts remain proposed until implemented and tested.

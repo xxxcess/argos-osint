@@ -21,6 +21,8 @@ python3 scripts/fleetworks_verify.py native-ui --agent \
   --output .agent-scratch/native-ui/selected-review
 ```
 
+Compare affected visual scenes with the approved `docs/design/matte-canvas/` theme, motion and interaction/state targets. Check symbol-only branding, blended matte layers, texture only for Submit/Confirm/Create/Delete actions, local loading sheen and stable continuous-scroll behavior. Generated concept mockups are targets, not Runtime evidence.
+
 Choose scenes from the actual executable inventory; the helper rejects zero, unknown, missing and stale output. Use affected compact/wide, scale, loading/error, matte/material and accessibility states. Add an existing bounded input script and expected final tree key when interaction matters. Keep outputs ignored and preserve original failure diagnostics. Never use terminal cells or an image approximation as Rune evidence.
 
 Open generated PNGs and inspect text, focus, clipping, scroll regions, contrast and state. Record generated versus inspected separately; repair demonstrated failures and rerun affected cases. Headless output does not prove Launch Services, real dialogs/clipboard, system preferences, minimum OS or matching-hardware GUI behavior. Report exact commands, executed cases, selected scene/profile/script, inspection findings and pending external checks. Do not claim signing, publication, live inference or backend integration from a native fixture.

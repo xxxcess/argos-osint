@@ -128,6 +128,57 @@ capture before handoff. Actual helper tests/rendering must be executed by the in
 the active acceptance tracker (for the cutover baseline, see
 [cutover acceptance](../../../.planning/2026-11-11-rune-macos-cutover/acceptance.md)).
 
+## Matte Canvas target review
+
+The approved [Matte Canvas theme](../../design/matte-canvas/theme.md),
+[interaction/state contract](../../design/matte-canvas/interaction-state.md) and
+[motion guide](../../design/matte-canvas/motion.md) define a **target**, not a
+recorded native implementation or verification result. The
+[implementation handoff](../../../.planning/2026-11-16-matte-canvas/handoff.md)
+maps the affected production symbols. Existing verification commands and
+historical evidence above remain applicable and unchanged. Run product checks
+only within the task's authorized verification scope.
+
+Register affected production-view scenes before selecting them with the existing
+helper; do not invent a scene name or infer availability from a mockup filename.
+Use controlled Runtime effects for state ordering and scripts for input/scroll
+behavior, then inspect captures and real temporal sequences separately.
+
+| Target | Focused review |
+| --- | --- |
+| [Workstation](../../design/matte-canvas/mockups/01-workstation-status.png) and [compact Workstation](../../design/matte-canvas/mockups/04-compact-workstation.png) | Match approved hierarchy and spacing; smooth matte cards/rows, softly blended canvas, cool text, semantic status and stable compact grids. Loading and settled telemetry must share the measured row/column decision. |
+| [Gateway setup](../../design/matte-canvas/mockups/02-setup-gateway.png) | Preserve real setup, focus and credential/pairing behavior while matching the composition. Utility controls remain smooth matte. Only Submit/Confirm/Create/Delete actions receive coarse moon-rock material. |
+| [Jobs and Logs](../../design/matte-canvas/mockups/03-jobs-logs.png) | Continuous scrolling replaces Previous/Next/page numbers without changing opaque cursor/authorization contracts. Verify stable row identity, anchor/focus/selection, boundary loading/retry, finite cache behavior and no extra log toolbar. |
+| Splash → gateway → service loading/live state | Complete logo materials from the first visible frame, five satellites clear of the crescent, finite three-second startup and a continuous shared canvas. Preserve symbol-only branding; permanent sheen is logo-only, with cool sheen reserved separately for unresolved loading. |
+
+Exercise native **640×480 and 1600×900 at 1×/2×**, plus the affected measured
+breakpoints and actual production Linux preferences. Reduced motion must retain
+the same static geometry. Inspect functional focus and error affordances after
+decorative panel strokes are removed. Compare the whole flow at the same exposure
+and size; approved mockups are design references, never substitute Runtime PNGs.
+
+Required temporal cases are initial load → data/verified empty; repeated unchanged
+refresh; empty log success → several empty follows; readiness refresh failure →
+retry → recovery; late obsolete query/scope/generation replies; mutation acceptance
+versus completion; and active interruption versus terminal completion. Headings,
+connection health and retained content must not be remounted or renamed per poll.
+Skeletons retain a steady base with a translated cool sheen; completion/error must
+not wait for an animation or cosmetic timer.
+
+For continuous lists, drive repeated boundary events, duplicate/repeated/empty
+cursors, tail failures and local retries, then invalidate scope during an in-flight
+read. Assert one admitted read per query/cursor, deduplicated rows, no-progress
+pause, honest end-versus-bound state and no all-backend fallback. Insert, prepend
+and evict while the reader is scrolled away or a row is focused/expanded: preserve
+the row/pixel anchor, and resume log live-edge following only when the reader
+returns. Record chosen cache/overscan caps and observed memory, rather than calling
+unbounded accumulation continuous scrolling.
+
+Keep separate evidence for documentation review, unit/Runtime assertions,
+capture generation, actual visual/temporal inspection and installed-app behavior.
+Static screenshots alone cannot prove absence of flicker or scroll jumps. This
+target-review addition records no new product test, capture or GUI pass.
+
 ## Dispatchable UI visual review
 
 After an agent freezes a native or web UI PR revision, dispatch

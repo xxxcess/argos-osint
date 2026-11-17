@@ -1,0 +1,9 @@
+{
+  "name": "fleetworks-quiet-orbit-preview",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Offline selected Quiet Orbit preview renderer; separate from the native app runtime.",
+  "dependencies": {
+    "sharp": "0.35.5"
+  }
+}

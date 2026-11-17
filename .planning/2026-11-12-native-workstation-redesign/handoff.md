@@ -1,5 +1,7 @@
 # Native workstation redesign — handoff
 
+> Visual supersession: this dated record retains its original implementation/evidence context. New work follows the approved [matte canvas theme](../../docs/design/matte-canvas/README.md) and [current implementation handoff](../2026-11-16-matte-canvas/handoff.md). Earlier gold/ivory primary accents, pointer reflections, blanket textured controls, decorative panel rims and routine page controls are not the current visual target.
+
 **State:** product changes implemented;120 scoped library tests pass, full embedded runtime gate blocked by disk capacity. [Acceptance/results](acceptance.md) · [Docs audit](phase8-design.md) · [Backend audit](phase9-design.md)
 
 [![Native setup and independent backend](../../docs/diagrams/native-connections.svg)](../../docs/diagrams/native-connections.html)

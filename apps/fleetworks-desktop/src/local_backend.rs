@@ -553,15 +553,87 @@ pub fn build_companion_command(
     Ok(command)
 }
 
-/// Bounded lossy stderr sanitization for diagnostics display without control codes.
+/// Removes terminal escape sequences so only readable text is left: CSI (`ESC [ ... final`, the
+/// colors and cursor moves a logger writes), OSC and the other string sequences (`ESC ] ...` up
+/// to BEL or `ESC \`), two-byte and intermediate escapes, and a stray `ESC`. An unterminated
+/// string sequence ends at the next newline, so one bad line never hides the diagnostics after it.
+#[must_use]
+pub fn strip_terminal_escapes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\u{1b}' {
+            out.push(ch);
+            continue;
+        }
+        match chars.peek().copied() {
+            Some('[') => {
+                chars.next();
+                // Parameters and intermediates, then one final byte.
+                while let Some(&c) = chars.peek() {
+                    if ('\u{20}'..='\u{3f}').contains(&c) {
+                        chars.next();
+                    } else {
+                        if ('\u{40}'..='\u{7e}').contains(&c) {
+                            chars.next();
+                        }
+                        break;
+                    }
+                }
+            }
+            Some(']' | 'P' | 'X' | '^' | '_') => {
+                chars.next();
+                while let Some(c) = chars.next() {
+                    if c == '\u{7}' {
+                        break;
+                    }
+                    if c == '\u{1b}' {
+                        if chars.peek() == Some(&'\\') {
+                            chars.next();
+                        }
+                        break;
+                    }
+                    if c == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            Some(c) if ('\u{20}'..='\u{2f}').contains(&c) => {
+                // Intermediates (such as the charset selector `ESC ( B`), then a final byte.
+                while chars
+                    .peek()
+                    .is_some_and(|c| ('\u{20}'..='\u{2f}').contains(c))
+                {
+                    chars.next();
+                }
+                if chars
+                    .peek()
+                    .is_some_and(|c| ('\u{30}'..='\u{7e}').contains(c))
+                {
+                    chars.next();
+                }
+            }
+            Some(c) if ('\u{30}'..='\u{7e}').contains(&c) => {
+                chars.next();
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Bounded lossy stderr sanitization for diagnostics display without control codes. Terminal
+/// escape sequences are removed whole before the tail is taken, so a cut never leaves a
+/// fragment such as `[0m`.
 #[must_use]
 pub fn sanitize_stderr_excerpt(bytes: &[u8]) -> String {
-    let tail = if bytes.len() > MAX_STDERR_EXCERPT_BYTES {
-        &bytes[bytes.len() - MAX_STDERR_EXCERPT_BYTES..]
-    } else {
-        bytes
-    };
-    String::from_utf8_lossy(tail)
+    let text = strip_terminal_escapes(&String::from_utf8_lossy(bytes));
+    let mut start = text.len().saturating_sub(MAX_STDERR_EXCERPT_BYTES);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    text[start..]
         .chars()
         .filter(|ch| *ch == '\n' || !ch.is_control())
         .collect::<String>()

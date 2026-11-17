@@ -137,7 +137,7 @@ fn backend_mode_card(
     preferences: crate::accessibility::ViewPreferences,
     kit: &Kit,
     pointer_ref: Option<&rune::Live<[f32; 2]>>,
-    shadow_ref: Option<&rune::Live<[f32; 2]>>,
+    _shadow_ref: Option<&rune::Live<[f32; 2]>>,
 ) -> El {
     let remote_btn = ActionButton::new("Remote Gateway")
         .key("backend-mode-remote")
@@ -176,7 +176,7 @@ fn backend_mode_card(
             .child(remote_btn)
             .child(local_btn)
     };
-    material::luminous_card(
+    material::responsive_card(
         rune::col()
             .padding(16.0)
             .gap(10.0)
@@ -195,9 +195,7 @@ fn backend_mode_card(
             .child(buttons),
         StatusTone::Neutral,
         false,
-        preferences,
-        pointer_ref,
-        shadow_ref,
+        narrow,
     )
 }
 
@@ -376,7 +374,7 @@ fn local_backend_setup_card(
     preferences: crate::accessibility::ViewPreferences,
     kit: &Kit,
     pointer_ref: Option<&rune::Live<[f32; 2]>>,
-    shadow_ref: Option<&rune::Live<[f32; 2]>>,
+    _shadow_ref: Option<&rune::Live<[f32; 2]>>,
 ) -> El {
     let mut body = rune::col()
         .padding(16.0)
@@ -558,7 +556,7 @@ fn local_backend_setup_card(
     } else {
         StatusTone::Accent
     };
-    material::luminous_card(body, tone, false, preferences, pointer_ref, shadow_ref)
+    material::responsive_card(body, tone, false, narrow)
 }
 
 fn setup_gateway(state: &State, cx: &Cx<State>, kit: &Kit) -> El {

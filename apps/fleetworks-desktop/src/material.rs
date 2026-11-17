@@ -159,7 +159,8 @@ impl GroupEdge {
     };
 
     /// The group's coverage `depth` px inside its boundary: `t*t*(3-2t)` for `t = depth / ramp`.
-    pub(crate) fn alpha(self, depth: f32) -> f32 {
+    #[cfg(test)]
+    fn alpha(self, depth: f32) -> f32 {
         let t = (depth / self.ramp).clamp(0.0, 1.0);
         t * t * (3.0 - 2.0 * t)
     }
@@ -180,6 +181,17 @@ pub(crate) fn luminous_card(
     _shadow_offset: Option<&Live<[f32; 2]>>,
 ) -> El {
     group_surface(content, tone, selected, GroupEdge::STANDARD)
+}
+
+/// A group that takes the compact perimeter in a compact window, so every control of a setup
+/// card stays reachable at the 640 x 480 floor.
+pub(crate) fn responsive_card(content: El, tone: StatusTone, selected: bool, compact: bool) -> El {
+    let edge = if compact {
+        GroupEdge::COMPACT
+    } else {
+        GroupEdge::STANDARD
+    };
+    group_surface(content, tone, selected, edge)
 }
 
 /// Draw `content` as a group with the perimeter `edge`, inset to clear the ramp.

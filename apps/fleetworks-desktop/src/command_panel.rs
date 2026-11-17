@@ -96,11 +96,15 @@ pub struct CommandPanel {
     pub(crate) open: bool,
     pub(crate) query: TextEdit,
     pub(crate) active: usize,
+    /// Set when the panel opens; the panel's first layout moves keyboard focus into the filter
+    /// and clears it, so typing works without a click and resizing never steals focus again.
+    pub(crate) focus_pending: bool,
 }
 
 impl CommandPanel {
     pub(crate) fn close(&mut self) {
         self.open = false;
+        self.focus_pending = false;
         self.query = TextEdit::new("");
         self.active = 0;
     }
@@ -135,6 +139,7 @@ impl State {
         self.commands.query = TextEdit::new("");
         self.commands.active = 0;
         self.commands.open = true;
+        self.commands.focus_pending = true;
     }
 
     pub(crate) fn run_command(&mut self, command: Command) {
@@ -293,7 +298,16 @@ pub(crate) fn view(
         .radius(10.0)
         .child(header)
         .child(body)
-        .token_motion(kit.motion.overlay);
+        .token_motion(kit.motion.overlay)
+        // Keyboard focus goes to the filter as soon as the panel is laid out, once per opening.
+        .on_layout_tx(|state: &mut State, _rect: [f32; 4], tx| {
+            if state.commands.focus_pending {
+                state.commands.focus_pending = false;
+                tx.focus("command-search/input", true);
+            } else {
+                tx.live_only();
+            }
+        });
     for shadow in kit.shadow_layers(&kit.elevation.overlay) {
         panel = panel.box_shadow(shadow);
     }
@@ -446,5 +460,40 @@ mod tests {
         runtime.frame(4.0 / 60.0);
         assert!(!runtime.state.commands.open);
         assert_eq!(runtime.state.page, Page::Jobs);
+    }
+
+    #[test]
+    fn opening_the_panel_puts_keyboard_focus_in_the_filter_without_a_click() {
+        let mut runtime = rune::Runtime::new(
+            crate::tests::registered_fixture(),
+            crate::app::view,
+            (1280.0, 800.0),
+            rune::Env {
+                system_dark: true,
+                scale: 1.0,
+            },
+        );
+        let focused_filter = |runtime: &rune::Runtime<State>| {
+            runtime.elements().iter().any(|element| {
+                element.focused
+                    && element.key.as_deref() == Some("input")
+                    && element.path.contains("command-search")
+            })
+        };
+        runtime.frame(0.0);
+        assert!(!focused_filter(&runtime));
+        for opening in 0..2 {
+            runtime.update(|state, _| state.open_command_panel());
+            for step in 1..5 {
+                runtime.frame(f64::from(opening * 10 + step) / 60.0);
+            }
+            assert!(
+                focused_filter(&runtime),
+                "the filter has focus after opening {opening}"
+            );
+            assert!(!runtime.state.commands.focus_pending, "requested once");
+            runtime.update(|state, _| state.commands.close());
+            runtime.frame(f64::from(opening * 10 + 6) / 60.0);
+        }
     }
 }

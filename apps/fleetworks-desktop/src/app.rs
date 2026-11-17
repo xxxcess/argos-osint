@@ -878,6 +878,10 @@ impl State {
         }
     }
 
+    pub(crate) fn readiness_pending(&self) -> bool {
+        self.readiness_request.is_some()
+    }
+
     pub fn refresh_readiness(&mut self) {
         if !self.connected() {
             self.readiness =

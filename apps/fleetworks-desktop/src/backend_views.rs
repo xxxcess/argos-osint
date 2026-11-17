@@ -2241,7 +2241,7 @@ pub(crate) fn maintenance_confirmation_content(
     } else {
         Some("The backend context or selected dataset changed. Cancel and review again.".into())
     };
-    let refreshing = state.readiness_request.is_some() || state.configuration_read_pending();
+    let refreshing = state.readiness_pending() || state.configuration_read_pending();
     let is_reindex = confirmation.operation == MaintenanceOperation::ReindexActors;
     let title = if is_reindex {
         "Build actor search index".to_owned()

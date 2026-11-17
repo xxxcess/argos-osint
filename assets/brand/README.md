@@ -9,4 +9,4 @@
 | `brand-manifest.json` | Hashes, geometry and timing for every file above. |
 
 The native splash is drawn from vector geometry in `apps/fleetworks-desktop/src/orbit.rs`, over the
-shared `#060709` canvas. `brand-manifest.json` records its geometry and timing.
+shared `#060709` canvas. `brand-manifest.json` records its geometry and timing. Geometry, timing, the reduced-motion still and reproduction steps are in [Quiet Orbit, matte theme and live states](../../docs/design/native-workstation-handoff/brand-space-ui/README.md).

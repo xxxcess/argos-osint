@@ -6,11 +6,11 @@
 
 ## Cold-launch startup
 
-Each cold launch of the production app shows the packaged Fleetworks logo for 3 seconds. The logo fades in over 250 ms, holds until 2.75 s, then fades out. With Reduced Motion it stays static for the same 3 seconds. Then **Choose your connection** offers **Local Embedded** and **Remote Gateway**.
+Each cold launch of the production app plays the **Quiet Orbit** scene for 3 seconds over the same `#060709` canvas as setup and the services: a dim molten-glass sphere, an obsidian crescent and five obsidian-glass satellites on an inclined orbit. The complete scene is visible from the first frame and plays at its eight-second pace (it does not speed up to finish a turn). From 2.65 s it crossfades into **Choose your connection**, which offers **Local Embedded** and **Remote Gateway**; the choice takes input at 3.00 s. With Reduced Motion the scene is one still for the same 3 seconds. The orbit scales as one unit with the window (compact widths, fractional scale, high DPI). It is drawn from vector geometry, so there is no media file to fail; [how to rebuild and check it](../../design/native-workstation-handoff/brand-space-ui/fleetworks-splash-handoff.md#reproduce).
 
 Choosing a destination only opens the existing setup for it. Nothing starts a companion, connects, or falls back to the other transport. Starting and connecting stay explicit actions there. The splash does not run again on reconnect.
 
-A launch with `--api-origin` or `--api-token-file` skips the splash and choice, so scripted and CI launches are unchanged. Fixtures skip it too. The code is `apps/fleetworks-desktop/src/startup.rs`.
+A launch with `--api-origin` or `--api-token-file` skips the splash and choice, so scripted and CI launches are unchanged. Fixtures skip it too. The timeline is `apps/fleetworks-desktop/src/startup.rs` and the scene is `apps/fleetworks-desktop/src/orbit.rs`.
 
 ## Inbox and Assistant dock
 

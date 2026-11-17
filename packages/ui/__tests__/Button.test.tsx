@@ -227,4 +227,60 @@ describe("Button token bindings", () => {
     expect(colors.accentSoft).toBe("rgba(36, 220, 227, 0.1)");
     expect(colors.border).toBe("#647587");
   });
+
+  it("gives a submit action the theme base, cyan ink and a 44 px target", () => {
+    const { container } = render(
+      <Button onPress={() => {}} intent="submit">
+        Connect
+      </Button>,
+    );
+    const button = buttonEl(container)!;
+    expect(applied(button).backgroundColor).toBe("rgb(16, 38, 44)");
+    expect(applied(button).minHeight).toBe("44px");
+    expect(applied(button).borderTopColor).toBe("rgb(100, 117, 135)");
+    expect(applied(screen.getByText("Connect")).color).toBe(
+      "rgb(36, 220, 227)",
+    );
+  });
+
+  it("tints confirm mint and delete rose, and a disabled action returns to the raised base", () => {
+    const { container, rerender } = render(
+      <Button onPress={() => {}} intent="confirm">
+        Confirm
+      </Button>,
+    );
+    expect(applied(buttonEl(container)).backgroundColor).toBe(
+      "rgb(16, 40, 31)",
+    );
+    expect(applied(screen.getByText("Confirm")).color).toBe(
+      "rgb(35, 223, 160)",
+    );
+    rerender(
+      <Button onPress={() => {}} intent="delete">
+        Delete
+      </Button>,
+    );
+    expect(applied(buttonEl(container)).backgroundColor).toBe(
+      "rgb(43, 24, 35)",
+    );
+    expect(applied(screen.getByText("Delete")).color).toBe(
+      "rgb(242, 128, 160)",
+    );
+    rerender(
+      <Button onPress={() => {}} intent="delete" disabled>
+        Delete
+      </Button>,
+    );
+    expect(applied(buttonEl(container)).backgroundColor).toBe(
+      "rgb(18, 24, 32)",
+    );
+    expect(applied(screen.getByText("Delete")).color).toBe(
+      "rgb(129, 146, 164)",
+    );
+  });
+
+  it("leaves a button without an intent smooth", () => {
+    const { container } = render(<Button onPress={() => {}}>Plain</Button>);
+    expect(applied(buttonEl(container)).minHeight).toBe("40px");
+  });
 });

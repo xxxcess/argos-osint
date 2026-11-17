@@ -19,6 +19,7 @@ use rune_kit::Elevation;
 use rune_kit::Kit;
 
 use crate::accessibility::ViewPreferences;
+use crate::rock;
 use crate::theme;
 use crate::theme::StatusTone;
 
@@ -197,57 +198,42 @@ fn finish_colors(finish: MetalFinish) -> (Color, Color, Color) {
     }
 }
 
-/// The context tint of a textured finish.
-fn finish_tint(finish: MetalFinish) -> Color {
-    match finish {
-        MetalFinish::FracturedConfirm => theme::hex(theme::STATUS_OK),
-        MetalFinish::FracturedDanger => theme::hex(theme::STATUS_ERR),
-        _ => theme::hex(theme::ACCENT),
+/// The overlay of one shard. It changes a channel by about `50 * opacity * |tone|` levels at
+/// most: matte relief, not gloss. Lighter shards add TEXT_PRIMARY, darker ones CAST_SHADOW.
+fn shard_color(tone: f32, opacity: f32) -> Color {
+    if tone > 0.0 {
+        theme::hex(theme::TEXT_PRIMARY).alpha(0.22 * opacity * tone)
+    } else {
+        theme::hex(theme::CAST_SHADOW).alpha((1.25 * opacity * -tone).min(1.0))
     }
 }
 
-/// The fractured-obsidian texture: faceted shards alternating faint light and dark, with a few
-/// cool cracks in the tint. Coordinates span a 100 x 32 box that stretches to the control, inset
-/// so no facet pokes outside the rounded corners. It paints over the fill and under the label.
-pub(crate) fn fracture_shape(tint: Color, opacity: f32) -> Shape {
-    let a = [3.0, 2.0];
-    let b = [40.0, 2.0];
-    let c = [97.0, 2.0];
-    let d = [97.0, 30.0];
-    let e = [60.0, 30.0];
-    let f = [3.0, 30.0];
-    let p = [34.0, 14.0];
-    let q = [66.0, 9.0];
-    let r = [80.0, 20.0];
-    let s = [22.0, 22.0];
-    let facets: [[[f32; 2]; 3]; 12] = [
-        [a, b, p],
-        [b, q, p],
-        [b, c, q],
-        [c, r, q],
-        [c, d, r],
-        [r, d, e],
-        [q, r, e],
-        [p, q, e],
-        [p, e, f],
-        [s, p, f],
-        [a, p, s],
-        [a, s, f],
-    ];
+/// Tiles laid side by side under one action; the 256 px tile repeats to 768 px. Shortcut: a
+/// wider action shows no texture past that, and one taller than the 90 px tile rows has none
+/// below them. Raise the count if a wider textured action appears.
+const TILE_COPIES: usize = 3;
+
+/// The fractured-obsidian texture, one 256 px tile from [`crate::rock`] repeated along x. It is
+/// anchored to the control's top-left corner at a fixed scale, so a label, busy state or width
+/// change never moves it, and it is clipped to the control's rounded corners. It paints over
+/// the fill and under the label.
+fn rock_texture(radius: f32, opacity: f32) -> El {
     let mut shape = Shape::new();
-    for (index, facet) in facets.iter().enumerate() {
-        // At most about 6 channel levels of relief at the rest opacity of 0.12: matte, not gloss.
-        let color = if index % 2 == 0 {
-            theme::hex(theme::TEXT_PRIMARY).alpha(0.22 * opacity)
-        } else {
-            theme::hex(theme::CAST_SHADOW).alpha(1.25 * opacity)
-        };
-        shape = shape.fill(facet.to_vec(), color);
+    for shard in rock::shards() {
+        shape = shape.fill(shard.points.to_vec(), shard_color(shard.tone, opacity));
     }
-    for (from, to) in [(p, q), (q, r), (p, e), (q, e), (b, p), (b, q), (r, e)] {
-        shape = shape.line(from, to, 0.6, rune::LineCap::Butt, tint.alpha(opacity));
-    }
-    shape.view_box(100.0, 32.0)
+    let tiles = (0..TILE_COPIES).map(|n| {
+        el().absolute(n as f32 * rock::TILE, 0.0)
+            .size(rock::TILE, 90.0)
+            .shape(shape.clone())
+    });
+    el().key("rock-texture")
+        .absolute(0.0, 0.0)
+        .w_full()
+        .h_full()
+        .a11y_hidden()
+        .clip_rounded(radius)
+        .children(tiles)
 }
 
 /// Apply a finish to a button. Everything is a flat matte fill; the fractured finishes add the
@@ -277,7 +263,7 @@ pub(crate) fn apply_liquid_metal(
         } else {
             TEXTURE_OPACITY
         };
-        styled = styled.shape(fracture_shape(finish_tint(finish), opacity));
+        styled = styled.child(rock_texture(radius, opacity));
     }
     if shimmer {
         if preferences.reduced_motion {
@@ -453,10 +439,17 @@ mod finish_tests {
     }
 
     #[test]
-    fn the_texture_has_facets_and_cracks_at_every_opacity() {
-        for opacity in [TEXTURE_OPACITY, TEXTURE_OPACITY_DISABLED] {
-            assert!(!fracture_shape(theme::hex(theme::ACCENT), opacity).is_empty());
-        }
+    fn the_texture_is_faint_at_rest_and_fainter_when_disabled() {
+        // 0.12 rest opacity: at most 0.22 * 0.12 of white, under 7 levels.
+        let light = shard_color(1.0, TEXTURE_OPACITY);
+        assert!(light.a <= 0.22 * 0.12 + 1e-6, "{}", light.a);
+        assert!(255.0 * light.a <= 7.0);
+        // A neutral shard paints nothing; a dark shard darkens.
+        assert_eq!(shard_color(0.0, TEXTURE_OPACITY).a, 0.0);
+        assert!(shard_color(-1.0, TEXTURE_OPACITY).a > 0.0);
+        assert!(shard_color(1.0, TEXTURE_OPACITY_DISABLED).a < light.a);
+        // Three 256 px tiles cover the widest textured action.
+        assert!(TILE_COPIES as f32 * rock::TILE >= 768.0);
     }
 
     #[test]
@@ -472,13 +465,13 @@ mod finish_tests {
             assert_eq!(hovered, theme::hex(hover), "{finish:?}");
             assert_eq!(border, theme::hex("#647587"), "functional boundary");
         }
-        assert_eq!(finish_tint(MetalFinish::Fractured), theme::hex("#24DCE3"));
+        assert_eq!(finish_ink(MetalFinish::Fractured), theme::hex("#24DCE3"));
         assert_eq!(
-            finish_tint(MetalFinish::FracturedConfirm),
+            finish_ink(MetalFinish::FracturedConfirm),
             theme::hex("#23DFA0")
         );
         assert_eq!(
-            finish_tint(MetalFinish::FracturedDanger),
+            finish_ink(MetalFinish::FracturedDanger),
             theme::hex("#F280A0")
         );
     }

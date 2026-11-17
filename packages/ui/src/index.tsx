@@ -1,5 +1,6 @@
 "use client";
 import React, { useState } from "react";
+import { ROCK_TILE_HEIGHT, ROCK_TILE, rockTileImage } from "./rockTile";
 import {
   View,
   Text,
@@ -61,6 +62,51 @@ export const glass = matteCard;
 export const glow = (color: string): WebStyle => ({
   boxShadow: `inset 0 0 0 1px ${color}`,
 });
+/**
+ * Actions that submit, confirm, create or delete (Connect submits) carry the coarse matte rock
+ * texture; every other control stays smooth. Fills and ink follow docs/design/matte-canvas/theme.md.
+ */
+export type ActionIntent = "submit" | "confirm" | "delete";
+export const actionIntents: Record<
+  ActionIntent,
+  { rest: string; hover: string; pressed: string; ink: string }
+> = {
+  submit: {
+    rest: "#10262C",
+    hover: "#12282E",
+    pressed: "#0E242A",
+    ink: "#24DCE3",
+  },
+  confirm: {
+    rest: "#10281F",
+    hover: "#122A21",
+    pressed: "#0E261D",
+    ink: "#23DFA0",
+  },
+  delete: {
+    rest: "#2B1823",
+    hover: "#2D1A25",
+    pressed: "#291621",
+    ink: "#F280A0",
+  },
+};
+/** Texture opacity per state: rest, hover, pressed, disabled. */
+export const textureOpacity = {
+  rest: 0.12,
+  hover: 0.14,
+  pressed: 0.1,
+  disabled: 0.04,
+};
+/** The rock tile as web-only background styles, anchored to the control's top-left corner. */
+export function rockTextureStyle(opacity: number): WebStyle {
+  return {
+    backgroundImage: rockTileImage(opacity),
+    backgroundSize: `${ROCK_TILE}px ${ROCK_TILE_HEIGHT}px`,
+    backgroundPosition: "0 0",
+    backgroundRepeat: "repeat-x",
+    backgroundOrigin: "border-box",
+  };
+}
 export type Tone = "accent" | "success" | "warning" | "danger" | "purple";
 export const toneColor: Record<Tone, string> = {
   accent: colors.accent,
@@ -159,6 +205,7 @@ export function Button({
   disabled = false,
   label,
   variant = "default",
+  intent,
 }: {
   children: React.ReactNode;
   onPress: () => void;
@@ -166,8 +213,10 @@ export function Button({
   disabled?: boolean;
   label?: string;
   variant?: "default" | "quiet" | "primary";
+  intent?: ActionIntent;
 }) {
   const [hovered, setHovered] = useState(false);
+  const tint = intent ? actionIntents[intent] : undefined;
   return (
     <Pressable
       accessibilityRole="button"
@@ -180,6 +229,25 @@ export function Button({
       onHoverOut={() => setHovered(false)}
       style={({ pressed }) => [
         s.button,
+        tint && s.action,
+        tint && {
+          backgroundColor: disabled
+            ? colors.raised
+            : pressed
+              ? tint.pressed
+              : hovered
+                ? tint.hover
+                : tint.rest,
+          ...rockTextureStyle(
+            disabled
+              ? textureOpacity.disabled
+              : pressed
+                ? textureOpacity.pressed
+                : hovered
+                  ? textureOpacity.hover
+                  : textureOpacity.rest,
+          ),
+        },
         variant === "quiet" && s.quiet,
         variant === "primary" && s.primary,
         !disabled &&
@@ -190,8 +258,8 @@ export function Button({
         !disabled && hovered && !pressed && variant !== "primary" && s.hovered,
         !disabled && pressed && variant === "primary" && s.primaryPressed,
         !disabled && pressed && variant !== "primary" && s.pressed,
-        active && s.active,
-        disabled && s.disabled,
+        !tint && active && s.active,
+        !tint && disabled && s.disabled,
       ]}
     >
       <Text
@@ -199,8 +267,9 @@ export function Button({
           s.buttonText,
           variant === "quiet" && s.quietText,
           variant === "primary" && s.primaryText,
-          active && s.activeText,
-          disabled && s.disabledText,
+          tint && { color: disabled ? colors.muted : tint.ink },
+          !tint && active && s.activeText,
+          !tint && disabled && s.disabledText,
         ]}
       >
         {children}
@@ -274,6 +343,13 @@ const s = StyleSheet.create({
     borderRadius: 2,
     backgroundColor: colors.raised,
     borderColor: colors.border,
+  },
+  action: {
+    minHeight: 44,
+    paddingHorizontal: 16,
+    borderRadius: 10,
+    borderColor: colors.border,
+    overflow: "hidden",
   },
   buttonText: {
     textTransform: "uppercase",

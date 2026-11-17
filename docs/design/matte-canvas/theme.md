@@ -115,6 +115,20 @@ Context tint affects only the eligible action and its existing semantic indicati
 | Disabled | Raised-control base, disabled ink, texture opacity `0.04`; retain reason and semantic disabled state |
 | Pending | Keep the same material/label geometry; only the allowed loading layer below may move |
 
+### Procedural tile (implemented stand-in for the crescent crop)
+
+No crescent-crop tile asset exists in the repository, so the runtime uses a small deterministic tile generated from integers. It keeps the geometry above (256×256 logical px, fragments 12–28 px, top-left anchor, one tile shared by every button, no runtime noise or random phase). The crescent-derived 512×512 grayscale tile remains the target and would replace the generator without changing the recipe.
+
+Reproduce it: native `apps/fleetworks-desktop/src/rock.rs` and web `packages/ui/src/rockTile.ts` run the same algorithm.
+
+1. Seed `0xA4605A11`. Hash with `lowbias32` (`x^=x>>16; x*=0x7feb352d; x^=x>>15; x*=0x846ca68b; x^=x>>16`, 32-bit). For grid cell `(i, j)` and purpose `salt`, `noise = mix(mix(seed ^ salt*0x9E3779B1) ^ (j*16 + i))`.
+2. Grid of 12×12 cells over 25 600 hundredths of a pixel. Vertex `(i, j)` is `i*25600/12` plus an offset of `noise(i mod 12, j mod 12, salt) mod 641 - 320` hundredths (salt 1 for x, 2 for y), so the tile repeats without a seam and fragments are 15–28 px.
+3. Each cell splits into two triangles; `noise(i, j, 3) & 1` picks the diagonal. Tone magnitude is `(300 + noise(i, j, 4) mod 701) / 1000`, its sign from `noise(i, j, 5) & 1`; the second triangle takes the opposite tone, so the mean tone is exactly zero. Only cell rows 0–3 are generated (reaching 85 px). **Shortcut:** an action taller than that, or wider than three native tiles (768 px), shows no texture beyond it.
+4. Lighter shards overlay `#D5DCE5` at alpha `0.22 * opacity * tone`; darker shards overlay `#020304` at `1.25 * opacity * |tone|`, which is at most about ±6 channel levels at rest opacity 0.12. Opacity per state: rest 0.12, hover 0.14 (web), pressed 0.10 (web), disabled 0.04.
+5. Both tests pin checksum `2914555029` over the shard list (`checksum = checksum*31 + round(tone*1000) + round(x0*100) + index`, 32-bit).
+
+Native paints the tile as three absolute 256 px children inside one hidden, rounded-clipped layer over the button fill. Web renders the same polygons as one cached SVG data-URI `background-image` (`backgroundSize: 256px 90px`, `repeat-x`, position `0 0`). Native hover and pressed change only the fill today.
+
 Normal text must reach **4.5:1**, large text **3:1**, and essential boundaries/focus **3:1** against adjacent colors after compositing. Reference calculations on the opaque tokens give primary/supporting/muted text **11.75/7.85/5.09:1** against the elevated surface, functional boundary **3.43:1**, and destructive ink **6.66:1** against its untextured base. These calculations are design checks, not rendered accessibility approval; verify the brightest texture samples, antialiasing and every state in production views.
 
 ## 4. Motion: loading-only translated sheen

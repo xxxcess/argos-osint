@@ -67,7 +67,7 @@ Approved native visual references: [Workstation Status](../../design/matte-canva
 | --- | --- |
 | Reading, metrics and readiness | Smooth matte charcoal, diffuse edges blending into the canvas; group by spacing/type without card strokes or grid dividers |
 | Navigation and utility controls | Smooth matte; Settings, Cancel, filter, refresh, pop-out and read Retry never use rock texture; use a flat contextual selection marker |
-| Submit / Confirm / Create / Delete | Coarse matte fractured crescent-rock on the button face only; Connect qualifies as form submission; contextual color without metallic reflection |
+| Submit / Confirm / Create / Delete | Coarse matte fractured crescent-rock on the button face only; Connect qualifies as form submission; contextual color without metallic reflection. Use `<Button intent="submit" | "confirm" | "delete">` (`packages/ui/src/index.tsx`); the tile is `rockTile.ts` |
 | Selected | Stable semantic treatment plus the appropriate accessible state; distinct from keyboard focus |
 | Disabled | Readable muted label and semantic disabled state; material eligibility still follows the action's intent |
 | Pending placeholder | Constant matte skeleton base with restrained cool translated sheen; localized to unresolved content and static for reduced motion |

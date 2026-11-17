@@ -228,6 +228,9 @@ pub(crate) fn interactive_tile(
 /// Texture opacity at rest, hover-free; disabled controls use [`TEXTURE_OPACITY_DISABLED`].
 pub(crate) const TEXTURE_OPACITY: f32 = 0.12;
 pub(crate) const TEXTURE_OPACITY_DISABLED: f32 = 0.04;
+/// Texture opacity while hovered. shortcut: the pressed value 0.10 is not drawn, because Rune
+/// has no pressed-state style for descendants; pressed darkens the fill by 2 levels instead.
+pub(crate) const TEXTURE_OPACITY_HOVER: f32 = 0.14;
 
 /// Fill, border and hover fill for one finish. Hover adds 2 to each base channel. Every finish is
 /// a flat fill; the textured ones sit on the theme's action bases.
@@ -274,23 +277,41 @@ const TILE_COPIES: usize = 3;
 /// anchored to the control's top-left corner at a fixed scale, so a label, busy state or width
 /// change never moves it, and it is clipped to the control's rounded corners. It paints over
 /// the fill and under the label.
-fn rock_texture(radius: f32, opacity: f32) -> El {
+fn rock_texture(radius: f32, rest: f32, hover: f32) -> El {
     let mut shape = Shape::new();
     for shard in rock::shards() {
-        shape = shape.fill(shard.points.to_vec(), shard_color(shard.tone, opacity));
+        shape = shape.fill(shard.points.to_vec(), shard_color(shard.tone, hover));
     }
     let tiles = (0..TILE_COPIES).map(|n| {
         el().absolute(n as f32 * rock::TILE, 0.0)
             .size(rock::TILE, 90.0)
             .shape(shape.clone())
     });
-    el().key("rock-texture")
+    // The shape is drawn at the hover opacity; at rest the layer's group opacity scales it down.
+    let layer = el()
+        .key("rock-texture")
         .absolute(0.0, 0.0)
         .w_full()
         .h_full()
         .a11y_hidden()
         .clip_rounded(radius)
-        .children(tiles)
+        .children(tiles);
+    if rest < hover {
+        layer.group_opacity(rest / hover, 1.0)
+    } else {
+        layer
+    }
+}
+
+/// A color shifted by `levels` 8-bit channel levels (negative darkens).
+fn shade(color: Color, levels: f32) -> Color {
+    let shift = |channel: f32| (channel + levels / 255.0).clamp(0.0, 1.0);
+    Color {
+        r: shift(color.r),
+        g: shift(color.g),
+        b: shift(color.b),
+        a: color.a,
+    }
 }
 
 /// Apply a finish to a button. Everything is a flat matte fill; the fractured finishes add the
@@ -315,12 +336,14 @@ pub(crate) fn apply_liquid_metal(
     }
     let mut styled = button.fill(fill).border(1.0, border).radius(radius);
     if finish.fractured() {
-        let opacity = if disabled && !shimmer {
-            TEXTURE_OPACITY_DISABLED
+        let (rest, hover) = if disabled && !shimmer {
+            (TEXTURE_OPACITY_DISABLED, TEXTURE_OPACITY_DISABLED)
         } else {
-            TEXTURE_OPACITY
+            (TEXTURE_OPACITY, TEXTURE_OPACITY_HOVER)
         };
-        styled = styled.child(rock_texture(radius, opacity));
+        styled = styled
+            .hover_group()
+            .child(rock_texture(radius, rest, hover));
     }
     if shimmer {
         if preferences.reduced_motion {
@@ -353,7 +376,13 @@ pub(crate) fn apply_liquid_metal(
     if disabled {
         return styled.dim(0.55);
     }
-    styled.hover(hover_fill)
+    let styled = styled.hover(hover_fill);
+    if finish.fractured() {
+        // Pressed subtracts 2 levels from the base, as hover adds 2.
+        styled.press(shade(fill, -2.0))
+    } else {
+        styled
+    }
 }
 
 /// Foreground ink color matching each `MetalFinish`.
@@ -539,6 +568,20 @@ mod finish_tests {
             );
             assert_eq!(finish.fractured(), textured, "{finish:?}");
         }
+    }
+
+    #[test]
+    fn hover_adds_texture_and_pressed_subtracts_two_levels_from_the_base() {
+        assert!(TEXTURE_OPACITY < TEXTURE_OPACITY_HOVER);
+        assert_eq!(TEXTURE_OPACITY_HOVER, 0.14);
+        let base = theme::hex("#10262C");
+        let pressed = shade(base, -2.0);
+        assert!((base.r - pressed.r - 2.0 / 255.0).abs() < 1e-6);
+        assert!((base.b - pressed.b - 2.0 / 255.0).abs() < 1e-6);
+        assert_eq!(pressed.a, base.a);
+        // Darkening never leaves the channel range.
+        assert_eq!(shade(theme::hex("#000000"), -2.0).r, 0.0);
+        assert_eq!(shade(theme::hex("#FFFFFF"), 2.0).g, 1.0);
     }
 
     #[test]

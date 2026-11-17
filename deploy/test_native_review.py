@@ -113,6 +113,27 @@ class NativeReviewTests(unittest.TestCase):
         self.assertEqual(recipients, ["api"])
         self.assertIn("  gateway_operator_token:\n    file: ${FLEETWORKS_HOST_WORKSPACE}/secrets/operator-token\n", template)
 
+    def test_atlas_overlay_wires_authenticated_engine_readiness_into_gateway(self):
+        deploy = Path(__file__).parent
+        base = (deploy / "compose.native-review.yml").read_text()
+        atlas = (deploy / "compose.atlas.yml").read_text()
+        services = atlas.split("\nsecrets:\n", 1)[0]
+        blocks = re.split(r"(?m)^  ([a-z][a-z0-9-]*):(?: &[a-z-]+)?\n", services)
+        definitions = dict(zip(blocks[1::2], blocks[2::2]))
+        api = definitions["api"]
+        for engine in ("nlp", "classifier"):
+            kind = engine.upper()
+            self.assertNotIn(f"FLEETWORKS_{kind}_ORIGIN:", base)
+            self.assertIn(f"FLEETWORKS_{kind}_ORIGIN: http://{engine}:8080", api)
+            self.assertIn(
+                f"FLEETWORKS_{kind}_TOKEN_FILE: /run/secrets/internal_token", api
+            )
+            self.assertIn(
+                "FLEETWORKS_INTERNAL_TOKEN_FILE: /run/secrets/internal_token",
+                definitions[engine],
+            )
+        self.assertIn("    secrets:\n      - internal_token\n", api)
+
     def test_actor_seed_mount_is_native_review_only(self):
         base = (Path(__file__).parent / "compose.native-review.yml").read_text()
         overlay = (Path(__file__).parent / "compose.actor-bootstrap.yml").read_text()

@@ -35,6 +35,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use argos_osint_api::actor_search::SearchClient;
+use argos_osint_api::classifier_activation::ActivationArtifacts;
 use argos_osint_api::datasets::DatasetStore;
 use argos_osint_api::network_router_with_private_services;
 use argos_osint_api::workstation::ReadinessOwners;
@@ -387,11 +388,16 @@ impl HttpHarness {
         let dataset_store = DatasetStore::open(staged_dir).expect("open dataset store");
         let readiness = ReadinessOwners::new(deployment.deployment_id.clone(), Vec::new())
             .expect("readiness owners");
-        let services = PrivateServices::default()
+        let mut services = PrivateServices::default()
             .with_search(SearchClient::from_local(Arc::new(LocalActorSearchBackend(
                 Arc::clone(&search_service),
             ))))
             .with_workstation(readiness, dataset_store.clone());
+        if cfg!(feature = "classifier") {
+            services = services.with_activation_artifacts(
+                ActivationArtifacts::new(root.clone()).expect("HTTP activation artifact owner"),
+            );
+        }
 
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -460,7 +466,7 @@ impl HttpHarness {
             store: dataset_store,
             index: Some(index_worker),
             relinquish_on_shutdown: false,
-            classifier_enabled: true,
+            classifier_enabled: cfg!(feature = "classifier"),
         };
         let worker_repo = repo.clone();
         let worker_root = root.clone();
@@ -546,11 +552,11 @@ async fn run_shared_flow(
     assert!(caps.features.iter().any(|f| f == "logs"));
     let local = transport == "ipc";
     let local_nlp = local && cfg!(feature = "nlp");
-    let local_classifier = local && cfg!(feature = "classifier");
+    let classifier_enabled = cfg!(feature = "classifier");
     assert_eq!(caps.features.iter().any(|f| f == "nlp"), local_nlp);
     assert_eq!(
         caps.features.iter().any(|f| f == "classifier"),
-        local_classifier
+        local && classifier_enabled
     );
     record(
         &mut *report,
@@ -1129,15 +1135,20 @@ async fn run_shared_flow(
         local_nlp,
         "{transport}: readiness must reflect the bundled NLP startup probe"
     );
-    if local {
+    for id in [
+        ReadinessActionId::TrainClassifier,
+        ReadinessActionId::ActivateClassifier,
+    ] {
         assert_eq!(
             readiness
                 .checks
                 .iter()
                 .flat_map(|check| &check.actions)
-                .any(|action| action.id == ReadinessActionId::TrainClassifier && action.allowed),
-            local_classifier,
-            "IPC training preflight must agree with the bundled classifier capability"
+                .find(|action| action.id == id)
+                .expect("classifier preflight action")
+                .allowed,
+            classifier_enabled,
+            "{transport}: preflight {id:?} must reflect the configured Natural worker"
         );
     }
     record(
@@ -1351,9 +1362,9 @@ async fn run_shared_flow(
         "missing job_cancel 404 parity",
     );
 
-    // The HTTP fixture has no activation artifacts. A bundled IPC engine
-    // reaches the scoped lookup, where the synthetic candidate does not exist.
-    let candidate_status = if local_classifier { 404 } else { 503 };
+    // Both configured backends reach the scoped lookup. An unavailable
+    // classifier must fail closed before resolving the synthetic candidate.
+    let candidate_status = if classifier_enabled { 404 } else { 503 };
     let candidate = CandidateIdentity::new(
         "candidate-1".to_owned(),
         "train-job-1".to_owned(),
@@ -1382,7 +1393,7 @@ async fn run_shared_flow(
     record(
         &mut *report,
         "classifier_activate",
-        "intentional_exception",
+        "live_parity",
         "activation rejects the missing candidate or unavailable service",
     );
 
@@ -1400,7 +1411,7 @@ async fn run_shared_flow(
     record(
         &mut *report,
         "classifier_candidate_detail",
-        "intentional_exception",
+        "live_parity",
         "preview rejects the missing candidate or unavailable service",
     );
 
@@ -1410,13 +1421,21 @@ async fn run_shared_flow(
         .unwrap_err();
     assert_eq!(
         act_result_err,
-        ClientError::Status(if local && !local_classifier { 503 } else { 404 }),
+        ClientError::Status(if local && !classifier_enabled {
+            503
+        } else {
+            404
+        }),
         "{transport}: activation result requires an enabled IPC engine and an existing job"
     );
     record(
         &mut *report,
         "classifier_activation_result",
-        "intentional_exception",
+        if classifier_enabled {
+            "live_parity"
+        } else {
+            "intentional_exception"
+        },
         "disabled IPC engine returns 503; missing activation job returns 404",
     );
 
@@ -1439,14 +1458,14 @@ async fn run_shared_flow(
         .unwrap_err();
     assert_eq!(
         train_err,
-        ClientError::Status(if local && !local_classifier { 503 } else { 409 }),
-        "{transport}: training requires an enabled IPC engine and a valid dataset"
+        ClientError::Status(if classifier_enabled { 409 } else { 503 }),
+        "{transport}: training requires an enabled worker and a valid dataset"
     );
     record(
         &mut *report,
         "train_classifier",
-        "intentional_exception",
-        "disabled IPC engine returns 503; missing training dataset returns 409",
+        "live_parity",
+        "unavailable worker returns 503; missing training dataset returns 409",
     );
 
     let logs_follow_op = IpcOperation::from_get_with_query(LOGS_FOLLOW_PATH, &LogQuery::default())
@@ -1688,16 +1707,13 @@ async fn http_and_local_ipc_backends_satisfy_parity_and_intentional_exceptions()
         operations: vec![
             "capabilities".to_owned(),
             "workstation_readiness".to_owned(),
-            "train_classifier".to_owned(),
-            "classifier_candidate_detail".to_owned(),
-            "classifier_activate".to_owned(),
             "classifier_activation_result".to_owned(),
         ],
-        reason: "Local IPC advertises bundled engines after startup probes; the HTTP fixture has no NLP probe or activation artifacts."
+        reason: "Embedded IPC advertises bundled engines after startup probes. Distributed HTTP clients use readiness for configured workers and independently probed services."
             .to_owned(),
-        http_behavior: "Capabilities omit nlp/classifier; activation & preview return 503."
+        http_behavior: "Capabilities omit the bundled engine flags. The fixture does not configure a private NLP probe. A configured worker exposes Natural training and activation; missing activation job results return 404."
             .to_owned(),
-        ipc_behavior: "Enabled builds report NLP Ready, allow training preflight, and reject missing jobs and datasets. Disabled classifier builds reject classifier operations with 503."
+        ipc_behavior: "Enabled builds report NLP Ready and expose the same Natural maintenance workflow. Disabled classifier builds reject classifier operations with 503."
             .to_owned(),
         verified: true,
     });

@@ -3,6 +3,15 @@ services:
     environment:
       FLEETWORKS_ATLAS_DISPATCH: "1"
 
+  api:
+    environment:
+      FLEETWORKS_NLP_ORIGIN: http://nlp:8080
+      FLEETWORKS_NLP_TOKEN_FILE: /run/secrets/internal_token
+      FLEETWORKS_CLASSIFIER_ORIGIN: http://classifier:8080
+      FLEETWORKS_CLASSIFIER_TOKEN_FILE: /run/secrets/internal_token
+    secrets:
+      - internal_token
+
   atlas:
     extends:
       file: compose.native-review.yml

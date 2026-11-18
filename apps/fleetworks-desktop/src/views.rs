@@ -2015,7 +2015,10 @@ fn dossier(state: &State, preferences: crate::accessibility::ViewPreferences, ki
             )
         }
     };
-    body.key("actor-dossier").w_full()
+    rune::col()
+        .key("actor-dossier")
+        .w_full()
+        .child(body.w_full())
 }
 
 fn associations(label: &str, rows: &[Association], kit: &Kit) -> El {

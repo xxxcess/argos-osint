@@ -784,17 +784,21 @@ fn host_resources_show_stale_marker_after_a_failed_refresh() {
         .contains("Telemetry unavailable"));
 }
 
-fn brain_results_fixture() -> State {
+pub(crate) fn brain_search_response_fixture() -> ActorSearchResponse {
     use fleetworks_contracts::search::ActorSearchHit;
-    let mut state = registered_fixture();
-    state.page = Page::Brain;
-    state.brain.results = Load::Ready(ActorSearchResponse::new(
+    ActorSearchResponse::new(
         ["first", "second"]
             .into_iter()
             .map(|id| ActorSearchHit::new(id.into(), id.into(), 1, "test-generation".into()))
             .collect(),
         IndexStatus::unknown("2026-01-01T00:00:00Z".into()),
-    ));
+    )
+}
+
+fn brain_results_fixture() -> State {
+    let mut state = registered_fixture();
+    state.page = Page::Brain;
+    state.brain.results = Load::Ready(brain_search_response_fixture());
     state.intents.clear();
     state
 }

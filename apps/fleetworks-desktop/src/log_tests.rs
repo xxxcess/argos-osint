@@ -897,11 +897,17 @@ fn loading_list_areas_render_shape_accurate_shimmering_skeletons_with_reduced_mo
     runtime.update(|state, _| {
         state.navigate(crate::app::Page::Brain);
         state.brain.results = Load::Loading;
-        state.brain.showing_detail = true;
-        state.brain.dossier = Load::Loading;
     });
     runtime.frame(2.0 / 60.0);
     assert!(runtime.find("search-loading").is_some());
+    assert!(runtime.find("dossier-loading").is_none());
+
+    runtime.update(|state, _| {
+        state.brain.results = Load::Ready(crate::tests::brain_search_response_fixture());
+        state.toggle_actor(0);
+    });
+    runtime.frame(3.0 / 60.0);
+    assert!(runtime.find("actor-hit-first").is_some());
     assert!(runtime.find("dossier-loading").is_some());
 
     runtime.update(|state, _| {
@@ -912,7 +918,7 @@ fn loading_list_areas_render_shape_accurate_shimmering_skeletons_with_reduced_mo
             ..crate::accessibility::FixtureAccessibility::default()
         });
     });
-    runtime.frame(3.0 / 60.0);
+    runtime.frame(4.0 / 60.0);
     assert!(runtime.find("models-loading").is_some());
     assert!(
         runtime.find("skeleton-shimmer").is_none(),

@@ -916,12 +916,23 @@ fn holding_enter_in_brain_search_toggles_the_highlighted_dossier_once() {
         },
     );
     runtime.frame(0.0);
-    runtime.update(|_, tx| tx.focus("actor-search/value/input", true));
+    let search_input = |element: &rune::ElementInfo| {
+        element.key.as_deref() == Some("input") && element.path.contains("/actor-search/")
+    };
+    let [x, y, width, height] = runtime
+        .elements()
+        .into_iter()
+        .find(search_input)
+        .expect("the real search editor")
+        .rect;
+    let (x, y) = (x + width / 2.0, y + height / 2.0);
+    runtime.pointer_down(x, y);
+    runtime.pointer_up(x, y);
     runtime.frame(1.0 / 60.0);
     assert!(runtime
         .elements()
         .iter()
-        .any(|element| { element.focused && element.path.ends_with("actor-search/value/input") }));
+        .any(|element| search_input(element) && element.focused));
 
     let enter = rune::KeyEvent {
         key: rune::Key::Enter,

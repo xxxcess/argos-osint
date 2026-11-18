@@ -229,6 +229,38 @@ fn build_companion_command_scrubs_remote_secrets_and_sets_local_ipc_args() {
 }
 
 #[tokio::test]
+async fn early_embedded_startup_failure_displays_sanitized_stderr() {
+    let temp = tempfile::tempdir().expect("private fixture directory");
+    let root = temp
+        .path()
+        .canonicalize()
+        .expect("canonical fixture directory");
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+        .expect("make state directory private");
+    let binary = root.join(COMPANION_BINARY_NAME);
+    std::fs::write(
+        &binary,
+        b"#!/bin/sh\nprintf '\\033[31mstartup-marker\\033[0m\\n' >&2\nexit 1\n",
+    )
+    .expect("write synthetic companion");
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700))
+        .expect("make companion executable");
+
+    let error = LocalBackendProcess::spawn(&binary, &root)
+        .await
+        .expect_err("synthetic companion exits before HelloAck");
+    let message = error.to_string();
+    assert!(
+        message.contains("Hello/HelloAck handshake failed"),
+        "{message}"
+    );
+    assert!(message.contains("startup-marker"), "{message}");
+    assert!(!message.contains("Ready RPC"));
+    assert!(!message.contains('\u{1b}'));
+    assert!(!message.contains("[31m") && !message.contains("[0m"));
+}
+
+#[tokio::test]
 async fn local_ipc_handshake_capabilities_missing_optional_nlp_and_classifier() {
     let temp = tempfile::tempdir().expect("tempdir");
     let state_dir = temp.path().canonicalize().expect("canonical tempdir");

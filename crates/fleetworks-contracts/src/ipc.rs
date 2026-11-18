@@ -165,6 +165,52 @@ impl fmt::Display for IpcError {
 
 impl std::error::Error for IpcError {}
 
+/// Failed child startup, with separate bounded process diagnostics.
+#[must_use]
+pub struct IpcStartupError {
+    cause: IpcError,
+    stderr: Vec<u8>,
+}
+
+impl IpcStartupError {
+    /// Raw child stderr collected before attachment, limited to [`MAX_IPC_STDERR_BYTES`].
+    /// Sanitize it for display and keep it out of general logs.
+    #[must_use]
+    pub fn captured_stderr(&self) -> &[u8] {
+        &self.stderr
+    }
+}
+
+impl From<IpcError> for IpcStartupError {
+    fn from(cause: IpcError) -> Self {
+        Self {
+            cause,
+            stderr: Vec::new(),
+        }
+    }
+}
+
+impl fmt::Display for IpcStartupError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.cause, formatter)
+    }
+}
+
+impl fmt::Debug for IpcStartupError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("IpcStartupError")
+            .field("cause", &self.cause)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::error::Error for IpcStartupError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.cause)
+    }
+}
+
 impl From<IpcError> for ClientError {
     fn from(error: IpcError) -> Self {
         match error {
@@ -1239,6 +1285,17 @@ struct LocalIpcShared {
     stderr_buffer: Arc<Mutex<Vec<u8>>>,
 }
 
+// A cancelled startup must not detach a task that still owns the stderr pipe.
+struct StartupStderrTask(Option<JoinHandle<()>>);
+
+impl Drop for StartupStderrTask {
+    fn drop(&mut self) {
+        if let Some(task) = &self.0 {
+            task.abort();
+        }
+    }
+}
+
 struct LocalIpcSession {
     shared: Arc<LocalIpcShared>,
     outbound_tx: Mutex<Option<mpsc::Sender<IpcEnvelope>>>,
@@ -1365,14 +1422,25 @@ impl LocalIpcClient {
             client_version.into(),
         )
         .await
+        .map_err(|error| error.cause)
     }
 
     /// Attach to an already-spawned child process using its piped `stdin`, `stdout`, and optional `stderr`.
     pub async fn from_child(
-        mut child: Child,
+        child: Child,
         client_name: impl Into<String>,
         client_version: impl Into<String>,
     ) -> Result<Self, IpcError> {
+        Self::attach_child(child, client_name, client_version)
+            .await
+            .map_err(|error| error.cause)
+    }
+
+    async fn attach_child(
+        mut child: Child,
+        client_name: impl Into<String>,
+        client_version: impl Into<String>,
+    ) -> Result<Self, IpcStartupError> {
         let stdin = child.stdin.take().ok_or(IpcError::PipeClosed)?;
         let stdout = child.stdout.take().ok_or(IpcError::PipeClosed)?;
         let stderr = child.stderr.take();
@@ -1393,6 +1461,17 @@ impl LocalIpcClient {
         client_name: impl Into<String>,
         client_version: impl Into<String>,
     ) -> Result<Self, IpcError> {
+        Self::spawn_command_with_diagnostics(command, client_name, client_version)
+            .await
+            .map_err(|error| error.cause)
+    }
+
+    /// Spawn a child command and retain bounded stderr if attachment fails.
+    pub async fn spawn_command_with_diagnostics(
+        command: &mut Command,
+        client_name: impl Into<String>,
+        client_version: impl Into<String>,
+    ) -> Result<Self, IpcStartupError> {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1401,52 +1480,76 @@ impl LocalIpcClient {
         let child = command
             .spawn()
             .map_err(|error| IpcError::Io(error.kind()))?;
-        Self::from_child(child, client_name, client_version).await
+        Self::attach_child(child, client_name, client_version).await
     }
 
     async fn connect_with_child<R, W, E>(
         mut reader: R,
         mut writer: W,
         stderr: Option<E>,
-        child: Option<Child>,
+        mut child: Option<Child>,
         client_name: String,
         client_version: String,
-    ) -> Result<Self, IpcError>
+    ) -> Result<Self, IpcStartupError>
     where
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
         E: AsyncRead + Unpin + Send + 'static,
     {
         let stderr_buffer = Arc::new(Mutex::new(Vec::new()));
-        let stderr_task = stderr.map(|err_stream| {
+        let mut stderr_task = StartupStderrTask(stderr.map(|err_stream| {
             let buffer = Arc::clone(&stderr_buffer);
             tokio::spawn(drain_bounded_stderr(err_stream, buffer))
-        });
+        }));
 
         let hello = IpcEnvelope::Hello(IpcHello::new(client_name, client_version));
         let handshake = async {
             write_frame(&mut writer, &hello).await?;
-            match read_frame(&mut reader).await? {
-                Some(IpcEnvelope::HelloAck(ack)) => Ok(ack),
-                Some(_) => Err(IpcError::UnexpectedFrame),
-                None => Err(IpcError::PipeClosed),
-            }
-        };
-        let ack = tokio::time::timeout(DEFAULT_HANDSHAKE_TIMEOUT, handshake)
-            .await
-            .map_err(|_| IpcError::Timeout)??;
-
-        if ack.protocol_version < IPC_MIN_PROTOCOL_VERSION
-            || ack.protocol_version > IPC_PROTOCOL_VERSION
-        {
-            return Err(IpcError::UnsupportedVersion(ack.protocol_version));
-        }
-        if !ack.compatible {
-            if ack.protocol_version != IPC_PROTOCOL_VERSION {
+            let ack = match read_frame(&mut reader).await? {
+                Some(IpcEnvelope::HelloAck(ack)) => ack,
+                Some(_) => return Err(IpcError::UnexpectedFrame),
+                None => return Err(IpcError::PipeClosed),
+            };
+            if ack.protocol_version < IPC_MIN_PROTOCOL_VERSION
+                || ack.protocol_version > IPC_PROTOCOL_VERSION
+                || (!ack.compatible && ack.protocol_version != IPC_PROTOCOL_VERSION)
+            {
                 return Err(IpcError::UnsupportedVersion(ack.protocol_version));
             }
-            return Err(IpcError::HandshakeFailed);
-        }
+            if !ack.compatible {
+                return Err(IpcError::HandshakeFailed);
+            }
+            Ok(ack)
+        };
+        let handshake_deadline = tokio::time::Instant::now() + DEFAULT_HANDSHAKE_TIMEOUT;
+        let ack = match tokio::time::timeout_at(handshake_deadline, handshake)
+            .await
+            .unwrap_or(Err(IpcError::Timeout))
+        {
+            Ok(ack) => ack,
+            Err(cause) => {
+                // Stdout may reach EOF before the drain task sees buffered stderr.
+                // Bound reaping and draining by the existing startup deadline.
+                if let Some(child) = child.as_mut() {
+                    let _ = child.start_kill();
+                }
+                let cleanup_deadline =
+                    handshake_deadline.min(tokio::time::Instant::now() + CHILD_EXIT_GRACE);
+                let _ = tokio::time::timeout_at(cleanup_deadline, async {
+                    if let Some(child) = child.as_mut() {
+                        let _ = child.wait().await;
+                    }
+                    if let Some(task) = stderr_task.0.as_mut() {
+                        let _ = task.await;
+                    }
+                })
+                .await;
+                drop(stderr_task);
+                let stderr =
+                    std::mem::take(&mut *stderr_buffer.lock().expect("stderr buffer lock"));
+                return Err(IpcStartupError { cause, stderr });
+            }
+        };
 
         let (outbound_tx, outbound_rx) = mpsc::channel(MAX_IPC_QUEUE_DEPTH);
         let (events_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
@@ -1473,7 +1576,7 @@ impl LocalIpcClient {
             outbound_tx: Mutex::new(Some(outbound_tx)),
             reader_task: Mutex::new(Some(reader_handle)),
             writer_task: Mutex::new(Some(writer_handle)),
-            stderr_task: Mutex::new(stderr_task),
+            stderr_task: Mutex::new(stderr_task.0.take()),
             child: Mutex::new(child),
         });
 
@@ -2337,6 +2440,54 @@ mod tests {
         assert_eq!(uploaded.dataset.id, "dataset-ipc-1");
         server_task.await.unwrap();
         tokio::fs::remove_file(&path).await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn startup_diagnostics_retain_stderr_on_early_close_and_timeout() {
+        const MARKER: &[u8] = b"synthetic startup diagnostic";
+        for cause in [IpcError::PipeClosed, IpcError::Timeout] {
+            let (stream, mut peer) = tokio::io::duplex(4096);
+            let (reader, writer) = tokio::io::split(stream);
+            let (stderr, mut stderr_peer) = tokio::io::duplex(4096);
+            let fixture = tokio::spawn(async move {
+                assert!(matches!(
+                    read_frame(&mut peer).await.expect("read client Hello"),
+                    Some(IpcEnvelope::Hello(_))
+                ));
+                stderr_peer.write_all(MARKER).await.expect("write stderr");
+                if cause == IpcError::Timeout {
+                    // Model a stalled companion with both pipes still open.
+                    std::future::pending::<()>().await;
+                }
+            });
+            let error = tokio::time::timeout(
+                DEFAULT_HANDSHAKE_TIMEOUT + Duration::from_secs(1),
+                LocalIpcClient::connect_with_child(
+                    reader,
+                    writer,
+                    Some(stderr),
+                    None,
+                    "desktop".into(),
+                    "0.2.1".into(),
+                ),
+            )
+            .await
+            .expect("startup failure must finish even with stderr still open")
+            .expect_err("fixture withholds HelloAck");
+            assert_eq!(error.cause, cause);
+            assert_eq!(error.captured_stderr(), MARKER);
+            assert!(!error.to_string().contains("synthetic startup diagnostic"));
+            assert!(!format!("{error:?}").contains("synthetic startup diagnostic"));
+            if cause == IpcError::Timeout {
+                fixture.abort();
+                assert!(fixture
+                    .await
+                    .expect_err("stalled fixture aborted")
+                    .is_cancelled());
+            } else {
+                fixture.await.expect("closing fixture completed");
+            }
+        }
     }
 
     #[tokio::test]

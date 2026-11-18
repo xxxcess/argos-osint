@@ -172,16 +172,15 @@ impl LocalBackendProcess {
         let validated_dir = validate_private_state_dir(state_dir)?;
         let mut command = build_companion_command(&validated_bin, &validated_dir)?;
         let ipc = Arc::new(
-            LocalIpcClient::spawn_command(
+            LocalIpcClient::spawn_command_with_diagnostics(
                 &mut command,
                 "fleetworks-desktop",
                 env!("CARGO_PKG_VERSION"),
             )
             .await
             .map_err(|error| {
-                LocalBackendError::Transport(format!(
-                    "failed to start embedded backend over stdio IPC: {error}"
-                ))
+                let message = format!("Embedded backend Hello/HelloAck handshake failed: {error}");
+                backend_transport_error(message, error.captured_stderr())
             })?,
         );
         Self::finish_attach(Some(validated_bin), validated_dir, ipc).await
@@ -228,16 +227,10 @@ impl LocalBackendProcess {
                 ready.clone()
             }
             None => client.ready().await.map_err(|error| {
-                let stderr = sanitize_stderr_excerpt(&ipc.captured_stderr());
-                if stderr.is_empty() {
-                    LocalBackendError::Transport(format!(
-                        "embedded backend readiness handshake failed: {error}"
-                    ))
-                } else {
-                    LocalBackendError::Transport(format!(
-                        "embedded backend readiness handshake failed: {error} ({stderr})"
-                    ))
-                }
+                backend_transport_error(
+                    format!("Embedded backend Ready RPC failed: {error}"),
+                    &ipc.captured_stderr(),
+                )
             })?,
         };
         Ok(Self {
@@ -619,6 +612,15 @@ pub fn strip_terminal_escapes(text: &str) -> String {
         }
     }
     out
+}
+
+fn backend_transport_error(message: String, stderr: &[u8]) -> LocalBackendError {
+    let stderr = sanitize_stderr_excerpt(stderr);
+    if stderr.is_empty() {
+        LocalBackendError::Transport(message)
+    } else {
+        LocalBackendError::Transport(format!("{message} ({stderr})"))
+    }
 }
 
 /// Bounded lossy stderr sanitization for diagnostics display without control codes. Terminal

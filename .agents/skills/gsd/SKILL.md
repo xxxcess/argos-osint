@@ -1,13 +1,9 @@
 ---
 name: gsd
 description: >-
-  Babysit open pull requests (CI checks and Cursor bot security reviews) and
-  autonomously implement specifications from PRs titled "spec implementation:
-  <feature name>" by dispatching per-PR subagents on a ~1-hour scheduled loop
-  until all triggered implementations, security fixes, and checks complete.
-  Each PR update runs an affected Linux x86_64 native and backend first pass.
-  After exact-head first-pass CI succeeds, a second pass checks the remaining
-  affected platforms and web.
+  Monitor open Argos PRs, address CI and Cursor review findings, and delegate
+  spec implementation PRs. Run affected Linux native and backend checks first,
+  then promote the exact green head to affected macOS and React Native Web checks.
 ---
 
 # GSD — PR Babysitter, Security Responder & Spec Implementer
@@ -21,18 +17,16 @@ Run a bounded (~1 hour) autonomous monitoring and delivery loop in the active co
 
 ## Nightly workflow (canonical)
 
-Each push to an open integration PR runs the [scoped first pass](../../../docs/wiki/code/ci.md#nightly-gsd-order). Keep the affected Linux x86_64 native app and backend checks green together. Native review uses the real debug package and Rune evidence on that commit. Shared native behavior must work on **Embedded** and **Distributed** with equivalent capability and authority. Record any intentional transport difference in the [parity contract](../../../docs/wiki/code/native-connections.md#backend-types-and-parity).
+Each push runs the [Linux-first CI pass](../../../docs/wiki/code/ci.md#nightly-gsd-order) for the affected Linux x86-64 native app and AMD64 backend. Use [UI scope guidance](../../../AGENTS.md#ui-changes) to select the native or Web skill. Track the exact-head Linux package, inspected fixtures and live verdict as they become available. Preserve shared behavior and authority across [Embedded and Distributed](../../../docs/wiki/code/native-connections.md#backend-types-and-parity).
 
-Once first-pass **Fleetworks required** is green, dispatch the second pass against the same PR and SHA. It runs builds and checks for affected Intel and Apple Silicon Mac apps and the React Native Web app, plus affected ARM64 backend lanes. Track Linux visual review in parallel as soon as the exact Linux evidence is available. New commits restart the first pass and need their own review. Trusted integration pushes retain their release verification.
-
-The **first-pass backend gate** includes only the affected Linux AMD64 service, embedded storage, backend image/Compose and Atlas BERT jobs. The **Linux gate** is [`Linux app / x86_64-unknown-linux-gnu`](../../../.github/workflows/fleetworks-native-linux.yml) when selected. It runs the engine-free check, format and focused unit tests, Rune PNG/tree captures, debug package with the companion, Docker-free Embedded smoke and HTTP/IPC parity. An intentionally unselected lane is recorded as skipped. A native app feature stays incomplete until the applicable Linux review, including a visual verdict when the UI changes, is recorded for the exact revision.
+After **Fleetworks required** is green, dispatch pass two for the same PR and SHA. It covers affected macOS Intel and Apple Silicon apps, React Native Web and remaining backend lanes. Every new head starts a new first pass. Trusted integration pushes retain release verification.
 
 Run these steps in order. The loop sections below keep their detail.
 
 1. **Poll.** Run `gsd_poll.py` ([Routine Loop](#routine-loop-per-poll-cycle) step 1). Skip release-bot and fork (`isCrossRepository`) PRs. Never merge.
 2. **Work in the PR worktree.** For each actionable PR use `.agent-scratch/worktrees/pr-<n>`, checked out to the PR head. Do not touch the main checkout, `main` or `nightly`.
 3. **Read owner comments as requirements.** New owner comments on the PR (and in the session) are new requirements. Track each one in `.agent-scratch/gsd-state.json` under `prs.<n>.requirements` with its comment id and `open | done`; mark one done only with the pushed sha that satisfies it.
-4. **Iterate on the Linux first pass.** Fix regressions in affected backend, parity and Linux native jobs. Defer other-platform or web checks to the second pass.
+4. **Iterate on the Linux first pass.** Fix affected backend, parity and native regressions. Record skipped lanes and any pending Linux review.
 5. **Cheap local checks only.** CI is the test runner. Run locally only: `rustfmt --check --edition 2021 apps/fleetworks-desktop/src/lib.rs` (it follows the module tree) or `cargo fmt --check`, `prettier --check` on changed web and Markdown files, `python3 scripts/fleetworks_doc_links.py` (0 broken), and `node scripts/release_check.mjs message --file <msg>` with `node scripts/release_check.mjs versions`. No full builds, no full test suites and no mutation runs ([root rules](../../../AGENTS.md)).
 6. **Commit and push.** Stage exact paths, use Conventional Commits and one small commit per slice. Before the first push of a run, check `git merge-tree --write-tree origin/<base> HEAD`. Push with the full branch name and a literal sha: `git push origin <sha>:refs/heads/<headRefName>`, with no shell variables, substitutions or brace expansion. Never force-push.
 7. **Read failed CI once.** After a push, read each failed job log once (`gh api --allow-escape-sequences repos/xxxcess/argos-osint/actions/jobs/<id>/logs`) instead of waiting in a loop; the owner or the next scheduled wake reports CI events. Plain `gh pr view` can fail, so read PRs through `gh api repos/xxxcess/argos-osint/pulls/<n>`.
@@ -49,7 +43,7 @@ Run these steps in order. The loop sections below keep their detail.
 10. **Update state.** After each push and each CI read, write `head_sha`, `status`, `backend_gate` and `linux_gate` (each `pending | failing | green`), the Linux review verdict and second-pass run/result, `requirements`, `addressed_cursor_comments`, `worktree` and `notes` to `.agent-scratch/gsd-state.json`.
     The poll output's `verification_passes` reports the aggregate checks for the first and second passes separately.
 11. **One status comment.** Post or update a single PR comment that starts with `<!-- gsd-status -->`: head SHA, first-pass backend and Linux gates, Linux review, second-pass result and open requirements. Create it with `gh api repos/xxxcess/argos-osint/issues/<n>/comments -f body='...'` and update it with `gh api -X PATCH repos/xxxcess/argos-osint/issues/comments/<id> -f body='...'`. Always pass the body inline, never read from a file.
-12. **Dispatch after first-pass CI succeeds.** Use the [second-pass dispatch](../../../docs/wiki/code/ci.md#nightly-gsd-order) for the same PR and exact head, then inspect the affected macOS and React Native Web builds and checks. Track the first-pass package, fixtures, visual verdict, and outstanding Linux feedback in parallel. Keep first-pass and second-pass results separate. Refresh baselines only from CI captures.
+12. **Track both passes.** Record the [second-pass run and results](../../../docs/wiki/code/ci.md#nightly-gsd-order) separately from Linux package, fixture and live evidence. Refresh visual baselines from CI captures.
 
 ---
 

@@ -32,7 +32,7 @@ Understand the product, then follow its implementation. This is the maintained e
 | [Build artifact map](wiki/code/build-artifacts.md) | Tools, compiler caches, QA evidence, app/web/image outputs and data ownership |
 | [scripts/](../scripts) | Builds, storage tests, releases and verification; [workflow](wiki/code/contributing.md) |
 | [.opencode/](../.opencode) | Role/command/skill configuration; [guide](wiki/code/opencode-v2.md) |
-| [.agents/skills/](../.agents/skills) | Repository skills for other agent hosts; [gsd nightly workflow](../.agents/skills/gsd/SKILL.md#nightly-workflow-canonical) (scoped Linux x86_64 native and backend first pass, then other affected targets after Linux review) |
+| [.agents/skills/](../.agents/skills) | Repository skills for other agent hosts; [gsd nightly workflow](../.agents/skills/gsd/SKILL.md#nightly-workflow-canonical) (scoped Linux x86_64 native and backend first pass, then other affected targets once first-pass CI succeeds) |
 | [.github/workflows/](../.github/workflows) | First-pass Linux review, second-pass platform checks and release automation. [CI guide](wiki/code/ci.md) |
 | [.planning/](../.planning) | Named task work; [format and retention](wiki/code/planning-artifacts.md) |
 

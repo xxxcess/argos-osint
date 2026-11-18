@@ -6,7 +6,7 @@ description: >-
   <feature name>" by dispatching per-PR subagents on a ~1-hour scheduled loop
   until all triggered implementations, security fixes, and checks complete.
   Each PR update runs an affected Linux x86_64 native and backend first pass.
-  After exact-head Linux review, an explicit second pass checks the remaining
+  After exact-head first-pass CI succeeds, a second pass checks the remaining
   affected platforms and web.
 ---
 
@@ -23,7 +23,7 @@ Run a bounded (~1 hour) autonomous monitoring and delivery loop in the active co
 
 Each push to an open integration PR runs the [scoped first pass](../../../docs/wiki/code/ci.md#nightly-gsd-order). Keep the affected Linux x86_64 native app and backend checks green together. Native review uses the real debug package and Rune evidence on that commit. Shared native behavior must work on **Embedded** and **Distributed** with equivalent capability and authority. Record any intentional transport difference in the [parity contract](../../../docs/wiki/code/native-connections.md#backend-types-and-parity).
 
-Once **Fleetworks required** and Linux review are green for that head, dispatch the second pass against the same PR and SHA. It runs the deferred affected Mac, backend arm64 and web lanes. New commits restart the first pass and need their own review. Trusted integration pushes retain their release verification.
+Once first-pass **Fleetworks required** is green, dispatch the second pass against the same PR and SHA. It runs builds and checks for affected Intel and Apple Silicon Mac apps and the React Native Web app, plus affected ARM64 backend lanes. Track Linux visual review in parallel as soon as the exact Linux evidence is available. New commits restart the first pass and need their own review. Trusted integration pushes retain their release verification.
 
 The **first-pass backend gate** includes only the affected Linux AMD64 service, embedded storage, backend image/Compose and Atlas BERT jobs. The **Linux gate** is [`Linux app / x86_64-unknown-linux-gnu`](../../../.github/workflows/fleetworks-native-linux.yml) when selected. It runs the engine-free check, format and focused unit tests, Rune PNG/tree captures, debug package with the companion, Docker-free Embedded smoke and HTTP/IPC parity. An intentionally unselected lane is recorded as skipped. A native app feature stays incomplete until the applicable Linux review, including a visual verdict when the UI changes, is recorded for the exact revision.
 
@@ -42,14 +42,14 @@ Run these steps in order. The loop sections below keep their detail.
    | --- | --- | --- |
    | 1 | Affected AMD64 backend, embedded, backend images and other selected backend checks | Fix in the first pass |
    | 1 | `Linux app / x86_64-unknown-linux-gnu` | Fix in the first pass and collect the exact-head reviewer verdict |
-   | 2 | Affected Mac apps, remaining backend architectures, `Scoped web` and web images | Dispatch the second pass after Linux review |
+   | 2 | Affected Mac apps, remaining backend architectures, `Scoped web` and web images | Dispatch as soon as first-pass CI succeeds |
 
    A runner-capacity or toolchain failure (lost runner, no capacity, GitHub 5xx, a C build such as `blake3`) is not our code: rerun the failed jobs at most twice per commit with `gh api -X POST repos/xxxcess/argos-osint/actions/runs/<id>/rerun-failed-jobs` once the run has completed, then report it without changing code. Fix real failures at the root cause. Refresh visual-regression baselines only from CI capture artifacts, never from local renders.
 9. **Keep docs and design in sync.** Update affected docs, tags and diagrams in the same change ([conventions](../../../docs/wiki/code/conventions.md)). Keep [docs/design/matte-canvas](../../../docs/design/matte-canvas/README.md) consistent with the code and add reproduction steps for anything generated or derived. Do not touch work the owner put on hold.
 10. **Update state.** After each push and each CI read, write `head_sha`, `status`, `backend_gate` and `linux_gate` (each `pending | failing | green`), the Linux review verdict and second-pass run/result, `requirements`, `addressed_cursor_comments`, `worktree` and `notes` to `.agent-scratch/gsd-state.json`.
     The poll output's `verification_passes` reports the aggregate checks for the first and second passes separately.
 11. **One status comment.** Post or update a single PR comment that starts with `<!-- gsd-status -->`: head SHA, first-pass backend and Linux gates, Linux review, second-pass result and open requirements. Create it with `gh api repos/xxxcess/argos-osint/issues/<n>/comments -f body='...'` and update it with `gh api -X PATCH repos/xxxcess/argos-osint/issues/comments/<id> -f body='...'`. Always pass the body inline, never read from a file.
-12. **Collect Linux review before widening checks.** Record the first-pass job, exact package and fixture links, what was inspected and the reviewer verdict or outstanding feedback. Use the [second-pass dispatch](../../../docs/wiki/code/ci.md#nightly-gsd-order) after the applicable Linux checks and review pass. Keep first-pass and second-pass results separate. Refresh baselines only from CI captures.
+12. **Dispatch after first-pass CI succeeds.** Use the [second-pass dispatch](../../../docs/wiki/code/ci.md#nightly-gsd-order) for the same PR and exact head, then inspect the affected macOS and React Native Web builds and checks. Track the first-pass package, fixtures, visual verdict, and outstanding Linux feedback in parallel. Keep first-pass and second-pass results separate. Refresh baselines only from CI captures.
 
 ---
 

@@ -105,7 +105,7 @@ free of backend Docker engines.
 | Unit tests | `not_run_by_this_command`; retain scoped test results separately |
 | Backend/inference | Not exercised; source-to-visible search and real model/checkpoint gates remain separate |
 
-The [Linux x86_64 workflow](../../../.github/workflows/fleetworks-native-linux.yml) supplies the first-pass debug package, scoped tests and Rune artifacts, including the `backend-choice` fixture. Review the package as soon as it is available for the exact head and record the verdict before [dispatching the second pass](ci.md#nightly-gsd-order). For a shared backend change, exercise the same affected native operation with Embedded IPC and Distributed HTTP under equivalent capabilities and authority.
+The [Linux x86_64 workflow](../../../.github/workflows/fleetworks-native-linux.yml) supplies the first-pass debug package, scoped tests and Rune artifacts, including the `backend-choice` fixture. Review the package as soon as it is available for the exact head and record the visual verdict. [Dispatch the second pass](ci.md#nightly-gsd-order) when first-pass CI is green. For a shared backend change, exercise the same affected native operation with Embedded IPC and Distributed HTTP under equivalent capabilities and authority.
 
 The second-pass [dual-Mac workflow](../../../.github/workflows/fleetworks-native.yml) (`package`
 and `verify` jobs on `macos-15-intel` and `macos-15`) runs `cargo fmt --check`,

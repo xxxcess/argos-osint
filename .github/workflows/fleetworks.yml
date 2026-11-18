@@ -1,7 +1,7 @@
 name: Fleetworks
 
 # Pull request updates run the Linux first pass. Dispatch the second pass
-# for a reviewed head. Branch publication keeps the complete release gates.
+# after its CI succeeds. Branch publication keeps the complete release gates.
 on:
   push:
     branches: [dev, nightly, main]
@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       stage:
-        description: Standard verification or second pass after Linux review
+        description: Standard verification or second pass after first-pass CI succeeds
         type: choice
         options: [standard, second]
         default: standard

@@ -158,7 +158,8 @@ Verified Rust-BERT Linux worker bundles and exported image archives are attached
 ```mermaid
 flowchart LR
   A[PR creation / update] --> B[Linux and affected backend first pass]
-  B --> I[Linux review and exact-head second pass]
+  B --> I[Green first pass triggers exact-head second pass]
+  B --> J[Linux visual review tracks the package and captures]
   C[Merge into nightly / dev / main] --> D[Recover unpublished source scope]
   D --> E[Checks + native app verification]
   E --> F[Build / smoke selected images]

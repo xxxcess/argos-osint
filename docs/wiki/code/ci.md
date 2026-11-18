@@ -2,14 +2,14 @@
 
 [Code route](index.md) · [Contributing](contributing.md) · [Versioning](versioning.md)
 
-One [Fleetworks workflow](../../../.github/workflows/fleetworks.yml) selects current product checks. Feature and fix PRs into `dev`, `nightly` or `main` run the Linux first pass on creation and every pushed update. The remaining affected targets run in an explicit second pass after Linux review. Integration-branch pushes verify the merged revision and publish only selected, verified artifacts.
+One [Fleetworks workflow](../../../.github/workflows/fleetworks.yml) selects current product checks. Feature and fix PRs into `dev`, `nightly` or `main` run the Linux first pass on creation and every pushed update. The remaining affected targets run in an explicit second pass after first-pass CI succeeds. Integration-branch pushes verify the merged revision and publish only selected, verified artifacts.
 
 [![Events, selected checks and channel publication](../../diagrams/ci-scopes.svg)](../../diagrams/ci-scopes.html)
 
 | Event | Checks | Published output |
 | --- | --- | --- |
 | PR opened, synchronized or reopened into `dev`, `nightly`, `main` | First pass with affected Linux x86_64 native and AMD64 backend lanes | Linux debug app, test and fixture evidence when selected |
-| After first-pass CI and Linux review | Dispatch second pass for the same PR head. Run the remaining selected platforms and web lanes | Test, fixture and debug artifacts |
+| After first-pass CI succeeds | Dispatch second pass for the same PR head. Run the remaining selected platforms and web lanes | Test, fixture and debug artifacts |
 | Push to `nightly` | Selected checks and artifact gates | Versioned GitHub assets and GHCR images; `nightly` channel |
 | Push to `dev` or `main` | Selected checks and artifact gates | Versioned GitHub assets and GHCR images; `stable` channel |
 | Manual Fleetworks dispatch | Full or exact-base scoped checks | Evidence only; no channel publication |
@@ -95,7 +95,7 @@ Only trusted integration pushes get publication writes, with packages permission
 
 1. Push a focused change. The automatic first pass uses the PR merge-base diff to select only affected Linux x86_64 app and AMD64 backend work. This can include services, embedded storage, backend images, packaged Compose or classifier checks. Mac apps, web checks and the web image wait for the second pass.
 2. As soon as the exact-head [Linux app and Rune evidence](#native-app-review-evidence) are available, reviewers can test the package while affected backend jobs continue. Exercise affected behavior on Linux, using both **Embedded** and **Distributed** when a shared contract changes. Record the reviewer verdict and the inspected captures or walkthrough on the PR. Fix reported regressions and review the new head.
-3. Dispatch the second pass when **Fleetworks required** and the applicable Linux review both pass. The workflow resolves the base from the open PR and checks the full head SHA and successful first pass. It runs affected deferred targets, including Intel and Apple Silicon Mac apps, ARM64 backend checks and web work. It skips the previously verified Linux app and AMD64 backend jobs. Trusted integration pushes still run release verification independently.
+3. Dispatch the second pass as soon as first-pass **Fleetworks required** is green for the exact head. Continue any outstanding Linux visual review in parallel. The workflow resolves the base from the open PR and checks the full head SHA and successful first pass. It runs affected deferred targets, including Intel and Apple Silicon Mac builds and checks, the React Native Web build and browser checks, and ARM64 backend checks. It skips the previously verified Linux app and AMD64 backend jobs. Trusted integration pushes still run release verification independently.
 
 ```sh
 gh workflow run fleetworks.yml --ref "<pr-head-branch>" \

@@ -71,7 +71,7 @@ Build flow: flushed stage/command markers and live Cargo diagnostics on **stderr
 | Event / stage | Output |
 | --- | --- |
 | PR first pass, targeting `dev`, `nightly` or `main` | Affected Linux x86_64 debug app and Rune PNG/tree evidence, plus selected AMD64 backend diagnostics |
-| Exact-head second pass after Linux review | Selected Mac debug app and Rune evidence, remaining backend architectures and web evidence |
+| Exact-head second pass after first-pass CI succeeds | Selected Mac debug app and Rune evidence, remaining backend architectures and web evidence |
 | Trusted push to `nightly` / `dev` / `main` | Selected release-profile, versioned unsigned Mac ZIPs (Intel/Apple Silicon) and non-release Linux x86_64 `.tar.gz` archives; manifests/checksums retained as 14-day Actions artifacts |
 | Native verification | Download by immutable artifact ID, require artifact digest, then verify ZIP / `.tar.gz` checksum/source/version/target/bundle identity without installing or launching |
 | Selected Linux image verification | Native AMD64 + ARM64 build → exact-image-ID smoke → push verified digests and export `fleetworks-images-linux-{amd64,arm64}.tar.gz` + `.sha256`; `release-images-{amd64,arm64}.json` records source/version/image/archive identity. |

@@ -364,6 +364,24 @@ mod tests {
     }
 
     #[test]
+    fn backend_choice_capture_has_the_fixture_marker() {
+        let mut state = State::fixture();
+        state.fixture_show_backend_choice();
+        let mut runtime = rune::Runtime::new(
+            state,
+            crate::app::view,
+            (640.0, 480.0),
+            rune::Env {
+                system_dark: true,
+                scale: 1.0,
+            },
+        );
+        runtime.frame(0.0);
+        assert!(runtime.find("startup-choose").is_some());
+        assert!(runtime.find("fixture-marker").is_some());
+    }
+
+    #[test]
     fn the_crossfade_shows_both_layers_and_the_orbit_fits_a_compact_window() {
         let mut runtime = runtime((640.0, 480.0), 2.0);
         runtime.update(|state, _| {

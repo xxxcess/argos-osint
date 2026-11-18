@@ -1365,7 +1365,8 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     let mut layers = Vec::new();
     crate::material::configure_kit(&mut kit, preferences);
     if state.startup.active() {
-        return crate::startup::view(state, preferences, &kit, cx.layout_size("startup"));
+        let startup = crate::startup::view(state, preferences, &kit, cx.layout_size("startup"));
+        return mark_fixture(state, &kit, startup);
     }
     let compact_rail = cx
         .layout_size("app-shell")
@@ -1698,21 +1699,7 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
         );
     }
     let base = split.build(&kit).key("app-shell");
-    let base = if state.fixture {
-        rune::col()
-            .w_full()
-            .h_full()
-            .child(
-                rune::text("Fixture — synthetic data, boundary effects disabled")
-                    .key("fixture-marker")
-                    .font(kit.ty.small)
-                    .color(kit.c.info.fg)
-                    .padding(6.0),
-            )
-            .child(base.grow(1.0).min_h(0.0))
-    } else {
-        base
-    };
+    let base = mark_fixture(state, &kit, base);
     rune_kit::root(base, layers)
         .on_window_focus(State::log_window_focus)
         .on_pointer_move_local(|state: &mut State, pointer, tx| {
@@ -1726,6 +1713,23 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
                 .set([(0.5 - nx) * 16.0, (0.5 - ny) * 14.0]);
             tx.live_only();
         })
+}
+
+fn mark_fixture(state: &State, kit: &Kit, view: El) -> El {
+    if !state.fixture {
+        return view;
+    }
+    rune::col()
+        .w_full()
+        .h_full()
+        .child(
+            rune::text("Fixture — synthetic data, boundary effects disabled")
+                .key("fixture-marker")
+                .font(kit.ty.small)
+                .color(kit.c.info.fg)
+                .padding(6.0),
+        )
+        .child(view.grow(1.0).min_h(0.0))
 }
 
 fn compact_icon_rail(

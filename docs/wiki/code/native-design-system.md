@@ -4,7 +4,7 @@
 
 Rune macOS and Linux x86_64 client (`apps/fleetworks-desktop`). One selected destination; backend boundaries remain governed by the connection/runtime contracts. Intel Web shares paint/branding (`@tag:look-and-feel`) and workstation Connect while keeping its navigation and topology/list behavior.
 
-**Approved target · 2026-11-17:** [Matte canvas theme](../../design/matte-canvas/theme.md) and [interaction/state contract](../../design/matte-canvas/interaction-state.md). Cool neutral text, symbol-only branding, diffuse grouped surfaces, flat semantic colors and narrowly eligible matte-rock actions supersede the earlier reflective/gold interface. This update changes documentation only; runtime integration and verification remain pending.
+**Approved target · 2026-11-17:** [Matte canvas theme](../../design/matte-canvas/theme.md) and [interaction/state contract](../../design/matte-canvas/interaction-state.md). Cool neutral text, symbol-only branding, diffuse grouped surfaces, flat semantic colors and narrowly eligible matte-rock actions supersede the earlier reflective/gold interface. Source implementation, fixture evidence, and live review are tracked separately.
 
 [![Native shell and selected destination](../../diagrams/native-workstation-layout.svg)](../../diagrams/native-workstation-layout.html)
 
@@ -12,8 +12,7 @@ Rune macOS and Linux x86_64 client (`apps/fleetworks-desktop`). One selected des
 
 These [inspected Rune Runtime captures](https://github.com/xxxcess/argos-osint/pull/67#issuecomment-6879191295) come from the passing [macOS ARM CI job](https://github.com/xxxcess/argos-osint/actions/runs/43606326381) at `fddb8405`. They show synthetic UI states; the installed native app has a separate review phase.
 
-| Wide workstation shell | Backend choice | Cold launch opens **Choose a backend** after the splash. **Embedded** and **Distributed** select the **Backend type** in **Setup Gateway**. **Start Embedded Backend** and **Stop Embedded Backend** manage the companion. **Connect** uses the Distributed URL and pairing flow. Shared operation controls follow advertised permissions, readiness and capabilities. |
-| Workstation Settings |
+| Wide workstation shell | Workstation Settings |
 | --- | --- |
 | [![Wide workstation shell](https://github.com/user-attachments/assets/4da95468-dd85-41e7-8e8d-ed8705f3b6ba)](https://github.com/user-attachments/assets/4da95468-dd85-41e7-8e8d-ed8705f3b6ba) | [![Workstation Settings dialog](https://github.com/user-attachments/assets/a72e60ce-ed34-40c7-8b31-0347d176afdc)](https://github.com/user-attachments/assets/a72e60ce-ed34-40c7-8b31-0347d176afdc) |
 | Readiness checks | Compact paged jobs |
@@ -28,6 +27,21 @@ Explicit user decisions govern. This page owns the maintained native control/des
 Source baseline: `nightly` commit `00b700afd77ddac6cba2e2bd7ae91ab3802b7197`, tree `5051474185a8eb14b38e607480bb24c65352fff0`. Pointer lighting, reflective finishes, rolling values and explicit page buttons described below are baseline facts, not approved target guidance. Historical CI captures above do not verify the new target.
 
 Normal setup implements [pairing and macOS Keychain](native-connections.md#pairing-and-keychain-agreed-target). Explicit operator/headless file mode stays independent. Runtime/backend/live Keychain evidence remains separately tracked.
+
+## Designing a native interaction
+
+Fleetworks Desktop is an operator workstation. A screen should make the current scope, the state of the work, and the next action clear. Use the [Rune skill](../../../.opencode/skills/fleetworks-rune-verify/SKILL.md) when turning these decisions into a production view and review evidence.
+
+| Decision | Fleetworks practice |
+| --- | --- |
+| Choose a composition | Use rows for scanning and selecting, tables for comparison, and grouped panels for facts or controls that support one decision. Brain Search keeps the result list and opens the selected dossier in place. Jobs & Logs retains its comparison table and selected-job context. |
+| Establish hierarchy | Use consistent alignment, type weight, and spacing from the shared components. Give the primary task the widest and most prominent area, then fold ancillary information into disclosure. Keep textual labels for significant state changes. |
+| Use motion to explain a change | Provide immediate press and focus feedback. Use a short Rune transition when a disclosure changes position or depth. Keep telemetry and list updates steady, and reserve motion for the region changing state. Follow the timing and preferences in the [motion contract](../../design/matte-canvas/motion.md). |
+| Preserve keyboard and pointer intent | Use native controls and name them for their action. Inspect order, focus contrast, visible hit bounds, Escape, focus return, and held-key behavior. At compact widths keep the same reading order and one scroll owner per task. |
+| Plan the complete state flow | Sketch initial loading, settled results or empty state, refresh, stale or failed reads, and recovery. Keep resolved same-scope content visible while refreshing. Mark unavailable features from capability evidence and preserve explicit confirmation for backend work. |
+| Review the interaction in context | Inspect the production Rune view at compact and wide sizes, then replay the keyboard, scroll, and state transitions affected by the change. Review the exact Linux package and fixture captures as they appear. Run second-pass platform checks when first-pass CI is green. |
+
+This workflow adapts the upstream skill’s principles for hierarchy, restrained motion, and context-aware feedback to Rune and the approved Fleetworks visual language. [Native App Designer reference](https://github.com/curiositech/some_claude_skills/blob/main/.claude/skills/native-app-designer/SKILL.md)
 
 ## Complete native control allowlist
 

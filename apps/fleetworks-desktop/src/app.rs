@@ -1715,7 +1715,7 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
         })
 }
 
-fn mark_fixture(state: &State, kit: &Kit, view: El) -> El {
+fn mark_fixture(state: &State, kit: &rune_kit::Kit, view: El) -> El {
     if !state.fixture {
         return view;
     }

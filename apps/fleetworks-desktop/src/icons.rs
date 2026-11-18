@@ -142,9 +142,16 @@ pub static ASSISTANT: Icon = Icon {
     body: r#"<rect x="2" y="2.5" width="12" height="11" rx="1.8" stroke="currentColor" stroke-width="1.4" fill="none"/><path d="M10 2.5v11" stroke="currentColor" stroke-width="1.4"/><path d="M12 6.2v1.6M11.2 7h1.6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
 };
 
-/// Command panel magnifier.
-pub static SEARCH: Icon = Icon {
-    name: "fw-search",
+/// Expanded record disclosure.
+pub static CHEVRON_DOWN: Icon = Icon {
+    name: "fw-chevron-down",
     view: 16.0,
-    body: r#"<circle cx="7" cy="7" r="4.4" stroke="currentColor" stroke-width="1.4" fill="none"/><path d="m10.4 10.4 3.1 3.1" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>"#,
+    body: r#"<path d="m3.5 6 4.5 4.5L12.5 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>"#,
+};
+
+/// Standard command symbol, distinct from actor search.
+pub static COMMAND: Icon = Icon {
+    name: "fw-command",
+    view: 16.0,
+    body: r#"<path d="M5.5 5.5h5v5h-5zM5.5 5.5H3.75A1.75 1.75 0 1 1 5.5 3.75v1.75Zm5 0V3.75a1.75 1.75 0 1 1 1.75 1.75H10.5Zm0 5h1.75a1.75 1.75 0 1 1-1.75 1.75V10.5Zm-5 0v1.75a1.75 1.75 0 1 1-1.75-1.75H5.5Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" fill="none"/>"#,
 };

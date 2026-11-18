@@ -9,7 +9,6 @@ use fleetworks_workstation::native::BackendKind;
 use rune::Cx;
 use rune::El;
 use rune::ScrollSpec;
-use rune::Transition;
 use rune_kit::Collapsible;
 use rune_kit::Dialog;
 use rune_kit::Kit;
@@ -1711,23 +1710,6 @@ fn brain(state: &State, cx: &mut Cx<State>, kit: &Kit) -> El {
         .for_view(state.fixture, cx.is_reduced_motion());
     let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
     let shadow_ref = (!preferences.matte()).then_some(&state.shadow_offset);
-    let narrow = cx
-        .layout_size("page-content")
-        .is_some_and(|size| size[0] < 720.0);
-    if narrow && state.brain.showing_detail {
-        return rune::col()
-            .w_full()
-            .grow(1.0)
-            .min_h(0.0)
-            .child(
-                ActionButton::new("Back to results")
-                    .key("brain-back")
-                    .finish(MetalFinish::Gunmetal)
-                    .on_press(|state: &mut State| state.brain.showing_detail = false)
-                    .build(kit, preferences, pointer_ref),
-            )
-            .child(dossier(state, preferences, kit));
-    }
     let search = TextInput::new(&state.brain.query)
         .label("Search actors")
         .placeholder("Search actors")
@@ -1785,6 +1767,8 @@ fn brain(state: &State, cx: &mut Cx<State>, kit: &Kit) -> El {
             }
             for (index, hit) in response.rows.iter().enumerate() {
                 let selected = state.brain.highlighted == Some(index);
+                let expanded = state.brain.showing_detail
+                    && state.brain.selected_actor.as_deref() == Some(hit.actor_id.as_str());
                 let tile = material::interactive_tile(
                     rune::row()
                         .w_full()
@@ -1814,9 +1798,16 @@ fn brain(state: &State, cx: &mut Cx<State>, kit: &Kit) -> El {
                                 )),
                         )
                         .child(
-                            rune::icon(&icons::CHEVRON_RIGHT, 14.0)
-                                .color(kit.c.icon_muted)
-                                .a11y_hidden(),
+                            rune::icon(
+                                if expanded {
+                                    &icons::CHEVRON_DOWN
+                                } else {
+                                    &icons::CHEVRON_RIGHT
+                                },
+                                14.0,
+                            )
+                            .color(kit.c.icon_muted)
+                            .a11y_hidden(),
                         ),
                     selected,
                     if selected {
@@ -1831,9 +1822,28 @@ fn brain(state: &State, cx: &mut Cx<State>, kit: &Kit) -> El {
                 .key(format!("actor-hit-{}", hit.actor_id))
                 .role("button")
                 .label(hit.label.clone())
+                .expanded(expanded)
                 .focusable(true)
-                .on_press(move |state: &mut State| state.select_actor(index));
-                list = list.child(tile);
+                .on_press(move |state: &mut State| state.toggle_actor(index))
+                .on_key(move |state: &mut State, event, tx| {
+                    if event.key == rune::Key::Enter && event.mods == rune::Mods::default() {
+                        if !tx.key_repeat() {
+                            state.toggle_actor(index);
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                });
+                let mut record = rune::col()
+                    .key(format!("actor-record-{}", hit.actor_id))
+                    .w_full()
+                    .gap(8.0)
+                    .child(tile);
+                if expanded {
+                    record = record.child(dossier(state, preferences, kit));
+                }
+                list = list.child(record);
             }
             if response.truncated {
                 list = list.child(quiet(
@@ -1843,31 +1853,7 @@ fn brain(state: &State, cx: &mut Cx<State>, kit: &Kit) -> El {
             }
         }
     }
-    let results = scroll(list, "actor-results");
-    if narrow {
-        results
-    } else {
-        let detail_panel = if preferences.reduced_motion {
-            dossier(state, preferences, kit).grow(1.0).min_w(0.0)
-        } else {
-            rune::col()
-                .key(format!(
-                    "dossier-pane-{}",
-                    state.brain.highlighted.unwrap_or(9999)
-                ))
-                .grow(1.0)
-                .min_w(0.0)
-                .transition(Transition::offset(8.0, 0.0).combined(Transition::opacity()))
-                .child(dossier(state, preferences, kit))
-        };
-        rune::row()
-            .w_full()
-            .grow(1.0)
-            .min_h(0.0)
-            .gap(16.0)
-            .child(results.w(340.0).min_w(300.0).grow(0.0))
-            .child(detail_panel)
-    }
+    scroll(list, "actor-results")
 }
 
 fn dossier(state: &State, preferences: crate::accessibility::ViewPreferences, kit: &Kit) -> El {
@@ -1893,9 +1879,18 @@ fn dossier(state: &State, preferences: crate::accessibility::ViewPreferences, ki
             shadow_ref,
         ),
         Load::Pending | Load::Loading => ui_components::skeleton_dossier(preferences, kit),
-        Load::Failed(error) => {
-            rune::col().child(line(error.clone(), kit).key("dossier-error").role("alert"))
-        }
+        Load::Failed(error) => rune::col()
+            .gap(8.0)
+            .child(line(error.clone(), kit).key("dossier-error").role("alert"))
+            .child(
+                ActionButton::new("Retry dossier")
+                    .key("dossier-retry")
+                    .finish(MetalFinish::Gunmetal)
+                    .on_press(|state: &mut State| {
+                        state.retry_dossier();
+                    })
+                    .build(kit, preferences, pointer_ref),
+            ),
         Load::Ready(actor) => {
             let facet_idx = match state.brain_facet {
                 DossierFacet::Overview => 0,
@@ -1918,9 +1913,8 @@ fn dossier(state: &State, preferences: crate::accessibility::ViewPreferences, ki
                 .padding(16.0)
                 .gap(12.0)
                 .child(
-                    rune::row()
+                    rune::col()
                         .w_full()
-                        .center_y()
                         .gap(10.0)
                         .child(
                             rune::col()
@@ -2021,7 +2015,7 @@ fn dossier(state: &State, preferences: crate::accessibility::ViewPreferences, ki
             )
         }
     };
-    scroll(body, "actor-dossier")
+    body.key("actor-dossier").w_full()
 }
 
 fn associations(label: &str, rows: &[Association], kit: &Kit) -> El {

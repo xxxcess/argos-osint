@@ -182,7 +182,7 @@ fn on_field_key(state: &mut State, event: &KeyEvent) -> bool {
 
 /// The toolbar button.
 pub(crate) fn toolbar_button(kit: &Kit) -> El {
-    rune_kit::IconButton::new(&icons::SEARCH)
+    rune_kit::IconButton::new(&icons::COMMAND)
         .variant(rune_kit::IconButtonVariant::Ghost)
         .label("Command panel (Ctrl+K or ⌘K)")
         .on_press(|state: &mut State| state.open_command_panel())

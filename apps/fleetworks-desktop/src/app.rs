@@ -1105,6 +1105,42 @@ impl State {
         }
     }
 
+    /// Open one result at a time; collapsing fences any pending dossier response.
+    pub fn toggle_actor(&mut self, index: usize) {
+        let Load::Ready(response) = &self.brain.results else {
+            return;
+        };
+        let Some(hit) = response.rows.get(index) else {
+            return;
+        };
+        if self.brain.showing_detail && self.brain.selected_actor.as_deref() == Some(&hit.actor_id)
+        {
+            self.brain.showing_detail = false;
+            self.brain.selected_actor = None;
+            self.brain.dossier = Load::Idle;
+            self.brain.detail_revision = self.brain.detail_revision.wrapping_add(1);
+            self.dossier_request = None;
+        } else {
+            self.select_actor(index);
+        }
+    }
+
+    pub fn retry_dossier(&mut self) {
+        let Load::Ready(response) = &self.brain.results else {
+            return;
+        };
+        if !self.brain.showing_detail {
+            return;
+        }
+        if let Some(index) = response
+            .rows
+            .iter()
+            .position(|hit| Some(hit.actor_id.as_str()) == self.brain.selected_actor.as_deref())
+        {
+            self.select_actor(index);
+        }
+    }
+
     pub fn select_actor(&mut self, index: usize) {
         let Load::Ready(response) = &self.brain.results else {
             return;
@@ -1117,6 +1153,7 @@ impl State {
         self.brain.selected_actor = Some(id.clone());
         self.brain.detail_revision = self.brain.detail_revision.wrapping_add(1);
         self.brain.showing_detail = true;
+        self.brain_facet = DossierFacet::Overview;
         if !self.fixture && (self.services.is_none() || self.client.is_none()) {
             self.brain.dossier = Load::Failed("Gateway dossier services are unavailable".into());
             return;
@@ -1142,7 +1179,7 @@ impl State {
             Key::Up => self.brain.move_highlight(false),
             Key::Enter => {
                 if let Some(index) = self.brain.highlighted {
-                    self.select_actor(index);
+                    self.toggle_actor(index);
                 } else {
                     self.search_now();
                 }

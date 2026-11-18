@@ -783,3 +783,117 @@ fn host_resources_show_stale_marker_after_a_failed_refresh() {
         .to_string()
         .contains("Telemetry unavailable"));
 }
+
+fn brain_results_fixture() -> State {
+    use fleetworks_contracts::search::ActorSearchHit;
+    let mut state = registered_fixture();
+    state.page = Page::Brain;
+    state.brain.results = Load::Ready(ActorSearchResponse::new(
+        ["first", "second"]
+            .into_iter()
+            .map(|id| ActorSearchHit::new(id.into(), id.into(), 1, "test-generation".into()))
+            .collect(),
+        IndexStatus::unknown("2026-01-01T00:00:00Z".into()),
+    ));
+    state.intents.clear();
+    state
+}
+
+#[test]
+fn brain_records_fetch_only_on_expansion_and_fence_collapse_query_and_selection() {
+    let mut state = brain_results_fixture();
+    assert!(state.intents.is_empty());
+    state.toggle_actor(0);
+    assert!(
+        matches!(state.intents.last(), Some(Intent::Dossier { actor_id }) if actor_id == "first")
+    );
+    let first = state.brain.detail_revision;
+    state.toggle_actor(0);
+    assert!(!state.brain.showing_detail);
+    assert!(matches!(state.brain.results, Load::Ready(_)));
+    state
+        .brain
+        .complete_dossier(first, Err("late collapsed response".into()));
+    assert!(matches!(state.brain.dossier, Load::Idle));
+    assert_eq!(state.intents.len(), 1, "collapse must never fetch");
+    state.toggle_actor(0);
+    let reopened = state.brain.detail_revision;
+    state.toggle_actor(1);
+    state
+        .brain
+        .complete_dossier(reopened, Err("late first record".into()));
+    assert!(matches!(state.brain.dossier, Load::Loading));
+    assert_eq!(state.brain.selected_actor.as_deref(), Some("second"));
+    let second = state.brain.detail_revision;
+    state
+        .brain
+        .complete_dossier(second, Err("retryable failure".into()));
+    state.brain.highlighted = Some(0);
+    state.retry_dossier();
+    assert!(
+        matches!(state.intents.last(), Some(Intent::Dossier { actor_id }) if actor_id == "second")
+    );
+    let retry = state.brain.detail_revision;
+    state.brain.edited(0.0);
+    state.brain.complete_dossier(retry, Err("old query".into()));
+    assert!(!state.brain.showing_detail);
+    assert!(matches!(state.brain.dossier, Load::Idle));
+}
+
+#[test]
+fn brain_real_result_disclosure_preserves_list_at_compact_and_wide_sizes() {
+    for size in [(640.0, 480.0), (1280.0, 800.0)] {
+        let mut runtime = Runtime::new(
+            brain_results_fixture(),
+            app::view,
+            size,
+            Env {
+                system_dark: true,
+                scale: 1.0,
+            },
+        );
+        runtime.frame(0.0);
+        assert!(runtime.find("actor-dossier").is_none());
+        assert!(runtime.state.intents.is_empty());
+        let (x, y) = runtime
+            .find("actor-hit-first")
+            .expect("first result trigger");
+        runtime.pointer_down(x, y);
+        runtime.pointer_up(x, y);
+        runtime.frame(1.0 / 60.0);
+        assert!(runtime.find("actor-dossier").is_some());
+        let trigger = runtime
+            .elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some("actor-hit-first"))
+            .expect("disclosure element");
+        assert_eq!(
+            trigger.expanded,
+            Some(true),
+            "disclosure announces its state"
+        );
+        assert!(runtime.find("actor-results").is_some());
+        assert!(
+            runtime.find("actor-search").is_some(),
+            "opening never navigates away from search"
+        );
+        runtime.update(|_, tx| tx.focus("actor-hit-first", true));
+        runtime.frame(1.5 / 60.0);
+        runtime.key(rune::KeyEvent {
+            key: rune::Key::Enter,
+            mods: rune::Mods::default(),
+        });
+        runtime.frame(2.0 / 60.0);
+        assert!(runtime.find("actor-dossier").is_none());
+        assert!(runtime.find("actor-hit-second").is_some());
+        assert_eq!(
+            runtime
+                .state
+                .intents
+                .iter()
+                .filter(|intent| matches!(intent, Intent::Dossier { .. }))
+                .count(),
+            1
+        );
+    }
+}

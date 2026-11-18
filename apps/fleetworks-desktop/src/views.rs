@@ -1716,7 +1716,7 @@ fn brain(state: &State, cx: &mut Cx<State>, kit: &Kit) -> El {
         .width(None)
         .on_edit(|state: &mut State| &mut state.brain.query)
         .on_change(|state: &mut State, tx| state.query_edited(tx))
-        .on_key(|state: &mut State, event, _| state.search_key(event))
+        .on_key(|state: &mut State, event, tx| state.search_key(event, tx.key_repeat()))
         .on_submit(|state: &mut State, _| state.search_now())
         .build(kit)
         .key("actor-search");

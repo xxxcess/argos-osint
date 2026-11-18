@@ -901,3 +901,56 @@ fn brain_real_result_disclosure_preserves_list_at_compact_and_wide_sizes() {
         );
     }
 }
+
+#[test]
+fn holding_enter_in_brain_search_toggles_the_highlighted_dossier_once() {
+    let mut state = brain_results_fixture();
+    state.brain.highlighted = Some(0);
+    let mut runtime = Runtime::new(
+        state,
+        app::view,
+        (1180.0, 800.0),
+        Env {
+            system_dark: true,
+            scale: 1.0,
+        },
+    );
+    runtime.frame(0.0);
+    runtime.update(|_, tx| tx.focus("actor-search/value/input", true));
+    runtime.frame(1.0 / 60.0);
+    assert!(runtime
+        .elements()
+        .iter()
+        .any(|element| { element.focused && element.path.ends_with("actor-search/value/input") }));
+
+    let enter = rune::KeyEvent {
+        key: rune::Key::Enter,
+        mods: rune::Mods::default(),
+    };
+    let revision = runtime.state.brain.detail_revision;
+    runtime.key(enter.clone());
+    runtime.frame(2.0 / 60.0);
+    for step in 3..8 {
+        runtime.repeat_key(enter.clone());
+        runtime.frame(f64::from(step) / 60.0);
+        assert!(runtime.find("actor-dossier").is_some());
+    }
+    assert_eq!(runtime.state.brain.detail_revision, revision + 1);
+    assert_eq!(
+        runtime.state.intents,
+        vec![Intent::Dossier {
+            actor_id: "first".into(),
+        }]
+    );
+
+    runtime.key_up(enter.clone());
+    runtime.key(enter.clone());
+    runtime.frame(8.0 / 60.0);
+    for step in 9..14 {
+        runtime.repeat_key(enter.clone());
+        runtime.frame(f64::from(step) / 60.0);
+        assert!(runtime.find("actor-dossier").is_none());
+    }
+    assert_eq!(runtime.state.brain.detail_revision, revision + 2);
+    assert_eq!(runtime.state.intents.len(), 1);
+}

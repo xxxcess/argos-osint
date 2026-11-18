@@ -1173,10 +1173,11 @@ impl State {
         }
     }
 
-    pub fn search_key(&mut self, event: &KeyEvent) -> bool {
+    pub fn search_key(&mut self, event: &KeyEvent, repeat: bool) -> bool {
         match event.key {
             Key::Down => self.brain.move_highlight(true),
             Key::Up => self.brain.move_highlight(false),
+            Key::Enter if repeat => {}
             Key::Enter => {
                 if let Some(index) = self.brain.highlighted {
                     self.toggle_actor(index);

@@ -1573,8 +1573,14 @@ fn unread_never_counts_a_row_twice_or_a_refresh() {
         "only the row new to the loaded set counts"
     );
 
-    // A refresh of the same scope re-reads rows; it is not an arrival.
+    // A same-query refresh preserves unread IDs while away and never counts
+    // duplicate or older rows appearing after already-known rows.
     let refresh = logs.refresh().expect("refresh read");
+    assert_eq!(
+        logs.unread(),
+        1,
+        "starting a same-query refresh preserves unread IDs before the response arrives"
+    );
     assert!(logs.complete(
         &refresh,
         Ok(LogReply::Page(page(
@@ -1587,9 +1593,109 @@ fn unread_never_counts_a_row_twice_or_a_refresh() {
     ));
     assert_eq!(
         logs.unread(),
-        0,
-        "a refresh resets the view and adds nothing"
+        1,
+        "refresh keeps existing unread IDs without counting duplicates or older rows"
     );
+    assert!(logs.set_away(false));
+    assert_eq!(logs.unread(), 0);
+}
+
+#[test]
+fn transient_refresh_and_older_errors_preserve_loaded_page_viewport_and_unread_ids() {
+    let mut logs = ready();
+    logs.table.select("event-0");
+    logs.set_away(true);
+    follow_with(&mut logs, 10, 2, 3);
+    assert_eq!(logs.rows.len(), 3);
+    assert_eq!(logs.unread(), 2);
+
+    // Transient Refresh error keeps loaded rows, viewport cursor, and unread IDs.
+    let refresh = logs.refresh().expect("same-query refresh");
+    assert_eq!(logs.rows.len(), 3);
+    assert!(logs.complete(&refresh, Err(ClientError::Status(503))));
+    assert_eq!(logs.status, LogStatus::Unavailable);
+    assert_eq!(logs.rows.len(), 3);
+    assert_eq!(logs.table.cursor(), Some("event-0"));
+    assert_eq!(logs.unread(), 2);
+    assert!(logs.available());
+
+    // Transient Older error also preserves loaded rows, viewport cursor, and unread IDs.
+    let older = logs.older().expect("older page retry");
+    assert!(logs.complete(&older, Err(ClientError::Timeout)));
+    assert_eq!(logs.status, LogStatus::Unavailable);
+    assert_eq!(logs.rows.len(), 3);
+    assert_eq!(logs.table.cursor(), Some("event-0"));
+    assert_eq!(logs.unread(), 2);
+
+    // Job/scope change clears rows, viewport cursor, and unread IDs.
+    logs.select_target(LogTarget::Job {
+        id: "other-job".into(),
+        descendants: false,
+    });
+    assert!(logs.rows.is_empty());
+    assert!(logs.table.cursor().is_none());
+    assert_eq!(logs.unread(), 0);
+}
+
+#[test]
+fn same_query_refresh_preserves_unread_ids_and_counts_only_new_newer_rows() {
+    let mut logs = ready();
+    logs.set_away(true);
+    follow_with(&mut logs, 10, 1, 3);
+    assert_eq!(logs.unread(), 1);
+
+    // Loading an older page never increments unread.
+    let older = logs.older().expect("older page");
+    assert!(logs.complete(
+        &older,
+        Ok(LogReply::Page(page(100, 2, 20, Some(cursor(4)), None)))
+    ));
+    assert_eq!(logs.unread(), 1);
+
+    // Same-query refresh catch-up with two brand-new newer rows at the head
+    // before already-known rows counts only those two new newer IDs plus the preserved unread ID.
+    let refresh = logs.refresh().expect("catch-up refresh");
+    let catchup: LogPage = serde_json::from_value(json!({
+        "rows": [row(30), row(29), row(10), row(0)],
+        "counts": {"total": 22, "info": 22, "error": 0, "warn": 0, "debug": 0},
+        "apps": ["tools"],
+        "apps_complete": true,
+        "next_cursor": cursor(5),
+        "follow_cursor": cursor(6),
+        "available": true,
+        "private_logs_only": true,
+        "shared_private_logs_available": true,
+        "reason_code": null,
+        "narrowing_hint": null,
+        "has_more": true
+    }))
+    .expect("catch-up page");
+    assert!(logs.complete(&refresh, Ok(LogReply::Page(catchup))));
+    assert_eq!(logs.unread(), 3);
+
+    // Re-refreshing the exact same head page never double-counts.
+    let repeat = logs.refresh().expect("repeat refresh");
+    let same_head: LogPage = serde_json::from_value(json!({
+        "rows": [row(30), row(29), row(10), row(0)],
+        "counts": {"total": 22, "info": 22, "error": 0, "warn": 0, "debug": 0},
+        "apps": ["tools"],
+        "apps_complete": true,
+        "next_cursor": cursor(5),
+        "follow_cursor": cursor(6),
+        "available": true,
+        "private_logs_only": true,
+        "shared_private_logs_available": true,
+        "reason_code": null,
+        "narrowing_hint": null,
+        "has_more": true
+    }))
+    .expect("same head page");
+    assert!(logs.complete(&repeat, Ok(LogReply::Page(same_head))));
+    assert_eq!(logs.unread(), 3);
+
+    // Reaching the newest row clears unread.
+    assert_eq!(logs.jump_to_newest().as_deref(), Some("event-30"));
+    assert_eq!(logs.unread(), 0);
 }
 
 #[test]

@@ -872,3 +872,126 @@ fn near_end_pauses_after_a_failed_tail_until_the_explicit_retry() {
     state.request_jobs(JobsEvent::More);
     assert!(state.scoped_jobs.loading_more(), "Retry still works");
 }
+
+#[test]
+fn jobs_nav_badge_counts_in_progress_buckets_omits_unknown_and_clears_on_authority_change() {
+    let mut state = registered_app();
+    // Before any page loads, count is unknown -> omitted (never "0").
+    assert_eq!(state.scoped_jobs.in_progress_count(), None);
+    assert_eq!(
+        crate::app::sidebar_row_badge(&state, crate::app::Page::Jobs),
+        None
+    );
+
+    // Page with running(2) + queued(3) + retrying(1) = 6, even though only 1 row is loaded.
+    state.request_jobs(JobsEvent::Apply);
+    let ticket = state.scoped_jobs.active_ticket().expect("ticket").clone();
+    let mut reply = page(&ticket.binding, 1, None);
+    reply.counts = Some(JobsDashboardCounts {
+        active: 2,
+        queued: 3,
+        retrying: 1,
+        failed: 4,
+        completed_recent: 9,
+    });
+    state.complete_scoped_jobs(ticket, Ok(reply));
+    assert_eq!(state.scoped_jobs.in_progress_count(), Some(6));
+    assert_eq!(
+        crate::app::sidebar_row_badge(&state, crate::app::Page::Jobs).as_deref(),
+        Some("6")
+    );
+
+    // Unknown counts (None) omits the badge rather than showing "0".
+    state.request_jobs(JobsEvent::Poll);
+    let poll = state.scoped_jobs.active_ticket().expect("poll").clone();
+    let mut unknown_reply = page(&poll.binding, 1, None);
+    unknown_reply.counts = None;
+    unknown_reply.observed_at = "2026-11-12T12:01:00Z".into();
+    state.complete_scoped_jobs(poll, Ok(unknown_reply));
+    assert_eq!(state.scoped_jobs.in_progress_count(), None);
+    assert_eq!(
+        crate::app::sidebar_row_badge(&state, crate::app::Page::Jobs),
+        None
+    );
+
+    // Authority change clears the count.
+    state.request_jobs(JobsEvent::Poll);
+    let poll2 = state.scoped_jobs.active_ticket().expect("poll2").clone();
+    let mut active_reply = page(&poll2.binding, 1, None);
+    active_reply.counts = Some(JobsDashboardCounts {
+        active: 1,
+        queued: 0,
+        retrying: 0,
+        failed: 0,
+        completed_recent: 0,
+    });
+    active_reply.observed_at = "2026-11-12T12:02:00Z".into();
+    state.complete_scoped_jobs(poll2, Ok(active_reply));
+    assert_eq!(
+        crate::app::sidebar_row_badge(&state, crate::app::Page::Jobs).as_deref(),
+        Some("1")
+    );
+    state.scoped_jobs.invalidate_origin();
+    assert_eq!(state.scoped_jobs.in_progress_count(), None);
+    assert_eq!(
+        crate::app::sidebar_row_badge(&state, crate::app::Page::Jobs),
+        None
+    );
+}
+
+#[test]
+fn selected_job_detail_is_not_overwritten_by_stale_list_refresh_and_tail_cursor_survives() {
+    let mut state = state_with_jobs_head(Some(2));
+    // Load tail page 2 so tail_cursor advances to cursor(3).
+    state.request_jobs(JobsEvent::More);
+    let tail = state.scoped_jobs.active_ticket().expect("tail").clone();
+    state.complete_scoped_jobs(tail.clone(), Ok(page(&tail.binding, 2, Some(3))));
+    assert_eq!(state.scoped_jobs.loaded_pages(), 2);
+
+    // Select fixture-job-1 and give it a newer terminal detail observation.
+    state.backend.selected_job = Some("fixture-job-1".into());
+    let newer_detail: crate::backend::JobDetail = serde_json::from_value(json!({
+        "job": {
+            "id": "fixture-job-1",
+            "app": "tools",
+            "operation": "manual_tool",
+            "title": "Synthetic eligible job 1",
+            "state": "completed",
+            "phase": "done",
+            "progress_done": 100,
+            "progress_total": 100,
+            "error_summary": "",
+            "private_details_available": true,
+            "activity_actions_available": false,
+            "status_only": false
+        },
+        "stages": [],
+        "private_details_available": true,
+        "activity_actions_available": false
+    }))
+    .expect("newer detail");
+    state.backend.detail = Load::Ready(newer_detail);
+
+    // A head poll returns an older "queued" row for fixture-job-1.
+    state.request_jobs(JobsEvent::Poll);
+    let poll = state.scoped_jobs.active_ticket().expect("poll").clone();
+    let mut stale_row_page = page(&poll.binding, 1, Some(99));
+    stale_row_page.observed_at = "2026-11-12T12:00:30Z".into();
+    state.complete_scoped_jobs(poll, Ok(stale_row_page));
+
+    // Selected detail must remain "completed" (not regressed to "queued").
+    let Load::Ready(detail) = &state.backend.detail else {
+        panic!("detail must remain ready");
+    };
+    assert_eq!(detail.job.state, "completed");
+    assert_eq!(detail.job.progress_done, Some(100));
+
+    // Tail cursor must still be cursor(3) (not reset to cursor(99)).
+    state.request_jobs(JobsEvent::More);
+    let next_tail = state
+        .scoped_jobs
+        .active_ticket()
+        .expect("next tail")
+        .clone();
+    assert_eq!(next_tail.query.cursor, Some(cursor(3)));
+}

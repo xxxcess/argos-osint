@@ -358,8 +358,8 @@ impl State {
         }
     }
 
-    /// Restore only the explicitly selected origin. An empty installation never
-    /// starts a pairing request or adopts a token file automatically.
+    /// Preload only the saved pairing origin from local settings. Startup never
+    /// dispatches a connection or pairing request before the user explicitly clicks Connect.
     pub(crate) fn initialize_pairing_connection(&mut self) {
         if self.fixture || self.pairing.startup_loaded || !self.uses_native_pairing() {
             return;
@@ -382,14 +382,18 @@ impl State {
             return;
         }
         self.pairing.request = None;
+        let is_remote = self.backend_kind == fleetworks_workstation::native::BackendKind::Remote;
         match result {
             Ok(RestoreOutcome::DurableOrPending(origin)) => {
-                self.connection.origin = rune::TextEdit::new(origin);
-                self.connect_pairing(false);
+                if is_remote {
+                    self.connection.origin = rune::TextEdit::new(origin);
+                }
             }
             Ok(RestoreOutcome::SessionEnded(origin)) => {
-                self.connection.origin = rune::TextEdit::new(origin);
-                self.pairing.stage = PairingStage::Failed(PairingFailure::SessionEnded);
+                if is_remote {
+                    self.connection.origin = rune::TextEdit::new(origin);
+                    self.pairing.stage = PairingStage::Failed(PairingFailure::SessionEnded);
+                }
             }
             Ok(RestoreOutcome::None) => {}
             Err(error) => self.pairing.stage = PairingStage::Failed(error),
@@ -729,3 +733,84 @@ async fn connect_or_pair_with_storage(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod restore_tests {
+    use fleetworks_workstation::native::BackendKind;
+
+    use super::*;
+
+    #[test]
+    fn saved_pairing_restore_preloads_origin_without_dispatching_connect() {
+        let mut state = State::fixture();
+        state.pairing.fixture_enabled = true;
+        state.startup = crate::startup::Startup::cold_launch();
+        state.backend_kind = BackendKind::Remote;
+        let epoch = state.connection.epoch;
+
+        state.restored_pairing(
+            epoch,
+            Ok(RestoreOutcome::DurableOrPending(
+                "https://gateway.example.test/".into(),
+            )),
+        );
+
+        assert_eq!(
+            state.connection.origin.text,
+            "https://gateway.example.test/"
+        );
+        assert_eq!(state.connection.status, ConnectionStatus::Disconnected);
+        assert_eq!(state.pairing.stage, PairingStage::Idle);
+        assert!(state.pairing.request.is_none());
+        assert!(
+            state.intents.is_empty(),
+            "saved-pairing restore must not dispatch Connect or PairingConnect: {:?}",
+            state.intents
+        );
+
+        // Selecting Distributed from startup keeps the preloaded origin and still never connects.
+        state.choose_startup_destination(BackendKind::Remote);
+        assert_eq!(
+            state.connection.origin.text,
+            "https://gateway.example.test/"
+        );
+        assert_eq!(state.connection.status, ConnectionStatus::Disconnected);
+        assert_eq!(state.pairing.stage, PairingStage::Idle);
+        assert!(state.setup_gateway);
+        assert!(
+            !state
+                .intents
+                .iter()
+                .any(|intent| matches!(intent, Intent::Connect | Intent::PairingConnect)),
+            "choosing Distributed must not auto-connect: {:?}",
+            state.intents
+        );
+    }
+
+    #[test]
+    fn saved_pairing_restore_does_not_overwrite_local_backend_or_stale_epoch() {
+        let mut state = State::fixture();
+        state.backend_kind = BackendKind::Local;
+        state.connection.origin = rune::TextEdit::new("local://embedded");
+        let epoch = state.connection.epoch;
+
+        state.restored_pairing(
+            epoch,
+            Ok(RestoreOutcome::DurableOrPending(
+                "https://gateway.example.test/".into(),
+            )),
+        );
+        assert_eq!(state.connection.origin.text, "local://embedded");
+        assert!(state.intents.is_empty());
+
+        state.backend_kind = BackendKind::Remote;
+        state.restored_pairing(
+            epoch.wrapping_add(1),
+            Ok(RestoreOutcome::DurableOrPending(
+                "https://stale.example.test/".into(),
+            )),
+        );
+        assert_eq!(state.connection.origin.text, "local://embedded");
+        assert!(state.intents.is_empty());
+    }
+}

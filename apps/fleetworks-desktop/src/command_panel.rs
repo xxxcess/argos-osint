@@ -124,9 +124,27 @@ impl State {
         )
     }
 
+    /// Whether any active page confirmation dialog is currently pending.
+    /// Commands defers instead of layering over or dismissing pending confirmations.
+    pub(crate) fn has_active_confirmation_dialog(&self) -> bool {
+        self.confirm_cycle_delete
+            || self.confirm_maintenance_dialog
+            || self.cycles.confirmation.is_some()
+            || self.maintenance.confirmation.is_some()
+            || self.configuration.confirmation.is_some()
+            || self.transfer.confirmation.is_some()
+            || self.submissions.atlas.confirmation.is_some()
+            || self.submissions.tools.confirmation.is_some()
+            || self.classifier_activation.confirmation.is_some()
+            || self.job_actions.confirmation.is_some()
+            || self.workspaces.confirmation.is_some()
+            || self.rebind.confirmation.is_some()
+            || self.connection_profiles.confirmation.is_some()
+    }
+
     /// Open from Cmd/Ctrl+K or the toolbar. This panel becomes the only overlay.
     pub(crate) fn open_command_panel(&mut self) {
-        if self.startup.active() {
+        if self.startup.active() || self.has_active_confirmation_dialog() {
             return;
         }
         self.settings_open = false;
@@ -199,7 +217,7 @@ pub(crate) fn view(
     preferences: crate::accessibility::ViewPreferences,
     layers: &mut Vec<El>,
 ) {
-    if !state.commands.open {
+    if !state.commands.open || state.has_active_confirmation_dialog() {
         return;
     }
     let entries = state.command_entries();
@@ -404,6 +422,31 @@ mod tests {
         state.open_command_panel();
         assert!(!state.settings_open);
         assert!(!state.inbox.open);
+        assert!(state.commands.open);
+    }
+
+    #[test]
+    fn opening_is_deferred_while_a_page_confirmation_dialog_is_pending() {
+        let mut state = crate::tests::registered_fixture();
+        state.confirm_maintenance_dialog = true;
+        state.open_command_panel();
+        assert!(!state.commands.open);
+        assert!(state.confirm_maintenance_dialog);
+
+        state.confirm_maintenance_dialog = false;
+        state.confirm_cycle_delete = true;
+        state.open_command_panel();
+        assert!(!state.commands.open);
+        assert!(state.confirm_cycle_delete);
+
+        state.confirm_cycle_delete = false;
+        state.cycles.confirmation = Some("cycle-1".into());
+        state.open_command_panel();
+        assert!(!state.commands.open);
+        assert_eq!(state.cycles.confirmation.as_deref(), Some("cycle-1"));
+
+        state.cycles.confirmation = None;
+        state.open_command_panel();
         assert!(state.commands.open);
     }
 

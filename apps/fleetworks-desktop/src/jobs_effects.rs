@@ -142,16 +142,11 @@ impl State {
             {
                 if let Some(updated) = jobs.rows.iter().find(|job| job.id == selected_id).cloned() {
                     let transitioned = match &mut self.backend.detail {
-                        Load::Ready(detail) if detail.job.id == updated.id => {
-                            let changed = detail.job.state != updated.state
-                                || detail.job.phase != updated.phase
-                                || detail.job.progress_done != updated.progress_done
-                                || detail.job.progress_total != updated.progress_total
-                                || detail.job.error_summary != updated.error_summary;
-                            if changed {
-                                detail.job = updated;
-                            }
-                            changed
+                        Load::Ready(detail)
+                            if should_reconcile_detail_from_row(&detail.job, &updated) =>
+                        {
+                            detail.job = updated;
+                            true
                         }
                         _ => false,
                     };
@@ -186,6 +181,49 @@ impl State {
             _ => Load::Idle,
         };
     }
+}
+
+fn job_state_rank(state: &str) -> u8 {
+    match state {
+        "queued" => 1,
+        "retry_scheduled" => 2,
+        "running" => 3,
+        "completed" | "failed" | "cancelled" | "stopped" => 4,
+        _ => 0,
+    }
+}
+
+fn should_reconcile_detail_from_row(
+    current: &crate::backend::ActivityJob,
+    candidate: &crate::backend::ActivityJob,
+) -> bool {
+    if current.id != candidate.id {
+        return false;
+    }
+    if current.private_details_available && candidate.status_only {
+        return false;
+    }
+    let current_rank = job_state_rank(&current.state);
+    let candidate_rank = job_state_rank(&candidate.state);
+    if current_rank == 4 && candidate_rank < 4 {
+        return false;
+    }
+    if candidate_rank > current_rank {
+        return true;
+    }
+    if candidate_rank < current_rank && candidate_rank != 0 {
+        return false;
+    }
+    match (current.progress_done, candidate.progress_done) {
+        (Some(cur), Some(cand)) if cand < cur => return false,
+        (Some(_), None) => return false,
+        _ => {}
+    }
+    current.state != candidate.state
+        || current.phase != candidate.phase
+        || current.progress_done != candidate.progress_done
+        || current.progress_total != candidate.progress_total
+        || current.error_summary != candidate.error_summary
 }
 
 impl GatewayEffects {

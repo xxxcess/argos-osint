@@ -179,6 +179,8 @@ pub fn run() -> anyhow::Result<()> {
             }
             state.local_backend.cli_binary_override = options.local_backend_bin.clone();
             state.local_backend.refresh_binary_status();
+            // Load local workstation metadata and preload any saved origin only;
+            // neither Embedded nor Distributed starts or connects until explicit user action.
             state.initialize_workspaces(options.workspace.clone());
             state
         })

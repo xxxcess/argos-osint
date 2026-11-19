@@ -198,10 +198,14 @@ fn section_content(state: &State, preferences: ViewPreferences, kit: &Kit) -> El
             "Display",
             rune::col()
                 .child(setting_row(
-                    "Liquid metal",
-                    "The app follows macOS Reduce Transparency.",
+                    "Surfaces",
+                    surface_preference_description(cfg!(target_os = "macos")),
                     Some(ui_components::status_pill(
-                        if preferences.matte() { "Matte" } else { "On" },
+                        if preferences.matte() {
+                            "Opaque"
+                        } else {
+                            "Transparent"
+                        },
                         None,
                         StatusTone::Accent,
                         kit,
@@ -209,13 +213,13 @@ fn section_content(state: &State, preferences: ViewPreferences, kit: &Kit) -> El
                     kit,
                 ))
                 .child(setting_row(
-                    "Motion",
-                    "The app follows macOS Reduce Motion.",
+                    "Reduced motion",
+                    motion_preference_description(cfg!(target_os = "macos")),
                     Some(ui_components::status_pill(
                         if preferences.reduced_motion {
                             "Reduced"
                         } else {
-                            "On"
+                            "Standard"
                         },
                         None,
                         StatusTone::Neutral,
@@ -451,6 +455,22 @@ pub(crate) fn page(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
         .child(content)
 }
 
+fn surface_preference_description(is_macos: bool) -> &'static str {
+    if is_macos {
+        "Follows macOS Reduce Transparency and FLEETWORKS_OPAQUE_MATERIALS."
+    } else {
+        "Uses transparent surfaces by default, or opaque surfaces when FLEETWORKS_OPAQUE_MATERIALS is set."
+    }
+}
+
+fn motion_preference_description(is_macos: bool) -> &'static str {
+    if is_macos {
+        "Follows macOS Reduce Motion."
+    } else {
+        "Follows your desktop reduced-motion accessibility preference."
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rune::Env;
@@ -459,7 +479,24 @@ mod tests {
     use crate::app;
     use crate::app::Page;
 
+    use super::motion_preference_description;
+    use super::surface_preference_description;
     use super::SettingsSection;
+
+    #[test]
+    fn appearance_copy_omits_macos_wording_on_linux() {
+        let linux_surfaces = surface_preference_description(false);
+        let linux_motion = motion_preference_description(false);
+        assert!(!linux_surfaces.contains("macOS"));
+        assert!(!linux_motion.contains("macOS"));
+        assert!(linux_surfaces.contains("FLEETWORKS_OPAQUE_MATERIALS"));
+        assert!(linux_motion.to_ascii_lowercase().contains("reduced-motion"));
+
+        let mac_surfaces = surface_preference_description(true);
+        let mac_motion = motion_preference_description(true);
+        assert!(mac_surfaces.contains("macOS Reduce Transparency"));
+        assert!(mac_motion.contains("macOS Reduce Motion"));
+    }
 
     #[test]
     fn settings_categories_open_the_existing_configuration_destination() {

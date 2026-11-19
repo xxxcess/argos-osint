@@ -282,6 +282,7 @@ impl State {
                 self.workspaces.message = Some(error);
             }
         }
+        // Preload local pairing/profile metadata only; never start a connection automatically.
         if self.uses_native_pairing() {
             self.initialize_pairing_connection();
         } else if matches!(self.connection_profiles.catalog, Load::Idle)

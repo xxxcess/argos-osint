@@ -1103,6 +1103,16 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
         );
     } else {
         gateway_body = gateway_body.child(crate::readiness_cards::checks(state, preferences, kit));
+        if matches!(state.readiness, Load::Failed(_)) {
+            gateway_body = gateway_body.child(
+                ActionButton::new("Retry")
+                    .key("workstation-readiness-retry")
+                    .icon(&icons::REFRESH)
+                    .finish(MetalFinish::Gunmetal)
+                    .on_press(|state: &mut State| state.refresh_readiness())
+                    .build(kit, preferences, pointer_ref),
+            );
+        }
     }
     let gateway = material::luminous_card(
         gateway_body,
@@ -1144,6 +1154,10 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
                     .build(kit, layers);
             }
         }
+        let stale_notice = state.host_metrics_stale_notice();
+        let metrics_unsynced = stale_notice
+            .as_ref()
+            .map(|notice| unsynced_glyph("host-metrics-unsynced", notice.clone(), kit));
         let mut resources = rune::col()
             .padding(16.0)
             .gap(12.0)
@@ -1152,7 +1166,7 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
                 &icons::CPU,
                 "Host Resources",
                 Some("Click a telemetry tile to inspect host specifications"),
-                None,
+                metrics_unsynced,
                 None,
                 kit,
             ));
@@ -1175,21 +1189,6 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
                 resources = resources.child(line(error.clone(), kit).role("alert"));
             }
             Load::Ready(metrics) => {
-                let stale_notice = state.host_metrics_stale_notice();
-                if let Some(notice) = &stale_notice {
-                    resources = resources.child(
-                        ui_components::async_status_strip(
-                            "host-metrics-stale",
-                            "Telemetry unavailable",
-                            notice.clone(),
-                            false,
-                            StatusTone::Warn,
-                            preferences,
-                            kit,
-                        )
-                        .role("alert"),
-                    );
-                }
                 let mut tiles = if narrow_workstation {
                     rune::col().w_full().gap(10.0)
                 } else {
@@ -1227,9 +1226,7 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
                         formatted,
                         valid,
                         valid.map(|v| (v / 100.0) as f32),
-                        if stale_notice.is_some() {
-                            "Stale"
-                        } else if valid.is_some() {
+                        if valid.is_some() {
                             "API host load"
                         } else {
                             "Unavailable"
@@ -1317,11 +1314,32 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
     scroll(body.child(native), "workstation-body")
 }
 
+/// Small, muted unsynced indicator for last-good data whose refresh is out of sync.
+/// Distinct from the offline gateway indicator; exposes age/reason on demand via accessibility.
+pub(crate) fn unsynced_glyph(key: &str, reason: impl Into<String>, kit: &Kit) -> El {
+    let reason = reason.into();
+    rune::row()
+        .key(key.to_owned())
+        .center()
+        .w(20.0)
+        .h(20.0)
+        .radius(999.0)
+        .fill(StatusTone::Warn.bg())
+        .role("status")
+        .label(reason)
+        .child(
+            rune::icon(&icons::REFRESH, 12.0)
+                .color(kit.c.text_muted)
+                .a11y_hidden(),
+        )
+}
+
 struct ActorSearchSummary {
     status_label: &'static str,
     tone: StatusTone,
     next_action: String,
     freshness: String,
+    unsynced_reason: Option<String>,
     can_search: bool,
     building: bool,
     stage: Option<String>,
@@ -1333,12 +1351,16 @@ struct ActorSearchSummary {
 
 fn summarize_actor_search(state: &State) -> ActorSearchSummary {
     let reindex_job = active_or_selected_reindex_job(state);
-    let receipt_job = match &state.maintenance.receipt {
-        Load::Ready(receipt) if receipt.operation == MaintenanceOperation::ReindexActors => {
-            Some(receipt.job_id.as_str())
-        }
-        _ => None,
-    };
+    let receipt_job = state
+        .maintenance
+        .operation_job(MaintenanceOperation::ReindexActors)
+        .map(|record| record.job_id.as_str())
+        .or(match &state.maintenance.receipt {
+            Load::Ready(receipt) if receipt.operation == MaintenanceOperation::ReindexActors => {
+                Some(receipt.job_id.as_str())
+            }
+            _ => None,
+        });
     let mut details = Vec::new();
     let (catalog_check, search_check, observed_at) = match &state.readiness {
         Load::Ready(readiness) => (
@@ -1380,10 +1402,17 @@ fn summarize_actor_search(state: &State) -> ActorSearchSummary {
         details.push(format!("Pending request: {}", pending.request.request_id));
     }
 
-    let freshness = match (observed_at, search_check) {
-        (Some(ts), Some(_)) if search_fresh => format!("Observed {ts} · Fresh"),
-        (Some(ts), _) => format!("Observed {ts} · Stale — refresh checks"),
-        (None, _) => "Readiness has not been observed yet.".to_owned(),
+    let freshness = match observed_at {
+        Some(ts) => format!("Observed {ts}"),
+        None => "Readiness has not been observed yet.".to_owned(),
+    };
+    let unsynced_reason = match (observed_at, search_check) {
+        (Some(_), Some(_)) if search_fresh && state.readiness_error.is_none() => None,
+        (Some(ts), _) => Some(match &state.readiness_error {
+            Some(error) => format!("Observation unsynced (last observed {ts}): {error}"),
+            None => format!("Observation unsynced (last observed {ts}); refresh checks"),
+        }),
+        (None, _) => None,
     };
 
     let (status_label, tone, next_action, can_search, building, needs_seed) = if state
@@ -1525,6 +1554,7 @@ fn summarize_actor_search(state: &State) -> ActorSearchSummary {
         tone,
         next_action,
         freshness,
+        unsynced_reason,
         can_search,
         building,
         stage,
@@ -1536,6 +1566,13 @@ fn summarize_actor_search(state: &State) -> ActorSearchSummary {
 }
 
 fn active_or_selected_reindex_job(state: &State) -> Option<&crate::backend::ActivityJob> {
+    if let Some(detail) = state
+        .maintenance
+        .operation_job(MaintenanceOperation::ReindexActors)
+        .and_then(|record| record.detail.as_ref())
+    {
+        return Some(&detail.job);
+    }
     if let Load::Ready(detail) = &state.backend.detail {
         if detail.job.operation == "actor_reindex" {
             return Some(&detail.job);
@@ -1559,6 +1596,20 @@ fn actor_search_summary_card(state: &State, preferences: ViewPreferences, kit: &
     let busy_submit =
         state.maintenance.busy() || matches!(state.maintenance.receipt, Load::Loading);
 
+    let mut status_slot = rune::row()
+        .center_y()
+        .gap(6.0)
+        .child(ui_components::status_pill(
+            summary.status_label,
+            None,
+            summary.tone,
+            kit,
+        ));
+    if let Some(reason) = &summary.unsynced_reason {
+        status_slot =
+            status_slot.child(unsynced_glyph("actor-search-unsynced", reason.clone(), kit));
+    }
+
     let mut card_body = rune::col()
         .padding(16.0)
         .gap(10.0)
@@ -1567,12 +1618,7 @@ fn actor_search_summary_card(state: &State, preferences: ViewPreferences, kit: &
             &icons::BRAIN,
             "Actor search",
             Some(&summary.freshness),
-            Some(ui_components::status_pill(
-                summary.status_label,
-                None,
-                summary.tone,
-                kit,
-            )),
+            Some(status_slot),
             Some(ui_components::status_pill(
                 "Connected",
                 None,
@@ -1704,6 +1750,20 @@ fn actor_search_summary_card(state: &State, preferences: ViewPreferences, kit: &
     )
 }
 
+fn index_state_label(state: IndexState) -> (&'static str, StatusTone) {
+    match state {
+        IndexState::Ready => ("Search ready", StatusTone::Ok),
+        IndexState::Indexing
+        | IndexState::Paused
+        | IndexState::Throttled
+        | IndexState::Stale
+        | IndexState::Degraded => ("Index catching up", StatusTone::Warn),
+        IndexState::NotBuilt | IndexState::Unavailable | IndexState::Unknown | _ => {
+            ("Not built", StatusTone::Warn)
+        }
+    }
+}
+
 fn brain(state: &State, cx: &mut Cx<State>, kit: &Kit) -> El {
     let preferences = state
         .accessibility
@@ -1747,19 +1807,32 @@ fn brain(state: &State, cx: &mut Cx<State>, kit: &Kit) -> El {
             list = list.child(ui_components::skeleton_actor_results(preferences, kit));
         }
         Load::Failed(error) => {
-            list = list.child(line(error.clone(), kit).key("search-error").role("alert"));
+            list = list.child(
+                rune::col()
+                    .gap(8.0)
+                    .child(line(error.clone(), kit).key("search-error").role("alert"))
+                    .child(
+                        ActionButton::new("Retry search")
+                            .key("search-retry")
+                            .icon(&icons::REFRESH)
+                            .finish(MetalFinish::Gunmetal)
+                            .disabled(
+                                !state.search_available()
+                                    || state.brain.query.text.trim().is_empty(),
+                            )
+                            .on_press(|state: &mut State| state.search_now())
+                            .build(kit, preferences, pointer_ref),
+                    ),
+            );
         }
         Load::Ready(response) => {
             let current = response.index.state == IndexState::Ready;
             if !current {
+                let (index_label, index_tone) = index_state_label(response.index.state);
                 list = list.child(
-                    ui_components::status_pill(
-                        format!("Index: {:?}", response.index.state),
-                        Some(&icons::ALERT),
-                        StatusTone::Warn,
-                        kit,
-                    )
-                    .key("index-status"),
+                    ui_components::status_pill(index_label, Some(&icons::ALERT), index_tone, kit)
+                        .label(format!("{index_label} ({})", response.index.state))
+                        .key("index-status"),
                 );
             }
             if response.rows.is_empty() && current {

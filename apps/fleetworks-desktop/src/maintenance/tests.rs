@@ -1775,3 +1775,235 @@ fn a_first_readiness_failure_shows_an_error_with_nothing_to_keep() {
     assert!(matches!(state.readiness, Load::Failed(_)));
     assert!(state.readiness_error.is_none());
 }
+
+fn synthetic_job_detail(
+    id: &str,
+    operation: &str,
+    job_state: &str,
+    phase: &str,
+    maintenance_result: Option<serde_json::Value>,
+) -> crate::backend::JobDetail {
+    serde_json::from_value(serde_json::json!({
+        "job": {
+            "id": id,
+            "app": "fleetworks",
+            "title": operation,
+            "operation": operation,
+            "state": job_state,
+            "phase": phase,
+            "progress_done": 10,
+            "progress_total": 10,
+            "error_summary": "",
+            "private_details_available": true,
+            "activity_actions_available": false,
+            "status_only": false
+        },
+        "stages": [],
+        "private_details_available": true,
+        "activity_actions_available": false,
+        "maintenance_result": maintenance_result
+    }))
+    .expect("synthetic job detail")
+}
+
+#[test]
+fn per_operation_receipt_retention_keeps_training_result_when_seed_or_reindex_starts() {
+    let mut state = state(true);
+    let epoch = state.connection.epoch;
+    let origin = state.origin_revision;
+
+    state.maintenance.set_operation_job(
+        MaintenanceOperation::TrainClassifier,
+        "job-train-1".into(),
+        false,
+    );
+    let train_rev = state.maintenance.receipt_poll_revisions[2];
+    state.complete_maintenance_job_detail(
+        epoch,
+        origin,
+        MaintenanceOperation::TrainClassifier,
+        train_rev,
+        "job-train-1",
+        Ok(synthetic_job_detail(
+            "job-train-1",
+            "classifier_train",
+            "completed",
+            "done",
+            Some(serde_json::json!({
+                "operation": "classifier_train",
+                "engine": "natural",
+                "candidate_model_id": "cand-001"
+            })),
+        )),
+    );
+
+    // Starting Seed and Reindex must not erase the completed TrainClassifier result.
+    state.maintenance.set_operation_job(
+        MaintenanceOperation::SeedActors,
+        "job-seed-1".into(),
+        false,
+    );
+    state.maintenance.set_operation_job(
+        MaintenanceOperation::ReindexActors,
+        "job-reindex-1".into(),
+        false,
+    );
+    let seed_rev = state.maintenance.receipt_poll_revisions[0];
+    state.complete_maintenance_job_detail(
+        epoch,
+        origin,
+        MaintenanceOperation::SeedActors,
+        seed_rev,
+        "job-seed-1",
+        Ok(synthetic_job_detail(
+            "job-seed-1",
+            "actor_seed",
+            "completed",
+            "done",
+            Some(serde_json::json!({
+                "operation": "actor_seed",
+                "processed": 42,
+                "total": 42,
+                "database_seeded": true
+            })),
+        )),
+    );
+
+    assert_eq!(
+        state
+            .maintenance
+            .operation_job(MaintenanceOperation::TrainClassifier)
+            .map(|r| r.job_id.as_str()),
+        Some("job-train-1")
+    );
+    assert_eq!(
+        state
+            .maintenance
+            .operation_job(MaintenanceOperation::SeedActors)
+            .map(|r| r.job_id.as_str()),
+        Some("job-seed-1")
+    );
+    assert_eq!(
+        state
+            .maintenance
+            .operation_job(MaintenanceOperation::ReindexActors)
+            .map(|r| r.job_id.as_str()),
+        Some("job-reindex-1")
+    );
+
+    let runtime = runtime(state);
+    let elements = runtime.elements();
+    let texts: Vec<&str> = elements
+        .iter()
+        .filter_map(|el| el.text.as_deref())
+        .collect();
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("Candidate trained · Not activated")),
+        "training card must keep its candidate-not-activated result: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t.contains("Actors seeded")),
+        "seed card must distinguish Actors seeded from search index ready: {texts:?}"
+    );
+    assert!(runtime.find("maintenance-op-job-train").is_some());
+    assert!(runtime.find("maintenance-op-job-seed").is_some());
+    assert!(runtime.find("maintenance-op-job-reindex").is_some());
+}
+
+#[test]
+fn seed_and_train_active_job_polling_is_independent_of_jobs_filter_and_selection() {
+    let mut state = state(true);
+    state
+        .connection
+        .capabilities
+        .as_mut()
+        .expect("capabilities")
+        .permissions
+        .push(Permission::ReadWorkstationActivity);
+    // Jobs page is filtered to Failed and has an unrelated job selected.
+    state.scoped_jobs.draft.status = crate::jobs_query::JobsStatusFilter::Failed;
+    state.backend.selected_job = Some("unrelated-job-99".into());
+
+    state.maintenance.set_operation_job(
+        MaintenanceOperation::SeedActors,
+        "job-seed-live".into(),
+        false,
+    );
+    state.maintenance.set_operation_job(
+        MaintenanceOperation::TrainClassifier,
+        "job-train-live".into(),
+        false,
+    );
+
+    let active = state.maintenance.active_receipt_jobs();
+    assert_eq!(active.len(), 2);
+    assert_eq!(state.poll_maintenance_receipt_jobs(), 2);
+    assert_eq!(
+        state.backend.selected_job.as_deref(),
+        Some("unrelated-job-99"),
+        "polling Seed & Train receipts must not disturb Jobs selection"
+    );
+
+    // Completing SeedActors removes it from active_receipt_jobs while TrainClassifier stays active.
+    let epoch = state.connection.epoch;
+    let origin = state.origin_revision;
+    let seed_rev = state.maintenance.receipt_poll_revisions[0];
+    state.complete_maintenance_job_detail(
+        epoch,
+        origin,
+        MaintenanceOperation::SeedActors,
+        seed_rev,
+        "job-seed-live",
+        Ok(synthetic_job_detail(
+            "job-seed-live",
+            "actor_seed",
+            "completed",
+            "done",
+            None,
+        )),
+    );
+    let remaining = state.maintenance.active_receipt_jobs();
+    assert_eq!(
+        remaining,
+        vec![(
+            MaintenanceOperation::TrainClassifier,
+            "job-train-live".to_owned()
+        )]
+    );
+}
+
+#[test]
+fn initial_workstation_readiness_failure_offers_local_retry_and_defers_commands_during_confirmation(
+) {
+    let mut state = state(true);
+    state.page = Page::Workstation;
+    state.scoped_logs.window_focused = true;
+    state.readiness = Load::Failed("temporary gateway error".into());
+    assert!(
+        state.maintenance_checks_due(10.0),
+        "Workstation initial readiness failure must allow retry"
+    );
+
+    // Commands overlay is deferred while a maintenance confirmation is active.
+    state.maintenance.confirmation = Some(MaintenanceConfirmation {
+        operation: MaintenanceOperation::ReindexActors,
+        context: state.registration.context.clone().expect("context"),
+        origin_revision: state.origin_revision,
+        configuration_revision: 0,
+        dataset: None,
+    });
+    state.commands.open = true;
+    assert!(state.has_active_confirmation());
+
+    let runtime = runtime(state);
+    assert!(
+        runtime.find("workstation-readiness-retry").is_some(),
+        "Workstation readiness failure must expose a local Retry control"
+    );
+    assert!(
+        runtime.find("command-panel").is_none(),
+        "Commands overlay must not render over an active confirmation"
+    );
+}

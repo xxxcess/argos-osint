@@ -350,6 +350,7 @@ pub struct State {
     pub(crate) dossier_request: Option<RequestTask>,
     pub(crate) readiness_revision: u64,
     pub(crate) readiness_refresh_at: f64,
+    pub(crate) maintenance_jobs_refresh_at: f64,
     pub(crate) jobs_refresh_at: f64,
     pub(crate) jobs_discovery_at: f64,
     pub(crate) host_metrics_revision: u64,
@@ -429,6 +430,7 @@ impl Default for State {
             dossier_request: None,
             readiness_revision: 0,
             readiness_refresh_at: 0.0,
+            maintenance_jobs_refresh_at: 0.0,
             jobs_refresh_at: 0.0,
             jobs_discovery_at: 0.0,
             host_metrics_revision: 0,
@@ -655,6 +657,7 @@ impl State {
         self.readiness_received_at = None;
         self.readiness_error = None;
         self.readiness_refresh_at = 0.0;
+        self.maintenance_jobs_refresh_at = 0.0;
         self.jobs_refresh_at = 0.0;
         self.jobs_discovery_at = 0.0;
         self.host_metrics = Load::Idle;
@@ -944,6 +947,30 @@ impl State {
         self.connection.status == ConnectionStatus::Connected
     }
 
+    pub(crate) fn has_active_confirmation(&self) -> bool {
+        self.confirm_maintenance_dialog
+            || self.confirm_cycle_delete
+            || self.maintenance.confirmation.is_some()
+            || self.cycles.confirmation.is_some()
+            || self.configuration.confirmation.is_some()
+            || self.job_actions.confirmation.is_some()
+            || self.classifier_activation.confirmation.is_some()
+            || self.transfer.confirmation.is_some()
+            || self.rebind.confirmation.is_some()
+            || self.connection_profiles.confirmation.is_some()
+            || self.workspaces.confirmation.is_some()
+            || self
+                .submissions
+                .lane(SubmissionKind::Atlas)
+                .confirmation
+                .is_some()
+            || self
+                .submissions
+                .lane(SubmissionKind::Tool)
+                .confirmation
+                .is_some()
+    }
+
     pub(crate) fn maintenance_checks_due(&self, now: f64) -> bool {
         if !matches!(self.page, Page::Seed | Page::Workstation)
             || self.setup_gateway
@@ -958,7 +985,7 @@ impl State {
             Load::Ready(readiness) => readiness.checks.iter().any(|check| {
                 check.state == ReadinessState::Running || !self.readiness_check_fresh_at(check, now)
             }),
-            Load::Idle | Load::Failed(_) => self.page == Page::Seed,
+            Load::Idle | Load::Failed(_) => matches!(self.page, Page::Seed | Page::Workstation),
             Load::Pending | Load::Loading => false,
         }
     }
@@ -1200,19 +1227,39 @@ impl State {
     }
 }
 
-/// Seconds between discovery reads when no active job is known.
+/// Seconds between discovery reads when no active job is known on the Jobs page.
 const JOBS_DISCOVERY_SECS: f64 = 5.0;
+/// Low-cadence registered aggregate refresh while focused on another page.
+const JOBS_BACKGROUND_DISCOVERY_SECS: f64 = 15.0;
 
-/// Jobs page scheduling. Two independent jobs share the tick:
+/// Jobs scheduling. On the Jobs page, two independent loops share the tick:
 /// - follow known active work, or recover unavailable logs of the selected job;
-/// - discover newly admitted work for the registered workstation. Discovery never depends on
-///   the selection or on log recovery, because the selection only narrows what is shown.
+/// - discover newly admitted work for the registered workstation.
+/// Off the Jobs page, refresh the shared registered job aggregate at a bounded low cadence
+/// while focused without changing the current list query or scroll position.
 pub(crate) fn poll_jobs(state: &mut State, now: f64, tx: &mut Tx) -> bool {
-    if state.page != Page::Jobs
-        || state.fixture
+    if state.fixture
         || !state.connected()
         || !state.scoped_logs.window_focused
+        || state.setup_gateway
     {
+        return false;
+    }
+    if state.page != Page::Jobs {
+        if state.registration.context.is_some()
+            && state.permission(fleetworks_contracts::context::Permission::ReadWorkstationActivity)
+        {
+            let mut changed = false;
+            if now >= state.jobs_discovery_at {
+                state.jobs_discovery_at = now + JOBS_BACKGROUND_DISCOVERY_SECS;
+                if !state.scoped_jobs.busy() {
+                    state.request_jobs(crate::jobs_query::JobsEvent::Poll);
+                    changed = true;
+                }
+            }
+            tx.wake_after(Duration::from_secs(5));
+            return changed;
+        }
         return false;
     }
     let mut changed = false;
@@ -1268,6 +1315,14 @@ fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
         if state.maintenance_checks_due(now) {
             state.refresh_readiness();
             changed = true;
+        }
+        if !state.maintenance.active_receipt_jobs().is_empty()
+            && now >= state.maintenance_jobs_refresh_at
+        {
+            state.maintenance_jobs_refresh_at = now + 2.0;
+            if state.poll_maintenance_receipt_jobs() > 0 {
+                changed = true;
+            }
         }
         tx.wake_after(Duration::from_secs(2));
     }
@@ -1326,7 +1381,7 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         if state.commands.open {
             state.commands.close();
             tx.focus("command-open", false);
-        } else {
+        } else if !state.has_active_confirmation() {
             state.open_command_panel();
         }
         return true;
@@ -1635,7 +1690,10 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
                     ConnectionStatus::Failed(_) => "Fault",
                     ConnectionStatus::Disconnected => "Offline",
                 },
-                None,
+                match &state.connection.status {
+                    ConnectionStatus::Disconnected => Some(&icons::SERVER),
+                    _ => None,
+                },
                 connection_tone,
                 &kit,
             ));
@@ -1723,7 +1781,9 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
             .build(&kit, &mut layers);
     }
 
-    crate::command_panel::view(state, &kit, preferences, &mut layers);
+    if !state.has_active_confirmation() {
+        crate::command_panel::view(state, &kit, preferences, &mut layers);
+    }
 
     let mut split = SplitView::new(main)
         .toolbar(toolbar)
@@ -1883,7 +1943,13 @@ fn context_rail(state: &State, kit: &rune_kit::Kit, connection_tone: StatusTone)
         ));
     if let Some(count) = sidebar_row_badge(state, page) {
         let count_num = count.parse::<usize>().unwrap_or(0);
-        let records = if count_num == 1 {
+        let records = if page == Page::Jobs {
+            if count_num == 1 {
+                "1 job in progress".to_owned()
+            } else {
+                format!("{count} jobs in progress")
+            }
+        } else if count_num == 1 {
             "1 visible record".to_owned()
         } else {
             format!("{count} visible records")
@@ -1967,14 +2033,13 @@ fn sidebar_row_status(state: &State, page: Page) -> Option<RowStatus> {
     }
 }
 
-fn sidebar_row_badge(state: &State, page: Page) -> Option<String> {
+pub(crate) fn sidebar_row_badge(state: &State, page: Page) -> Option<String> {
     match page {
         Page::Jobs => state
             .scoped_jobs
-            .page
-            .as_ref()
-            .filter(|page| !page.rows.is_empty())
-            .map(|page| page.rows.len().to_string()),
+            .in_progress_count()
+            .filter(|&count| count > 0)
+            .map(|count| count.to_string()),
         Page::Atlas => match &state.cycles.history {
             Load::Ready(history) if !history.rows.is_empty() => {
                 Some(history.rows.len().to_string())

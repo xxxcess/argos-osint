@@ -151,6 +151,17 @@ pub struct JobsDashboardCounts {
     pub completed_recent: u64,
 }
 
+impl JobsDashboardCounts {
+    /// Server-authoritative unfiltered jobs currently in progress
+    /// (`running + queued + retry_scheduled`).
+    #[must_use]
+    pub fn in_progress(&self) -> u64 {
+        self.active
+            .saturating_add(self.queued)
+            .saturating_add(self.retrying)
+    }
+}
+
 /// Match totals are a current observation, not an immutable snapshot or the
 /// sum of the legacy scope-wide dashboard buckets.
 #[derive(Clone, Deserialize)]
@@ -296,6 +307,15 @@ impl JobsQueryState {
         self.tail_cursor.is_some()
             && (self.loaded_pages() >= HISTORY_LIMIT || self.row_count() >= MAX_ROWS)
     }
+    /// Server-authoritative unfiltered count of jobs in progress, or `None` when unknown.
+    #[must_use]
+    pub fn in_progress_count(&self) -> Option<u64> {
+        self.page
+            .as_ref()
+            .and_then(|page| page.counts.as_ref())
+            .map(JobsDashboardCounts::in_progress)
+    }
+
     pub fn origin_label(&self) -> Option<String> {
         self.binding
             .as_ref()
@@ -382,7 +402,10 @@ impl JobsQueryState {
                 }
             }
             JobsEvent::Poll => {
-                if self.page.is_none() {
+                if self.loading_more() {
+                    // Wait for an active tail continuation rather than cancelling it.
+                    JobsEffect::default()
+                } else if self.page.is_none() {
                     let query = self.first_query(now);
                     let read = match query {
                         Ok(query) => {
@@ -509,10 +532,22 @@ impl JobsQueryState {
                 self.tail_error = None;
             }
             Ok(page) if self.valid_page(&page, ticket) => {
-                // A head refresh keeps appended rows. Before any tail exists it also
-                // refreshes the cursor for the next page.
+                // Ignore an older poll observation so newer head state is never regressed.
+                if ticket.is_poll
+                    && self.page.as_ref().is_some_and(|current| {
+                        observed_older_than(&page.observed_at, &current.observed_at)
+                    })
+                {
+                    return false;
+                }
+                // A head refresh keeps appended rows and reconciles overlapping IDs without
+                // resetting the tail cursor. Before any tail exists it also refreshes the cursor.
                 if self.tail_pages == 0 {
                     self.tail_cursor = page.next_cursor.clone();
+                } else if !self.more.is_empty() {
+                    let head_ids: std::collections::HashSet<&str> =
+                        page.rows.iter().map(|row| row.id.as_str()).collect();
+                    self.more.retain(|row| !head_ids.contains(row.id.as_str()));
                 }
                 self.page = Some(page);
                 self.status = JobsLoad::Ready;
@@ -597,6 +632,13 @@ impl JobsQueryState {
         self.status = JobsLoad::Idle;
         self.message = None;
     }
+}
+
+fn observed_older_than(candidate: &str, current: &str) -> bool {
+    DateTime::parse_from_rfc3339(candidate)
+        .ok()
+        .zip(DateTime::parse_from_rfc3339(current).ok())
+        .is_some_and(|(candidate, current)| candidate < current)
 }
 
 fn cursor_valid(value: &str) -> bool {

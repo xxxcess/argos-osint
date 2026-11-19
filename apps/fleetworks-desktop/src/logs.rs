@@ -163,8 +163,8 @@ pub struct LogState {
     pub following: bool,
     /// The reader has scrolled off the newest rows at the top of the table.
     away: bool,
-    /// Followed rows that arrived while the reader was away and that they have not seen.
-    unread: usize,
+    /// Distinct newer row IDs that arrived while the reader was away and have not been seen.
+    unread_ids: BTreeSet<String>,
     pub visible: bool,
     pub window_focused: bool,
     pub export: LogExport,
@@ -223,24 +223,33 @@ impl LogState {
         }
         self.away = away;
         if !away {
-            self.unread = 0;
+            self.unread_ids.clear();
         }
         true
     }
     /// Newest rows that arrived while the reader was away from them.
     pub fn unread(&self) -> usize {
-        self.unread
+        self.unread_ids.len()
     }
     /// The jump control: clears the count and returns the newest row to scroll to.
     pub fn jump_to_newest(&mut self) -> Option<String> {
-        self.unread = 0;
+        self.unread_ids.clear();
         self.away = false;
         self.rows.first().map(|row| row.id.clone())
     }
-    /// Counts rows that were new to the loaded set, and only while the reader is away.
-    fn note_arrivals(&mut self, added: usize) {
-        if self.away && added > 0 {
-            self.unread = self.unread.saturating_add(added).min(DISPLAY_LIMIT);
+    /// Counts distinct newer row IDs that arrived while the reader is away.
+    fn note_arrivals<I>(&mut self, ids: I)
+    where
+        I: IntoIterator<Item = String>,
+    {
+        if !self.away {
+            return;
+        }
+        for id in ids {
+            if self.unread_ids.len() >= DISPLAY_LIMIT {
+                break;
+            }
+            self.unread_ids.insert(id);
         }
     }
     pub fn can_export(&self) -> bool {
@@ -303,7 +312,7 @@ impl LogState {
         self.rows.clear();
         self.table = TableState::new().key(TABLE_KEY);
         self.away = false;
-        self.unread = 0;
+        self.unread_ids.clear();
         self.counts = None;
         self.apps.clear();
         self.apps_complete = false;
@@ -437,9 +446,9 @@ impl LogState {
             query,
         };
         self.active = Some(ticket.clone());
-        // Only a fresh read is unresolved. Follow, older and export keep the resolved status,
-        // so a verified empty result or loaded rows never fall back to a skeleton.
-        if action == LogAction::Refresh {
+        // Only an initial/unresolved read is Loading. Same-query refresh, follow, older and export
+        // keep the resolved state so loaded rows and viewport never flash back to a skeleton.
+        if action == LogAction::Refresh && !self.available {
             self.status = LogStatus::Loading;
         }
         Some(ticket)
@@ -454,7 +463,13 @@ impl LogState {
                 return None;
             }
         };
-        self.reset();
+        let same_query = self.available && self.query.as_ref() == Some(&query);
+        if same_query {
+            self.cancel_requests();
+            self.export = LogExport::default();
+        } else {
+            self.reset();
+        }
         self.query = Some(query.clone());
         self.ticket(LogAction::Refresh, query)
     }
@@ -529,19 +544,21 @@ impl LogState {
             Err(error) => Err(error),
         };
         if let Err(error) = result {
-            let transient_follow = ticket.action == LogAction::Follow
+            let transient_loaded = ticket.action != LogAction::Export
                 && self.available
                 && !matches!(
                     error,
                     ClientError::Status(401 | 403 | 409) | ClientError::InvalidResponse
                 );
-            if transient_follow {
+            if transient_loaded {
                 self.following = false;
                 self.status = LogStatus::Unavailable;
-                self.message = Some(
+                self.message = Some(if ticket.action == LogAction::Follow {
                     "Operational log follow was interrupted. Syncing again with worker status…"
-                        .into(),
-                );
+                        .into()
+                } else {
+                    "Authorized operational logs are temporarily unavailable. Showing the last loaded page; refresh when the gateway is ready.".into()
+                });
             } else {
                 let rejected = matches!(error, ClientError::Status(401 | 403));
                 self.reset();
@@ -594,6 +611,7 @@ impl LogState {
         }
         let mut ids = BTreeSet::new();
         let mut fresh = Vec::new();
+        let mut validated = Vec::with_capacity(page.rows.len());
         for row in page.rows {
             validate_row(&row)?;
             if !ids.insert(row.id.clone()) {
@@ -604,15 +622,17 @@ impl LogState {
                     return Err(ClientError::InvalidResponse);
                 }
             } else {
-                fresh.push(row);
+                fresh.push(row.clone());
             }
+            validated.push(row);
         }
+        let was_available = self.available;
         self.counts = page.counts;
         self.apps = page.apps;
         self.apps_complete = page.apps_complete;
         self.shared_private_logs_available = page.shared_private_logs_available;
         self.available = true;
-        if self.rows.len() + fresh.len() > DISPLAY_LIMIT {
+        if action != LogAction::Refresh && self.rows.len() + fresh.len() > DISPLAY_LIMIT {
             self.following = false;
             self.status = LogStatus::DisplayLimit;
             self.message = Some("The received page exceeds the 500-summary display bound. Narrow filters or prepare a separate export; its cursor was not advanced.".into());
@@ -620,19 +640,34 @@ impl LogState {
         }
         match action {
             LogAction::Follow => {
-                let added = fresh.len();
+                let fresh_ids: Vec<String> = fresh.iter().map(|row| row.id.clone()).collect();
                 fresh.reverse();
                 fresh.append(&mut self.rows);
                 self.rows = fresh;
                 self.follow_cursor = page.next_cursor;
-                self.note_arrivals(added);
+                self.note_arrivals(fresh_ids);
             }
-            LogAction::Refresh | LogAction::Older => {
+            LogAction::Refresh => {
+                if was_available {
+                    let previous_ids: BTreeSet<&str> =
+                        self.rows.iter().map(|row| row.id.as_str()).collect();
+                    let newer_ids: Vec<String> = validated
+                        .iter()
+                        .take_while(|row| !previous_ids.contains(row.id.as_str()))
+                        .map(|row| row.id.clone())
+                        .collect();
+                    self.rows = validated;
+                    self.unread_ids.retain(|id| ids.contains(id));
+                    self.note_arrivals(newer_ids);
+                } else {
+                    self.rows = validated;
+                }
+                self.next_cursor = page.next_cursor;
+                self.follow_cursor = page.follow_cursor;
+            }
+            LogAction::Older => {
                 self.rows.extend(fresh);
                 self.next_cursor = page.next_cursor;
-                if action == LogAction::Refresh {
-                    self.follow_cursor = page.follow_cursor;
-                }
             }
             _ => return Err(ClientError::InvalidResponse),
         }

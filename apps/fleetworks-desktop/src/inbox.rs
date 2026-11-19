@@ -5,6 +5,8 @@
 //! readiness check name, never from error text, URLs or credentials. The whole list resets when
 //! the connection authority changes.
 
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::VecDeque;
 
 use fleetworks_contracts::readiness::ReadinessState;
@@ -19,6 +21,8 @@ use crate::State;
 pub(crate) const MAX_ITEMS: usize = 50;
 /// Remembered job transitions, so one job transition is recorded once.
 const MAX_SEEN_JOB_EVENTS: usize = 200;
+/// Bounded map of tracked job states across pagination and filtering.
+const MAX_TRACKED_JOBS: usize = 512;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum Filter {
@@ -76,13 +80,25 @@ pub(crate) struct Observation {
     pub checks: Vec<(String, ReadinessState)>,
 }
 
+/// Authorized job status update used to reconcile bounded known job states.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct JobStatusUpdate {
+    pub id: String,
+    pub title: String,
+    pub state: String,
+    /// Optional authoritative transition identity; defaults to canonical terminal state.
+    pub transition_id: Option<String>,
+}
+
 #[derive(Debug, Default)]
 pub struct Inbox {
     items: VecDeque<Item>,
     next_id: u64,
     scope: Option<u64>,
     link: Link,
-    jobs: Vec<(String, String)>,
+    known_jobs: BTreeMap<String, String>,
+    known_job_order: VecDeque<String>,
     checks: Vec<(String, ReadinessState)>,
     seen_job_events: VecDeque<String>,
     pub(crate) open: bool,
@@ -101,7 +117,18 @@ impl Inbox {
 
     pub(crate) fn visible(&self) -> Vec<&Item> {
         self.items()
-            .filter(|item| self.filter == Filter::All || !item.read)
+            .filter(|item| {
+                self.filter == Filter::All || !item.read || self.selected == Some(item.id)
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_known_job_ids(&self) -> Vec<String> {
+        self.known_jobs
+            .iter()
+            .filter(|(_, state)| crate::backend::job_is_active(state))
+            .map(|(id, _)| id.clone())
             .collect()
     }
 
@@ -125,10 +152,101 @@ impl Inbox {
     fn reset(&mut self) {
         self.items.clear();
         self.link = Link::Unknown;
-        self.jobs.clear();
+        self.known_jobs.clear();
+        self.known_job_order.clear();
         self.checks.clear();
         self.seen_job_events.clear();
         self.selected = None;
+    }
+
+    fn record_known_job(&mut self, id: String, state: String) {
+        if self.known_jobs.contains_key(&id) {
+            self.known_jobs.insert(id, state);
+            return;
+        }
+        while self.known_jobs.len() >= MAX_TRACKED_JOBS {
+            let evict_index = self
+                .known_job_order
+                .iter()
+                .position(|known_id| {
+                    self.known_jobs
+                        .get(known_id)
+                        .is_some_and(|known_state| !crate::backend::job_is_active(known_state))
+                })
+                .unwrap_or(0);
+            if let Some(evicted) = self.known_job_order.remove(evict_index) {
+                self.known_jobs.remove(&evicted);
+            } else {
+                break;
+            }
+        }
+        self.known_job_order.push_back(id.clone());
+        self.known_jobs.insert(id, state);
+    }
+
+    fn observe_job_update(
+        &mut self,
+        now: f64,
+        id: String,
+        title: &str,
+        state: String,
+        transition_id: Option<&str>,
+    ) -> bool {
+        let was_active = self
+            .known_jobs
+            .get(&id)
+            .is_some_and(|previous| crate::backend::job_is_active(previous));
+        let mut changed = false;
+        if was_active && !crate::backend::job_is_active(&state) {
+            let identity = transition_id
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_ascii_lowercase)
+                .unwrap_or_else(|| describe_job_state(&state));
+            let key = format!("{id}:{identity}");
+            if !self.seen_job_events.contains(&key) {
+                self.seen_job_events.push_back(key);
+                while self.seen_job_events.len() > MAX_SEEN_JOB_EVENTS {
+                    self.seen_job_events.pop_front();
+                }
+                let state_label = describe_job_state(&state);
+                self.push(
+                    Kind::Job,
+                    format!("Job {state_label}"),
+                    format!("{title} is now {state_label}. Open Jobs & Logs for details."),
+                    now,
+                );
+                changed = true;
+            }
+        }
+        self.record_known_job(id, state);
+        changed
+    }
+
+    /// Reconcile bounded known job states from authorized status updates without
+    /// emitting a burst on initial hydration. Deduplicates by job + authoritative
+    /// transition identity and ignores updates for a mismatched scope.
+    #[cfg(test)]
+    pub(crate) fn reconcile_job_statuses<I>(&mut self, now: f64, scope: u64, updates: I) -> bool
+    where
+        I: IntoIterator<Item = JobStatusUpdate>,
+    {
+        if self.scope != Some(scope) {
+            return false;
+        }
+        let mut changed = false;
+        for update in updates.into_iter().take(MAX_TRACKED_JOBS) {
+            if self.observe_job_update(
+                now,
+                update.id,
+                &update.title,
+                update.state,
+                update.transition_id.as_deref(),
+            ) {
+                changed = true;
+            }
+        }
+        changed
     }
 
     fn push(&mut self, kind: Kind, title: String, detail: String, at: f64) {
@@ -161,11 +279,9 @@ impl Inbox {
             self.reset();
             self.scope = Some(observation.scope);
             self.link = observation.link;
-            self.jobs = observation
-                .jobs
-                .into_iter()
-                .map(|(id, _, state)| (id, state))
-                .collect();
+            for (id, _, state) in observation.jobs {
+                self.record_known_job(id, state);
+            }
             self.checks = observation.checks;
             return changed;
         }
@@ -196,35 +312,11 @@ impl Inbox {
             self.link = observation.link;
         }
 
-        for (id, title, state) in &observation.jobs {
-            let previous = self.jobs.iter().find(|(known, _)| known == id);
-            let was_active =
-                previous.is_some_and(|(_, state)| crate::backend::job_is_active(state));
-            if was_active && !crate::backend::job_is_active(state) {
-                let key = format!("{id}:{}", state.to_ascii_lowercase());
-                if !self.seen_job_events.contains(&key) {
-                    self.seen_job_events.push_back(key);
-                    while self.seen_job_events.len() > MAX_SEEN_JOB_EVENTS {
-                        self.seen_job_events.pop_front();
-                    }
-                    self.push(
-                        Kind::Job,
-                        format!("Job {}", describe_job_state(state)),
-                        format!(
-                            "{title} is now {}. Open Jobs & Logs for details.",
-                            describe_job_state(state)
-                        ),
-                        now,
-                    );
-                    changed = true;
-                }
+        for (id, title, state) in observation.jobs {
+            if self.observe_job_update(now, id, &title, state, None) {
+                changed = true;
             }
         }
-        self.jobs = observation
-            .jobs
-            .into_iter()
-            .map(|(id, _, state)| (id, state))
-            .collect();
 
         for (name, state) in &observation.checks {
             let Some((_, previous)) = self.checks.iter().find(|(known, _)| known == name) else {
@@ -320,19 +412,26 @@ impl State {
             ConnectionStatus::Failed(_) => Link::Failed,
             ConnectionStatus::Disconnected => Link::Unknown,
         };
-        let jobs = self
-            .scoped_jobs
-            .page
-            .as_ref()
-            .filter(|_| self.registration.context.is_some())
-            .map(|page| {
-                page.rows
-                    .iter()
-                    .take(100)
-                    .map(|row| (row.id.clone(), row.title.clone(), row.state.clone()))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut jobs = Vec::new();
+        if self.registration.context.is_some() {
+            let mut seen_ids = BTreeSet::new();
+            if let Some(page) = &self.scoped_jobs.page {
+                for row in page.rows.iter().take(MAX_TRACKED_JOBS) {
+                    if seen_ids.insert(row.id.clone()) {
+                        jobs.push((row.id.clone(), row.title.clone(), row.state.clone()));
+                    }
+                }
+            }
+            if let Load::Ready(detail) = &self.backend.detail {
+                if jobs.len() < MAX_TRACKED_JOBS && seen_ids.insert(detail.job.id.clone()) {
+                    jobs.push((
+                        detail.job.id.clone(),
+                        detail.job.title.clone(),
+                        detail.job.state.clone(),
+                    ));
+                }
+            }
+        }
         let checks = match &self.readiness {
             Load::Ready(readiness) => readiness
                 .checks
@@ -658,11 +757,134 @@ mod tests {
         inbox.select(id);
         assert_eq!(inbox.unread(), 1);
         inbox.filter = Filter::Unread;
-        assert_eq!(inbox.visible().len(), 1);
+        // The expanded selected row stays visible in Unread until collapsed.
+        assert_eq!(inbox.visible().len(), 2);
         inbox.select(id);
         assert!(inbox.selected.is_none());
+        assert_eq!(inbox.visible().len(), 1);
         inbox.mark_all_read();
         assert_eq!(inbox.unread(), 0);
+    }
+
+    #[test]
+    fn unread_filter_keeps_selected_row_visible_until_collapse_and_decrements_once() {
+        let mut state = crate::tests::registered_fixture();
+        state.inbox.observe(0.0, obs(1, Link::Connecting));
+        state.inbox.observe(1.0, obs(1, Link::Connected));
+        state.inbox.filter = Filter::Unread;
+        state.inbox.open = true;
+        let id = state.inbox.items().next().expect("item").id;
+
+        let mut runtime = rune::Runtime::new(
+            state,
+            crate::app::view,
+            (1180.0, 800.0),
+            rune::Env {
+                system_dark: true,
+                scale: 1.0,
+            },
+        );
+        runtime.frame(0.0);
+        runtime.frame(1.0 / 60.0);
+        assert_eq!(runtime.state.inbox.unread(), 1);
+        assert!(runtime.find(&format!("inbox-item-{id}")).is_some());
+
+        runtime.update(|state, _| state.inbox.select(id));
+        runtime.frame(2.0 / 60.0);
+        assert_eq!(runtime.state.inbox.unread(), 0);
+        assert!(
+            runtime.find(&format!("inbox-item-{id}")).is_some(),
+            "expanded row stays visible in Unread filter until collapsed"
+        );
+        assert!(
+            runtime.find(&format!("inbox-item-{id}-detail")).is_some(),
+            "expanded detail renders in Unread filter"
+        );
+
+        // Collapsing removes the read item from Unread and does not underflow unread count.
+        runtime.update(|state, _| state.inbox.select(id));
+        runtime.frame(3.0 / 60.0);
+        assert_eq!(runtime.state.inbox.unread(), 0);
+        assert!(runtime.find(&format!("inbox-item-{id}")).is_none());
+    }
+
+    #[test]
+    fn known_jobs_survive_pagination_and_reconcile_without_initial_hydration_burst() {
+        let mut inbox = Inbox::default();
+        let mut head = obs(1, Link::Connected);
+        head.jobs = vec![job("j1", "running"), job("j0", "completed")];
+        assert!(!inbox.observe(1.0, head));
+        assert_eq!(inbox.items().count(), 0);
+
+        // Pagination/filtering hides j1 from the current head page; j1 must stay remembered.
+        let mut filtered_page = obs(1, Link::Connected);
+        filtered_page.jobs = vec![job("j2", "completed"), job("j3", "failed")];
+        assert!(
+            !inbox.observe(2.0, filtered_page),
+            "initial observation of terminal jobs on another page must not emit a burst"
+        );
+        assert!(inbox.active_known_job_ids().contains(&"j1".to_owned()));
+
+        // Reconciling j1 from an authorized status update records its completion once.
+        assert!(inbox.reconcile_job_statuses(
+            3.0,
+            1,
+            [JobStatusUpdate {
+                id: "j1".into(),
+                title: "Title j1".into(),
+                state: "completed".into(),
+                transition_id: Some("rev-9".into()),
+            }],
+        ));
+        assert_eq!(inbox.items().count(), 1);
+        assert_eq!(inbox.items().next().expect("item").title, "Job completed");
+
+        // Re-delivering the same job + authoritative transition identity is deduplicated.
+        assert!(!inbox.reconcile_job_statuses(
+            4.0,
+            1,
+            [JobStatusUpdate {
+                id: "j1".into(),
+                title: "Title j1".into(),
+                state: "completed".into(),
+                transition_id: Some("rev-9".into()),
+            }],
+        ));
+        assert_eq!(inbox.items().count(), 1);
+
+        // Mismatched scope updates are ignored.
+        assert!(!inbox.reconcile_job_statuses(
+            5.0,
+            2,
+            [JobStatusUpdate {
+                id: "j4".into(),
+                title: "Title j4".into(),
+                state: "failed".into(),
+                transition_id: None,
+            }],
+        ));
+    }
+
+    #[test]
+    fn retry_scheduled_transition_does_not_emit_false_terminal_item() {
+        let mut inbox = Inbox::default();
+        let mut active = obs(1, Link::Connected);
+        active.jobs = vec![job("j1", "running")];
+        inbox.observe(1.0, active);
+
+        let mut retrying = obs(1, Link::Connected);
+        retrying.jobs = vec![job("j1", "retry_scheduled")];
+        assert!(
+            !inbox.observe(2.0, retrying),
+            "active -> retry_scheduled is nonterminal and must not produce an Inbox item"
+        );
+        assert_eq!(inbox.items().count(), 0);
+
+        let mut failed = obs(1, Link::Connected);
+        failed.jobs = vec![job("j1", "failed")];
+        assert!(inbox.observe(3.0, failed));
+        assert_eq!(inbox.items().count(), 1);
+        assert_eq!(inbox.items().next().expect("item").title, "Job failed");
     }
 
     #[test]

@@ -2212,6 +2212,8 @@ fn associations(label: &str, rows: &[Association], kit: &Kit) -> El {
 #[cfg(test)]
 mod tests {
     use fleetworks_contracts::pairing::PairingChallenge;
+    use fleetworks_contracts::readiness::ReadinessCheckId;
+    use fleetworks_contracts::readiness::ReadinessState;
     use rune::Env;
     use rune::Key;
     use rune::KeyEvent;
@@ -2220,7 +2222,9 @@ mod tests {
 
     use crate::app;
     use crate::app::Intent;
+    use crate::app::Load;
     use crate::app::Page;
+    use crate::app::SeedStage;
     use crate::app::State;
     use crate::pairing::PairingFailure;
     use crate::pairing::PairingStage;

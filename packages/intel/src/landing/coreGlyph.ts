@@ -74,15 +74,39 @@ function haloSprite() {
 
 export function coreGlyph() {
   const group = new Group();
-  group.add(
-    new Mesh(
-      new SphereGeometry(14, 20, 16),
-      new MeshBasicMaterial({ color: landingColors.core }),
-    ),
-  );
+  const sphereMaterial = new MeshBasicMaterial({ color: landingColors.core });
+  const sphere = new Mesh(new SphereGeometry(14, 20, 16), sphereMaterial);
   const halo = haloSprite();
   const crescent = crescentSprite();
+  group.add(sphere);
   if (halo) group.add(halo);
   if (crescent) group.add(crescent);
-  return { group, halo };
+
+  function setHalo(scale: number, opacity: number) {
+    if (!halo) return;
+    halo.scale.setScalar(scale);
+    halo.material.opacity = opacity;
+  }
+
+  return {
+    group,
+    setHaloColor(color: string) {
+      halo?.material.color.set(color);
+    },
+    settleHalo() {
+      setHalo(90, 0.55);
+    },
+    pulseHalo(elapsed: number) {
+      const pulse = Math.sin((elapsed * Math.PI * 2) / 2.4);
+      setHalo(90 + pulse * 12, 0.5 + pulse * 0.12);
+    },
+    dispose() {
+      sphere.geometry.dispose();
+      sphereMaterial.dispose();
+      for (const sprite of [halo, crescent]) {
+        sprite?.material.map?.dispose();
+        sprite?.material.dispose();
+      }
+    },
+  };
 }

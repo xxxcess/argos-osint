@@ -2,7 +2,6 @@
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import ForceGraph3D from "react-force-graph-3d";
-import { Mesh, Sprite } from "three";
 import { coreGlyph } from "./coreGlyph";
 import { landingColors, topologyColors } from "../shell/intel-theme";
 
@@ -37,7 +36,7 @@ export default function OrbitCanvas({
   const createGlyph = useCallback(() => {
     if (!glyph.current) {
       const next = coreGlyph();
-      next.halo?.material.color.set(haloColor.current);
+      next.setHaloColor(haloColor.current);
       glyph.current = next;
     }
     return glyph.current.group;
@@ -49,22 +48,13 @@ export default function OrbitCanvas({
     for (const force of ["charge", "link", "center"]) api.d3Force(force, null);
     api.cameraPosition({ x: 0, y: 100, z: 480 });
     if (reduced) {
-      const halo = glyph.current?.halo;
-      if (halo) {
-        halo.scale.setScalar(90);
-        halo.material.opacity = 0.55;
-      }
+      glyph.current?.settleHalo();
       return;
     }
     let frame = 0;
     const loop = (now: number) => {
       const elapsed = now / 1000;
-      const halo = glyph.current?.halo;
-      if (halo) {
-        const pulse = Math.sin((elapsed * Math.PI * 2) / 2.4);
-        halo.scale.setScalar(90 + pulse * 12);
-        halo.material.opacity = 0.5 + pulse * 0.12;
-      }
+      glyph.current?.pulseHalo(elapsed);
       api.cameraPosition({
         x: Math.sin(elapsed * 0.1) * 480,
         y: 100,
@@ -78,24 +68,12 @@ export default function OrbitCanvas({
 
   useEffect(() => {
     haloColor.current = coreColor;
-    glyph.current?.halo?.material.color.set(coreColor);
+    glyph.current?.setHaloColor(coreColor);
   }, [coreColor]);
 
   useEffect(
     () => () => {
-      glyph.current?.group.traverse((object) => {
-        if (object instanceof Mesh) {
-          object.geometry.dispose();
-          const materials = Array.isArray(object.material)
-            ? object.material
-            : [object.material];
-          materials.forEach((material) => material.dispose());
-        }
-        if (object instanceof Sprite) {
-          object.material.map?.dispose();
-          object.material.dispose();
-        }
-      });
+      glyph.current?.dispose();
       glyph.current = null;
     },
     [],

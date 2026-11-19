@@ -575,6 +575,17 @@ mod native {
             init,
             scenes: &[
                 ("backend-choice", State::fixture_show_backend_choice),
+                ("backend-choice-opening", |state| {
+                    state.startup = fleetworks_desktop::startup::Startup::cold_launch();
+                }),
+                ("backend-choice-reduced-motion", |state| {
+                    state.fixture_show_backend_choice();
+                    state.accessibility.fixture_override =
+                        Some(fleetworks_desktop::accessibility::FixtureAccessibility {
+                            reduced_motion: true,
+                            ..Default::default()
+                        });
+                }),
                 ("redesign-status", redesign_scenes::status),
                 ("redesign-seed", redesign_scenes::seed),
                 ("redesign-seed-ready", redesign_scenes::seed_ready),

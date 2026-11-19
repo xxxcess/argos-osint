@@ -29,8 +29,8 @@
   },
   "startup": {
     "duration_ms": 3000,
-    "crossfade_start_ms": 2650,
-    "focus_transfer_ms": 3000,
+    "backend_choices_from_first_frame": true,
+    "settled_pose": "hold the end of the opening; Back does not replay",
     "full_materials_from_first_frame": true,
     "replay_on_navigation": false,
     "reduced_motion": "complete static logo",

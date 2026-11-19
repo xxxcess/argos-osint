@@ -2060,8 +2060,25 @@ fn operation_job_card_status(
             )
         }
         Some((job, result)) if job.state == "completed" => {
+            let seed_count = if operation == MaintenanceOperation::SeedActors {
+                let job_count =
+                    job.progress_done
+                        .zip(job.progress_total)
+                        .and_then(|(done, total)| {
+                            Some((u64::try_from(done).ok()?, u64::try_from(total).ok()?))
+                        });
+                result
+                    .and_then(|result| result.processed.zip(result.total))
+                    .or(job_count)
+                    .filter(|(done, total)| *total > 0 && done <= total)
+            } else {
+                None
+            };
             let outcome = match operation {
-                MaintenanceOperation::SeedActors => "Actors seeded".to_owned(),
+                MaintenanceOperation::SeedActors => seed_count.map_or_else(
+                    || "Completed".to_owned(),
+                    |(done, total)| format!("Completed ({done}/{total})"),
+                ),
                 MaintenanceOperation::ReindexActors => {
                     if result.and_then(|r| r.reader_visible) == Some(false) {
                         "Index built".to_owned()
@@ -2079,8 +2096,11 @@ fn operation_job_card_status(
                 _ => "Completed".to_owned(),
             };
             let mut parts = vec![format!("Job {short_id}")];
+            if operation == MaintenanceOperation::SeedActors {
+                parts.insert(0, "Actors seeded".to_owned());
+            }
             if let Some(res) = result {
-                if let Some(processed) = res.processed {
+                if let Some(processed) = res.processed.filter(|_| seed_count.is_none()) {
                     parts.push(res.total.map_or_else(
                         || format!("{processed} processed"),
                         |total| format!("{processed} / {total} processed"),
@@ -2283,7 +2303,7 @@ pub(crate) fn maintenance(
             "1. Seed Actors",
             MaintenanceOperation::SeedActors,
             "maintenance-seed",
-            "Choose a CSV to add or update actors. Existing actors outside this CSV are kept.",
+            "Use a CSV to add or update actors. Existing actors outside this CSV are kept.",
             &icons::SEED,
             MetalFinish::GoldCta,
         ),
@@ -2301,7 +2321,7 @@ pub(crate) fn maintenance(
             "Optional · Train Classifier (Natural)",
             MaintenanceOperation::TrainClassifier,
             "maintenance-train",
-            "Independent of search indexing. Choose a training CSV for a Natural candidate; training does not activate it.",
+            "Independent of search indexing. Use a training CSV for a Natural candidate. Activation is separate.",
             &icons::MODELS,
             MetalFinish::Gunmetal,
         ),
@@ -2311,6 +2331,16 @@ pub(crate) fn maintenance(
         let (preflight_label, preflight_tone, button_busy) =
             maintenance_preflight_status(state, operation, &preflight);
         let focused = state.seed_stage == stage_match;
+        let dataset = match operation {
+            MaintenanceOperation::SeedActors => Some(DatasetKind::ActorCatalog),
+            MaintenanceOperation::TrainClassifier => Some(DatasetKind::ClassifierTraining),
+            _ => None,
+        };
+        let action_label = if cfg!(target_os = "linux") && dataset.is_some() {
+            "Enter CSV path"
+        } else {
+            label
+        };
         let mut operation_card = rune::col().padding(14.0).gap(8.0).child(
             rune::row()
                 .w_full()
@@ -2328,7 +2358,7 @@ pub(crate) fn maintenance(
                 .child(heading(label, kit))
                 .child(rune::spacer())
                 .child(
-                    ActionButton::new(label)
+                    ActionButton::new(action_label)
                         .key(key)
                         .icon(glyph)
                         .finish(finish)
@@ -2337,14 +2367,12 @@ pub(crate) fn maintenance(
                         .disabled(reason.is_some())
                         .on_press_tx(move |state: &mut State, tx| {
                             state.seed_stage = stage_match;
-                            match operation {
-                                MaintenanceOperation::SeedActors => {
-                                    state.choose_dataset(DatasetKind::ActorCatalog, tx)
+                            match dataset {
+                                Some(kind) if cfg!(target_os = "linux") => {
+                                    state.enter_csv_path(kind, tx);
                                 }
-                                MaintenanceOperation::TrainClassifier => {
-                                    state.choose_dataset(DatasetKind::ClassifierTraining, tx)
-                                }
-                                _ => state.preview_maintenance(operation),
+                                Some(kind) => state.choose_dataset(kind, tx),
+                                None => state.preview_maintenance(operation),
                             }
                         })
                         .build(kit, preferences, pointer_ref),
@@ -2443,24 +2471,33 @@ fn csv_path_prompt(
     if let Some(error) = &prompt.error {
         column = column.child(line(error.clone(), kit).role("alert"));
     }
-    column.child(
-        rune::row()
-            .gap(8.0)
-            .child(
-                ActionButton::new("Use this CSV")
-                    .key("maintenance-csv-path-submit")
-                    .finish(MetalFinish::Fractured)
-                    .on_press(|state: &mut State| state.submit_csv_path())
-                    .build(kit, preferences, pointer_ref),
-            )
-            .child(
-                ActionButton::new("Cancel")
-                    .key("maintenance-csv-path-cancel")
-                    .finish(MetalFinish::Gunmetal)
-                    .on_press(|state: &mut State| state.cancel_csv_path_prompt())
-                    .build(kit, preferences, pointer_ref),
-            ),
-    )
+    let mut actions = rune::row()
+        .gap(8.0)
+        .child(
+            ActionButton::new("Use this CSV")
+                .key("maintenance-csv-path-submit")
+                .finish(MetalFinish::Fractured)
+                .on_press(|state: &mut State| state.submit_csv_path())
+                .build(kit, preferences, pointer_ref),
+        )
+        .child(
+            ActionButton::new("Cancel")
+                .key("maintenance-csv-path-cancel")
+                .finish(MetalFinish::Gunmetal)
+                .on_press(|state: &mut State| state.cancel_csv_path_prompt())
+                .build(kit, preferences, pointer_ref),
+        );
+    if cfg!(target_os = "linux") {
+        let kind = prompt.kind;
+        actions = actions.child(
+            ActionButton::new("Browse…")
+                .key("maintenance-csv-path-browse")
+                .finish(MetalFinish::Gunmetal)
+                .on_press_tx(move |state: &mut State, tx| state.choose_dataset(kind, tx))
+                .build(kit, preferences, pointer_ref),
+        );
+    }
+    column.child(actions)
 }
 
 pub(crate) fn maintenance_confirmation_content(

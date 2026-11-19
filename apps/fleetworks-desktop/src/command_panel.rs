@@ -8,6 +8,7 @@ use rune::El;
 use rune::Key;
 use rune::KeyEvent;
 use rune::TextEdit;
+use rune::Transition;
 use rune_kit::Kit;
 
 use crate::app::Page;
@@ -257,6 +258,8 @@ pub(crate) fn view(
                 } else {
                     theme::hex(theme::SURFACE)
                 })
+                .hover(theme::hex(theme::SURFACE_ELEVATED))
+                .press(theme::hex(theme::SELECTION_SURFACE))
                 .on_press(move |state: &mut State| state.run_command(command))
                 .child(
                     rune::text(entry.label.clone())
@@ -313,6 +316,11 @@ pub(crate) fn view(
         .radius(10.0)
         .child(header)
         .child(body)
+        .transition(crate::app::surface_transition(
+            preferences.reduced_motion,
+            Transition::offset(0.0, -6.0),
+        ))
+        .instant_changes()
         .token_motion(kit.motion.overlay);
     for shadow in kit.shadow_layers(&kit.elevation.overlay) {
         panel = panel.box_shadow(shadow);
@@ -327,12 +335,22 @@ pub(crate) fn view(
             .w_full()
             .h_full()
             .fill(kit.c.scrim)
+            .transition(if preferences.reduced_motion {
+                Transition::none()
+            } else {
+                Transition::opacity()
+            })
             .token_motion(kit.motion.overlay)
             .a11y_hidden(),
     );
     layers.push(
         rune::el()
             .key("command-panel-layer")
+            .transition(if preferences.reduced_motion {
+                Transition::none()
+            } else {
+                Transition::identity()
+            })
             .absolute(0.0, 0.0)
             .w_full()
             .h_full()
@@ -526,6 +544,92 @@ mod tests {
             runtime.update(|state, _| state.commands.close());
             runtime.frame(f64::from(opening * 10 + 6) / 60.0);
             assert!(!runtime.state.commands.query.focused);
+        }
+    }
+
+    #[test]
+    fn navigation_dossier_and_command_motion_preserve_the_shell_and_accept_input() {
+        for reduced_motion in [false, true] {
+            let mut state = crate::tests::registered_fixture();
+            state.page = Page::Workstation;
+            let mut runtime = rune::Runtime::new(
+                state,
+                crate::app::view,
+                (1280.0, 800.0),
+                rune::Env {
+                    system_dark: true,
+                    scale: 1.0,
+                },
+            );
+            runtime.set_system_reduced_motion(reduced_motion);
+            runtime.on_key = crate::app::spec().on_key;
+            runtime.frame(0.0);
+
+            let assert_entrance = |runtime: &rune::Runtime<State>, key| {
+                let (_, opacity) = runtime.presented(key).expect("surface is mounted");
+                if reduced_motion {
+                    assert_eq!(opacity, 1.0, "{key} appears whole under reduced motion");
+                } else {
+                    assert!(opacity > 0.0 && opacity < 1.0, "{key} fades in: {opacity}");
+                }
+            };
+            let stable_shell = runtime.presented("app-shell").expect("connected shell");
+            runtime.update(|state, _| {
+                state.navigate(Page::Brain);
+                state.brain.results =
+                    crate::app::Load::Ready(crate::tests::brain_search_response_fixture());
+            });
+            runtime.frame(0.0);
+            assert_entrance(&runtime, "screen-brain");
+            assert!(
+                runtime
+                    .presented("screen-workstation")
+                    .is_none_or(|(_, opacity)| opacity == 0.0),
+                "the outgoing page is no longer painted"
+            );
+            assert_eq!(runtime.presented("app-shell"), Some(stable_shell));
+            for _ in 0..24 {
+                runtime.frame(1.0 / 60.0);
+            }
+
+            let actor_trigger = runtime.find("actor-hit-first").expect("actor result");
+            runtime.update(|state, _| state.toggle_actor(0));
+            runtime.frame(0.0);
+            assert_entrance(&runtime, "actor-dossier");
+            assert_eq!(runtime.find("actor-hit-first"), Some(actor_trigger));
+            for _ in 0..24 {
+                runtime.frame(1.0 / 60.0);
+            }
+            runtime.update(|state, _| {
+                state
+                    .brain
+                    .complete_dossier(state.brain.detail_revision, Err("Gateway busy".into()));
+            });
+            runtime.frame(0.0);
+            assert!(runtime.find("dossier-retry").is_some());
+            let (_, opacity) = runtime.presented("actor-dossier").unwrap();
+            assert!(
+                (opacity - 1.0).abs() < 0.001,
+                "a response does not replay the reveal"
+            );
+            assert_eq!(runtime.find("actor-hit-first"), Some(actor_trigger));
+
+            runtime.key(KeyEvent {
+                key: Key::Command('k'),
+                mods: rune::Mods {
+                    ctrl: true,
+                    ..rune::Mods::default()
+                },
+            });
+            runtime.frame(0.0);
+            assert_entrance(&runtime, "command-panel-dialog");
+            runtime.key(KeyEvent {
+                key: Key::Text("jobs".into()),
+                mods: rune::Mods::default(),
+            });
+            runtime.frame(0.0);
+            assert_eq!(runtime.state.commands.query.text, "jobs");
+            assert_eq!(runtime.presented("app-shell"), Some(stable_shell));
         }
     }
 

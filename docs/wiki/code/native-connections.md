@@ -6,11 +6,11 @@
 
 ## Cold-launch startup
 
-Each cold launch of the production app plays the **Quiet Orbit** scene for 3 seconds over the same `#060709` canvas as setup and the services: a dim molten-glass sphere, an obsidian crescent and five obsidian-glass satellites on an inclined orbit. The complete scene is visible from the first frame and plays at its eight-second pace (it does not speed up to finish a turn). From 2.65 s it crossfades into **Choose a backend**, which offers **Embedded** and **Distributed**; the choice takes input at 3.00 s. With Reduced Motion the scene is one still for the same 3 seconds. The orbit scales as one unit with the window (compact widths, fractional scale, high DPI). It is a bounded native vector scene (no media file to load or fail) using the reference geometry in `docs/design/matte-canvas/motion.md` (PR 70).
+A cold launch opens **Choose a backend** with **Embedded** and **Distributed** available from the first frame. [Quiet Orbit](../../design/matte-canvas/motion.md) plays at its reference pace behind the tiles and settles into a still. Reduced Motion uses the still immediately. The orbit scales as one unit on the same `#060709` canvas as setup and the services.
 
-Choosing a type opens **Setup Gateway** with that **Backend type** selected. The splash ends before any companion starts or gateway connects. Start or connect explicitly in setup. The splash runs once per cold launch.
+Choosing a tile opens **Setup Gateway** with that backend selected. Use **Start Embedded Backend** or **Connect** to proceed. **Back** returns to the chooser without replaying the launch animation.
 
-A launch with `--api-origin` or `--api-token-file` skips the splash and choice, so scripted and CI launches are unchanged. Most fixtures skip it. The `backend-choice` fixture exercises the completed splash handoff and chooser. The timeline is `apps/fleetworks-desktop/src/startup.rs` and the scene is `apps/fleetworks-desktop/src/orbit.rs`.
+A launch with `--api-origin` or `--api-token-file` skips the chooser. The `backend-choice` fixture exercises the production chooser with synthetic effects. The startup controls are in `apps/fleetworks-desktop/src/startup.rs` and the scene is in `apps/fleetworks-desktop/src/orbit.rs`.
 
 On **Start Embedded Backend**, the embedded companion warms its bundled Compromise NLP engine when built with NLP support. That check measures the bundled engine. Atlas and Focus Brief depend on their own advertised services. The bundled Natural classifier supports explicitly confirmed, candidate-only training through **DB Seed & Train**. Starting the backend never trains or activates a model. Natural training availability does not establish readiness for Atlas's separate Rust-BERT classifier. The base Embedded connection remains available when an optional engine is unavailable.
 

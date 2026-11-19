@@ -20,6 +20,8 @@ use rune::El;
 use rune::Key;
 use rune::KeyEvent;
 use rune::Live;
+use rune::Spring;
+use rune::SpringPair;
 use rune::Transition;
 use rune::Tx;
 use rune_kit::shell;
@@ -250,6 +252,7 @@ pub enum Intent {
     UploadDataset { kind: DatasetKind },
     Datasets,
     Maintenance { operation: MaintenanceOperation },
+    MaintenanceJobStatus { job_id: String },
     Configuration { action: ConfigurationAction },
     PrepareProfileImport,
     ProfileTransfer { action: TransferAction },
@@ -1289,18 +1292,12 @@ pub(crate) fn poll_jobs(state: &mut State, now: f64, tx: &mut Tx) -> bool {
 fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
     state.clock = now;
     let mut changed = false;
-    if state.startup.active() {
-        // The splash clock starts at the first frame. No backend work runs behind startup.
+    if state.startup.active() && !state.setup_gateway {
         state.startup.begin(now);
-        if let Some(wait) = state.startup.next_wake(
-            now,
-            state
-                .accessibility
-                .for_view(state.fixture, false)
-                .reduced_motion,
-        ) {
+        if let Some(wait) = state.startup.next_wake(now) {
             tx.wake_after(Duration::from_secs_f64(wait));
         }
+        // Redraw the orbit's final pose even when this poll schedules no subsequent frame.
         return true;
     }
     changed |= state.observe_inbox();
@@ -1378,6 +1375,13 @@ fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
 }
 
 fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
+    if state.startup.active() {
+        if event.key == Key::Escape && state.setup_gateway {
+            state.return_to_startup_choice(tx);
+            return true;
+        }
+        return false;
+    }
     if event.is_command('k') && !event.mods.shift {
         if state.commands.open {
             state.commands.close();
@@ -1447,6 +1451,18 @@ pub fn spec() -> AppSpec<State> {
     }
 }
 
+/// Keep the surface readable and its input available during the brief entrance.
+pub(crate) fn surface_transition(reduced_motion: bool, mut transition: Transition) -> Transition {
+    if reduced_motion {
+        return Transition::none();
+    }
+    transition.insertion.opacity = 0.8;
+    transition.springs(SpringPair::new(
+        Spring::new(0.16, 0.0),
+        Spring::new(0.12, 0.0),
+    ))
+}
+
 /// Shared view used unchanged by the production executable and native fixture example.
 pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     let preferences = state
@@ -1459,8 +1475,8 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     let mut layers = Vec::new();
     crate::material::configure_kit(&mut kit, preferences);
     if state.startup.active() {
-        let startup = crate::startup::view(state, preferences, &kit, cx.layout_size("startup"));
-        return mark_fixture(state, &kit, startup);
+        let startup = crate::startup::view(state, cx, preferences, &kit);
+        return mark_fixture(state, &kit, startup).on_window_focus(State::log_window_focus);
     }
     let compact_rail = cx
         .layout_size("app-shell")
@@ -1614,7 +1630,12 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
         .gap(8.0)
         .center_y()
         .child(crate::command_panel::toolbar_button(&kit))
-        .child(crate::inbox::toolbar_item(state, &kit, &mut layers));
+        .child(crate::inbox::toolbar_item(
+            state,
+            &kit,
+            preferences,
+            &mut layers,
+        ));
     if state.assistant.enabled && state.connected() && !state.setup_gateway {
         trailing = trailing.child(crate::assistant::toggle(
             assistant_placement != crate::assistant::Placement::Hidden,
@@ -1709,23 +1730,28 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
         format!("screen-{}", state.page.key())
     };
     let page_body = views::page(state, cx, &kit, &mut layers);
-    let animated_page = if preferences.reduced_motion {
-        rune::col()
-            .key(screen_key)
-            .w_full()
-            .grow(1.0)
-            .min_h(0.0)
-            .child(page_body)
+    // Only the content changes identity on navigation. Keep the shell, toolbar and canvas in place.
+    let page_transition = if state.setup_gateway {
+        Transition::offset(0.0, 5.0)
     } else {
-        rune::col()
-            .key(screen_key)
-            .w_full()
-            .grow(1.0)
-            .min_h(0.0)
-            .transition(Transition::offset(0.0, 12.0).combined(Transition::opacity()))
-            .child(page_body)
+        Transition::identity()
     };
-    let content = content.child(animated_page);
+    let mut page_transition = surface_transition(preferences.reduced_motion, page_transition);
+    // Discard the old page immediately, including when its connection scope just changed.
+    page_transition.springs.exit = Spring::NONE;
+    let screen = rune::col()
+        .key(screen_key)
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .transition(page_transition)
+        .child(page_body);
+    let screen = if preferences.reduced_motion {
+        screen.instant_changes()
+    } else {
+        screen
+    };
+    let content = content.child(screen);
     let mut main = rune::row().key("main-area").w_full().h_full().min_h(0.0);
     if compact_rail {
         main = main.child(compact_icon_rail(state, &kit, connection_tone, preferences));
@@ -1749,6 +1775,11 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
             layers.push(
                 rune::row()
                     .key("assistant-overlay")
+                    .transition(if preferences.reduced_motion {
+                        Transition::none()
+                    } else {
+                        Transition::identity()
+                    })
                     .absolute(0.0, 0.0)
                     .w_full()
                     .h_full()
@@ -1761,7 +1792,15 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
                                 state.assistant.preference = crate::assistant::Preference::Closed;
                             }),
                     )
-                    .child(crate::assistant::dock(state, &kit, preferences)),
+                    .child(
+                        crate::assistant::dock(state, &kit, preferences)
+                            .focus_return("assistant-toggle")
+                            .transition(surface_transition(
+                                preferences.reduced_motion,
+                                Transition::offset(6.0, 0.0),
+                            ))
+                            .instant_changes(),
+                    ),
             );
         }
         crate::assistant::Placement::Hidden => {}

@@ -12,7 +12,7 @@ Reproduce the approved [Workstation](mockups/01-workstation-status.png), [Gatewa
 - Coarse matte moon-rock material is reserved for **Submit, Confirm, Create and Delete** action buttons. Utilities, navigation, toggles, filters, cards and data rows remain smooth matte. An ordinary Retry, Refresh, Back or Load more control must not inherit the coarse action material simply because it is a button.
 - The emblem is the persistent symbol-only brand. Only the logo has permanent sheen. Loading may use the restrained cool sheen below; ordinary controls, live badges, values and text do not continually glint or pulse.
 - Use cool text and the semantic palette in the theme; do not reintroduce ivory typography. Health is not conveyed by color alone. Preserve visible focus, accessible names, error explanations and input affordances even when removing decorative borders.
-- Keep the same surface quality through splash → gateway → service first load → settled/live service. Loading, unavailable and stale content occupy the same component family and exposure as normal content.
+- Keep the same surface quality through backend chooser → gateway setup → service first load → settled/live service. Loading, unavailable and stale content occupy the same component family and exposure as normal content.
 
 ## Current mechanisms and selected changes
 

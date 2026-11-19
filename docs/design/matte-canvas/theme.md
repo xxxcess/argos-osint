@@ -22,9 +22,9 @@ These generated mockups establish composition and material direction. Numbers, h
 
 ## 1. Canvas, color and branding
 
-Use an opaque **`#060709`** canvas for the window, web page, splash boundary and inset reading beds. Avoid stars, grain, vignettes or a wallpaper across working screens. The logo can contain its approved stars, molten core and reflective glass; its prepared asset edges must blend into this canvas or be transparent. Never stretch a poster to fill a logo slot.
+Use an opaque **`#060709`** canvas for the window, web page, backend chooser and inset reading beds. Avoid stars, grain, vignettes or a wallpaper across working screens. The logo can contain its approved stars, molten core and reflective glass; its prepared asset edges must blend into this canvas or be transparent. Never stretch a poster to fill a logo slot.
 
-Brand with the **symbol only**. Do not place a visible “Fleetworks” wordmark beside the mark or repeat it in page headings, cards or toolbars. Retain the product name in application metadata, OS identity, accessible naming where needed and documentation. Keep existing slot/API responsibilities, including `FleetworksMark` and native `BRAND_MARK`; replacing their artwork is implementation work. At small sizes use the documented silhouette fallback, preserving one crescent, one sphere and five triangles. Large setup/splash art may retain material detail. Do not repeat reflective logo treatments on controls.
+Brand with the **symbol only**. Do not place a visible “Fleetworks” wordmark beside the mark or repeat it in page headings, cards or toolbars. Retain the product name in application metadata, OS identity, accessible naming where needed and documentation. Keep existing slot/API responsibilities, including `FleetworksMark` and native `BRAND_MARK`; replacing their artwork is implementation work. At small sizes use the documented silhouette fallback, preserving one crescent, one sphere and five triangles. Large backend chooser art may retain material detail. Do not repeat reflective logo treatments on controls.
 
 ### Exact target tokens
 
@@ -142,7 +142,7 @@ Normal text must reach **4.5:1**, large text **3:1**, and essential boundaries/f
 
 ## 4. Motion: loading-only translated sheen
 
-There is **zero persistent sheen** on interface surfaces. No resting/hovered reflection bands, pointer lights, ambient glow, specular card layers or cursor-reactive shadows. The material emblem is the sole persistent reflective artwork exception; its approved startup animation remains governed by the splash contract.
+There is **zero persistent sheen** on interface surfaces. No resting/hovered reflection bands, pointer lights, ambient glow, specular card layers or cursor-reactive shadows. The material emblem is the sole persistent reflective artwork exception; its approved startup animation remains governed by the [Quiet Orbit motion contract](motion.md).
 
 A genuinely pending, unresolved region may use a restrained translated loading band over a **steady base**:
 

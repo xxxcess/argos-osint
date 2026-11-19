@@ -481,9 +481,8 @@ pub(crate) fn mark(height: f32) -> El {
     .label("Fleetworks")
 }
 
-/// The orbit as one element sized for `window`.
-pub(crate) fn view(seconds: f32, animated: bool, window: Option<[f32; 2]>) -> El {
-    let [width, height] = display_size(window);
+/// The orbit as one element within the chooser's uniformly scaled envelope.
+pub(crate) fn view(seconds: f32, animated: bool, width: f32, height: f32) -> El {
     stack(seconds, animated, width, height)
         .key("startup-orbit")
         .label("Fleetworks")
@@ -733,8 +732,11 @@ mod tests {
         );
         let startup = &manifest["startup"];
         let ms = |key: &str| startup[key].as_f64().unwrap();
-        assert!((ms("duration_ms") - crate::startup::CHOOSE_AT * 1000.0).abs() < 1e-6);
-        assert!((ms("crossfade_start_ms") - crate::startup::CROSSFADE_AT * 1000.0).abs() < 1e-6);
+        assert!((ms("duration_ms") - crate::startup::INTRO_SECONDS * 1000.0).abs() < 1e-6);
+        assert_eq!(
+            startup["backend_choices_from_first_frame"].as_bool(),
+            Some(true)
+        );
         assert_eq!(manifest["canvas"]["color"].as_str(), Some("#060709"));
         assert_eq!(crate::theme::BACKGROUND, "#060709");
     }

@@ -6,7 +6,7 @@
 
 Use the approved [material source](../../../assets/brand/source/fleetworks-liquid-metal-glass.png), SHA-256 `1ae553782431da7649a1d88accdacc9076c3a039f1c2b5c0018f5998d7d70112`. Its smoky glass sphere contains a molten ivory/amber core; the crescent contains coarse fractured obsidian. Five glass triangular satellites preserve the brand geometry. Retain the sparse faint stars within the crescent. Warm metallic highlights belong to this symbol, never to ordinary controls or reading surfaces.
 
-Brand display areas contain the symbol alone. Remove the visible wordmark in the splash, navigation header and setup brand region; preserve the product name in accessibility labels, window titles, package metadata and documentation. This is not a repository, API, package or application-identity rename. Screen titles such as Setup Gateway remain functional headings outside the brand region.
+Brand display areas contain the symbol alone. Remove the visible wordmark in the backend chooser, navigation header and setup brand region; preserve the product name in accessibility labels, window titles, package metadata and documentation. This is not a repository, API, package or application-identity rename. Screen titles such as Setup Gateway remain functional headings outside the brand region.
 
 All materials are visible in the first frame. There is no flat-shape, outline-only, assembly or shape-to-glass introduction. Use the selected [Quiet Orbit GIF](../../../assets/brand/reference/fleetworks-quiet-orbit.gif), SHA-256 `772a48940527a5fe04121bb7cc5aec443cf33ffbec9ec518b960ac041096c797`. The [MP4](../../../assets/brand/reference/fleetworks-quiet-orbit.mp4) (SHA-256 `d3871331a96c2a8ffcc859c10cadc63992b70fe428751d990983e463f76fa650`, 30 fps) retains smoother tonal detail; the [poster](../../../assets/brand/reference/fleetworks-quiet-orbit.png) (SHA-256 `c247cf0cc97c1beec3ad077e372b8bbb8ef032ed070e3a58eb714515369b5463`) supplies a static reference. These are 2.5D texture-backed design studies, not volumetric simulation or application recordings.
 
@@ -17,15 +17,15 @@ The [playback manifest](../../../assets/brand/reference/quiet-orbit/playback.jso
 | Item | Contract |
 | --- | --- |
 | Review loop | 800×450, 16 seconds (MP4: 480 frames at 30 fps; GIF: 240 frames at 15 fps); seamless periodic orbit and core flow |
-| Native startup | 3 seconds at the quiet orbital pace; do not accelerate a full revolution into that interval |
-| Transition | Setup appears beneath the scene at 2.65 seconds; opacity handoff and input/focus transfer finish by 3.00 seconds |
+| Native chooser | The complete scene and both backend tiles are usable in the first frame. Sample 3 seconds at the quiet orbital pace, then hold the final pose. |
+| Setup | The selected Embedded or Distributed form enters on the same canvas with a short fade and a six-point shift. Start Embedded Backend and Connect remain explicit. Back restores focus to the selected tile and holds the settled scene. |
 | Scope | One startup presentation; no replay on navigation, dialog close, refresh or in-app reconnect |
 | Reduced motion / asset failure | Complete static logo; accessible setup remains available; no initial flat reveal or blank blocked screen |
 | After startup | Ordinary pages are static apart from useful local activity; no full-canvas decorative motion loop |
 
 Measure the complete scene envelope, including every satellite pose, before sizing. Use a centered contain transform with uniform scale: `s = min(availableWidth / envelopeWidth, availableHeight / envelopeHeight)`. Calculate available dimensions after page insets, keep the envelope inside the measured native window, and convert logical points to physical pixels only at rasterization. Do not size by the sphere alone or stretch an 800×450 rectangle. Recheck at minimum 640×480, compact 800×1100, baseline 1180×780 and wide 1440×900, with 1×/2× scale and enlarged text. Logo scaling must not push the setup form outside the available viewport.
 
-Use the same opaque `#060709` root clear color for native window, splash host, setup, content shell and web page. Scene transparency uses object coverage, with premultiplied alpha consistently applied through interpolation/compositing; black mineral interiors remain opaque. Do not use brightness/chroma keying to remove exterior black. The baked reference GIF stays unchanged and is not a production background layer. Derive supported RGBA layers or a bounded native scene for runtime; any exterior space/stars belong to a separate persistent canvas layer rather than the logo rectangle. Working screens use the theme's uniform canvas; settle exterior star opacity to zero by service content, without an exposure step or image-backing boundary. Missing textures fall back to the complete static mark, not a new loading screen.
+Use the same opaque `#060709` root clear color for native window, backend chooser, setup, content shell and web page. The artwork extends behind the chooser heading, where a localized dark scrim keeps the text readable. Two equal matte tiles stay within the window. Scene transparency uses object coverage, with premultiplied alpha consistently applied through interpolation/compositing; black mineral interiors remain opaque. Do not use brightness/chroma keying to remove exterior black. The baked reference GIF stays unchanged and is not a production background layer. Derive supported RGBA layers or a bounded native scene for runtime; any exterior space/stars belong to a separate persistent canvas layer rather than the logo rectangle. Working screens use the theme's uniform canvas; settle exterior star opacity to zero by service content, without an exposure step or image-backing boundary. Missing textures fall back to the complete static mark, not a new loading screen.
 
 ## Collision and orbital geometry
 
@@ -45,7 +45,7 @@ The native scene is a bounded render, not the baked GIF: `orbit.rs` draws a back
 | Crescent | Coarse fractured obsidian with faint flecks and a polished edge | About eighty angular facets cut from a jittered grid with the shared `rock::noise` hash, tone 0 to 1 per facet, a lit edge on a third of them, warm and cool flecks, a polished outline |
 | Prisms | Dark glass triangles with bright edges and depth | Smoky body, lit and shaded facet, inner bevel, bright lit edge, faint rim and a warm reflection near the base |
 
-Compared on the matching still pose (1.5 s, which is also the reduced-motion pose), the 2.65 s handoff pose and the loop start: the core now shows the approved molten flow and glass reflections instead of overlapping bands; the crescent still reads as angular rock with a polished edge but is not photographic; the prisms show facets and depth; the front and back passes, the 5.3 unit clearance and the three-second startup are unchanged. Remaining differences are visible and left for visual review: the core's motion is a shear of one still, not fluid; the crescent is vector facets, and the reference crescent is also shaped differently (a flatter, wider bowl whose centre sits about 15 scene units below the core, against 44 here), so a photographic crescent needs an agreed re-fit of its geometry and a rerun of the clearance check; the prism glass is flat-shaded.
+Compared on the matching still pose (1.5 s, which is also the reduced-motion pose), the 3 s settled pose and the loop start: the core now shows the approved molten flow and glass reflections instead of overlapping bands; the crescent still reads as angular rock with a polished edge but is not photographic; the prisms show facets and depth; the front and back passes, the 5.3 unit clearance and the opening's three-second playback window are unchanged. Remaining differences are visible and left for visual review: the core's motion is a shear of one still, not fluid; the crescent is vector facets, and the reference crescent is also shaped differently (a flatter, wider bowl whose centre sits about 15 scene units below the core, against 44 here), so a photographic crescent needs an agreed re-fit of its geometry and a rerun of the clearance check; the prism glass is flat-shaded.
 
 Clearance after the material change: the geometry and its test are unchanged (about 8 scene units at the closest approach), and a new test subtracts 1.3 units for the painted reach (prism rim 0.3, crescent edge 0.5, one antialiasing step 0.5) and still requires 5.3. The authoring clearance scripts need numpy, scipy and Pillow and were not run, so no new raster measurement is claimed.
 
@@ -55,7 +55,7 @@ To compare a pose without building the app, run the preview port of the scene (a
 python3 assets/brand/reference/quiet-orbit/source/native_preview.py 1.5 .agent-scratch/quiet-orbit/native-1.5.svg 5
 ```
 
-Use `1.5` for the still pose, `2.65` for the handoff and `0` for the loop start. The real check remains the native fixture captures in [native verification](../../wiki/code/native-verification.md).
+Use `1.5` for the reduced-motion pose, `3` for the settled chooser and `0` for the loop start. The real check remains the native fixture captures in [native verification](../../wiki/code/native-verification.md).
 
 ## Offline reproduction
 
@@ -71,6 +71,10 @@ python3 assets/brand/reference/quiet-orbit/source/clearance/verify_clearance.py 
 
 The [verifier notes](../../../assets/brand/reference/quiet-orbit/source/clearance/README.md) explain threshold, alpha-fringe and prism-depth assumptions. Keep generated frames, dependency directories and new reports in ignored scratch. Preserve source reference bytes and record deliberate derivatives separately. Production packaging must use formats supported by the native resource pipeline, bounded decoded memory and an asset-failure fallback; a GIF in documentation does not establish native GIF support. Web assets retain exact URL allowlisting and configured base-path handling.
 
+## In-app transitions
+
+The connected shell keeps its navigation and canvas fixed during a keyed 160 ms content fade. Brain details open from the selected result with a four-point shift. Inbox, Assistant and Commands enter with short four- to six-point slides and fades. Refreshes keep the same view identity, scroll and selection. With reduced motion the views swap directly and keep focus and status cues.
+
 ## Acceptance
 
-Compare actual splash → setup → services captures on one canvas. Inspect the full orbit, transition midpoint and final setup frame for clipped satellites, moon intersection, background rectangles, black/gray flashes and wordmarks. Verify focus transfers once, setup can proceed offline, reduced-motion behavior is static, and hidden/unfocused windows stop unnecessary animation. Record actual decode time, startup impact, frame pacing and decoded memory against the current app baseline before adopting runtime derivatives. The documentation change only imports the selected references and the existing authoring evidence.
+Capture the first-frame chooser, both setup paths and the connected shell at 640×480 and a normal desktop size. Check for clipped satellites, intersections, unreadable labels and canvas flashes. Operate both tiles by keyboard, verify Back restores focus without replay, and check that only Start or Connect dispatches a backend action. Repeat with reduced motion. Exercise one page change, a Brain disclosure and an overlay with both motion settings. Record installed-app results separately from production-view fixtures.

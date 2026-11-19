@@ -34,13 +34,13 @@ use rune::FileDialogOptions;
 use rune::TextEdit;
 use rune::Tx;
 use serde::Deserialize;
-use serde::Serialize;
 use sha2::Digest;
 use sha2::Sha256;
 
 use crate::app::Intent;
 use crate::app::Load;
 use crate::app::State;
+use crate::backend;
 use crate::backend::JobDetail;
 use crate::connection::GatewayEffects;
 use crate::connection::RequestTask;
@@ -68,9 +68,8 @@ pub struct MaintenanceConfirmation {
     pub dataset: Option<DatasetRef>,
 }
 
-/// Typed-path fallback for desktops where the file chooser cannot open (for example Linux
-/// without a chooser service). The path names a file on this computer only. It is read here,
-/// validated and uploaded by the same code as a picked file, and is never sent to the backend.
+/// Entry for a path on this workstation. The same code validates and uploads a typed or picked
+/// file and keeps the source path on this workstation.
 pub struct CsvPathPrompt {
     pub kind: DatasetKind,
     pub input: TextEdit,
@@ -365,6 +364,26 @@ impl Maintenance {
 }
 
 impl State {
+    pub(crate) fn enter_csv_path(&mut self, kind: DatasetKind, tx: &mut Tx) {
+        self.prepare_csv_path_prompt(kind);
+        tx.focus("maintenance-csv-path/value/input", true);
+    }
+
+    fn prepare_csv_path_prompt(&mut self, kind: DatasetKind) {
+        if !self
+            .maintenance
+            .csv_path_prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.kind == kind)
+        {
+            self.maintenance.csv_path_prompt = Some(CsvPathPrompt {
+                kind,
+                input: TextEdit::new(String::new()),
+                error: None,
+            });
+        }
+    }
+
     pub fn choose_dataset(&mut self, kind: DatasetKind, tx: &mut Tx) {
         let operation = match kind {
             DatasetKind::ActorCatalog => MaintenanceOperation::SeedActors,
@@ -392,6 +411,7 @@ impl State {
                 }
                 match result {
                     Ok(Some(path)) => {
+                        state.maintenance.csv_path_prompt = None;
                         state.select_local_dataset(path, kind);
                         state.upload_selected_dataset();
                     }
@@ -408,11 +428,7 @@ impl State {
             "The dataset chooser could not open a file. Enter the path of a local CSV instead."
                 .into(),
         );
-        self.maintenance.csv_path_prompt = Some(CsvPathPrompt {
-            kind,
-            input: TextEdit::new(String::new()),
-            error: None,
-        });
+        self.prepare_csv_path_prompt(kind);
     }
 
     pub fn cancel_csv_path_prompt(&mut self) {
@@ -1283,6 +1299,7 @@ impl State {
                 continue;
             }
             if self.fixture {
+                self.record(Intent::MaintenanceJobStatus { job_id });
                 started += 1;
                 continue;
             }
@@ -1300,23 +1317,22 @@ impl State {
             self.maintenance.receipt_poll_revisions[slot] =
                 self.maintenance.receipt_poll_revisions[slot].wrapping_add(1);
             let revision = self.maintenance.receipt_poll_revisions[slot];
-            let query_id = job_id.clone();
+            let context = context.clone();
             let task = services.runtime.spawn(async move {
-                #[derive(Serialize)]
-                struct DetailQuery<'a> {
-                    id: &'a str,
-                    limit: u16,
-                }
-                let result: Result<JobDetail, ClientError> = client
-                    .get_with_query(
-                        "/api/v1/jobs/detail",
-                        &DetailQuery {
-                            id: &query_id,
-                            limit: 100,
-                        },
-                    )
-                    .await;
+                let result = backend::read_job_detail(&client, &job_id).await;
                 ui.update(move |state, _| {
+                    if !state.permission(Permission::ReadWorkstationActivity)
+                        || !state
+                            .registration
+                            .context
+                            .as_ref()
+                            .is_some_and(|current| current.same_request_context(&context))
+                    {
+                        if state.maintenance.receipt_poll_revisions[slot] == revision {
+                            state.maintenance.receipt_poll_requests[slot] = None;
+                        }
+                        return;
+                    }
                     state.complete_maintenance_job_detail(
                         epoch,
                         origin_revision,

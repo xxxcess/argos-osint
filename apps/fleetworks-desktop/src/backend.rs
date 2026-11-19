@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 use fleetworks_contracts::context::ActivityScope;
 use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::Client;
+use fleetworks_contracts::ClientError;
+use fleetworks_contracts::JOB_DETAIL_PATH;
 use rune::TextEdit;
 use serde::Deserialize;
 use serde::Serialize;
@@ -453,6 +455,7 @@ impl State {
             }
             Page::Seed => {
                 self.refresh_readiness();
+                self.poll_maintenance_receipt_jobs();
                 self.backend_read(ReadRequest::Models);
                 self.backend_read(ReadRequest::Profile);
             }
@@ -468,6 +471,7 @@ impl State {
             Page::Jobs => self.backend_read(ReadRequest::Jobs {}),
             Page::Workstation => {
                 self.refresh_readiness();
+                self.poll_maintenance_receipt_jobs();
                 self.backend_read(ReadRequest::Profile);
                 self.refresh_host_metrics();
             }
@@ -778,16 +782,9 @@ async fn read(
         // Lists use the registered Jobs controller's explicit newest/cursor
         // contract; this generic detail adapter cannot issue a legacy list.
         ReadRequest::Jobs { .. } => Err(fleetworks_contracts::ClientError::InvalidRequest),
-        ReadRequest::JobDetail { id } => client
-            .get_with_query(
-                "/api/v1/jobs/detail",
-                &ActivityQuery {
-                    id: Some(&id),
-                    limit: 100,
-                },
-            )
+        ReadRequest::JobDetail { id } => read_job_detail(client, &id)
             .await
-            .map(ReadResult::JobDetail),
+            .map(|detail| ReadResult::JobDetail(Box::new(detail))),
         ReadRequest::Logs { id } => client
             .get_with_query(
                 "/api/v1/logs",
@@ -799,6 +796,18 @@ async fn read(
             .await
             .map(ReadResult::Logs),
     }
+}
+
+pub(crate) async fn read_job_detail(client: &Client, id: &str) -> Result<JobDetail, ClientError> {
+    #[derive(Serialize)]
+    struct DetailQuery<'a> {
+        id: &'a str,
+        limit: u16,
+    }
+
+    client
+        .get_with_query(JOB_DETAIL_PATH, &DetailQuery { id, limit: 100 })
+        .await
 }
 
 #[cfg(test)]

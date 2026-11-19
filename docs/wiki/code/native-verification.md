@@ -105,7 +105,7 @@ free of backend Docker engines.
 | Unit tests | `not_run_by_this_command`; retain scoped test results separately |
 | Backend/inference | Not exercised; source-to-visible search and real model/checkpoint gates remain separate |
 
-The [Linux x86_64 workflow](../../../.github/workflows/fleetworks-native-linux.yml) supplies the first-pass debug package, scoped tests and Rune artifacts, including the `backend-choice` fixture. Review the package as soon as it is available for the exact head and record the visual verdict. [Dispatch the second pass](ci.md#nightly-gsd-order) when first-pass CI is green. For a shared backend change, exercise the same affected native operation with Embedded IPC and Distributed HTTP under equivalent capabilities and authority.
+The [Linux x86_64 workflow](../../../.github/workflows/fleetworks-native-linux.yml) supplies the first-pass debug package, scoped tests and Rune artifacts, including the settled `backend-choice` fixture. The `backend-choice-opening` and `backend-choice-reduced-motion` scenes capture the first pose and the accessibility fallback. Review the package as soon as it is available for the exact head and record the visual verdict. [Dispatch the second pass](ci.md#nightly-gsd-order) when first-pass CI is green. For a shared backend change, exercise the same affected native operation with Embedded IPC and Distributed HTTP under equivalent capabilities and authority.
 
 The second-pass [dual-Mac workflow](../../../.github/workflows/fleetworks-native.yml) (`package`
 and `verify` jobs on `macos-15-intel` and `macos-15`) runs `cargo fmt --check`,
@@ -153,7 +153,7 @@ behavior, then inspect captures and real temporal sequences separately.
 | [Workstation](../../design/matte-canvas/mockups/01-workstation-status.png) and [compact Workstation](../../design/matte-canvas/mockups/04-compact-workstation.png) | Match approved hierarchy and spacing; smooth matte cards/rows, softly blended canvas, cool text, semantic status and stable compact grids. Loading and settled telemetry must share the measured row/column decision. |
 | [Gateway setup](../../design/matte-canvas/mockups/02-setup-gateway.png) | Preserve real setup, focus and credential/pairing behavior while matching the composition. Utility controls remain smooth matte. Only Submit/Confirm/Create/Delete actions receive coarse moon-rock material. |
 | [Jobs and Logs](../../design/matte-canvas/mockups/03-jobs-logs.png) | Continuous scrolling replaces Previous/Next/page numbers without changing opaque cursor/authorization contracts. Verify stable row identity, anchor/focus/selection, boundary loading/retry, finite cache behavior and no extra log toolbar. |
-| Splash → gateway → service loading/live state | Complete logo materials from the first visible frame, five satellites clear of the crescent, finite three-second startup and a continuous shared canvas. Preserve symbol-only branding; permanent sheen is logo-only, with cool sheen reserved separately for unresolved loading. |
+| Backend chooser → setup → service loading/live state | Complete logo materials and two keyboard-usable choices from the first frame. Check the three-second orbit for clearance, settled and reduced-motion poses, Back focus without replay, explicit Start and Connect, and the shared canvas throughout. |
 
 Exercise native **640×480 and 1600×900 at 1×/2×**, plus the affected measured
 breakpoints and actual production Linux preferences. Reduced motion must retain

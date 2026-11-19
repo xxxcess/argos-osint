@@ -125,7 +125,7 @@ fn uploaded(kind: DatasetKind) -> DatasetUpload {
 }
 
 #[test]
-fn actor_and_training_buttons_request_their_own_csv_picker_without_submitting_jobs() {
+fn actor_and_training_buttons_choose_their_own_csv_source_without_submitting_jobs() {
     for (key, kind) in [
         ("maintenance-seed", DatasetKind::ActorCatalog),
         ("maintenance-train", DatasetKind::ClassifierTraining),
@@ -133,6 +133,20 @@ fn actor_and_training_buttons_request_their_own_csv_picker_without_submitting_jo
         let mut runtime = runtime(state(false));
         let mut clock = 0.0;
         click(&mut runtime, key, &mut clock);
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                runtime
+                    .state
+                    .maintenance
+                    .csv_path_prompt
+                    .as_ref()
+                    .map(|prompt| prompt.kind),
+                Some(kind),
+                "the primary action must reveal typed input before opening a file chooser"
+            );
+            assert!(runtime.state.intents.is_empty());
+            click(&mut runtime, "maintenance-csv-path-browse", &mut clock);
+        }
         assert_eq!(runtime.state.intents, vec![Intent::ChooseDataset { kind }]);
         assert!(runtime.state.maintenance.confirmation.is_none());
     }
@@ -1783,7 +1797,24 @@ fn synthetic_job_detail(
     phase: &str,
     maintenance_result: Option<serde_json::Value>,
 ) -> crate::backend::JobDetail {
-    serde_json::from_value(serde_json::json!({
+    serde_json::from_value(synthetic_job_detail_json(
+        id,
+        operation,
+        job_state,
+        phase,
+        maintenance_result,
+    ))
+    .expect("synthetic job detail")
+}
+
+fn synthetic_job_detail_json(
+    id: &str,
+    operation: &str,
+    job_state: &str,
+    phase: &str,
+    maintenance_result: Option<serde_json::Value>,
+) -> serde_json::Value {
+    serde_json::json!({
         "job": {
             "id": id,
             "app": "fleetworks",
@@ -1802,8 +1833,137 @@ fn synthetic_job_detail(
         "private_details_available": true,
         "activity_actions_available": false,
         "maintenance_result": maintenance_result
-    }))
-    .expect("synthetic job detail")
+    })
+}
+
+#[test]
+fn window_focus_reaches_maintenance_state_during_cold_start() {
+    let mut state = state(false);
+    state.startup = crate::startup::Startup::cold_launch();
+    let mut runtime = runtime(state);
+    assert!(!runtime.state.scoped_logs.window_focused);
+
+    runtime.window_focus(true);
+    runtime.frame(1.0 / 60.0);
+
+    assert!(
+        runtime.state.scoped_logs.window_focused,
+        "maintenance polling must see focus received before the main shell is shown"
+    );
+}
+
+#[tokio::test]
+async fn seed_card_refresh_reconciles_the_registered_job_and_keeps_the_terminal_count() {
+    use std::time::Duration;
+
+    use serde_json::json;
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+
+    let mut state = state(true);
+    state
+        .connection
+        .capabilities
+        .as_mut()
+        .expect("capabilities")
+        .permissions
+        .push(Permission::ReadWorkstationActivity);
+    state.scoped_jobs.draft.status = crate::jobs_query::JobsStatusFilter::Failed;
+    let context = state
+        .registration
+        .context
+        .clone()
+        .expect("registered context");
+    let job_id = "seed-two-actors";
+    let operation = MaintenanceOperation::SeedActors;
+    state
+        .maintenance
+        .set_operation_job(operation, job_id.into(), false);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept scoped detail read");
+        let mut headers = Vec::new();
+        while !headers.ends_with(b"\r\n\r\n") {
+            assert!(headers.len() < 4096, "request headers must be bounded");
+            headers.push(stream.read_u8().await.expect("read headers"));
+        }
+        let headers = String::from_utf8(headers).unwrap().to_ascii_lowercase();
+        assert!(
+            headers.starts_with("get /api/v1/jobs/detail?id=seed-two-actors&limit=100 http/1.1")
+        );
+        assert!(headers.contains("\r\nx-fleetworks-registration: synthetic-registration\r\n"));
+        assert!(headers.contains("\r\nx-fleetworks-registration-revision: 1\r\n"));
+        assert!(headers.contains("\r\nauthorization: bearer fixture-token\r\n"));
+        let mut detail = synthetic_job_detail_json(
+            job_id,
+            "actor_seed",
+            "completed",
+            "done",
+            Some(
+                json!({"operation":"actor_seed", "processed":2, "total":2, "database_seeded":true}),
+            ),
+        );
+        detail["job"]["progress_done"] = json!(2);
+        detail["job"]["progress_total"] = json!(2);
+        let body = detail.to_string();
+        stream
+            .write_all(
+                format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes(),
+            )
+            .await
+            .expect("send the authorized terminal detail");
+    });
+
+    let mut runtime = runtime(state);
+    let mut clock = 0.0;
+    click(&mut runtime, "maintenance-refresh", &mut clock);
+    assert!(runtime
+        .state
+        .intents
+        .contains(&Intent::MaintenanceJobStatus {
+            job_id: job_id.into(),
+        }));
+    let client = Client::new(&origin, Some("fixture-token"))
+        .unwrap()
+        .with_registered_context(&context)
+        .unwrap();
+    let (detail, served) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(backend::read_job_detail(&client, job_id), server)
+    })
+    .await
+    .expect("scoped detail exchange must finish");
+    served.expect("gateway checked the registered request");
+    let detail = detail.expect("read exact job");
+    runtime.update(move |state, _| {
+        let revision = state.maintenance.receipt_poll_revisions[0];
+        state.complete_maintenance_job_detail(
+            state.connection.epoch,
+            state.origin_revision,
+            operation,
+            revision,
+            job_id,
+            Ok(detail),
+        );
+    });
+    runtime.frame(1.0 / 60.0);
+    assert_eq!(runtime.state.page, Page::Seed);
+    assert!(runtime.state.backend.selected_job.is_none());
+    assert!(runtime.state.maintenance.active_receipt_jobs().is_empty());
+    assert!(runtime
+        .elements()
+        .iter()
+        .any(|el| el.text.as_deref() == Some("Completed (2/2)")));
+
+    runtime.update(|state, _| state.navigate(Page::Brain));
+    runtime.frame(1.0 / 60.0);
+    runtime.update(|state, _| state.navigate(Page::Seed));
+    runtime.frame(1.0 / 60.0);
+    assert!(runtime
+        .elements()
+        .iter()
+        .any(|el| el.text.as_deref() == Some("Completed (2/2)")));
 }
 
 #[test]

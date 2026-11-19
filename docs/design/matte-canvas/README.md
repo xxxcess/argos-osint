@@ -1,6 +1,6 @@
 # Matte canvas design reference
 
-Approved visual target for the native client and shared web paint. The four images below use illustrative data; they are generated design references, not captures of the running application. This documentation/asset change does not implement the theme, splash, loading fixes or continuous scrolling.
+Approved visual target for the native client and shared web paint. The four generated design references below use illustrative data. See the [native verification guide](../../wiki/code/native-verification.md) for production-view captures.
 
 ## Read and reproduce
 

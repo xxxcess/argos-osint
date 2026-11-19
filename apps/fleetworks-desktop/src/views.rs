@@ -9,6 +9,7 @@ use fleetworks_workstation::native::BackendKind;
 use rune::Cx;
 use rune::El;
 use rune::ScrollSpec;
+use rune::Transition;
 use rune_kit::Collapsible;
 use rune_kit::Dialog;
 use rune_kit::Kit;
@@ -506,11 +507,14 @@ fn local_backend_setup_card(
                     .key("gateway-setup-done")
                     .icon(&icons::SHIELD_CHECK)
                     .finish(MetalFinish::GoldCta)
-                    .on_press(|state: &mut State| state.setup_gateway = false)
+                    .on_press_tx(State::finish_gateway_setup)
                     .build(kit, preferences, pointer_ref),
             );
         }
-        actions = actions.child(stop_btn).child(switch_btn);
+        actions = actions.child(stop_btn);
+        if !state.startup.active() {
+            actions = actions.child(switch_btn);
+        }
         body = body.child(actions);
     } else {
         if let ConnectionStatus::Failed(error) = &state.connection.status {
@@ -542,13 +546,15 @@ fn local_backend_setup_card(
             .disabled(connecting)
             .on_press(|state: &mut State| state.set_backend_kind(BackendKind::Remote))
             .build(kit, preferences, pointer_ref);
-        let actions = if narrow {
+        let mut actions = if narrow {
             rune::col().w_full().gap(8.0)
         } else {
             rune::row().w_full().gap(8.0)
         }
-        .child(start_btn)
-        .child(switch_btn);
+        .child(start_btn);
+        if !state.startup.active() {
+            actions = actions.child(switch_btn);
+        }
         body = body.child(actions);
     }
 
@@ -562,20 +568,20 @@ fn local_backend_setup_card(
     material::responsive_card(body, tone, false, compact)
 }
 
-fn setup_gateway(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
+pub(crate) fn setup_gateway(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
     let preferences = state
         .accessibility
         .for_view(state.fixture, cx.is_reduced_motion());
     let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
     let shadow_ref = (!preferences.matte()).then_some(&state.shadow_offset);
-    let narrow = cx
-        .layout_size("page-content")
-        .is_some_and(|size| size[0] < 520.0);
+    let size = if state.startup.active() {
+        cx.layout_size("startup").or(Some([640.0, 480.0]))
+    } else {
+        cx.layout_size("page-content")
+    };
+    let narrow = size.is_some_and(|size| size[0] < 520.0);
     // A short window also takes the compact group edge so every setup control stays reachable.
-    let compact = narrow
-        || cx
-            .layout_size("page-content")
-            .is_some_and(|size| size[1] < 560.0);
+    let compact = narrow || size.is_some_and(|size| size[1] < 560.0);
     let busy = state.pairing.busy()
         || state.connection.status == ConnectionStatus::Connecting
         || state.local_backend.stopping;
@@ -651,8 +657,9 @@ fn setup_gateway(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
             active_step,
             preferences,
             kit,
-        ))
-        .child(backend_mode_card(
+        ));
+    if !state.startup.active() {
+        body = body.child(backend_mode_card(
             state,
             narrow,
             compact,
@@ -661,6 +668,7 @@ fn setup_gateway(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
             kit,
             pointer_ref,
         ));
+    }
 
     if state.is_local_backend() {
         body = body.child(local_backend_setup_card(
@@ -767,7 +775,7 @@ fn pairing_status(
                     .key("gateway-setup-done")
                     .icon(&icons::SHIELD_CHECK)
                     .finish(MetalFinish::GoldCta)
-                    .on_press(|state: &mut State| state.setup_gateway = false)
+                    .on_press_tx(State::finish_gateway_setup)
                     .build(kit, preferences, pointer_ref),
             );
         }
@@ -1897,6 +1905,8 @@ fn brain(state: &State, cx: &mut Cx<State>, kit: &Kit) -> El {
                 .label(hit.label.clone())
                 .expanded(expanded)
                 .focusable(true)
+                .focus_ring(2.0, 2.0, theme::hex(theme::ACCENT_HIGHLIGHT))
+                .press(theme::hex(theme::SELECTION_SURFACE))
                 .on_press(move |state: &mut State| state.toggle_actor(index))
                 .on_key(move |state: &mut State, event, tx| {
                     if event.key == rune::Key::Enter && event.mods == rune::Mods::default() {
@@ -2091,6 +2101,12 @@ fn dossier(state: &State, preferences: crate::accessibility::ViewPreferences, ki
     rune::col()
         .key("actor-dossier")
         .w_full()
+        .transition(crate::app::surface_transition(
+            preferences.reduced_motion,
+            Transition::offset(0.0, -4.0),
+        ))
+        // The disclosure owns the entrance. Loading and resolved content share its position.
+        .instant_changes()
         .child(body.w_full())
 }
 

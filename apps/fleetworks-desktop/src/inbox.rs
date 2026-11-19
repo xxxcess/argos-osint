@@ -477,7 +477,12 @@ fn bell(inbox: &Inbox, kit: &Kit) -> El {
 }
 
 /// The toolbar bell and its popover. The popover is pushed to `layers`.
-pub(crate) fn toolbar_item(state: &State, kit: &Kit, layers: &mut Vec<El>) -> El {
+pub(crate) fn toolbar_item(
+    state: &State,
+    kit: &Kit,
+    preferences: crate::accessibility::ViewPreferences,
+    layers: &mut Vec<El>,
+) -> El {
     let inbox = &state.inbox;
     let popover = rune_kit::Popover::new("inbox")
         .trigger(bell(inbox, kit))
@@ -491,7 +496,21 @@ pub(crate) fn toolbar_item(state: &State, kit: &Kit, layers: &mut Vec<El>) -> El
             state.inbox.selected = None;
         })
         .child(body(state, kit));
-    popover.build(kit, layers)
+    let mut inbox_layers = Vec::new();
+    let trigger = popover.build(kit, &mut inbox_layers);
+    // The kit puts the anchored panel above its dismiss layer. Keep the anchor and focus handling.
+    if let Some(panel) = inbox_layers.pop() {
+        layers.extend(inbox_layers);
+        layers.push(
+            panel
+                .transition(crate::app::surface_transition(
+                    preferences.reduced_motion,
+                    rune::Transition::offset(0.0, -4.0),
+                ))
+                .instant_changes(),
+        );
+    }
+    trigger
 }
 
 fn body(state: &State, kit: &Kit) -> El {

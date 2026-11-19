@@ -1075,6 +1075,7 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
             let actor = summarize_actor_search(state);
             let prefer_actor = actor.needs_seed
                 || actor.building
+                || actor.background_indexing
                 || actor.status_label == "Queued"
                 || state.maintenance.pending_reindex.is_some()
                 || state
@@ -1413,6 +1414,7 @@ struct ActorSearchSummary {
     unsynced_reason: Option<String>,
     can_search: bool,
     building: bool,
+    background_indexing: bool,
     stage: Option<String>,
     scanned: Option<u64>,
     total: Option<u64>,
@@ -1421,17 +1423,8 @@ struct ActorSearchSummary {
 }
 
 fn summarize_actor_search(state: &State) -> ActorSearchSummary {
-    let reindex_job = active_or_selected_reindex_job(state);
-    let receipt_job = state
-        .maintenance
-        .operation_job(MaintenanceOperation::ReindexActors)
-        .map(|record| record.job_id.as_str())
-        .or(match &state.maintenance.receipt {
-            Load::Ready(receipt) if receipt.operation == MaintenanceOperation::ReindexActors => {
-                Some(receipt.job_id.as_str())
-            }
-            _ => None,
-        });
+    let reindex_job = active_actor_reindex(state);
+    let receipt_job = queued_actor_reindex_id(state);
     let mut details = Vec::new();
     let (catalog_check, search_check, observed_at) = match &state.readiness {
         Load::Ready(readiness) => (
@@ -1483,6 +1476,26 @@ fn summarize_actor_search(state: &State) -> ActorSearchSummary {
         (None, _) => None,
     };
 
+    let paused = search_check.is_some_and(|check| {
+        let reason = check.reason_code.to_ascii_lowercase();
+        reason.contains("pause")
+            || reason.contains("paced")
+            || check.explanation.to_ascii_lowercase().contains("paused")
+    });
+    let catalog_needs_data = catalog_check.filter(|catalog| {
+        catalog.state == ReadinessState::NotReady && state.readiness_check_fresh(catalog)
+    });
+    let background_indexing = search_fresh
+        && search_check.is_some_and(|check| check.state == ReadinessState::Running)
+        && reindex_job.is_none()
+        && receipt_job.is_none()
+        && catalog_needs_data.is_none()
+        && state.maintenance.pending_reindex.is_none()
+        && !paused;
+    let can_query_current_index = capability_ready
+        && search_fresh
+        && search_check.is_some_and(|check| check.state == ReadinessState::Ready);
+
     let (status_label, tone, next_action, can_search, building, needs_seed) = if state
         .maintenance
         .pending_reindex
@@ -1497,57 +1510,61 @@ fn summarize_actor_search(state: &State) -> ActorSearchSummary {
             false,
             false,
         )
+    } else if let Some(job) = reindex_job {
+        let (label, guidance) = match job.state.as_str() {
+            "queued" | "pending" => ("Queued", "The actor index request is queued."),
+            "retry_scheduled" => ("Retrying", "The actor index job is scheduled to retry."),
+            _ => ("Building", "The actor index job is running."),
+        };
+        (
+            label,
+            StatusTone::Info,
+            guidance.to_owned(),
+            can_query_current_index,
+            true,
+            false,
+        )
+    } else if receipt_job.is_some() {
+        (
+            "Queued",
+            StatusTone::Info,
+            "Actor index request is queued on the backend; follow progress in Jobs.".to_owned(),
+            can_query_current_index,
+            false,
+            false,
+        )
+    } else if background_indexing {
+        (
+            "Background indexing",
+            StatusTone::Info,
+            crate::readiness_cards::ACTOR_INDEX_CATCH_UP.to_owned(),
+            false,
+            false,
+            false,
+        )
+    } else if let Some(catalog) = catalog_needs_data {
+        let guidance = if catalog.explanation.is_empty() {
+            "Seed an actor CSV catalog before building the search index.".to_owned()
+        } else {
+            catalog.explanation.clone()
+        };
+        ("Needs data", StatusTone::Warn, guidance, false, false, true)
     } else if let Some(check) = search_check {
-        let reason_lower = check.reason_code.to_ascii_lowercase();
-        let explanation_lower = check.explanation.to_ascii_lowercase();
-        let paused = reason_lower.contains("pause")
-            || reason_lower.contains("paced")
-            || explanation_lower.contains("paused");
-        if let Some(catalog) = catalog_check.filter(|catalog| {
-            catalog.state == ReadinessState::NotReady && state.readiness_check_fresh(catalog)
-        }) {
-            let guidance = if catalog.explanation.is_empty() {
-                "Seed an actor CSV catalog before building the search index.".to_owned()
-            } else {
-                catalog.explanation.clone()
-            };
-            ("Needs data", StatusTone::Warn, guidance, false, false, true)
-        } else if check.state == ReadinessState::Ready && search_fresh {
+        if check.state == ReadinessState::Ready && search_fresh {
             (
                 "Ready",
                 StatusTone::Ok,
                 "Actor search is ready; open Search actors to query the catalog.".to_owned(),
-                capability_ready,
+                can_query_current_index,
                 false,
                 false,
             )
         } else if paused {
             (
-                    "Paused",
-                    StatusTone::Warn,
-                    "Indexing is paused or write-paced on the backend; inspect job details or refresh checks."
-                        .to_owned(),
-                    false,
-                    false,
-                    false,
-                )
-        } else if check.state == ReadinessState::Running
-            || reindex_job.is_some_and(|job| crate::backend::job_is_active(&job.state))
-        {
-            (
-                    "Building",
-                    StatusTone::Info,
-                    "Actor search index build is active; readiness updates automatically when finished."
-                        .to_owned(),
-                    false,
-                    true,
-                    false,
-                )
-        } else if receipt_job.is_some() {
-            (
-                "Queued",
-                StatusTone::Info,
-                "Actor index request is queued on the backend; follow progress in Jobs.".to_owned(),
+                "Paused",
+                StatusTone::Warn,
+                "Indexing is paused or write-paced on the backend; refresh checks for details."
+                    .to_owned(),
                 false,
                 false,
                 false,
@@ -1583,26 +1600,6 @@ fn summarize_actor_search(state: &State) -> ActorSearchSummary {
                     false,
                 )
         }
-    } else if catalog_check.is_some_and(|check| {
-        check.state == ReadinessState::NotReady && state.readiness_check_fresh(check)
-    }) {
-        (
-            "Needs data",
-            StatusTone::Warn,
-            "Seed an actor CSV catalog before building the search index.".to_owned(),
-            false,
-            false,
-            true,
-        )
-    } else if receipt_job.is_some() {
-        (
-            "Queued",
-            StatusTone::Info,
-            "Actor index request is queued on the backend; follow progress in Jobs.".to_owned(),
-            false,
-            false,
-            false,
-        )
     } else {
         (
             if matches!(state.readiness, Load::Pending | Load::Loading) {
@@ -1637,6 +1634,7 @@ fn summarize_actor_search(state: &State) -> ActorSearchSummary {
         unsynced_reason,
         can_search,
         building,
+        background_indexing,
         stage,
         scanned,
         total,
@@ -1645,26 +1643,57 @@ fn summarize_actor_search(state: &State) -> ActorSearchSummary {
     }
 }
 
-fn active_or_selected_reindex_job(state: &State) -> Option<&crate::backend::ActivityJob> {
-    if let Some(detail) = state
+pub(crate) fn active_actor_reindex(state: &State) -> Option<&crate::backend::ActivityJob> {
+    let rows = match &state.backend.jobs {
+        Load::Ready(jobs) => jobs.rows.as_slice(),
+        _ => &[],
+    };
+    let selected = match &state.backend.detail {
+        Load::Ready(detail) if detail.job.operation == "actor_reindex" => Some(&detail.job),
+        _ => None,
+    };
+    let receipt_detail = state
         .maintenance
         .operation_job(MaintenanceOperation::ReindexActors)
         .and_then(|record| record.detail.as_ref())
+        .map(|detail| &detail.job);
+    let details = [selected, receipt_detail];
+    rows.iter()
+        .filter(|job| job.operation == "actor_reindex")
+        .filter(|job| {
+            !details
+                .into_iter()
+                .flatten()
+                .any(|detail| detail.id == job.id && !crate::backend::job_is_active(&detail.state))
+        })
+        .chain(details.into_iter().flatten().filter(|detail| {
+            !rows
+                .iter()
+                .any(|row| row.id == detail.id && !crate::backend::job_is_active(&row.state))
+        }))
+        .find(|job| crate::backend::job_is_active(&job.state))
+}
+
+pub(crate) fn queued_actor_reindex_id(state: &State) -> Option<&str> {
+    let id = if let Some(record) = state
+        .maintenance
+        .operation_job(MaintenanceOperation::ReindexActors)
     {
-        return Some(&detail.job);
-    }
-    if let Load::Ready(detail) = &state.backend.detail {
-        if detail.job.operation == "actor_reindex" {
-            return Some(&detail.job);
+        if record.detail.is_some() {
+            return None;
         }
-    }
-    if let Load::Ready(jobs) = &state.backend.jobs {
-        return jobs
-            .rows
-            .iter()
-            .find(|job| job.operation == "actor_reindex");
-    }
-    None
+        record.job_id.as_str()
+    } else if let Load::Ready(receipt) = &state.maintenance.receipt {
+        if receipt.operation != MaintenanceOperation::ReindexActors {
+            return None;
+        }
+        receipt.job_id.as_str()
+    } else {
+        return None;
+    };
+    let observed = matches!(&state.backend.jobs, Load::Ready(jobs) if jobs.rows.iter().any(|job| job.id == id))
+        || matches!(&state.backend.detail, Load::Ready(detail) if detail.job.id == id);
+    (!observed).then_some(id)
 }
 
 fn open_workstation_seed(state: &mut State) {
@@ -1672,6 +1701,17 @@ fn open_workstation_seed(state: &mut State) {
         state.seed_stage = SeedStage::Seed;
         state.navigate(Page::Seed);
     }
+}
+
+fn workstation_search_action() -> ActionButton {
+    ActionButton::new("Search actors")
+        .key("workstation-search-actors")
+        .icon(&icons::BRAIN)
+        .on_press(|state: &mut State| {
+            if summarize_actor_search(state).can_search {
+                state.navigate(Page::Brain);
+            }
+        })
 }
 
 fn actor_search_summary_card(
@@ -1702,19 +1742,9 @@ fn actor_search_summary_card(
             status_slot.child(unsynced_glyph("actor-search-unsynced", reason.clone(), kit));
     }
 
-    let relevant_job = active_or_selected_reindex_job(state)
-        .filter(|job| crate::backend::job_is_active(&job.state))
+    let relevant_job = active_actor_reindex(state)
         .map(|job| job.id.as_str())
-        .or_else(|| {
-            (summary.status_label == "Queued")
-                .then(|| {
-                    state
-                        .maintenance
-                        .operation_job(MaintenanceOperation::ReindexActors)
-                })
-                .flatten()
-                .map(|record| record.job_id.as_str())
-        });
+        .or_else(|| queued_actor_reindex_id(state));
     let primary = if state.maintenance.pending_reindex.is_some() {
         ActionButton::new("Check request")
             .key("workstation-check-index-request")
@@ -1726,22 +1756,15 @@ fn actor_search_summary_card(
             .key("workstation-open-seed")
             .icon(&icons::SEED)
             .on_press(open_workstation_seed)
-    } else if summary.can_search {
-        ActionButton::new("Search actors")
-            .key("workstation-search-actors")
-            .icon(&icons::BRAIN)
-            .on_press(|state: &mut State| {
-                if summarize_actor_search(state).can_search {
-                    state.navigate(Page::Brain);
-                }
-            })
     } else if let Some(job_id) = relevant_job {
         let id = job_id.to_owned();
         ActionButton::new("View job")
             .key("workstation-view-index-job")
             .icon(&icons::JOBS)
             .on_press(move |state: &mut State| state.open_job(&id))
-    } else if disabled_reason.is_none() && !busy_submit {
+    } else if summary.can_search {
+        workstation_search_action()
+    } else if disabled_reason.is_none() && !busy_submit && !summary.background_indexing {
         ActionButton::new("Build actor index")
             .key(crate::maintenance::WORKSTATION_REINDEX_ACTION_KEY)
             .icon(&icons::BRAIN)
@@ -1796,11 +1819,18 @@ fn actor_search_summary_card(
                     kit,
                 ))
                 .child(status_slot)
-                .child(primary),
+                .child(primary)
+                .children(
+                    (summary.can_search && relevant_job.is_some())
+                        .then(|| workstation_search_action().build(kit, preferences, pointer_ref)),
+                ),
         );
 
+    if summary.background_indexing {
+        card_body = card_body.child(quiet(summary.next_action.clone(), kit));
+    }
     if summary.building {
-        let stage_label = summary.stage.as_deref().unwrap_or("Building");
+        let stage_label = summary.stage.as_deref().unwrap_or(summary.status_label);
         let progress = match (summary.scanned, summary.total) {
             (Some(done), Some(total)) if total > 0 => {
                 let frac = (done as f32 / total as f32).clamp(0.0, 1.0);
@@ -1818,7 +1848,7 @@ fn actor_search_summary_card(
     {
         let mut details_col = rune::col()
             .gap(4.0)
-            .child(quiet(summary.next_action, kit))
+            .children((!summary.background_indexing).then(|| quiet(summary.next_action, kit)))
             .child(quiet(summary.freshness, kit));
         for detail in summary.details.iter().take(6) {
             details_col = details_col.child(quiet(detail.clone(), kit));
@@ -2893,10 +2923,22 @@ mod tests {
                 "Needs data",
             ),
             (
+                ReadinessState::NotReady,
+                ReadinessState::Running,
+                "index_catching_up",
+                "Needs data",
+            ),
+            (
                 ReadinessState::Ready,
                 ReadinessState::NotReady,
                 "not_built",
                 "Not built",
+            ),
+            (
+                ReadinessState::Ready,
+                ReadinessState::Running,
+                "index_catching_up",
+                crate::readiness_cards::ACTOR_INDEX_CATCH_UP,
             ),
             (
                 ReadinessState::Ready,
@@ -2960,6 +3002,14 @@ mod tests {
                 assert!(rt.find("workstation-open-seed").is_some());
                 assert!(rt.find("workstation-build-actor-index").is_none());
             }
+            if search_state == ReadinessState::Running {
+                assert!(rt.find("workstation-view-index-job").is_none());
+                assert!(rt.find("workstation-build-actor-index").is_none());
+                assert!(
+                    app::sidebar_row_badge(&rt.state, Page::Jobs).is_none(),
+                    "readiness alone must not contribute to the jobs badge",
+                );
+            }
         }
 
         // Building state with an unknown total exposes a phase and the observed count.
@@ -3008,6 +3058,22 @@ mod tests {
         assert!(!building_tree.contains('%'));
 
         rt.update(|state, _| {
+            if let Load::Ready(readiness) = &mut state.readiness {
+                let check = readiness
+                    .checks
+                    .iter_mut()
+                    .find(|check| check.id == ReadinessCheckId::ActorSearch)
+                    .expect("actor search check");
+                check.state = ReadinessState::Ready;
+                check.reason_code = "index_reader_visible".into();
+            }
+        });
+        clock += 1.0 / 60.0;
+        rt.frame(clock);
+        assert!(rt.find("workstation-view-index-job").is_some());
+        assert!(rt.find("workstation-search-actors").is_some());
+
+        rt.update(|state, _| {
             state.backend.jobs = Load::Idle;
             if let Load::Ready(readiness) = &mut state.readiness {
                 let check = readiness
@@ -3015,6 +3081,7 @@ mod tests {
                     .iter_mut()
                     .find(|check| check.id == ReadinessCheckId::ActorSearch)
                     .expect("actor search check");
+                check.state = ReadinessState::NotReady;
                 check.reason_code = "not_built".into();
             }
         });

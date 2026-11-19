@@ -939,6 +939,98 @@ fn jobs_nav_badge_counts_in_progress_buckets_omits_unknown_and_clears_on_authori
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn actor_reindex_is_listed_and_updates_the_jobs_badge_from_workstation() {
+    use crate::app;
+    use crate::app::Page;
+    use crate::connection::GatewayEffects;
+    use fleetworks_contracts::Client;
+    use std::sync::Arc;
+
+    let mut state = registered_app();
+    state.page = Page::Workstation;
+    state.scoped_logs.window_focused = true;
+    // Supply the production effects boundary without installing a UI handle so
+    // this test can deliver each registered response deterministically.
+    state.services = Some(Arc::new(GatewayEffects::new(
+        tokio::runtime::Handle::current(),
+    )));
+    state.client = Some(Client::new("http://127.0.0.1:1", Some("synthetic-token")).unwrap());
+    let mut runtime = Runtime::new(
+        state,
+        app::view,
+        (1280.0, 800.0),
+        Env {
+            system_dark: true,
+            scale: 1.0,
+        },
+    );
+    runtime.frame(0.0);
+    assert_eq!(app::sidebar_row_badge(&runtime.state, Page::Jobs), None);
+
+    for (step, (job_state, active, queued, retrying)) in [
+        ("queued", 0, 1, 0),
+        ("running", 1, 0, 0),
+        ("retry_scheduled", 0, 0, 1),
+        ("completed", 0, 0, 0),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(runtime.state.page, Page::Workstation);
+        let now = 100.0 + 16.0 * step as f64;
+        runtime.update(|state, tx| {
+            state.scoped_logs.window_focused = true;
+            state.fixture = false;
+            assert!(app::poll_jobs(state, now, tx));
+            state.fixture = true;
+        });
+        let ticket = runtime
+            .state
+            .scoped_jobs
+            .active_ticket()
+            .expect("off-screen scheduler requests registered activity")
+            .clone();
+        let mut response = page(&ticket.binding, 1, None);
+        response.rows[0].operation = "actor_reindex".into();
+        response.rows[0].title = "Rebuild actor index".into();
+        response.rows[0].state = job_state.into();
+        response.rows[0].phase = job_state.into();
+        response.counts = Some(JobsDashboardCounts {
+            active,
+            queued,
+            retrying,
+            failed: 0,
+            completed_recent: u64::from(job_state == "completed"),
+        });
+        response.observed_at = format!("2026-11-12T12:00:0{step}Z");
+        runtime.update(move |state, _| state.complete_scoped_jobs(ticket, Ok(response)));
+        let expected_badge = (job_state != "completed").then_some("1");
+        assert_eq!(
+            app::sidebar_row_badge(&runtime.state, Page::Jobs).as_deref(),
+            expected_badge,
+            "badge while on Workstation for {job_state}",
+        );
+        assert_eq!(
+            crate::views::active_actor_reindex(&runtime.state).map(|job| job.state.as_str()),
+            (job_state != "completed").then_some(job_state),
+        );
+
+        runtime.update(|state, _| state.page = Page::Jobs);
+        runtime.frame((2 * step + 1) as f64 / 60.0);
+        assert!(
+            runtime.find("activity-job-fixture-job-1").is_some(),
+            "tracked actor reindex must be present in Jobs & Logs for {job_state}",
+        );
+        assert!(runtime
+            .accessibility_json()
+            .to_string()
+            .contains("Rebuild actor index"));
+        runtime.update(|state, _| state.page = Page::Workstation);
+        runtime.frame((2 * step + 2) as f64 / 60.0);
+    }
+}
+
 #[test]
 fn selected_job_detail_is_not_overwritten_by_stale_list_refresh_and_tail_cursor_survives() {
     let mut state = state_with_jobs_head(Some(2));

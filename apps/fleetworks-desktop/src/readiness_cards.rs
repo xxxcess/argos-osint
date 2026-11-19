@@ -21,6 +21,8 @@ use crate::views::line;
 use crate::views::quiet;
 use crate::views::unsynced_glyph;
 
+pub(crate) const ACTOR_INDEX_CATCH_UP: &str = "Actor index catching up in the background";
+
 impl State {
     pub(crate) fn readiness_check_fresh(&self, check: &ReadinessCheck) -> bool {
         self.readiness_check_fresh_at(check, self.clock)
@@ -107,18 +109,24 @@ pub(crate) fn checks(state: &State, preferences: ViewPreferences, kit: &Kit) -> 
                 let fresh = state.readiness_check_fresh(check);
                 let check_id = check.id.as_str();
                 let expanded = state.selected_readiness.as_deref() == Some(check_id);
-                let mut disclosure = Collapsible::new(
-                    format!("{}: {}", title(check.id), label(check.state)),
-                    expanded,
-                )
-                .on_toggle(move |state: &mut State| {
-                    state.selected_readiness =
-                        if state.selected_readiness.as_deref() == Some(check_id) {
-                            None
-                        } else {
-                            Some(check_id.to_owned())
-                        };
-                });
+                let background_indexing = check.id == ReadinessCheckId::ActorSearch
+                    && check.state == ReadinessState::Running
+                    && crate::views::active_actor_reindex(state).is_none()
+                    && crate::views::queued_actor_reindex_id(state).is_none();
+                let heading = if background_indexing {
+                    ACTOR_INDEX_CATCH_UP.to_owned()
+                } else {
+                    format!("{}: {}", title(check.id), label(check.state))
+                };
+                let mut disclosure =
+                    Collapsible::new(heading, expanded).on_toggle(move |state: &mut State| {
+                        state.selected_readiness =
+                            if state.selected_readiness.as_deref() == Some(check_id) {
+                                None
+                            } else {
+                                Some(check_id.to_owned())
+                            };
+                    });
                 if expanded {
                     let mut detail = rune::col()
                         .w_full()

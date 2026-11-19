@@ -6,7 +6,7 @@
 
 ## Cold-launch startup
 
-A cold launch opens **Choose a backend** with **Embedded** and **Distributed** available from the first frame. [Quiet Orbit](../../design/matte-canvas/motion.md) plays at its reference pace behind the tiles and settles into a still. Reduced Motion uses the still immediately. The orbit scales as one unit on the same `#060709` canvas as setup and the services.
+A cold launch opens **Choose a backend** with **Embedded** and **Distributed** available from the first frame. [Quiet Orbit](../../design/matte-canvas/motion.md) plays at its reference pace above the tiles and settles into a still. Reduced Motion uses the still immediately. The orbit scales as one unit on the same `#060709` canvas as setup and the services.
 
 Choosing a tile opens **Setup Gateway** with that backend selected. Use **Start Embedded Backend** or **Connect** to proceed. **Back** returns to the chooser without replaying the launch animation.
 

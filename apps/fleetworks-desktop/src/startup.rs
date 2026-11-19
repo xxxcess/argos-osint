@@ -123,24 +123,20 @@ fn choose(state: &State, preferences: ViewPreferences, kit: &Kit, window: Option
     let [width, height] = window.unwrap_or([640.0, 480.0]);
     // Leave room for the controls before containing the complete orbit in the remaining space.
     let [orbit_width, orbit_height] = orbit::display_size(Some([width, height - 210.0]));
-    let canvas = theme::hex(theme::BACKGROUND);
+    let scrim = theme::hex(theme::CAST_SHADOW);
     rune::col()
         .key("startup-choose")
         .w_full()
         .items_center()
+        .gap(8.0)
         .child(
-            rune::col()
-                .size(orbit_width, (orbit_height - 18.0).max(0.0))
-                .child(
-                    orbit::view(
-                        state.startup.seconds(state.clock) as f32,
-                        !preferences.reduced_motion,
-                        orbit_width,
-                        orbit_height,
-                    )
-                    .absolute(0.0, 0.0)
-                    .inert(),
-                ),
+            orbit::view(
+                state.startup.seconds(state.clock) as f32,
+                !preferences.reduced_motion,
+                orbit_width,
+                orbit_height,
+            )
+            .inert(),
         )
         .child(
             rune::col()
@@ -148,7 +144,11 @@ fn choose(state: &State, preferences: ViewPreferences, kit: &Kit, window: Option
                 .w_full()
                 .max_w(400.0)
                 .items_center()
-                .gradient(canvas.alpha(0.76), canvas)
+                .radial_gradient(
+                    [0.5, 0.45],
+                    [200.0, 82.0],
+                    [(0.0, scrim.alpha(0.72)), (1.0, scrim.alpha(0.0))],
+                )
                 .gap(14.0)
                 .child(
                     rune::text("Choose a backend")
@@ -360,7 +360,17 @@ mod tests {
         ] {
             let mut runtime = runtime(size, reduced);
             runtime.frame(0.0);
-            assert!(runtime.find("startup-orbit").is_some());
+            let ([orbit_x, orbit_y, orbit_w, orbit_h], _) = runtime
+                .presented("startup-orbit")
+                .expect("first-frame orbit");
+            let ([_, controls_y, _, _], _) = runtime
+                .presented("startup-choice-controls")
+                .expect("first-frame controls");
+            assert!(orbit_x >= 0.0 && orbit_y >= 0.0 && orbit_x + orbit_w <= size.0);
+            assert!(
+                orbit_y + orbit_h <= controls_y,
+                "controls backing must leave the full orbit visible"
+            );
             for (choice, name) in [(LOCAL, "Embedded"), (REMOTE, "Distributed")] {
                 let ([x, y, w, h], alpha) = runtime.presented(choice).expect("first-frame tile");
                 assert_eq!(w, h, "backend choice must be square");

@@ -723,9 +723,8 @@ fn seed_button_preflight_status_shimmer_and_progressive_disclosure_reflect_state
     runtime.update(|state, _| state.seed_stage = SeedStage::Maintenance);
     runtime.frame(2.0 / 60.0);
     let reindex_tree = runtime.accessibility_json().to_string();
-    assert!(
-        reindex_tree.contains("This gateway has not advertised a durable consumer for this operation")
-    );
+    assert!(reindex_tree
+        .contains("This gateway has not advertised a durable consumer for this operation"));
     assert!(!reindex_tree.contains("Choose a CSV to add or update actors."));
 
     runtime.update(|state, _| {

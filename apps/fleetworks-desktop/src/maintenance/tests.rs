@@ -174,6 +174,16 @@ fn opening_csv_entry_accepts_immediate_typing_and_cancel_restores_focus() {
             .any(|element| { element.focused && element.key.as_deref() == Some(opener) }));
 
         press(&mut runtime, rune::Key::Text(" ".into()));
+        runtime.frame(1.0 / 60.0);
+        assert!(
+            runtime.elements().iter().any(|element| {
+                element.focused
+                    && element.key.as_deref() == Some("input")
+                    && element.path.contains("maintenance-csv-path")
+            }),
+            "the CSV editor has focus on its first rendered frame"
+        );
+
         press(&mut runtime, rune::Key::Text("/".into()));
         runtime.frame(1.0 / 60.0);
         let prompt = runtime
@@ -188,7 +198,7 @@ fn opening_csv_entry_accepts_immediate_typing_and_cancel_restores_focus() {
         );
         assert!(prompt.input.focused);
 
-        let mut clock = 2.0 / 60.0;
+        let mut clock = 3.0 / 60.0;
         click(&mut runtime, "maintenance-csv-path-cancel", &mut clock);
         assert!(runtime.state.maintenance.csv_path_prompt.is_none());
         assert!(runtime

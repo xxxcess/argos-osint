@@ -695,10 +695,10 @@ fn status_checks_share_the_compact_keyboard_disclosures_and_keep_the_blocker_vis
     const CRITICAL: &str = "readiness-critical-action";
     const SECTION: &str = "status-checks-toggle/trigger";
     const SETUP_SWITCH: &str = "setup-advanced-toggle/switch";
-    const FAILED_ROW: &str = "readiness-jobs/trigger";
+    const FAILED_ROW: &str = "readiness-trigger-jobs";
     const FAILED_DETAIL: &str = "readiness-details-jobs";
-    const CHECKING_ROW: &str = "readiness-actor_search/trigger";
-    const PASSED_ROW: &str = "readiness-gateway/trigger";
+    const CHECKING_ROW: &str = "readiness-trigger-actor_search";
+    const PASSED_ROW: &str = "readiness-trigger-gateway";
 
     let check = |id, state, reason: &str, explanation: &str| {
         let mut check = ReadinessCheck::new(

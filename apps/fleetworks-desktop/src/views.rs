@@ -1031,6 +1031,13 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
     } else {
         "Distributed"
     };
+    let deployment = state
+        .connection
+        .capabilities
+        .as_ref()
+        .and_then(|capabilities| capabilities.deployment_id.as_deref())
+        .filter(|id| state.connected() && !id.is_empty());
+    let identity = deployment.map_or_else(|| backend.to_owned(), |id| format!("{backend} · {id}"));
     let transport_kind = if state.is_local_backend() {
         "IPC"
     } else if state.connection.origin.text.starts_with("https://") {
@@ -1046,8 +1053,11 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
             .center_y()
             .gap(6.0)
             .child(
-                ui_components::status_pill(backend, None, StatusTone::Neutral, kit)
-                    .key("workstation-backend-mode"),
+                heading(identity, kit)
+                    .key("workstation-backend-mode")
+                    .min_w(0.0)
+                    .shrink()
+                    .wrap_anywhere(),
             )
             .child(
                 ui_components::status_pill(
@@ -1160,10 +1170,6 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
         .gap(8.0)
         .key("gateway-backend-card")
         .child(line(connection_status(state), kit))
-        .child(quiet(
-            format!("Deployment: {}", state.connection.deployment_label()),
-            kit,
-        ))
         .child(quiet(
             format!(
                 "Fleetworks {} · {}",

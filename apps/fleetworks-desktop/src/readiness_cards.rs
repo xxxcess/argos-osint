@@ -48,7 +48,7 @@ pub(crate) fn workstation_section(state: &State, preferences: ViewPreferences, k
         .w_full()
         .gap(6.0)
         .child(
-            disclosure_trigger(summary.clone(), open, kit)
+            disclosure_trigger("trigger", summary.clone(), open, kit)
                 .fill(kit.c.layer_01)
                 .child(disclosure_text(summary, kit))
                 .child(chevron(open, kit))
@@ -88,11 +88,14 @@ impl State {
         }
         self.expanded_readiness.insert(id);
         self.selected_readiness = Some(id.as_str().to_owned());
-        let row = format!("readiness-{}", id.as_str());
-        let trigger = format!("{row}/trigger");
+        let trigger = check_trigger_key(id);
         tx.scroll_into_view(trigger.clone());
         tx.focus(trigger, tx.focus_visible());
     }
+}
+
+fn check_trigger_key(id: ReadinessCheckId) -> String {
+    format!("readiness-trigger-{}", id.as_str())
 }
 
 fn summary_label(state: &State) -> String {
@@ -296,8 +299,9 @@ fn check_row(
         reason
     });
     let label = format!("{name}: {}", status.label());
+    let trigger_key = check_trigger_key(id);
     let mut service = if has_details {
-        disclosure_trigger(label, expanded, kit)
+        disclosure_trigger(trigger_key, label, expanded, kit)
             .child(disclosure_text(name, kit))
             .child(chevron(expanded, kit))
             .on_press(move |state: &mut State| {
@@ -312,7 +316,7 @@ fn check_row(
             })
     } else {
         rune::row()
-            .key("trigger")
+            .key(trigger_key)
             .min_h(32.0)
             .px(8.0)
             .center_y()
@@ -420,9 +424,9 @@ fn status_tag(status: CheckStatus, check_id: &str, tone: StatusTone, kit: &Kit) 
         )
 }
 
-fn disclosure_trigger(label: String, expanded: bool, kit: &Kit) -> El {
+fn disclosure_trigger(key: impl Into<String>, label: String, expanded: bool, kit: &Kit) -> El {
     rune::row()
-        .key("trigger")
+        .key(key)
         .role("button")
         .label(label)
         .expanded(expanded)

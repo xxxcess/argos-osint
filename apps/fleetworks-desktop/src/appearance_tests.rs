@@ -183,9 +183,9 @@ fn actual_readiness_view_distinguishes_stale_ready_and_unverified_inference() {
     let collapsed = runtime.accessibility_json().to_string();
     assert!(collapsed.contains("Status checks · 2 unresolved"));
     assert!(!collapsed.contains("passed"));
-    assert!(runtime.find("readiness-gateway/trigger").is_none());
+    assert!(runtime.find("readiness-trigger-gateway").is_none());
     assert!(runtime
-        .find("readiness-classifier_inference/trigger")
+        .find("readiness-trigger-classifier_inference")
         .is_none());
 
     runtime.update(|_, tx| tx.focus("status-checks-toggle", true));

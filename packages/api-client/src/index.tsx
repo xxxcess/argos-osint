@@ -501,9 +501,10 @@ function Connection({
   const hasReadySnapshot = isHealthReady(health.data) && !revoked;
   const stale = hasReadySnapshot && health.isError;
   const connected = hasReadySnapshot;
-  const instance = hasReadySnapshot
-    ? `${health.data.instance_id}${namespace ? `:${namespace}` : ""}`
-    : "";
+  const instance =
+    hasReadySnapshot && health.data
+      ? `${health.data.instance_id}${namespace ? `:${namespace}` : ""}`
+      : "";
   const lastSyncedAt =
     hasReadySnapshot && health.dataUpdatedAt > 0
       ? health.dataUpdatedAt

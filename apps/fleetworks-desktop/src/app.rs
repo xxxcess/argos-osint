@@ -295,6 +295,8 @@ pub struct State {
     pub tool_key_dialog: bool,
     pub setup_advanced_open: bool,
     pub workstation_inspector: Option<WorkstationInspector>,
+    pub(crate) workstation_metrics_open: bool,
+    pub(crate) workstation_diagnostics_open: bool,
     pub seed_stage: SeedStage,
     pub models_tab: ModelsTab,
     pub models_provider_dialog: bool,
@@ -379,6 +381,8 @@ impl Default for State {
             tool_key_dialog: false,
             setup_advanced_open: false,
             workstation_inspector: None,
+            workstation_metrics_open: false,
+            workstation_diagnostics_open: false,
             seed_stage: SeedStage::Seed,
             models_tab: ModelsTab::Roles,
             models_provider_dialog: false,
@@ -647,6 +651,9 @@ impl State {
     fn reset_connection_state(&mut self) {
         self.cancel_requests();
         self.activity_tab = ActivityTab::Jobs;
+        self.workstation_metrics_open = false;
+        self.workstation_diagnostics_open = false;
+        self.workstation_inspector = None;
         self.invalidate_origin();
         self.registration.interfaces = Load::Idle;
         self.registration.selected_interface = None;
@@ -1300,6 +1307,7 @@ fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
         // Redraw the orbit's final pose even when this poll schedules no subsequent frame.
         return true;
     }
+    changed |= state.startup.poll_flight(now, tx);
     changed |= state.observe_inbox();
     changed |= state.sync_assistant();
     changed |= state.poll_scoped_logs();
@@ -1498,7 +1506,7 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
                     .gap(8.0)
                     .center_y()
                     // The approved symbol alone: no wordmark. Its accessible name stays "Fleetworks".
-                    .child(crate::orbit::mark(34.0))
+                    .child(crate::startup::rail_mark(state, 34.0, preferences))
                     .child(rune::spacer())
                     .child(ui_components::status_dot(connection_tone, preferences)),
             )
@@ -1591,7 +1599,7 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
         } else {
             "Setup Gateway"
         }
-    } else if compact_header {
+    } else if compact_header && title_page != Page::Workstation {
         title_page.compact_title()
     } else {
         title_page.title()
@@ -1833,6 +1841,9 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     }
     let base = split.build(&kit).key("app-shell");
     let base = mark_fixture(state, &kit, base);
+    if let Some(mark) = crate::startup::rail_handoff(state, cx, preferences) {
+        layers.insert(0, mark);
+    }
     rune_kit::root(base, layers)
         .on_window_focus(State::log_window_focus)
         .on_pointer_move_local(|state: &mut State, pointer, tx| {
@@ -1881,6 +1892,7 @@ fn compact_icon_rail(
         .items_center()
         .fill(theme::hex(theme::SURFACE))
         .border_sides([0.0, 1.0, 0.0, 0.0], theme::hex(theme::BORDER_SUBTLE))
+        .child(crate::startup::rail_mark(state, 28.0, preferences))
         .child(
             rune::col()
                 .py(4.0)

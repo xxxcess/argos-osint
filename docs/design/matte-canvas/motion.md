@@ -18,9 +18,10 @@ The [playback manifest](../../../assets/brand/reference/quiet-orbit/playback.jso
 | --- | --- |
 | Review loop | 800×450, 16 seconds (MP4: 480 frames at 30 fps; GIF: 240 frames at 15 fps); seamless periodic orbit and core flow |
 | Native chooser | The complete scene and both backend tiles are usable in the first frame. Sample 3 seconds at the quiet orbital pace, then hold the final pose. |
-| Setup | The selected Embedded or Distributed form enters on the same canvas with a short fade and a six-point shift. Start Embedded Backend and Connect remain explicit. Back restores focus to the selected tile and holds the settled scene. |
+| Setup | The selected form opens immediately. Move the current orbit pose into the setup header over about 220 ms and keep the mark there through start, registration, failure and retry. Start Embedded Backend and Connect remain explicit. Back restores focus to the selected tile and returns the settled mark without replay. |
+| Done | Mount Workstation Status immediately. Move the mark into the wide or compact sidebar rail over about 200 ms and settle into the fixed-crown symbol. |
 | Scope | One startup presentation; no replay on navigation, dialog close, refresh or in-app reconnect |
-| Reduced motion / asset failure | Complete static logo; accessible setup remains available; no initial flat reveal or blank blocked screen |
+| Reduced motion / asset failure | Show the complete static mark directly at each destination. Chooser, form and workstation input follow the same timing. |
 | After startup | Ordinary pages are static apart from useful local activity; no full-canvas decorative motion loop |
 
 Measure the complete scene envelope, including every satellite pose, before sizing. Use a centered contain transform with uniform scale: `s = min(availableWidth / envelopeWidth, availableHeight / envelopeHeight)`. Calculate available dimensions after page insets, keep the envelope inside the measured native window, and convert logical points to physical pixels only at rasterization. Do not size by the sphere alone or stretch an 800×450 rectangle. Recheck at minimum 640×480, compact 800×1100, baseline 1180×780 and wide 1440×900, with 1×/2× scale and enlarged text. Logo scaling must not push the setup form outside the available viewport.

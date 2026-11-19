@@ -273,6 +273,48 @@ select {
   z-index: 2;
   padding-bottom: 12px;
 }
+@media (max-width: 599px) {
+  #intel-content-frame[data-testid="intel-bulletin-frame"] {
+    padding: 12px 8px;
+  }
+  #intel-bulletin-header {
+    padding: 8px 12px;
+    gap: 8px;
+  }
+  #intel-category-rail {
+    padding: 6px 8px;
+    gap: 2px;
+  }
+  #intel-article-feed {
+    padding: 8px;
+    gap: 4px;
+  }
+  #intel-feed-header {
+    padding-bottom: 4px;
+  }
+  #intel-job-menu {
+    position: fixed;
+    right: 16px;
+    bottom: 64px;
+  }
+}
+@media (max-width: 599px) and (pointer: coarse) {
+  #intel-content-frame[data-testid="intel-bulletin-frame"] {
+    padding-top: 4px;
+  }
+  #intel-article-feed {
+    gap: 2px;
+  }
+}
+@media (pointer: coarse) {
+  #intel-bulletin :is([role="button"], input),
+  #intel-status-bar [role="button"],
+  #intel-landing [role="button"] {
+    /* The desk is zoomed; preserve the measured CSS-pixel target size. */
+    min-width: calc(45px / var(--intel-ui-scale));
+    min-height: calc(45px / var(--intel-ui-scale));
+  }
+}
 #intel-article-feed [data-testid^="article-card-"] {
   transition:
     background-color 120ms,

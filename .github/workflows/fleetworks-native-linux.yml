@@ -115,6 +115,7 @@ jobs:
           ! grep -Eq 'test result: FAILED\.' "${{ runner.temp }}/linux-native-evidence/unit-tests.log"
 
       - name: Render headless Linux native UI fixture captures (Lavapipe)
+        id: native_ui
         shell: bash
         run: |
           set -euo pipefail
@@ -125,6 +126,7 @@ jobs:
           if [[ -n "$icd" ]]; then
             export VK_ICD_FILENAMES="$icd"
             export VK_DRIVER_FILES="$icd"
+            printf 'icd=%s\n' "$icd" >> "$GITHUB_OUTPUT"
           fi
           vulkaninfo --summary | tee "${{ runner.temp }}/linux-native-evidence/vulkaninfo-summary.txt"
           python3 scripts/fleetworks_verify.py native-ui --agent --require-clean \
@@ -141,6 +143,44 @@ jobs:
             --scene command-panel \
             --scene catalog \
             --size 1280x800 --size 640x480 --scale 1
+
+      - name: Capture startup motion and reduced-motion transitions (Lavapipe)
+        if: inputs.profile == 'debug'
+        env:
+          LAVAPIPE_ICD: ${{ steps.native_ui.outputs.icd }}
+          EXPECTED_HEAD: ${{ inputs.expected-head }}
+          LINUX_TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "$LAVAPIPE_ICD" ]]; then
+            export VK_ICD_FILENAMES="$LAVAPIPE_ICD"
+            export VK_DRIVER_FILES="$LAVAPIPE_ICD"
+          fi
+          evidence="$RUNNER_TEMP/linux-native-evidence/ui"
+          scripts=apps/fleetworks-desktop/tests/fixtures/scripts
+          capture=(python3 scripts/fleetworks_verify.py native-ui --agent --require-clean
+            --target "$LINUX_TARGET" --revision "$EXPECTED_HEAD" --size 640x480 --size 1280x800 --scale 1 --at 0)
+          chooser=(--scene backend-choice-opening --scene backend-choice-reduced-motion)
+
+          "${capture[@]}" "${chooser[@]}" --output "$evidence/startup-dock" --script-at 0.20 \
+            --script "backend-choice-opening=$scripts/startup-dock.json" \
+            --script "backend-choice-reduced-motion=$scripts/startup-dock.json" \
+            --script-expect-key backend-choice-opening=startup-orbit-flight \
+            --script-expect-key backend-choice-reduced-motion=startup-setup-mark
+
+          "${capture[@]}" "${chooser[@]}" --output "$evidence/startup-back" --script-at 0.65 \
+            --script "backend-choice-opening=$scripts/startup-dock-back.json" \
+            --script "backend-choice-reduced-motion=$scripts/startup-dock-back.json" \
+            --script-expect-key backend-choice-opening=startup-choose \
+            --script-expect-key backend-choice-reduced-motion=startup-choose
+
+          "${capture[@]}" --output "$evidence/startup-done" --script-at 0.20 \
+            --scene startup-embedded-registered --scene startup-embedded-registered-reduced-motion \
+            --script "startup-embedded-registered=$scripts/startup-done.json" \
+            --script "startup-embedded-registered-reduced-motion=$scripts/startup-done.json" \
+            --script-expect-key startup-embedded-registered=screen-workstation \
+            --script-expect-key startup-embedded-registered-reduced-motion=screen-workstation
 
       - name: Publish Linux UI captures for early review
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

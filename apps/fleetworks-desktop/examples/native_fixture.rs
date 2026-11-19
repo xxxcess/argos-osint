@@ -570,6 +570,16 @@ mod native {
         }
     }
 
+    fn startup_registered(state: &mut State, reduced_motion: bool) {
+        state.fixture_show_startup_setup(fleetworks_workstation::native::BackendKind::Local);
+        registered(state);
+        state.accessibility.fixture_override =
+            Some(fleetworks_desktop::accessibility::FixtureAccessibility {
+                reduced_motion,
+                ..Default::default()
+            });
+    }
+
     pub fn run() {
         rune::run(AppSpec {
             init,
@@ -585,6 +595,12 @@ mod native {
                             reduced_motion: true,
                             ..Default::default()
                         });
+                }),
+                ("startup-embedded-registered", |state| {
+                    startup_registered(state, false);
+                }),
+                ("startup-embedded-registered-reduced-motion", |state| {
+                    startup_registered(state, true);
                 }),
                 ("redesign-status", redesign_scenes::status),
                 ("redesign-seed", redesign_scenes::seed),

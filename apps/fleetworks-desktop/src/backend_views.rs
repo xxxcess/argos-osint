@@ -45,7 +45,7 @@ fn card(state: &State, preferences: ViewPreferences, tone: StatusTone, body: El)
     let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
     let shadow_ref = (!preferences.matte()).then_some(&state.shadow_offset);
     material::luminous_card(
-        body.padding(16.0).gap(10.0).w_full(),
+        body.padding(12.0).gap(8.0).w_full(),
         tone,
         false,
         preferences,
@@ -593,7 +593,7 @@ fn tools(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
     let mut body = rune::col().gap(12.0).child(ui_components::section_header(
         &icons::TOOLS,
         "OSINT Tools",
-        Some("Inspect gateway-advertised services & configure masked provider keys"),
+        None,
         None,
         None,
         kit,
@@ -614,7 +614,7 @@ fn tools(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
         for tool in &catalog.tools {
             body = body.child(material::luminous_card(
                 rune::col()
-                    .padding(14.0)
+                    .padding(10.0)
                     .gap(6.0)
                     .key(format!("tool-{}", tool.id))
                     .child(
@@ -666,7 +666,7 @@ fn tools(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
             };
             body = body.child(material::interactive_tile(
                 rune::row()
-                    .padding(14.0)
+                    .padding(10.0)
                     .gap(10.0)
                     .center_y()
                     .key(format!("tool-provider-{}", credential.provider))
@@ -1083,7 +1083,7 @@ fn models(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut V
                         );
                     }
                     body = body.child(material::interactive_tile(
-                        row.padding(14.0),
+                        row.padding(10.0),
                         active,
                         if active {
                             StatusTone::Accent
@@ -1244,7 +1244,7 @@ fn jobs(
     let mut body = rune::col().gap(12.0).child(ui_components::section_header(
         &icons::JOBS,
         "Jobs & Logs",
-        Some("Workstation-scoped activity stream and bounded operational summaries"),
+        None,
         count_pill,
         None,
         kit,
@@ -1441,15 +1441,11 @@ fn jobs(
                     (false, None) => format!("Phase: {phase}"),
                     (true, None) => detail.job.state.clone(),
                 };
-                if crate::backend::job_is_active(&detail.job.state) {
-                    details = details.child(
-                        Progress::new(None)
-                            .label(progress_label)
-                            .build(kit)
-                            .w_full(),
-                    );
-                } else if known_done.is_some() || !phase.is_empty() {
-                    details = details.child(quiet(progress_label, kit));
+                if crate::backend::job_is_active(&detail.job.state)
+                    || known_done.is_some()
+                    || !phase.is_empty()
+                {
+                    details = details.child(quiet(progress_label, kit).role("status"));
                 }
             }
             if !detail.private_details_available
@@ -2057,7 +2053,7 @@ fn operation_job_card_status(
                 stage_title.to_owned(),
                 parts.join(" · "),
                 state_tone(&job.state),
-                Some(frac),
+                frac,
             )
         }
         Some((job, result)) if job.state == "completed" => {
@@ -2169,7 +2165,7 @@ fn operation_job_card_status(
         );
     if let Some(frac) = active_progress {
         strip = strip.child(
-            Progress::new(frac)
+            Progress::new(Some(frac))
                 .label(format!("{title} · Job {short_id}"))
                 .build(kit)
                 .w_full(),
@@ -2344,7 +2340,7 @@ pub(crate) fn maintenance(
             }
             _ => label,
         };
-        let mut operation_card = rune::col().padding(14.0).gap(8.0).child(
+        let mut operation_card = rune::col().padding(10.0).gap(8.0).child(
             rune::row()
                 .w_full()
                 .center_y()

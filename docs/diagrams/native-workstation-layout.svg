@@ -23,10 +23,10 @@
 <text x="290" y="129" class="zone">SELECTED DESTINATION · SCROLLS INDEPENDENTLY</text>
 <rect x="282" y="144" width="640" height="168" rx="6" class="node"/>
 <text x="302" y="177" class="label">Workstation Status</text>
-<text x="302" y="208" class="note">Host resources, gateway readiness and repair actions</text>
-<text x="302" y="237" class="small">Actor search card → Build actor index</text>
+<text x="302" y="208" class="note">Backend identity, transport and registration</text>
+<text x="302" y="237" class="small">First actionable issue → one guarded next step</text>
 <rect x="302" y="256" width="190" height="36" rx="6" class="pill"/>
-<text x="319" y="280" class="small">Build actor index</text>
+<text x="319" y="280" class="small">Seed actors…</text>
 <rect x="282" y="330" width="640" height="196" rx="6" class="node"/>
 <text x="302" y="362" class="label">Destination records</text>
 <text x="302" y="391" class="note">Compact bounded rows, selected detail and next-page control</text>

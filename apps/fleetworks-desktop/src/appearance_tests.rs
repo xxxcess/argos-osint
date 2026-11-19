@@ -178,7 +178,9 @@ fn actual_readiness_view_distinguishes_stale_ready_and_unverified_inference() {
     runtime.state.readiness_received_at = Some(0.0);
     runtime.frame(0.0);
     let tree = runtime.accessibility_json().to_string();
-    assert!(tree.contains("Gateway: Ready · stale observation"));
+    assert!(tree.contains("Gateway: Ready"));
+    assert!(tree.contains("Gateway is unsynced. Last observed"));
+    assert!(!tree.contains("stale observation"));
     assert!(tree.contains("Classifier inference: Unknown"));
     assert!(!tree.contains("Classifier inference: Ready"));
     assert!(
@@ -223,6 +225,7 @@ fn material_and_matte_preserve_interactive_hit_bounds_and_a11y_on_status_and_see
             let mut state = crate::tests::registered_fixture();
             state.page = page;
             state.accessibility.fixture_override = Some(preferences);
+            state.workstation_metrics_open = true;
             state.host_metrics = Load::Ready(metrics.clone());
             state.readiness = Load::Ready(WorkstationReadiness::new(
                 "synthetic-deployment".into(),

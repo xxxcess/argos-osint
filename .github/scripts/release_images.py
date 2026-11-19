@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -56,10 +57,16 @@ def build(args):
     pending = closure - reused
     settings = [part for role, tag in sorted(tags.items()) if role in pending
                 for part in ("--set", f"{role}.tags={tag}")]
+    started = time.monotonic()
     if pending:
-        run("docker", "buildx", "bake", "-f", "deploy/docker-bake.hcl", "--load",
+        if args.builder == "depot":
+            builder = ("depot", "bake", "--project", args.depot_project, "--build-platform", platform)
+        else:
+            builder = ("docker", "buildx", "bake")
+        run(*builder, "-f", "deploy/docker-bake.hcl", "--load",
             "--set", f"*.platforms={platform}", *settings, *sorted(pending),
             env={**os.environ, "VERSION": args.version})
+    smoke_started = time.monotonic()
     inspected = images.inspect_images(tags, platform)
     args.directory.mkdir(parents=True, exist_ok=True)
     if compose:
@@ -74,6 +81,7 @@ def build(args):
     else:
         # Web-only UI packaging does not compile or launch backend engines.
         run("docker", "run", "--rm", "--entrypoint", "node", tags["web"], "-e", "process.exit(0)")
+    smoke_finished = time.monotonic()
     published = {}
     archive_info = None
     if args.push:
@@ -105,6 +113,12 @@ def build(args):
         archive_info = {"name": archive.name, "sha256": archive_digest, "bytes": archive.stat().st_size}
     result = {"revision": args.revision, "version": args.version, "image_tag": args.image_tag,
               "arch": args.arch, "selected": sorted(selected), "images": published}
+    if not args.push:
+        result["builder"] = args.builder
+        result["timings_seconds"] = {
+            "bake_and_load": round(smoke_started - started, 3),
+            "smoke": round(smoke_finished - smoke_started, 3),
+        }
     if archive_info is not None:
         result["archive"] = archive_info
     (args.directory / f"release-images-{args.arch}.json").write_text(json.dumps(result, sort_keys=True) + "\n")
@@ -119,9 +133,14 @@ def main():
     parser.add_argument("--image-tag", required=True)
     parser.add_argument("--registry", required=True)
     parser.add_argument("--directory", type=Path, required=True)
+    parser.add_argument("--builder", choices=("buildx", "depot"), default="buildx")
+    parser.add_argument("--depot-project", help="Depot project ID for --builder depot")
     parser.add_argument("--push", action="store_true")
     parser.add_argument("--compose", action="store_true", help="also verify the complete backend closure for relay/deployment changes")
-    build(parser.parse_args())
+    args = parser.parse_args()
+    if args.builder == "depot" and not args.depot_project:
+        parser.error("--builder depot requires --depot-project")
+    build(args)
 
 
 if __name__ == "__main__":

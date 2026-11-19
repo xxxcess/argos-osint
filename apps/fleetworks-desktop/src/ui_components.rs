@@ -102,15 +102,22 @@ impl ActionButton {
         preferences: ViewPreferences,
         pointer_offset: Option<&Live<[f32; 2]>>,
     ) -> El {
-        let ink = material::finish_ink(self.finish);
+        let ink = if self.disabled {
+            theme::hex(theme::TEXT_DISABLED)
+        } else {
+            material::finish_ink(self.finish)
+        };
         let active_shimmer = self.shimmer || self.busy;
         let disabled = self.disabled || self.busy;
+        // Textured actions use the theme's 44 px control height and 16 px padding.
         let height = match self.finish {
             MetalFinish::ObsidianPill => 28.0,
+            finish if finish.fractured() => 44.0,
             _ => 32.0,
         };
         let px = match self.finish {
             MetalFinish::ObsidianPill => 11.0,
+            finish if finish.fractured() => 16.0,
             _ => 14.0,
         };
         let a11y_label = match &self.status {
@@ -127,7 +134,7 @@ impl ActionButton {
             .center()
             .focusable(!disabled)
             .disabled(disabled)
-            .focus_ring(2.0, 1.0, theme::hex(theme::ACCENT_HIGHLIGHT));
+            .focus_ring(2.0, 2.0, theme::hex(theme::ACCENT_HIGHLIGHT));
 
         if self.busy {
             content = content.child(
@@ -172,6 +179,11 @@ impl ActionButton {
             );
         }
 
+        let tiles = if self.finish.fractured() {
+            material::texture_tiles(self.key.as_deref())
+        } else {
+            0
+        };
         let mut styled = material::apply_liquid_metal(
             content,
             self.finish,
@@ -179,6 +191,7 @@ impl ActionButton {
             active_shimmer,
             preferences,
             pointer_offset,
+            tiles,
         );
         if let Some(key) = self.key {
             styled = styled.key(key);
@@ -368,7 +381,7 @@ pub(crate) fn metric_ring_tile(
     .role("button")
     .label(format!("{label}: {value_text}"))
     .focusable(true)
-    .focus_ring(2.0, 0.0, theme::hex(theme::ACCENT_HIGHLIGHT))
+    .focus_ring(2.0, 2.0, theme::hex(theme::ACCENT_HIGHLIGHT))
 }
 
 /// Inline configuration toggle row backed by `rune_kit::Switch`.
@@ -426,7 +439,7 @@ pub(crate) fn stage_stepper(
         } else {
             StatusTone::Neutral
         };
-        let mut pill = row()
+        let pill = row()
             .grow(1.0)
             .h(28.0)
             .px(10.0)
@@ -460,13 +473,6 @@ pub(crate) fn stage_stepper(
                         kit.c.text_faint
                     }),
             );
-        if current && !preferences.matte() {
-            pill = pill.box_shadow(Shadow {
-                blur: 10.0,
-                color: theme::hex(theme::GOLD_GLOW).alpha(0.24),
-                ..Shadow::default()
-            });
-        }
         track = track.child(pill);
     }
     track

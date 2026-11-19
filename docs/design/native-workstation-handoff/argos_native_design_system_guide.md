@@ -1,29 +1,31 @@
 # Argos OSINT repository — Native design system guide
 
-**Status:** Working draft, adapted to the current Fleetworks native app.  
-**Baseline:** `xxxcess/argos-osint` · `feat/atlas-zero-shot` · `d219d5964a29d50fa99de4cdcf2b228391576b4a` · audited November 12, 2026.  
-**Proposed repository location:** `docs/wiki/code/native-design-system.md` (new, following the existing wiki structure).  
-**Companion:** `argos_workstation_identity_implementation_spec.md` defines the contract migration and adoption work.
+**Status:** Historical structural audit with the approved visual direction updated on **2026-11-17**.  
+**Historical baseline:** `xxxcess/argos-osint` · `feat/atlas-zero-shot` · `d219d5964a29d50fa99de4cdcf2b228391576b4a` · audited November 12, 2026.  
+**Current authorities:** [Native control contract](../../wiki/code/native-design-system.md), [matte canvas theme](../matte-canvas/theme.md) and [interaction/state](../matte-canvas/interaction-state.md).  
+**Original companion:** `argos_workstation_identity_implementation_spec.md` records the initial migration proposal.
+
+Sections 2–4 and 6–9 preserve that dated structural reasoning. They are not a current source audit or a replacement control allowlist: later pairing, Settings, permitted retry and other maintained contracts take precedence. Section 5 replaces the former gold/ivory and satin-metal visual direction. The current change is documentation only; runtime adoption and verification remain pending.
 
 ## 1. Purpose and scope
 
 Make the native application understandable at an initial glance. Each destination has one clear purpose, a short status summary and only the controls specified in `argos_osint_workstation_ui_specification.md`. The supplied reference governs the application structure and allowed interaction points. Existing source determines reusable components, real operations and contracts that require migration.
 
-The structure, component rules and control allowlist in this design system apply to the Rune/rune-kit native macOS app. The shared visual direction for native and Intel Web is **Matte Obsidian with Satin Metal Accents**, expressed minimally using the existing brand logo's gold and ivory. Matte black dominates the canvas and card bodies. Interactive controls use dim, low-sheen satin graphite edges with barely perceptible depth; cards have only a very faint static edge. Section 5 defines that treatment and the brand-logo alignment. Intel Web's existing layout, controls and interaction patterns remain governed by the web UI guidance. The shared API and Intel Web Connect changes separately support the requested workstation identity transition.
+The original structural proposal applies to the Rune/rune-kit native client; the maintained native wiki now owns its allowlist. The approved shared visual direction is **Matte canvas**: a uniform `#060709` canvas, cool neutral text, diffuse grouped backgrounds, flat semantic colors and coarse matte rock only on eligible semantic actions. Reflective material belongs to the symbol artwork, not general controls. Section 5 links the reproducible current contract. Intel Web retains its navigation, controls, reading order and topology/list behavior.
 
 The target product uses one registered workstation identity. Remove workspace selection, workspace registration, folder management and workspace-based Connect IDs. Do not retain an invisible default workspace behind the new interface. Local settings storage and backend deployment directories remain implementation concerns, not user-facing identities.
 
-The native app remains an API client. The gateway and Linux services own execution, storage, indexing, inference and authoritative configuration. Opening the app or completing setup does not start those services. Product branding remains Fleetworks; its theme adopts matte obsidian with minimal satin accents.
+The native app remains an API client. The gateway and Linux services own execution, storage, indexing, inference and authoritative configuration. Opening the app or completing setup does not start those services. Product identity remains Fleetworks; visible UI branding uses the symbol alone under the current theme.
 
-## 2. Audited starting point
+## 2. Historical audited starting point
 
-The current app already has a native `Sidebar`, `Toolbar`, `SplitView` and one selected page. Its initial Workstation page combines connection profiles, credential fields, registration, interface selection, readiness, dataset management, seeding, training, reindexing and activation in one scroll. Models and Profile also append complete editors below their lists. The structural problem is the amount and ordering of content inside pages, rather than every application page being mounted together. [S1][S2][S3]
+At the November 12 audit, the app had a native `Sidebar`, `Toolbar`, `SplitView` and one selected page. Its initial Workstation page combines connection profiles, credential fields, registration, interface selection, readiness, dataset management, seeding, training, reindexing and activation in one scroll. Models and Profile also append complete editors below their lists. The structural problem is the amount and ordering of content inside pages, rather than every application page being mounted together. [S1][S2][S3]
 
 Reuse the existing shell, asynchronous effects, view helpers and theme implementation, updating the visual tokens and material recipes in place. Brain already supplies an adaptive result/dossier arrangement. The existing operational log implementation supplies bounded rendering and visibility-aware reads. These are implementation foundations; their additional controls are not automatically part of the target interface. [S1][S2][S10]
 
-The current branch is newer than `main` for this native work. This document records a source audit, not an installed-app visual inspection, a performance measurement or an implemented change.
+The branch comparison belonged to the November 12 audit. It establishes neither the current branch state nor installed-app visual inspection, performance or completion of the later target.
 
-## 3. Control allowlist
+## 3. Historical control allowlist
 
 This table is the complete native interaction surface. A control must map to one of these entries. Ordinary selection, submission, dismissal, loading, confirmation and error states needed to operate a listed control are included; they must not grow into separate administration screens.
 
@@ -43,11 +45,11 @@ Do not carry over separate Test/Connect/Disconnect buttons, saved-profile CRUD, 
 
 An unavailable action stays within its listed control: show the concrete reason adjacent to it and disable submission. Do not add a repair toolbar or a settings destination to compensate. A revision-sensitive action may use an in-place review/confirmation state of that same action. Backend work must never be submitted by merely opening a page.
 
-## 4. Shell and navigation
+## 4. Historical shell and navigation
 
 ### Persistent shell
 
-Retain the native titlebar integration and current Rune shell. Use actual macOS window controls rather than painted traffic-light substitutes. The title area identifies the app and current destination, with **Setup Gateway** at the trailing edge.
+Retain the native titlebar integration and current Rune shell. Use actual macOS window controls rather than painted traffic-light substitutes. The title area identifies the current destination, with **Setup Gateway** at the trailing edge. Current visible branding uses the symbol alone; it does not add a Fleetworks wordmark.
 
 The sidebar header shows a short gateway label, connection state and a bounded endpoint label. Selecting it opens **Workstation Status**. Connection status describes the gateway connection; it does not imply that every worker or model is ready.
 
@@ -70,83 +72,26 @@ Reuse the current initial window size of 1180 × 780 logical points, minimum 640
 
 The collapsed sidebar retains accessible navigation and tooltips as in the reference. At the minimum size, content becomes a single column; a selected dossier or job detail replaces its list within the same destination using ordinary navigation. Wider layouts may use list/detail panes. Keep one clear scroll owner for each pane, a stable heading/action region, and no horizontal page scrolling for normal text.
 
-## 5. Shared visual direction — Matte Obsidian with Satin Metal Accents
+## 5. Approved visual direction — Matte canvas
 
-Use matte obsidian-black canvas and card bodies, with the **canonical logo's muted gold and ivory as the brand palette**. Make the satin-metal finish dim and low-sheen: graphite controls have faint edges and barely perceptible depth, while cards receive only a very subtle static edge. Bright silver/chrome borders, broad glossy reflections, shiny surface gradients and sweeping sheen are excluded. The current native and web palettes are the audited starting point; the values below are target design tokens to implement in both clients. [S4][S12][S14]
+The [canonical theme guide](../matte-canvas/theme.md) replaces this section's former gold/ivory palette and satin-metal recipes. It contains exact tokens, compositing and texture formulas, responsive group widths, typography, preference behavior, performance boundaries and four approved mockups. The [interaction/state companion](../matte-canvas/interaction-state.md) owns stable realtime text, retained refresh, localized loading and cursor continuation.
 
-### Target palette from the brand logo
-
-| Target token | Value | Use |
-| --- | --- | --- |
-| `BACKGROUND` | `#060709` | Flat matte obsidian window/page canvas |
-| `SURFACE` | `#0B0C0F` | Matte black base for cards and ordinary controls |
-| `SURFACE_RAISED` | `#111317` | Solid tonal separation for raised controls and panels |
-| `SURFACE_INSET` | `#060709` | Quiet inner beds for long text, tables and logs |
-| `TEXT_PRIMARY` | `#F3EEE4` | Main text and the canonical logo's ivory disc |
-| `TEXT_SECONDARY` | `#D6D2C4` | Supporting text |
-| `TEXT_MUTED` | `#B8B4A8` | Readable lower-priority metadata |
-| `ACCENT` | `#C6A56E` | Canonical ray gold; primary action, selection and focus emphasis |
-| `ACCENT_PRESSED` | `#C4A265` | Canonical crescent gold; solid pressed-state color |
-| `CARD_EDGE` (new) | `rgba(243,238,228,0.02)` | Very faint static card edge derived from logo ivory |
-| `BORDER_DECORATIVE` (new) | `#3A3833` | Dim warm-graphite framing where the edge does not identify an essential control |
-| `BORDER_CONTROL` | `#898274` | Functional boundary where needed to identify a control; preserve actual contrast checks independently of decorative satin edges |
-| `SATIN_CONTROL_EDGE` (new) | `rgba(243,238,228,0.03)` | Faint, static satin edge on interactive controls; never a bright border or broad reflection |
-
-Keep the Kit's distinct success, warning, danger and information roles, plus the web's evidence-kind and metric colors. Pair state colors with text or icons. Gold identifies the brand and interaction emphasis; status meanings retain their own colors.
-
-### Minimalism rules
-
-- Let obsidian and charcoal occupy most of the interface. Use the logo's gold for selected navigation, focus and one compact primary action in the active view.
-- Use solid matte bodies and, at most, one faint static edge per card/control. Depth should be barely perceptible; add a small shadow only when elevation needs to be explained. Avoid bright silver/chrome outlines, broad reflections, shiny gradients, stacked decorative borders, heavy glow and ornamental card nesting.
-- Use aligned content, consistent spacing and a short type hierarchy. Keep labels and necessary status information clear; avoid repeated explanatory blocks and decorative icons.
-- Keep the canonical logo in its existing branding position, at a restrained size. Preserve its five-ray geometry and exact gold/ivory colors; do not repeat it on cards or animate the emblem.
-- Keep surfaces stable at rest and during interaction. Hover changes only a control's border or solid fill; it never launches a sheen sweep. Read-only cards remain matte and static.
-
-The intended appearance is a clean intelligence workstation dominated by matte black, muted brand colors and minimal satin graphite detail. Tonal separation and spacing establish hierarchy; the dim finish should be barely perceptible and never become reflective focal content.
-
-### Surface recipes
-
-| Surface | Required finish |
+| Element | Current target |
 | --- | --- |
-| Window/page canvas | Uniform, opaque matte obsidian black with minimal decoration. |
-| All card surfaces | Solid matte black/charcoal fill with a very faint static logo-ivory edge, initially about 1–2% opacity. Use a minimal shadow only for meaningful elevation. No broad reflective overlay or glossy gradient. |
-| Interactive dark controls | Matte graphite body, dim satin edge initially about 2–3% opacity, a functional boundary and barely perceptible depth. Apply to the permitted buttons, fields, selectors, navigation items and selectable cards/rows. Keep text-entry areas quiet while typing. |
-| Primary action | One compact, muted gold control with a solid `#C6A56E` body, `#C4A265` pressed state and dark `#060709` text. Keep its finish flat and low-sheen; secondary controls remain matte graphite. |
-| Long text, table and log interiors | Solid obsidian/inset fill within the matte container, with stable foreground contrast and no reflective overlays. |
+| Canvas | Uniform opaque `#060709`, shared by native/web and matched at logo/splash edges. No working-screen starfield, grain or vignette. |
+| Text and controls | Cool gray primary `#D5DCE5`, supporting `#A8B6C5`, muted `#8192A4`; cyan interaction `#24DCE3`. No ivory/gold primary UI accents. |
+| Grouping | Flat `#0B0F14` background, 20px rounded bounds and a 16px inward smoothstep alpha fade into the canvas; crisp text and controls above the mask. Functional borders and focus remain independent. |
+| Branding | Symbol only; no visible Fleetworks wordmark. Preserve the approved crescent, sphere and five triangles, aspect and canvas-matched edges. Reflective/gold/ivory detail is confined to the material emblem. |
+| Action material | Static coarse crescent-rock texture only for semantic submit/confirm/create/delete, including Connect. Tint by intent and apply the deterministic crop/scale/opacity recipe. All ordinary navigation, Settings, filters, pop-out, inspect, read-retry, metric and readiness surfaces remain flat. |
+| Motion | Zero persistent control/card sheen, specular bands, pointer lights or cursor shadows. Only genuinely pending unresolved regions may translate a restrained band over an unchanged base; text never pulses. Reduced motion is static. |
+| Semantic color | Flat green, amber, rose, blue, cyan and distinct chart categories retain their actual meanings. Unknown values are not fabricated zero; warning amber is not generic branding. |
+| Composition | Grouped responsive grids for overview/options/status; tables remain for comparisons. Preserve native allowed controls and web navigation/reading order, focus, scroll and authoritative state. |
 
-These edge-opacity ranges are starting design values to verify in actual rendered views. The 1–3% satin edges and dim decorative border never replace functional control boundaries or keyboard-focus tokens. Preserve the existing numeric contrast checks after alpha compositing; adjust the appropriate functional token when a control needs a clearer boundary instead of weakening those checks. Use solid tonal separation, a faint decorative edge and minimal shadow to establish depth; do not add noisy textures, glossy gradients, reflective sweeps or shimmer. A card's finish does not create an action: read-only cards have no pointer cursor, interactive focus or hover treatment.
+Use existing native `theme.rs`, `material.rs`, `ui_components.rs` and corresponding `@argos/ui`/Intel theme ownership. Helper names such as `apply_liquid_metal`, `luminous_card`, `glass` or `mutedGoldPrimary` describe existing code; they do not exempt a consumer from the new material rules. New semantic-action metadata or mask/grid helpers must be identified as proposed implementation, not claimed as existing APIs.
 
-### Interaction states
+Keep the 2px cool focus ring, functional contrast and full-opacity glyphs outside decorative masks. Preserve opaque fallbacks, static reduced-motion states and readable disabled reasons. The narrow surface change creates no backend authority or new operations. Runtime screenshots, temporal stability, keyboard behavior and actual composited contrast must be verified later; the documentation and generated mockups are not implementation evidence.
 
-| State | Visual behavior |
-| --- | --- |
-| Rest | Solid matte body, fine static edge and readable label; noninteractive cards remain in this state. |
-| Hover on an interactive surface | Make a small border or solid-fill change within the muted graphite/gold palette. Keep the finish dim; no bright silver rim, sheen sweep or moving reflection. |
-| Pressed | Darken the solid fill or reduce apparent elevation; keep the hit target and surrounding layout fixed. |
-| Keyboard focus | Persistent visible focus outline independent of the satin edge or state transition. Use a contrasting outline on the gold primary variant where needed. |
-| Selected | Stable selection fill/border and existing selection semantics. A highlight animation alone cannot indicate selection. |
-| Disabled or unavailable | Reduce border emphasis/elevation and keep the label plus reason readable on the matte body. |
-| Loading or error | Keep the existing state indicator and message clear against the matte body. Motion cannot imply progress that the API has not reported. |
-
-Use short 120–180 ms color/border transitions as an initial value. Reduce Motion uses immediate or reduced transitions. Surfaces are opaque by default; Reduce Transparency retains the same matte fills and static edges without backdrop blur. Keep decorative surface animation absent, including when the app/view is hidden or unfocused. Use the existing renderer's solid fills, borders and shallow shadows. This theme adds no renderer dependency or continuous animation loop.
-
-### Type, spacing and implementation
-
-Use current Kit body/small/medium typography and monospace for logs and machine identifiers. Start with the existing 20-point page padding and 14-point section gap, normalizing the smaller 4/6/8-point gaps by purpose. Long content wraps and foreground text remains clear through every interaction state. The fine satin edge must not substitute for a necessary control boundary or focus indicator. [S2]
-
-Implement reusable matte-card, matte-dark-control and muted-gold-primary recipes in the current native theme/material helpers, and equivalent tokens/recipes in the existing web theme/CSS. Centralize the canonical brand colors and satin-edge settings within each existing theme system. Avoid per-screen decorative effects. The native structure and control allowlist still determine which controls exist.
-
-### Intel Web and brand alignment
-
-Apply these target palette and material recipes to Intel Web's existing controls and cards, including the Connect surface and Intel shell/content panels. Its audited palette matched the old native palette; update both clients to this new target together. Preserve distinct semantic, metric and topology colors and keep graph rendering/reading areas quiet. [S12]
-
-- **Brand mark:** replace the three-solid-ray approximation in `packages/ui/src/FleetworksMark.tsx` with the existing canonical five-outlined-ray emblem. Preserve its `#C6A56E` rays, `#C4A265` crescent and `#F3EEE4` disc. Reuse its geometry. If the existing hardcoded charcoal knockout produces a patch on obsidian, make that knockout transparent with equivalent vector geometry/masking; use the new background only for intentionally opaque icon variants. [S13][S14]
-- **Placement:** retain the existing `IntelStatusBar` logo slot and `FleetworksMark` size API. Preserve aspect ratio, accessible labeling and base-path-safe asset resolution. Keep browser/app icon variants consistent with the same emblem. [S15]
-- **Scope:** retain the web's current typography scale, layout, navigation, controls, responsive behavior and topology/list interactions. The native control allowlist does not remove web controls. Theme and material styling add no API calls or UI workflow.
-
-Verify actual native and browser views for matte canvas/card coverage, restrained static control edges, rest/hover/press/focus/disabled states, long-text readability, small-logo fit at 1×/2×, reduced motion and opaque surfaces. Source tokens alone do not establish visual approval.
-
-## 6. Workstation connection and identity
+## 6. Historical workstation connection and identity
 
 ### Two-step setup
 
@@ -164,7 +109,7 @@ Remove workspace name, marker and ID from new active registration/context/reques
 
 Display the returned Connect ID as selectable text in the Workstation identity card. The existing Intel Web Connect form accepts that ID and resolves the same workstation. The browser retains its server-side WebRelay credential and protected session. No new native Copy ID or Open Browser button is added by this guide. [S7]
 
-## 7. Destination composition and API behavior
+## 7. Historical destination composition and API behavior
 
 ### Workstation Status
 
@@ -206,7 +151,7 @@ Use one queue-and-log destination. A compact job list shows operational state; s
 
 Both native and browser activity use server-resolved workstation membership. Remove workspace narrowing from new requests. No global-job fallback exists when registration is absent. No additional tabs, filters, retry/cancel, follow toggle or export controls appear. Selection and automatic bounded continuation supply the listed queue/log interaction without extra toolbars.
 
-## 8. Shared state and request rules
+## 8. Historical shared state and request rules
 
 | Situation | Required presentation and behavior |
 | --- | --- |
@@ -222,7 +167,7 @@ Both native and browser activity use server-resolved workstation membership. Rem
 
 Keep these mechanics in shared state/effects and service contracts. The screen should show the relevant state plainly, rather than displaying protocol internals as permanent explanatory content.
 
-## 9. Acceptance criteria
+## 9. Historical structural acceptance
 
 - The connected landing screen makes the workstation, gateway and current readiness understandable without scrolling through forms or maintenance controls.
 - Exactly the six reference control destinations appear beneath the gateway/status entry. Every visible interactive control maps to the allowlist.
@@ -230,17 +175,16 @@ Keep these mechanics in shared state/effects and service contracts. The screen s
 - The two-step wizard can connect and register using a correctly provisioned origin-bound credential; changing origins never forwards the old credential.
 - Native and Intel Web resolve the same workstation ID. IP changes preserve that identity. Different workstations and deployments remain isolated.
 - Every action reaches a supported typed API contract with actual authorization and capability gates. No static example data is presented as live state.
-- Native and Intel Web use matte obsidian-black canvas and card bodies. Controls use dim, low-sheen satin graphite edges and barely perceptible depth; bright silver/chrome borders, broad reflections, glossy gradients and sheen sweeps are absent.
-- The logo's exact gold/ivory colors inform both clients. Gold is used sparingly, the active view has one compact primary action, and ordinary cards use a very subtle static edge without repeated logos or heavy decorative framing.
-- Read-only cards do not imply clickability. Reduced-motion and reduced-transparency modes retain the opaque matte finish and readable static focus/state cues.
+- Visual acceptance is now defined by [Matte canvas](../matte-canvas/theme.md): cool neutral UI, symbol-only branding, diffuse grouped backgrounds with sharp content, role-limited matte-rock actions and no persistent sheen outside the emblem.
+- Read-only groups do not imply clickability. Independent focus and readable state cues survive reduced preferences; unresolved loading alone can use the bounded translated sheen.
 - The native app retains its API-only architecture. Setup does not launch backend processes.
-- Intel Web uses the canonical five-ray logo without a mismatched background patch. Its existing controls, layout and topology behavior remain intact; the native allowlist applies only to native screens.
+- Intel Web uses the current approved symbol and legible small-size fallback without a mismatched background patch. Its control responsibilities, reading order and topology behavior remain intact; the native allowlist applies only to native screens.
 - At 1180 × 780 and 640 × 480, headings/actions remain reachable, normal text wraps, and list/detail scrolling and keyboard focus remain coherent. Actual Rune runtime captures and physical-Mac checks must verify this during implementation.
 - Old sessions and pending operations follow the companion migration spec. Historical activity is preserved without granting access to unrelated jobs.
 
 ## Sources
 
-All repository links are pinned to the audited commit. The user's supplied structural Markdown and subsequent constraints are the target-design authority; these sources establish the existing implementation.
+These repository links remain pinned to the historical November 12 audit; they do not establish current implementation. Current theme/source-baseline references are in [Matte canvas](../matte-canvas/theme.md), with the maintained native wiki owning the active control contract.
 
 [S1]: https://github.com/xxxcess/argos-osint/blob/d219d5964a29d50fa99de4cdcf2b228391576b4a/apps/fleetworks-desktop/src/app.rs
 [S2]: https://github.com/xxxcess/argos-osint/blob/d219d5964a29d50fa99de4cdcf2b228391576b4a/apps/fleetworks-desktop/src/views.rs

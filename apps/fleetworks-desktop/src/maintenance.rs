@@ -39,10 +39,14 @@ use sha2::Sha256;
 
 use crate::app::Intent;
 use crate::app::Load;
+use crate::app::Page;
 use crate::app::State;
+use crate::backend;
+use crate::backend::JobDetail;
 use crate::connection::GatewayEffects;
 use crate::connection::RequestTask;
 use crate::platform;
+use crate::theme::StatusTone;
 
 #[derive(Clone, Debug)]
 pub struct LocalDataset {
@@ -65,13 +69,126 @@ pub struct MaintenanceConfirmation {
     pub dataset: Option<DatasetRef>,
 }
 
-/// Typed-path fallback for desktops where the file chooser cannot open (for example Linux
-/// without a chooser service). The path names a file on this computer only. It is read here,
-/// validated and uploaded by the same code as a picked file, and is never sent to the backend.
+/// Entry for a path on this workstation. The same code validates and uploads a typed or picked
+/// file and keeps the source path on this workstation.
 pub struct CsvPathPrompt {
     pub kind: DatasetKind,
     pub input: TextEdit,
     pub error: Option<String>,
+}
+
+/// Typed preflight verdict for a maintenance operation, derived from readiness and authority state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MaintenancePreflight {
+    Ready,
+    Uploading,
+    RequestPending,
+    LocalClassifierUnavailable,
+    PermissionRequired,
+    RegistrationRequired,
+    ReadinessUnobserved,
+    RegistrationContextMismatch,
+    ChecksStale,
+    ActionDisabled(Option<String>),
+    ConfigurationRevisionMissing,
+    UnresolvedReindexAttempt,
+    ActorCatalogNotSeeded,
+    ConsumerUnavailable,
+    UnsupportedOperation,
+}
+
+impl MaintenancePreflight {
+    /// Human-readable explanation when an operation cannot start yet.
+    #[must_use]
+    pub fn disabled_reason(&self) -> Option<String> {
+        match self {
+            Self::Ready => None,
+            Self::LocalClassifierUnavailable => {
+                Some("Natural classifier training is unavailable on this embedded backend.".into())
+            }
+            Self::PermissionRequired => Some("Backend maintenance permission required".into()),
+            Self::RegistrationRequired => Some("Register this workstation first".into()),
+            Self::ReadinessUnobserved => {
+                Some("Refresh backend checks to observe operation availability".into())
+            }
+            Self::RegistrationContextMismatch => {
+                Some("Refresh checks for the current registered context".into())
+            }
+            Self::UnsupportedOperation => Some("This maintenance operation is unsupported".into()),
+            Self::ChecksStale => Some("The operation observation is stale; refresh checks".into()),
+            Self::ActionDisabled(reason) => Some(
+                reason
+                    .clone()
+                    .unwrap_or_else(|| "Backend has not enabled this operation".into()),
+            ),
+            Self::ConfigurationRevisionMissing => Some(
+                "Refresh Profile or Models to confirm the backend configuration revision".into(),
+            ),
+            Self::UnresolvedReindexAttempt => Some(
+                "An unresolved actor index request exists; check request status or clear stale attempt"
+                    .into(),
+            ),
+            Self::ActorCatalogNotSeeded => {
+                Some("Complete actor seeding with actors in the database before building the index".into())
+            }
+            Self::Uploading => Some("Validating and uploading the selected CSV…".into()),
+            Self::RequestPending => {
+                Some("A maintenance request is awaiting its acceptance receipt".into())
+            }
+            Self::ConsumerUnavailable => {
+                Some("This gateway has not advertised a durable consumer for this operation".into())
+            }
+        }
+    }
+
+    /// Short status label and semantic tone for action controls, derived from typed state.
+    #[must_use]
+    pub fn status_label(&self) -> (&'static str, StatusTone) {
+        match self {
+            Self::Ready => ("Ready", StatusTone::Ok),
+            Self::Uploading => ("Upload active", StatusTone::Info),
+            Self::RequestPending => ("Request active", StatusTone::Info),
+            Self::LocalClassifierUnavailable => ("Unavailable", StatusTone::Neutral),
+            Self::PermissionRequired => ("No permission", StatusTone::Err),
+            Self::RegistrationRequired => ("Register first", StatusTone::Warn),
+            Self::ReadinessUnobserved | Self::RegistrationContextMismatch | Self::ChecksStale => {
+                ("Refresh checks", StatusTone::Warn)
+            }
+            Self::ConfigurationRevisionMissing => ("Sync config", StatusTone::Warn),
+            Self::UnresolvedReindexAttempt => ("Resolve attempt", StatusTone::Warn),
+            Self::ActorCatalogNotSeeded => ("Seed actors first", StatusTone::Warn),
+            Self::ActionDisabled(_) => ("Unavailable", StatusTone::Warn),
+            Self::ConsumerUnavailable | Self::UnsupportedOperation => {
+                ("Unavailable", StatusTone::Err)
+            }
+        }
+    }
+}
+
+/// Bounded per-operation current/last accepted job association for the active registered scope.
+#[derive(Clone, Debug)]
+pub struct OperationJobRecord {
+    pub operation: MaintenanceOperation,
+    pub job_id: String,
+    pub reused: bool,
+    pub detail: Option<JobDetail>,
+    pub poll_error: Option<String>,
+}
+
+const OPERATION_SLOTS: usize = 3;
+pub(crate) const SEED_ACTION_KEY: &str = "maintenance-seed";
+pub(crate) const TRAIN_ACTION_KEY: &str = "maintenance-train";
+pub(crate) const REINDEX_ACTION_KEY: &str = "maintenance-reindex";
+pub(crate) const WORKSTATION_REINDEX_ACTION_KEY: &str = "workstation-build-actor-index";
+pub(crate) const CSV_PATH_KEY: &str = "maintenance-csv-path";
+
+fn operation_slot(operation: MaintenanceOperation) -> Option<usize> {
+    match operation {
+        MaintenanceOperation::SeedActors => Some(0),
+        MaintenanceOperation::ReindexActors => Some(1),
+        MaintenanceOperation::TrainClassifier => Some(2),
+        _ => None,
+    }
 }
 
 pub struct Maintenance {
@@ -82,8 +199,11 @@ pub struct Maintenance {
     pub selected_dataset: Option<DatasetRef>,
     pub confirmation: Option<MaintenanceConfirmation>,
     pub receipt: Load<MaintenanceReceipt>,
+    pub operation_jobs: [Option<OperationJobRecord>; OPERATION_SLOTS],
     pub message: Option<String>,
+    pub(crate) active_operation: Option<MaintenanceOperation>,
     pub(crate) pending_preview: Option<MaintenanceOperation>,
+    restore_workstation_index_focus: bool,
     pub(crate) seed_accepted_at: Option<String>,
     pub(crate) last_request: Option<MaintenanceRequest>,
     pub(crate) pending_reindex: Option<PendingActorReindex>,
@@ -92,9 +212,11 @@ pub struct Maintenance {
     pub(crate) upload_revision: u64,
     pub(crate) datasets_revision: u64,
     pub(crate) operation_revision: u64,
+    pub(crate) receipt_poll_revisions: [u64; OPERATION_SLOTS],
     pub(crate) upload_request: Option<RequestTask>,
     pub(crate) datasets_request: Option<RequestTask>,
     pub(crate) operation_request: Option<RequestTask>,
+    pub(crate) receipt_poll_requests: [Option<RequestTask>; OPERATION_SLOTS],
     pub(crate) reindex_journal_request: Option<RequestTask>,
     pub(crate) reindex_reconcile_request: Option<RequestTask>,
 }
@@ -109,8 +231,11 @@ impl Default for Maintenance {
             selected_dataset: None,
             confirmation: None,
             receipt: Load::Idle,
+            operation_jobs: [None, None, None],
             message: None,
+            active_operation: None,
             pending_preview: None,
+            restore_workstation_index_focus: false,
             seed_accepted_at: None,
             last_request: None,
             pending_reindex: None,
@@ -119,9 +244,11 @@ impl Default for Maintenance {
             upload_revision: 0,
             datasets_revision: 0,
             operation_revision: 0,
+            receipt_poll_revisions: [0; OPERATION_SLOTS],
             upload_request: None,
             datasets_request: None,
             operation_request: None,
+            receipt_poll_requests: [None, None, None],
             reindex_journal_request: None,
             reindex_reconcile_request: None,
         }
@@ -129,6 +256,77 @@ impl Default for Maintenance {
 }
 
 impl Maintenance {
+    #[must_use]
+    pub fn operation_job(&self, operation: MaintenanceOperation) -> Option<&OperationJobRecord> {
+        let slot = operation_slot(operation)?;
+        self.operation_jobs[slot].as_ref()
+    }
+
+    pub fn set_operation_job(
+        &mut self,
+        operation: MaintenanceOperation,
+        job_id: String,
+        reused: bool,
+    ) {
+        let Some(slot) = operation_slot(operation) else {
+            return;
+        };
+        let keep_detail = self.operation_jobs[slot]
+            .as_ref()
+            .filter(|existing| existing.job_id == job_id)
+            .and_then(|existing| existing.detail.clone());
+        self.operation_jobs[slot] = Some(OperationJobRecord {
+            operation,
+            job_id,
+            reused,
+            detail: keep_detail,
+            poll_error: None,
+        });
+        self.receipt_poll_requests[slot] = None;
+        self.receipt_poll_revisions[slot] = self.receipt_poll_revisions[slot].wrapping_add(1);
+    }
+
+    pub(crate) fn update_operation_job_detail(
+        &mut self,
+        operation: MaintenanceOperation,
+        job_id: &str,
+        detail: JobDetail,
+    ) -> bool {
+        let Some(slot) = operation_slot(operation) else {
+            return false;
+        };
+        let Some(record) = self.operation_jobs[slot].as_mut() else {
+            return false;
+        };
+        if record.job_id != job_id || detail.job.id != job_id {
+            return false;
+        }
+        let was_active = record
+            .detail
+            .as_ref()
+            .is_none_or(|prev| crate::backend::job_is_active(&prev.job.state));
+        let now_active = crate::backend::job_is_active(&detail.job.state);
+        record.detail = Some(detail);
+        record.poll_error = None;
+        was_active && !now_active
+    }
+
+    /// Bounded list of tracked maintenance job IDs that have not yet reached a terminal state.
+    #[must_use]
+    pub fn active_receipt_jobs(&self) -> Vec<(MaintenanceOperation, String)> {
+        self.operation_jobs
+            .iter()
+            .flatten()
+            .filter(|record| {
+                record
+                    .detail
+                    .as_ref()
+                    .is_none_or(|detail| crate::backend::job_is_active(&detail.job.state))
+            })
+            .map(|record| (record.operation, record.job_id.clone()))
+            .collect()
+    }
+
     pub(crate) fn busy(&self) -> bool {
         self.upload_request.is_some()
             || self.datasets_request.is_some()
@@ -137,7 +335,16 @@ impl Maintenance {
     }
     pub(crate) fn invalidate_origin(&mut self) {
         self.csv_path_prompt = None;
+        self.local_dataset = None;
+        self.selected_dataset = None;
+        self.datasets = Load::Idle;
+        self.upload = Load::Idle;
+        self.upload_request = None;
+        self.datasets_request = None;
+        self.datasets_revision = self.datasets_revision.wrapping_add(1);
+        self.active_operation = None;
         self.pending_preview = None;
+        self.restore_workstation_index_focus = false;
         self.seed_accepted_at = None;
         self.confirmation = None;
         self.last_request = None;
@@ -145,21 +352,48 @@ impl Maintenance {
         self.reindex_association = None;
         self.reindex_details_open = false;
         self.operation_request = None;
+        self.receipt_poll_requests = [None, None, None];
+        for revision in &mut self.receipt_poll_revisions {
+            *revision = revision.wrapping_add(1);
+        }
         self.reindex_journal_request = None;
         self.reindex_reconcile_request = None;
         self.operation_revision = self.operation_revision.wrapping_add(1);
         self.receipt = Load::Idle;
+        self.operation_jobs = [None, None, None];
     }
     pub(crate) fn cancel_requests(&mut self) {
         self.upload_request = None;
         self.datasets_request = None;
         self.operation_request = None;
+        self.receipt_poll_requests = [None, None, None];
         self.reindex_journal_request = None;
         self.reindex_reconcile_request = None;
     }
 }
 
 impl State {
+    pub(crate) fn enter_csv_path(&mut self, kind: DatasetKind, tx: &mut Tx) {
+        self.prepare_csv_path_prompt(kind);
+        tx.focus(CSV_PATH_KEY, true);
+        tx.scroll_into_view(CSV_PATH_KEY);
+    }
+
+    fn prepare_csv_path_prompt(&mut self, kind: DatasetKind) {
+        if self
+            .maintenance
+            .csv_path_prompt
+            .as_ref()
+            .is_none_or(|prompt| prompt.kind != kind)
+        {
+            self.maintenance.csv_path_prompt = Some(CsvPathPrompt {
+                kind,
+                input: TextEdit::new(String::new()),
+                error: None,
+            });
+        }
+    }
+
     pub fn choose_dataset(&mut self, kind: DatasetKind, tx: &mut Tx) {
         let operation = match kind {
             DatasetKind::ActorCatalog => MaintenanceOperation::SeedActors,
@@ -181,42 +415,48 @@ impl State {
                 ..Default::default()
             }
             .filter("CSV", &["csv"]),
-            move |state: &mut State, result, _| {
+            move |state: &mut State, result, tx| {
                 if state.connection.epoch != epoch {
                     return;
                 }
                 match result {
                     Ok(Some(path)) => {
+                        state.maintenance.csv_path_prompt = None;
                         state.select_local_dataset(path, kind);
                         state.upload_selected_dataset();
                     }
                     Ok(None) => {}
-                    Err(_) => state.open_csv_path_prompt(kind),
+                    Err(_) => state.open_csv_path_prompt(kind, tx),
                 }
             },
         );
     }
 
     /// The chooser is unavailable: let the operator type the path of a local CSV instead.
-    pub(crate) fn open_csv_path_prompt(&mut self, kind: DatasetKind) {
+    pub(crate) fn open_csv_path_prompt(&mut self, kind: DatasetKind, tx: &mut Tx) {
         self.maintenance.message = Some(
             "The dataset chooser could not open a file. Enter the path of a local CSV instead."
                 .into(),
         );
-        self.maintenance.csv_path_prompt = Some(CsvPathPrompt {
-            kind,
-            input: TextEdit::new(String::new()),
-            error: None,
-        });
+        self.enter_csv_path(kind, tx);
     }
 
-    pub fn cancel_csv_path_prompt(&mut self) {
-        self.maintenance.csv_path_prompt = None;
+    pub(crate) fn cancel_csv_path_prompt(&mut self, tx: &mut Tx) {
+        let Some(prompt) = self.maintenance.csv_path_prompt.take() else {
+            return;
+        };
+        let opener = match prompt.kind {
+            DatasetKind::ActorCatalog => SEED_ACTION_KEY,
+            DatasetKind::ClassifierTraining => TRAIN_ACTION_KEY,
+            _ => return,
+        };
+        tx.focus(opener, tx.focus_visible());
+        tx.scroll_into_view(opener);
     }
 
     /// Reuses the picker's selection, validation, upload and confirmation flow for a typed path.
     pub fn submit_csv_path(&mut self) {
-        let Some(prompt) = &mut self.maintenance.csv_path_prompt else {
+        let Some(prompt) = &self.maintenance.csv_path_prompt else {
             return;
         };
         let kind = prompt.kind;
@@ -225,17 +465,22 @@ impl State {
             DatasetKind::ClassifierTraining => MaintenanceOperation::TrainClassifier,
             _ => return,
         };
-        match parse_local_csv_path(&prompt.input.text, std::env::var_os("HOME").as_deref()) {
+        let path = parse_local_csv_path(&prompt.input.text, std::env::var_os("HOME").as_deref())
+            .and_then(|path| match self.maintenance_disabled_reason(operation) {
+                Some(reason) => Err(reason),
+                None => Ok(path),
+            });
+        match path {
             Ok(path) => {
-                if let Some(reason) = self.maintenance_disabled_reason(operation) {
-                    self.maintenance.message = Some(reason);
-                    return;
-                }
                 self.maintenance.csv_path_prompt = None;
                 self.select_local_dataset(path, kind);
                 self.upload_selected_dataset();
             }
-            Err(error) => prompt.error = Some(error),
+            Err(error) => {
+                if let Some(prompt) = &mut self.maintenance.csv_path_prompt {
+                    prompt.error = Some(error);
+                }
+            }
         }
     }
 
@@ -324,7 +569,8 @@ impl State {
         self.maintenance.last_request = None;
     }
 
-    pub fn maintenance_disabled_reason(&self, operation: MaintenanceOperation) -> Option<String> {
+    #[must_use]
+    pub fn maintenance_preflight(&self, operation: MaintenanceOperation) -> MaintenancePreflight {
         if operation == MaintenanceOperation::TrainClassifier
             && self.is_local_backend()
             && self
@@ -336,55 +582,41 @@ impl State {
                         .classifier_available
                 })
         {
-            return Some(
-                "Local companion backend was built without the optional classifier capability."
-                    .into(),
-            );
+            return MaintenancePreflight::LocalClassifierUnavailable;
         }
         if !self.permission(Permission::MaintainBackend) {
-            return Some("Backend maintenance permission required".into());
+            return MaintenancePreflight::PermissionRequired;
         }
         let Some(context) = &self.registration.context else {
-            return Some("Register this workstation first".into());
+            return MaintenancePreflight::RegistrationRequired;
         };
         let Load::Ready(readiness) = &self.readiness else {
-            return Some("Refresh backend checks to observe operation availability".into());
+            return MaintenancePreflight::ReadinessUnobserved;
         };
         if readiness.registration.as_ref().is_none_or(|receipt| {
             receipt.registration_id != context.registration_id
                 || receipt.revision != context.registration_revision
         }) {
-            return Some("Refresh checks for the current registered context".into());
+            return MaintenancePreflight::RegistrationContextMismatch;
         }
         let Some(action_id) = action_id(operation) else {
-            return Some("This maintenance operation is unsupported".into());
+            return MaintenancePreflight::UnsupportedOperation;
         };
         for check in &readiness.checks {
             if let Some(action) = check.actions.iter().find(|action| action.id == action_id) {
                 let fresh = self.readiness_check_fresh(check);
                 if !fresh {
-                    return Some("The operation observation is stale; refresh checks".into());
+                    return MaintenancePreflight::ChecksStale;
                 }
                 if !action.allowed {
-                    return Some(
-                        action
-                            .disabled_reason
-                            .clone()
-                            .unwrap_or_else(|| "Backend has not enabled this operation".into()),
-                    );
+                    return MaintenancePreflight::ActionDisabled(action.disabled_reason.clone());
                 }
                 if self.configuration_revision().is_none() {
-                    return Some(
-                        "Refresh Profile or Models to confirm the backend configuration revision"
-                            .into(),
-                    );
+                    return MaintenancePreflight::ConfigurationRevisionMissing;
                 }
                 if operation == MaintenanceOperation::ReindexActors {
                     if self.maintenance.pending_reindex.is_some() {
-                        return Some(
-                            "An unresolved actor index request exists; check request status or clear stale attempt"
-                                .into(),
-                        );
+                        return MaintenancePreflight::UnresolvedReindexAttempt;
                     }
                     let catalog_ready = readiness.checks.iter().any(|check| {
                         check.id == ReadinessCheckId::ActorCatalog
@@ -402,21 +634,25 @@ impl State {
                                 })
                     });
                     if !catalog_ready {
-                        return Some("Complete actor seeding with actors in the database before building the index".into());
+                        return MaintenancePreflight::ActorCatalogNotSeeded;
                     }
                 }
                 if matches!(self.maintenance.upload, Load::Loading) {
-                    return Some("Validating and uploading the selected CSV…".into());
+                    return MaintenancePreflight::Uploading;
                 }
                 if self.maintenance.operation_request.is_some()
                     || matches!(self.maintenance.receipt, Load::Loading)
                 {
-                    return Some("A maintenance request is awaiting its acceptance receipt".into());
+                    return MaintenancePreflight::RequestPending;
                 }
-                return None;
+                return MaintenancePreflight::Ready;
             }
         }
-        Some("This gateway has not advertised a durable consumer for this operation".into())
+        MaintenancePreflight::ConsumerUnavailable
+    }
+
+    pub fn maintenance_disabled_reason(&self, operation: MaintenanceOperation) -> Option<String> {
+        self.maintenance_preflight(operation).disabled_reason()
     }
 
     pub(crate) fn finish_dataset_preview(&mut self) {
@@ -511,35 +747,100 @@ impl State {
         self.confirm_maintenance_dialog = false;
     }
 
+    pub(crate) fn dismiss_maintenance_confirmation(&mut self, tx: &mut Tx) {
+        let opener = self
+            .maintenance
+            .confirmation
+            .as_ref()
+            .and_then(|confirmation| match confirmation.operation {
+                MaintenanceOperation::SeedActors => Some(SEED_ACTION_KEY),
+                MaintenanceOperation::TrainClassifier => Some(TRAIN_ACTION_KEY),
+                MaintenanceOperation::ReindexActors if self.confirm_maintenance_dialog => {
+                    Some(WORKSTATION_REINDEX_ACTION_KEY)
+                }
+                MaintenanceOperation::ReindexActors => Some(REINDEX_ACTION_KEY),
+                _ => None,
+            });
+        self.cancel_maintenance_confirmation();
+        if let Some(opener) = opener {
+            tx.focus(opener, true);
+            tx.scroll_into_view(opener);
+        }
+    }
+
+    /// RuneKit's modal Escape and close callbacks do not receive a transaction.
+    pub(crate) fn close_workstation_index_confirmation(&mut self) {
+        self.cancel_maintenance_confirmation();
+        self.maintenance.restore_workstation_index_focus = true;
+        if let Some(ui) = self
+            .services
+            .as_ref()
+            .and_then(|services| services.ui.get())
+        {
+            ui.wake();
+        }
+    }
+
+    pub(crate) fn restore_workstation_index_focus(&mut self, tx: &mut Tx) {
+        if std::mem::take(&mut self.maintenance.restore_workstation_index_focus)
+            && self.page == Page::Workstation
+            && !self.setup_gateway
+            && !self.has_active_confirmation()
+        {
+            tx.focus(WORKSTATION_REINDEX_ACTION_KEY, true);
+            tx.scroll_into_view(WORKSTATION_REINDEX_ACTION_KEY);
+        }
+    }
+
+    pub(crate) fn maintenance_confirmation_matches(
+        &self,
+        confirmation: &MaintenanceConfirmation,
+    ) -> bool {
+        confirmation.origin_revision == self.origin_revision
+            && self.registration.context.as_ref() == Some(&confirmation.context)
+            && self
+                .configuration_revision()
+                .is_none_or(|revision| revision == confirmation.configuration_revision)
+            && confirmation.dataset.as_ref().map(|dataset| dataset.kind)
+                == dataset_kind(confirmation.operation)
+            && confirmation.dataset.as_ref().is_none_or(|dataset| {
+                self.maintenance.selected_dataset.as_ref() == Some(dataset)
+                    && dataset.validate().is_ok()
+            })
+    }
+
+    pub(crate) fn maintenance_confirmation_preflight(
+        &self,
+        operation: MaintenanceOperation,
+    ) -> Option<String> {
+        if self.configuration_read_pending() {
+            return Some("Checking the backend configuration revision…".into());
+        }
+        self.maintenance_disabled_reason(operation)
+    }
+
     pub fn confirm_maintenance(&mut self) {
         if self.maintenance.operation_request.is_some()
             || matches!(self.maintenance.receipt, Load::Loading)
         {
             return;
         }
-        let Some(confirmation) = self.maintenance.confirmation.take() else {
+        let Some(confirmation) = self.maintenance.confirmation.as_ref() else {
             return;
         };
-        self.confirm_maintenance_dialog = false;
-        if confirmation.origin_revision != self.origin_revision
-            || self.registration.context.as_ref() != Some(&confirmation.context)
-            || self.configuration_revision() != Some(confirmation.configuration_revision)
-            || confirmation.dataset.as_ref().map(|dataset| dataset.kind)
-                != dataset_kind(confirmation.operation)
-            || confirmation.dataset.as_ref().is_some_and(|dataset| {
-                self.maintenance.selected_dataset.as_ref() != Some(dataset)
-                    || Some(dataset.kind) != dataset_kind(confirmation.operation)
-                    || dataset.validate().is_err()
-            })
-        {
+        if !self.maintenance_confirmation_matches(confirmation) {
+            self.cancel_maintenance_confirmation();
             self.maintenance.message =
                 Some("Origin or backend configuration changed; review the operation again".into());
             return;
         }
-        if let Some(reason) = self.maintenance_disabled_reason(confirmation.operation) {
+        if let Some(reason) = self.maintenance_confirmation_preflight(confirmation.operation) {
             self.maintenance.message = Some(reason);
             return;
         }
+        let confirmation = confirmation.clone();
+        self.cancel_maintenance_confirmation();
+        self.maintenance.message = None;
         self.submit_maintenance(confirmation, None);
     }
 
@@ -574,7 +875,10 @@ impl State {
             }
         };
         self.maintenance.message = None;
-        self.maintenance.reindex_association = None;
+        if confirmation.operation == MaintenanceOperation::ReindexActors {
+            self.maintenance.reindex_association = None;
+        }
+        self.maintenance.active_operation = Some(confirmation.operation);
         self.maintenance.receipt = Load::Loading;
         self.maintenance.operation_revision = self.maintenance.operation_revision.wrapping_add(1);
         self.maintenance.operation_request = services.maintenance(
@@ -660,6 +964,11 @@ impl State {
         }
         self.maintenance.pending_reindex = None;
         self.maintenance.reindex_association = Some(accepted.association.clone());
+        self.maintenance.set_operation_job(
+            MaintenanceOperation::ReindexActors,
+            accepted.association.job_id.clone(),
+            true,
+        );
         self.maintenance.message = Some(format!(
             "Recovered accepted job {} for actor index request {}",
             accepted.association.job_id, accepted.request.request_id
@@ -691,6 +1000,11 @@ impl State {
                 JobRequestAssociation::new(job_id.clone(), recovered_origin, String::new());
             self.maintenance.pending_reindex = None;
             self.maintenance.reindex_association = Some(association.clone());
+            self.maintenance.set_operation_job(
+                MaintenanceOperation::ReindexActors,
+                job_id.clone(),
+                true,
+            );
             self.maintenance.message = Some(format!(
                 "Recovered accepted job {job_id} for actor index request {}",
                 request.request_id
@@ -815,6 +1129,11 @@ impl State {
                     Ok(association) if cleared => {
                         state.maintenance.pending_reindex = None;
                         state.maintenance.reindex_association = Some(association.clone());
+                        state.maintenance.set_operation_job(
+                            MaintenanceOperation::ReindexActors,
+                            association.job_id.clone(),
+                            true,
+                        );
                         state.maintenance.message = Some(format!(
                             "Recovered accepted job {} for actor index request {}",
                             association.job_id, association.origin.request_id
@@ -992,6 +1311,7 @@ impl GatewayEffects {
                     return;
                 }
                 state.maintenance.operation_request = None;
+                state.maintenance.active_operation = None;
                 match result {
                     Ok(admitted) => {
                         state.apply_maintenance_outcome(operation, admitted, &origin_for_ui)
@@ -1021,12 +1341,124 @@ impl State {
         }
     }
 
+    /// Refresh the bounded set of active Seed & Train receipt job IDs independently of the Jobs
+    /// page filter or selection.
+    pub(crate) fn poll_maintenance_receipt_jobs(&mut self) -> usize {
+        if !self.connected() || !self.permission(Permission::ReadWorkstationActivity) {
+            return 0;
+        }
+        let Some(context) = self.registration.context.clone() else {
+            return 0;
+        };
+        let active = self.maintenance.active_receipt_jobs();
+        if active.is_empty() {
+            return 0;
+        }
+        let mut started = 0;
+        for (operation, job_id) in active {
+            let Some(slot) = operation_slot(operation) else {
+                continue;
+            };
+            if self.maintenance.receipt_poll_requests[slot].is_some() {
+                continue;
+            }
+            if self.fixture {
+                self.record(Intent::MaintenanceJobStatus { job_id });
+                started += 1;
+                continue;
+            }
+            let (Some(services), Some(client)) = (&self.services, &self.client) else {
+                break;
+            };
+            let Ok(client) = client.with_registered_context(&context) else {
+                break;
+            };
+            let Some(ui) = services.ui.get().cloned() else {
+                break;
+            };
+            let epoch = self.connection.epoch;
+            let origin_revision = self.origin_revision;
+            self.maintenance.receipt_poll_revisions[slot] =
+                self.maintenance.receipt_poll_revisions[slot].wrapping_add(1);
+            let revision = self.maintenance.receipt_poll_revisions[slot];
+            let context = context.clone();
+            let task = services.runtime.spawn(async move {
+                let result = backend::read_job_detail(&client, &job_id).await;
+                ui.update(move |state, _| {
+                    if !state.permission(Permission::ReadWorkstationActivity)
+                        || !state
+                            .registration
+                            .context
+                            .as_ref()
+                            .is_some_and(|current| current.same_request_context(&context))
+                    {
+                        if state.maintenance.receipt_poll_revisions[slot] == revision {
+                            state.maintenance.receipt_poll_requests[slot] = None;
+                        }
+                        return;
+                    }
+                    state.complete_maintenance_job_detail(
+                        epoch,
+                        origin_revision,
+                        operation,
+                        revision,
+                        &job_id,
+                        result.map_err(|error| error.to_string()),
+                    );
+                });
+            });
+            self.maintenance.receipt_poll_requests[slot] = Some(RequestTask(task.abort_handle()));
+            started += 1;
+        }
+        started
+    }
+
+    pub(crate) fn complete_maintenance_job_detail(
+        &mut self,
+        epoch: u64,
+        origin_revision: u64,
+        operation: MaintenanceOperation,
+        revision: u64,
+        job_id: &str,
+        result: Result<JobDetail, String>,
+    ) {
+        let Some(slot) = operation_slot(operation) else {
+            return;
+        };
+        if self.connection.epoch != epoch
+            || self.origin_revision != origin_revision
+            || self.maintenance.receipt_poll_revisions[slot] != revision
+        {
+            return;
+        }
+        self.maintenance.receipt_poll_requests[slot] = None;
+        match result {
+            Ok(detail) => {
+                let became_terminal = self
+                    .maintenance
+                    .update_operation_job_detail(operation, job_id, detail);
+                if became_terminal && !self.fixture {
+                    self.refresh_readiness();
+                    self.refresh_jobs_after_admission();
+                }
+            }
+            Err(error) => {
+                if let Some(record) = self.maintenance.operation_jobs[slot].as_mut() {
+                    if record.job_id == job_id {
+                        record.poll_error = Some(error);
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) fn apply_maintenance_outcome(
         &mut self,
         operation: MaintenanceOperation,
         admitted: AdmittedMaintenance,
         origin: &str,
     ) {
+        self.maintenance.active_operation = None;
         self.maintenance.last_request = admitted.saved_request.clone();
         if operation == MaintenanceOperation::ReindexActors {
             self.maintenance.pending_reindex = admitted.pending_entry;
@@ -1049,9 +1481,15 @@ impl State {
                     } else {
                         None
                     };
+                self.maintenance.set_operation_job(
+                    receipt.operation,
+                    receipt.job_id.clone(),
+                    receipt.reused,
+                );
                 self.maintenance.receipt = Load::Ready(receipt.clone());
                 self.refresh_readiness();
                 self.refresh_jobs_after_admission();
+                self.poll_maintenance_receipt_jobs();
                 // Promote the pending guard into the bounded accepted-job record only after UI state holds the receipt.
                 if let (
                     Some(association),
@@ -1084,12 +1522,18 @@ impl State {
             }
             MaintenanceOutcome::Reconciled(association) => {
                 self.maintenance.reindex_association = Some(association.clone());
+                self.maintenance.set_operation_job(
+                    MaintenanceOperation::ReindexActors,
+                    association.job_id.clone(),
+                    true,
+                );
                 self.maintenance.message = Some(format!(
                     "Recovered accepted job {} for actor index request {}",
                     association.job_id, association.origin.request_id
                 ));
                 self.maintenance.receipt = Load::Idle;
                 self.refresh_readiness();
+                self.poll_maintenance_receipt_jobs();
             }
             MaintenanceOutcome::Failed(error) => {
                 self.maintenance.receipt = Load::Failed(error);

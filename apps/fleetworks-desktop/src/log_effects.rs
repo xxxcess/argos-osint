@@ -132,6 +132,14 @@ impl State {
         previous != self.scoped_logs.revision() || visible != self.scoped_logs.visible
     }
 
+    /// The log list's end sentinel changed visibility. Coming on screen loads one older page
+    /// through the same single-flight path as **Load older summaries**.
+    pub fn logs_near_end(&mut self, on_screen: bool, tx: &mut Tx) {
+        if on_screen && self.scoped_logs.auto_load_older() {
+            self.log_event(LogEvent::Older, tx);
+        }
+    }
+
     pub fn log_event(&mut self, event: LogEvent, tx: &mut Tx) {
         self.sync_log_binding();
         self.sync_log_visibility();

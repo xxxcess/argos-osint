@@ -20,6 +20,8 @@ use rune::El;
 use rune::Key;
 use rune::KeyEvent;
 use rune::Live;
+use rune::Spring;
+use rune::SpringPair;
 use rune::Transition;
 use rune::Tx;
 use rune_kit::shell;
@@ -250,6 +252,7 @@ pub enum Intent {
     UploadDataset { kind: DatasetKind },
     Datasets,
     Maintenance { operation: MaintenanceOperation },
+    MaintenanceJobStatus { job_id: String },
     Configuration { action: ConfigurationAction },
     PrepareProfileImport,
     ProfileTransfer { action: TransferAction },
@@ -273,6 +276,16 @@ pub enum Intent {
 /// One state owns navigation, context, client and asynchronous request guards.
 pub struct State {
     pub accessibility: Accessibility,
+    /// Cold-launch splash and connection choice. Finished by default so fixtures skip it.
+    pub startup: crate::startup::Startup,
+    /// Contextual Assistant dock. It sends nothing until a typed chat capability exists.
+    pub assistant: crate::assistant::Assistant,
+    /// Fixture only: draw the component catalog in place of the page.
+    pub(crate) fixture_catalog: bool,
+    /// Observed job, readiness and connection transitions for this authority.
+    pub inbox: crate::inbox::Inbox,
+    /// Cmd/Ctrl+K command panel over a fixed list of known actions.
+    pub commands: crate::command_panel::CommandPanel,
     pub page: Page,
     pub setup_gateway: bool,
     pub backend_kind: BackendKind,
@@ -318,6 +331,8 @@ pub struct State {
     pub activity_tab: ActivityTab,
     pub readiness: Load<WorkstationReadiness>,
     pub readiness_received_at: Option<f64>,
+    /// The last refresh failed while earlier same-scope checks are still shown as stale.
+    pub readiness_error: Option<String>,
     pub(crate) clock: f64,
     pub(crate) reveal: Option<String>,
     pub selected_workspace: Option<PathBuf>,
@@ -338,6 +353,7 @@ pub struct State {
     pub(crate) dossier_request: Option<RequestTask>,
     pub(crate) readiness_revision: u64,
     pub(crate) readiness_refresh_at: f64,
+    pub(crate) maintenance_jobs_refresh_at: f64,
     pub(crate) jobs_refresh_at: f64,
     pub(crate) jobs_discovery_at: f64,
     pub(crate) host_metrics_revision: u64,
@@ -349,6 +365,11 @@ impl Default for State {
     fn default() -> Self {
         Self {
             accessibility: Accessibility::default(),
+            startup: crate::startup::Startup::default(),
+            assistant: crate::assistant::Assistant::default(),
+            fixture_catalog: false,
+            inbox: crate::inbox::Inbox::default(),
+            commands: crate::command_panel::CommandPanel::default(),
             page: Page::Workstation,
             setup_gateway: false,
             backend_kind: BackendKind::Remote,
@@ -392,6 +413,7 @@ impl Default for State {
             activity_tab: ActivityTab::Jobs,
             readiness: Load::Idle,
             readiness_received_at: None,
+            readiness_error: None,
             clock: 0.0,
             reveal: None,
             selected_workspace: None,
@@ -411,6 +433,7 @@ impl Default for State {
             dossier_request: None,
             readiness_revision: 0,
             readiness_refresh_at: 0.0,
+            maintenance_jobs_refresh_at: 0.0,
             jobs_refresh_at: 0.0,
             jobs_discovery_at: 0.0,
             host_metrics_revision: 0,
@@ -559,7 +582,7 @@ impl State {
             .unwrap_or_else(|| "embedded".to_owned())
     }
 
-    /// Switch destination mode between Remote Gateway and Local Embedded without leaking tokens or URLs.
+    /// Switch between Distributed and Embedded without carrying credentials or URLs across.
     pub fn set_backend_kind(&mut self, kind: BackendKind) {
         if self.backend_kind == kind {
             return;
@@ -602,7 +625,7 @@ impl State {
         self.client = None;
         self.local_backend.stopping = true;
         self.local_backend.shutdown_message =
-            Some(format!("Stopping local companion backend ({reason})…"));
+            Some(format!("Stopping the embedded backend ({reason})…"));
         if let Some(services) = &self.services {
             self.local_shutdown_request =
                 services.shutdown_local_backend(process, reason.to_owned(), wait_for_quit);
@@ -635,7 +658,9 @@ impl State {
         self.page = Page::Workstation;
         self.readiness = Load::Idle;
         self.readiness_received_at = None;
+        self.readiness_error = None;
         self.readiness_refresh_at = 0.0;
+        self.maintenance_jobs_refresh_at = 0.0;
         self.jobs_refresh_at = 0.0;
         self.jobs_discovery_at = 0.0;
         self.host_metrics = Load::Idle;
@@ -775,7 +800,7 @@ impl State {
                 relinquished_leases,
             } => {
                 self.local_backend.shutdown_message = Some(format!(
-                    "Local companion backend shutdown notice (checkpointed={checkpointed}, relinquished_leases={relinquished_leases})."
+                    "Embedded backend shutdown notice (checkpointed={checkpointed}, relinquished_leases={relinquished_leases})."
                 ));
             }
             _ => {}
@@ -798,7 +823,7 @@ impl State {
             return;
         }
         self.local_backend.shutdown_message = Some(format!(
-            "Local IPC event stream skipped {skipped} notifications; refreshing readiness."
+            "Embedded IPC event stream skipped {skipped} notifications; refreshing readiness."
         ));
         if self.connected() {
             self.refresh_readiness();
@@ -822,11 +847,10 @@ impl State {
             self.local_backend.event_task = None;
             self.client = None;
             let detail = if stderr.is_empty() {
-                "Local companion backend IPC pipe closed unexpectedly (HTTP fallback disabled)."
-                    .to_owned()
+                "Embedded backend IPC pipe closed unexpectedly (HTTP fallback disabled).".to_owned()
             } else {
                 format!(
-                    "Local companion backend IPC pipe closed unexpectedly (HTTP fallback disabled): {stderr}"
+                    "Embedded backend IPC pipe closed unexpectedly (HTTP fallback disabled): {stderr}"
                 )
             };
             self.local_backend.pipe_closed_error = Some(detail.clone());
@@ -847,16 +871,20 @@ impl State {
         match outcome {
             Ok(ack) => {
                 self.local_backend.shutdown_message = Some(format!(
-                    "Local companion backend stopped cleanly (checkpointed={}, relinquished_leases={}).",
+                    "Embedded backend stopped cleanly (checkpointed={}, relinquished_leases={}).",
                     ack.checkpointed, ack.relinquished_leases
                 ));
                 self.local_backend.last_shutdown_ack = Some(ack);
             }
             Err(error) => {
                 self.local_backend.shutdown_message =
-                    Some(format!("Local companion backend shutdown notice: {error}"));
+                    Some(format!("Embedded backend shutdown notice: {error}"));
             }
         }
+    }
+
+    pub(crate) fn readiness_pending(&self) -> bool {
+        self.readiness_request.is_some()
     }
 
     pub fn refresh_readiness(&mut self) {
@@ -890,19 +918,60 @@ impl State {
 
     pub(crate) fn complete_readiness(&mut self, result: Result<WorkstationReadiness, String>) {
         self.readiness_request = None;
-        self.readiness = match result {
+        let kept = matches!(self.readiness, Load::Ready(_));
+        match result {
             Ok(readiness) if readiness.deployment_id == self.connection.deployment_label() => {
                 self.readiness_received_at = Some(self.clock);
-                Load::Ready(readiness)
+                self.readiness_error = None;
+                self.readiness = Load::Ready(readiness);
             }
-            Ok(_) => Load::Failed("Gateway returned readiness for a different deployment".into()),
-            Err(error) => Load::Failed(error),
-        };
+            Ok(_) => {
+                // Another deployment's checks are never kept.
+                self.readiness_received_at = None;
+                self.readiness_error = None;
+                self.readiness =
+                    Load::Failed("Gateway returned readiness for a different deployment".into());
+            }
+            Err(error) if kept => {
+                // A transient failure keeps the last same-scope checks, now marked stale: with no
+                // fresh observation every check reads as stale and repairs stay restricted.
+                self.readiness_received_at = None;
+                self.readiness_error = Some(error);
+            }
+            Err(error) => {
+                self.readiness_error = None;
+                self.readiness = Load::Failed(error);
+            }
+        }
         self.finish_dataset_preview();
     }
 
     pub fn connected(&self) -> bool {
         self.connection.status == ConnectionStatus::Connected
+    }
+
+    pub(crate) fn has_active_confirmation(&self) -> bool {
+        self.confirm_maintenance_dialog
+            || self.confirm_cycle_delete
+            || self.maintenance.confirmation.is_some()
+            || self.cycles.confirmation.is_some()
+            || self.configuration.confirmation.is_some()
+            || self.job_actions.confirmation.is_some()
+            || self.classifier_activation.confirmation.is_some()
+            || self.transfer.confirmation.is_some()
+            || self.rebind.confirmation.is_some()
+            || self.connection_profiles.confirmation.is_some()
+            || self.workspaces.confirmation.is_some()
+            || self
+                .submissions
+                .lane(SubmissionKind::Atlas)
+                .confirmation
+                .is_some()
+            || self
+                .submissions
+                .lane(SubmissionKind::Tool)
+                .confirmation
+                .is_some()
     }
 
     pub(crate) fn maintenance_checks_due(&self, now: f64) -> bool {
@@ -919,7 +988,7 @@ impl State {
             Load::Ready(readiness) => readiness.checks.iter().any(|check| {
                 check.state == ReadinessState::Running || !self.readiness_check_fresh_at(check, now)
             }),
-            Load::Idle | Load::Failed(_) => self.page == Page::Seed,
+            Load::Idle | Load::Failed(_) => matches!(self.page, Page::Seed | Page::Workstation),
             Load::Pending | Load::Loading => false,
         }
     }
@@ -1066,6 +1135,42 @@ impl State {
         }
     }
 
+    /// Open one result at a time; collapsing fences any pending dossier response.
+    pub fn toggle_actor(&mut self, index: usize) {
+        let Load::Ready(response) = &self.brain.results else {
+            return;
+        };
+        let Some(hit) = response.rows.get(index) else {
+            return;
+        };
+        if self.brain.showing_detail && self.brain.selected_actor.as_deref() == Some(&hit.actor_id)
+        {
+            self.brain.showing_detail = false;
+            self.brain.selected_actor = None;
+            self.brain.dossier = Load::Idle;
+            self.brain.detail_revision = self.brain.detail_revision.wrapping_add(1);
+            self.dossier_request = None;
+        } else {
+            self.select_actor(index);
+        }
+    }
+
+    pub fn retry_dossier(&mut self) {
+        let Load::Ready(response) = &self.brain.results else {
+            return;
+        };
+        if !self.brain.showing_detail {
+            return;
+        }
+        if let Some(index) = response
+            .rows
+            .iter()
+            .position(|hit| Some(hit.actor_id.as_str()) == self.brain.selected_actor.as_deref())
+        {
+            self.select_actor(index);
+        }
+    }
+
     pub fn select_actor(&mut self, index: usize) {
         let Load::Ready(response) = &self.brain.results else {
             return;
@@ -1078,6 +1183,7 @@ impl State {
         self.brain.selected_actor = Some(id.clone());
         self.brain.detail_revision = self.brain.detail_revision.wrapping_add(1);
         self.brain.showing_detail = true;
+        self.brain_facet = DossierFacet::Overview;
         if !self.fixture && (self.services.is_none() || self.client.is_none()) {
             self.brain.dossier = Load::Failed("Gateway dossier services are unavailable".into());
             return;
@@ -1097,13 +1203,14 @@ impl State {
         }
     }
 
-    pub fn search_key(&mut self, event: &KeyEvent) -> bool {
+    pub fn search_key(&mut self, event: &KeyEvent, repeat: bool) -> bool {
         match event.key {
             Key::Down => self.brain.move_highlight(true),
             Key::Up => self.brain.move_highlight(false),
+            Key::Enter if repeat => {}
             Key::Enter => {
                 if let Some(index) = self.brain.highlighted {
-                    self.select_actor(index);
+                    self.toggle_actor(index);
                 } else {
                     self.search_now();
                 }
@@ -1123,19 +1230,40 @@ impl State {
     }
 }
 
-/// Seconds between discovery reads when no active job is known.
+/// Seconds between discovery reads when no active job is known on the Jobs page.
 const JOBS_DISCOVERY_SECS: f64 = 5.0;
+/// Low-cadence registered aggregate refresh while focused on another page.
+const JOBS_BACKGROUND_DISCOVERY_SECS: f64 = 15.0;
 
-/// Jobs page scheduling. Two independent jobs share the tick:
+/// Jobs scheduling. On the Jobs page, two independent loops share the tick:
 /// - follow known active work, or recover unavailable logs of the selected job;
-/// - discover newly admitted work for the registered workstation. Discovery never depends on
-///   the selection or on log recovery, because the selection only narrows what is shown.
+/// - discover newly admitted work for the registered workstation.
+///
+/// Off the Jobs page, refresh the shared registered job aggregate at a bounded low cadence
+/// while focused without changing the current list query or scroll position.
 pub(crate) fn poll_jobs(state: &mut State, now: f64, tx: &mut Tx) -> bool {
-    if state.page != Page::Jobs
-        || state.fixture
+    if state.fixture
         || !state.connected()
         || !state.scoped_logs.window_focused
+        || state.setup_gateway
     {
+        return false;
+    }
+    if state.page != Page::Jobs {
+        if state.registration.context.is_some()
+            && state.permission(fleetworks_contracts::context::Permission::ReadWorkstationActivity)
+        {
+            let mut changed = false;
+            if now >= state.jobs_discovery_at {
+                state.jobs_discovery_at = now + JOBS_BACKGROUND_DISCOVERY_SECS;
+                if !state.scoped_jobs.busy() {
+                    state.request_jobs(crate::jobs_query::JobsEvent::Poll);
+                    changed = true;
+                }
+            }
+            tx.wake_after(Duration::from_secs(5));
+            return changed;
+        }
         return false;
     }
     let mut changed = false;
@@ -1164,6 +1292,16 @@ pub(crate) fn poll_jobs(state: &mut State, now: f64, tx: &mut Tx) -> bool {
 fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
     state.clock = now;
     let mut changed = false;
+    if state.startup.active() && !state.setup_gateway {
+        state.startup.begin(now);
+        if let Some(wait) = state.startup.next_wake(now) {
+            tx.wake_after(Duration::from_secs_f64(wait));
+        }
+        // Redraw the orbit's final pose even when this poll schedules no subsequent frame.
+        return true;
+    }
+    changed |= state.observe_inbox();
+    changed |= state.sync_assistant();
     changed |= state.poll_scoped_logs();
     changed |= state.sync_jobs_binding();
     if matches!(state.page, Page::Seed | Page::Workstation)
@@ -1175,6 +1313,14 @@ fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
         if state.maintenance_checks_due(now) {
             state.refresh_readiness();
             changed = true;
+        }
+        if !state.maintenance.active_receipt_jobs().is_empty()
+            && now >= state.maintenance_jobs_refresh_at
+        {
+            state.maintenance_jobs_refresh_at = now + 2.0;
+            if state.poll_maintenance_receipt_jobs() > 0 {
+                changed = true;
+            }
         }
         tx.wake_after(Duration::from_secs(2));
     }
@@ -1216,6 +1362,7 @@ fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
         tx.scroll_into_view(key);
         changed = true;
     }
+    state.restore_workstation_index_focus(tx);
     if !state.brain.in_flight
         && state
             .brain
@@ -1229,15 +1376,30 @@ fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
 }
 
 fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
+    if state.startup.active() {
+        if event.key == Key::Escape && state.setup_gateway {
+            state.return_to_startup_choice(tx);
+            return true;
+        }
+        return false;
+    }
+    if event.is_command('k') && !event.mods.shift {
+        if state.commands.open {
+            state.commands.close();
+            tx.focus("command-open", false);
+        } else if !state.has_active_confirmation() {
+            state.open_command_panel();
+        }
+        return true;
+    }
     if event.key == Key::Escape {
+        if state.commands.open {
+            state.commands.close();
+            tx.focus("command-open", false);
+            return true;
+        }
         if state.confirm_maintenance_dialog || state.maintenance.confirmation.is_some() {
-            let target = if state.page == Page::Workstation {
-                "workstation-build-actor-index"
-            } else {
-                "maintenance-reindex"
-            };
-            state.cancel_maintenance_confirmation();
-            tx.focus(target, false);
+            state.dismiss_maintenance_confirmation(tx);
             return true;
         }
         if state.settings_open {
@@ -1284,6 +1446,18 @@ pub fn spec() -> AppSpec<State> {
     }
 }
 
+/// Keep the surface readable and its input available during the brief entrance.
+pub(crate) fn surface_transition(reduced_motion: bool, mut transition: Transition) -> Transition {
+    if reduced_motion {
+        return Transition::none();
+    }
+    transition.insertion.opacity = 0.8;
+    transition.springs(SpringPair::new(
+        Spring::new(0.16, 0.0),
+        Spring::new(0.12, 0.0),
+    ))
+}
+
 /// Shared view used unchanged by the production executable and native fixture example.
 pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     let preferences = state
@@ -1295,6 +1469,10 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     let mut kit = theme::kit();
     let mut layers = Vec::new();
     crate::material::configure_kit(&mut kit, preferences);
+    if state.startup.active() {
+        let startup = crate::startup::view(state, cx, preferences, &kit);
+        return mark_fixture(state, &kit, startup).on_window_focus(State::log_window_focus);
+    }
     let compact_rail = cx
         .layout_size("app-shell")
         .is_some_and(|size| size[0] < 820.0);
@@ -1319,16 +1497,8 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
                     .py(10.0)
                     .gap(8.0)
                     .center_y()
-                    .child(
-                        rune::icon(&icons::BRAND_MARK, 18.0)
-                            .color(theme::hex(theme::ACCENT_HOVER))
-                            .a11y_hidden(),
-                    )
-                    .child(
-                        rune::text("Fleetworks")
-                            .font(kit.ty.body_medium)
-                            .color(theme::hex(theme::TEXT_PRIMARY)),
-                    )
+                    // The approved symbol alone: no wordmark. Its accessible name stays "Fleetworks".
+                    .child(crate::orbit::mark(34.0))
                     .child(rune::spacer())
                     .child(ui_components::status_dot(connection_tone, preferences)),
             )
@@ -1426,23 +1596,50 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     } else {
         title_page.title()
     };
+    let setup_button = crate::material::compact_toolbar(
+        ActionButton::new("Setup Gateway")
+            .key("connection-editor")
+            .icon(&icons::KEY)
+            .finish(if state.setup_gateway {
+                MetalFinish::GoldCta
+            } else {
+                MetalFinish::Gunmetal
+            })
+            .on_press(|state: &mut State| {
+                state.setup_gateway = true;
+            })
+            .build(&kit, preferences, pointer_ref),
+        preferences,
+    );
+    // The chat aux panel stays off until the typed chat contract lands. The original context
+    // rail keeps its place meanwhile.
+    let assistant_room = if state.assistant.enabled && state.connected() && !state.setup_gateway {
+        cx.layout_with("main-area", |rect| rect[2])
+    } else {
+        None
+    };
+    let assistant_placement = assistant_room.map_or(crate::assistant::Placement::Hidden, |room| {
+        state.assistant.preference.placement(room)
+    });
+    let mut trailing = rune::row()
+        .gap(8.0)
+        .center_y()
+        .child(crate::command_panel::toolbar_button(&kit))
+        .child(crate::inbox::toolbar_item(
+            state,
+            &kit,
+            preferences,
+            &mut layers,
+        ));
+    if state.assistant.enabled && state.connected() && !state.setup_gateway {
+        trailing = trailing.child(crate::assistant::toggle(
+            assistant_placement != crate::assistant::Placement::Hidden,
+            &kit,
+        ));
+    }
     let toolbar = Toolbar::new()
         .title(toolbar_title)
-        .trailing(crate::material::compact_toolbar(
-            ActionButton::new("Setup Gateway")
-                .key("connection-editor")
-                .icon(&icons::KEY)
-                .finish(if state.setup_gateway {
-                    MetalFinish::GoldCta
-                } else {
-                    MetalFinish::Gunmetal
-                })
-                .on_press(|state: &mut State| {
-                    state.setup_gateway = true;
-                })
-                .build(&kit, preferences, pointer_ref),
-            preferences,
-        ));
+        .trailing(trailing.child(setup_button));
 
     let any_busy = state.connection.status == ConnectionStatus::Connecting
         || state.pairing.busy()
@@ -1484,36 +1681,39 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
             );
         }
         scope_bar = scope_bar.child(rune::spacer());
-        if any_busy {
-            scope_bar = scope_bar.child(
-                rune::row()
-                    .gap(6.0)
-                    .center_y()
-                    .child(
-                        rune_kit::Spinner::new()
-                            .size(13.0)
-                            .color(theme::hex(theme::ACCENT_HOVER))
-                            .build(&kit),
-                    )
-                    .child(
-                        rune::text("Syncing")
-                            .font(kit.ty.small_medium)
-                            .color(theme::hex(theme::ACCENT_HOVER)),
-                    ),
-            );
+        // Connection health never changes with request activity. A reserved slot holds a small
+        // spinner while any read is in flight, so the pill and the bar keep their size.
+        let activity = if any_busy {
+            rune_kit::Spinner::new()
+                .size(13.0)
+                .color(theme::hex(theme::TEXT_MUTED))
+                .build(&kit)
         } else {
-            scope_bar = scope_bar.child(ui_components::status_pill(
+            rune::el()
+        };
+        scope_bar = scope_bar
+            .child(
+                rune::row()
+                    .key("activity-slot")
+                    .w(13.0)
+                    .h(13.0)
+                    .a11y_hidden()
+                    .child(activity),
+            )
+            .child(ui_components::status_pill(
                 match &state.connection.status {
                     ConnectionStatus::Connected => "Online",
                     ConnectionStatus::Connecting => "Connecting",
                     ConnectionStatus::Failed(_) => "Fault",
                     ConnectionStatus::Disconnected => "Offline",
                 },
-                None,
+                match &state.connection.status {
+                    ConnectionStatus::Disconnected => Some(&icons::SERVER),
+                    _ => None,
+                },
                 connection_tone,
                 &kit,
             ));
-        }
         content = content.child(scope_bar);
     }
 
@@ -1525,35 +1725,80 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
         format!("screen-{}", state.page.key())
     };
     let page_body = views::page(state, cx, &kit, &mut layers);
-    let animated_page = if preferences.reduced_motion {
-        rune::col()
-            .key(screen_key)
-            .w_full()
-            .grow(1.0)
-            .min_h(0.0)
-            .child(page_body)
+    // Only the content changes identity on navigation. Keep the shell, toolbar and canvas in place.
+    let page_transition = if state.setup_gateway {
+        Transition::offset(0.0, 5.0)
     } else {
-        rune::col()
-            .key(screen_key)
-            .w_full()
-            .grow(1.0)
-            .min_h(0.0)
-            .transition(Transition::offset(0.0, 12.0).combined(Transition::opacity()))
-            .child(page_body)
+        Transition::identity()
     };
-    let content = content.child(animated_page);
+    let mut page_transition = surface_transition(preferences.reduced_motion, page_transition);
+    // Discard the old page immediately, including when its connection scope just changed.
+    page_transition.springs.exit = Spring::NONE;
+    let screen = rune::col()
+        .key(screen_key)
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .transition(page_transition)
+        .child(page_body);
+    let screen = if preferences.reduced_motion {
+        screen.instant_changes()
+    } else {
+        screen
+    };
+    let content = content.child(screen);
     let mut main = rune::row().key("main-area").w_full().h_full().min_h(0.0);
     if compact_rail {
         main = main.child(compact_icon_rail(state, &kit, connection_tone, preferences));
     }
     main = main.child(content);
-    if state.connected()
+    if !state.assistant.enabled
+        && state.connected()
         && !state.setup_gateway
         && cx
             .layout_with("main-area", |rect| rect[2] >= 1120.0)
             .unwrap_or(false)
     {
         main = main.child(context_rail(state, &kit, connection_tone));
+    }
+    match assistant_placement {
+        crate::assistant::Placement::Docked => {
+            main = main.child(crate::assistant::dock(state, &kit, preferences));
+        }
+        crate::assistant::Placement::Overlay => {
+            // Too narrow to share the window: float the dock over the right edge.
+            layers.push(
+                rune::row()
+                    .key("assistant-overlay")
+                    .transition(if preferences.reduced_motion {
+                        Transition::none()
+                    } else {
+                        Transition::identity()
+                    })
+                    .absolute(0.0, 0.0)
+                    .w_full()
+                    .h_full()
+                    .child(
+                        rune::el()
+                            .key("assistant-scrim")
+                            .grow(1.0)
+                            .h_full()
+                            .on_press(|state: &mut State| {
+                                state.assistant.preference = crate::assistant::Preference::Closed;
+                            }),
+                    )
+                    .child(
+                        crate::assistant::dock(state, &kit, preferences)
+                            .focus_return("assistant-toggle")
+                            .transition(surface_transition(
+                                preferences.reduced_motion,
+                                Transition::offset(6.0, 0.0),
+                            ))
+                            .instant_changes(),
+                    ),
+            );
+        }
+        crate::assistant::Placement::Hidden => {}
     }
 
     if state.settings_open {
@@ -1571,6 +1816,10 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
             .build(&kit, &mut layers);
     }
 
+    if !state.has_active_confirmation() {
+        crate::command_panel::view(state, &kit, preferences, &mut layers);
+    }
+
     let mut split = SplitView::new(main)
         .toolbar(toolbar)
         .titlebar_inset(cx.titlebar_inset())
@@ -1583,21 +1832,7 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
         );
     }
     let base = split.build(&kit).key("app-shell");
-    let base = if state.fixture {
-        rune::col()
-            .w_full()
-            .h_full()
-            .child(
-                rune::text("Fixture — synthetic data, boundary effects disabled")
-                    .key("fixture-marker")
-                    .font(kit.ty.small)
-                    .color(kit.c.info.fg)
-                    .padding(6.0),
-            )
-            .child(base.grow(1.0).min_h(0.0))
-    } else {
-        base
-    };
+    let base = mark_fixture(state, &kit, base);
     rune_kit::root(base, layers)
         .on_window_focus(State::log_window_focus)
         .on_pointer_move_local(|state: &mut State, pointer, tx| {
@@ -1611,6 +1846,23 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
                 .set([(0.5 - nx) * 16.0, (0.5 - ny) * 14.0]);
             tx.live_only();
         })
+}
+
+fn mark_fixture(state: &State, kit: &rune_kit::Kit, view: El) -> El {
+    if !state.fixture {
+        return view;
+    }
+    rune::col()
+        .w_full()
+        .h_full()
+        .child(
+            rune::text("Fixture — synthetic data, boundary effects disabled")
+                .key("fixture-marker")
+                .font(kit.ty.small)
+                .color(kit.c.info.fg)
+                .padding(6.0),
+        )
+        .child(view.grow(1.0).min_h(0.0))
 }
 
 fn compact_icon_rail(
@@ -1726,7 +1978,13 @@ fn context_rail(state: &State, kit: &rune_kit::Kit, connection_tone: StatusTone)
         ));
     if let Some(count) = sidebar_row_badge(state, page) {
         let count_num = count.parse::<usize>().unwrap_or(0);
-        let records = if count_num == 1 {
+        let records = if page == Page::Jobs {
+            if count_num == 1 {
+                "1 job in progress".to_owned()
+            } else {
+                format!("{count} jobs in progress")
+            }
+        } else if count_num == 1 {
             "1 visible record".to_owned()
         } else {
             format!("{count} visible records")
@@ -1810,14 +2068,13 @@ fn sidebar_row_status(state: &State, page: Page) -> Option<RowStatus> {
     }
 }
 
-fn sidebar_row_badge(state: &State, page: Page) -> Option<String> {
+pub(crate) fn sidebar_row_badge(state: &State, page: Page) -> Option<String> {
     match page {
         Page::Jobs => state
             .scoped_jobs
-            .page
-            .as_ref()
-            .filter(|page| !page.rows.is_empty())
-            .map(|page| page.rows.len().to_string()),
+            .in_progress_count()
+            .filter(|&count| count > 0)
+            .map(|count| count.to_string()),
         Page::Atlas => match &state.cycles.history {
             Load::Ready(history) if !history.rows.is_empty() => {
                 Some(history.rows.len().to_string())

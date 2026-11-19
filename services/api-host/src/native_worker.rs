@@ -50,6 +50,7 @@ pub(crate) struct LocalWorkerConfig {
     pub(crate) store: DatasetStore,
     pub(crate) index: Option<ActorIndexWorker>,
     pub(crate) relinquish_on_shutdown: bool,
+    pub(crate) classifier_enabled: bool,
 }
 
 pub(crate) async fn run(
@@ -94,6 +95,7 @@ pub(crate) async fn run(
             store,
             index,
             relinquish_on_shutdown: false,
+            classifier_enabled: true,
         },
         signal,
     )
@@ -114,13 +116,21 @@ pub(crate) async fn run_with_config(
         store,
         index,
         relinquish_on_shutdown,
+        classifier_enabled,
     } = config;
     let reindex = index.is_some();
     let pools: Vec<&'static str> = lanes::Lane::ALL
         .into_iter()
         .filter(|lane| reindex || *lane != lanes::Lane::Reindex)
+        .filter(|lane| {
+            classifier_enabled || !matches!(lane, lanes::Lane::Train | lanes::Lane::Activate)
+        })
         .map(lanes::Lane::pool)
         .collect();
+    if !classifier_enabled {
+        job_dispatch::configure_pool(repo.db(), setup_jobs::TRAIN_POOL, false).await?;
+        classifier_activation::configure_consumer(&repo, false).await?;
+    }
     for pool in &pools {
         job_dispatch::ensure_queue_transport(repo.db(), pool).await?;
         job_dispatch::enable_pool(repo.db(), pool).await?;
@@ -129,13 +139,19 @@ pub(crate) async fn run_with_config(
         MaintenanceOperation::SeedActors,
         MaintenanceOperation::TrainClassifier,
     ] {
-        setup_jobs::enable_operation(repo.db(), operation, true).await?;
+        setup_jobs::enable_operation(
+            repo.db(),
+            operation,
+            operation != MaintenanceOperation::TrainClassifier || classifier_enabled,
+        )
+        .await?;
     }
     if reindex {
         setup_jobs::enable_operation(repo.db(), MaintenanceOperation::ReindexActors, true).await?;
     }
     let (stop, receive) = watch::channel(false);
-    let (routes, receivers) = lanes::bounded::<Received>(reindex);
+    let (routes, receivers) =
+        lanes::bounded_for_capabilities::<Received>(reindex, classifier_enabled);
     let tools = Arc::new(manual::Tools::default());
     let relinquished = Arc::new(AtomicUsize::new(0));
     let mut tasks = JoinSet::new();
@@ -157,7 +173,7 @@ pub(crate) async fn run_with_config(
         ));
     }
     // Queue transport and the actual bounded activation lane are now owned.
-    classifier_activation::configure_consumer(&repo, true).await?;
+    classifier_activation::configure_consumer(&repo, classifier_enabled).await?;
     tracing::info!(
         role = if relinquish_on_shutdown {
             "local-ipc-worker"
@@ -817,6 +833,7 @@ mod tests {
                         .expect("local index worker"),
                 ),
                 relinquish_on_shutdown: true,
+                classifier_enabled: true,
             },
             async move {
                 let _ = stop1_rx.await;
@@ -903,6 +920,7 @@ mod tests {
                         .expect("local index worker 2"),
                 ),
                 relinquish_on_shutdown: true,
+                classifier_enabled: true,
             },
             async move {
                 let _ = stop2_rx.await;

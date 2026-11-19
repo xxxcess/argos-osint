@@ -34,6 +34,8 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
 use crate::capabilities::Capabilities;
+use crate::chat::ChatTurnRequest;
+use crate::chat::CHAT_TURNS_PATH;
 use crate::classifier_activation::ActivationRequest;
 use crate::classifier_activation::ACTIVATION_PATH;
 use crate::classifier_activation::ACTIVATION_RESULT_PATH;
@@ -111,6 +113,7 @@ const PROFILE_TOOLS_SET_PATH: &str = "/api/v1/profile/tools/set";
 const PROFILE_EXPORT_PATH: &str = "/api/v1/profile/export";
 const PROFILE_IMPORT_PATH: &str = "/api/v1/profile/import";
 const ARTICLES_PATH: &str = "/api/v1/articles";
+const ARTICLES_SEARCH_PATH: &str = "/api/v1/articles/search";
 const LOGS_PATH: &str = "/api/v1/logs";
 const LOGS_FOLLOW_PATH: &str = "/api/v1/logs/follow";
 const LOGS_EXPORT_PATH: &str = "/api/v1/logs/export";
@@ -161,6 +164,52 @@ impl fmt::Display for IpcError {
 }
 
 impl std::error::Error for IpcError {}
+
+/// Failed child startup, with separate bounded process diagnostics.
+#[must_use]
+pub struct IpcStartupError {
+    cause: IpcError,
+    stderr: Vec<u8>,
+}
+
+impl IpcStartupError {
+    /// Raw child stderr collected before attachment, limited to [`MAX_IPC_STDERR_BYTES`].
+    /// Sanitize it for display and keep it out of general logs.
+    #[must_use]
+    pub fn captured_stderr(&self) -> &[u8] {
+        &self.stderr
+    }
+}
+
+impl From<IpcError> for IpcStartupError {
+    fn from(cause: IpcError) -> Self {
+        Self {
+            cause,
+            stderr: Vec::new(),
+        }
+    }
+}
+
+impl fmt::Display for IpcStartupError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.cause, formatter)
+    }
+}
+
+impl fmt::Debug for IpcStartupError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("IpcStartupError")
+            .field("cause", &self.cause)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::error::Error for IpcStartupError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.cause)
+    }
+}
 
 impl From<IpcError> for ClientError {
     fn from(error: IpcError) -> Self {
@@ -343,6 +392,25 @@ pub struct ArticlesListQuery {
     #[serde(deserialize_with = "deserialize_num_or_str")]
     pub limit: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+/// Query for `/api/v1/articles/search`: indexed title and description discovery.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
+pub struct ArticlesSearchQuery {
+    pub query: String,
+    pub category: String,
+    pub day: String,
+    pub source: String,
+    pub run: String,
+    #[serde(
+        deserialize_with = "deserialize_opt_num_or_str",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub limit: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
 }
 
@@ -584,6 +652,7 @@ pub enum IpcOperation {
     ActorsSearch(ActorSearchQuery),
     ActorDetail(ActorDetailQuery),
     ArticlesList(ArticlesListQuery),
+    ArticlesSearch(ArticlesSearchQuery),
     JobsList(JobsListQuery),
     JobDetail(JobDetailQuery),
     ToolResult(ToolResultQuery),
@@ -618,6 +687,7 @@ pub enum IpcOperation {
     TrainClassifier(MaintenanceRequest),
     ReindexActors(MaintenanceRequest),
     ClassifierActivate(ActivationRequest),
+    ChatTurnSubmit(ChatTurnRequest),
     ModelRoleSet(ModelRoleSetRequest),
     ProfileAccountUpsert(ProfileAccountUpsertRequest),
     ProfileAccountDelete(ProfileAccountDeleteRequest),
@@ -645,6 +715,7 @@ impl fmt::Debug for IpcOperation {
             Self::ActorsSearch(q) => f.debug_tuple("ActorsSearch").field(q).finish(),
             Self::ActorDetail(q) => f.debug_tuple("ActorDetail").field(q).finish(),
             Self::ArticlesList(q) => f.debug_tuple("ArticlesList").field(q).finish(),
+            Self::ArticlesSearch(q) => f.debug_tuple("ArticlesSearch").field(q).finish(),
             Self::JobsList(q) => f.debug_tuple("JobsList").field(q).finish(),
             Self::JobDetail(q) => f.debug_tuple("JobDetail").field(q).finish(),
             Self::ToolResult(q) => f.debug_tuple("ToolResult").field(q).finish(),
@@ -692,6 +763,8 @@ impl fmt::Debug for IpcOperation {
             Self::TrainClassifier(r) => f.debug_tuple("TrainClassifier").field(r).finish(),
             Self::ReindexActors(r) => f.debug_tuple("ReindexActors").field(r).finish(),
             Self::ClassifierActivate(r) => f.debug_tuple("ClassifierActivate").field(r).finish(),
+            // Operator text stays out of debug output.
+            Self::ChatTurnSubmit(_) => f.write_str("ChatTurnSubmit(..)"),
             Self::ModelRoleSet(r) => f.debug_tuple("ModelRoleSet").field(r).finish(),
             Self::ProfileAccountUpsert(r) => {
                 f.debug_tuple("ProfileAccountUpsert").field(r).finish()
@@ -730,6 +803,7 @@ impl IpcOperation {
         "actors_search",
         "actor_detail",
         "articles_list",
+        "articles_search",
         "jobs_list",
         "job_detail",
         "tool_result",
@@ -758,6 +832,7 @@ impl IpcOperation {
         "train_classifier",
         "reindex_actors",
         "classifier_activate",
+        "chat_turn_submit",
         "model_role_set",
         "profile_account_upsert",
         "profile_account_delete",
@@ -781,6 +856,7 @@ impl IpcOperation {
             Self::ActorsSearch(_) => "actors_search",
             Self::ActorDetail(_) => "actor_detail",
             Self::ArticlesList(_) => "articles_list",
+            Self::ArticlesSearch(_) => "articles_search",
             Self::JobsList(_) => "jobs_list",
             Self::JobDetail(_) => "job_detail",
             Self::ToolResult(_) => "tool_result",
@@ -809,6 +885,7 @@ impl IpcOperation {
             Self::TrainClassifier(_) => "train_classifier",
             Self::ReindexActors(_) => "reindex_actors",
             Self::ClassifierActivate(_) => "classifier_activate",
+            Self::ChatTurnSubmit(_) => "chat_turn_submit",
             Self::ModelRoleSet(_) => "model_role_set",
             Self::ProfileAccountUpsert(_) => "profile_account_upsert",
             Self::ProfileAccountDelete(_) => "profile_account_delete",
@@ -833,6 +910,7 @@ impl IpcOperation {
             Self::ActorsSearch(_) => (IpcMethod::Get, ACTOR_SEARCH_PATH),
             Self::ActorDetail(_) => (IpcMethod::Get, ACTOR_DETAIL_PATH),
             Self::ArticlesList(_) => (IpcMethod::Get, ARTICLES_PATH),
+            Self::ArticlesSearch(_) => (IpcMethod::Get, ARTICLES_SEARCH_PATH),
             Self::JobsList(_) => (IpcMethod::Get, JOBS_PATH),
             Self::JobDetail(_) => (IpcMethod::Get, JOB_DETAIL_PATH),
             Self::ToolResult(_) => (IpcMethod::Get, TOOL_RESULT_PATH),
@@ -860,6 +938,7 @@ impl IpcOperation {
             Self::TrainClassifier(_) => (IpcMethod::Post, CLASSIFIER_TRAIN_PATH),
             Self::ReindexActors(_) => (IpcMethod::Post, ACTOR_REINDEX_PATH),
             Self::ClassifierActivate(_) => (IpcMethod::Post, ACTIVATION_PATH),
+            Self::ChatTurnSubmit(_) => (IpcMethod::Post, CHAT_TURNS_PATH),
             Self::ModelRoleSet(_) => (IpcMethod::Post, MODELS_DEFAULTS_SET_PATH),
             Self::ProfileAccountUpsert(_) => (IpcMethod::Post, PROFILE_ACCOUNTS_UPSERT_PATH),
             Self::ProfileAccountDelete(_) => (IpcMethod::Post, PROFILE_ACCOUNTS_DELETE_PATH),
@@ -899,6 +978,7 @@ impl IpcOperation {
             ACTOR_SEARCH_PATH => decode_query(value).map(Self::ActorsSearch),
             ACTOR_DETAIL_PATH => decode_query(value).map(Self::ActorDetail),
             ARTICLES_PATH => decode_query(value).map(Self::ArticlesList),
+            ARTICLES_SEARCH_PATH => decode_query(value).map(Self::ArticlesSearch),
             JOBS_PATH => decode_query(value).map(Self::JobsList),
             JOB_DETAIL_PATH => decode_query(value).map(Self::JobDetail),
             TOOL_RESULT_PATH => decode_query(value).map(Self::ToolResult),
@@ -943,6 +1023,7 @@ impl IpcOperation {
             CLASSIFIER_TRAIN_PATH => decode_body(body_bytes).map(Self::TrainClassifier),
             ACTOR_REINDEX_PATH => decode_body(body_bytes).map(Self::ReindexActors),
             ACTIVATION_PATH => decode_body(body_bytes).map(Self::ClassifierActivate),
+            CHAT_TURNS_PATH => decode_body(body_bytes).map(Self::ChatTurnSubmit),
             MODELS_DEFAULTS_SET_PATH => decode_body(body_bytes).map(Self::ModelRoleSet),
             PROFILE_ACCOUNTS_UPSERT_PATH => decode_body(body_bytes).map(Self::ProfileAccountUpsert),
             PROFILE_ACCOUNTS_DELETE_PATH => decode_body(body_bytes).map(Self::ProfileAccountDelete),
@@ -1204,6 +1285,17 @@ struct LocalIpcShared {
     stderr_buffer: Arc<Mutex<Vec<u8>>>,
 }
 
+// A cancelled startup must not detach a task that still owns the stderr pipe.
+struct StartupStderrTask(Option<JoinHandle<()>>);
+
+impl Drop for StartupStderrTask {
+    fn drop(&mut self) {
+        if let Some(task) = &self.0 {
+            task.abort();
+        }
+    }
+}
+
 struct LocalIpcSession {
     shared: Arc<LocalIpcShared>,
     outbound_tx: Mutex<Option<mpsc::Sender<IpcEnvelope>>>,
@@ -1330,14 +1422,25 @@ impl LocalIpcClient {
             client_version.into(),
         )
         .await
+        .map_err(|error| error.cause)
     }
 
     /// Attach to an already-spawned child process using its piped `stdin`, `stdout`, and optional `stderr`.
     pub async fn from_child(
-        mut child: Child,
+        child: Child,
         client_name: impl Into<String>,
         client_version: impl Into<String>,
     ) -> Result<Self, IpcError> {
+        Self::attach_child(child, client_name, client_version)
+            .await
+            .map_err(|error| error.cause)
+    }
+
+    async fn attach_child(
+        mut child: Child,
+        client_name: impl Into<String>,
+        client_version: impl Into<String>,
+    ) -> Result<Self, IpcStartupError> {
         let stdin = child.stdin.take().ok_or(IpcError::PipeClosed)?;
         let stdout = child.stdout.take().ok_or(IpcError::PipeClosed)?;
         let stderr = child.stderr.take();
@@ -1358,6 +1461,17 @@ impl LocalIpcClient {
         client_name: impl Into<String>,
         client_version: impl Into<String>,
     ) -> Result<Self, IpcError> {
+        Self::spawn_command_with_diagnostics(command, client_name, client_version)
+            .await
+            .map_err(|error| error.cause)
+    }
+
+    /// Spawn a child command and retain bounded stderr if attachment fails.
+    pub async fn spawn_command_with_diagnostics(
+        command: &mut Command,
+        client_name: impl Into<String>,
+        client_version: impl Into<String>,
+    ) -> Result<Self, IpcStartupError> {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1366,52 +1480,76 @@ impl LocalIpcClient {
         let child = command
             .spawn()
             .map_err(|error| IpcError::Io(error.kind()))?;
-        Self::from_child(child, client_name, client_version).await
+        Self::attach_child(child, client_name, client_version).await
     }
 
     async fn connect_with_child<R, W, E>(
         mut reader: R,
         mut writer: W,
         stderr: Option<E>,
-        child: Option<Child>,
+        mut child: Option<Child>,
         client_name: String,
         client_version: String,
-    ) -> Result<Self, IpcError>
+    ) -> Result<Self, IpcStartupError>
     where
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
         E: AsyncRead + Unpin + Send + 'static,
     {
         let stderr_buffer = Arc::new(Mutex::new(Vec::new()));
-        let stderr_task = stderr.map(|err_stream| {
+        let mut stderr_task = StartupStderrTask(stderr.map(|err_stream| {
             let buffer = Arc::clone(&stderr_buffer);
             tokio::spawn(drain_bounded_stderr(err_stream, buffer))
-        });
+        }));
 
         let hello = IpcEnvelope::Hello(IpcHello::new(client_name, client_version));
         let handshake = async {
             write_frame(&mut writer, &hello).await?;
-            match read_frame(&mut reader).await? {
-                Some(IpcEnvelope::HelloAck(ack)) => Ok(ack),
-                Some(_) => Err(IpcError::UnexpectedFrame),
-                None => Err(IpcError::PipeClosed),
-            }
-        };
-        let ack = tokio::time::timeout(DEFAULT_HANDSHAKE_TIMEOUT, handshake)
-            .await
-            .map_err(|_| IpcError::Timeout)??;
-
-        if ack.protocol_version < IPC_MIN_PROTOCOL_VERSION
-            || ack.protocol_version > IPC_PROTOCOL_VERSION
-        {
-            return Err(IpcError::UnsupportedVersion(ack.protocol_version));
-        }
-        if !ack.compatible {
-            if ack.protocol_version != IPC_PROTOCOL_VERSION {
+            let ack = match read_frame(&mut reader).await? {
+                Some(IpcEnvelope::HelloAck(ack)) => ack,
+                Some(_) => return Err(IpcError::UnexpectedFrame),
+                None => return Err(IpcError::PipeClosed),
+            };
+            if ack.protocol_version < IPC_MIN_PROTOCOL_VERSION
+                || ack.protocol_version > IPC_PROTOCOL_VERSION
+                || (!ack.compatible && ack.protocol_version != IPC_PROTOCOL_VERSION)
+            {
                 return Err(IpcError::UnsupportedVersion(ack.protocol_version));
             }
-            return Err(IpcError::HandshakeFailed);
-        }
+            if !ack.compatible {
+                return Err(IpcError::HandshakeFailed);
+            }
+            Ok(ack)
+        };
+        let handshake_deadline = tokio::time::Instant::now() + DEFAULT_HANDSHAKE_TIMEOUT;
+        let ack = match tokio::time::timeout_at(handshake_deadline, handshake)
+            .await
+            .unwrap_or(Err(IpcError::Timeout))
+        {
+            Ok(ack) => ack,
+            Err(cause) => {
+                // Stdout may reach EOF before the drain task sees buffered stderr.
+                // Bound reaping and draining by the existing startup deadline.
+                if let Some(child) = child.as_mut() {
+                    let _ = child.start_kill();
+                }
+                let cleanup_deadline =
+                    handshake_deadline.min(tokio::time::Instant::now() + CHILD_EXIT_GRACE);
+                let _ = tokio::time::timeout_at(cleanup_deadline, async {
+                    if let Some(child) = child.as_mut() {
+                        let _ = child.wait().await;
+                    }
+                    if let Some(task) = stderr_task.0.as_mut() {
+                        let _ = task.await;
+                    }
+                })
+                .await;
+                drop(stderr_task);
+                let stderr =
+                    std::mem::take(&mut *stderr_buffer.lock().expect("stderr buffer lock"));
+                return Err(IpcStartupError { cause, stderr });
+            }
+        };
 
         let (outbound_tx, outbound_rx) = mpsc::channel(MAX_IPC_QUEUE_DEPTH);
         let (events_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
@@ -1438,7 +1576,7 @@ impl LocalIpcClient {
             outbound_tx: Mutex::new(Some(outbound_tx)),
             reader_task: Mutex::new(Some(reader_handle)),
             writer_task: Mutex::new(Some(writer_handle)),
-            stderr_task: Mutex::new(stderr_task),
+            stderr_task: Mutex::new(stderr_task.0.take()),
             child: Mutex::new(child),
         });
 
@@ -2302,6 +2440,54 @@ mod tests {
         assert_eq!(uploaded.dataset.id, "dataset-ipc-1");
         server_task.await.unwrap();
         tokio::fs::remove_file(&path).await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn startup_diagnostics_retain_stderr_on_early_close_and_timeout() {
+        const MARKER: &[u8] = b"synthetic startup diagnostic";
+        for cause in [IpcError::PipeClosed, IpcError::Timeout] {
+            let (stream, mut peer) = tokio::io::duplex(4096);
+            let (reader, writer) = tokio::io::split(stream);
+            let (stderr, mut stderr_peer) = tokio::io::duplex(4096);
+            let fixture = tokio::spawn(async move {
+                assert!(matches!(
+                    read_frame(&mut peer).await.expect("read client Hello"),
+                    Some(IpcEnvelope::Hello(_))
+                ));
+                stderr_peer.write_all(MARKER).await.expect("write stderr");
+                if cause == IpcError::Timeout {
+                    // Model a stalled companion with both pipes still open.
+                    std::future::pending::<()>().await;
+                }
+            });
+            let error = tokio::time::timeout(
+                DEFAULT_HANDSHAKE_TIMEOUT + Duration::from_secs(1),
+                LocalIpcClient::connect_with_child(
+                    reader,
+                    writer,
+                    Some(stderr),
+                    None,
+                    "desktop".into(),
+                    "0.2.1".into(),
+                ),
+            )
+            .await
+            .expect("startup failure must finish even with stderr still open")
+            .expect_err("fixture withholds HelloAck");
+            assert_eq!(error.cause, cause);
+            assert_eq!(error.captured_stderr(), MARKER);
+            assert!(!error.to_string().contains("synthetic startup diagnostic"));
+            assert!(!format!("{error:?}").contains("synthetic startup diagnostic"));
+            if cause == IpcError::Timeout {
+                fixture.abort();
+                assert!(fixture
+                    .await
+                    .expect_err("stalled fixture aborted")
+                    .is_cancelled());
+            } else {
+                fixture.await.expect("closing fixture completed");
+            }
+        }
     }
 
     #[tokio::test]

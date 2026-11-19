@@ -44,6 +44,8 @@ for (const width of [1440, 768, 390, 320]) {
             instance_id: "visual-instance",
           };
         else if (path === "days") body = { days: ["2026-10-25"] };
+        // The footer reads the backend name from readiness; none is set here.
+        else if (path === "workstation/readiness") body = {};
         else if (path === "articles/counts")
           body = {
             counts: {
@@ -78,7 +80,7 @@ for (const width of [1440, 768, 390, 320]) {
       "● API_OK",
     );
     await expect(
-      page.getByRole("button", { name: "server", exact: true }),
+      page.getByRole("button", { name: "Backend", exact: true }),
     ).toBeEnabled();
     await expect(
       page.getByRole("button", { name: "Bulletin", exact: true }),
@@ -94,7 +96,7 @@ for (const width of [1440, 768, 390, 320]) {
         () => document.documentElement.scrollWidth <= innerWidth,
       ),
     ).toBe(true);
-    await expect(page).toHaveScreenshot(`bulletin-${width}.png`, {
+    await expect.soft(page).toHaveScreenshot(`bulletin-${width}.png`, {
       fullPage: false,
       animations: "disabled",
       stylePath: screenshotStyle,
@@ -112,10 +114,10 @@ for (const width of [1440, 768, 390, 320]) {
       focus: getComputedStyle(document.activeElement!).outlineColor,
       selection: getComputedStyle(document.body, "::selection").backgroundColor,
     }));
-    expect(interactionColors.focus).toBe("rgb(216, 189, 140)");
-    expect(interactionColors.selection).toBe("rgb(50, 44, 34)");
+    expect(interactionColors.focus).toBe("rgb(114, 233, 255)");
+    expect(interactionColors.selection).toBe("rgb(16, 39, 45)");
     expect(interactionColors.selection).not.toBe(interactionColors.focus);
-    await expect(page).toHaveScreenshot(`bulletin-focus-${width}.png`, {
+    await expect.soft(page).toHaveScreenshot(`bulletin-focus-${width}.png`, {
       fullPage: false,
       animations: "disabled",
       stylePath: screenshotStyle,

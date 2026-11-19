@@ -21,6 +21,12 @@ import type {
   ConnectionRequestScope,
   RegisteredWebContext,
 } from "./connection-scope";
+import {
+  ACTOR_SEARCH_LIMIT,
+  actorSearchProblem,
+  type ActorSearchResponse,
+} from "./actor-search";
+export * from "./actor-search";
 export { connectionNamespace } from "./connection-scope";
 export type {
   ConnectionRequestScope,
@@ -221,6 +227,10 @@ interface Backend {
   setBase: (s: string) => void;
   instance: string;
   connected: boolean;
+  /** True when a previously ready same-scope connection failed its latest readiness refresh. */
+  stale: boolean;
+  /** Timestamp (ms since epoch) of the last successful readiness response for this scope. */
+  lastSyncedAt?: number;
   live?: LiveTransport;
   scope?: ConnectionRequestScope;
   connecting: boolean;
@@ -426,6 +436,23 @@ export function BackendProvider({
 }
 const READY_POLL_MS = 60_000;
 
+function isHealthReady(data: Health | undefined): data is Health {
+  return Boolean(
+    data &&
+      data.ready &&
+      data.storage &&
+      data.service === "argos-intel" &&
+      data.api_version === 1,
+  );
+}
+
+function isRevocationError(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    (error.status === 401 || error.status === 403 || error.status === 409)
+  );
+}
+
 function Connection({
   children,
   settings,
@@ -464,15 +491,24 @@ function Connection({
     refetchInterval: READY_POLL_MS,
     retry: false,
   });
-  const connected =
-    health.isSuccess &&
-    health.data.ready &&
-    health.data.storage &&
-    health.data.service === "argos-intel" &&
-    health.data.api_version === 1;
-  const instance = connected
-    ? `${health.data.instance_id}${namespace ? `:${namespace}` : ""}`
-    : "";
+  const revoked = health.isError && isRevocationError(health.error);
+  useEffect(() => {
+    if (!revoked) return;
+    client.removeQueries({
+      predicate: (query) => query.queryKey[0] !== "health",
+    });
+  }, [revoked, client]);
+  const hasReadySnapshot = isHealthReady(health.data) && !revoked;
+  const stale = hasReadySnapshot && health.isError;
+  const connected = hasReadySnapshot;
+  const instance =
+    hasReadySnapshot && health.data
+      ? `${health.data.instance_id}${namespace ? `:${namespace}` : ""}`
+      : "";
+  const lastSyncedAt =
+    hasReadySnapshot && health.dataUpdatedAt > 0
+      ? health.dataUpdatedAt
+      : undefined;
   const setBase = (raw: string) => {
     const next = safeBackend(raw);
     client.clear();
@@ -483,10 +519,12 @@ function Connection({
     setBase,
     instance,
     connected,
+    stale,
+    lastSyncedAt,
     live,
     scope,
     connecting: health.isFetching,
-    health: health.isSuccess ? health.data : undefined,
+    health: hasReadySnapshot ? health.data : undefined,
     connectionError: health.error?.message,
     createRequestId: settings.createRequestId,
     retry: () => {
@@ -498,6 +536,9 @@ function Connection({
   return (
     <BackendContext.Provider value={value}>{children}</BackendContext.Provider>
   );
+}
+export function useOptionalBackend() {
+  return useContext(BackendContext);
 }
 export function useBackend() {
   const v = useContext(BackendContext);
@@ -557,6 +598,36 @@ export function useHostMetrics() {
     });
   }, [b.base, b.instance, b.connected, b.live, client]);
   return query;
+}
+
+/**
+ * The operator-chosen backend name from authorized readiness. Keyed apart from
+ * host metrics and by backend instance, so a backend change never shows the
+ * previous name. Absent or invalid input resolves to null, never a guess.
+ */
+export function usePlatformIdentity() {
+  const b = useBackend();
+  return useQuery({
+    queryKey: [b.base, b.instance, "platform-identity"],
+    queryFn: async ({ signal }) => {
+      const readiness = await request<{
+        platform_identity?: { display_name?: unknown } | null;
+      }>(
+        b.base,
+        "workstation/readiness",
+        undefined,
+        signal,
+        REQUEST_TIMEOUT_MS,
+        b.scope,
+      );
+      const name = readiness.platform_identity?.display_name;
+      return typeof name === "string" && name.trim() ? name.trim() : null;
+    },
+    enabled: b.connected,
+    staleTime: 5 * 60_000,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
 }
 
 /** REST remains the brief snapshot. Push updates invalidate only this occurrence. */
@@ -620,6 +691,10 @@ export function useAction<T>(path: string, signal?: AbortSignal) {
   return useMutation({
     mutationFn: (body: unknown) => {
       if (!b.connected) throw new Error("API offline");
+      if (b.stale && path !== "topology/resolve")
+        throw new Error(
+          "Connection unsynced; retry connection before running this action",
+        );
       return request<T>(
         b.base,
         path,
@@ -711,6 +786,151 @@ export function useArticles(
     getNextPageParam: (last) => last.next_cursor || undefined,
   });
 }
+export const ARTICLE_SEARCH_MAX_BYTES = 256;
+export const ARTICLE_SEARCH_MAX_TERMS = 16;
+/** Mirrors the indexed route's plain-query limits so a bad query never leaves the browser. */
+export function articleSearchProblem(raw: string): string | null {
+  const query = raw.trim();
+  if (!query) return "Enter a word or phrase to search.";
+  if (new TextEncoder().encode(query).length > ARTICLE_SEARCH_MAX_BYTES)
+    return `Use at most ${ARTICLE_SEARCH_MAX_BYTES} bytes.`;
+  const terms = new Set(query.toLowerCase().split(/\s+/));
+  if (terms.size > ARTICLE_SEARCH_MAX_TERMS)
+    return `Use at most ${ARTICLE_SEARCH_MAX_TERMS} different words.`;
+  return null;
+}
+export interface ArticleSearchHit {
+  run_id: string;
+  article_id: string;
+  title: string;
+  description: string;
+  excerpt: string;
+  matched_field: "title" | "description";
+  categories: string[];
+  taxonomy_version: string;
+  admission_state: string;
+  publication_version: string;
+  source_name: string;
+  source_domain: string;
+  published_at: string;
+  url: string;
+}
+/** A search hit carries no image or author; the brief loads those from article detail. */
+export function articleFromHit(hit: ArticleSearchHit): Article {
+  return {
+    id: hit.article_id,
+    run_id: hit.run_id,
+    title: hit.title,
+    description: hit.excerpt || hit.description,
+    source_name: hit.source_name,
+    source_domain: hit.source_domain,
+    published_at: hit.published_at,
+    category: hit.categories[0] || "",
+    categories: hit.categories,
+    taxonomy_version: hit.taxonomy_version,
+    admission_state: hit.admission_state,
+    publication_version: hit.publication_version,
+    image_url: "",
+    url: hit.url,
+    author: "",
+  };
+}
+/**
+ * Explicit-submit search over the indexed titles and descriptions. The caller
+ * passes the submitted query; an empty one disables the read and the default
+ * feed shows. The key carries backend and instance, so results never survive
+ * a scope change. No polling: a page is a snapshot until the user resubmits.
+ */
+/** Optional narrowing for article search. These are filters, not full-text fields. */
+export interface ArticleSearchFilters {
+  /** `YYYY-MM-DD` retained day. */
+  day?: string;
+  /** A strategic domain id. */
+  category?: string;
+  /** Exact source domain, such as `example.test`. */
+  source?: string;
+}
+const SOURCE_DOMAIN = /^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$/;
+/** Keep only well-formed, non-empty filters, in a fixed order, so keys and URLs stay stable. */
+export function cleanArticleSearchFilters(
+  filters: ArticleSearchFilters = {},
+): ArticleSearchFilters {
+  const out: ArticleSearchFilters = {};
+  if (filters.category && filters.category !== "all")
+    out.category = filters.category;
+  if (filters.day && /^\d{4}-\d{2}-\d{2}$/.test(filters.day))
+    out.day = filters.day;
+  const source = filters.source?.trim().toLowerCase();
+  if (source && SOURCE_DOMAIN.test(source)) out.source = source;
+  return out;
+}
+export function useArticleSearch(
+  query: string,
+  filters: ArticleSearchFilters = {},
+) {
+  const b = useBackend();
+  const text = query.trim();
+  const narrow = cleanArticleSearchFilters(filters);
+  return useInfiniteQuery({
+    queryKey: [b.base, b.instance, "article-search", text, narrow],
+    initialPageParam: "",
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+    retry: false,
+    enabled: b.connected && !!text && articleSearchProblem(text) === null,
+    queryFn: ({ pageParam, signal }) =>
+      request<{
+        hits: ArticleSearchHit[];
+        next_cursor: string | null;
+        revision: string;
+        /** The bounded candidate window was filled; more matches may exist than any page reaches. */
+        truncated?: boolean;
+      }>(
+        b.base,
+        "articles/search?" +
+          new URLSearchParams({
+            query: text,
+            limit: "20",
+            ...narrow,
+            ...(pageParam ? { cursor: pageParam } : {}),
+          }),
+        undefined,
+        signal,
+        REQUEST_TIMEOUT_MS,
+        b.scope,
+      ),
+    getNextPageParam: (last) => last.next_cursor || undefined,
+  });
+}
+/**
+ * Submit-only actor discovery for the same query as article search. It is a
+ * separate read, so a failing actor index never changes the article results.
+ */
+export function useActorSearch(query: string) {
+  const b = useBackend();
+  const text = query.trim();
+  return useQuery({
+    queryKey: [b.base, b.instance, "actor-search", text],
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+    retry: false,
+    enabled: b.connected && !!text && actorSearchProblem(text) === null,
+    queryFn: ({ signal }) =>
+      request<ActorSearchResponse>(
+        b.base,
+        "actors/search?" +
+          new URLSearchParams({
+            mode: "discovery",
+            query: text,
+            limit: String(ACTOR_SEARCH_LIMIT),
+          }),
+        undefined,
+        signal,
+        REQUEST_TIMEOUT_MS,
+        b.scope,
+      ),
+  });
+}
 export function keyFor(a: Pick<Article, "run_id" | "id">) {
   return new URLSearchParams({ run: a.run_id, id: a.id }).toString();
 }
@@ -766,15 +986,21 @@ export function useGenerateTopologySummary() {
   const b = useBackend();
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (key: TopologySummaryKey) =>
-      request<TopologySummaryView>(
+    mutationFn: (key: TopologySummaryKey) => {
+      if (!b.connected) throw new Error("API offline");
+      if (b.stale)
+        throw new Error(
+          "Connection unsynced; retry connection before generating a summary",
+        );
+      return request<TopologySummaryView>(
         b.base,
         "topology/summary/generate",
         key,
         undefined,
         REQUEST_TIMEOUT_MS,
         b.scope,
-      ),
+      );
+    },
     retry: false,
     onSuccess: (view, key) =>
       client.setQueryData(

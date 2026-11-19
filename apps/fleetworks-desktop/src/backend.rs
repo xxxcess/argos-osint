@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 use fleetworks_contracts::context::ActivityScope;
 use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::Client;
+use fleetworks_contracts::ClientError;
+use fleetworks_contracts::JOB_DETAIL_PATH;
 use rune::TextEdit;
 use serde::Deserialize;
 use serde::Serialize;
@@ -290,6 +292,7 @@ pub struct Backend {
     pub logs: Load<JobLogs>,
     pub selected_workspace_only: bool,
     pub message: Option<String>,
+    pub(crate) refresh_errors: BTreeMap<ReadKind, String>,
     pub(crate) revisions: BTreeMap<ReadKind, u64>,
     requests: BTreeMap<ReadKind, RequestTask>,
 }
@@ -312,6 +315,7 @@ impl Default for Backend {
             logs: Load::Idle,
             selected_workspace_only: false,
             message: None,
+            refresh_errors: BTreeMap::new(),
             revisions: BTreeMap::new(),
             requests: BTreeMap::new(),
         }
@@ -321,7 +325,7 @@ impl Default for Backend {
 pub(crate) fn job_is_active(state: &str) -> bool {
     matches!(
         state.to_ascii_lowercase().as_str(),
-        "queued" | "pending" | "running" | "active" | "waiting" | "reconciling"
+        "queued" | "pending" | "running" | "active" | "waiting" | "reconciling" | "retry_scheduled"
     )
 }
 
@@ -334,12 +338,21 @@ impl Backend {
         self.requests.contains_key(&kind)
     }
 
+    pub fn refresh_error(&self, kind: ReadKind) -> Option<&str> {
+        self.refresh_errors.get(&kind).map(String::as_str)
+    }
+
+    pub fn is_unsynced(&self, kind: ReadKind) -> bool {
+        self.refresh_errors.contains_key(&kind)
+    }
+
     pub(crate) fn cancel_reads(&mut self) {
         self.requests.clear();
     }
 
     pub(crate) fn invalidate_activity(&mut self) {
         self.requests.retain(|kind, _| !kind.is_activity());
+        self.refresh_errors.retain(|kind, _| !kind.is_activity());
         self.jobs = Load::Idle;
         self.detail = Load::Idle;
         self.logs = Load::Idle;
@@ -371,7 +384,8 @@ impl Backend {
         }
     }
 
-    fn failed(&mut self, kind: ReadKind, error: String) {
+    pub(crate) fn failed(&mut self, kind: ReadKind, error: String) {
+        self.refresh_errors.remove(&kind);
         match kind {
             ReadKind::Articles => self.articles = Load::Failed(error),
             ReadKind::Tools => self.tools = Load::Failed(error),
@@ -390,9 +404,37 @@ impl Backend {
             ReadKind::Logs => self.logs = Load::Failed(error),
         }
     }
+
+    fn failed_refresh(&mut self, kind: ReadKind, error: String, authority_rejected: bool) {
+        if !authority_rejected {
+            let preserve_ready = match kind {
+                ReadKind::Tools => matches!(self.tools, Load::Ready(_)),
+                ReadKind::Models => matches!(self.models, Load::Ready(_)),
+                ReadKind::Profile => matches!(self.profile, Load::Ready(_)),
+                _ => false,
+            };
+            if preserve_ready {
+                self.refresh_errors.insert(kind, error.clone());
+                self.message = Some(error);
+                return;
+            }
+        }
+        self.failed(kind, error);
+    }
+
+    fn clear_refresh_error(&mut self, kind: ReadKind) {
+        if self.refresh_errors.remove(&kind).is_some() && self.refresh_errors.is_empty() {
+            self.message = None;
+        }
+    }
 }
 
 impl State {
+    pub(crate) fn configuration_read_pending(&self) -> bool {
+        self.backend.requests.contains_key(&ReadKind::Profile)
+            || self.backend.requests.contains_key(&ReadKind::Models)
+    }
+
     pub fn configuration_revision(&self) -> Option<u64> {
         let models = match &self.backend.models {
             Load::Ready(models) => Some(models.configuration_revision),
@@ -413,6 +455,7 @@ impl State {
             }
             Page::Seed => {
                 self.refresh_readiness();
+                self.poll_maintenance_receipt_jobs();
                 self.backend_read(ReadRequest::Models);
                 self.backend_read(ReadRequest::Profile);
             }
@@ -428,6 +471,7 @@ impl State {
             Page::Jobs => self.backend_read(ReadRequest::Jobs {}),
             Page::Workstation => {
                 self.refresh_readiness();
+                self.poll_maintenance_receipt_jobs();
                 self.backend_read(ReadRequest::Profile);
                 self.refresh_host_metrics();
             }
@@ -571,11 +615,22 @@ impl State {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn complete_backend_read(
         &mut self,
         kind: ReadKind,
         revision: u64,
         result: Result<ReadResult, String>,
+    ) {
+        self.complete_backend_read_result(kind, revision, result, false);
+    }
+
+    pub(crate) fn complete_backend_read_result(
+        &mut self,
+        kind: ReadKind,
+        revision: u64,
+        result: Result<ReadResult, String>,
+        authority_rejected: bool,
     ) {
         if self.backend.revisions.get(&kind) != Some(&revision) {
             return;
@@ -584,17 +639,23 @@ impl State {
         let previous_configuration_revision = self.configuration_revision();
         match result {
             Ok(ReadResult::Articles(page)) => self.backend.articles = Load::Ready(page),
-            Ok(ReadResult::Tools(catalog)) => self.backend.tools = Load::Ready(catalog),
-            Ok(ReadResult::Models(defaults)) => self.backend.models = Load::Ready(defaults),
+            Ok(ReadResult::Tools(catalog)) => {
+                self.backend.tools = Load::Ready(catalog);
+                self.backend.clear_refresh_error(ReadKind::Tools);
+            }
+            Ok(ReadResult::Models(defaults)) => {
+                self.backend.models = Load::Ready(defaults);
+                self.backend.clear_refresh_error(ReadKind::Models);
+            }
             Ok(ReadResult::Profile(profile)) => {
-                self.backend.profile = if profile.configuration_format == 1
-                    && profile.portable_schema_version == 4
-                {
-                    Load::Ready(profile)
+                if profile.configuration_format == 1 && profile.portable_schema_version == 4 {
+                    self.backend.profile = Load::Ready(profile);
+                    self.backend.clear_refresh_error(ReadKind::Profile);
                 } else {
-                    Load::Failed(
+                    self.backend.failed(
+                        ReadKind::Profile,
                         "Gateway profile requires the current explicit configuration format".into(),
-                    )
+                    );
                 }
             }
             Ok(ReadResult::JobDetail(detail)) => {
@@ -646,12 +707,21 @@ impl State {
                         .failed(kind, "Gateway returned logs for a different job".into());
                 }
             }
-            Err(error) => self.backend.failed(kind, error),
+            Err(error) => self.backend.failed_refresh(kind, error, authority_rejected),
         }
         if self.configuration_revision() != previous_configuration_revision {
             self.classifier_activation.invalidate_confirmation();
             self.submissions.invalidate_confirmations();
-            self.maintenance.confirmation = None;
+            if self
+                .maintenance
+                .confirmation
+                .as_ref()
+                .is_some_and(|confirmation| !self.maintenance_confirmation_matches(confirmation))
+            {
+                self.cancel_maintenance_confirmation();
+                self.maintenance.message =
+                    Some("Backend configuration changed. Review the operation again.".into());
+            }
             self.configuration.confirmation = None;
             self.transfer.confirmation = None;
         }
@@ -670,14 +740,17 @@ impl GatewayEffects {
         let ui = self.ui.get()?.clone();
         let kind = request.kind();
         let task = self.runtime.spawn(async move {
-            let result = read(&client, request)
-                .await
-                .map_err(|error| error.to_string());
+            let reply = read(&client, request).await;
+            let authority_rejected = matches!(
+                &reply,
+                Err(fleetworks_contracts::ClientError::Status(401 | 403))
+            );
+            let result = reply.map_err(|error| error.to_string());
             ui.update(move |state, _| {
                 if state.connection.epoch == epoch
                     && (!kind.is_activity() || state.origin_revision == origin_revision)
                 {
-                    state.complete_backend_read(kind, revision, result);
+                    state.complete_backend_read_result(kind, revision, result, authority_rejected);
                 }
             });
         });
@@ -709,16 +782,9 @@ async fn read(
         // Lists use the registered Jobs controller's explicit newest/cursor
         // contract; this generic detail adapter cannot issue a legacy list.
         ReadRequest::Jobs { .. } => Err(fleetworks_contracts::ClientError::InvalidRequest),
-        ReadRequest::JobDetail { id } => client
-            .get_with_query(
-                "/api/v1/jobs/detail",
-                &ActivityQuery {
-                    id: Some(&id),
-                    limit: 100,
-                },
-            )
+        ReadRequest::JobDetail { id } => read_job_detail(client, &id)
             .await
-            .map(ReadResult::JobDetail),
+            .map(|detail| ReadResult::JobDetail(Box::new(detail))),
         ReadRequest::Logs { id } => client
             .get_with_query(
                 "/api/v1/logs",
@@ -729,5 +795,120 @@ async fn read(
             )
             .await
             .map(ReadResult::Logs),
+    }
+}
+
+pub(crate) async fn read_job_detail(client: &Client, id: &str) -> Result<JobDetail, ClientError> {
+    #[derive(Serialize)]
+    struct DetailQuery<'a> {
+        id: &'a str,
+        limit: u16,
+    }
+
+    client
+        .get_with_query(JOB_DETAIL_PATH, &DetailQuery { id, limit: 100 })
+        .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_tools() -> ToolCatalog {
+        ToolCatalog {
+            tools: vec![ToolDefinition {
+                id: "whois".into(),
+                name: "WHOIS".into(),
+                category: "domain".into(),
+                description: "Domain lookup".into(),
+                inputs: vec!["domain".into()],
+                restrictions: String::new(),
+                timeout_seconds: 30,
+            }],
+        }
+    }
+
+    fn sample_models() -> ModelDefaults {
+        ModelDefaults {
+            roles: vec!["extractor".into()],
+            defaults: BTreeMap::new(),
+            configuration_revision: 3,
+            catalog: Vec::new(),
+            model_variants: BTreeMap::new(),
+        }
+    }
+
+    fn sample_profile() -> ProfileSnapshot {
+        ProfileSnapshot {
+            configuration_revision: 3,
+            configuration_format: 1,
+            accounts: Vec::new(),
+            tool_credentials: Vec::new(),
+            setup_required: false,
+            portable_schema_version: 4,
+        }
+    }
+
+    #[test]
+    fn job_is_active_includes_retry_scheduled_and_excludes_terminal_states() {
+        for active in [
+            "queued",
+            "pending",
+            "running",
+            "active",
+            "waiting",
+            "reconciling",
+            "retry_scheduled",
+            "RETRY_SCHEDULED",
+        ] {
+            assert!(job_is_active(active), "{active} should be active");
+        }
+        for terminal in ["completed", "failed", "cancelled", "dead", "succeeded"] {
+            assert!(!job_is_active(terminal), "{terminal} should be terminal");
+        }
+    }
+
+    #[test]
+    fn transient_refresh_failures_preserve_loaded_tools_models_and_profile_with_unsynced_state() {
+        let mut state = State::fixture();
+        state.backend.tools = Load::Ready(sample_tools());
+        state.backend.models = Load::Ready(sample_models());
+        state.backend.profile = Load::Ready(sample_profile());
+
+        for kind in [ReadKind::Tools, ReadKind::Models, ReadKind::Profile] {
+            state.backend.revisions.insert(kind, 1);
+            state.complete_backend_read_result(
+                kind,
+                1,
+                Err("503 Service Unavailable".into()),
+                false,
+            );
+            assert!(state.backend.is_unsynced(kind));
+            assert_eq!(
+                state.backend.refresh_error(kind),
+                Some("503 Service Unavailable")
+            );
+        }
+        assert!(matches!(state.backend.tools, Load::Ready(_)));
+        assert!(matches!(state.backend.models, Load::Ready(_)));
+        assert!(matches!(state.backend.profile, Load::Ready(_)));
+
+        // Authority rejection clears loaded data immediately.
+        state.complete_backend_read_result(
+            ReadKind::Models,
+            1,
+            Err("401 Unauthorized".into()),
+            true,
+        );
+        assert!(matches!(state.backend.models, Load::Failed(_)));
+        assert!(!state.backend.is_unsynced(ReadKind::Models));
+
+        // Authority/backend change via disconnect clears all loaded state and unsynced flags.
+        state.disconnect();
+        assert!(matches!(state.backend.tools, Load::Idle));
+        assert!(matches!(state.backend.models, Load::Idle));
+        assert!(matches!(state.backend.profile, Load::Idle));
+        assert!(!state.backend.is_unsynced(ReadKind::Tools));
+        assert!(!state.backend.is_unsynced(ReadKind::Profile));
     }
 }

@@ -102,7 +102,7 @@ export function ConnectForm({
               }}
               disabled={pending || !connectId}
               label="Connect registered workstation"
-              variant="primary"
+              intent="submit"
             >
               {pending ? "Verifying…" : "Connect"}
             </Button>

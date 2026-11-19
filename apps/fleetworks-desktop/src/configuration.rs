@@ -603,6 +603,78 @@ impl State {
             self.configuration.draft_revision,
         );
     }
+
+    pub(crate) fn complete_configuration(
+        &mut self,
+        epoch: u64,
+        revision: u64,
+        draft_revision: u64,
+        expected_revision: u64,
+        action: ConfigurationAction,
+        result: Result<ConfigurationSaved, ClientError>,
+    ) {
+        if self.connection.epoch != epoch || self.configuration.revision != revision {
+            return;
+        }
+        self.configuration.request = None;
+        let conflict = matches!(&result, Err(ClientError::Status(409)));
+        let authority_rejected = matches!(&result, Err(ClientError::Status(401 | 403)));
+        self.configuration.result = match result {
+            Ok(saved) if saved.saved && saved.configuration_revision > expected_revision => {
+                if self.configuration.draft_revision == draft_revision {
+                    self.configuration.saved_draft_revision = draft_revision;
+                    match action {
+                        ConfigurationAction::ProviderAccount => {
+                            self.configuration.account_api_key.replace_text("");
+                            self.configuration.account_api_key.set_secure(true);
+                        }
+                        ConfigurationAction::ToolCredentials => {
+                            self.configuration.tool_primary.replace_text("");
+                            self.configuration.tool_primary.set_secure(true);
+                            self.configuration.tool_fallback.replace_text("");
+                            self.configuration.tool_fallback.set_secure(true);
+                        }
+                        _ => {}
+                    }
+                }
+                self.configuration.message = None;
+                self.maintenance.confirmation = None;
+                self.submissions.invalidate_confirmations();
+                self.classifier_activation.invalidate_confirmation();
+                Load::Ready(saved)
+            }
+            Ok(_) => {
+                let message = "Gateway returned an invalid configuration receipt".to_owned();
+                self.configuration.message = Some(message.clone());
+                Load::Failed(message)
+            }
+            Err(ClientError::Status(409)) => {
+                let message = "Backend configuration changed or needs an explicit current-format reset; refresh and review before retrying".to_owned();
+                self.configuration.message = Some(message.clone());
+                Load::Failed(message)
+            }
+            Err(error) => {
+                let message = error.to_string();
+                self.configuration.message = Some(message.clone());
+                Load::Failed(message)
+            }
+        };
+        if authority_rejected {
+            self.configuration.confirmation = None;
+            let error =
+                "Gateway authorization changed; reconnect before editing configuration.".to_owned();
+            self.backend
+                .failed(crate::backend::ReadKind::Profile, error.clone());
+            self.backend
+                .failed(crate::backend::ReadKind::Models, error.clone());
+            self.backend.failed(crate::backend::ReadKind::Tools, error);
+            return;
+        }
+        if conflict || matches!(self.configuration.result, Load::Ready(_)) {
+            self.backend_read(ReadRequest::Profile);
+            self.backend_read(ReadRequest::Models);
+        }
+    }
 }
 
 impl GatewayEffects {
@@ -619,37 +691,32 @@ impl GatewayEffects {
             let expected_revision = change.expected_revision();
             let action = change.action();
             let result: Result<ConfigurationSaved, ClientError> = match change {
-                ConfigurationChange::ModelRole(request) => client.post("/api/v1/models/defaults/set", &request).await,
-                ConfigurationChange::Account(request) => client.post("/api/v1/profile/accounts/upsert", &request).await,
-                ConfigurationChange::DeleteAccount(request) => client.post("/api/v1/profile/accounts/delete", &request).await,
-                ConfigurationChange::ToolCredentials(request) => client.post("/api/v1/profile/tools/set", &request).await,
+                ConfigurationChange::ModelRole(request) => {
+                    client.post("/api/v1/models/defaults/set", &request).await
+                }
+                ConfigurationChange::Account(request) => {
+                    client
+                        .post("/api/v1/profile/accounts/upsert", &request)
+                        .await
+                }
+                ConfigurationChange::DeleteAccount(request) => {
+                    client
+                        .post("/api/v1/profile/accounts/delete", &request)
+                        .await
+                }
+                ConfigurationChange::ToolCredentials(request) => {
+                    client.post("/api/v1/profile/tools/set", &request).await
+                }
             };
             ui.update(move |state, _| {
-                if state.connection.epoch != epoch || state.configuration.revision != revision { return; }
-                state.configuration.request = None;
-                let conflict = matches!(&result, Err(ClientError::Status(409)));
-                state.configuration.result = match result {
-                    Ok(saved) if saved.saved && saved.configuration_revision > expected_revision => {
-                        if state.configuration.draft_revision == draft_revision {
-                            state.configuration.saved_draft_revision = draft_revision;
-                            match action {
-                                ConfigurationAction::ProviderAccount => state.configuration.account_api_key.replace_text(""),
-                                ConfigurationAction::ToolCredentials => { state.configuration.tool_primary.replace_text(""); state.configuration.tool_fallback.replace_text(""); },
-                                _ => {},
-                            }
-                        }
-                        state.maintenance.confirmation = None;
-                        state.submissions.invalidate_confirmations();
-                        state.classifier_activation.invalidate_confirmation();
-                        Load::Ready(saved)
-                    }
-                    Ok(_) => Load::Failed("Gateway returned an invalid configuration receipt".into()),
-                    Err(ClientError::Status(409)) => Load::Failed("Backend configuration changed or needs an explicit current-format reset; refresh and review before retrying".into()),
-                    Err(error) => Load::Failed(error.to_string()),
-                };
-                if conflict || matches!(state.configuration.result, Load::Ready(_)) {
-                    state.backend_read(ReadRequest::Profile); state.backend_read(ReadRequest::Models);
-                }
+                state.complete_configuration(
+                    epoch,
+                    revision,
+                    draft_revision,
+                    expected_revision,
+                    action,
+                    result,
+                );
             });
         });
         Some(RequestTask(task.abort_handle()))
@@ -693,5 +760,93 @@ mod tests {
         assert!(fallback.contains_key("provider"));
         assert!(fallback.contains_key("account"));
         assert!(fallback.contains_key("model"));
+    }
+
+    #[test]
+    fn transient_configuration_and_refresh_failures_preserve_drafts_last_good_data_and_masked_secrets(
+    ) {
+        use crate::app::Load;
+        use crate::app::State;
+        use crate::backend::ModelDefaults;
+        use crate::backend::ProfileSnapshot;
+        use crate::backend::ReadKind;
+        use crate::backend::ToolCatalog;
+        use fleetworks_contracts::ClientError;
+
+        use super::ConfigurationAction;
+
+        let mut state = State::fixture();
+        state.backend.tools = Load::Ready(ToolCatalog { tools: Vec::new() });
+        state.backend.models = Load::Ready(ModelDefaults {
+            roles: vec!["extractor".into()],
+            defaults: BTreeMap::new(),
+            configuration_revision: 4,
+            catalog: Vec::new(),
+            model_variants: BTreeMap::new(),
+        });
+        state.backend.profile = Load::Ready(ProfileSnapshot {
+            configuration_revision: 4,
+            configuration_format: 1,
+            accounts: Vec::new(),
+            tool_credentials: Vec::new(),
+            setup_required: false,
+            portable_schema_version: 4,
+        });
+        state.configuration.role = rune::TextEdit::new("extractor");
+        state.configuration.tool_provider = rune::TextEdit::new("shodan");
+        state
+            .configuration
+            .tool_primary
+            .replace_text("secret-key-1");
+        state
+            .configuration
+            .account_api_key
+            .replace_text("acct-secret");
+        assert!(state.configuration.tool_primary.is_secure());
+        assert!(state.configuration.account_api_key.is_secure());
+
+        let epoch = state.connection.epoch;
+        let revision = state.configuration.revision;
+        let draft_revision = state.configuration.draft_revision;
+        state.complete_configuration(
+            epoch,
+            revision,
+            draft_revision,
+            4,
+            ConfigurationAction::ToolCredentials,
+            Err(ClientError::Status(503)),
+        );
+
+        assert!(matches!(state.configuration.result, Load::Failed(_)));
+        assert!(state.configuration.message.is_some());
+        assert!(matches!(state.backend.tools, Load::Ready(_)));
+        assert!(matches!(state.backend.models, Load::Ready(_)));
+        assert!(matches!(state.backend.profile, Load::Ready(_)));
+        assert_eq!(state.configuration.role.text, "extractor");
+        assert_eq!(state.configuration.tool_provider.text, "shodan");
+        assert_eq!(state.configuration.tool_primary.text, "secret-key-1");
+        assert!(state.configuration.tool_primary.is_secure());
+        assert!(state.configuration.account_api_key.is_secure());
+
+        // Authority rejection clears loaded backend configuration data.
+        state.complete_configuration(
+            epoch,
+            revision,
+            draft_revision,
+            4,
+            ConfigurationAction::ToolCredentials,
+            Err(ClientError::Status(401)),
+        );
+        assert!(matches!(state.backend.tools, Load::Failed(_)));
+        assert!(matches!(state.backend.models, Load::Failed(_)));
+        assert!(matches!(state.backend.profile, Load::Failed(_)));
+        assert!(!state.backend.is_unsynced(ReadKind::Profile));
+
+        // Authority/backend change via disconnect clears drafts and keeps secret inputs masked.
+        state.disconnect();
+        assert!(state.configuration.role.text.is_empty());
+        assert!(state.configuration.tool_primary.text.is_empty());
+        assert!(state.configuration.tool_primary.is_secure());
+        assert!(state.configuration.account_api_key.is_secure());
     }
 }

@@ -155,6 +155,15 @@ async function fixtures(
         next_cursor: null,
         revision: "r1",
       };
+    else if (path === "articles/search")
+      body = { hits: [], next_cursor: null, revision: "search-fixture" };
+    else if (path === "actors/search")
+      body = {
+        rows: [],
+        index: { state: "ready" },
+        truncated: false,
+        continuation: null,
+      };
     else if (path === "articles/detail")
       body = {
         article,
@@ -504,15 +513,19 @@ test("browse, search, brief, related, topology and reconnect", async ({
     await expect(
       page.getByRole("button", { name: cat, exact: true }),
     ).toBeVisible();
-  await page.getByRole("textbox", { name: "Search articles" }).fill("missing");
+  const headerSearch = page.getByRole("textbox", {
+    name: "Search articles and actors",
+  });
+  await headerSearch.fill("missing");
+  await headerSearch.press("Enter");
   await expect(
-    page.getByText("No articles match this day, category and search."),
+    page.getByText("No article title or description matches this search."),
   ).toBeVisible();
   await page.screenshot({
     path: `${captureDir}/empty-search.png`,
     fullPage: true,
   });
-  await page.getByRole("textbox", { name: "Search articles" }).fill("");
+  await page.getByRole("button", { name: "Clear search" }).click();
   await page.getByRole("button", { name: /^Open Focus Brief:/ }).click();
   await expect.poll(() => f.admissions).toEqual([]);
   await expect(
@@ -569,15 +582,17 @@ test("browse, search, brief, related, topology and reconnect", async ({
   ).toBeVisible();
   f.offline();
   await page.clock.fastForward(60_000);
+  // Transient same-scope readiness failure keeps Workspace mounted and offers local Retry.
   await expect(
-    page.getByRole("alert").filter({ hasText: "Failed to fetch" }),
+    page.getByRole("button", {
+      name: "Select node Port authority, entity",
+      exact: true,
+    }),
   ).toBeVisible();
-  await expect(page.getByLabel("API offline", { exact: true })).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Jobs", exact: true }),
-  ).toHaveCount(0);
+  await expect(page.getByLabel(/^API connection unsynced/)).toBeVisible();
   f.online();
-  await page.getByRole("button", { name: "Connect / retry" }).click();
+  await page.getByRole("button", { name: "Retry connection" }).click();
+  await expect(page.getByLabel("API connected", { exact: true })).toBeVisible();
   await expect(
     page.getByRole("button", {
       name: "Select node Port authority, entity",
@@ -667,7 +682,9 @@ test("selection controls support keyboard activation and visible focus", async (
   await expect(
     page.getByRole("button", { name: /^Open Focus Brief:/ }),
   ).toBeVisible();
-  const search = page.getByRole("textbox", { name: "Search articles" });
+  const search = page.getByRole("textbox", {
+    name: "Search articles and actors",
+  });
   await search.focus();
   await search.press("Tab");
   // Header search precedes the category rail in the reference layout and DOM.
@@ -1012,9 +1029,7 @@ for (const changeCategory of [false, true]) {
       el.scrollTop = el.scrollHeight;
     });
     await expect
-      .poll(
-        () => cursors.filter((c) => c === "governance:opaque-next").length,
-      )
+      .poll(() => cursors.filter((c) => c === "governance:opaque-next").length)
       .toBe(1);
     await expect(
       page.getByRole("progressbar", {
@@ -1024,9 +1039,9 @@ for (const changeCategory of [false, true]) {
     ).toBeVisible();
     for (let i = 0; i < 5; i++)
       await scroller.evaluate((el) => el.dispatchEvent(new Event("scroll")));
-    expect(
-      cursors.filter((c) => c === "governance:opaque-next"),
-    ).toHaveLength(1);
+    expect(cursors.filter((c) => c === "governance:opaque-next")).toHaveLength(
+      1,
+    );
     await page.screenshot({
       path: `${captureDir}/next-page-loading-${changeCategory}.png`,
       fullPage: true,
@@ -1419,10 +1434,14 @@ test("desktop launcher returns to the retained intelligence bulletin", async ({
   await fixtures(page);
   await gotoBulletin(page);
   await expect(page.getByText(a.title)).toBeVisible();
-  await page.getByRole("button", { name: "server", exact: true }).click();
+  await page.getByRole("button", { name: "Backend", exact: true }).click();
   await page.getByRole("button", { name: "Open Intel", exact: true }).click();
   await expect(page.getByText(a.title)).toBeVisible();
-  await page.getByRole("textbox", { name: "Search articles" }).fill("missing");
+  const search = page.getByRole("textbox", {
+    name: "Search articles and actors",
+  });
+  await search.fill("missing");
+  await search.press("Enter");
   await expect(page.getByText(a.title)).toHaveCount(0);
 });
 
@@ -1544,9 +1563,7 @@ test("global All follows one server cursor stream and retains rows across a fail
   ).toBe(true);
   expect(
     reads
-      .filter(
-        (read) => read.category === "governance" && read.cursor !== null,
-      )
+      .filter((read) => read.category === "governance" && read.cursor !== null)
       .every((read) => read.cursor === cursor),
   ).toBe(true);
   await expect(
@@ -1659,7 +1676,7 @@ for (const width of [1536, 1440, 768, 390, 320]) {
         .poll(() =>
           tile.evaluate((element) => getComputedStyle(element).borderTopColor),
         )
-        .toContain("198, 165, 110");
+        .toContain("36, 220, 227");
       await page.mouse.move(0, 0);
     }
     await launcher.focus();
@@ -1667,15 +1684,17 @@ for (const width of [1536, 1440, 768, 390, 320]) {
       .poll(() =>
         tile.evaluate((element) => getComputedStyle(element).borderTopColor),
       )
-      .toContain("198, 165, 110");
+      .toContain("36, 220, 227");
     await page.keyboard.press("Enter");
     await expect(
       page.getByRole("heading", { name: "Intelligence bulletin" }),
     ).toBeVisible();
     await expect(page.getByText(a.title)).toBeVisible();
     await expectFixedStatusBar(page);
-    await page.getByRole("textbox", { name: "Search articles" }).fill("harbor");
-    await page.getByRole("button", { name: "server", exact: true }).click();
+    await page
+      .getByRole("textbox", { name: "Search articles and actors" })
+      .fill("harbor");
+    await page.getByRole("button", { name: "Backend", exact: true }).click();
     const returning = page.getByRole("button", {
       name: "Open Intel",
       exact: true,
@@ -1683,7 +1702,9 @@ for (const width of [1536, 1440, 768, 390, 320]) {
     await returning.focus();
     await returning.press("Space");
     await expect(
-      page.getByRole("textbox", { name: "Search articles" }),
+      page.getByRole("textbox", {
+        name: "Search articles and actors",
+      }),
     ).toHaveValue("harbor");
     await expectFixedStatusBar(page);
   });
@@ -2171,7 +2192,7 @@ test("Home, Bulletin, Brief and inference Topology routes survive reload and his
     .getByRole("button", { name: "Return to Bulletin", exact: true })
     .click();
   await expect(page).toHaveURL(/\/bulletin$/);
-  await page.getByRole("button", { name: "server", exact: true }).click();
+  await page.getByRole("button", { name: "Backend", exact: true }).click();
   await expect(page).toHaveURL(/\/home$/);
   expect(state.requests).toContain("articles/detail");
 });

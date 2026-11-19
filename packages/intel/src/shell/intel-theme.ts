@@ -1,41 +1,46 @@
-/** Matte Fleetworks paint; layout, typography and semantic colors stay separate. */
+/**
+ * Matte deep-space paint: one #060709 canvas, charcoal tonal steps, cool gray text.
+ * Mirrors native theme.rs; palette-contrast.test.ts keeps the two in step.
+ * Status colors (always paired with a label or icon): cyan live/running, blue info,
+ * mint healthy, amber warning/stale, rose error, violet queued/paused, slate unknown.
+ */
 export const intelColors = {
   bg: "#060709",
-  panel: "#0B0C0F",
-  panelRaised: "#111317",
+  panel: "#0B0F14",
+  panelRaised: "#121820",
   inset: "#060709",
   scrim: "rgba(6,7,9,0.9)",
-  border: "rgba(243,238,228,0.02)",
-  borderDecorative: "#3A3833",
-  satinControlEdge: "rgba(243,238,228,0.03)",
-  borderStrong: "#898274",
-  divider: "#3A3833",
-  text: "#F3EEE4",
-  dim: "#D6D2C4",
-  muted: "#B8B4A8",
-  faint: "#B8B4A8",
-  accent: "#C6A56E",
-  accentPressed: "#C4A265",
-  accentHover: "#D8BD8C",
+  border: "rgba(213,220,229,0.02)",
+  borderDecorative: "#2B343F",
+  satinControlEdge: "rgba(213,220,229,0.03)",
+  borderStrong: "#647587",
+  divider: "#2B343F",
+  text: "#D5DCE5",
+  dim: "#A8B6C5",
+  muted: "#8192A4",
+  faint: "#8192A4",
+  accent: "#24DCE3",
+  accentPressed: "#1BB8C2",
+  accentHover: "#68E7EB",
   onAccent: "#060709",
-  selectionSurface: "#322C22",
-  accentSoft: "rgba(198,165,110,0.10)",
-  accentBorder: "rgba(198,165,110,0.75)",
-  select: "#D8BD8C",
-  textSelection: "#322C22",
-  success: "#5FD39A",
-  danger: "#F06A8A",
-  dangerSoft: "rgba(240,106,138,0.12)",
-  cool: "#5AB8F0",
-  warning: "#E5B45B",
-  fab: "#111317",
+  selectionSurface: "#10272D",
+  accentSoft: "rgba(36,220,227,0.10)",
+  accentBorder: "rgba(36,220,227,0.75)",
+  select: "#68E7EB",
+  textSelection: "#10272D",
+  success: "#23DFA0",
+  danger: "#F280A0",
+  dangerSoft: "rgba(242,128,160,0.12)",
+  cool: "#53BAF5",
+  warning: "#F1C84B",
+  fab: "#121820",
 };
 /** Channel identifiers, not severity, confidence or API-health indicators. */
 export const intelMetricColors = {
-  cpu: "#5FD39A",
-  memory: intelColors.cool,
-  disk: "#C08CF5",
-  network: "#E06AA0",
+  cpu: "#24DCE3",
+  memory: "#BA77F2",
+  disk: "#35AFFF",
+  network: "#F28C65",
 };
 export const intelKindColors = {
   actor: "#FFB347",
@@ -81,13 +86,13 @@ export const intelType = {
 /** Graph-only treatments, matching the evidence topology reference. */
 export const topologyColors = {
   bg: "#060709",
-  panel: "#0B0C0F",
-  grid: "rgba(137,130,116,0.09)",
-  axis: "rgba(137,130,116,0.18)",
-  accent: "#C6A56E",
-  edge: "#A79B80",
+  panel: "#0B0F14",
+  grid: "rgba(100,117,135,0.09)",
+  axis: "rgba(100,117,135,0.18)",
+  accent: "#24DCE3",
+  edge: "#8E9BB0",
   labelBg: "#060709",
-  ghost: "#0B0C0F",
+  ghost: "#0B0F14",
 };
 
 export const intelMotion = {
@@ -103,11 +108,11 @@ export const intelMotion = {
 export const intelStatus = Object.fromEntries(
   Object.entries({
     idle: intelColors.muted,
-    queued: intelColors.warning,
-    running: intelColors.cool,
+    queued: "#B48EFF",
+    running: "#24DCE3",
     succeeded: intelColors.success,
     failed: intelColors.danger,
-    stale: "#C08CF5",
+    stale: intelColors.warning,
   }).map(([state, color]) => [state, { color, glow: "none" }]),
 ) as Record<
   "idle" | "queued" | "running" | "succeeded" | "failed" | "stale",

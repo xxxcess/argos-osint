@@ -120,6 +120,20 @@ def summarize_checks(rollup: list[dict] | None) -> dict:
     return {"counts": counts, "failed": failed, "pending": pending}
 
 
+def verification_passes(rollup: list[dict] | None) -> dict:
+    checks = rollup or []
+    return {
+        stage: summarize_checks([
+            check for check in checks
+            if (check.get("name") or check.get("context")) == name
+        ])
+        for stage, name in (
+            ("first", "Fleetworks required"),
+            ("second", "Fleetworks second pass"),
+        )
+    }
+
+
 def load_state(path: Path, hours: float, reset: bool) -> dict:
     now = datetime.now(timezone.utc)
     if path.exists() and not reset:
@@ -174,7 +188,9 @@ def main() -> int:
         branch = pr["headRefName"]
         head_sha = pr["headRefOid"]
         spec_match = SPEC_TITLE_RE.match(title.strip())
-        checks = summarize_checks(pr.get("statusCheckRollup"))
+        rollup = pr.get("statusCheckRollup")
+        checks = summarize_checks(rollup)
+        passes = verification_passes(rollup)
         prev = state["prs"].get(num, {})
         addressed_ids = set(prev.get("addressed_cursor_comments", []))
 
@@ -200,6 +216,7 @@ def main() -> int:
             "draft": bool(pr.get("isDraft")),
             "url": pr["url"],
             "checks": checks["counts"],
+            "verification_passes": passes,
             "failed_checks": checks["failed"],
             "pending_checks": len(checks["pending"]),
             "cursor_security_findings": cursor_findings,
@@ -218,6 +235,7 @@ def main() -> int:
             "head_sha": head_sha,
             "kind": "spec_impl" if spec_match else "babysit",
             "last_checks": checks["counts"],
+            "verification_passes": passes,
             "last_unaddressed_cursor_count": len(unaddressed_cursor),
         }
 

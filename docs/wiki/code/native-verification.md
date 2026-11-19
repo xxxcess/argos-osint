@@ -23,6 +23,13 @@ affected by Cargo target-directory overrides. Keep one build owner and freeze th
 selected source before generating final evidence. A dirty checkout is recorded
 as dirty and does not establish immutable commit-only provenance.
 
+Scenes `assistant-open`, `assistant-opaque`, `command-panel` and
+`command-panel-opaque` draw the Assistant dock (with a synthetic conversation)
+and the command overlay in their glass and opaque forms, and `catalog` and
+`catalog-opaque` draw the component catalog. The Mac lane captures all six; the
+Linux lane captures the glass ones. They send nothing and use no
+backend.
+
 A selected baseline capture:
 
 ```sh
@@ -98,7 +105,9 @@ free of backend Docker engines.
 | Unit tests | `not_run_by_this_command`; retain scoped test results separately |
 | Backend/inference | Not exercised; source-to-visible search and real model/checkpoint gates remain separate |
 
-The [dual-Mac workflow](../../../.github/workflows/fleetworks-native.yml) (`package`
+The [Linux x86_64 workflow](../../../.github/workflows/fleetworks-native-linux.yml) supplies the first-pass debug package, scoped tests and Rune artifacts, including the settled `backend-choice` fixture. The `backend-choice-opening` and `backend-choice-reduced-motion` scenes capture the first pose and the accessibility fallback. Review the package as soon as it is available for the exact head and record the visual verdict. [Dispatch the second pass](ci.md#nightly-gsd-order) when first-pass CI is green. For a shared backend change, exercise the same affected native operation with Embedded IPC and Distributed HTTP under equivalent capabilities and authority.
+
+The second-pass [dual-Mac workflow](../../../.github/workflows/fleetworks-native.yml) (`package`
 and `verify` jobs on `macos-15-intel` and `macos-15`) runs `cargo fmt --check`,
 scoped `fleetworks-desktop`, `fleetworks-workstation` and `fleetworks-contracts`
 unit tests, and then invokes this same `native-ui --agent --require-clean`
@@ -110,12 +119,7 @@ exit does not supply either result. Adding or renaming native scenes or
 interaction scripts requires coordinating `.github/workflows/fleetworks-native.yml`
 updates with Code Architect.
 
-When the user is available for interactive review, a passing app artifact for the
-local Mac architecture starts native review before the remaining hosted matrix
-finishes. Record the artifact's exact revision, close the running app, rebuild the
-isolated backend and native app locally, and open the app. Track unfinished Linux,
-storage and installed-app checks separately; artifact creation alone is not a
-local behavior pass.
+For the Linux first pass, use the matching artifact on the review Linux host and record exact revision, backend type, interaction results and remaining gaps. The second pass can add matching-hardware Mac review using its own artifact. Fixture review, live behavior and installed-app evidence remain separate.
 
 The [offline Python fixtures](../../../scripts/test_fleetworks_native_verify.py)
 cover selection/artifact-path fences, implicit debug cache reuse, bounded profiles,
@@ -128,9 +132,60 @@ capture before handoff. Actual helper tests/rendering must be executed by the in
 the active acceptance tracker (for the cutover baseline, see
 [cutover acceptance](../../../.planning/2026-11-11-rune-macos-cutover/acceptance.md)).
 
+## Matte Canvas target review
+
+The approved [Matte Canvas theme](../../design/matte-canvas/theme.md),
+[interaction/state contract](../../design/matte-canvas/interaction-state.md) and
+[motion guide](../../design/matte-canvas/motion.md) define a **target**, not a
+recorded native implementation or verification result. The
+[implementation handoff](../../../.planning/2026-11-16-matte-canvas/handoff.md)
+maps the affected production symbols. Existing verification commands and
+historical evidence above remain applicable and unchanged. Run product checks
+only within the task's authorized verification scope.
+
+Register affected production-view scenes before selecting them with the existing
+helper; do not invent a scene name or infer availability from a mockup filename.
+Use controlled Runtime effects for state ordering and scripts for input/scroll
+behavior, then inspect captures and real temporal sequences separately.
+
+| Target | Focused review |
+| --- | --- |
+| [Workstation](../../design/matte-canvas/mockups/01-workstation-status.png) and [compact Workstation](../../design/matte-canvas/mockups/04-compact-workstation.png) | Match approved hierarchy and spacing; smooth matte cards/rows, softly blended canvas, cool text, semantic status and stable compact grids. Loading and settled telemetry must share the measured row/column decision. |
+| [Gateway setup](../../design/matte-canvas/mockups/02-setup-gateway.png) | Preserve real setup, focus and credential/pairing behavior while matching the composition. Utility controls remain smooth matte. Only Submit/Confirm/Create/Delete actions receive coarse moon-rock material. |
+| [Jobs and Logs](../../design/matte-canvas/mockups/03-jobs-logs.png) | Continuous scrolling replaces Previous/Next/page numbers without changing opaque cursor/authorization contracts. Verify stable row identity, anchor/focus/selection, boundary loading/retry, finite cache behavior and no extra log toolbar. |
+| Backend chooser → setup → service loading/live state | Complete logo materials and two keyboard-usable choices from the first frame. Check the three-second orbit for clearance, settled and reduced-motion poses, Back focus without replay, explicit Start and Connect, and the shared canvas throughout. |
+
+Exercise native **640×480 and 1600×900 at 1×/2×**, plus the affected measured
+breakpoints and actual production Linux preferences. Reduced motion must retain
+the same static geometry. Inspect functional focus and error affordances after
+decorative panel strokes are removed. Compare the whole flow at the same exposure
+and size; approved mockups are design references, never substitute Runtime PNGs.
+
+Required temporal cases are initial load → data/verified empty; repeated unchanged
+refresh; empty log success → several empty follows; readiness refresh failure →
+retry → recovery; late obsolete query/scope/generation replies; mutation acceptance
+versus completion; and active interruption versus terminal completion. Headings,
+connection health and retained content must not be remounted or renamed per poll.
+Skeletons retain a steady base with a translated cool sheen; completion/error must
+not wait for an animation or cosmetic timer.
+
+For continuous lists, drive repeated boundary events, duplicate/repeated/empty
+cursors, tail failures and local retries, then invalidate scope during an in-flight
+read. Assert one admitted read per query/cursor, deduplicated rows, no-progress
+pause, honest end-versus-bound state and no all-backend fallback. Insert, prepend
+and evict while the reader is scrolled away or a row is focused/expanded: preserve
+the row/pixel anchor, and resume log live-edge following only when the reader
+returns. Record chosen cache/overscan caps and observed memory, rather than calling
+unbounded accumulation continuous scrolling.
+
+Keep separate evidence for documentation review, unit/Runtime assertions,
+capture generation, actual visual/temporal inspection and installed-app behavior.
+Static screenshots alone cannot prove absence of flicker or scroll jumps. This
+target-review addition records no new product test, capture or GUI pass.
+
 ## Dispatchable UI visual review
 
-After an agent freezes a native or web UI PR revision, dispatch
+Use the normal Linux CI artifacts for first-pass native review. For additional Mac or web capture after the first pass, dispatch
 [`ui-visual-review.yml`](../../../.github/workflows/ui-visual-review.yml) with the
 open PR number, full head SHA and the smallest affected capture selection. The
 workflow checks out the exact revision, generates Rune/Playwright images, retains

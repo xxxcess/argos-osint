@@ -8,7 +8,7 @@ Detailed agent rules, loaded before editing or running checks.
 
 Before running verification tests, ask the user to choose the scope once unless it is already authorized in the session: (1) verify feature functionality through scoped checks, then hand off native review on the user's local machine, or (2) run all applicable verification checks until implementation issues are resolved. Scope (1) has three phases: static formatting/contract checks, targeted feature tests through the real affected code path, and a handoff listing exact native review steps plus any unrun Docker, embedded, installed-app or platform gates. Confirm where builds and tests run. When the user selects GitHub CI, push a task branch and inspect checks for its exact revision; do not compile locally until a requested native review requires it. Scope (2) continues through all applicable gates under the resource and platform rules below. The gate commands below describe authorized verification; they do not override this scope choice.
 
-For native or web UI changes in an open PR, dispatch the [visual review workflow](native-verification.md#dispatchable-ui-visual-review) after source freeze with exact PR/head and affected scenes or web surfaces. Inspect generated images, post selected images inline to the PR and record their durable docs or exact-head release reference. This visual phase supplements the selected functionality checks; it does not change the agreed local-versus-CI build scope.
+For first-pass native UI changes, review the exact-head Linux app package and inspect the Rune captures in the CI artifact. Record the visual verdict on the PR. The [visual review workflow](native-verification.md#dispatchable-ui-visual-review) supplies additional selected captures after the first pass. Record durable evidence in the affected docs or an exact-head release.
 
 Browser checks use the repository Playwright runner. Its development server sets `ARGOS_WEB_TEST_DEV=1` to isolate Next output and locks under `.agent-scratch/next-web-tests`; custom test configurations must inherit this setting. Different ports alone do not isolate Next’s development lock. Preserve the user’s `.next` cache and frontend process.
 
@@ -21,7 +21,7 @@ ARGOS_WEB_TEST_DEV=1 pnpm check:web-build
 
 Without that setting, both retain the normal launcher `.next` behavior. The isolated build/check pair does not establish a production browser pass or the full frontend gate. After that pair, `ARGOS_WEB_TEST_DEV=1 pnpm test:e2e` runs the repository’s default production browser profile against the same isolated output. Development uses `ARGOS_WEB_PROFILE=dev pnpm test:e2e` and always isolates output. Never stop the user’s launcher or remove its lock to make verification run.
 
-Rust 1.95.0 is pinned. Agents build through `python3 scripts/agent_cargo.py … --locked`, which writes to `target/agents`. Leave `ARGOS_EMBED` unset. The wrapper also removes inherited values. Use `cargo fmt` directly. Keep `target/debug` for the user's builds. Local checks use the host's native architecture.
+Rust 1.95.0 is pinned. Agents build through `python3 scripts/agent_cargo.py … --locked`, which writes to `target/agents` to avoid evicting the user's `target/debug` cache. Leave `ARGOS_EMBED` unset. The wrapper also removes inherited values. Use `cargo fmt` directly. Local checks use the host's native architecture.
 
 Run `cargo fmt --all -- --check` before costly Rust checks. If it fails, inspect the dirty diff, format the affected task-owned files under the existing authorization, preserve semantics and unrelated work, then rerun the check. Formatting failure must be resolved or reported; never silently waive the gate.
 
@@ -31,7 +31,7 @@ For Fleetworks client, service, deployment or web work, start with the [scope pl
 
 ### Development loops: native app and Docker
 
-Fleetworks has a Rune macOS and Linux x86_64 client, an independently operated Linux backend and Intel Web. The app connects to the gateway; direct Docker Compose operates services. Pick the shortest loop that exercises the changed contract, then widen. The commands below are the fast paths; deployment details stay in the [deployment guide](../../../deploy/README.md).
+Fleetworks has a Rune macOS and Linux x86_64 client, an Embedded companion, a Distributed Linux backend and Intel Web. Docker Compose operates Distributed services. Use explicit Start in the app for Embedded. Pick the shortest loop that exercises the changed contract, then widen. The commands below are the fast paths; deployment details stay in the [deployment guide](../../../deploy/README.md).
 
 [![Fleetworks development loops](../../diagrams/dev-loops.svg)](../../diagrams/dev-loops.html)
 
@@ -144,7 +144,25 @@ Never run blanket `cargo clean`, remove locks to bypass contention or erase user
 
 ### Targeted local Rust builds and tests (fast iteration)
 
-Detect the native host with `uname -ms` and `rustc -vV | grep '^host:'`. Reuse one feature graph and `target/agents`. Set `CARGO_BUILD_JOBS` from memory pressure. For an affected embedded contract, keep the workspace's compatibility features `embedded,nlp,classifier`.
+Detect the native host with `uname -ms` and `rustc -vV | grep '^host:'`. Reuse one feature graph and `target/agents`. The workspace `.cargo/config.toml` sets `jobs = 2` to avoid OOM on hosts with 8 GB RAM — override with `CARGO_BUILD_JOBS=4` on larger machines.
+
+**Desktop app (lightweight).** The native app depends only on `fleetworks-contracts`, `fleetworks-workstation`, and `fleetworks-broker` — no RocksDB, tract-core, or tokenizers. Build or test just the app:
+
+```sh
+cargo check -p fleetworks-desktop
+cargo test -p fleetworks-desktop --lib
+```
+
+In RustRover, use the **Test fleetworks-desktop** run configuration (`.idea/runConfigurations/`) instead of the default workspace test. The heavy backend crates are excluded from IDE indexing (`.idea/argos-osint.iml`) to save memory and disk.
+
+**Companion backend.** The companion (`argos-api-host`) enables `embedded,nlp,classifier` features by default, pulling in RocksDB, tract-core and tokenizers. Build it only when needed:
+
+```sh
+cargo check --manifest-path services/api-host/Cargo.toml
+python3 scripts/fleetworks_candidate.py build-native --target host --profile debug
+```
+
+**Workspace-wide backend tests.** For an affected embedded contract, keep the workspace's compatibility features `embedded,nlp,classifier`:
 
 ```sh
 python3 scripts/agent_cargo.py check --locked -p argos-osint-core
@@ -181,7 +199,7 @@ env -u ARGOS_SURREAL_MODE -u ARGOS_SURREAL_BIN -u ARGOS_SURREAL_REQUIRED \
 
 The gate runs format, Clippy, workspace tests, actual service-host CLI help and required embedded storage. Its broad workspace test phase uses `--no-fail-fast` to collect independent target failures while retaining a failing exit status; the earlier formatting and compile/lint preflight still stop on errors. Parent mode variables stay unset so mode-selected storage runs once. Targeted storage tests set mode and required execution explicitly. Embedded storage retains workspace library/binary unit targets to preserve dependency-feature unification; those units and some native-only fixtures execute in both phases. Selecting only storage integration targets can create another cold graph. CLI help prints Cargo progress while building the normal service executable and may require a separate runtime graph.
 
-Pull requests into `dev`, `nightly` and `main` run selected Fleetworks checks on creation and every pushed update. Affected Linux storage changes select embedded compatibility; the normal Rune Mac lanes stay engine-free. Direct `gh workflow run embedded.yml --ref <branch>` retains the four-platform diagnostic. Integration pushes publish only verified, source-scoped [channel artifacts](versioning.md#release-automation). Dispatch `mutation.yml` for hosted mutation evidence. Once changes are published, inspect the checks for the exact revision with `gh pr checks`, `gh run list` or `gh run view --log-failed`. `.github` remains Code Architect-owned. MiniLM requires explicit opt-in.
+Pull requests into `dev`, `nightly` and `main` run affected Linux x86_64 app and AMD64 backend checks on creation and every pushed update. After first-pass CI succeeds, dispatch the [second pass](ci.md#nightly-gsd-order) for the same head. Track exact-head Linux visual review in parallel. Affected storage changes select embedded compatibility. The Rune Mac client lanes stay engine-free. Direct `gh workflow run embedded.yml --ref <branch>` retains the four-platform diagnostic. Integration pushes publish only verified, source-scoped [channel artifacts](versioning.md#release-automation). Dispatch `mutation.yml` for hosted mutation evidence. Once changes are published, inspect the checks for the exact revision with `gh pr checks`, `gh run list` or `gh run view --log-failed`. `.github` remains Code Architect-owned. MiniLM requires explicit opt-in.
 
 ## Storage facts
 

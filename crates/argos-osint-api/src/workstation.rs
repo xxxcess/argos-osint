@@ -195,7 +195,9 @@ struct Observations {
 #[derive(Clone)]
 pub struct ReadinessOwners {
     deployment_id: String,
+    platform_display_name: Option<String>,
     probes: Vec<ReadinessProbe>,
+    local_nlp: Option<bool>,
     configured_inputs: Vec<fleetworks_contracts::readiness::ConfiguredMaintenanceInput>,
     cache: Arc<Mutex<Option<Observations>>>,
 }
@@ -218,10 +220,29 @@ impl ReadinessOwners {
         }
         Ok(Self {
             deployment_id,
+            platform_display_name: None,
             probes,
+            local_nlp: None,
             configured_inputs: Vec::new(),
             cache: Arc::new(Mutex::new(None)),
         })
+    }
+    /// Record the in-process Compromise startup probe, not an HTTP service or model inference.
+    pub fn with_local_nlp(mut self, ready: bool) -> Self {
+        self.local_nlp = Some(ready);
+        self
+    }
+    /// Set the operator-chosen backend label read from deployment metadata at startup.
+    /// An invalid stored label is an error, so a corrupt value is never shown.
+    pub fn with_platform_display_name(mut self, name: Option<String>) -> anyhow::Result<Self> {
+        self.platform_display_name = match name {
+            Some(name) => Some(
+                argos_osint_core::storage::connect_registry::validate_platform_display_name(&name)
+                    .map_err(|_| anyhow::anyhow!("invalid platform display name"))?,
+            ),
+            None => None,
+        };
+        Ok(self)
     }
     /// Load a bounded operator-owned startup configuration, never a client-chosen path.
     /// Call only from a blocking startup worker. Dataset bytes remain staged/validated separately.
@@ -591,6 +612,28 @@ async fn collect(
     for service in services {
         checks.extend(service);
     }
+    if let Some(ready) = owners.local_nlp {
+        checks.retain(|check| check.id != ReadinessCheckId::Nlp);
+        checks.push(check(
+            ReadinessCheckId::Nlp,
+            if ready {
+                ReadinessState::Ready
+            } else {
+                ReadinessState::Unavailable
+            },
+            if ready {
+                "local_compromise_ready"
+            } else {
+                "local_compromise_unavailable"
+            },
+            if ready {
+                "In-process Compromise completed its startup annotation probe"
+            } else {
+                "Optional in-process Compromise engine is unavailable; base IPC remains available"
+            },
+            &at,
+        ));
+    }
     for id in [
         ReadinessCheckId::Brain,
         ReadinessCheckId::Control,
@@ -886,6 +929,9 @@ pub(crate) async fn read_value(
     }
     let mut response = WorkstationReadiness::new(owners.deployment_id.clone(), observed_at, checks);
     response.configured_inputs = configured_inputs;
+    if let Some(name) = &owners.platform_display_name {
+        response = response.with_platform_identity(name.clone());
+    }
     if let Some(context) = context {
         response.registration = Some(RegistrationReceipt::new(
             context.deployment_id,
@@ -1146,6 +1192,30 @@ mod tests {
                 .configuration_revision,
             0
         );
+    }
+
+    #[test]
+    fn platform_display_name_is_optional_validated_and_never_host_derived() {
+        let owners = ReadinessOwners::new("deployment-a".into(), vec![]).expect("owners");
+        assert!(owners.platform_display_name.is_none());
+        let named = owners
+            .clone()
+            .with_platform_display_name(Some("  Studio rack  ".into()))
+            .expect("valid label");
+        assert_eq!(named.platform_display_name.as_deref(), Some("Studio rack"));
+        let cleared = named
+            .with_platform_display_name(None)
+            .expect("absent label is allowed");
+        assert!(cleared.platform_display_name.is_none());
+        for bad in ["", "   ", "line\nbreak", &"x".repeat(65)] {
+            assert!(
+                owners
+                    .clone()
+                    .with_platform_display_name(Some(bad.to_owned()))
+                    .is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
     }
 
     #[test]

@@ -1,0 +1,109 @@
+{
+  "schema": 1,
+  "accepted_direction": "matte-canvas",
+  "baseline": {
+    "repository": "xxxcess/argos-osint",
+    "branch": "nightly",
+    "commit": "00b700afd77ddac6cba2e2bd7ae91ab3802b7197"
+  },
+  "audit_date": "2026-11-16 America/New_York",
+  "implementation_status": "approved design; application runtime unchanged by this documentation update",
+  "assets": [
+    {
+      "path": "docs/design/matte-canvas/mockups/01-workstation-status.png",
+      "role": "Approved wide overview",
+      "sha256": "26d09931de15d5fc2c239d109bcfc8a43e8bfc4b647e1469bb5ff4f93e446590",
+      "bytes": 1447740,
+      "evidence": "generated concept / design reference; not a native or web runtime capture",
+      "dimensions": [
+        1586,
+        992
+      ],
+      "frames": 1
+    },
+    {
+      "path": "docs/design/matte-canvas/mockups/02-setup-gateway.png",
+      "role": "Approved setup with textured form submission",
+      "sha256": "4bd24ed85a1f8b1a2b7a5ad6ae8559b98ba9941fb8c9e2e0c8207f05f1e36b90",
+      "bytes": 1387307,
+      "evidence": "generated concept / design reference; not a native or web runtime capture",
+      "dimensions": [
+        1586,
+        992
+      ],
+      "frames": 1
+    },
+    {
+      "path": "docs/design/matte-canvas/mockups/03-jobs-logs.png",
+      "role": "Approved continuous queue and localized loading",
+      "sha256": "35d6bd026137fe2e27cb4a6a989b9f9aaa5e921ce3093f4c93708a0caad5b984",
+      "bytes": 1542901,
+      "evidence": "generated concept / design reference; not a native or web runtime capture",
+      "dimensions": [
+        1585,
+        992
+      ],
+      "frames": 1
+    },
+    {
+      "path": "docs/design/matte-canvas/mockups/04-compact-workstation.png",
+      "role": "Approved compact overview",
+      "sha256": "7519aaf4cdc9dfec96521eebf75576eb742fadc1e237688157fd92b8cddbd639",
+      "bytes": 1639699,
+      "evidence": "generated concept / design reference; not a native or web runtime capture",
+      "dimensions": [
+        1070,
+        1470
+      ],
+      "frames": 1
+    },
+    {
+      "path": "assets/brand/source/fleetworks-liquid-metal-glass.png",
+      "role": "Immutable approved material source",
+      "sha256": "1ae553782431da7649a1d88accdacc9076c3a039f1c2b5c0018f5998d7d70112",
+      "bytes": 904172,
+      "evidence": "generated concept / design reference; not a native or web runtime capture",
+      "dimensions": [
+        1671,
+        941
+      ],
+      "frames": 1
+    },
+    {
+      "path": "assets/brand/reference/fleetworks-quiet-orbit.gif",
+      "role": "Selected sixteen-second animation reference (+30% triangle orbit elevation)",
+      "sha256": "772a48940527a5fe04121bb7cc5aec443cf33ffbec9ec518b960ac041096c797",
+      "bytes": 3081862,
+      "evidence": "generated concept / design reference; not a native or web runtime capture",
+      "dimensions": [
+        800,
+        450
+      ],
+      "frames": 240
+    },
+    {
+      "path": "assets/brand/reference/fleetworks-quiet-orbit.mp4",
+      "role": "Higher tonal fidelity motion reference (+30% triangle orbit elevation)",
+      "sha256": "d3871331a96c2a8ffcc859c10cadc63992b70fe428751d990983e463f76fa650",
+      "bytes": 2481785,
+      "evidence": "generated concept / design reference; not a native or web runtime capture",
+      "dimensions": [
+        800,
+        450
+      ],
+      "frames": 480
+    },
+    {
+      "path": "assets/brand/reference/fleetworks-quiet-orbit.png",
+      "role": "Orbit poster (+30% triangle orbit elevation)",
+      "sha256": "c247cf0cc97c1beec3ad077e372b8bbb8ef032ed070e3a58eb714515369b5463",
+      "bytes": 216966,
+      "evidence": "generated concept / design reference; not a native or web runtime capture",
+      "dimensions": [
+        800,
+        450
+      ],
+      "frames": 1
+    }
+  ]
+}

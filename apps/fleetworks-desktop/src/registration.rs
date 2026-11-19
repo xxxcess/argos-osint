@@ -175,7 +175,8 @@ impl State {
         };
         if self.is_local_backend() && capabilities.links.intel_web.is_none() {
             self.registration.message = Some(
-                "Intel Web handoff is available only when connected to a remote gateway.".into(),
+                "Intel Web handoff is available only when connected to a distributed gateway."
+                    .into(),
             );
             return;
         }

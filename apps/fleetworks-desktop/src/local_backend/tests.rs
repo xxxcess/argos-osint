@@ -229,6 +229,38 @@ fn build_companion_command_scrubs_remote_secrets_and_sets_local_ipc_args() {
 }
 
 #[tokio::test]
+async fn early_embedded_startup_failure_displays_sanitized_stderr() {
+    let temp = tempfile::tempdir().expect("private fixture directory");
+    let root = temp
+        .path()
+        .canonicalize()
+        .expect("canonical fixture directory");
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+        .expect("make state directory private");
+    let binary = root.join(COMPANION_BINARY_NAME);
+    std::fs::write(
+        &binary,
+        b"#!/bin/sh\nprintf '\\033[31mstartup-marker\\033[0m\\n' >&2\nexit 1\n",
+    )
+    .expect("write synthetic companion");
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700))
+        .expect("make companion executable");
+
+    let error = LocalBackendProcess::spawn(&binary, &root)
+        .await
+        .expect_err("synthetic companion exits before HelloAck");
+    let message = error.to_string();
+    assert!(
+        message.contains("Hello/HelloAck handshake failed"),
+        "{message}"
+    );
+    assert!(message.contains("startup-marker"), "{message}");
+    assert!(!message.contains("Ready RPC"));
+    assert!(!message.contains('\u{1b}'));
+    assert!(!message.contains("[31m") && !message.contains("[0m"));
+}
+
+#[tokio::test]
 async fn local_ipc_handshake_capabilities_missing_optional_nlp_and_classifier() {
     let temp = tempfile::tempdir().expect("tempdir");
     let state_dir = temp.path().canonicalize().expect("canonical tempdir");
@@ -471,4 +503,63 @@ fn selecting_local_backend_on_fresh_root_leaves_state_dir_implicit_and_provision
     .expect("fresh workstation provisions implicit local state_dir");
     assert!(provisioned.ends_with("local-backend/embedded"));
     assert!(provisioned.is_dir());
+}
+
+#[test]
+fn terminal_escape_sequences_are_removed_whole() {
+    // Colors and styles from a logger: no `[2m` or `[0m` fragments are left behind.
+    assert_eq!(
+        strip_terminal_escapes("\u{1b}[2m2026-11-17\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m ready"),
+        "2026-11-17  INFO ready"
+    );
+    // Cursor moves, erase, and parameters with intermediates.
+    assert_eq!(
+        strip_terminal_escapes("a\u{1b}[1;31;4mb\u{1b}[2Kc\u{1b}[?25lD"),
+        "abcD"
+    );
+    // OSC titles end at BEL or ST; other string sequences too.
+    assert_eq!(strip_terminal_escapes("x\u{1b}]0;title\u{7}y"), "xy");
+    assert_eq!(
+        strip_terminal_escapes("x\u{1b}]8;;https://e.example\u{1b}\\link\u{1b}]8;;\u{1b}\\"),
+        "xlink"
+    );
+    assert_eq!(strip_terminal_escapes("p\u{1b}Pdata\u{1b}\\q"), "pq");
+    // Charset selectors, two-byte escapes and a stray ESC.
+    assert_eq!(strip_terminal_escapes("a\u{1b}(Bb\u{1b}7c\u{1b}"), "abc");
+    // Ordinary text, brackets and unicode are untouched.
+    assert_eq!(
+        strip_terminal_escapes("[INFO] 100% ok — done"),
+        "[INFO] 100% ok — done"
+    );
+    // An unterminated string sequence stops at the line end, so later lines survive.
+    assert_eq!(
+        strip_terminal_escapes("a\u{1b}]0;never closed\nnext line"),
+        "a\nnext line"
+    );
+    // A truncated sequence at the end of input leaves nothing visible.
+    assert_eq!(strip_terminal_escapes("end\u{1b}[3"), "end");
+}
+
+#[test]
+fn stderr_excerpts_show_no_escape_fragments_and_stay_bounded() {
+    let raw = b"\x1b[2mfirst\x1b[0m\n\x1b[31mERROR\x1b[0m disk full\x07\x08\n";
+    let shown = sanitize_stderr_excerpt(raw);
+    assert_eq!(shown, "first\nERROR disk full");
+    assert!(!shown.contains('['), "{shown:?}");
+
+    // The tail is taken after the sequences are removed, so a cut cannot split one.
+    let mut long = Vec::new();
+    for _ in 0..2000 {
+        long.extend_from_slice(b"\x1b[0;32mok\x1b[0m ");
+    }
+    let shown = sanitize_stderr_excerpt(&long);
+    assert!(shown.len() <= MAX_STDERR_EXCERPT_BYTES);
+    assert!(
+        !shown.contains('[') && !shown.contains('\u{1b}'),
+        "{shown:?}"
+    );
+    assert!(shown.starts_with("ok"), "{:?}", &shown[..16]);
+
+    // Invalid UTF-8 is replaced, not shown as raw bytes.
+    assert!(sanitize_stderr_excerpt(b"bad \xff\xfe bytes").contains("bad"));
 }

@@ -9,6 +9,24 @@ use std::time::Instant;
 use objc2_app_kit::NSWorkspace;
 
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+/// Set to `1`, `true`, `yes` or `on` to draw every surface opaque on any platform.
+pub const OPAQUE_MATERIALS_ENV: &str = "FLEETWORKS_OPAQUE_MATERIALS";
+
+/// The operator's opaque-materials preference. Blur happens inside the window, so a
+/// platform no longer forces the opaque mode; only this preference or Reduce Transparency does.
+pub(crate) fn opaque_requested(value: Option<&str>) -> bool {
+    value.is_some_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+fn opaque_from_environment() -> bool {
+    static OPAQUE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OPAQUE.get_or_init(|| opaque_requested(std::env::var(OPAQUE_MATERIALS_ENV).ok().as_deref()))
+}
 
 /// Developer-only appearance inputs; the production CLI exposes no override.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -89,7 +107,7 @@ impl Accessibility {
         ViewPreferences {
             reduced_motion: rune_reduced_motion,
             reduced_transparency,
-            matte_fallback: cfg!(target_os = "linux"),
+            matte_fallback: opaque_from_environment(),
         }
     }
 }
@@ -118,6 +136,17 @@ mod tests {
             appearance.transparency.get().is_none(),
             "synthetic values never populate the OS cache"
         );
+    }
+
+    #[test]
+    fn only_an_explicit_preference_requests_opaque_materials() {
+        assert!(!opaque_requested(None));
+        assert!(!opaque_requested(Some("")));
+        assert!(!opaque_requested(Some("0")));
+        assert!(!opaque_requested(Some("no")));
+        for on in ["1", "true", " TRUE ", "yes", "On"] {
+            assert!(opaque_requested(Some(on)), "{on}");
+        }
     }
 
     #[test]

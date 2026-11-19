@@ -10,7 +10,9 @@ Service and evidence terms used across Fleetworks. See the [architecture](../cod
 
 | Name | Role |
 | --- | --- |
-| Fleetworks Desktop | API-only native macOS hub; protected installation identity identifies workstation requests and registered activity |
+| Fleetworks Desktop | API-only native macOS and Linux x86_64 hub; protected installation identity identifies workstation requests and registered activity |
+| Embedded | Backend type that runs a bundled companion and state directory on the workstation. The desktop uses framed stdio IPC. |
+| Distributed | Backend type that uses an operator-managed HTTP(S) gateway, including an isolated Docker Compose gateway on the workstation. |
 | Venture | Retired operator launcher; [historical disposition](../../archive/cli-retirement.md). Current deployment uses direct Docker Compose |
 | Intel | Web workspace for Bulletin, Focus Brief, Actor Dossier and Topology |
 | Atlas | Collects headlines and hands off durable classification and derivative work |
@@ -52,7 +54,7 @@ history. Retained-source entries remain truthful when canonical indexing is abse
 
 ## Persistence
 
-- A Fleetworks backend uses an [operator-selected network SurrealDB endpoint](../code/fleetworks.md#launch-the-compose-stack); native folders do not create separate backend databases.
+- Distributed uses an [operator-selected network SurrealDB endpoint](../code/fleetworks.md#launch-the-compose-stack). Embedded owns its private in-process SurrealDB state. Desktop folders do not partition backend identity or resources.
 - Memory, provenance, graph edges and vector indexes live behind the [storage boundary](../code/storage.md).
 - Current storage modules define schema bootstrap and recall behavior.
 

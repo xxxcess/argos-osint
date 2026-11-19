@@ -157,7 +157,9 @@ Verified Rust-BERT Linux worker bundles and exported image archives are attached
 
 ```mermaid
 flowchart LR
-  A[PR creation / update] --> B[Read-only scoped checks]
+  A[PR creation / update] --> B[Linux and affected backend first pass]
+  B --> I[Green first pass triggers exact-head second pass]
+  B --> J[Linux visual review tracks the package and captures]
   C[Merge into nightly / dev / main] --> D[Recover unpublished source scope]
   D --> E[Checks + native app verification]
   E --> F[Build / smoke selected images]
@@ -171,7 +173,7 @@ build failed. The first publication covers all production targets. Later
 native-only or web-only changes leave unrelated images alone; documentation-only
 changes publish nothing once that baseline exists.
 
-PRs and manual verification dispatches never publish. Trusted integration pushes
+PR checks and the [exact-head second pass](ci.md#nightly-gsd-order) produce review evidence. Trusted integration pushes
 publish only after selected checks pass. Native release packaging receives the
 calculated `--version`, so app metadata, its manifest and archive agree without
 editing Cargo source versions. Linux jobs smoke exact loaded image IDs, verify

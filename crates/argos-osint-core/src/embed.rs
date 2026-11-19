@@ -15,10 +15,16 @@
 //! degrades to Jaccard. Unit tests in this crate default to disabled so the default
 //! `cargo test` never touches the network; `ARGOS_EMBED=1` opts in.
 
-use std::path::{Path, PathBuf};
+#[cfg(feature = "classifier")]
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(feature = "classifier")]
 use std::sync::OnceLock;
 
-use anyhow::{anyhow, Context, Result};
+#[cfg(feature = "classifier")]
+use anyhow::Context;
+use anyhow::{anyhow, Result};
+#[cfg(feature = "classifier")]
 use tract_onnx::prelude::*;
 
 /// Vector width of all-MiniLM-L6-v2.
@@ -28,10 +34,12 @@ pub const MODEL_FILE: &str = "model_quantized.onnx";
 pub const TOKENIZER_FILE: &str = "tokenizer.json";
 /// all-MiniLM-L6-v2 was trained on 256 word pieces; longer text is truncated.
 const MAX_TOKENS: usize = 256;
+#[cfg(feature = "classifier")]
 const DOWNLOAD_TIMEOUT_SECS: u64 = 180;
 
-/// False when `ARGOS_EMBED` is `0`, `false`, `off`, or `no`. Unset means enabled,
-/// except in this crate's unit tests, which stay offline unless `ARGOS_EMBED=1`.
+/// False when `ARGOS_EMBED` is `0`, `false`, `off`, or `no`, or when built without the
+/// `classifier` feature. Unset means enabled, except in this crate's unit tests, which
+/// stay offline unless `ARGOS_EMBED=1`.
 pub fn enabled() -> bool {
     #[cfg(test)]
     if testing::disabled() {
@@ -41,9 +49,15 @@ pub fn enabled() -> bool {
     if testing::active() {
         return true;
     }
+    #[cfg(not(feature = "classifier"))]
+    {
+        return false;
+    }
+    #[cfg(feature = "classifier")]
     flag_enabled(std::env::var("ARGOS_EMBED").ok().as_deref())
 }
 
+#[cfg(any(feature = "classifier", test))]
 fn flag_enabled(value: Option<&str>) -> bool {
     match value {
         Some(value) => !matches!(
@@ -76,8 +90,10 @@ pub fn model_dir() -> PathBuf {
         .join("all-MiniLM-L6-v2")
 }
 
+#[cfg(feature = "classifier")]
 type Plan = Arc<TypedRunnableModel>;
 
+#[cfg(feature = "classifier")]
 struct Embedder {
     tokenizer: tokenizers::Tokenizer,
     plan: Plan,
@@ -86,8 +102,10 @@ struct Embedder {
     inputs: usize,
 }
 
+#[cfg(feature = "classifier")]
 static EMBEDDER: OnceLock<std::result::Result<Embedder, String>> = OnceLock::new();
 
+#[cfg(feature = "classifier")]
 fn embedder() -> Result<&'static Embedder> {
     anyhow::ensure!(enabled(), "embedding disabled (ARGOS_EMBED=0)");
     EMBEDDER
@@ -103,7 +121,16 @@ pub fn warm_up() -> Result<()> {
     if testing::active() {
         return Ok(());
     }
-    embedder().map(|_| ())
+    #[cfg(feature = "classifier")]
+    {
+        embedder().map(|_| ())
+    }
+    #[cfg(not(feature = "classifier"))]
+    {
+        Err(anyhow!(
+            "embedding model unavailable: built without the `classifier` feature"
+        ))
+    }
 }
 
 /// One normalized 384-d vector.
@@ -116,7 +143,17 @@ pub fn embed_one(text: &str) -> Result<Vec<f32>> {
     if testing::active() {
         return Ok(testing::hash_embed(text));
     }
-    embedder()?.embed(text)
+    #[cfg(feature = "classifier")]
+    {
+        embedder()?.embed(text)
+    }
+    #[cfg(not(feature = "classifier"))]
+    {
+        let _ = text;
+        Err(anyhow!(
+            "embedding model unavailable: built without the `classifier` feature"
+        ))
+    }
 }
 
 pub fn embed_batch(texts: &[&str]) -> Result<Vec<Vec<f32>>> {
@@ -128,10 +165,21 @@ pub fn embed_batch(texts: &[&str]) -> Result<Vec<Vec<f32>>> {
     if testing::active() {
         return Ok(texts.iter().map(|text| testing::hash_embed(text)).collect());
     }
-    let model = embedder()?;
-    texts.iter().map(|text| model.embed(text)).collect()
+    #[cfg(feature = "classifier")]
+    {
+        let model = embedder()?;
+        texts.iter().map(|text| model.embed(text)).collect()
+    }
+    #[cfg(not(feature = "classifier"))]
+    {
+        let _ = texts;
+        Err(anyhow!(
+            "embedding model unavailable: built without the `classifier` feature"
+        ))
+    }
 }
 
+#[cfg(feature = "classifier")]
 fn load(dir: &Path) -> Result<Embedder> {
     let model_path = dir.join(MODEL_FILE);
     let tokenizer_path = dir.join(TOKENIZER_FILE);
@@ -177,6 +225,7 @@ fn load(dir: &Path) -> Result<Embedder> {
     })
 }
 
+#[cfg(feature = "classifier")]
 impl Embedder {
     fn embed(&self, text: &str) -> Result<Vec<f32>> {
         let encoding = self
@@ -252,12 +301,14 @@ pub(crate) fn normalize(mut vector: Vec<f32>) -> Vec<f32> {
     vector
 }
 
+#[cfg(feature = "classifier")]
 fn hf_url(file: &str) -> String {
     format!("https://huggingface.co/{MODEL_REPO}/resolve/main/{file}")
 }
 
 /// Downloads `url` to `path` unless it already exists. Writes to a temp file first so
 /// an interrupted download is never mistaken for a model.
+#[cfg(feature = "classifier")]
 fn ensure_file(path: &Path, url: &str) -> Result<()> {
     if path.is_file() && std::fs::metadata(path)?.len() > 0 {
         return Ok(());
@@ -295,6 +346,7 @@ fn ensure_file(path: &Path, url: &str) -> Result<()> {
     result
 }
 
+#[cfg(feature = "classifier")]
 fn download_file(path: &Path, url: &str) -> Result<()> {
     let url = url.to_string();
     let bytes = crate::async_bridge::block_on(async move {

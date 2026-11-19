@@ -4,17 +4,18 @@
 
 ## Fleetworks service boundaries
 
-[![Fleetworks service boundaries](../../diagrams/fleetworks.svg)](../../diagrams/fleetworks.html)
+[![Fleetworks Distributed backend and clients](../../diagrams/fleetworks.svg)](../../diagrams/fleetworks.html)
 
 | Component | Owns |
 | --- | --- |
-| [Rune macOS desktop](../../../apps/fleetworks-desktop) | Native pages, input and accessibility; protected installation identity and origin-bound Keychain references through the [workstation library](../../../crates/fleetworks-workstation); bounded gateway requests through shared [contracts](../../../crates/fleetworks-contracts). Connects to independently running services. |
+| [Rune macOS and Linux x86_64 desktop](../../../apps/fleetworks-desktop) | Native pages, input and accessibility; protected installation identity and origin-bound Keychain references through the [workstation library](../../../crates/fleetworks-workstation); bounded gateway requests through shared [contracts](../../../crates/fleetworks-contracts). Selects the Embedded companion or Distributed gateway. |
 | [Intel Web](../../../apps/web-desktop) | React Native Web presentation, topology and its accessible list, Connect/session gate, and a same-origin server relay using its separately provisioned gateway credential. |
-| Linux backend: [API](../../../crates/argos-osint-api), [service host](../../../services/api-host) and [Core](../../../crates/argos-osint-core) | Authenticated gateway/live streams, private services, durable workers, shared configuration and domain storage. Linux owns [classifier/NLP execution](classifier.md), [Tantivy discovery](actor-search.md), SurrealDB and [Jobs persistence](../../../crates/fleetworks-jobs). |
+| Distributed Linux backend: [API](../../../crates/argos-osint-api), [service host](../../../services/api-host) and [Core](../../../crates/argos-osint-core) | Authenticated gateway/live streams, private services, durable workers, shared configuration and domain storage. Linux owns [classifier/NLP execution](classifier.md), [Tantivy discovery](actor-search.md), SurrealDB and [Jobs persistence](../../../crates/fleetworks-jobs). |
+| [Embedded companion](../../diagrams/local-ipc-companion.html) | Private in-process SurrealDB, Jobs persistence and actor search behind framed stdio IPC. Uses the same registered native contracts and advertises available engines. |
 
-External operator tooling owns deployment origins, service processes, images and volumes. The Compose recipes publish their selected gateway/web ports on loopback; the isolated backend-only review recipe omits the web app. The gateway reaches private Brain, Tools, Control, Jobs and execution roles, plus configured Linux NLP, classifier and search services. Actor discovery uses private Tantivy behind the gateway's current canonical eligibility checks; selected dossiers come from authoritative SurrealDB. The Mac app receives bounded gateway projections and keeps engine, index and deployment ownership on Linux. [Actor discovery ownership](actor-search.md)
+External operator tooling owns Distributed origins, service processes, images and volumes. The Compose recipes publish their selected gateway/web ports on loopback; the isolated backend-only review recipe omits the web app. The gateway reaches private Brain, Tools, Control, Jobs and execution roles, plus configured Linux NLP, classifier and search services. Actor discovery uses private Tantivy behind the gateway's current canonical eligibility checks; selected dossiers come from authoritative SurrealDB. The native app receives bounded projections. The selected backend owns engines and indexes. [Actor discovery ownership](actor-search.md)
 
-Direct [Docker Compose](../../../deploy/README.md) operates backend services and optional Intel Web. Venture, the six terminal clients and legacy `argos` are retired. The Rune app connects to the gateway and never starts a backend, web server or container. [Service startup and roles](fleetworks.md)
+Direct [Docker Compose](../../../deploy/README.md) operates backend services and optional Intel Web. Venture, the six terminal clients and legacy `argos` are retired. The Rune app manages the Embedded companion only after explicit start or stop. Operators manage Distributed services and optional Intel Web separately. [Backend types and parity](native-connections.md#backend-types-and-parity) · [Service startup and roles](fleetworks.md)
 
 Native [pairing and Keychain](native-connections.md#pairing-and-keychain-agreed-target) separates public challenge start/poll from Operator approval and authenticated APIs. Settings contain non-secret recovery references; macOS Keychain holds polling/access secrets. Explicit operator/headless token-file mode is independent. [Verification](../../../.planning/2026-11-12-native-pairing-implementation/acceptance.md) remains separately recorded.
 
@@ -24,7 +25,7 @@ The brief worker runs stages and publication. Atlas uses a Jobs-owned embedded d
 
 `@tag:surreal-storage`
 
-Service processes share the explicitly configured private SurrealDB endpoint. The standalone Compose recipe provisions a persistent authenticated database; independently managed deployments supply their own endpoint and credentials. [Storage map](storage.md) · [Planned Jobs ownership and rollout scopes](jobs-persistence.md)
+Distributed service processes share the explicitly configured private SurrealDB endpoint. Embedded opens a private in-process store under its own state directory. The standalone Compose recipe provisions a persistent authenticated database; independently managed deployments supply their own endpoint and credentials. [Storage map](storage.md) · [Planned Jobs ownership and rollout scopes](jobs-persistence.md)
 
 [![Persistence stack](../../diagrams/persistence.svg)](../../diagrams/persistence.html)
 
@@ -135,7 +136,7 @@ NLP-off body matching: word-boundary exact pass always runs on cleaned bodies; N
 
 Recon integration: turn-start and material-gap discovery now search BOTH actor and article indexes (recon/orchestrate.rs discover_catalog_articles / replan_discovery); lookup never creates actors or claims; Jev cannot override identity ambiguity.
 
-API: `GET /api/v1/articles/search` → `ArticleSearchPage` {hits with article id/revision, excerpt, matched_field, rank, categories/source, revision fingerprint, next_cursor}; capabilities feature `"article-search"`.
+API: `GET /api/v1/articles/search` → `ArticleSearchPage` {hits with article id/revision, excerpt, matched_field, rank, categories/source, revision fingerprint, next_cursor, `truncated`}; capabilities feature `"article-search"`. `truncated` is true when a field's bounded candidate window (256) was filled, so lower-ranked matches may exist that no page reaches. The same read is available over local IPC as `articles_search`.
 
 Current domain filters use `governance`, `security`, `economic`, `human`, `environmental` and `scientific`. Historical seven-topic tags remain explicitly legacy; a matching string alone does not establish current membership. See [taxonomy](../concepts/strategic-domains-taxonomy.md).
 
@@ -213,6 +214,10 @@ The native app and [Intel Web](intel-web.md) use the versioned gateway. Server-l
 The browser enters through the same-origin web relay, whose purpose credential stays server-side. Connect exchanges a registered context for a server-issued session; subsequent requests and streams enforce current session, Host/Origin, permission and registration checks. A displayed Connect ID selects context and grants no authentication authority. Native Open Intel Web uses that real gate. Topology remains in the browser; native Brain provides discovery and authoritative dossier controls. Direct Compose readiness checks and separately configured web startup are operator actions. [Web lifecycle](../../diagrams/intel-web.html)
 
 The existing [native verifier](../../../scripts/fleetworks_verify.py) selects and renders shared-view PNG/tree fixtures; scoped Cargo tests separately exercise Runtime/state/input assertions. The [candidate helper](../../../scripts/fleetworks_candidate.py) builds/packages a staged macOS `.app`, manifest, ZIP and checksums. The [native CI lane](../../../.github/workflows/fleetworks.yml) selects both architectures through the [shared Mac workflow](../../../.github/workflows/fleetworks-native.yml), with exact source/toolchain/Rune identity and verification of downloaded artifact bytes. These source paths are implemented; complete dual-architecture hosted execution, installed-app GUI/OS integration, tested minimum macOS, signing/notarization and trusted publication retain separate acceptance gates. Generated frames and bundle checks carry their own evidence and cannot establish those later outcomes. [Native verification limits](native-verification.md)
+
+## Assistant chat turn endpoint
+
+`POST /api/v1/workstation/chat/turns` (and IPC `chat_turn_submit`) accepts one typed turn from a native registered caller with `SubmitInteractive`. It checks the turn and the caller's registration and answers `{"status":"ok"}`. It stores nothing, starts no job and never writes an assistant reply. The browser relay does not carry it. The backend advertises `chat` as supported so the native composer can clear its draft on send. The wider typed contract, with threads, messages and events, is described in [assistant-chat-contract.md](assistant-chat-contract.md) and is not served yet.
 
 ## Async runtime safety
 

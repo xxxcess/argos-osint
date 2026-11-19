@@ -64,6 +64,16 @@ impl State {
         self.request_jobs(event);
     }
 
+    /// The list's end sentinel changed visibility. Coming on screen continues once through the
+    /// same single-flight path as Load more; a failed tail waits for its explicit Retry, so an
+    /// auto-load never loops on an error.
+    pub fn jobs_near_end(&mut self, on_screen: bool) {
+        if on_screen && self.scoped_jobs.tail_error().is_none() && self.scoped_jobs.can_load_more()
+        {
+            self.request_jobs(JobsEvent::More);
+        }
+    }
+
     pub fn request_jobs(&mut self, event: JobsEvent) {
         self.sync_jobs_binding();
         let now = if self.fixture {
@@ -81,7 +91,7 @@ impl State {
             self.project_jobs_page();
             return;
         };
-        let keep_ready_jobs = matches!(event, JobsEvent::Poll)
+        let keep_ready_jobs = matches!(event, JobsEvent::Poll | JobsEvent::More)
             && !effect.clear_selection
             && matches!(self.backend.jobs, Load::Ready(_));
         if !keep_ready_jobs {
@@ -132,16 +142,11 @@ impl State {
             {
                 if let Some(updated) = jobs.rows.iter().find(|job| job.id == selected_id).cloned() {
                     let transitioned = match &mut self.backend.detail {
-                        Load::Ready(detail) if detail.job.id == updated.id => {
-                            let changed = detail.job.state != updated.state
-                                || detail.job.phase != updated.phase
-                                || detail.job.progress_done != updated.progress_done
-                                || detail.job.progress_total != updated.progress_total
-                                || detail.job.error_summary != updated.error_summary;
-                            if changed {
-                                detail.job = updated;
-                            }
-                            changed
+                        Load::Ready(detail)
+                            if should_reconcile_detail_from_row(&detail.job, &updated) =>
+                        {
+                            detail.job = updated;
+                            true
                         }
                         _ => false,
                     };
@@ -157,11 +162,11 @@ impl State {
     }
 
     /// The existing bounded detail/action consumers see only this validated
-    /// current-page projection. This is never a fallback legacy list request.
+    /// head-plus-tail projection. This is never a fallback legacy list request.
     fn project_jobs_page(&mut self) {
         self.backend.jobs = match (&self.scoped_jobs.page, self.scoped_jobs.status) {
             (Some(page), JobsLoad::Ready) => Load::Ready(ActivityJobs {
-                rows: page.rows.clone(),
+                rows: self.scoped_jobs.rows(),
                 activity_scope: page.activity_scope.clone(),
                 relation_counts_available: page.relation_counts_available,
                 activity_actions_available: page.activity_actions_available,
@@ -176,6 +181,49 @@ impl State {
             _ => Load::Idle,
         };
     }
+}
+
+fn job_state_rank(state: &str) -> u8 {
+    match state {
+        "queued" => 1,
+        "retry_scheduled" => 2,
+        "running" => 3,
+        "completed" | "failed" | "cancelled" | "stopped" => 4,
+        _ => 0,
+    }
+}
+
+fn should_reconcile_detail_from_row(
+    current: &crate::backend::ActivityJob,
+    candidate: &crate::backend::ActivityJob,
+) -> bool {
+    if current.id != candidate.id {
+        return false;
+    }
+    if current.private_details_available && candidate.status_only {
+        return false;
+    }
+    let current_rank = job_state_rank(&current.state);
+    let candidate_rank = job_state_rank(&candidate.state);
+    if current_rank == 4 && candidate_rank < 4 {
+        return false;
+    }
+    if candidate_rank > current_rank {
+        return true;
+    }
+    if candidate_rank < current_rank && candidate_rank != 0 {
+        return false;
+    }
+    match (current.progress_done, candidate.progress_done) {
+        (Some(cur), Some(cand)) if cand < cur => return false,
+        (Some(_), None) => return false,
+        _ => {}
+    }
+    current.state != candidate.state
+        || current.phase != candidate.phase
+        || current.progress_done != candidate.progress_done
+        || current.progress_total != candidate.progress_total
+        || current.error_summary != candidate.error_summary
 }
 
 impl GatewayEffects {

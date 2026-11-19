@@ -48,3 +48,59 @@ it("never starts animation after a delayed accessibility response outlives the c
   await act(async () => resolve(false));
   expect(loop).not.toHaveBeenCalled();
 });
+
+it("paints a steady cool base with no opacity pulse", async () => {
+  vi.spyOn(AccessibilityInfo, "isReduceMotionEnabled").mockResolvedValue(true);
+  render(<Skeleton lines={2} />);
+  await act(async () => {});
+  for (const line of screen.getAllByTestId("skeleton-line")) {
+    expect(getComputedStyle(line).backgroundColor).toBe("rgb(39, 49, 59)");
+    expect(getComputedStyle(line).opacity).not.toBe("0.55");
+  }
+});
+
+it("pauses the sheen while the page is hidden and resumes when it is visible", async () => {
+  vi.spyOn(AccessibilityInfo, "isReduceMotionEnabled").mockResolvedValue(false);
+  const animation = { start: vi.fn(), stop: vi.fn(), reset: vi.fn() };
+  const loop = vi.spyOn(Animated, "loop").mockReturnValue(animation);
+  const state = vi.spyOn(document, "visibilityState", "get");
+  state.mockReturnValue("visible");
+  const { unmount } = render(<Skeleton />);
+  await act(async () => {});
+  expect(animation.start).toHaveBeenCalledTimes(1);
+
+  state.mockReturnValue("hidden");
+  act(() => {
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  expect(animation.stop).toHaveBeenCalled();
+  expect(loop).toHaveBeenCalledTimes(1);
+
+  state.mockReturnValue("visible");
+  act(() => {
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  expect(loop).toHaveBeenCalledTimes(2);
+
+  unmount();
+  const calls = loop.mock.calls.length;
+  act(() => {
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  expect(loop).toHaveBeenCalledTimes(calls);
+});
+
+it("shares one loop across skeletons and stops it with the last one", async () => {
+  vi.spyOn(AccessibilityInfo, "isReduceMotionEnabled").mockResolvedValue(false);
+  const animation = { start: vi.fn(), stop: vi.fn(), reset: vi.fn() };
+  const loop = vi.spyOn(Animated, "loop").mockReturnValue(animation);
+  const first = render(<Skeleton />);
+  const second = render(<Skeleton lines={2} />);
+  await act(async () => {});
+  expect(loop).toHaveBeenCalledTimes(1);
+  expect(animation.start).toHaveBeenCalledTimes(1);
+  first.unmount();
+  expect(animation.stop).not.toHaveBeenCalled();
+  second.unmount();
+  expect(animation.stop).toHaveBeenCalled();
+});

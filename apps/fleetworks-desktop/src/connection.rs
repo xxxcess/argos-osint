@@ -279,7 +279,7 @@ impl GatewayEffects {
                     }
                 })
                 .await
-                .map_err(|_| "Local backend storage worker stopped".to_owned())?
+                .map_err(|_| "Embedded backend storage worker stopped".to_owned())?
                 .map_err(|error| error.to_string())?;
                 let process = Arc::new(
                     LocalBackendProcess::spawn(&binary, &state_dir)

@@ -140,6 +140,9 @@ jobs:
             --revision "$FLEETWORKS_HEAD" --output "$RUNNER_TEMP/fleetworks-native-evidence/shell-settings" \
             --scene registration-ready --scene workstation-partial-seed \
             --scene atlas-articles-ready --scene jobs-page-two \
+            --scene assistant-open --scene assistant-opaque \
+            --scene command-panel --scene command-panel-opaque \
+            --scene catalog --scene catalog-opaque \
             --size 1440x860 --size 640x480 --scale 1 \
             --script registration-ready=apps/fleetworks-desktop/tests/fixtures/scripts/workstation-settings-open.json \
             --script-expect-key registration-ready=workstation-settings-body

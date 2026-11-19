@@ -6,7 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["embedded", "nlp", "classifier"]
+# Defaults are empty so that workspace-wide builds skip heavy dependencies.
+# The companion (`argos-api-host`) enables the features it needs via its own defaults.
+default = []
 embedded = ["argos-osint-core/embedded"]
 server = ["argos-osint-core/server"]
 nlp = ["argos-osint-core/nlp"]

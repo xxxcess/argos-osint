@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "role": "Coarse crescent rock overlay for Submit, Confirm, Create, Delete and Connect",
+  "recipe": "docs/design/matte-canvas/theme.md#deterministic-asset-and-tint-recipe",
+  "source": {
+    "path": "assets/brand/source/fleetworks-liquid-metal-glass.png",
+    "sha256": "1ae553782431da7649a1d88accdacc9076c3a039f1c2b5c0018f5998d7d70112"
+  },
+  "crop_box_source_px": {
+    "x": 655,
+    "y": 715,
+    "width": 256,
+    "height": 96
+  },
+  "excluded": "polished rim, glowing inclusions, molten sphere and highlights (luminance capped at the 97th percentile of the crop)",
+  "luminance": "0.2126 R + 0.7152 G + 0.0722 B on sRGB bytes",
+  "highlight_cap_luma": 96.277,
+  "tile": "mirror quilt: crop stacked with its mirror to 256 x 256, then mirrored on both axes to 512 x 512; seamless when repeated",
+  "tile_size_px": 512,
+  "displayed_logical_px": 256,
+  "normalization": {
+    "mean_luma": 24.977,
+    "scale_luma_p99_abs_deviation": 71.3,
+    "quantization_steps": 16,
+    "mean_T_after_quantization": 0.00012
+  },
+  "export": {
+    "overlay_at_opacity_1": "T > 0: TEXT_PRIMARY #D5DCE5 alpha 0.22 T; T < 0: CAST_SHADOW #020304 alpha min(1, 1.25 |T|)",
+    "opacity_by_state": {
+      "rest": 0.12,
+      "hover": 0.14,
+      "pressed": 0.1,
+      "disabled": 0.04
+    }
+  },
+  "outputs": {
+    "fleetworks-rock-tile.png": {
+      "bytes": 121822,
+      "sha256": "ea8550d5744aad46133e237e87d16ba7220a41b32e983be1ef62f2ea64b47f83"
+    },
+    "fleetworks-rock-tile.rgba": {
+      "bytes": 1048576,
+      "sha256": "51bbc95754a5618353cb512e3f7ab6977b37fabbf5887f6beda808bbea2547a1",
+      "fnv1a32": 2000210541
+    }
+  }
+}

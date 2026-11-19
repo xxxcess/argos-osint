@@ -107,7 +107,7 @@ fn registered_handler_applies_filters_and_pins_requests_while_drafts_change() {
     );
     state.scoped_jobs.draft.text = TextEdit::new("needle edited");
     state.scoped_jobs.draft_edited();
-    assert!(state.scoped_jobs.dirty && !state.scoped_jobs.can_next());
+    assert!(state.scoped_jobs.dirty && !state.scoped_jobs.can_load_more());
     assert_eq!(first.query.text.as_deref(), Some("needle"));
     state.complete_scoped_jobs(first.clone(), Ok(page(&first.binding, 1, Some(2))));
     assert!(state.scoped_jobs.page.is_some() && state.scoped_jobs.dirty);
@@ -137,7 +137,7 @@ fn registered_paging_uses_server_tokens_and_keeps_dashboard_counts_separate() {
         !observed.apps_complete,
         "incomplete facets cannot claim completeness"
     );
-    state.request_jobs(JobsEvent::Next);
+    state.request_jobs(JobsEvent::More);
     let next = state
         .scoped_jobs
         .active_ticket()
@@ -150,30 +150,18 @@ fn registered_paging_uses_server_tokens_and_keeps_dashboard_counts_separate() {
     let mut reply = page(&next.binding, 2, Some(3));
     reply.matched_total = None;
     state.complete_scoped_jobs(next, Ok(reply));
-    assert_eq!(state.scoped_jobs.page_number(), 2);
-    assert!(
+    assert_eq!(state.scoped_jobs.loaded_pages(), 2);
+    assert_eq!(state.scoped_jobs.rows().len(), 2);
+    assert_eq!(
         state
             .scoped_jobs
             .page
             .as_ref()
-            .expect("second page")
-            .matched_total
-            .is_none(),
-        "unavailable total never becomes zero or a dashboard bucket"
+            .expect("head page")
+            .matched_total,
+        Some(3),
+        "a tail page never replaces the observed total or turns it into zero"
     );
-    state.request_jobs(JobsEvent::Previous);
-    let previous = state
-        .scoped_jobs
-        .active_ticket()
-        .expect("server-issued previous token")
-        .clone();
-    assert_eq!(
-        serde_json::to_value(&previous.query).expect("fixed first-page cursor"),
-        json!({"sort":"newest","cursor":cursor(1)})
-    );
-    state.complete_scoped_jobs(previous.clone(), Ok(page(&previous.binding, 1, Some(2))));
-    assert_eq!(state.scoped_jobs.page_number(), 1);
-    assert!(!state.scoped_jobs.can_previous());
     state.page = crate::app::Page::Jobs;
     let mut runtime = Runtime::new(
         state,
@@ -197,10 +185,15 @@ fn registered_paging_uses_server_tokens_and_keeps_dashboard_counts_separate() {
     }
     for key in ["jobs-page-next", "jobs-page-previous"] {
         assert!(
-            runtime.find(key).is_some(),
-            "the current registered page exposes {key}"
+            runtime.find(key).is_none(),
+            "retired page control {key} cannot reappear"
         );
     }
+    assert!(
+        runtime.find("jobs-load-more").is_some(),
+        "a head with a continuation offers one load-more control"
+    );
+    assert!(runtime.find("activity-job-fixture-job-2").is_some());
     fn announces_dashboard_bucket(node: &serde_json::Value) -> bool {
         ["name", "value", "description"].into_iter().any(|field| {
             node[field]
@@ -230,7 +223,7 @@ fn registered_paging_uses_server_tokens_and_keeps_dashboard_counts_separate() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn native_page_buttons_wait_for_delayed_registered_results() {
+async fn load_more_appends_at_the_tail_while_rows_stay_visible() {
     let mut state = registered_app();
     state.page = crate::app::Page::Jobs;
     state.request_jobs(JobsEvent::Apply);
@@ -253,15 +246,15 @@ async fn native_page_buttons_wait_for_delayed_registered_results() {
     runtime.frame(clock);
     assert!(runtime.find("activity-job-fixture-job-1").is_some());
 
-    runtime.update(|_, tx| tx.scroll_into_view("jobs-page-next"));
+    runtime.update(|_, tx| tx.scroll_into_view("jobs-load-more"));
     clock += 1.0 / 60.0;
     runtime.frame(clock);
     let (x, y) = runtime
-        .find("jobs-page-next")
-        .expect("visible next-page button");
+        .find("jobs-load-more")
+        .expect("visible load-more button");
     assert!(
         (0.0..1180.0).contains(&x) && (50.0..780.0).contains(&y),
-        "next-page control must be inside the Jobs scroll viewport"
+        "load-more must be inside the Jobs scroll viewport"
     );
     runtime.pointer_down(x, y);
     runtime.pointer_up(x, y);
@@ -271,11 +264,15 @@ async fn native_page_buttons_wait_for_delayed_registered_results() {
         .state
         .scoped_jobs
         .active_ticket()
-        .expect("actual next-page request")
+        .expect("actual tail request")
         .clone();
     assert_eq!(next.query.cursor.as_deref(), Some(cursor(2).as_str()));
-    assert!(matches!(runtime.state.backend.jobs, Load::Loading));
-    assert!(runtime.find("activity-job-fixture-job-1").is_none());
+    assert!(runtime.state.scoped_jobs.loading_more());
+    assert!(
+        matches!(runtime.state.backend.jobs, Load::Ready(_)),
+        "a tail fetch never swaps the list for a skeleton"
+    );
+    assert!(runtime.find("activity-job-fixture-job-1").is_some());
     assert!(runtime.find("activity-job-fixture-job-2").is_none());
 
     let (release, response) = tokio::sync::oneshot::channel();
@@ -288,9 +285,13 @@ async fn native_page_buttons_wait_for_delayed_registered_results() {
     runtime.update(move |state, _| state.complete_scoped_jobs(next, Ok(second_page)));
     clock += 1.0 / 60.0;
     runtime.frame(clock);
+    assert!(runtime.find("activity-job-fixture-job-1").is_some());
     assert!(runtime.find("activity-job-fixture-job-2").is_some());
-    assert!(runtime.find("activity-job-fixture-job-1").is_none());
-    assert_eq!(runtime.state.scoped_jobs.page_number(), 2);
+    assert!(
+        runtime.find("jobs-load-more").is_none(),
+        "no continuation left, so no control"
+    );
+    assert_eq!(runtime.state.scoped_jobs.loaded_pages(), 2);
     assert!(runtime
         .accessibility_json()
         .to_string()
@@ -339,14 +340,14 @@ fn stale_query_context_auth_and_expired_cursor_never_repopulate_private_rows() {
     );
     jobs.complete(&reset, Err(ClientError::Status(409)));
     assert_eq!(jobs.status, JobsLoad::RestartRequired);
-    assert!(jobs.page.is_none() && jobs.handle(JobsEvent::Next, now()).read.is_none());
+    assert!(jobs.page.is_none() && jobs.handle(JobsEvent::More, now()).read.is_none());
     assert!(jobs.handle(JobsEvent::Apply, now()).read.is_some());
     jobs.bind(Some(binding("b")), false);
     assert!(!jobs.connected() && jobs.active_ticket().is_none());
 }
 
 #[test]
-fn history_is_bounded_and_invalid_scope_or_shared_private_payload_clears_the_page() {
+fn tail_is_bounded_and_invalid_scope_or_shared_private_payload_clears_the_page() {
     let mut jobs = JobsQueryState::default();
     jobs.bind(Some(binding("a")), true);
     let first = jobs
@@ -356,20 +357,19 @@ fn history_is_bounded_and_invalid_scope_or_shared_private_payload_clears_the_pag
     jobs.complete(&first, Ok(page(&binding("a"), 1, Some(2))));
     for number in 2..=HISTORY_LIMIT {
         let next = jobs
-            .handle(JobsEvent::Next, now())
+            .handle(JobsEvent::More, now())
             .read
-            .expect("bounded next");
+            .expect("bounded tail");
         jobs.complete(&next, Ok(page(&binding("a"), number, Some(number + 1))));
     }
-    assert_eq!(jobs.history.len(), HISTORY_LIMIT);
-    assert_eq!(jobs.page_number(), HISTORY_LIMIT);
-    assert!(jobs.page.as_ref().expect("last loaded page").has_more);
-    assert!(!jobs.can_next() && jobs.can_previous());
-    assert!(jobs.history.iter().all(|token| cursor_valid(token)));
+    assert_eq!(jobs.loaded_pages(), HISTORY_LIMIT);
+    assert!(!jobs.can_load_more() && jobs.at_bound());
+    assert!(jobs.handle(JobsEvent::More, now()).read.is_none());
+    assert!(jobs.tail_cursor.as_deref().is_some_and(cursor_valid));
     let refresh = jobs.handle(JobsEvent::Apply, now()).read.expect("refresh");
     jobs.complete(&refresh, Ok(page(&binding("b"), 1, None)));
     assert_eq!(jobs.status, JobsLoad::Failed);
-    assert!(jobs.page.is_none() && jobs.history.is_empty());
+    assert!(jobs.page.is_none() && jobs.rows().is_empty() && jobs.tail_cursor.is_none());
     let current = jobs
         .handle(JobsEvent::Apply, now())
         .read
@@ -422,7 +422,7 @@ fn app_adapter_preserves_logs_drafts_but_drops_pages_on_permission_and_context_c
         state.scoped_logs.draft.text.text,
         "keep independent log draft"
     );
-    state.request_jobs(JobsEvent::Next);
+    state.request_jobs(JobsEvent::More);
     let pending = state
         .scoped_jobs
         .active_ticket()
@@ -496,11 +496,11 @@ fn paged_rows_route_to_exact_details_and_preview_is_invalidated_before_page_or_f
     });
     state.preview_job_action(JobAction::Retry);
     assert!(state.job_actions.confirmation.is_some());
-    state.request_jobs(JobsEvent::Next);
+    state.request_jobs(JobsEvent::Apply);
     let pending = state
         .scoped_jobs
         .active_ticket()
-        .expect("next page")
+        .expect("filter refresh")
         .clone();
     assert!(state.job_actions.confirmation.is_none() && state.backend.selected_job.is_none());
     state.intents.clear();
@@ -513,7 +513,7 @@ fn paged_rows_route_to_exact_details_and_preview_is_invalidated_before_page_or_f
     state.complete_scoped_jobs(pending.clone(), Ok(page(&pending.binding, 2, None)));
     assert!(
         matches!(state.backend.jobs, Load::Loading),
-        "an old next-page callback cannot replace the new query"
+        "an old refresh callback cannot replace the new query"
     );
     state.complete_scoped_jobs(current.clone(), Ok(page(&current.binding, 1, None)));
     assert_eq!(
@@ -680,4 +680,318 @@ fn scheduler_discovers_new_work_while_a_completed_job_with_unavailable_logs_is_s
         crate::app::poll_jobs(state, 102.0, tx);
     });
     assert_eq!(runtime.state.scoped_jobs.reads_begun(), again);
+}
+
+fn full_page(binding: &JobsBinding, number: usize, next: Option<usize>) -> JobsPage {
+    let mut page = page(binding, number, next);
+    let template = page.rows[0].clone();
+    page.rows = (0..usize::from(PAGE_SIZE))
+        .map(|index| {
+            let mut row = template.clone();
+            row.id = format!("job-{number}-{index}");
+            row
+        })
+        .collect();
+    page
+}
+
+fn loaded_jobs(next: Option<usize>) -> JobsQueryState {
+    let mut jobs = JobsQueryState::default();
+    jobs.bind(Some(binding("a")), true);
+    let first = jobs
+        .handle(JobsEvent::Apply, now())
+        .read
+        .expect("first read");
+    jobs.complete(&first, Ok(page(&binding("a"), 1, next)));
+    jobs
+}
+
+#[test]
+fn tail_pages_append_without_duplicates_and_keep_the_head_order() {
+    let mut jobs = loaded_jobs(Some(2));
+    let tail = jobs.handle(JobsEvent::More, now()).read.expect("tail read");
+    // The second page repeats the head row, as a refreshed head can shift the boundary.
+    let mut reply = page(&binding("a"), 2, None);
+    let repeated = jobs.page.as_ref().expect("head").rows[0].clone();
+    reply.rows.insert(0, repeated);
+    assert!(jobs.complete(&tail, Ok(reply)));
+    let ids: Vec<String> = jobs.rows().into_iter().map(|row| row.id).collect();
+    assert_eq!(ids, vec!["fixture-job-1", "fixture-job-2"]);
+    assert!(!jobs.can_load_more(), "the last page ends continuation");
+}
+
+#[test]
+fn row_cap_stops_loading_even_when_the_server_has_more() {
+    let mut jobs = JobsQueryState::default();
+    jobs.bind(Some(binding("a")), true);
+    let first = jobs
+        .handle(JobsEvent::Apply, now())
+        .read
+        .expect("first read");
+    jobs.complete(&first, Ok(full_page(&binding("a"), 1, Some(2))));
+    let pages = MAX_ROWS / usize::from(PAGE_SIZE);
+    for number in 2..=pages {
+        let tail = jobs.handle(JobsEvent::More, now()).read.expect("tail read");
+        jobs.complete(
+            &tail,
+            Ok(full_page(&binding("a"), number, Some(number + 1))),
+        );
+    }
+    assert_eq!(jobs.rows().len(), MAX_ROWS);
+    assert!(!jobs.can_load_more() && jobs.at_bound());
+    assert!(jobs.handle(JobsEvent::More, now()).read.is_none());
+}
+
+#[test]
+fn tail_failure_keeps_every_row_and_retry_recovers() {
+    let mut jobs = loaded_jobs(Some(2));
+    let tail = jobs.handle(JobsEvent::More, now()).read.expect("tail read");
+    assert!(jobs.loading_more() && !jobs.can_load_more());
+    jobs.complete(&tail, Err(ClientError::Transport));
+    assert_eq!(jobs.status, JobsLoad::Ready);
+    assert!(jobs.tail_error().is_some() && !jobs.loading_more());
+    assert_eq!(jobs.rows().len(), 1, "resolved rows stay visible");
+    assert!(jobs.can_load_more(), "the recovery control is available");
+    let retry = jobs.handle(JobsEvent::More, now()).read.expect("retry");
+    assert!(jobs.tail_error().is_none(), "retrying clears the error");
+    assert_eq!(retry.query.cursor.as_deref(), Some(cursor(2).as_str()));
+    jobs.complete(&retry, Ok(page(&binding("a"), 2, None)));
+    assert_eq!(jobs.rows().len(), 2);
+}
+
+#[test]
+fn an_outdated_tail_reply_never_overwrites_newer_state() {
+    let mut jobs = loaded_jobs(Some(2));
+    let tail = jobs.handle(JobsEvent::More, now()).read.expect("tail read");
+    // A newer query replaces the tail read before it answers.
+    let newer = jobs
+        .handle(JobsEvent::Apply, now())
+        .read
+        .expect("newer read");
+    assert!(!jobs.complete(&tail, Ok(page(&binding("a"), 2, None))));
+    assert!(jobs.page.is_none() && jobs.rows().is_empty());
+    assert!(jobs.complete(&newer, Ok(page(&binding("a"), 7, Some(8)))));
+    let ids: Vec<String> = jobs.rows().into_iter().map(|row| row.id).collect();
+    assert_eq!(ids, vec!["fixture-job-7"]);
+}
+
+#[test]
+fn a_scope_switch_clears_loaded_rows_and_ignores_the_old_tail_reply() {
+    let mut jobs = loaded_jobs(Some(2));
+    let tail = jobs.handle(JobsEvent::More, now()).read.expect("tail read");
+    jobs.bind(Some(binding("b")), true);
+    assert!(jobs.page.is_none() && jobs.rows().is_empty() && jobs.tail_cursor.is_none());
+    assert!(!jobs.complete(&tail, Ok(page(&binding("a"), 2, None))));
+    assert!(jobs.rows().is_empty() && jobs.loaded_pages() == 0);
+}
+
+#[test]
+fn a_head_poll_refreshes_the_head_and_keeps_appended_rows() {
+    let mut jobs = loaded_jobs(Some(2));
+    let tail = jobs.handle(JobsEvent::More, now()).read.expect("tail read");
+    jobs.complete(&tail, Ok(page(&binding("a"), 2, Some(3))));
+    let poll = jobs.handle(JobsEvent::Poll, now()).read.expect("poll");
+    assert!(jobs.loaded_pages() == 2 && jobs.status == JobsLoad::Ready);
+    let mut refreshed = page(&binding("a"), 1, Some(2));
+    refreshed.rows[0].state = "running".into();
+    assert!(jobs.complete(&poll, Ok(refreshed)));
+    let rows = jobs.rows();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].state, "running");
+    assert_eq!(rows[1].id, "fixture-job-2");
+    assert_eq!(
+        jobs.tail_cursor.as_deref(),
+        Some(cursor(3).as_str()),
+        "a head poll keeps the tail cursor once a tail exists"
+    );
+}
+
+#[test]
+fn a_failed_poll_keeps_same_scope_rows_and_a_selection_survives_load_more() {
+    let mut state = registered_app();
+    state.request_jobs(JobsEvent::Apply);
+    let first = state.scoped_jobs.active_ticket().expect("read").clone();
+    state.complete_scoped_jobs(first.clone(), Ok(page(&first.binding, 1, Some(2))));
+    state.backend.selected_job = Some("fixture-job-1".into());
+    state.request_jobs(JobsEvent::More);
+    assert_eq!(state.backend.selected_job.as_deref(), Some("fixture-job-1"));
+    let tail = state.scoped_jobs.active_ticket().expect("tail").clone();
+    state.complete_scoped_jobs(tail.clone(), Ok(page(&tail.binding, 2, Some(3))));
+    assert_eq!(state.backend.selected_job.as_deref(), Some("fixture-job-1"));
+    state.request_jobs(JobsEvent::Poll);
+    let poll = state.scoped_jobs.active_ticket().expect("poll").clone();
+    state.complete_scoped_jobs(poll, Err(ClientError::Transport));
+    assert!(matches!(state.backend.jobs, crate::app::Load::Ready(_)));
+    assert_eq!(state.scoped_jobs.rows().len(), 2);
+    assert!(state.scoped_jobs.message.is_some(), "stale reason is kept");
+}
+
+fn state_with_jobs_head(next: Option<usize>) -> crate::app::State {
+    let mut state = registered_app();
+    state.request_jobs(JobsEvent::Apply);
+    let head = state
+        .scoped_jobs
+        .active_ticket()
+        .expect("newest read")
+        .clone();
+    state.complete_scoped_jobs(head.clone(), Ok(page(&head.binding, 1, next)));
+    state
+}
+
+#[test]
+fn near_end_loads_one_tail_only_when_the_sentinel_comes_on_screen() {
+    let mut state = state_with_jobs_head(Some(2));
+    state.jobs_near_end(false);
+    assert!(state.scoped_jobs.active_ticket().is_none(), "off screen");
+    state.jobs_near_end(true);
+    assert!(state.scoped_jobs.loading_more(), "on screen loads the tail");
+    let tail = state.scoped_jobs.active_ticket().expect("tail").clone();
+    // Repeated visibility reports while the read is in flight add no second read.
+    state.jobs_near_end(true);
+    let still = state.scoped_jobs.active_ticket().expect("same read");
+    assert_eq!(still.query.cursor, tail.query.cursor);
+    state.complete_scoped_jobs(tail.clone(), Ok(page(&tail.binding, 2, None)));
+    assert_eq!(state.scoped_jobs.rows().len(), 2);
+    // The server's end stops it: no continuation, no read.
+    state.jobs_near_end(true);
+    assert!(state.scoped_jobs.active_ticket().is_none());
+}
+
+#[test]
+fn near_end_pauses_after_a_failed_tail_until_the_explicit_retry() {
+    let mut state = state_with_jobs_head(Some(2));
+    state.jobs_near_end(true);
+    let tail = state.scoped_jobs.active_ticket().expect("tail").clone();
+    state.complete_scoped_jobs(tail, Err(ClientError::Transport));
+    assert!(state.scoped_jobs.tail_error().is_some());
+    state.jobs_near_end(true);
+    assert!(
+        state.scoped_jobs.active_ticket().is_none(),
+        "a failed tail is not retried by scrolling"
+    );
+    state.request_jobs(JobsEvent::More);
+    assert!(state.scoped_jobs.loading_more(), "Retry still works");
+}
+
+#[test]
+fn jobs_nav_badge_counts_in_progress_buckets_omits_unknown_and_clears_on_authority_change() {
+    let mut state = registered_app();
+    // Before any page loads, count is unknown -> omitted (never "0").
+    assert_eq!(state.scoped_jobs.in_progress_count(), None);
+    assert_eq!(
+        crate::app::sidebar_row_badge(&state, crate::app::Page::Jobs),
+        None
+    );
+
+    // Page with running(2) + queued(3) + retrying(1) = 6, even though only 1 row is loaded.
+    state.request_jobs(JobsEvent::Apply);
+    let ticket = state.scoped_jobs.active_ticket().expect("ticket").clone();
+    let mut reply = page(&ticket.binding, 1, None);
+    reply.counts = Some(JobsDashboardCounts {
+        active: 2,
+        queued: 3,
+        retrying: 1,
+        failed: 4,
+        completed_recent: 9,
+    });
+    state.complete_scoped_jobs(ticket, Ok(reply));
+    assert_eq!(state.scoped_jobs.in_progress_count(), Some(6));
+    assert_eq!(
+        crate::app::sidebar_row_badge(&state, crate::app::Page::Jobs).as_deref(),
+        Some("6")
+    );
+
+    // Unknown counts (None) omits the badge rather than showing "0".
+    state.request_jobs(JobsEvent::Poll);
+    let poll = state.scoped_jobs.active_ticket().expect("poll").clone();
+    let mut unknown_reply = page(&poll.binding, 1, None);
+    unknown_reply.counts = None;
+    unknown_reply.observed_at = "2026-11-12T12:01:00Z".into();
+    state.complete_scoped_jobs(poll, Ok(unknown_reply));
+    assert_eq!(state.scoped_jobs.in_progress_count(), None);
+    assert_eq!(
+        crate::app::sidebar_row_badge(&state, crate::app::Page::Jobs),
+        None
+    );
+
+    // Authority change clears the count.
+    state.request_jobs(JobsEvent::Poll);
+    let poll2 = state.scoped_jobs.active_ticket().expect("poll2").clone();
+    let mut active_reply = page(&poll2.binding, 1, None);
+    active_reply.counts = Some(JobsDashboardCounts {
+        active: 1,
+        queued: 0,
+        retrying: 0,
+        failed: 0,
+        completed_recent: 0,
+    });
+    active_reply.observed_at = "2026-11-12T12:02:00Z".into();
+    state.complete_scoped_jobs(poll2, Ok(active_reply));
+    assert_eq!(
+        crate::app::sidebar_row_badge(&state, crate::app::Page::Jobs).as_deref(),
+        Some("1")
+    );
+    state.scoped_jobs.invalidate_origin();
+    assert_eq!(state.scoped_jobs.in_progress_count(), None);
+    assert_eq!(
+        crate::app::sidebar_row_badge(&state, crate::app::Page::Jobs),
+        None
+    );
+}
+
+#[test]
+fn selected_job_detail_is_not_overwritten_by_stale_list_refresh_and_tail_cursor_survives() {
+    let mut state = state_with_jobs_head(Some(2));
+    // Load tail page 2 so tail_cursor advances to cursor(3).
+    state.request_jobs(JobsEvent::More);
+    let tail = state.scoped_jobs.active_ticket().expect("tail").clone();
+    state.complete_scoped_jobs(tail.clone(), Ok(page(&tail.binding, 2, Some(3))));
+    assert_eq!(state.scoped_jobs.loaded_pages(), 2);
+
+    // Select fixture-job-1 and give it a newer terminal detail observation.
+    state.backend.selected_job = Some("fixture-job-1".into());
+    let newer_detail: crate::backend::JobDetail = serde_json::from_value(json!({
+        "job": {
+            "id": "fixture-job-1",
+            "app": "tools",
+            "operation": "manual_tool",
+            "title": "Synthetic eligible job 1",
+            "state": "completed",
+            "phase": "done",
+            "progress_done": 100,
+            "progress_total": 100,
+            "error_summary": "",
+            "private_details_available": true,
+            "activity_actions_available": false,
+            "status_only": false
+        },
+        "stages": [],
+        "private_details_available": true,
+        "activity_actions_available": false
+    }))
+    .expect("newer detail");
+    state.backend.detail = Load::Ready(newer_detail);
+
+    // A head poll returns an older "queued" row for fixture-job-1.
+    state.request_jobs(JobsEvent::Poll);
+    let poll = state.scoped_jobs.active_ticket().expect("poll").clone();
+    let mut stale_row_page = page(&poll.binding, 1, Some(99));
+    stale_row_page.observed_at = "2026-11-12T12:00:30Z".into();
+    state.complete_scoped_jobs(poll, Ok(stale_row_page));
+
+    // Selected detail must remain "completed" (not regressed to "queued").
+    let Load::Ready(detail) = &state.backend.detail else {
+        panic!("detail must remain ready");
+    };
+    assert_eq!(detail.job.state, "completed");
+    assert_eq!(detail.job.progress_done, Some(100));
+
+    // Tail cursor must still be cursor(3) (not reset to cursor(99)).
+    state.request_jobs(JobsEvent::More);
+    let next_tail = state
+        .scoped_jobs
+        .active_ticket()
+        .expect("next tail")
+        .clone();
+    assert_eq!(next_tail.query.cursor, Some(cursor(3)));
 }

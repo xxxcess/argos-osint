@@ -1,10 +1,9 @@
 ---
 name: gsd
 description: >-
-  Babysit open pull requests (CI checks and Cursor bot security reviews) and
-  autonomously implement specifications from PRs titled "spec implementation:
-  <feature name>" by dispatching per-PR subagents on a ~1-hour scheduled loop
-  until all triggered implementations, security fixes, and checks complete.
+  Monitor open Argos PRs, address CI and Cursor review findings, and delegate
+  spec implementation PRs. Run affected Linux native and backend checks first,
+  then promote the exact green head to affected macOS and React Native Web checks.
 ---
 
 # GSD — PR Babysitter, Security Responder & Spec Implementer
@@ -13,6 +12,38 @@ Run a bounded (~1 hour) autonomous monitoring and delivery loop in the active co
 1. **Babysit open PRs** in `xxxcess/argos-osint` — track hosted CI runs, inspect failed logs, dispatch subagents to implement and push targeted fixes for genuine regressions (or rerun transient runner failures), address **Cursor bot (`cursor[bot]`) security review findings**, and leave merging to the user.
 2. **Implement spec PRs via dedicated per-PR subagents** — watch for open PRs titled `spec implementation: <feature name>` (case-insensitive), spawn a subagent per PR (which may break independent modules/docs into disjoint child workers) inside an isolated worktree, extract the spec from the PR body/comments and changed spec files, build performant, secure, and scalable implementations on that PR's branch, update affected docs/diagrams per [conventions](../../../docs/wiki/code/conventions.md), run scoped checks, and commit + push back to the PR branch.
 3. **Continue on a timer** for ~60 minutes until the time window expires and all triggered implementations, security fixes, and CI checks settle.
+
+---
+
+## Nightly workflow (canonical)
+
+Each push runs the [Linux-first CI pass](../../../docs/wiki/code/ci.md#nightly-gsd-order) for the affected Linux x86-64 native app and AMD64 backend. Use [UI scope guidance](../../../AGENTS.md#ui-changes) to select the native or Web skill. Track the exact-head Linux package, inspected fixtures and live verdict as they become available. Preserve shared behavior and authority across [Embedded and Distributed](../../../docs/wiki/code/native-connections.md#backend-types-and-parity).
+
+After **Fleetworks required** is green, dispatch pass two for the same PR and SHA. It covers affected macOS Intel and Apple Silicon apps, React Native Web and remaining backend lanes. Every new head starts a new first pass. Trusted integration pushes retain release verification.
+
+Run these steps in order. The loop sections below keep their detail.
+
+1. **Poll.** Run `gsd_poll.py` ([Routine Loop](#routine-loop-per-poll-cycle) step 1). Skip release-bot and fork (`isCrossRepository`) PRs. Never merge.
+2. **Work in the PR worktree.** For each actionable PR use `.agent-scratch/worktrees/pr-<n>`, checked out to the PR head. Do not touch the main checkout, `main` or `nightly`.
+3. **Read owner comments as requirements.** New owner comments on the PR (and in the session) are new requirements. Track each one in `.agent-scratch/gsd-state.json` under `prs.<n>.requirements` with its comment id and `open | done`; mark one done only with the pushed sha that satisfies it.
+4. **Iterate on the Linux first pass.** Fix affected backend, parity and native regressions. Record skipped lanes and any pending Linux review.
+5. **Cheap local checks only.** CI is the test runner. Run locally only: `rustfmt --check --edition 2021 apps/fleetworks-desktop/src/lib.rs` (it follows the module tree) or `cargo fmt --check`, `prettier --check` on changed web and Markdown files, `python3 scripts/fleetworks_doc_links.py` (0 broken), and `node scripts/release_check.mjs message --file <msg>` with `node scripts/release_check.mjs versions`. No full builds, no full test suites and no mutation runs ([root rules](../../../AGENTS.md)).
+6. **Commit and push.** Stage exact paths, use Conventional Commits and one small commit per slice. Before the first push of a run, check `git merge-tree --write-tree origin/<base> HEAD`. Push with the full branch name and a literal sha: `git push origin <sha>:refs/heads/<headRefName>`, with no shell variables, substitutions or brace expansion. Never force-push.
+7. **Read failed CI once.** After a push, read each failed job log once (`gh api --allow-escape-sequences repos/xxxcess/argos-osint/actions/jobs/<id>/logs`) instead of waiting in a loop; the owner or the next scheduled wake reports CI events. Plain `gh pr view` can fail, so read PRs through `gh api repos/xxxcess/argos-osint/pulls/<n>`.
+8. **Fix in priority order.**
+
+   | Order | Failing jobs | Action |
+   | --- | --- | --- |
+   | 1 | Affected AMD64 backend, embedded, backend images and other selected backend checks | Fix in the first pass |
+   | 1 | `Linux app / x86_64-unknown-linux-gnu` | Fix in the first pass and collect the exact-head reviewer verdict |
+   | 2 | Affected Mac apps, remaining backend architectures, `Scoped web` and web images | Dispatch as soon as first-pass CI succeeds |
+
+   A runner-capacity or toolchain failure (lost runner, no capacity, GitHub 5xx, a C build such as `blake3`) is not our code: rerun the failed jobs at most twice per commit with `gh api -X POST repos/xxxcess/argos-osint/actions/runs/<id>/rerun-failed-jobs` once the run has completed, then report it without changing code. Fix real failures at the root cause. Refresh visual-regression baselines only from CI capture artifacts, never from local renders.
+9. **Keep docs and design in sync.** Update affected docs, tags and diagrams in the same change ([conventions](../../../docs/wiki/code/conventions.md)). Keep [docs/design/matte-canvas](../../../docs/design/matte-canvas/README.md) consistent with the code and add reproduction steps for anything generated or derived. Do not touch work the owner put on hold.
+10. **Update state.** After each push and each CI read, write `head_sha`, `status`, `backend_gate` and `linux_gate` (each `pending | failing | green`), the Linux review verdict and second-pass run/result, `requirements`, `addressed_cursor_comments`, `worktree` and `notes` to `.agent-scratch/gsd-state.json`.
+    The poll output's `verification_passes` reports the aggregate checks for the first and second passes separately.
+11. **One status comment.** Post or update a single PR comment that starts with `<!-- gsd-status -->`: head SHA, first-pass backend and Linux gates, Linux review, second-pass result and open requirements. Create it with `gh api repos/xxxcess/argos-osint/issues/<n>/comments -f body='...'` and update it with `gh api -X PATCH repos/xxxcess/argos-osint/issues/comments/<id> -f body='...'`. Always pass the body inline, never read from a file.
+12. **Track both passes.** Record the [second-pass run and results](../../../docs/wiki/code/ci.md#nightly-gsd-order) separately from Linux package, fixture and live evidence. Refresh visual baselines from CI captures.
 
 ---
 
@@ -38,7 +69,7 @@ Every implementation and fix produced by GSD or its subagents must satisfy all t
   - Keep `apps/fleetworks-desktop` engine-free (no Docker/backend dependency inside native Cargo tests) while verifying log-consuming, readiness, job-streaming, and backpressure/error UI behaviors against **simulated backend log streams**:
     1. **Loopback mock gateway (`TcpListener` + `fleetworks_contracts::operational_logs` over `127.0.0.1:0` driving `rune::Runtime`)**: Mirror the `TcpListener` + delayed-response seams in [maintenance tests](../../../apps/fleetworks-desktop/src/maintenance/tests.rs) and [jobs query tests](../../../apps/fleetworks-desktop/src/jobs_query_tests.rs) alongside [log tests](../../../apps/fleetworks-desktop/src/log_tests.rs) so actual native HTTP/JSON transport, follow cursors, stale-epoch/cancel races, and Rune UI state/tree transitions run end-to-end offline.
     2. **Semantic log scenario replay**: Drive sequences of synthetic `info`, recoverable `warn` (e.g. `status=429` `write_paced`, `correction_required=false`), fatal `error` (`correction_required=true`, truncated/malformed pages, HTTP `503`), and high-volume `DISPLAY_LIMIT` bursts; assert bounded memory/table size, intact cursor continuation, secret/token redaction, and accurate UI surfacing.
-    3. **Review & test gate**: When implementing or reviewing changes affecting operational logs, jobs/cycle progress, readiness diagnostics, or retry/error handling, require simulated backend-log `Runtime` tests in `cargo test --locked -p fleetworks-desktop` (which executes in CI via [fleetworks-native.yml](../../../.github/workflows/fleetworks-native.yml)).
+    3. **Review & test gate**: When implementing or reviewing changes affecting operational logs, jobs/cycle progress, readiness diagnostics, or retry/error handling, require simulated backend-log `Runtime` tests in `cargo test --locked -p fleetworks-desktop` (which executes in the first pass via [fleetworks-native-linux.yml](../../../.github/workflows/fleetworks-native-linux.yml)).
 
 ---
 
@@ -92,7 +123,7 @@ Match any open PR whose title starts with `spec implementation:` (case-insensiti
 
 For each new or updated `spec implementation: <feature name>` PR, spawn a dedicated PR Lead subagent (`invoke_subagent`, `TypeName: "self"`) instructed to:
 1. **Read the full spec**:
-   - Inspect `gh pr view <num> -R xxxcess/argos-osint --json title,body,comments,reviews,files,headRefName,baseRefName`.
+   - Read the PR with `gh api repos/xxxcess/argos-osint/pulls/<num>` plus its issue comments and reviews (plain `gh pr view` can fail).
    - Read any spec/plan/design markdown files added or modified in the PR.
 2. **Create/sync the PR's isolated worktree**:
    - `git fetch origin <headRefName>` and ensure `.agent-scratch/worktrees/pr-<num>` points to `origin/<headRefName>`.
@@ -109,7 +140,7 @@ For each new or updated `spec implementation: <feature name>` PR, spawn a dedica
      ```
 5. **Commit, push & report back**:
    - Stage only the exact changed files (`git add <paths...>`, never `git add .`).
-   - Commit and push to `origin HEAD:<headRefName>`.
+   - Commit and push with the full branch name and a literal sha (`git push origin <sha>:refs/heads/<headRefName>`), never force-push.
    - Return the new `headRefOid` (`pushed_sha`), changed file list, and exact test results so the parent records `status: "ci_pending"` in `.agent-scratch/gsd-state.json` and monitors the resulting CI run.
 
 ### 3. Dispatch fixes for Cursor bot (`cursor[bot]`) security findings
@@ -120,7 +151,7 @@ On every cycle, inspect `cursor_security_findings` reported by `gsd_poll.py` (wh
    - Inspect every cited `path`, `line`, and security explanation in detail.
    - Verify the exploit/vulnerability path in the actual codebase — never blindly suppress warnings or weaken validation.
    - Implement a root-cause security fix preserving performance and scalability, and add a focused regression test proving the fix where feasible.
-2. Validate affected tests + commit/version policy, commit only exact changed files, and push to `origin HEAD:<headRefName>`.
+2. Validate affected tests + commit/version policy, commit only exact changed files, and push with the full branch name and a literal sha (`git push origin <sha>:refs/heads/<headRefName>`).
 3. Record each resolved finding's `uid` (e.g., `review_comment:4573016625`) in `addressed_cursor_comments` in `.agent-scratch/gsd-state.json` (and reply concisely on the PR/comment referencing the fix commit SHA if helpful). Wait for Cursor's next review pass on the new commit to verify no new findings remain.
 
 ### 4. Babysit open PR CI checks & backend container logs
@@ -131,15 +162,15 @@ For each tracked open PR (both regular open PRs and pushed `spec implementation:
 3. **Failed check or container error/semantic warning**:
    - Fetch failed job logs via `gh run view <run_id> -R xxxcess/argos-osint --log-failed` (and inspect image/Compose smoke service logs for container `ERROR`s or semantically harmful `WARN`s).
    - Distinguish **transient runner/infra issues** (e.g. runner lost communication, macOS capacity timeout, GitHub API 502/rate limit) from **real code/lint/test/service-log failures**.
-   - For transient failures: rerun failed jobs with `gh run rerun <run_id> -R xxxcess/argos-osint --failed` (at most twice per commit SHA before flagging as blocked).
-   - For real failures or backend container errors / actionable semantic warnings: dispatch or wake that PR's subagent in `.agent-scratch/worktrees/pr-<num>` to fix the root cause cleanly, verify with the affected local test, validate commit message & versions, and push back to `origin HEAD:<headRefName>`.
-4. **All checks green and `unaddressed_cursor_count == 0` and no unresolved container errors/actionable warnings**:
+   - For transient failures: rerun failed jobs with `gh api -X POST repos/xxxcess/argos-osint/actions/runs/<run_id>/rerun-failed-jobs` after the run completes (at most twice per commit SHA before flagging as blocked; do not change code for a runner or toolchain problem).
+   - For real failures or backend container errors / actionable semantic warnings: dispatch or wake that PR's subagent in `.agent-scratch/worktrees/pr-<num>` to fix the root cause cleanly, verify with the affected local test, validate commit message & versions, and push back by full branch name and literal sha. Fix in the [priority order](#nightly-workflow-canonical).
+4. **Selected checks in both passes green, applicable Linux review recorded, and no unresolved findings**:
    - Mark the PR's current `headRefOid` as `"complete"` in `.agent-scratch/gsd-state.json`.
    - **Do NOT merge the PR.** Leave merging to the user and note that the PR is green and ready for review/merge.
 
 ### 5. Schedule next wakeup & exit rule
 
-- **Keep polling** using the `schedule` tool (e.g. `DurationSeconds: 240` for a 4-minute cadence, or `120` when a CI run or Cursor review is near completion).
+- **Wake on events, not in-turn loops.** Wake on the `schedule` timer or when the owner reports a CI event; after a push, report and end the turn instead of waiting on CI.
 - **Stop condition**: End the scheduled loop once **both**:
   1. Current time >= `end_at` (~1 hour after `started_at`), **and**
   2. All triggered `spec implementation:` implementations, active `cursor[bot]` security findings, active PR subagents, and their latest CI checks have finished (or are explicitly reported as blocked/failing after retry).

@@ -20,6 +20,24 @@ use fleetworks_contracts::context::RegisteredContext;
 use fleetworks_workstation::native::WorkspaceState;
 
 #[test]
+fn the_sidebar_header_shows_the_symbol_alone_and_the_compact_rail_keeps_none() {
+    let env = Env {
+        system_dark: true,
+        scale: 1.0,
+    };
+    let mut wide = Runtime::new(State::fixture(), app::view, (1180.0, 800.0), env);
+    wide.frame(0.0);
+    assert!(
+        wide.find("brand-mark").is_some(),
+        "the approved symbol, named Fleetworks, heads the sidebar"
+    );
+    let mut narrow = Runtime::new(State::fixture(), app::view, (640.0, 480.0), env);
+    narrow.frame(0.0);
+    assert!(narrow.find("compact-icon-rail").is_some());
+    assert!(narrow.find("brand-mark").is_none());
+}
+
+#[test]
 fn real_shell_navigation_works_offline_without_boundary_effects() {
     let default_state = State::default();
     assert_eq!(default_state.page, Page::Workstation);
@@ -668,14 +686,21 @@ fn seed_button_preflight_status_shimmer_and_progressive_disclosure_reflect_state
     assert!(runtime.find("maintenance-seed").is_some());
     assert!(runtime.find("maintenance-train").is_some());
     assert!(runtime.find("maintenance-reindex").is_some());
+    let (seed_action, train_action) = if cfg!(target_os = "linux") {
+        ("Enter actor CSV path", "Enter training CSV path")
+    } else {
+        ("1. Seed Actors", "Optional · Train Classifier (Natural)")
+    };
+    let seed_explanation =
+        "Use a CSV to add or update actors. Existing actors outside this CSV are kept.";
     let seed_tree = runtime.accessibility_json().to_string();
     assert!(!seed_tree.contains("Pre-flight Checklist"));
-    assert!(seed_tree.contains("Seed Actors (Ready)"));
-    assert!(seed_tree.contains("Build Search Index (Unavailable)"));
-    assert!(seed_tree.contains("Train Classifier — Natural (Unavailable)"));
-    assert!(seed_tree.contains("Choose a CSV to add or update actors."));
-    assert!(!seed_tree.contains("Choose a training CSV for a Natural candidate."));
-    assert!(runtime.find("liquid-shimmer").is_none());
+    assert!(seed_tree.contains(&format!("{seed_action} (Ready)")));
+    assert!(seed_tree.contains("2. Build Search Index (Unavailable)"));
+    assert!(seed_tree.contains(&format!("{train_action} (Unavailable)")));
+    assert!(seed_tree.contains(seed_explanation));
+    assert!(!seed_tree.contains("Use a training CSV for a Natural candidate."));
+    assert!(runtime.find("loading-shimmer").is_none());
 
     runtime.update(|state, _| state.maintenance.upload = Load::Loading);
     runtime.update(|state, _| {
@@ -686,8 +711,8 @@ fn seed_button_preflight_status_shimmer_and_progressive_disclosure_reflect_state
     });
     runtime.frame(0.5 / 60.0);
     let uploading_tree = runtime.accessibility_json().to_string();
-    assert!(uploading_tree.contains("Seed Actors (Uploading…)"));
-    assert!(runtime.find("liquid-shimmer").is_some());
+    assert!(uploading_tree.contains(&format!("{seed_action} (Uploading…)")));
+    assert!(runtime.find("loading-shimmer").is_some());
     runtime.update(|state, _| {
         state.maintenance.upload = Load::Idle;
         state.maintenance.local_dataset = None;
@@ -696,14 +721,16 @@ fn seed_button_preflight_status_shimmer_and_progressive_disclosure_reflect_state
     runtime.update(|state, _| state.seed_stage = SeedStage::Classifier);
     runtime.frame(1.0 / 60.0);
     let classifier_tree = runtime.accessibility_json().to_string();
-    assert!(classifier_tree.contains("Choose a training CSV for a Natural candidate."));
-    assert!(!classifier_tree.contains("Choose a CSV to add or update actors."));
+    assert!(classifier_tree
+        .contains("This gateway has not advertised a durable consumer for this operation"));
+    assert!(!classifier_tree.contains(seed_explanation));
 
     runtime.update(|state, _| state.seed_stage = SeedStage::Maintenance);
     runtime.frame(2.0 / 60.0);
     let reindex_tree = runtime.accessibility_json().to_string();
-    assert!(reindex_tree.contains("Build the actor-search projection from the backend catalog."));
-    assert!(!reindex_tree.contains("Choose a training CSV for a Natural candidate."));
+    assert!(reindex_tree
+        .contains("This gateway has not advertised a durable consumer for this operation"));
+    assert!(!reindex_tree.contains(seed_explanation));
 
     runtime.update(|state, _| {
         state.page = Page::Models;
@@ -744,24 +771,200 @@ fn host_resources_show_stale_marker_after_a_failed_refresh() {
         },
     );
     runtime.frame(0.0);
-    assert!(!runtime
-        .accessibility_json()
-        .to_string()
-        .contains("Telemetry unavailable"));
+    assert!(runtime.find("host-metrics-unsynced").is_none());
 
     runtime.update(|state, _| state.apply_host_metrics(Err("gateway timed out".into())));
     runtime.frame(1.0 / 60.0);
     let tree = runtime.accessibility_json().to_string();
     assert!(
-        tree.contains("Telemetry unavailable"),
-        "stale strip missing"
+        runtime.find("host-metrics-unsynced").is_some(),
+        "unsynced glyph missing"
     );
-    assert!(tree.contains("gateway timed out"));
+    assert!(tree.contains("Latest refresh failed: gateway timed out"));
 
     runtime.update(|state, _| state.apply_host_metrics(Ok(HostMetrics::default())));
     runtime.frame(2.0 / 60.0);
-    assert!(!runtime
-        .accessibility_json()
-        .to_string()
-        .contains("Telemetry unavailable"));
+    assert!(runtime.find("host-metrics-unsynced").is_none());
+}
+
+pub(crate) fn brain_search_response_fixture() -> ActorSearchResponse {
+    use fleetworks_contracts::search::ActorSearchHit;
+    ActorSearchResponse::new(
+        ["first", "second"]
+            .into_iter()
+            .map(|id| ActorSearchHit::new(id.into(), id.into(), 1, "test-generation".into()))
+            .collect(),
+        IndexStatus::unknown("2026-01-01T00:00:00Z".into()),
+    )
+}
+
+fn brain_results_fixture() -> State {
+    let mut state = registered_fixture();
+    state.page = Page::Brain;
+    state.brain.results = Load::Ready(brain_search_response_fixture());
+    state.intents.clear();
+    state
+}
+
+#[test]
+fn brain_records_fetch_only_on_expansion_and_fence_collapse_query_and_selection() {
+    let mut state = brain_results_fixture();
+    assert!(state.intents.is_empty());
+    state.toggle_actor(0);
+    assert!(
+        matches!(state.intents.last(), Some(Intent::Dossier { actor_id }) if actor_id == "first")
+    );
+    let first = state.brain.detail_revision;
+    state.toggle_actor(0);
+    assert!(!state.brain.showing_detail);
+    assert!(matches!(state.brain.results, Load::Ready(_)));
+    state
+        .brain
+        .complete_dossier(first, Err("late collapsed response".into()));
+    assert!(matches!(state.brain.dossier, Load::Idle));
+    assert_eq!(state.intents.len(), 1, "collapse must never fetch");
+    state.toggle_actor(0);
+    let reopened = state.brain.detail_revision;
+    state.toggle_actor(1);
+    state
+        .brain
+        .complete_dossier(reopened, Err("late first record".into()));
+    assert!(matches!(state.brain.dossier, Load::Loading));
+    assert_eq!(state.brain.selected_actor.as_deref(), Some("second"));
+    let second = state.brain.detail_revision;
+    state
+        .brain
+        .complete_dossier(second, Err("retryable failure".into()));
+    state.brain.highlighted = Some(0);
+    state.retry_dossier();
+    assert!(
+        matches!(state.intents.last(), Some(Intent::Dossier { actor_id }) if actor_id == "second")
+    );
+    let retry = state.brain.detail_revision;
+    state.brain.edited(0.0);
+    state.brain.complete_dossier(retry, Err("old query".into()));
+    assert!(!state.brain.showing_detail);
+    assert!(matches!(state.brain.dossier, Load::Idle));
+}
+
+#[test]
+fn brain_real_result_disclosure_preserves_list_at_compact_and_wide_sizes() {
+    for size in [(640.0, 480.0), (1280.0, 800.0)] {
+        let mut runtime = Runtime::new(
+            brain_results_fixture(),
+            app::view,
+            size,
+            Env {
+                system_dark: true,
+                scale: 1.0,
+            },
+        );
+        runtime.frame(0.0);
+        assert!(runtime.find("actor-dossier").is_none());
+        assert!(runtime.state.intents.is_empty());
+        let (x, y) = runtime
+            .find("actor-hit-first")
+            .expect("first result trigger");
+        runtime.pointer_down(x, y);
+        runtime.pointer_up(x, y);
+        runtime.frame(1.0 / 60.0);
+        assert!(runtime.find("actor-dossier").is_some());
+        let trigger = runtime
+            .elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some("actor-hit-first"))
+            .expect("disclosure element");
+        assert_eq!(
+            trigger.expanded,
+            Some(true),
+            "disclosure announces its state"
+        );
+        assert!(runtime.find("actor-results").is_some());
+        assert!(
+            runtime.find("actor-search").is_some(),
+            "opening never navigates away from search"
+        );
+        runtime.update(|_, tx| tx.focus("actor-hit-first", true));
+        runtime.frame(1.5 / 60.0);
+        runtime.key(rune::KeyEvent {
+            key: rune::Key::Enter,
+            mods: rune::Mods::default(),
+        });
+        runtime.frame(2.0 / 60.0);
+        assert!(runtime.find("actor-dossier").is_none());
+        assert!(runtime.find("actor-hit-second").is_some());
+        assert_eq!(
+            runtime
+                .state
+                .intents
+                .iter()
+                .filter(|intent| matches!(intent, Intent::Dossier { .. }))
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn holding_enter_in_brain_search_toggles_the_highlighted_dossier_once() {
+    let mut state = brain_results_fixture();
+    state.brain.highlighted = Some(0);
+    let mut runtime = Runtime::new(
+        state,
+        app::view,
+        (1180.0, 800.0),
+        Env {
+            system_dark: true,
+            scale: 1.0,
+        },
+    );
+    runtime.frame(0.0);
+    let search_input = |element: &rune::ElementInfo| {
+        element.key.as_deref() == Some("input") && element.path.contains("/actor-search/")
+    };
+    let [x, y, width, height] = runtime
+        .elements()
+        .into_iter()
+        .find(search_input)
+        .expect("the real search editor")
+        .rect;
+    let (x, y) = (x + width / 2.0, y + height / 2.0);
+    runtime.pointer_down(x, y);
+    runtime.pointer_up(x, y);
+    runtime.frame(1.0 / 60.0);
+    assert!(runtime
+        .elements()
+        .iter()
+        .any(|element| search_input(element) && element.focused));
+
+    let enter = rune::KeyEvent {
+        key: rune::Key::Enter,
+        mods: rune::Mods::default(),
+    };
+    let revision = runtime.state.brain.detail_revision;
+    runtime.key(enter.clone());
+    runtime.frame(2.0 / 60.0);
+    for step in 3..8 {
+        runtime.repeat_key(enter.clone());
+        runtime.frame(f64::from(step) / 60.0);
+        assert!(runtime.find("actor-dossier").is_some());
+    }
+    assert_eq!(runtime.state.brain.detail_revision, revision + 1);
+    assert_eq!(
+        runtime.state.intents,
+        vec![Intent::Dossier {
+            actor_id: "first".into(),
+        }]
+    );
+
+    runtime.key_up(enter.clone());
+    runtime.key(enter.clone());
+    runtime.frame(8.0 / 60.0);
+    for step in 9..14 {
+        runtime.repeat_key(enter.clone());
+        runtime.frame(f64::from(step) / 60.0);
+        assert!(runtime.find("actor-dossier").is_none());
+    }
+    assert_eq!(runtime.state.brain.detail_revision, revision + 2);
+    assert_eq!(runtime.state.intents.len(), 1);
 }

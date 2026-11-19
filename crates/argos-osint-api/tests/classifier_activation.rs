@@ -344,7 +344,8 @@ async fn explicit_activation_enforces_permissions_source_privacy_revision_and_ex
         8080,
         Arc::new(Vec::new()),
     );
-    let app = network_router(state, policy).layer(Extension(Arc::new(
+    let unconfigured = network_router(state, policy);
+    let app = unconfigured.clone().layer(Extension(Arc::new(
         ActivationArtifacts::new(root.clone()).expect("real server-owned artifact home"),
     )));
     let preview_path = format!(
@@ -391,6 +392,32 @@ async fn explicit_activation_enforces_permissions_source_privacy_revision_and_ex
         SyntheticBaselineConsent::ActivateSyntheticBaseline,
     )
     .expect("separate confirmation");
+    assert_eq!(
+        call(
+            &unconfigured,
+            "GET",
+            &preview_path,
+            NATIVE,
+            Some(&creator),
+            json!({})
+        )
+        .await
+        .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        call(
+            &unconfigured,
+            "POST",
+            ACTIVATION_PATH,
+            NATIVE,
+            Some(&creator),
+            serde_json::to_value(&request).expect("typed request"),
+        )
+        .await
+        .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
     let (status, receipt) = call(
         &app,
         "POST",

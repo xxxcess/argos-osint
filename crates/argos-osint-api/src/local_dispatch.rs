@@ -48,6 +48,7 @@ use crate::activity_actions;
 use crate::activity_paging;
 use crate::actor_dossier;
 use crate::base64;
+use crate::chat;
 use crate::classifier_activation;
 use crate::configuration;
 use crate::connect;
@@ -284,6 +285,7 @@ impl LocalGateway {
             | IpcOperation::ActorsSearch(_)
             | IpcOperation::ActorDetail(_)
             | IpcOperation::ArticlesList(_)
+            | IpcOperation::ArticlesSearch(_)
             | IpcOperation::JobsList(_)
             | IpcOperation::JobDetail(_)
             | IpcOperation::ToolResult(_)
@@ -385,6 +387,26 @@ impl LocalGateway {
                     .map_err(|_| DispatchError::from(crate::bad()))?;
                 let page =
                     argos_osint_core::intel_service::articles(&self.state.repo, &article_query)
+                        .await
+                        .map_err(crate::internal)?;
+                json_payload(page)
+            }
+            IpcOperation::ArticlesSearch(query) => {
+                self.require_global_read(principal, registration).await?;
+                let search = argos_osint_core::storage::article_discovery::ArticleSearchQuery {
+                    query: query.query,
+                    category: query.category,
+                    day: query.day,
+                    source: query.source,
+                    run: query.run,
+                    limit: query.limit.map(usize::from),
+                    cursor: query.cursor,
+                };
+                search
+                    .validate()
+                    .map_err(|_| DispatchError::from(crate::bad()))?;
+                let page =
+                    argos_osint_core::intel_service::article_search(&self.state.repo, &search)
                         .await
                         .map_err(crate::internal)?;
                 json_payload(page)
@@ -928,6 +950,17 @@ impl LocalGateway {
                     configuration::delete_account_request(&self.state, Some(&context), delete)
                         .await?,
                 ))
+            }
+            IpcOperation::ChatTurnSubmit(request) => {
+                let context = self
+                    .resolve(
+                        principal,
+                        registration,
+                        Permission::SubmitInteractive,
+                        ContextRequirement::Registered,
+                    )
+                    .await?;
+                json_payload(chat::submit_request(&self.state, &context, request).await?)
             }
             IpcOperation::ProfileToolsSet(request) => {
                 let context = self

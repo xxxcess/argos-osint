@@ -4,6 +4,8 @@ DEFINE FIELD IF NOT EXISTS revision ON connect_registry_guard TYPE int DEFAULT 0
 DEFINE TABLE IF NOT EXISTS connect_control SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS configuration_epoch ON connect_control TYPE string;
 DEFINE FIELD IF NOT EXISTS admission_open ON connect_control TYPE bool DEFAULT true;
+-- Optional operator-chosen label for this backend. Bootstrap-only; never derived from the host.
+DEFINE FIELD IF NOT EXISTS platform_display_name ON connect_control TYPE option<string> ASSERT $value = NONE OR (string::len($value) > 0 AND string::len($value) <= 64);
 
 DEFINE TABLE IF NOT EXISTS connect_workstation SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS workstation_id ON connect_workstation TYPE string;

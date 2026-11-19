@@ -78,6 +78,27 @@ pub struct DeploymentState {
     pub deployment_id: String,
     pub configuration_epoch: String,
     pub admission_open: bool,
+    /// Operator-chosen backend label set at bootstrap. `None` until one is configured.
+    pub platform_display_name: Option<String>,
+}
+
+/// Longest backend label, in characters.
+pub const PLATFORM_DISPLAY_NAME_MAX_CHARS: usize = 64;
+/// Longest backend label, in UTF-8 bytes.
+pub const PLATFORM_DISPLAY_NAME_MAX_BYTES: usize = 256;
+
+/// Trim and bound a backend label: non-blank, at most 64 characters and 256 UTF-8 bytes, no
+/// control characters. The label is shown to operators, so it is never derived from the host.
+pub fn validate_platform_display_name(input: &str) -> Result<String, RegistryError> {
+    let name = input.trim();
+    if name.is_empty()
+        || name.chars().count() > PLATFORM_DISPLAY_NAME_MAX_CHARS
+        || name.len() > PLATFORM_DISPLAY_NAME_MAX_BYTES
+        || name.chars().any(char::is_control)
+    {
+        return Err(RegistryError::InvalidInput);
+    }
+    Ok(name.to_owned())
 }
 
 /// Registration creation/reuse; retries describe actual storage contention.
@@ -182,6 +203,7 @@ struct ControlRow {
     configuration_epoch: String,
     admission_open: bool,
     contract_version: i64,
+    platform_display_name: Option<String>,
 }
 
 #[derive(SurrealValue)]
@@ -277,7 +299,7 @@ async fn guard_in(tx: &Tx) -> Result<i64, TxError> {
 }
 
 async fn deployment_in(tx: &Tx) -> Result<DeploymentState, TxError> {
-    let mut response = run(tx, tx.query("SELECT VALUE instance_id FROM ONLY storage_meta:identity; SELECT configuration_epoch, admission_open, contract_version ?? 1 AS contract_version FROM ONLY connect_control:configuration;")).await?;
+    let mut response = run(tx, tx.query("SELECT VALUE instance_id FROM ONLY storage_meta:identity; SELECT configuration_epoch, admission_open, contract_version ?? 1 AS contract_version, platform_display_name FROM ONLY connect_control:configuration;")).await?;
     let deployment_id: Option<String> = take(&mut response, 0)?;
     let control: Option<ControlRow> = take(&mut response, 1)?;
     let deployment_id = deployment_id
@@ -290,6 +312,10 @@ async fn deployment_in(tx: &Tx) -> Result<DeploymentState, TxError> {
         deployment_id,
         configuration_epoch: control.configuration_epoch,
         admission_open: control.admission_open,
+        // A stored value that no longer validates is treated as unset, never shown.
+        platform_display_name: control
+            .platform_display_name
+            .and_then(|name| validate_platform_display_name(&name).ok()),
     })
 }
 
@@ -310,6 +336,33 @@ pub async fn initialize_control(db: &Surreal<Any>) -> Result<DeploymentState, Re
             deployment_in(&tx).await
         }
     }).await?;
+    Ok(result.value)
+}
+
+/// Explicit operator bootstrap only. Sets the backend label without touching the deployment ID,
+/// epoch, admission or any registration, so a rename never changes identity. Callers that have no
+/// label to set do not call this, which leaves any stored label unchanged.
+pub async fn set_platform_display_name(
+    repo: &Repository,
+    name: &str,
+) -> Result<DeploymentState, RegistryError> {
+    let name = validate_platform_display_name(name)?;
+    let result = run_tx(repo.db(), RetryPolicy::default(), |tx| {
+        let name = name.clone();
+        async move {
+            guard_in(&tx).await?;
+            // The row must already exist: bootstrap creates it, this only labels it.
+            deployment_in(&tx).await?;
+            run(
+                &tx,
+                tx.query("UPDATE connect_control:configuration SET platform_display_name = $name RETURN NONE")
+                    .bind(("name", name)),
+            )
+            .await?;
+            deployment_in(&tx).await
+        }
+    })
+    .await?;
     Ok(result.value)
 }
 
@@ -1149,4 +1202,48 @@ pub async fn revoke_session(
         }
     }).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod platform_display_name_tests {
+    use super::*;
+
+    #[test]
+    fn labels_are_trimmed_and_kept_whole() {
+        assert_eq!(
+            validate_platform_display_name("  Studio rack 2  ").expect("valid"),
+            "Studio rack 2"
+        );
+        assert_eq!(
+            validate_platform_display_name("Büro Zürich").expect("unicode"),
+            "Büro Zürich"
+        );
+    }
+
+    #[test]
+    fn blank_control_and_oversized_labels_are_rejected() {
+        for bad in ["", "   ", "\t", "a\nb", "a\u{0}b", "a\u{7f}b", "x\u{85}y"] {
+            assert!(
+                matches!(
+                    validate_platform_display_name(bad),
+                    Err(RegistryError::InvalidInput)
+                ),
+                "{bad:?} must be rejected"
+            );
+        }
+        let sixty_four = "x".repeat(PLATFORM_DISPLAY_NAME_MAX_CHARS);
+        assert!(validate_platform_display_name(&sixty_four).is_ok());
+        assert!(validate_platform_display_name(&format!("{sixty_four}x")).is_err());
+    }
+
+    #[test]
+    fn the_byte_bound_applies_to_multibyte_labels() {
+        // 64 four-byte characters are 256 bytes: allowed. A fifth-byte-class overflow is not
+        // reachable with 64 characters, so the byte bound is the same limit stated twice.
+        let max = "\u{1F600}".repeat(PLATFORM_DISPLAY_NAME_MAX_CHARS);
+        assert_eq!(max.len(), PLATFORM_DISPLAY_NAME_MAX_BYTES);
+        assert!(validate_platform_display_name(&max).is_ok());
+        let over = "\u{1F600}".repeat(PLATFORM_DISPLAY_NAME_MAX_CHARS + 1);
+        assert!(validate_platform_display_name(&over).is_err());
+    }
 }

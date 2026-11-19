@@ -89,10 +89,11 @@ describe("Intel status bar", () => {
     expect(paint(screen.getByText("3376 KB/s"), "color")).toBe(
       intelMetricColors.network.toLowerCase(),
     );
-    expect(
-      screen.getByRole("button", { name: "macOS 26.0, x86 · 16 cores" }),
-    ).toHaveTextContent("macOS");
-    expect(screen.getByText("x86 · 16 cores")).toBeVisible();
+    // Host OS and chipset never name the Home control; the fallback does.
+    expect(screen.getByRole("button", { name: "Backend" })).toHaveTextContent(
+      "Backend",
+    );
+    expect(screen.queryByText(/macOS|x86/)).not.toBeInTheDocument();
     expect(screen.getByLabelText("API connected")).toHaveTextContent("API_OK");
     expect(screen.getByText("10:00:54 AM")).toBeVisible();
   });
@@ -119,6 +120,29 @@ describe("Intel status bar", () => {
     expect(screen.queryByText("KB/s")).not.toBeInTheDocument();
   });
 
+  it("names the Home control from the backend name, never from host details", () => {
+    const { rerender } = render(
+      <IntelStatusBar
+        connected
+        activeApp
+        backendName="  Studio rack  "
+        metrics={{ platform: "macOS 26.0", chipset: "x86 · 16 cores" }}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Studio rack" })).toBeVisible();
+    expect(screen.queryByText(/macOS|x86/)).not.toBeInTheDocument();
+    rerender(
+      <IntelStatusBar
+        connected
+        activeApp
+        backendName="   "
+        metrics={{ platform: "macOS 26.0" }}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Backend" })).toBeVisible();
+    expect(screen.getByRole("group", { name: "Backend host" })).toBeVisible();
+  });
+
   it.each([768, 390, 320])(
     "keeps navigation and connection status at %ipx without metric clutter",
     async (width) => {
@@ -140,12 +164,61 @@ describe("Intel status bar", () => {
       const tab = screen.getByRole("button", { name: "Bulletin" });
       expect(tab).toHaveTextContent(width < 600 ? "Intel" : "intelligence");
       expect(tab).toHaveAttribute("aria-pressed", "true");
-      await user.click(screen.getByRole("button", { name: "server" }));
+      await user.click(screen.getByRole("button", { name: "Backend" }));
       await user.click(screen.getByRole("button", { name: "Bulletin" }));
       expect(home).toHaveBeenCalledOnce();
       expect(intel).toHaveBeenCalledOnce();
     },
   );
+
+  it("retains last valid metrics with a muted unsynced glyph and accessible details without a visible Stale label", () => {
+    render(
+      <IntelStatusBar
+        connected
+        activeApp
+        metrics={{
+          cpuPercent: 34,
+          memoryPercent: 61,
+          diskPercent: 22,
+          networkKBps: 128,
+        }}
+        metricsUnsynced={{
+          updatedAt: Date.UTC(2026, 10, 18, 12, 0, 0),
+          reason: "HTTP 503",
+        }}
+      />,
+    );
+    expect(screen.getByText("34%")).toBeVisible();
+    expect(screen.getByText("61%")).toBeVisible();
+    expect(screen.getByText("22%")).toBeVisible();
+    expect(screen.getByText("128 KB/s")).toBeVisible();
+    const glyph = screen.getByLabelText(/Host metrics unsynced.*HTTP 503/);
+    expect(glyph).toBeVisible();
+    expect(glyph).toHaveTextContent("◇");
+    expect(screen.queryByText(/stale/i)).not.toBeInTheDocument();
+  });
+
+  it("shows a muted unsynced connection glyph and local Retry control without a visible Stale banner", async () => {
+    const retry = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <IntelStatusBar
+        connected
+        activeApp
+        connectionUnsynced={{
+          updatedAt: Date.UTC(2026, 10, 18, 12, 0, 0),
+          reason: "HTTP 503",
+        }}
+        onRetryConnection={retry}
+      />,
+    );
+    const glyph = screen.getByLabelText(/API connection unsynced.*HTTP 503/);
+    expect(glyph).toBeVisible();
+    expect(glyph).toHaveTextContent("◇");
+    expect(screen.queryByText(/stale/i)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Retry connection" }));
+    expect(retry).toHaveBeenCalledOnce();
+  });
 });
 
 describe("Intel scroll-to-bottom control", () => {

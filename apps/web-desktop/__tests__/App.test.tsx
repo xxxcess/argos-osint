@@ -60,7 +60,7 @@ describe("Web Desktop App (real IntelApp)", () => {
     render(<IntelApp />, { wrapper: providerWrapper() });
     expect(screen.queryByLabelText("API offline")).toBeNull();
     expect(screen.getByTestId("landing-core")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "server" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Backend" })).toBeDisabled();
     expect(
       screen.queryByRole("button", { name: "Open Intel" }),
     ).not.toBeInTheDocument();
@@ -122,7 +122,7 @@ describe("Web Desktop App (real IntelApp)", () => {
         "API_OK",
       ),
     );
-    expect(screen.getByRole("button", { name: "server" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Backend" })).toBeEnabled();
     expect(
       screen.queryByRole("button", { name: /^Bulletin$/ }),
     ).not.toBeInTheDocument();
@@ -171,13 +171,15 @@ describe("Web Desktop App (real IntelApp)", () => {
     await screen.findByLabelText("API connected");
     await user.click(screen.getByRole("button", { name: "Open Intel" }));
     await user.type(
-      screen.getByRole("textbox", { name: "Search articles" }),
+      screen.getByRole("textbox", {
+        name: "Search articles and actors",
+      }),
       "shipping",
     );
     await user.click(
       screen.getByRole("button", { name: /^Economy & Supply Chains$/ }),
     );
-    await user.click(screen.getByRole("button", { name: /^server$/ }));
+    await user.click(screen.getByRole("button", { name: /^Backend$/ }));
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Open Intel" })).toBeVisible(),
     );
@@ -189,7 +191,9 @@ describe("Web Desktop App (real IntelApp)", () => {
       screen.getByRole("heading", { name: "Intelligence bulletin" }),
     ).toBeVisible();
     expect(
-      screen.getByRole("textbox", { name: "Search articles" }),
+      screen.getByRole("textbox", {
+        name: "Search articles and actors",
+      }),
     ).toHaveValue("shipping");
     expect(
       screen.getByRole("button", { name: /^Economy & Supply Chains$/ }),

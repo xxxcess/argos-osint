@@ -35,6 +35,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use argos_osint_api::actor_search::SearchClient;
+use argos_osint_api::classifier_activation::ActivationArtifacts;
 use argos_osint_api::datasets::DatasetStore;
 use argos_osint_api::network_router_with_private_services;
 use argos_osint_api::workstation::ReadinessOwners;
@@ -51,6 +52,8 @@ use argos_osint_core::storage::server;
 use argos_osint_core::storage::setup_jobs as core_setup_jobs;
 use fleetworks_contracts::actor_index::ActorIndexLimits;
 use fleetworks_contracts::capabilities::Capabilities;
+use fleetworks_contracts::chat::ChatTurnAck;
+use fleetworks_contracts::chat::CHAT_TURNS_PATH;
 use fleetworks_contracts::classifier_activation::ActivationRequest;
 use fleetworks_contracts::classifier_activation::ActiveModelRevision;
 use fleetworks_contracts::classifier_activation::CandidateIdentity;
@@ -81,6 +84,7 @@ use fleetworks_contracts::readiness::DatasetRef;
 use fleetworks_contracts::readiness::MaintenanceOperation;
 use fleetworks_contracts::readiness::MaintenanceReceipt;
 use fleetworks_contracts::readiness::MaintenanceRequest;
+use fleetworks_contracts::readiness::ReadinessActionId;
 use fleetworks_contracts::readiness::ReadinessCheckId;
 use fleetworks_contracts::readiness::ReadinessState;
 use fleetworks_contracts::readiness::WorkstationReadiness;
@@ -132,6 +136,7 @@ const PROFILE_ACCOUNTS_UPSERT_PATH: &str = "/api/v1/profile/accounts/upsert";
 const PROFILE_ACCOUNTS_DELETE_PATH: &str = "/api/v1/profile/accounts/delete";
 const PROFILE_TOOLS_SET_PATH: &str = "/api/v1/profile/tools/set";
 const ARTICLES_PATH: &str = "/api/v1/articles";
+const ARTICLES_SEARCH_PATH: &str = "/api/v1/articles/search";
 const LOGS_PATH: &str = "/api/v1/logs";
 const LOGS_FOLLOW_PATH: &str = "/api/v1/logs/follow";
 const REGISTRATION_CONTEXT_PATH: &str = "/api/v1/connect/registrations/context";
@@ -383,11 +388,16 @@ impl HttpHarness {
         let dataset_store = DatasetStore::open(staged_dir).expect("open dataset store");
         let readiness = ReadinessOwners::new(deployment.deployment_id.clone(), Vec::new())
             .expect("readiness owners");
-        let services = PrivateServices::default()
+        let mut services = PrivateServices::default()
             .with_search(SearchClient::from_local(Arc::new(LocalActorSearchBackend(
                 Arc::clone(&search_service),
             ))))
             .with_workstation(readiness, dataset_store.clone());
+        if cfg!(feature = "classifier") {
+            services = services.with_activation_artifacts(
+                ActivationArtifacts::new(root.clone()).expect("HTTP activation artifact owner"),
+            );
+        }
 
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -456,6 +466,7 @@ impl HttpHarness {
             store: dataset_store,
             index: Some(index_worker),
             relinquish_on_shutdown: false,
+            classifier_enabled: cfg!(feature = "classifier"),
         };
         let worker_repo = repo.clone();
         let worker_root = root.clone();
@@ -539,18 +550,19 @@ async fn run_shared_flow(
     assert!(caps.features.iter().any(|f| f == "workstation-readiness"));
     assert!(caps.features.iter().any(|f| f == "jobs"));
     assert!(caps.features.iter().any(|f| f == "logs"));
-    assert!(
-        !caps
-            .features
-            .iter()
-            .any(|f| f == "nlp" || f == "classifier"),
-        "{transport}: optional nlp/classifier features must be omitted when engines are absent"
+    let local = transport == "ipc";
+    let local_nlp = local && cfg!(feature = "nlp");
+    let classifier_enabled = cfg!(feature = "classifier");
+    assert_eq!(caps.features.iter().any(|f| f == "nlp"), local_nlp);
+    assert_eq!(
+        caps.features.iter().any(|f| f == "classifier"),
+        local && classifier_enabled
     );
     record(
         &mut *report,
         "capabilities",
-        "live_parity",
-        "native contract features without optional nlp/classifier engines",
+        "intentional_exception",
+        "shared native contract and transport-specific optional engines",
     );
 
     if let Some(unauth) = unauthenticated_http_client {
@@ -1115,6 +1127,30 @@ async fn run_shared_flow(
         .checks
         .iter()
         .any(|c| c.id == ReadinessCheckId::ActorCatalog && c.state == ReadinessState::Ready));
+    assert_eq!(
+        readiness
+            .checks
+            .iter()
+            .any(|check| check.id == ReadinessCheckId::Nlp && check.state == ReadinessState::Ready),
+        local_nlp,
+        "{transport}: readiness must reflect the bundled NLP startup probe"
+    );
+    for id in [
+        ReadinessActionId::TrainClassifier,
+        ReadinessActionId::ActivateClassifier,
+    ] {
+        assert_eq!(
+            readiness
+                .checks
+                .iter()
+                .flat_map(|check| &check.actions)
+                .find(|action| action.id == id)
+                .expect("classifier preflight action")
+                .allowed,
+            classifier_enabled,
+            "{transport}: preflight {id:?} must reflect the configured Natural worker"
+        );
+    }
     record(
         &mut *report,
         "workstation_readiness",
@@ -1142,6 +1178,33 @@ async fn run_shared_flow(
         "articles_list",
         "live_parity",
         "articles read parity",
+    );
+
+    let found = client
+        .get_with_query::<serde_json::Value>(
+            ARTICLES_SEARCH_PATH,
+            &json!({"query": "harbor", "limit": 5}),
+        )
+        .await
+        .expect("articles search");
+    assert!(
+        found["hits"].is_array(),
+        "{transport}: search page has hits"
+    );
+    assert_eq!(found["truncated"], json!(false));
+    assert_eq!(
+        client
+            .get_with_query::<serde_json::Value>(ARTICLES_SEARCH_PATH, &json!({"query": "  "}))
+            .await
+            .unwrap_err(),
+        ClientError::Status(400),
+        "{transport}: blank search returns 400"
+    );
+    record(
+        &mut *report,
+        "articles_search",
+        "live_parity",
+        "indexed article search page and blank-query 400 parity",
     );
 
     let cycles = client
@@ -1219,6 +1282,34 @@ async fn run_shared_flow(
         "unknown tool_run 400 parity",
     );
 
+    let chat_turn = |input: &str| {
+        serde_json::json!({
+            "request_id": format!("parity-chat-{transport}"),
+            "context": MutationContext::new(&registered_context),
+            "source": {"kind": "job", "id": "parity-chat-source"},
+            "input": input,
+        })
+    };
+    let ack: ChatTurnAck = client
+        .post(CHAT_TURNS_PATH, &chat_turn("Is this reachable?"))
+        .await
+        .expect("chat turn acknowledged");
+    assert!(ack.is_ok(), "{transport}: chat turn answers ok");
+    assert_eq!(
+        client
+            .post::<serde_json::Value>(CHAT_TURNS_PATH, &chat_turn("   "))
+            .await
+            .unwrap_err(),
+        ClientError::Status(400),
+        "{transport}: empty chat turn returns 400"
+    );
+    record(
+        &mut *report,
+        "chat_turn_submit",
+        "live_parity",
+        "chat turn ok acknowledgement and empty-input 400 parity",
+    );
+
     assert_eq!(
         client
             .get_with_query::<serde_json::Value>(
@@ -1271,7 +1362,9 @@ async fn run_shared_flow(
         "missing job_cancel 404 parity",
     );
 
-    // Unavailable optional classifier surface: explicit 503 capability errors on both transports.
+    // Both configured backends reach the scoped lookup. An unavailable
+    // classifier must fail closed before resolving the synthetic candidate.
+    let candidate_status = if classifier_enabled { 404 } else { 503 };
     let candidate = CandidateIdentity::new(
         "candidate-1".to_owned(),
         "train-job-1".to_owned(),
@@ -1294,14 +1387,14 @@ async fn run_shared_flow(
             .post::<serde_json::Value>(ACTIVATION_PATH, &activate_req)
             .await
             .unwrap_err(),
-        ClientError::Status(503),
-        "{transport}: unavailable classifier activation returns explicit 503"
+        ClientError::Status(candidate_status),
+        "{transport}: activation rejects an absent candidate or unavailable engine"
     );
     record(
         &mut *report,
         "classifier_activate",
-        "intentional_exception",
-        "unavailable optional classifier returns explicit 503 capability error",
+        "live_parity",
+        "activation rejects the missing candidate or unavailable service",
     );
 
     assert_eq!(
@@ -1312,38 +1405,38 @@ async fn run_shared_flow(
             )
             .await
             .unwrap_err(),
-        ClientError::Status(503),
-        "{transport}: unavailable classifier candidate preview returns explicit 503"
+        ClientError::Status(candidate_status),
+        "{transport}: candidate preview rejects an absent candidate or unavailable engine"
     );
     record(
         &mut *report,
         "classifier_candidate_detail",
-        "intentional_exception",
-        "unavailable optional classifier candidate preview returns explicit 503",
+        "live_parity",
+        "preview rejects the missing candidate or unavailable service",
     );
 
     let act_result_err = client
         .get_with_query::<serde_json::Value>(ACTIVATION_RESULT_PATH, &[("job_id", "missing-job")])
         .await
         .unwrap_err();
-    if transport == "ipc" {
-        assert_eq!(
-            act_result_err,
-            ClientError::Status(503),
-            "IPC returns explicit 503 when classifier capability is disabled"
-        );
-    } else {
-        assert_eq!(
-            act_result_err,
-            ClientError::Status(404),
-            "HTTP activation result checks durable repository state when activation artifacts are absent"
-        );
-    }
+    assert_eq!(
+        act_result_err,
+        ClientError::Status(if local && !classifier_enabled {
+            503
+        } else {
+            404
+        }),
+        "{transport}: activation result requires an enabled IPC engine and an existing job"
+    );
     record(
         &mut *report,
         "classifier_activation_result",
-        "intentional_exception",
-        "IPC capability gate returns 503 while HTTP returns 404 for absent activation job",
+        if classifier_enabled {
+            "live_parity"
+        } else {
+            "intentional_exception"
+        },
+        "disabled IPC engine returns 503; missing activation job returns 404",
     );
 
     let train_dataset = DatasetRef::new(
@@ -1363,24 +1456,16 @@ async fn run_shared_flow(
         .post::<serde_json::Value>(CLASSIFIER_TRAIN_PATH, &train_req)
         .await
         .unwrap_err();
-    if transport == "ipc" {
-        assert_eq!(
-            train_err,
-            ClientError::Status(503),
-            "IPC returns explicit 503 when classifier training engine is absent"
-        );
-    } else {
-        assert_eq!(
-            train_err,
-            ClientError::Status(409),
-            "HTTP rejects unconfigured/missing classifier training dataset cleanly with 409"
-        );
-    }
+    assert_eq!(
+        train_err,
+        ClientError::Status(if classifier_enabled { 409 } else { 503 }),
+        "{transport}: training requires an enabled worker and a valid dataset"
+    );
     record(
         &mut *report,
         "train_classifier",
-        "intentional_exception",
-        "unavailable optional classifier training surfaces explicit capability/configuration rejection",
+        "live_parity",
+        "unavailable worker returns 503; missing training dataset returns 409",
     );
 
     let logs_follow_op = IpcOperation::from_get_with_query(LOGS_FOLLOW_PATH, &LogQuery::default())
@@ -1618,18 +1703,17 @@ async fn http_and_local_ipc_backends_satisfy_parity_and_intentional_exceptions()
         verified: true,
     });
     report.record_exception(IntentionalExceptionRecord {
-        id: "optional_classifier_and_nlp_unavailable".to_owned(),
+        id: "optional_classifier_and_nlp_capabilities".to_owned(),
         operations: vec![
-            "train_classifier".to_owned(),
-            "classifier_candidate_detail".to_owned(),
-            "classifier_activate".to_owned(),
+            "capabilities".to_owned(),
+            "workstation_readiness".to_owned(),
             "classifier_activation_result".to_owned(),
         ],
-        reason: "Local embedded companions run without optional Python NLP or classifier engines unless explicitly enabled; HTTP servers without ActivationArtifacts also disable activation endpoints."
+        reason: "Embedded IPC advertises bundled engines after startup probes. Distributed HTTP clients use readiness for configured workers and independently probed services."
             .to_owned(),
-        http_behavior: "Capabilities omit nlp/classifier; activation & preview return 503."
+        http_behavior: "Capabilities omit the bundled engine flags. The fixture does not configure a private NLP probe. A configured worker exposes Natural training and activation; missing activation job results return 404."
             .to_owned(),
-        ipc_behavior: "Capabilities omit nlp/classifier; all classifier operations fail closed with explicit 503 capability-disabled errors."
+        ipc_behavior: "Enabled builds report NLP Ready and expose the same Natural maintenance workflow. Disabled classifier builds reject classifier operations with 503."
             .to_owned(),
         verified: true,
     });

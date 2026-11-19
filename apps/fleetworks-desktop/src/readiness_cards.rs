@@ -80,6 +80,29 @@ pub(crate) fn checks(state: &State, preferences: ViewPreferences, kit: &Kit) -> 
                     ))
                     .child(quiet(format!("Observed {}", readiness.observed_at), kit)),
             );
+            if let Some(error) = &state.readiness_error {
+                body = body.child(
+                    rune::row()
+                        .key("readiness-update-failed")
+                        .w_full()
+                        .center_y()
+                        .gap(8.0)
+                        .child(ui_components::status_pill(
+                            "Update failed",
+                            None,
+                            StatusTone::Warn,
+                            kit,
+                        ))
+                        .child(quiet(format!("Showing the last checks. {error}"), kit))
+                        .child(
+                            ActionButton::new("Retry")
+                                .key("readiness-retry")
+                                .finish(MetalFinish::Gunmetal)
+                                .on_press(|state: &mut State| state.refresh_readiness())
+                                .build(kit, preferences, None),
+                        ),
+                );
+            }
             if readiness.checks.is_empty() {
                 body = body.child(quiet(
                     "The backend returned no check observations. Readiness is unknown.",

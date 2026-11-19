@@ -11,31 +11,31 @@ import { paint, sheetProp, sheetStyle } from "../../../vitest.test-support";
  * prove real components consume them rather than redeclaring values.
  */
 describe("Theme tokens (imported from @argos/ui source)", () => {
-  it("defines the matte obsidian/ivory and graphite surfaces", () => {
+  it("defines the matte canvas and cool charcoal surfaces", () => {
     expect(colors.bg).toBe("#060709");
-    expect(colors.panel).toBe("#0B0C0F");
-    expect(colors.raised).toBe("#111317");
-    expect(colors.border).toBe("#898274");
-    expect(colors.text).toBe("#F3EEE4");
-    expect(colors.dim).toBe("#D6D2C4");
-    expect(colors.muted).toBe("#B8B4A8");
+    expect(colors.panel).toBe("#0B0F14");
+    expect(colors.raised).toBe("#121820");
+    expect(colors.border).toBe("#647587");
+    expect(colors.text).toBe("#D5DCE5");
+    expect(colors.dim).toBe("#A8B6C5");
+    expect(colors.muted).toBe("#8192A4");
   });
 
   it("defines accent/accent2 plus the four status hues", () => {
-    expect(colors.accent).toBe("#C6A56E");
+    expect(colors.accent).toBe("#24DCE3");
     expect(colors.accent2).toBe("#c678dd");
-    expect(colors.success).toBe("#98c379");
-    expect(colors.warning).toBe("#e5c07b");
-    expect(colors.danger).toBe("#f08a8a");
+    expect(colors.success).toBe("#23dfa0");
+    expect(colors.warning).toBe("#f1c84b");
+    expect(colors.danger).toBe("#f280a0");
   });
 
   it("retains compatibility names as opaque matte fills and faint decorative edges", () => {
-    expect(colors.glass).toBe("#0B0C0F");
-    expect(colors.glassStrong).toBe("#111317");
-    expect(colors.glassBorder).toBe("#898274");
-    expect(colors.cardEdge).toBe("rgba(243, 238, 228, 0.02)");
-    expect(colors.satinControlEdge).toBe("rgba(243, 238, 228, 0.03)");
-    expect(colors.accentSoft).toBe("rgba(198, 165, 110, 0.1)");
+    expect(colors.glass).toBe("#0B0F14");
+    expect(colors.glassStrong).toBe("#121820");
+    expect(colors.glassBorder).toBe("#647587");
+    expect(colors.cardEdge).toBe("rgba(213, 220, 229, 0.02)");
+    expect(colors.satinControlEdge).toBe("rgba(213, 220, 229, 0.03)");
+    expect(colors.accentSoft).toBe("rgba(36, 220, 227, 0.1)");
   });
 
   it("keeps mono for telemetry and body for prose", () => {
@@ -77,8 +77,7 @@ describe("Theme tokens (imported from @argos/ui source)", () => {
     const appliedStyle = sheetStyle(panel);
     expect(paint(panel, "backgroundColor")).toBe(colors.glass.toLowerCase());
     expect(appliedStyle["backdrop-filter"]).toBeUndefined();
-    expect(paint(panel, "borderTopColor")).toBe(colors.cardEdge);
-    expect(appliedStyle["border-top-width"]).toBe("1px");
+    expect(appliedStyle["border-top-width"]).toBe("0px");
     expect(screen.getByText("token consumer")).toBeVisible();
   });
 

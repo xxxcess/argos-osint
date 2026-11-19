@@ -1,5 +1,5 @@
 "use client";
-import React, { useEffect, useState } from "react";
+import React, { createContext, useContext, useEffect, useState } from "react";
 import {
   View,
   Text,
@@ -9,11 +9,41 @@ import {
   StyleSheet,
   Animated,
 } from "react-native";
-import { INTEL_CATEGORIES, INTEL_DOMAIN_NAMES } from "@argos/api-client";
+import {
+  INTEL_CATEGORIES,
+  INTEL_DOMAIN_NAMES,
+  useOptionalBackend,
+} from "@argos/api-client";
 import { useReducedMotion } from "../../shell/motion";
 import { moveCategoryFocus } from "../category-keyboard.web";
 import { intelColors as c } from "../../shell/intel-theme";
 import { intelFonts } from "../../shell/intel-fonts";
+
+export type CategoryCountsSync = {
+  unsynced: boolean;
+  updatedAt?: number;
+  reason?: string;
+};
+
+export const CategoryCountsSyncContext =
+  createContext<CategoryCountsSync | null>(null);
+
+function formatSyncTime(updatedAt?: number): string | null {
+  if (!updatedAt || !Number.isFinite(updatedAt)) return null;
+  return new Date(updatedAt).toLocaleTimeString("en-US");
+}
+
+function unsyncedCountLabel(
+  label: string,
+  updatedAt?: number,
+  reason?: string,
+): string {
+  const parts = [`Article count for ${label} unsynced`];
+  const at = formatSyncTime(updatedAt);
+  if (at) parts.push(`last updated ${at}`);
+  if (reason?.trim()) parts.push(reason.trim());
+  return parts.join(" · ");
+}
 
 function categoryLabel(category: string) {
   const domain = INTEL_CATEGORIES.find((id) => id === category);
@@ -28,14 +58,31 @@ export function CategoryRail({
   counts,
   onCategory,
   wide,
+  unsynced,
+  unsyncedReason,
+  unsyncedUpdatedAt,
 }: {
   categories: string[];
   category: string;
   counts?: Record<string, number>;
   onCategory: (category: string) => void;
   wide: boolean;
+  unsynced?: boolean;
+  unsyncedReason?: string;
+  unsyncedUpdatedAt?: number;
 }) {
   const p = { categories, category, counts, onCategory };
+  const countsSync = useContext(CategoryCountsSyncContext);
+  const backend = useOptionalBackend();
+  const isUnsynced = Boolean(
+    unsynced || countsSync?.unsynced || backend?.stale,
+  );
+  const reason =
+    unsyncedReason ??
+    countsSync?.reason ??
+    (backend?.stale ? backend.connectionError : undefined);
+  const updatedAt =
+    unsyncedUpdatedAt ?? countsSync?.updatedAt ?? backend?.lastSyncedAt;
   const reduced = useReducedMotion();
   const [top] = useState(() => new Animated.Value(0));
   const active = Math.max(0, categories.indexOf(category));
@@ -48,9 +95,6 @@ export function CategoryRail({
     animation.start();
     return () => animation.stop();
   }, [active, reduced, top]);
-  function articleCount(category: string) {
-    return String(counts?.[category] ?? 0);
-  }
   const categoryItems = (
     <View
       nativeID="intel-categories"
@@ -71,43 +115,66 @@ export function CategoryRail({
           }}
         />
       ) : null}
-      {p.categories.map((category) => (
-        <Pressable
-          key={category}
-          accessibilityRole="button"
-          accessibilityLabel={categoryLabel(category)}
-          accessibilityState={{ selected: p.category === category }}
-          aria-pressed={p.category === category}
-          onPress={() => p.onCategory(category)}
-          style={({ pressed }) => [
-            s.category,
-            !wide && s.categoryChip,
-            p.category === category && s.selectedCategory,
-            pressed && { borderColor: c.select },
-          ]}
-        >
-          <Text
-            style={[
-              s.categoryName,
-              p.category === category && { color: c.accent, fontWeight: "700" },
+      {p.categories.map((item) => {
+        const label = categoryLabel(item);
+        const value = counts?.[item];
+        const hasCount = typeof value === "number" && Number.isFinite(value);
+        return (
+          <Pressable
+            key={item}
+            accessibilityRole="button"
+            accessibilityLabel={label}
+            accessibilityState={{ selected: p.category === item }}
+            aria-pressed={p.category === item}
+            onPress={() => p.onCategory(item)}
+            style={({ pressed }) => [
+              s.category,
+              !wide && s.categoryChip,
+              p.category === item && s.selectedCategory,
+              pressed && { borderColor: c.select },
             ]}
           >
-            {categoryLabel(category)}
-          </Text>
-          <Text
-            accessibilityLabel={`Article count for ${categoryLabel(category)}`}
-            style={[
-              s.countBadge,
-              p.category === category && {
-                color: c.accent,
-                backgroundColor: c.accentSoft,
-              },
-            ]}
-          >
-            {articleCount(category)}
-          </Text>
-        </Pressable>
-      ))}
+            <Text
+              style={[
+                s.categoryName,
+                p.category === item && { color: c.accent, fontWeight: "700" },
+              ]}
+            >
+              {label}
+            </Text>
+            <View style={s.countGroup}>
+              {hasCount && isUnsynced ? (
+                <Text
+                  accessibilityLabel={unsyncedCountLabel(
+                    label,
+                    updatedAt,
+                    reason,
+                  )}
+                  style={s.unsyncedGlyph}
+                >
+                  ◇
+                </Text>
+              ) : null}
+              <Text
+                accessibilityLabel={
+                  hasCount
+                    ? `Article count for ${label}: ${value}`
+                    : `Article count for ${label}: unavailable`
+                }
+                style={[
+                  s.countBadge,
+                  p.category === item && {
+                    color: c.accent,
+                    backgroundColor: c.accentSoft,
+                  },
+                ]}
+              >
+                {hasCount ? String(value) : "—"}
+              </Text>
+            </View>
+          </Pressable>
+        );
+      })}
     </View>
   );
   return wide ? (
@@ -139,6 +206,16 @@ const s = StyleSheet.create({
     fontSize: 13,
     color: c.dim,
     flexShrink: 1,
+  },
+  countGroup: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+  },
+  unsyncedGlyph: {
+    fontFamily: intelFonts.mono,
+    fontSize: 12,
+    color: c.muted,
   },
   countBadge: {
     fontFamily: intelFonts.mono,

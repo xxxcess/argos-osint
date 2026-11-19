@@ -10,6 +10,14 @@ on:
         description: Exact source revision selected by the scope planner
         type: string
         required: true
+      arch:
+        description: Linux architecture selected by Fleetworks (amd64, arm64 or both)
+        type: string
+        default: both
+      scoped:
+        description: Run only first-pass embedded backend checks
+        type: boolean
+        default: false
   workflow_dispatch:
 
 concurrency:
@@ -33,7 +41,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: ${{ fromJson(github.event_name == 'workflow_dispatch' && inputs.head == '' && '[{"name":"Linux x86_64","os":"ubuntu-24.04"},{"name":"Linux aarch64","os":"ubuntu-24.04-arm"},{"name":"macOS arm64","os":"macos-15"},{"name":"macOS Intel","os":"macos-15-intel"}]' || '[{"name":"Linux x86_64","os":"ubuntu-24.04"},{"name":"Linux aarch64","os":"ubuntu-24.04-arm"}]') }}
+        platform: ${{ fromJson(github.event_name == 'workflow_dispatch' && inputs.head == '' && '[{"name":"Linux x86_64","os":"ubuntu-24.04"},{"name":"Linux aarch64","os":"ubuntu-24.04-arm"},{"name":"macOS arm64","os":"macos-15"},{"name":"macOS Intel","os":"macos-15-intel"}]' || inputs.arch == 'amd64' && '[{"name":"Linux x86_64","os":"ubuntu-24.04"}]' || inputs.arch == 'arm64' && '[{"name":"Linux aarch64","os":"ubuntu-24.04-arm"}]' || '[{"name":"Linux x86_64","os":"ubuntu-24.04"},{"name":"Linux aarch64","os":"ubuntu-24.04-arm"}]') }}
     runs-on: ${{ matrix.platform.os }}
     timeout-minutes: 90
     steps:
@@ -99,5 +107,36 @@ jobs:
           clang_dir="$(dirname "$(xcrun --find clang)")/../lib"
           test -f "$clang_dir/libclang.dylib"
           printf 'LIBCLANG_PATH=%s\n' "$clang_dir" >> "$GITHUB_ENV"
+      - name: Verify affected embedded backend
+        if: inputs.scoped
+        env:
+          ARGOS_SURREAL_MODE: embedded
+          ARGOS_SURREAL_REQUIRED: "1"
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo=(python3 scripts/agent_cargo.py)
+          backend=(-p argos-api-host -p argos-osint-api -p argos-osint-core -p fleetworks-jobs)
+          "${cargo[@]}" clippy --locked "${backend[@]}" --no-default-features \
+            --features embedded,nlp,classifier --lib --bins -- -D warnings
+          # The lifecycle test starts a real worker. Give its memory guard a fresh
+          # test process without changing the backend feature graph or the guard.
+          lifecycle=local_ipc::embedded::tests::ipc_lifecycle_registration_seed_and_restart_resume_preserves_job_without_duplicates
+          lifecycle_log="$RUNNER_TEMP/embedded-ipc-lifecycle.log"
+          "${cargo[@]}" test --locked "${backend[@]}" --no-default-features \
+            --features embedded,nlp,classifier --lib --bins --no-fail-fast \
+            -- "$lifecycle" --exact | tee "$lifecycle_log"
+          grep -Fq "test $lifecycle ... ok" "$lifecycle_log"
+          "${cargo[@]}" test --locked "${backend[@]}" --no-default-features \
+            --features embedded,nlp,classifier --lib --bins --no-fail-fast -- --skip "$lifecycle"
+          "${cargo[@]}" test --locked -p argos-osint-api --no-default-features \
+            --features embedded,nlp,classifier --test classifier_activation
+          "${cargo[@]}" test --locked -p argos-osint-core --no-default-features \
+            --features embedded,nlp,classifier,fixtures --no-fail-fast \
+            --test storage_contracts --test storage_jobs --test storage_brief --test storage_brief_publish \
+            --test storage_provider_pacer --test storage_provider_account --test storage_credits \
+            --test storage_actor_catalog --test storage_atlas_delete --test storage_setup_jobs \
+            --test storage_classifier_activation --test storage_operational_logs
       - name: Local matrix leg (embedded)
+        if: '!inputs.scoped'
         run: bash scripts/local_matrix.sh --storage embedded

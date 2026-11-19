@@ -99,6 +99,10 @@ NLP-off body matching: word-boundary exact pass always runs on cleaned bodies; N
 
 ---
 
+## Backend display name
+
+`connect_control:configuration.platform_display_name` is an optional operator label, 1 to 64 printable characters, set only by `argos-api-host --role bootstrap --platform-display-name`. It is separate from the deployment ID and the host metrics, and it is never derived from the host. Readiness projects it as `platform_identity { deployment_id, display_name }` when present, and clients show **Backend** when it is absent.
+
 ## Intel web read service
 
 The [UI-independent Intel service](../../../crates/argos-osint-core/src/intel_service.rs) supplies keyset article occurrence pages and brief projections to the [local HTTP API](intel-web.md). Bootstrap adds the `atlas_article_bulletin` category/time/ID index idempotently; record formats and schema version remain unchanged. The API host owns the repository and the native app does not open it. Existing embedded locks/server leases therefore remain authoritative.

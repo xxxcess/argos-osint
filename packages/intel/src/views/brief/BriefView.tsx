@@ -118,7 +118,7 @@ export function BriefView({
           nativeID="intel-brief-reader"
           style={[
             s.body,
-            { flex: 2 },
+            { flex: 1, minWidth: 0 },
             narrow && { width: "100%" },
             narrow && s.narrowPadding,
           ]}
@@ -165,9 +165,11 @@ export function BriefView({
         <View
           nativeID="intel-context-rail"
           style={{
-            flex: 1,
+            // A fixed 340 column for sources, related leads and provenance beside the evidence.
+            ...(narrow
+              ? { width: "100%" as const }
+              : { width: 340, flexShrink: 0 }),
             minWidth: 0,
-            width: narrow ? "100%" : undefined,
             padding: 20,
             gap: 20,
           }}

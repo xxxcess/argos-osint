@@ -50,8 +50,8 @@ describe("Button (real @argos/ui component)", () => {
     const button = buttonEl(container)!;
     // minHeight 40 keeps the default touch target; default surface is matte graphite.
     expect(applied(button).minHeight).toBe("40px");
-    expect(applied(button).backgroundColor).toBe("rgb(17, 19, 23)");
-    expect(applied(button).borderTopColor).toBe("rgb(137, 130, 116)");
+    expect(applied(button).backgroundColor).toBe("rgb(18, 24, 32)");
+    expect(applied(button).borderTopColor).toBe("rgb(100, 117, 135)");
   });
 
   it("applies the primary variant with accent tokens", () => {
@@ -62,9 +62,9 @@ describe("Button (real @argos/ui component)", () => {
     );
     const button = buttonEl(container)!;
     expect(applied(button).backgroundColor).toBe(
-      "rgb(198, 165, 110)", // flat accent body
+      "rgb(36, 220, 227)", // flat accent body
     );
-    expect(applied(button).borderTopColor).toBe("rgb(198, 165, 110)");
+    expect(applied(button).borderTopColor).toBe("rgb(36, 220, 227)");
     expect(applied(screen.getByText("Primary")).color).toBe("rgb(6, 7, 9)");
   });
 
@@ -77,8 +77,8 @@ describe("Button (real @argos/ui component)", () => {
     const button = buttonEl(container)!;
     // jsdom serializes `transparent` as rgba(0, 0, 0, 0).
     expect(applied(button).backgroundColor).toBe("rgba(0, 0, 0, 0)");
-    expect(applied(button).borderTopColor).toBe("rgb(137, 130, 116)"); // border, not accent
-    expect(applied(screen.getByText("Quiet")).color).toBe("rgb(214, 210, 196)"); // dim
+    expect(applied(button).borderTopColor).toBe("rgb(100, 117, 135)"); // border, not accent
+    expect(applied(screen.getByText("Quiet")).color).toBe("rgb(168, 182, 197)"); // dim
   });
 
   it("applies the active (selection) state: accent surface and contrasting text without glow", () => {
@@ -88,7 +88,7 @@ describe("Button (real @argos/ui component)", () => {
       </Button>,
     );
     const button = buttonEl(container)!;
-    expect(applied(button).backgroundColor).toBe("rgb(198, 165, 110)"); // accent
+    expect(applied(button).backgroundColor).toBe("rgb(36, 220, 227)"); // accent
     expect(applied(button).boxShadow).toBe("");
     // Selection uses the bg token against the accent surface for contrast.
     expect(applied(screen.getByText("Active")).color).toBe("rgb(6, 7, 9)");
@@ -130,11 +130,11 @@ describe("Button focus/selection lanes (hover + pressed)", () => {
     const button = buttonEl(container)!;
     await user.hover(button);
     expect(applied(button).backgroundColor).toBe(
-      "rgba(198, 165, 110, 0.1)", // accentSoft
+      "rgba(36, 220, 227, 0.1)", // accentSoft
     );
-    expect(applied(button).borderTopColor).toBe("rgb(198, 165, 110)"); // accent
+    expect(applied(button).borderTopColor).toBe("rgb(36, 220, 227)"); // accent
     await user.unhover(button);
-    expect(applied(button).backgroundColor).toBe("rgb(17, 19, 23)");
+    expect(applied(button).backgroundColor).toBe("rgb(18, 24, 32)");
   });
 
   it("changes the flat primary fill on hover without a glow", async () => {
@@ -146,7 +146,7 @@ describe("Button focus/selection lanes (hover + pressed)", () => {
     );
     const button = buttonEl(container)!;
     await user.hover(button);
-    expect(applied(button).backgroundColor).toBe("rgb(216, 189, 140)");
+    expect(applied(button).backgroundColor).toBe("rgb(104, 231, 235)");
     expect(applied(button).boxShadow).toBe("");
     await user.unhover(button);
     expect(applied(button).boxShadow).toBe("");
@@ -169,7 +169,7 @@ describe("Button focus/selection lanes (hover + pressed)", () => {
     });
     // React/pressability flushes after the event loop turns, so wait for it.
     await waitFor(
-      () => expect(applied(button).backgroundColor).toBe("rgb(17, 19, 23)"), // glassStrong
+      () => expect(applied(button).backgroundColor).toBe("rgb(18, 24, 32)"), // glassStrong
     );
     await act(async () => {
       button.dispatchEvent(
@@ -183,13 +183,11 @@ describe("Button focus/selection lanes (hover + pressed)", () => {
     // Releasing press returns to the active hover lane (still hovered).
     await waitFor(
       () =>
-        expect(applied(button).backgroundColor).toBe(
-          "rgba(198, 165, 110, 0.1)",
-        ), // accentSoft
+        expect(applied(button).backgroundColor).toBe("rgba(36, 220, 227, 0.1)"), // accentSoft
     );
     await user.unhover(button);
     await waitFor(() =>
-      expect(applied(button).backgroundColor).toBe("rgb(17, 19, 23)"),
+      expect(applied(button).backgroundColor).toBe("rgb(18, 24, 32)"),
     );
   });
 
@@ -223,10 +221,85 @@ describe("Button focus/selection lanes (hover + pressed)", () => {
 // Token sanity: the button palette stays on the terminal-desk neutrals.
 describe("Button token bindings", () => {
   it("binds the glass, glassStrong, accentSoft and border tokens", () => {
-    expect(colors.accent).toBe("#C6A56E");
-    expect(colors.glass).toBe("#0B0C0F");
-    expect(colors.glassStrong).toBe("#111317");
-    expect(colors.accentSoft).toBe("rgba(198, 165, 110, 0.1)");
-    expect(colors.border).toBe("#898274");
+    expect(colors.accent).toBe("#24DCE3");
+    expect(colors.glass).toBe("#0B0F14");
+    expect(colors.glassStrong).toBe("#121820");
+    expect(colors.accentSoft).toBe("rgba(36, 220, 227, 0.1)");
+    expect(colors.border).toBe("#647587");
+  });
+
+  it("gives a submit action the theme base, cyan ink and a 44 px target", () => {
+    const { container } = render(
+      <Button onPress={() => {}} intent="submit">
+        Connect
+      </Button>,
+    );
+    const button = buttonEl(container)!;
+    expect(applied(button).backgroundColor).toBe("rgb(16, 38, 44)");
+    expect(applied(button).minHeight).toBe("44px");
+    expect(applied(button).borderTopColor).toBe("rgb(100, 117, 135)");
+    expect(applied(screen.getByText("Connect")).color).toBe(
+      "rgb(36, 220, 227)",
+    );
+  });
+
+  it("tints confirm mint and delete rose, and a disabled action returns to the raised base", () => {
+    const { container, rerender } = render(
+      <Button onPress={() => {}} intent="confirm">
+        Confirm
+      </Button>,
+    );
+    expect(applied(buttonEl(container)).backgroundColor).toBe(
+      "rgb(16, 40, 31)",
+    );
+    expect(applied(screen.getByText("Confirm")).color).toBe(
+      "rgb(35, 223, 160)",
+    );
+    rerender(
+      <Button onPress={() => {}} intent="delete">
+        Delete
+      </Button>,
+    );
+    expect(applied(buttonEl(container)).backgroundColor).toBe(
+      "rgb(43, 24, 35)",
+    );
+    expect(applied(screen.getByText("Delete")).color).toBe(
+      "rgb(242, 128, 160)",
+    );
+    rerender(
+      <Button onPress={() => {}} intent="delete" disabled>
+        Delete
+      </Button>,
+    );
+    expect(applied(buttonEl(container)).backgroundColor).toBe(
+      "rgb(18, 24, 32)",
+    );
+    expect(applied(screen.getByText("Delete")).color).toBe(
+      "rgb(129, 146, 164)",
+    );
+  });
+
+  it("leaves a button without an intent smooth", () => {
+    const { container } = render(<Button onPress={() => {}}>Plain</Button>);
+    expect(applied(buttonEl(container)).minHeight).toBe("40px");
+  });
+
+  it("draws the rock overlay at the state opacity, and none on a smooth button", () => {
+    const layer = (container: HTMLElement) =>
+      container.querySelector('[aria-hidden="true"]') as HTMLElement | null;
+    const { container, rerender } = render(
+      <Button onPress={() => {}} intent="submit">
+        Go
+      </Button>,
+    );
+    expect(applied(layer(container)!).opacity).toBe("0.12");
+    rerender(
+      <Button onPress={() => {}} intent="submit" disabled>
+        Go
+      </Button>,
+    );
+    expect(applied(layer(container)!).opacity).toBe("0.04");
+    rerender(<Button onPress={() => {}}>Go</Button>);
+    expect(layer(container)).toBeNull();
   });
 });

@@ -198,10 +198,14 @@ fn section_content(state: &State, preferences: ViewPreferences, kit: &Kit) -> El
             "Display",
             rune::col()
                 .child(setting_row(
-                    "Liquid metal",
-                    "The app follows macOS Reduce Transparency.",
+                    "Surfaces",
+                    surface_preference_description(cfg!(target_os = "macos")),
                     Some(ui_components::status_pill(
-                        if preferences.matte() { "Matte" } else { "On" },
+                        if preferences.matte() {
+                            "Opaque"
+                        } else {
+                            "Transparent"
+                        },
                         None,
                         StatusTone::Accent,
                         kit,
@@ -209,13 +213,13 @@ fn section_content(state: &State, preferences: ViewPreferences, kit: &Kit) -> El
                     kit,
                 ))
                 .child(setting_row(
-                    "Motion",
-                    "The app follows macOS Reduce Motion.",
+                    "Reduced motion",
+                    motion_preference_description(cfg!(target_os = "macos")),
                     Some(ui_components::status_pill(
                         if preferences.reduced_motion {
                             "Reduced"
                         } else {
-                            "On"
+                            "Standard"
                         },
                         None,
                         StatusTone::Neutral,
@@ -228,9 +232,9 @@ fn section_content(state: &State, preferences: ViewPreferences, kit: &Kit) -> El
         SettingsSection::Gateway => {
             let mut rows = rune::col().child(setting_row(
                 if state.is_local_backend() {
-                    "Local Embedded Backend"
+                    "Embedded backend"
                 } else {
-                    "Gateway URL"
+                    "Distributed gateway URL"
                 },
                 if state.is_local_backend() {
                     format!(
@@ -259,10 +263,10 @@ fn section_content(state: &State, preferences: ViewPreferences, kit: &Kit) -> El
             ));
             if state.local_backend.active() {
                 rows = rows.child(setting_row(
-                    "Local companion process",
+                    "Embedded companion process",
                     "Gracefully shut down the embedded companion backend.",
                     Some(
-                        ActionButton::new("Stop Local Backend")
+                        ActionButton::new("Stop Embedded Backend")
                             .key("settings-stop-local-backend")
                             .finish(MetalFinish::Gunmetal)
                             .disabled(state.local_backend.stopping)
@@ -273,8 +277,8 @@ fn section_content(state: &State, preferences: ViewPreferences, kit: &Kit) -> El
                 ));
             }
             rows = rows.child(setting_row(
-                "Pairing and access",
-                "Switch between Remote Gateway and Local Embedded, or inspect connection status.",
+                "Backend and access",
+                "Select Embedded or Distributed, or inspect connection status.",
                 Some(
                     ActionButton::new("Setup Gateway")
                         .key("settings-gateway-open")
@@ -368,7 +372,7 @@ pub(crate) fn page(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
                 .role("button")
                 .label(section.title())
                 .focusable(true)
-                .focus_ring(2.0, 1.0, theme::hex(theme::ACCENT_HIGHLIGHT))
+                .focus_ring(2.0, 2.0, theme::hex(theme::ACCENT_HIGHLIGHT))
                 .w_full()
                 .h(31.0)
                 .px(9.0)
@@ -451,6 +455,22 @@ pub(crate) fn page(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
         .child(content)
 }
 
+fn surface_preference_description(is_macos: bool) -> &'static str {
+    if is_macos {
+        "Follows macOS Reduce Transparency and FLEETWORKS_OPAQUE_MATERIALS."
+    } else {
+        "Uses transparent surfaces by default, or opaque surfaces when FLEETWORKS_OPAQUE_MATERIALS is set."
+    }
+}
+
+fn motion_preference_description(is_macos: bool) -> &'static str {
+    if is_macos {
+        "Follows macOS Reduce Motion."
+    } else {
+        "Follows your desktop reduced-motion accessibility preference."
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rune::Env;
@@ -459,7 +479,24 @@ mod tests {
     use crate::app;
     use crate::app::Page;
 
+    use super::motion_preference_description;
+    use super::surface_preference_description;
     use super::SettingsSection;
+
+    #[test]
+    fn appearance_copy_omits_macos_wording_on_linux() {
+        let linux_surfaces = surface_preference_description(false);
+        let linux_motion = motion_preference_description(false);
+        assert!(!linux_surfaces.contains("macOS"));
+        assert!(!linux_motion.contains("macOS"));
+        assert!(linux_surfaces.contains("FLEETWORKS_OPAQUE_MATERIALS"));
+        assert!(linux_motion.to_ascii_lowercase().contains("reduced-motion"));
+
+        let mac_surfaces = surface_preference_description(true);
+        let mac_motion = motion_preference_description(true);
+        assert!(mac_surfaces.contains("macOS Reduce Transparency"));
+        assert!(mac_motion.contains("macOS Reduce Motion"));
+    }
 
     #[test]
     fn settings_categories_open_the_existing_configuration_destination() {

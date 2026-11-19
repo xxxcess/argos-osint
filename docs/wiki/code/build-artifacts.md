@@ -70,13 +70,14 @@ Build flow: flushed stage/command markers and live Cargo diagnostics on **stderr
 
 | Event / stage | Output |
 | --- | --- |
-| PR opened or updated, targeting `dev`, `nightly` or `main` | Selected debug tests/builds and Rune PNG/tree evidence on both Mac architectures and Linux x86_64; no app release publication |
+| PR first pass, targeting `dev`, `nightly` or `main` | Affected Linux x86_64 debug app and Rune PNG/tree evidence, plus selected AMD64 backend diagnostics |
+| Exact-head second pass after first-pass CI succeeds | Selected Mac debug app and Rune evidence, remaining backend architectures and web evidence |
 | Trusted push to `nightly` / `dev` / `main` | Selected release-profile, versioned unsigned Mac ZIPs (Intel/Apple Silicon) and non-release Linux x86_64 `.tar.gz` archives; manifests/checksums retained as 14-day Actions artifacts |
 | Native verification | Download by immutable artifact ID, require artifact digest, then verify ZIP / `.tar.gz` checksum/source/version/target/bundle identity without installing or launching |
 | Selected Linux image verification | Native AMD64 + ARM64 build → exact-image-ID smoke → push verified digests and export `fleetworks-images-linux-{amd64,arm64}.tar.gz` + `.sha256`; `release-images-{amd64,arm64}.json` records source/version/image/archive identity. |
 | Required checks pass | GitHub Release assets for selected native ZIPs, Linux image tarballs and Atlas BERT worker bundles (`atlas-bert-linux-{amd64,arm64}.tar.gz`); selected multiarchitecture GHCR image indexes with immutable version/full-SHA tags and `nightly` or `stable` aliases |
 
-Source checks gate trusted image staging; artifact checks gate publication, and final **Fleetworks required** includes its result. `nightly` publishes prereleases/nightly images; `dev` and `main` share the stable channel. Publication and its verification scopes widen from the last published ancestor, so pending changes are covered; first publication selects all components, while docs-only changes skip products after a baseline. Pure RN Web UI changes select web checks/images without backend engines or Mac builds. [CI](ci.md) · [Version rules](versioning.md)
+Source checks gate trusted image staging; artifact checks gate publication, and final **Fleetworks required** includes its result. `nightly` publishes prereleases/nightly images; `dev` and `main` share the stable channel. Publication and its verification scopes widen from the last published ancestor, so pending changes are covered; first publication selects all components, while docs-only changes skip products after a baseline. Pure RN Web UI changes select web checks and images for the second pass. [CI](ci.md) · [Version rules](versioning.md)
 
 Published apps remain unsigned. Signing/notarization, minimum-macOS and matching-hardware GUI/Keychain evidence are separate; they are not implemented prerequisites for this automatic unsigned publication.
 

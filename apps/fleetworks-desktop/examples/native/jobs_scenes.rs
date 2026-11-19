@@ -115,7 +115,7 @@ pub fn filters_ready(state: &mut State) {
 pub fn page_two(state: &mut State) {
     setup(state);
     state.request_jobs(JobsEvent::Apply);
-    state.request_jobs(JobsEvent::Next);
+    state.request_jobs(JobsEvent::More);
 }
 pub fn no_matches(state: &mut State) {
     setup(state);
@@ -126,7 +126,7 @@ pub fn expired(state: &mut State) {
     setup(state);
     state.request_jobs(JobsEvent::Apply);
     state.fixture_effect = None;
-    state.request_jobs(JobsEvent::Next);
+    state.request_jobs(JobsEvent::More);
     let ticket = state
         .scoped_jobs
         .active_ticket()

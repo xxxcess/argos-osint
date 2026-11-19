@@ -11,7 +11,6 @@ use rune_kit::Cell;
 use rune_kit::Dialog;
 use rune_kit::Kit;
 use rune_kit::Progress;
-use rune_kit::ProgressCircle;
 use rune_kit::RollingText;
 use rune_kit::SegmentedControl;
 use rune_kit::Table;
@@ -27,6 +26,7 @@ use crate::app::State;
 use crate::icons;
 use crate::job_actions::JobAction;
 use crate::logs::LogStatus;
+use crate::maintenance;
 use crate::material;
 use crate::material::MetalFinish;
 use crate::submission::AcceptedReceipt;
@@ -241,7 +241,7 @@ fn atlas(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
                                 ActionButton::new("Confirm New Cycle")
                                     .key("atlas-submit-confirm")
                                     .icon(&icons::ATLAS)
-                                    .finish(MetalFinish::GoldCta)
+                                    .finish(MetalFinish::FracturedConfirm)
                                     .on_press(|state: &mut State| {
                                         state.confirm_submission(SubmissionKind::Atlas)
                                     })
@@ -280,13 +280,46 @@ fn atlas(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
         ));
     }
     if let Some(AcceptedReceipt::Atlas(receipt)) = &lane.receipt {
+        let matched_cycle = match &state.cycles.history {
+            Load::Ready(cycles) => cycles
+                .rows
+                .iter()
+                .find(|cycle| cycle.job_id == receipt.job_id || cycle.run_id == receipt.run_id),
+            _ => None,
+        };
+        let (receipt_title, receipt_detail, receipt_tone) = match matched_cycle {
+            Some(cycle) if !crate::backend::job_is_active(&cycle.state) => {
+                let detail = match (cycle.article_count, &cycle.finished_at) {
+                    (Some(count), _) => format!("Job {} · {count} articles", receipt.job_id),
+                    (None, Some(finished)) => {
+                        format!("Job {} · Finished {finished}", receipt.job_id)
+                    }
+                    (None, None) => format!("Job {} · {}", receipt.job_id, cycle.state),
+                };
+                (
+                    format!("Cycle {} · {}", receipt.run_id, cycle.state),
+                    detail,
+                    state_tone(&cycle.state),
+                )
+            }
+            Some(cycle) => (
+                format!("Cycle {} · {}", receipt.run_id, cycle.state),
+                format!("Job {} · Completion pending", receipt.job_id),
+                state_tone(&cycle.state),
+            ),
+            None => (
+                format!("Accepted cycle {}", receipt.run_id),
+                format!("Job {} · Completion pending", receipt.job_id),
+                StatusTone::Ok,
+            ),
+        };
         action = action.child(
             ui_components::async_status_strip(
                 "atlas-receipt",
-                format!("Accepted cycle {}", receipt.run_id),
-                format!("Job {} · Completion pending", receipt.job_id),
+                receipt_title,
+                receipt_detail,
                 false,
-                StatusTone::Ok,
+                receipt_tone,
                 preferences,
                 kit,
             )
@@ -302,12 +335,31 @@ fn atlas(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
         action = action.child(line(message.clone(), kit).role("status"));
     }
 
+    let cycles_unsynced = state.cycles.read_error.as_ref().map(|error| {
+        crate::views::unsynced_glyph(
+            "cycles-unsynced",
+            format!("Cycle history unsynced · {error}"),
+            kit,
+        )
+    });
+    let cycles_retry = (state.cycles.read_error.is_some()
+        || matches!(state.cycles.history, Load::Failed(_)))
+    .then(|| {
+        ActionButton::new("Retry")
+            .key("cycles-history-retry")
+            .icon(&icons::REFRESH)
+            .finish(MetalFinish::Gunmetal)
+            .busy(state.cycles.busy())
+            .disabled(!state.connected() || state.cycles.busy())
+            .on_press(|state: &mut State| state.refresh_cycles())
+            .build(kit, preferences, pointer_ref)
+    });
     let mut history = rune::col().child(ui_components::section_header(
         &icons::JOBS,
         "Cycle history",
         Some("Select any cycle to expand run metadata or history removal"),
-        None,
-        None,
+        cycles_unsynced,
+        cycles_retry,
         kit,
     ));
     if let Some(message) = list_load_or_skeleton(
@@ -412,29 +464,13 @@ fn atlas(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
                 .key(format!("cycle-{}", cycle.job_id)),
             );
         }
-        history = history.child(
-            rune::row()
-                .w_full()
-                .gap(8.0)
-                .center_y()
-                .child(
-                    ActionButton::new("Previous page")
-                        .key("cycles-page-previous")
-                        .finish(MetalFinish::ObsidianPill)
-                        .disabled(state.cycles.page_index == 0 || state.cycles.busy())
-                        .on_press(|state: &mut State| state.previous_cycles_page())
-                        .build(kit, preferences, pointer_ref),
-                )
-                .child(quiet(format!("Page {}", state.cycles.page_index + 1), kit))
-                .child(
-                    ActionButton::new("Next page")
-                        .key("cycles-page-next")
-                        .finish(MetalFinish::ObsidianPill)
-                        .disabled(cycles.next_cursor.is_none() || state.cycles.busy())
-                        .on_press(|state: &mut State| state.next_cycles_page())
-                        .build(kit, preferences, pointer_ref),
-                ),
-        );
+        history = history.child(cycles_tail(
+            state,
+            cycles.rows.len(),
+            kit,
+            preferences,
+            pointer_ref,
+        ));
 
         if let Some(active_id) = &state.selected_cycle_id {
             if let Some(cycle) = cycles.rows.iter().find(|c| c.job_id == *active_id) {
@@ -501,7 +537,7 @@ fn atlas(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
                             ActionButton::new("Delete from history")
                                 .key("cycle-delete-confirm")
                                 .icon(&icons::TRASH)
-                                .finish(MetalFinish::CrimsonDanger)
+                                .finish(MetalFinish::FracturedDanger)
                                 .busy(matches!(state.cycles.deletion, Load::Loading))
                                 .on_press(|state: &mut State| state.confirm_delete_cycle())
                                 .build(kit, preferences, pointer_ref),
@@ -538,15 +574,6 @@ fn atlas(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
             },
             kit,
         ));
-    }
-    if let Some(error) = &state.cycles.read_error {
-        history = history.child(
-            line(
-                format!("Showing the last loaded history. Refresh failed: {error}"),
-                kit,
-            )
-            .role("alert"),
-        );
     }
     if let Some(message) = &state.cycles.message {
         history = history.child(line(message.clone(), kit).role("status"));
@@ -1094,7 +1121,7 @@ fn configuration_status(state: &State, preferences: ViewPreferences, kit: &Kit) 
                         ActionButton::new("Confirm change")
                             .key("configuration-confirm")
                             .icon(&icons::SHIELD_CHECK)
-                            .finish(MetalFinish::GoldCta)
+                            .finish(MetalFinish::FracturedConfirm)
                             .on_press(|state: &mut State| state.confirm_configuration())
                             .build(kit, preferences, pointer_ref),
                     )
@@ -1152,6 +1179,11 @@ fn job_count_text(count: usize) -> String {
     }
 }
 
+/// Jobs & Logs list width, gap and the page width from which the list sits beside the detail.
+const JOBS_LIST_WIDTH: f32 = 300.0;
+const JOBS_GAP: f32 = 16.0;
+const JOBS_SIDE_BY_SIDE_WIDTH: f32 = 940.0;
+
 fn jobs(
     state: &State,
     preferences: ViewPreferences,
@@ -1162,19 +1194,53 @@ fn jobs(
     let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
     let shadow_ref = (!preferences.matte()).then_some(&state.shadow_offset);
     let narrow = log_width < 660.0;
-    let job_count = match &state.backend.jobs {
-        Load::Ready(jobs) => Some(jobs.rows.len()),
-        _ => None,
+    let header_count = match (&state.scoped_jobs.page, state.scoped_jobs.status) {
+        (Some(page), crate::jobs_query::JobsLoad::Ready) => {
+            if let Some(total) = page.matched_total {
+                let label = if total == 1 {
+                    "1 match".to_owned()
+                } else {
+                    format!("{total} matches")
+                };
+                Some((total, label))
+            } else {
+                let loaded = state.scoped_jobs.row_count() as u64;
+                Some((loaded, format!("{loaded} loaded")))
+            }
+        }
+        _ => match &state.backend.jobs {
+            Load::Ready(jobs) => Some((jobs.rows.len() as u64, job_count_text(jobs.rows.len()))),
+            _ => None,
+        },
     };
-    let count_pill = job_count.map(|n| {
-        rune::row().gap(6.0).center_y().child(
-            RollingText::new("jobs-total-count", job_count_text(n))
-                .value(n as f64)
-                .font(kit.ty.small_medium)
-                .color(theme::hex(theme::ACCENT_HOVER))
-                .build(kit),
-        )
-    });
+    let jobs_unsynced = (state.scoped_jobs.status == crate::jobs_query::JobsLoad::Ready)
+        .then_some(state.scoped_jobs.message.as_ref())
+        .flatten()
+        .map(|error| {
+            crate::views::unsynced_glyph(
+                "jobs-unsynced",
+                format!("Jobs list unsynced · {error}"),
+                kit,
+            )
+        });
+    let count_pill = if header_count.is_some() || jobs_unsynced.is_some() {
+        let mut slot = rune::row().gap(6.0).center_y();
+        if let Some((n, label)) = header_count {
+            slot = slot.child(
+                RollingText::new("jobs-total-count", label)
+                    .value(n as f64)
+                    .font(kit.ty.small_medium)
+                    .color(theme::hex(theme::ACCENT_HOVER))
+                    .build(kit),
+            );
+        }
+        if let Some(glyph) = jobs_unsynced {
+            slot = slot.child(glyph);
+        }
+        Some(slot)
+    } else {
+        None
+    };
     let mut body = rune::col().gap(12.0).child(ui_components::section_header(
         &icons::JOBS,
         "Jobs & Logs",
@@ -1197,6 +1263,15 @@ fn jobs(
             "jobs-body",
         );
     }
+    // Wide enough for a ~300 pt list beside a detail pane that still has room for the log table.
+    let side_by_side = log_width >= JOBS_SIDE_BY_SIDE_WIDTH;
+    let detail_width = if side_by_side {
+        log_width - JOBS_LIST_WIDTH - JOBS_GAP
+    } else {
+        log_width
+    };
+    let mut list_col = rune::col().gap(12.0);
+    let mut detail_col = rune::col().gap(12.0);
     let show_list = !narrow || state.backend.selected_job.is_none();
     let show_detail = !narrow || state.backend.selected_job.is_some();
     if show_list {
@@ -1207,13 +1282,14 @@ fn jobs(
             preferences,
             kit,
         ) {
-            body = body.child(message);
+            list_col = list_col.child(message);
         }
         if let Load::Ready(jobs) = &state.backend.jobs {
             if jobs.rows.is_empty() {
-                body = body.child(quiet("No jobs are associated with this workstation.", kit));
+                list_col =
+                    list_col.child(quiet("No jobs are associated with this workstation.", kit));
             }
-            for job in jobs.rows.iter().take(100) {
+            for job in jobs.rows.iter() {
                 let id = job.id.clone();
                 let selected = state.backend.selected_job.as_deref() == Some(job.id.as_str());
                 let tone = state_tone(&job.state);
@@ -1257,7 +1333,7 @@ fn jobs(
                         tone,
                         kit,
                     ));
-                body = body.child(
+                list_col = list_col.child(
                     material::interactive_tile(
                         tile_content,
                         selected,
@@ -1273,41 +1349,18 @@ fn jobs(
                     .on_press(move |state: &mut State| state.select_job(&id)),
                 );
             }
-            body = body.child(
-                rune::row()
-                    .w_full()
-                    .gap(8.0)
-                    .center_y()
-                    .child(
-                        ActionButton::new("Previous page")
-                            .key("jobs-page-previous")
-                            .finish(MetalFinish::ObsidianPill)
-                            .disabled(!state.scoped_jobs.can_previous())
-                            .on_press(|state: &mut State| {
-                                state.request_jobs(crate::jobs_query::JobsEvent::Previous)
-                            })
-                            .build(kit, preferences, pointer_ref),
-                    )
-                    .child(quiet(
-                        format!("Page {}", state.scoped_jobs.page_number()),
-                        kit,
-                    ))
-                    .child(
-                        ActionButton::new("Next page")
-                            .key("jobs-page-next")
-                            .finish(MetalFinish::ObsidianPill)
-                            .disabled(!state.scoped_jobs.can_next())
-                            .on_press(|state: &mut State| {
-                                state.request_jobs(crate::jobs_query::JobsEvent::Next)
-                            })
-                            .build(kit, preferences, pointer_ref),
-                    ),
-            );
+            list_col = list_col.child(jobs_tail(
+                state,
+                jobs.rows.len(),
+                kit,
+                preferences,
+                pointer_ref,
+            ));
         }
     }
     if show_detail {
         if narrow && state.backend.selected_job.is_some() {
-            body = body.child(
+            detail_col = detail_col.child(
                 ActionButton::new("Back to jobs")
                     .key("jobs-back-to-list")
                     .finish(MetalFinish::Gunmetal)
@@ -1325,7 +1378,7 @@ fn jobs(
             preferences,
             kit,
         ) {
-            body = body.child(message);
+            detail_col = detail_col.child(message);
         }
     }
     if show_detail {
@@ -1360,42 +1413,44 @@ fn jobs(
                 ),
                 kit,
             ));
-            if let (Some(done), Some(total)) = (detail.job.progress_done, detail.job.progress_total)
+            if let Some((done, total)) = detail
+                .job
+                .progress_done
+                .zip(detail.job.progress_total)
+                .filter(|(done, total)| *done >= 0 && *total > 0)
             {
-                let frac = if total > 0 {
-                    (done as f32 / total as f32).clamp(0.0, 1.0)
+                let frac = (done.min(total) as f32 / total as f32).clamp(0.0, 1.0);
+                let prefix = if detail.job.phase.is_empty() {
+                    "Progress"
                 } else {
-                    0.0
+                    detail.job.phase.as_str()
                 };
                 details = details.child(
-                    rune::row()
-                        .w_full()
-                        .center_y()
-                        .gap(10.0)
-                        .child(
-                            ProgressCircle::new(frac)
-                                .size(24.0)
-                                .label("Job progress")
-                                .build(kit),
-                        )
-                        .child(
-                            Progress::new(Some(frac))
-                                .label(format!("Progress {done} / {total}"))
-                                .show_value()
-                                .build(kit)
-                                .grow(1.0),
-                        ),
-                );
-            } else if let Some(done) = detail.job.progress_done {
-                details = details.child(
-                    Progress::new(None)
-                        .label(format!(
-                            "{} · Scanned {done} (total unknown)",
-                            detail.job.phase
-                        ))
+                    Progress::new(Some(frac))
+                        .label(format!("{prefix} · {done} / {total}"))
+                        .show_value()
                         .build(kit)
                         .w_full(),
                 );
+            } else {
+                let phase = detail.job.phase.trim();
+                let known_done = detail.job.progress_done.filter(|done| *done >= 0);
+                let progress_label = match (phase.is_empty(), known_done) {
+                    (false, Some(done)) => format!("{phase} · {done} processed"),
+                    (true, Some(done)) => format!("{done} processed"),
+                    (false, None) => format!("Phase: {phase}"),
+                    (true, None) => detail.job.state.clone(),
+                };
+                if crate::backend::job_is_active(&detail.job.state) {
+                    details = details.child(
+                        Progress::new(None)
+                            .label(progress_label)
+                            .build(kit)
+                            .w_full(),
+                    );
+                } else if known_done.is_some() || !phase.is_empty() {
+                    details = details.child(quiet(progress_label, kit));
+                }
             }
             if !detail.private_details_available
                 || !detail.job.private_details_available
@@ -1456,7 +1511,7 @@ fn jobs(
                     let confirm_button = ActionButton::new("Confirm retry")
                         .key("job-action-confirm")
                         .icon(&icons::SHIELD_CHECK)
-                        .finish(MetalFinish::GoldCta)
+                        .finish(MetalFinish::FracturedConfirm)
                         .status(
                             if confirming { "Queuing…" } else { "Ready" },
                             if confirming {
@@ -1475,7 +1530,7 @@ fn jobs(
                             state.job_actions.confirmation = None;
                         })
                         .build(kit, preferences, pointer_ref);
-                    let action_buttons = if log_width < 420.0 {
+                    let action_buttons = if detail_width < 420.0 {
                         rune::col()
                             .gap(8.0)
                             .child(confirm_button)
@@ -1582,38 +1637,34 @@ fn jobs(
                             kit,
                         )),
                 );
-                if state.scoped_logs.busy() {
-                    let (strip_title, strip_detail, strip_tone) = if state.scoped_logs.following {
-                        (
-                            "Live operational stream active",
-                            format!("Synced with worker: {worker_summary}"),
-                            tone,
-                        )
-                    } else {
-                        (
-                            "Reading safe operational summaries…",
-                            format!("Worker status: {worker_summary}"),
-                            StatusTone::Info,
-                        )
-                    };
+                // One status strip with one key. Its title follows the job and the live toggle, never
+                // the individual request, so follow polls do not swap text or resize the section.
+                let job_active = crate::backend::job_is_active(&detail.job.state)
+                    && state.scoped_logs.status != LogStatus::Unavailable;
+                let strip = if state.scoped_logs.following {
+                    Some(("Live", format!("Worker: {worker_summary}"), tone))
+                } else if job_active {
+                    Some((
+                        "Job active",
+                        format!("Phase: {worker_summary}"),
+                        StatusTone::Info,
+                    ))
+                } else if state.scoped_logs.busy() {
+                    Some((
+                        "Reading summaries",
+                        format!("Worker: {worker_summary}"),
+                        StatusTone::Info,
+                    ))
+                } else {
+                    None
+                };
+                if let Some((strip_title, strip_detail, strip_tone)) = strip {
                     details = details.child(ui_components::async_status_strip(
-                        "logs-loading",
+                        "logs-status",
                         strip_title,
                         strip_detail,
                         true,
                         strip_tone,
-                        preferences,
-                        kit,
-                    ));
-                } else if crate::backend::job_is_active(&detail.job.state)
-                    && state.scoped_logs.status != LogStatus::Unavailable
-                {
-                    details = details.child(ui_components::async_status_strip(
-                        "logs-synced",
-                        "Worker job active",
-                        format!("Phase: {worker_summary}"),
-                        true,
-                        StatusTone::Info,
                         preferences,
                         kit,
                     ));
@@ -1634,7 +1685,12 @@ fn jobs(
                         );
                     }
                 }
-                if state.scoped_logs.rows.is_empty() && !state.scoped_logs.busy() {
+                // A read that already resolved stays resolved while a follow or older read runs.
+                let resolved = matches!(
+                    state.scoped_logs.status,
+                    LogStatus::Ready | LogStatus::DisplayLimit
+                );
+                if state.scoped_logs.rows.is_empty() && (!state.scoped_logs.busy() || resolved) {
                     // Three different states: not read yet, read with no events, and a failed read.
                     // A failed read shows its own message and Refresh button above.
                     match state.scoped_logs.status {
@@ -1651,7 +1707,7 @@ fn jobs(
                         _ => {}
                     }
                 }
-                if state.scoped_logs.rows.is_empty() && state.scoped_logs.busy() {
+                if state.scoped_logs.rows.is_empty() && state.scoped_logs.busy() && !resolved {
                     details = details.child(ui_components::skeleton_log_table(preferences, kit));
                 } else if !state.scoped_logs.rows.is_empty()
                     || matches!(
@@ -1659,7 +1715,13 @@ fn jobs(
                         LogStatus::Ready | LogStatus::DisplayLimit
                     )
                 {
-                    details = details.child(safe_log_table(state, kit, log_width));
+                    details = details.child(safe_log_table(
+                        state,
+                        kit,
+                        detail_width,
+                        preferences,
+                        pointer_ref,
+                    ));
                     if state.scoped_logs.can_load_older() {
                         details = details.child(
                             ActionButton::new("Load older summaries")
@@ -1670,10 +1732,24 @@ fn jobs(
                                 })
                                 .build(kit, preferences, pointer_ref),
                         );
+                        if state.scoped_logs.auto_load_older() {
+                            // A one-pixel sentinel, new for every loaded count: coming on screen
+                            // loads one older page, and a page that leaves it on screen loads
+                            // another.
+                            details = details.child(
+                                rune::el()
+                                    .key(format!("logs-near-end-{}", state.scoped_logs.rows.len()))
+                                    .size(1.0, 1.0)
+                                    .a11y_hidden()
+                                    .on_visible(|state: &mut State, on_screen, tx| {
+                                        state.logs_near_end(on_screen, tx)
+                                    }),
+                            );
+                        }
                     }
                 }
             }
-            body = body.child(card(state, preferences, tone, details));
+            detail_col = detail_col.child(card(state, preferences, tone, details));
 
             if state.selected_job_id.as_deref() == Some(detail.job.id.as_str()) {
                 let modal_body = rune::col()
@@ -1704,10 +1780,37 @@ fn jobs(
             }
         }
     }
+    body = if side_by_side && show_list && show_detail {
+        // A paged list beside the detail keeps the selection in view while it refreshes.
+        body.child(
+            rune::row()
+                .key("jobs-workbench")
+                .w_full()
+                .gap(JOBS_GAP)
+                .child(list_col.w(JOBS_LIST_WIDTH).shrink())
+                .child(detail_col.grow(1.0).min_w(0.0)),
+        )
+    } else {
+        body.child(list_col).child(detail_col)
+    };
     scroll(body, "jobs-body")
 }
 
-fn safe_log_table(state: &State, kit: &Kit, available_width: f32) -> El {
+/// The newest log row is at the top of the table. Its drawn position against the table's own
+/// top tells whether the reader has scrolled away from it, from the same layout the renderer
+/// draws, with no view commit while the answer is unchanged. shortcut: the signal comes from the
+/// newest row's own drawn rect, so a jump that unmounts it without it first moving off the top
+/// (dragging the scroll bar far) keeps the previous answer until it mounts again.
+fn safe_log_table(
+    state: &State,
+    kit: &Kit,
+    available_width: f32,
+    preferences: ViewPreferences,
+    pointer_ref: Option<&rune::Live<[f32; 2]>>,
+) -> El {
+    let style = rune_kit::TableStyle::from_kit(kit);
+    let table_rect = rune::Live::new([0.0_f32; 4]);
+    let newest_rect = table_rect.clone();
     let mut table = Table::new(
         |state: &State| &state.scoped_logs.table,
         |state: &mut State| &mut state.scoped_logs.table,
@@ -1743,9 +1846,36 @@ fn safe_log_table(state: &State, kit: &Kit, available_width: f32) -> El {
                 .min(0.0)
                 .resizable(false),
         )
-        .cell(|state: &State, index, column| {
+        .cell(move |state: &State, index, column| {
             let row = &state.scoped_logs.rows[index];
             match column {
+                // The newest row's own text reports where it is drawn. It repeats the kit's text
+                // cell (font, color, truncation) so the row looks as every other row does, and
+                // adds no column or hidden element for assistive technology to meet.
+                "message" if index == 0 => Cell::el(
+                    rune::text(row.message.clone())
+                        .font(style.font)
+                        .color(style.text)
+                        .truncate()
+                        .shrink()
+                        .min_w(0.0)
+                        .help_when_truncated(row.message.clone())
+                        .on_drawn_layout_tx({
+                            let table_rect = newest_rect.clone();
+                            move |state: &mut State, rect: [f32; 4], tx| {
+                                // The newest row's centre when the reader is at the top.
+                                let at_top = table_rect.get()[1]
+                                    + style.header_height
+                                    + style.row_height * 0.5;
+                                // Away once it has moved up by half a row.
+                                let away =
+                                    rect[1] + rect[3] * 0.5 < at_top - style.row_height * 0.5;
+                                if !state.scoped_logs.set_away(away) {
+                                    tx.live_only();
+                                }
+                            }
+                        }),
+                ),
                 "timestamp" => Cell::text(row.ts.clone()).mono().muted(),
                 "severity" => Cell::text(row.severity.clone()),
                 _ => Cell::text(row.message.clone()),
@@ -1756,8 +1886,45 @@ fn safe_log_table(state: &State, kit: &Kit, available_width: f32) -> El {
         .h(320.0)
         .min_h(320.0)
         .grow(0.0)
-        .fill(kit.c.surface_base);
-    let mut body = rune::col().gap(8.0).child(table);
+        .fill(kit.c.surface_base)
+        .drawn_rect_into(&table_rect);
+    let mut body = rune::col().gap(8.0);
+    let unread = state.scoped_logs.unread();
+    // The marker row is always present, empty at zero, so the table never shifts when the count
+    // first rises. The count is text and the control a labelled button, so nothing depends on
+    // color. The jump is the runtime's own scroll request, which lands at once under reduced
+    // motion.
+    let mut marker = rune::row()
+        .key("logs-unread")
+        .w_full()
+        .min_h(44.0)
+        .gap(8.0)
+        .center_y();
+    if unread > 0 {
+        marker = marker
+            .child(ui_components::status_pill(
+                format!(
+                    "{unread} new log {}",
+                    if unread == 1 { "line" } else { "lines" }
+                ),
+                None,
+                StatusTone::Info,
+                kit,
+            ))
+            .child(
+                ActionButton::new("Jump to newest")
+                    .key("logs-jump-newest")
+                    .finish(MetalFinish::ObsidianPill)
+                    .on_press_tx(|state: &mut State, tx| {
+                        if let Some(id) = state.scoped_logs.jump_to_newest() {
+                            tx.scroll_into_view_in(crate::logs::TABLE_KEY, id);
+                        }
+                    })
+                    .build(kit, preferences, pointer_ref),
+            );
+    }
+    body = body.child(marker);
+    body = body.child(table);
     if let Some(selected) = state
         .scoped_logs
         .table
@@ -1782,7 +1949,7 @@ fn safe_log_table(state: &State, kit: &Kit, available_width: f32) -> El {
 fn maintenance_preflight_status(
     state: &State,
     operation: MaintenanceOperation,
-    reason: Option<&str>,
+    preflight: &crate::maintenance::MaintenancePreflight,
 ) -> (&'static str, StatusTone, bool) {
     if matches!(state.maintenance.upload, Load::Loading) {
         let uploading_op = state
@@ -1805,22 +1972,7 @@ fn maintenance_preflight_status(
     }
     let queuing_for_op = (matches!(state.maintenance.receipt, Load::Loading)
         || state.maintenance.busy())
-        && (state
-            .maintenance
-            .last_request
-            .as_ref()
-            .is_some_and(|r| match operation {
-                MaintenanceOperation::SeedActors => r
-                    .dataset
-                    .as_ref()
-                    .is_some_and(|d| d.kind == DatasetKind::ActorCatalog),
-                MaintenanceOperation::TrainClassifier => r
-                    .dataset
-                    .as_ref()
-                    .is_some_and(|d| d.kind == DatasetKind::ClassifierTraining),
-                MaintenanceOperation::ReindexActors => r.dataset.is_none() && r.engine.is_none(),
-                _ => false,
-            })
+        && (state.maintenance.active_operation == Some(operation)
             || state.maintenance.pending_preview == Some(operation)
             || state
                 .maintenance
@@ -1833,32 +1985,212 @@ fn maintenance_preflight_status(
     if matches!(state.readiness, Load::Pending | Load::Loading) {
         return ("Checking…", StatusTone::Info, true);
     }
-    match reason {
-        None => ("Ready", StatusTone::Ok, false),
-        Some(text) if text.contains("Uploading") || text.contains("uploading") => {
-            ("Upload active", StatusTone::Info, false)
-        }
-        Some(text) if text.contains("acceptance receipt") => {
-            ("Request active", StatusTone::Info, false)
-        }
-        Some(text) if text.contains("permission") => ("No permission", StatusTone::Err, false),
-        Some(text) if text.contains("Register") => ("Register first", StatusTone::Warn, false),
-        Some(text) if text.contains("Refresh backend checks") => {
-            ("Refresh checks", StatusTone::Warn, false)
-        }
-        Some(text) if text.contains("current registered context") => {
-            ("Refresh checks", StatusTone::Warn, false)
-        }
-        Some(text) if text.contains("stale") => ("Checks stale", StatusTone::Warn, false),
-        Some(text) if text.contains("configuration revision") => {
-            ("Sync config", StatusTone::Warn, false)
-        }
-        Some(text) if text.contains("Complete actor seeding") => {
-            ("Seed actors first", StatusTone::Warn, false)
-        }
-        Some(text) if text.contains("durable consumer") => ("Unavailable", StatusTone::Err, false),
-        Some(_) => ("Preflight blocked", StatusTone::Err, false),
+    let (label, tone) = preflight.status_label();
+    (label, tone, false)
+}
+
+fn operation_key(operation: MaintenanceOperation) -> &'static str {
+    match operation {
+        MaintenanceOperation::SeedActors => "seed",
+        MaintenanceOperation::ReindexActors => "reindex",
+        MaintenanceOperation::TrainClassifier => "train",
+        _ => "other",
     }
+}
+
+fn operation_job_card_status(
+    state: &State,
+    operation: MaintenanceOperation,
+    preferences: ViewPreferences,
+    kit: &Kit,
+    pointer_ref: Option<&rune::Live<[f32; 2]>>,
+) -> Option<El> {
+    let record = state.maintenance.operation_job(operation)?;
+    let job_id = record.job_id.clone();
+    let short_id = truncate_id(&job_id, 24);
+    let fallback_job = match (&state.backend.detail, &state.backend.jobs) {
+        (Load::Ready(detail), _) if detail.job.id == job_id => {
+            Some((&detail.job, detail.maintenance_result.as_ref()))
+        }
+        (_, Load::Ready(jobs)) => jobs
+            .rows
+            .iter()
+            .find(|job| job.id == job_id)
+            .map(|job| (job, None)),
+        _ => None,
+    };
+    let observed = record
+        .detail
+        .as_ref()
+        .map(|detail| (&detail.job, detail.maintenance_result.as_ref()))
+        .or(fallback_job);
+
+    let (title, detail_text, tone, active_progress) = match observed {
+        Some((job, _)) if crate::backend::job_is_active(&job.state) => {
+            let stage_title = match job.state.as_str() {
+                "running" => "Running",
+                "retry_scheduled" => "Retrying",
+                _ => "Queued",
+            };
+            let phase = job.phase.trim();
+            let count_text = match (
+                job.progress_done.filter(|d| *d >= 0),
+                job.progress_total.filter(|t| *t > 0),
+            ) {
+                (Some(done), Some(total)) => Some(format!("{done} / {total}")),
+                (Some(done), None) => Some(format!("{done} processed")),
+                _ => None,
+            };
+            let mut parts = vec![format!("Job {short_id}")];
+            if !phase.is_empty() {
+                parts.push(phase.to_owned());
+            }
+            if let Some(counts) = count_text {
+                parts.push(counts);
+            }
+            let frac = job
+                .progress_done
+                .zip(job.progress_total)
+                .filter(|(done, total)| *done >= 0 && *total > 0)
+                .map(|(done, total)| (done.min(total) as f32 / total as f32).clamp(0.0, 1.0));
+            (
+                stage_title.to_owned(),
+                parts.join(" · "),
+                state_tone(&job.state),
+                Some(frac),
+            )
+        }
+        Some((job, result)) if job.state == "completed" => {
+            let seed_count = if operation == MaintenanceOperation::SeedActors {
+                let job_count =
+                    job.progress_done
+                        .zip(job.progress_total)
+                        .and_then(|(done, total)| {
+                            Some((u64::try_from(done).ok()?, u64::try_from(total).ok()?))
+                        });
+                result
+                    .and_then(|result| result.processed.zip(result.total))
+                    .or(job_count)
+                    .filter(|(done, total)| *total > 0 && done <= total)
+            } else {
+                None
+            };
+            let outcome = match operation {
+                MaintenanceOperation::SeedActors => seed_count.map_or_else(
+                    || "Completed".to_owned(),
+                    |(done, total)| format!("Completed ({done}/{total})"),
+                ),
+                MaintenanceOperation::ReindexActors => {
+                    if result.and_then(|r| r.reader_visible) == Some(false) {
+                        "Index built".to_owned()
+                    } else {
+                        "Search index ready".to_owned()
+                    }
+                }
+                MaintenanceOperation::TrainClassifier => {
+                    if result.and_then(|r| r.active_model_id.as_ref()).is_some() {
+                        "Classifier trained".to_owned()
+                    } else {
+                        "Candidate trained · Not activated".to_owned()
+                    }
+                }
+                _ => "Completed".to_owned(),
+            };
+            let mut parts = vec![format!("Job {short_id}")];
+            if operation == MaintenanceOperation::SeedActors {
+                parts.insert(0, "Actors seeded".to_owned());
+            }
+            if let Some(res) = result {
+                if let Some(processed) = res.processed.filter(|_| seed_count.is_none()) {
+                    parts.push(res.total.map_or_else(
+                        || format!("{processed} processed"),
+                        |total| format!("{processed} / {total} processed"),
+                    ));
+                } else if let Some(scanned) = res.scanned {
+                    parts.push(res.total.map_or_else(
+                        || format!("{scanned} scanned"),
+                        |total| format!("{scanned} / {total} scanned"),
+                    ));
+                }
+                if let Some(candidate) = res
+                    .candidate_model_id
+                    .as_deref()
+                    .filter(|id| !id.is_empty())
+                {
+                    parts.push(format!("Candidate {}", truncate_id(candidate, 18)));
+                }
+            }
+            (outcome, parts.join(" · "), StatusTone::Ok, None)
+        }
+        Some((job, _)) => {
+            let summary = if job.error_summary.is_empty() {
+                format!("Job {short_id} · {}", job.state)
+            } else {
+                format!("Job {short_id} · {}", job.error_summary)
+            };
+            (
+                format!("Job {}", job.state),
+                summary,
+                state_tone(&job.state),
+                None,
+            )
+        }
+        None => {
+            let title = if record.reused {
+                "Already running"
+            } else {
+                "Queued"
+            };
+            let detail = if record.reused {
+                format!("Job {short_id} is already active on the backend · Completion pending")
+            } else {
+                format!("Accepted job {short_id} · Completion pending")
+            };
+            (title.to_owned(), detail, StatusTone::Ok, None)
+        }
+    };
+
+    let op_key = operation_key(operation);
+    let mut strip = rune::col()
+        .key(format!("maintenance-op-job-{op_key}"))
+        .gap(6.0)
+        .child(
+            ui_components::async_status_strip(
+                format!("maintenance-op-strip-{op_key}"),
+                title.clone(),
+                detail_text,
+                false,
+                tone,
+                preferences,
+                kit,
+            )
+            .label(format!("{title}: Job {job_id}"))
+            .role("status"),
+        );
+    if let Some(frac) = active_progress {
+        strip = strip.child(
+            Progress::new(frac)
+                .label(format!("{title} · Job {short_id}"))
+                .build(kit)
+                .w_full(),
+        );
+    }
+    if let Some(error) = &record.poll_error {
+        strip = strip.child(crate::views::unsynced_glyph(
+            &format!("maintenance-op-unsynced-{op_key}"),
+            format!("Job status unsynced · {error}"),
+            kit,
+        ));
+    }
+    strip = strip.child(
+        ActionButton::new("View job")
+            .key(format!("maintenance-view-job-{op_key}"))
+            .icon(&icons::JOBS)
+            .finish(MetalFinish::ObsidianPill)
+            .on_press(move |state: &mut State| state.open_job(&job_id))
+            .build(kit, preferences, pointer_ref),
+    );
+    Some(strip)
 }
 
 pub(crate) fn maintenance(
@@ -1872,8 +2204,8 @@ pub(crate) fn maintenance(
 
     let active_step = match state.seed_stage {
         SeedStage::Seed => 0,
-        SeedStage::Classifier => 1,
-        SeedStage::Maintenance => 2,
+        SeedStage::Maintenance => 1,
+        SeedStage::Classifier => 2,
     };
     let checking_readiness = matches!(state.readiness, Load::Pending | Load::Loading);
     let refresh_btn = ActionButton::new("Refresh checks")
@@ -1898,27 +2230,38 @@ pub(crate) fn maintenance(
         .build(kit, preferences, pointer_ref);
 
     let stage_picker = SegmentedControl::new(
-        &["1. Seed Actors", "2. Train Classifier", "3. Search Index"],
+        &[
+            "1. Seed Actors",
+            "2. Search Index",
+            "Optional · Train Classifier",
+        ],
         Some(active_step),
     )
     .label("Maintenance stage")
     .fit()
     .on_pick(|state: &mut State, idx, _| {
         state.seed_stage = match idx {
-            1 => SeedStage::Classifier,
-            2 => SeedStage::Maintenance,
+            1 => SeedStage::Maintenance,
+            2 => SeedStage::Classifier,
             _ => SeedStage::Seed,
         };
     })
     .build(kit);
 
+    let readiness_unsynced = state.readiness_error.as_ref().map(|error| {
+        crate::views::unsynced_glyph(
+            "maintenance-readiness-unsynced",
+            format!("Readiness checks unsynced · {error}"),
+            kit,
+        )
+    });
     let mut body = rune::col()
         .gap(12.0)
         .child(ui_components::section_header(
             &icons::SEED,
             "DB Seed & Train",
-            Some("Actor seeding is required before building the search index; classifier training is optional."),
-            None,
+            Some("Seed Actors → Search Index; Train Classifier is independent and optional."),
+            readiness_unsynced,
             Some(refresh_btn),
             kit,
         ))
@@ -1958,36 +2301,49 @@ pub(crate) fn maintenance(
     for (stage_match, label, operation, key, explanation, glyph, finish) in [
         (
             SeedStage::Seed,
-            "Seed Actors",
+            "1. Seed Actors",
             MaintenanceOperation::SeedActors,
-            "maintenance-seed",
-            "Choose a CSV to add or update actors. Existing actors outside this CSV are kept.",
+            maintenance::SEED_ACTION_KEY,
+            "Use a CSV to add or update actors. Existing actors outside this CSV are kept.",
             &icons::SEED,
             MetalFinish::GoldCta,
         ),
         (
             SeedStage::Maintenance,
-            "Build Search Index",
+            "2. Build Search Index",
             MaintenanceOperation::ReindexActors,
-            "maintenance-reindex",
-            "Build the actor-search projection from the backend catalog.",
+            maintenance::REINDEX_ACTION_KEY,
+            "Build the actor-search projection from the seeded backend catalog.",
             &icons::BRAIN,
             MetalFinish::Gunmetal,
         ),
         (
             SeedStage::Classifier,
-            "Train Classifier — Natural",
+            "Optional · Train Classifier (Natural)",
             MaintenanceOperation::TrainClassifier,
-            "maintenance-train",
-            "Choose a training CSV for a Natural candidate. Training does not activate it.",
+            maintenance::TRAIN_ACTION_KEY,
+            "Independent of search indexing. Use a training CSV for a Natural candidate. Activation is separate.",
             &icons::MODELS,
             MetalFinish::Gunmetal,
         ),
     ] {
-        let reason = state.maintenance_disabled_reason(operation);
+        let preflight = state.maintenance_preflight(operation);
+        let reason = preflight.disabled_reason();
         let (preflight_label, preflight_tone, button_busy) =
-            maintenance_preflight_status(state, operation, reason.as_deref());
+            maintenance_preflight_status(state, operation, &preflight);
         let focused = state.seed_stage == stage_match;
+        let dataset = match operation {
+            MaintenanceOperation::SeedActors => Some(DatasetKind::ActorCatalog),
+            MaintenanceOperation::TrainClassifier => Some(DatasetKind::ClassifierTraining),
+            _ => None,
+        };
+        let action_label = match dataset {
+            Some(DatasetKind::ActorCatalog) if cfg!(target_os = "linux") => "Enter actor CSV path",
+            Some(DatasetKind::ClassifierTraining) if cfg!(target_os = "linux") => {
+                "Enter training CSV path"
+            }
+            _ => label,
+        };
         let mut operation_card = rune::col().padding(14.0).gap(8.0).child(
             rune::row()
                 .w_full()
@@ -2005,7 +2361,7 @@ pub(crate) fn maintenance(
                 .child(heading(label, kit))
                 .child(rune::spacer())
                 .child(
-                    ActionButton::new(label)
+                    ActionButton::new(action_label)
                         .key(key)
                         .icon(glyph)
                         .finish(finish)
@@ -2014,24 +2370,26 @@ pub(crate) fn maintenance(
                         .disabled(reason.is_some())
                         .on_press_tx(move |state: &mut State, tx| {
                             state.seed_stage = stage_match;
-                            match operation {
-                                MaintenanceOperation::SeedActors => {
-                                    state.choose_dataset(DatasetKind::ActorCatalog, tx)
+                            match dataset {
+                                Some(kind) if cfg!(target_os = "linux") => {
+                                    state.enter_csv_path(kind, tx);
                                 }
-                                MaintenanceOperation::TrainClassifier => {
-                                    state.choose_dataset(DatasetKind::ClassifierTraining, tx)
-                                }
-                                _ => state.preview_maintenance(operation),
+                                Some(kind) => state.choose_dataset(kind, tx),
+                                None => state.preview_maintenance(operation),
                             }
                         })
                         .build(kit, preferences, pointer_ref),
                 ),
         );
-        if focused {
+        if let Some(reason) = reason {
+            operation_card = operation_card.child(quiet(reason, kit));
+        } else if focused {
             operation_card = operation_card.child(quiet(explanation, kit));
-            if let Some(reason) = reason {
-                operation_card = operation_card.child(quiet(reason, kit));
-            }
+        }
+        if let Some(job_status) =
+            operation_job_card_status(state, operation, preferences, kit, pointer_ref)
+        {
+            operation_card = operation_card.child(job_status);
         }
         if let Some(prompt) = &state.maintenance.csv_path_prompt {
             let matches_card = matches!(
@@ -2074,9 +2432,6 @@ pub(crate) fn maintenance(
             body = body.child(message);
         }
     }
-    if let Some(receipt_banner) = actor_index_receipt_banner(state, preferences, kit) {
-        body = body.child(receipt_banner);
-    }
     if let Some(unresolved) = unresolved_actor_reindex_banner(state, preferences, kit) {
         body = body.child(unresolved);
     }
@@ -2107,7 +2462,7 @@ fn csv_path_prompt(
         })
         .on_submit(|state: &mut State, _| state.submit_csv_path())
         .build(kit)
-        .key("maintenance-csv-path");
+        .key(maintenance::CSV_PATH_KEY);
     let mut column = rune::col()
         .gap(8.0)
         .key("maintenance-csv-path-prompt")
@@ -2119,24 +2474,33 @@ fn csv_path_prompt(
     if let Some(error) = &prompt.error {
         column = column.child(line(error.clone(), kit).role("alert"));
     }
-    column.child(
-        rune::row()
-            .gap(8.0)
-            .child(
-                ActionButton::new("Use this CSV")
-                    .key("maintenance-csv-path-submit")
-                    .finish(MetalFinish::GoldCta)
-                    .on_press(|state: &mut State| state.submit_csv_path())
-                    .build(kit, preferences, pointer_ref),
-            )
-            .child(
-                ActionButton::new("Cancel")
-                    .key("maintenance-csv-path-cancel")
-                    .finish(MetalFinish::Gunmetal)
-                    .on_press(|state: &mut State| state.cancel_csv_path_prompt())
-                    .build(kit, preferences, pointer_ref),
-            ),
-    )
+    let mut actions = rune::row()
+        .gap(8.0)
+        .child(
+            ActionButton::new("Use this CSV")
+                .key("maintenance-csv-path-submit")
+                .finish(MetalFinish::Fractured)
+                .on_press(|state: &mut State| state.submit_csv_path())
+                .build(kit, preferences, pointer_ref),
+        )
+        .child(
+            ActionButton::new("Cancel")
+                .key("maintenance-csv-path-cancel")
+                .finish(MetalFinish::Gunmetal)
+                .on_press_tx(State::cancel_csv_path_prompt)
+                .build(kit, preferences, pointer_ref),
+        );
+    if cfg!(target_os = "linux") {
+        let kind = prompt.kind;
+        actions = actions.child(
+            ActionButton::new("Browse…")
+                .key("maintenance-csv-path-browse")
+                .finish(MetalFinish::Gunmetal)
+                .on_press_tx(move |state: &mut State, tx| state.choose_dataset(kind, tx))
+                .build(kit, preferences, pointer_ref),
+        );
+    }
+    column.child(actions)
 }
 
 pub(crate) fn maintenance_confirmation_content(
@@ -2147,6 +2511,13 @@ pub(crate) fn maintenance_confirmation_content(
 ) -> El {
     let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
     let busy = state.maintenance.busy() || matches!(state.maintenance.receipt, Load::Loading);
+    let current = state.maintenance_confirmation_matches(confirmation);
+    let blocked = if current {
+        state.maintenance_confirmation_preflight(confirmation.operation)
+    } else {
+        Some("The backend context or selected dataset changed. Cancel and review again.".into())
+    };
+    let refreshing = state.readiness_pending() || state.configuration_read_pending();
     let is_reindex = confirmation.operation == MaintenanceOperation::ReindexActors;
     let title = if is_reindex {
         "Build actor search index".to_owned()
@@ -2163,7 +2534,7 @@ pub(crate) fn maintenance_confirmation_content(
     } else {
         "Keep current backend state"
     };
-    rune::col()
+    let mut content = rune::col()
         .gap(8.0)
         .key("maintenance-confirmation")
         .child(heading(title, kit))
@@ -2201,36 +2572,59 @@ pub(crate) fn maintenance_confirmation_content(
                 },
             ),
             kit,
-        ))
-        .child(
-            rune::row()
-                .gap(8.0)
-                .child(
-                    ActionButton::new(confirm_label)
-                        .key("maintenance-confirm")
-                        .icon(&icons::SHIELD_CHECK)
-                        .finish(MetalFinish::GoldCta)
-                        .status(
-                            if busy { "Queuing…" } else { "Ready" },
-                            if busy {
-                                StatusTone::Accent
-                            } else {
-                                StatusTone::Ok
-                            },
-                        )
-                        .busy(busy)
-                        .disabled(busy)
-                        .on_press(|state: &mut State| state.confirm_maintenance())
-                        .build(kit, preferences, pointer_ref),
-                )
-                .child(
-                    ActionButton::new(cancel_label)
-                        .key("maintenance-cancel")
-                        .finish(MetalFinish::Gunmetal)
-                        .on_press(|state: &mut State| state.cancel_maintenance_confirmation())
-                        .build(kit, preferences, pointer_ref),
-                ),
-        )
+        ));
+    if let Some(reason) = &blocked {
+        content = content.child(line(reason.clone(), kit).role("status"));
+    }
+    if blocked.is_some() && current && !busy {
+        content = content.child(
+            ActionButton::new("Refresh checks")
+                .key("maintenance-confirm-refresh")
+                .icon(&icons::REFRESH)
+                .finish(MetalFinish::Gunmetal)
+                .busy(refreshing)
+                .disabled(!state.connected() || refreshing)
+                .on_press(|state: &mut State| state.refresh_page())
+                .build(kit, preferences, pointer_ref),
+        );
+    }
+    content.child(
+        rune::row()
+            .gap(8.0)
+            .child(
+                ActionButton::new(confirm_label)
+                    .key("maintenance-confirm")
+                    .icon(&icons::SHIELD_CHECK)
+                    .finish(MetalFinish::FracturedConfirm)
+                    .status(
+                        if busy {
+                            "Working…"
+                        } else if blocked.is_some() {
+                            "Blocked"
+                        } else {
+                            "Ready"
+                        },
+                        if busy {
+                            StatusTone::Accent
+                        } else if blocked.is_some() {
+                            StatusTone::Warn
+                        } else {
+                            StatusTone::Ok
+                        },
+                    )
+                    .busy(busy)
+                    .disabled(busy || blocked.is_some())
+                    .on_press(|state: &mut State| state.confirm_maintenance())
+                    .build(kit, preferences, pointer_ref),
+            )
+            .child(
+                ActionButton::new(cancel_label)
+                    .key("maintenance-cancel")
+                    .finish(MetalFinish::Gunmetal)
+                    .on_press_tx(State::dismiss_maintenance_confirmation)
+                    .build(kit, preferences, pointer_ref),
+            ),
+    )
 }
 
 pub(crate) fn actor_index_receipt_banner(
@@ -2239,7 +2633,75 @@ pub(crate) fn actor_index_receipt_banner(
     kit: &Kit,
 ) -> Option<El> {
     let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
+    if let Some(record) = state
+        .maintenance
+        .operation_job(MaintenanceOperation::ReindexActors)
+    {
+        let job_id = record.job_id.clone();
+        let short_id = truncate_id(&job_id, 24);
+        let (title, detail, tone) = match record.detail.as_ref() {
+            Some(detail) if !crate::backend::job_is_active(&detail.job.state) => {
+                let title = if detail.job.state == "completed" {
+                    "Search index ready"
+                } else {
+                    detail.job.state.as_str()
+                };
+                (
+                    title.to_owned(),
+                    format!("Job {short_id}"),
+                    state_tone(&detail.job.state),
+                )
+            }
+            Some(detail) => (
+                detail.job.state.clone(),
+                format!("Job {short_id} · {}", detail.job.phase),
+                state_tone(&detail.job.state),
+            ),
+            None => {
+                let title = if record.reused {
+                    "Already running"
+                } else {
+                    "Queued"
+                };
+                let detail = if record.reused {
+                    format!("Job {short_id} is already active on the backend · Completion pending")
+                } else {
+                    format!("Accepted job {short_id} · Completion pending")
+                };
+                (title.to_owned(), detail, StatusTone::Ok)
+            }
+        };
+        return Some(
+            rune::col()
+                .key("maintenance-accepted")
+                .gap(8.0)
+                .child(
+                    ui_components::async_status_strip(
+                        "maintenance-accepted-strip",
+                        title.clone(),
+                        detail,
+                        false,
+                        tone,
+                        preferences,
+                        kit,
+                    )
+                    .label(format!("{title}: Job {job_id}"))
+                    .role("status"),
+                )
+                .child(
+                    ActionButton::new("View job")
+                        .key("maintenance-view-job")
+                        .icon(&icons::JOBS)
+                        .finish(MetalFinish::ObsidianPill)
+                        .on_press(move |state: &mut State| state.open_job(&job_id))
+                        .build(kit, preferences, pointer_ref),
+                ),
+        );
+    }
     if let Load::Ready(receipt) = &state.maintenance.receipt {
+        if receipt.operation != MaintenanceOperation::ReindexActors {
+            return None;
+        }
         let title = if receipt.reused {
             "Already running"
         } else {
@@ -2378,4 +2840,138 @@ pub(crate) fn unresolved_actor_reindex_banner(
                     ),
             ),
     ))
+}
+
+/// The one footer under the cycle history: a count, then a single local control for continuous
+/// loading, as under the Jobs list. Rows and selection stay put while it changes.
+fn cycles_tail(
+    state: &State,
+    loaded: usize,
+    kit: &Kit,
+    preferences: ViewPreferences,
+    pointer_ref: Option<&rune::Live<[f32; 2]>>,
+) -> El {
+    let more = |label: &'static str| {
+        ActionButton::new(label)
+            .key("cycles-load-more")
+            .finish(MetalFinish::ObsidianPill)
+            .on_press(|state: &mut State| state.more_cycles())
+    };
+    let mut footer = rune::row()
+        .key("cycles-tail")
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .child(quiet(
+            format!(
+                "{loaded} {}",
+                if loaded == 1 {
+                    "cycle loaded"
+                } else {
+                    "cycles loaded"
+                }
+            ),
+            kit,
+        ));
+    if state.cycles.loading_more() {
+        footer = footer.child(
+            more("Loading more")
+                .busy(true)
+                .build(kit, preferences, pointer_ref),
+        );
+    } else if state.cycles_can_load_more() {
+        let label = if state.cycles.read_error.is_some() {
+            "Retry"
+        } else {
+            "Load more"
+        };
+        footer = footer.child(more(label).build(kit, preferences, pointer_ref));
+        if state.cycles.read_error.is_none() {
+            // A one-pixel sentinel, new for every loaded count: coming on screen loads the next
+            // segment, and a segment that leaves it on screen loads another.
+            footer = footer.child(
+                rune::el()
+                    .key(format!("cycles-near-end-{loaded}"))
+                    .size(1.0, 1.0)
+                    .a11y_hidden()
+                    .on_visible(|state: &mut State, on_screen, _| state.cycles_near_end(on_screen)),
+            );
+        }
+    } else if matches!(&state.cycles.history, Load::Ready(history) if history.next_cursor.is_some())
+    {
+        footer = footer.child(quiet(
+            "View limit reached. Newer cycles load as they arrive.",
+            kit,
+        ));
+    }
+    footer
+}
+
+/// The one footer under the Jobs list: a count, then a single local control for continuous
+/// loading. Rows, selection and scroll position stay put while it changes.
+fn jobs_tail(
+    state: &State,
+    loaded: usize,
+    kit: &Kit,
+    preferences: ViewPreferences,
+    pointer_ref: Option<&rune::Live<[f32; 2]>>,
+) -> El {
+    let jobs = &state.scoped_jobs;
+    let more = |label: &'static str| {
+        ActionButton::new(label)
+            .key("jobs-load-more")
+            .finish(MetalFinish::ObsidianPill)
+            .on_press(|state: &mut State| state.request_jobs(crate::jobs_query::JobsEvent::More))
+    };
+    let mut footer = rune::row()
+        .key("jobs-tail")
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .child(quiet(
+            format!(
+                "{loaded} {}",
+                if loaded == 1 {
+                    "job loaded"
+                } else {
+                    "jobs loaded"
+                }
+            ),
+            kit,
+        ));
+    if jobs.loading_more() {
+        footer = footer.child(
+            more("Loading more")
+                .busy(true)
+                .build(kit, preferences, pointer_ref),
+        );
+    } else if let Some(reason) = jobs.tail_error() {
+        footer = footer
+            .child(ui_components::status_pill(
+                "Could not load more",
+                None,
+                StatusTone::Warn,
+                kit,
+            ))
+            .child(more("Retry").build(kit, preferences, pointer_ref))
+            .child(quiet(reason.to_owned(), kit));
+    } else if jobs.can_load_more() {
+        footer = footer
+            .child(more("Load more").build(kit, preferences, pointer_ref))
+            // A one-pixel sentinel, new for every loaded count: when it comes on screen the next
+            // segment loads, and a segment that leaves it on screen loads another.
+            .child(
+                rune::el()
+                    .key(format!("jobs-near-end-{loaded}"))
+                    .size(1.0, 1.0)
+                    .a11y_hidden()
+                    .on_visible(|state: &mut State, on_screen, _| state.jobs_near_end(on_screen)),
+            );
+    } else if jobs.at_bound() {
+        footer = footer.child(quiet(
+            "Showing the newest jobs. Narrow the filters to see others.",
+            kit,
+        ));
+    }
+    footer
 }

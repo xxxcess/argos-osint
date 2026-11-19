@@ -67,11 +67,22 @@ impl<T> Routed<T> {
 /// A resource lane paired with its bounded delivery receiver.
 pub type LaneReceiver<T> = (Lane, mpsc::Receiver<Routed<T>>);
 
+#[cfg(test)]
 pub fn bounded<T>(reindex: bool) -> (Routes<T>, Vec<LaneReceiver<T>>) {
+    bounded_for_capabilities(reindex, true)
+}
+
+pub fn bounded_for_capabilities<T>(
+    reindex: bool,
+    classifier: bool,
+) -> (Routes<T>, Vec<LaneReceiver<T>>) {
     let mut senders = Vec::new();
     let mut receivers = Vec::new();
     for lane in Lane::ALL {
         if lane == Lane::Reindex && !reindex {
+            continue;
+        }
+        if !classifier && matches!(lane, Lane::Train | Lane::Activate) {
             continue;
         }
         let (sender, receiver) = mpsc::channel(CAPACITY_PER_POOL);
@@ -160,5 +171,28 @@ mod tests {
             routes.try_send(setup_jobs::REINDEX_POOL, 1),
             Err(RouteError::Unknown(1))
         ));
+    }
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+
+    #[test]
+    fn unavailable_classifier_preserves_queued_work_without_execution_lanes() {
+        let (routes, receivers) = bounded_for_capabilities::<()>(true, false);
+        assert!(receivers
+            .iter()
+            .all(|(lane, _)| !matches!(lane, Lane::Train | Lane::Activate)));
+        assert!(matches!(
+            routes.try_send(Lane::Train.pool(), ()),
+            Err(RouteError::Unknown(()))
+        ));
+        assert!(matches!(
+            routes.try_send(Lane::Activate.pool(), ()),
+            Err(RouteError::Unknown(()))
+        ));
+        assert!(routes.try_send(Lane::Seed.pool(), ()).is_ok());
+        assert!(routes.try_send(Lane::Tools.pool(), ()).is_ok());
     }
 }

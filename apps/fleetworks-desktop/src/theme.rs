@@ -1,4 +1,7 @@
-//! Logo-derived colors shared by the actual views and their fixtures.
+//! Matte deep-space colors shared by the actual views and their fixtures.
+//!
+//! One uninterrupted `#060709` canvas, charcoal tonal steps, cool gray text and seven status
+//! hues that always travel with a label or icon. Sheen belongs to the main logo only.
 
 use rune::color;
 use rune::Color;
@@ -8,52 +11,56 @@ use rune_kit::PaletteSeed;
 use rune_kit::StateColors;
 
 pub const BACKGROUND: &str = "#060709";
-pub const SURFACE: &str = "#0B0C0F";
-pub const SURFACE_RAISED: &str = "#111317";
-pub const SURFACE_ELEVATED: &str = "#181C26";
+pub const SURFACE: &str = "#0B0F14";
+pub const SURFACE_RAISED: &str = "#121820";
+pub const SURFACE_ELEVATED: &str = "#19212B";
 pub const SURFACE_INSET: &str = "#060709";
 /// Decorative framing; essential controls use BORDER_CONTROL.
-pub const BORDER_SUBTLE: &str = "#3A3833";
-pub const BORDER_CONTROL: &str = "#898274";
-pub const TEXT_PRIMARY: &str = "#F3EEE4";
-pub const TEXT_SECONDARY: &str = "#D6D2C4";
-pub const TEXT_MUTED: &str = "#B8B4A8";
-pub const ACCENT: &str = "#C6A56E";
-pub const ACCENT_PRESSED: &str = "#C4A265";
-pub const ACCENT_HOVER: &str = "#D8BD8C";
-pub const ACCENT_HIGHLIGHT: &str = "#F2DFB6";
-pub const ACCENT_DEEP: &str = "#8E6E3B";
+pub const BORDER_SUBTLE: &str = "#2B343F";
+pub const BORDER_CONTROL: &str = "#647587";
+pub const TEXT_PRIMARY: &str = "#D5DCE5";
+pub const TEXT_SECONDARY: &str = "#A8B6C5";
+pub const TEXT_MUTED: &str = "#8192A4";
+pub const TEXT_DISABLED: &str = "#7F8D9D";
+pub const ACCENT: &str = "#24DCE3";
+pub const ACCENT_PRESSED: &str = "#1BB8C2";
+pub const ACCENT_HOVER: &str = "#68E7EB";
+pub const ACCENT_HIGHLIGHT: &str = "#72E9FF";
+pub const ACCENT_DEEP: &str = "#0F6F75";
 pub const ON_ACCENT: &str = "#060709";
-pub const SELECTION_SURFACE: &str = "#322C22";
+pub const SELECTION_SURFACE: &str = "#10272D";
 
-/// Gunmetal metallic stops for neutral interactive controls.
+/// Cool dark-metal stops kept for the fractured-obsidian submit texture and the logo mark.
 pub const METAL_DARK_TOP: &str = "#222631";
 pub const METAL_DARK_MID: &str = "#14171F";
 pub const METAL_DARK_BOTTOM: &str = "#0D0F14";
 pub const METAL_PANEL_HIGHLIGHT: &str = "#252A32";
 pub const METAL_PANEL_MID: &str = "#151920";
 pub const METAL_PANEL_LOW: &str = "#0A0C10";
-pub const METAL_EDGE_TOP: &str = "#5A5448";
-pub const METAL_EDGE_BOTTOM: &str = "#24211C";
+pub const METAL_EDGE_TOP: &str = "#4A5262";
+pub const METAL_EDGE_BOTTOM: &str = "#1E232C";
 
-/// Luminous ambient glow and deep cast shadow colors.
-pub const LIGHT_SURFACE_GLOW: &str = "#F7E8C9";
-pub const GOLD_GLOW: &str = "#D8BD8C";
+/// Cool specular and cast-shadow colors. The names predate the matte theme; none is ivory now.
+pub const LIGHT_SURFACE_GLOW: &str = "#D5DCE5";
+pub const GOLD_GLOW: &str = "#9AA6B6";
 pub const CAST_SHADOW: &str = "#020304";
 
-/// Semantic status palette aligned with Fleetworks web tokens.
-pub const STATUS_OK: &str = "#5FD39A";
-pub const STATUS_OK_BG: &str = "#10241B";
-pub const STATUS_OK_BORDER: &str = "#2B6E4E";
-pub const STATUS_WARN: &str = "#E5B45B";
-pub const STATUS_WARN_BG: &str = "#282010";
-pub const STATUS_WARN_BORDER: &str = "#7A5D28";
-pub const STATUS_ERR: &str = "#F06A8A";
-pub const STATUS_ERR_BG: &str = "#291219";
-pub const STATUS_ERR_BORDER: &str = "#7D2B3F";
-pub const STATUS_INFO: &str = "#5AB8F0";
-pub const STATUS_INFO_BG: &str = "#10202D";
-pub const STATUS_INFO_BORDER: &str = "#2B5E80";
+/// Flat semantic status palette from the matte canvas theme (fills and borders are 10 % and 42 %
+/// blends of each color over the group body, because the theme specifies only the foregrounds).
+pub const STATUS_PENDING: &str = "#24DCE3";
+pub const STATUS_NEUTRAL: &str = "#95A4B5";
+pub const STATUS_OK: &str = "#23DFA0";
+pub const STATUS_OK_BG: &str = "#0D2422";
+pub const STATUS_OK_BORDER: &str = "#15664F";
+pub const STATUS_WARN: &str = "#F1C84B";
+pub const STATUS_WARN_BG: &str = "#22221A";
+pub const STATUS_WARN_BORDER: &str = "#6C5D2B";
+pub const STATUS_ERR: &str = "#F280A0";
+pub const STATUS_ERR_BG: &str = "#221A22";
+pub const STATUS_ERR_BORDER: &str = "#6C3E4F";
+pub const STATUS_INFO: &str = "#53BAF5";
+pub const STATUS_INFO_BG: &str = "#12202A";
+pub const STATUS_INFO_BORDER: &str = "#295772";
 
 /// Entity & category accent hues derived from `intel-theme.ts`.
 pub const ENTITY_PERSON: &str = "#C08CF5";
@@ -89,14 +96,14 @@ impl StatusTone {
     /// Foreground ink color for text and icons.
     pub fn fg(self) -> Color {
         match self {
-            Self::Neutral => hex(TEXT_SECONDARY),
+            Self::Neutral => hex(STATUS_NEUTRAL),
             Self::Accent => hex(ACCENT_HOVER),
             Self::Ok => hex(STATUS_OK),
             Self::Warn => hex(STATUS_WARN),
             Self::Err => hex(STATUS_ERR),
             Self::Info => hex(STATUS_INFO),
             Self::Violet => hex(ENTITY_GRAPH),
-            Self::Cyan => hex(ENTITY_TECH),
+            Self::Cyan => hex(STATUS_PENDING),
         }
     }
 
@@ -110,7 +117,7 @@ impl StatusTone {
             Self::Err => hex(STATUS_ERR_BG),
             Self::Info => hex(STATUS_INFO_BG),
             Self::Violet => hex(ENTITY_GRAPH).alpha(0.14),
-            Self::Cyan => hex(ENTITY_TECH).alpha(0.14),
+            Self::Cyan => hex(STATUS_PENDING).alpha(0.14),
         }
     }
 
@@ -124,7 +131,7 @@ impl StatusTone {
             Self::Err => hex(STATUS_ERR_BORDER),
             Self::Info => hex(STATUS_INFO_BORDER),
             Self::Violet => hex(ENTITY_GRAPH).alpha(0.45),
-            Self::Cyan => hex(ENTITY_TECH).alpha(0.45),
+            Self::Cyan => hex(STATUS_PENDING).alpha(0.45),
         }
     }
 }

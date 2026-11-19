@@ -8,8 +8,17 @@ import {
   StyleSheet,
   useWindowDimensions,
 } from "react-native";
-import { Notice, LoadingState, EmptyState } from "@argos/ui";
-import { keyFor, type Article, type useArticles } from "@argos/api-client";
+import { Notice, LoadingState, EmptyState, FleetworksMark } from "@argos/ui";
+import {
+  articleSearchProblem,
+  keyFor,
+  type Article,
+  type useArticles,
+  type ArticleSearchFilters,
+  type useActorSearch,
+  type useArticleSearch,
+} from "@argos/api-client";
+import { SearchResults } from "./SearchResults";
 import { BulletinSkeleton } from "./BulletinSkeleton";
 import { FeedHeader } from "./FeedHeader";
 import { ArticleCard } from "./ArticleCard";
@@ -26,6 +35,16 @@ type Props = {
   onCategory: (category: string) => void;
   search: string;
   onSearch: (search: string) => void;
+  /** The query last submitted; empty means the default feed shows. */
+  submittedSearch: string;
+  onSubmitSearch: () => void;
+  onClearSearch: () => void;
+  searchResults: ReturnType<typeof useArticleSearch>;
+  actorResults: ReturnType<typeof useActorSearch>;
+  /** Opens the dossier for a canonical `actor_id` from a discovery hit. */
+  onActor: (actorId: string) => void;
+  searchFilters: ArticleSearchFilters;
+  onSearchFilters: (filters: ArticleSearchFilters) => void;
   days: string[];
   selectedDay: string;
   onDay: (day: string) => void;
@@ -43,38 +62,41 @@ type Props = {
 export function BulletinView(p: Props) {
   const { width } = useWindowDimensions();
   const wide = width >= 900;
+  const searchProblem = p.search.trim() ? articleSearchProblem(p.search) : null;
   const loading =
     !p.list.data &&
     p.articles.length === 0 &&
     (p.daysPending || (p.list.isLoading && !!p.selectedDay));
   return (
     <View nativeID="intel-bulletin" style={s.shell}>
-      <View
-        style={[
-          s.header,
-          wide && {
-            flexDirection: "row",
-            alignItems: "center",
-          },
-          !wide && { paddingHorizontal: 24 },
-        ]}
-      >
+      <View style={[s.header, !wide && { paddingHorizontal: 24 }]}>
         <View style={s.headingRow}>
-          <Text accessibilityRole="header" style={s.title}>
+          <FleetworksMark size={30} />
+          {/* The logo is the visible header. The heading stays for assistive tech and tests. */}
+          <Text accessibilityRole="header" style={s.visuallyHidden}>
             Intelligence bulletin
           </Text>
         </View>
-        <View style={[s.search, wide && { flex: 1, maxWidth: 512 }]}>
+        <View style={[s.search, { flex: 1 }, wide && { maxWidth: 512 }]}>
           <View style={s.searchField}>
             <TextInput
-              accessibilityLabel="Search articles"
-              placeholder="Search articles"
+              accessibilityLabel="Search articles and actors"
+              placeholder="Search articles and actors…"
               placeholderTextColor={c.dim}
               value={p.search}
               onChangeText={p.onSearch}
+              onSubmitEditing={p.onSubmitSearch}
+              returnKeyType="search"
+              autoCapitalize="none"
+              autoCorrect={false}
               style={[s.input, width < 600 && { fontSize: 17 }]}
             />
           </View>
+          {searchProblem ? (
+            <Text accessibilityRole="alert" style={s.hint}>
+              {searchProblem}
+            </Text>
+          ) : null}
         </View>
       </View>
       <View style={[s.body, wide && { flexDirection: "row" }]}>
@@ -92,106 +114,127 @@ export function BulletinView(p: Props) {
           nativeID="intel-article-feed"
           style={[s.feed, !wide && { padding: 16 }]}
         >
-          <FeedHeader
-            sort={p.sort}
-            onSort={p.onSort}
-            days={p.days}
-            selectedDay={p.selectedDay}
-            onDay={p.onDay}
-            onRefresh={() => {
-              void p.list.refetch();
-            }}
-            refreshing={p.list.isFetching}
-          />
-          <ScrollView
-            nativeID="intel-article-scroll"
-            testID="article-list-scroll"
-            style={s.list}
-            contentContainerStyle={s.listContent}
-            scrollEventThrottle={100}
-            onScroll={({
-              nativeEvent: { contentOffset, contentSize, layoutMeasurement },
-            }) => {
-              if (
-                !p.list.hasNextPage ||
-                p.list.isFetching ||
-                p.list.isFetchNextPageError
-              )
-                return;
-              if (
-                contentOffset.y + layoutMeasurement.height >=
-                contentSize.height - 240
-              )
-                void p.list.fetchNextPage({ cancelRefetch: false });
-            }}
-          >
-            {p.daysError ? (
-              <View style={{ gap: 12 }}>
-                <Notice>{String(p.daysError)}</Notice>
-                <DeskButton onPress={p.onRetryDays}>
-                  Retry retained days
-                </DeskButton>
-              </View>
-            ) : null}
-            {p.list.isError && !p.list.isFetchNextPageError ? (
-              <View style={{ gap: 12 }}>
-                <Notice>{String(p.list.error)}</Notice>
-                <DeskButton
-                  onPress={() => {
-                    void p.list.refetch();
-                  }}
-                >
-                  Retry bulletin
-                </DeskButton>
-              </View>
-            ) : null}
-            {loading ? <BulletinSkeleton /> : null}
-            {p.daysSuccess && !p.selectedDay ? (
-              <EmptyState title="No articles yet">
-                Collect an Atlas cycle in Argos to populate this bulletin.
-              </EmptyState>
-            ) : null}
-            {p.list.data && !!p.selectedDay && p.articles.length === 0 ? (
-              <View style={{ gap: 16 }}>
-                <EmptyState title="NO MATCHING INTELLIGENCE">
-                  No articles match this day, category and search.
-                </EmptyState>
-                <DeskButton onPress={p.onReset}>Reset filters</DeskButton>
-              </View>
-            ) : null}
-            <View nativeID="intel-feed-cards" style={s.cards}>
-              {p.articles.map((article, index) => (
-                <ArticleCard
-                  key={keyFor(article)}
-                  article={article}
-                  featured={index === 0}
-                  onPress={() => p.onArticle(article)}
-                />
-              ))}
-            </View>
-            {p.list.isFetchingNextPage ? (
-              <LoadingState label="Loading more articles…" compact />
-            ) : null}
-            {p.list.isFetchNextPageError ? (
-              <Notice>
-                Could not load more articles. {p.list.error?.message}
-              </Notice>
-            ) : null}
-            {p.list.hasNextPage || p.list.isFetchNextPageError ? (
-              <DeskButton
-                disabled={p.list.isFetching}
-                onPress={() => {
-                  void p.list.fetchNextPage({ cancelRefetch: false });
+          {p.submittedSearch ? (
+            <SearchResults
+              query={p.submittedSearch}
+              search={p.searchResults}
+              actors={p.actorResults}
+              onActor={p.onActor}
+              onArticle={p.onArticle}
+              onClear={p.onClearSearch}
+              filters={p.searchFilters}
+              onFilters={p.onSearchFilters}
+              day={p.selectedDay}
+              category={p.category}
+            />
+          ) : (
+            <>
+              <FeedHeader
+                sort={p.sort}
+                onSort={p.onSort}
+                days={p.days}
+                selectedDay={p.selectedDay}
+                onDay={p.onDay}
+                onRefresh={() => {
+                  void p.list.refetch();
+                }}
+                refreshing={p.list.isFetching}
+              />
+              <ScrollView
+                nativeID="intel-article-scroll"
+                testID="article-list-scroll"
+                style={s.list}
+                contentContainerStyle={s.listContent}
+                scrollEventThrottle={100}
+                onScroll={({
+                  nativeEvent: {
+                    contentOffset,
+                    contentSize,
+                    layoutMeasurement,
+                  },
+                }) => {
+                  if (
+                    !p.list.hasNextPage ||
+                    p.list.isFetching ||
+                    p.list.isFetchNextPageError
+                  )
+                    return;
+                  if (
+                    contentOffset.y + layoutMeasurement.height >=
+                    contentSize.height - 240
+                  )
+                    void p.list.fetchNextPage({ cancelRefetch: false });
                 }}
               >
-                {p.list.isFetchingNextPage
-                  ? "Loading…"
-                  : p.list.isFetchNextPageError
-                    ? "Retry loading articles"
-                    : "Load more articles"}
-              </DeskButton>
-            ) : null}
-          </ScrollView>
+                {p.daysError ? (
+                  <View style={{ gap: 12 }}>
+                    <Notice>{String(p.daysError)}</Notice>
+                    <DeskButton onPress={p.onRetryDays}>
+                      Retry retained days
+                    </DeskButton>
+                  </View>
+                ) : null}
+                {p.list.isError && !p.list.isFetchNextPageError ? (
+                  <View style={{ gap: 12 }}>
+                    <Notice>{String(p.list.error)}</Notice>
+                    <DeskButton
+                      onPress={() => {
+                        void p.list.refetch();
+                      }}
+                    >
+                      Retry bulletin
+                    </DeskButton>
+                  </View>
+                ) : null}
+                {loading ? <BulletinSkeleton /> : null}
+                {p.daysSuccess && !p.selectedDay ? (
+                  <EmptyState title="No articles yet">
+                    Collect an Atlas cycle in Argos to populate this bulletin.
+                  </EmptyState>
+                ) : null}
+                {p.list.data && !!p.selectedDay && p.articles.length === 0 ? (
+                  <View style={{ gap: 16 }}>
+                    <EmptyState title="NO MATCHING INTELLIGENCE">
+                      No articles match this day, category and search.
+                    </EmptyState>
+                    <DeskButton onPress={p.onReset}>Reset filters</DeskButton>
+                  </View>
+                ) : null}
+                <View nativeID="intel-feed-cards" style={s.cards}>
+                  {p.articles.map((article, index) => (
+                    <ArticleCard
+                      key={keyFor(article)}
+                      article={article}
+                      featured={index === 0}
+                      onPress={() => p.onArticle(article)}
+                    />
+                  ))}
+                </View>
+                {p.list.isFetchingNextPage ? (
+                  <LoadingState label="Loading more articles…" compact />
+                ) : null}
+                {p.list.isFetchNextPageError ? (
+                  <Notice>
+                    Could not load more articles. {p.list.error?.message}
+                  </Notice>
+                ) : null}
+                {p.list.hasNextPage || p.list.isFetchNextPageError ? (
+                  <DeskButton
+                    disabled={p.list.isFetching}
+                    onPress={() => {
+                      void p.list.fetchNextPage({ cancelRefetch: false });
+                    }}
+                  >
+                    {p.list.isFetchingNextPage
+                      ? "Loading…"
+                      : p.list.isFetchNextPageError
+                        ? "Retry loading articles"
+                        : "Load more articles"}
+                  </DeskButton>
+                ) : null}
+              </ScrollView>
+            </>
+          )}
         </View>
       </View>
     </View>
@@ -216,26 +259,26 @@ const s = StyleSheet.create({
     borderBottomWidth: 1,
     borderColor: c.border,
     gap: 16,
+    // The logo and the search share one row at every width.
+    flexDirection: "row",
+    alignItems: "center",
     justifyContent: "space-between",
     flexShrink: 0,
   },
   headingRow: {
     flexDirection: "row",
-    flexWrap: "wrap",
     alignItems: "center",
     gap: 12,
-    minWidth: 0,
-    flexShrink: 1,
+    flexShrink: 0,
   },
-  title: {
-    color: c.text,
-    fontFamily: intelFonts.body,
-    fontSize: 21,
-    lineHeight: 27,
-    fontWeight: "700",
-    flexShrink: 1,
+  visuallyHidden: {
+    position: "absolute",
+    width: 1,
+    height: 1,
+    overflow: "hidden",
   },
   search: { gap: 6, minWidth: 0 },
+  hint: { color: c.dim, fontFamily: intelFonts.body, fontSize: 13 },
   searchField: { minWidth: 0, width: "100%" },
   micro: {
     color: c.dim,

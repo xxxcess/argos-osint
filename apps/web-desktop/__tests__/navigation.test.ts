@@ -1,5 +1,8 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { createMemoryNavigation } from "../../../packages/intel/src/navigation";
+import {
+  actorRouteFor,
+  createMemoryNavigation,
+} from "../../../packages/intel/src/navigation";
 import { routeFromUrl, routeUrl, webNavigation } from "../app/navigation";
 import type { IntelRoute } from "../../../packages/intel/src/navigation";
 
@@ -135,4 +138,13 @@ it("round-trips source actor dossiers without treating the extracted reference a
     actorFrom: route,
   });
   expect(webNavigation.getSnapshot()).toMatchObject({ actorFrom: route });
+});
+
+it("links a discovery hit to its dossier by canonical id only", () => {
+  const id = "actor /&?:one";
+  const route = actorRouteFor(id);
+  expect(route).toEqual({ screen: "actor", id });
+  const url = routeUrl(route);
+  expect(url).toBe(`/actor?${new URLSearchParams({ id })}`);
+  expect(routeFromUrl(new URL(url, location.origin))).toEqual(route);
 });

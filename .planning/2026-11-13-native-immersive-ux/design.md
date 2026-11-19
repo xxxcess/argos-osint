@@ -1,5 +1,7 @@
 # Fleetworks Native Immersive UX — Design Specification
 
+> Visual supersession: this dated record retains its original implementation/evidence context. New work follows the approved [matte canvas theme](../../docs/design/matte-canvas/README.md) and [current implementation handoff](../2026-11-16-matte-canvas/handoff.md). Earlier gold/ivory primary accents, pointer reflections, blanket textured controls, decorative panel rims and routine page controls are not the current visual target.
+
 [Decisions](decisions.md) · [Acceptance](acceptance.md)
 
 Grounded in `anomalyco/rune` revision `205b8d4` (`crates/rune`, `crates/rune-kit`, `crates/rune-motion`, `crates/rune-fx`, `crates/rune-light`) and tailored to `apps/fleetworks-desktop`.

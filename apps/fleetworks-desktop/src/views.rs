@@ -70,10 +70,19 @@ pub(crate) fn scroll(body: El, key: &str) -> El {
         .scroll(ScrollSpec {
             stick_bottom: false,
         })
+        // Keep the row at the top of the view where it is when rows are inserted above it, so a
+        // continuation, refresh or eviction never moves a reader who has scrolled down.
+        .scroll_anchor()
         .child(body.w_full().padding(20.0).gap(14.0))
 }
 
 pub(crate) fn page(state: &State, cx: &mut Cx<State>, kit: &Kit, layers: &mut Vec<El>) -> El {
+    if state.fixture_catalog {
+        let preferences = state
+            .accessibility
+            .for_view(state.fixture, cx.is_reduced_motion());
+        return crate::catalog::view(kit, preferences);
+    }
     if state.setup_gateway {
         return setup_gateway(state, cx, kit);
     }
@@ -101,23 +110,23 @@ fn connection_status(state: &State) -> String {
     match &state.connection.status {
         ConnectionStatus::Disconnected => {
             if state.is_local_backend() {
-                "Local companion backend is stopped".into()
+                "Embedded backend is stopped".into()
             } else {
-                "No gateway connection".into()
+                "Distributed gateway is disconnected".into()
             }
         }
         ConnectionStatus::Connecting => {
             if state.is_local_backend() {
-                "Starting local companion backend over stdio IPC…".into()
+                "Starting the embedded backend over stdio IPC…".into()
             } else {
-                "Checking gateway authentication and compatibility…".into()
+                "Checking distributed gateway authentication and compatibility…".into()
             }
         }
         ConnectionStatus::Connected => {
             if state.is_local_backend() {
-                "Connected to local embedded companion backend (stdio IPC)".into()
+                "Connected to the embedded backend over stdio IPC".into()
             } else {
-                "Connected to a compatible gateway".into()
+                "Connected to a compatible distributed gateway".into()
             }
         }
         ConnectionStatus::Failed(error) => error.clone(),
@@ -127,13 +136,13 @@ fn connection_status(state: &State) -> String {
 fn backend_mode_card(
     state: &State,
     narrow: bool,
+    compact: bool,
     busy: bool,
     preferences: crate::accessibility::ViewPreferences,
     kit: &Kit,
     pointer_ref: Option<&rune::Live<[f32; 2]>>,
-    shadow_ref: Option<&rune::Live<[f32; 2]>>,
 ) -> El {
-    let remote_btn = ActionButton::new("Remote Gateway")
+    let remote_btn = ActionButton::new("Distributed")
         .key("backend-mode-remote")
         .icon(&icons::SERVER)
         .finish(if !state.is_local_backend() {
@@ -144,7 +153,7 @@ fn backend_mode_card(
         .disabled(busy)
         .on_press(|state: &mut State| state.set_backend_kind(BackendKind::Remote))
         .build(kit, preferences, pointer_ref);
-    let local_btn = ActionButton::new("Local Embedded")
+    let local_btn = ActionButton::new("Embedded")
         .key("backend-mode-local")
         .icon(&icons::WORKSTATION)
         .finish(if state.is_local_backend() {
@@ -160,27 +169,27 @@ fn backend_mode_card(
             .key("backend-mode")
             .w_full()
             .gap(8.0)
-            .child(remote_btn)
             .child(local_btn)
+            .child(remote_btn)
     } else {
         rune::row()
             .key("backend-mode")
             .w_full()
             .gap(8.0)
-            .child(remote_btn)
             .child(local_btn)
+            .child(remote_btn)
     };
-    material::luminous_card(
+    material::responsive_card(
         rune::col()
             .padding(16.0)
             .gap(10.0)
             .child(ui_components::section_header(
                 &icons::SERVER,
-                "Backend Mode",
+                "Backend type",
                 Some(if state.is_local_backend() {
-                    "Supervise a private local companion backend on this workstation via framed stdio IPC"
+                    "Run the backend on this workstation through its bundled companion process."
                 } else {
-                    "Connect over HTTPS or loopback HTTP to a paired Fleetworks gateway"
+                    "Connect to a distributed deployment through its HTTPS or loopback HTTP gateway."
                 }),
                 None,
                 None,
@@ -189,9 +198,7 @@ fn backend_mode_card(
             .child(buttons),
         StatusTone::Neutral,
         false,
-        preferences,
-        pointer_ref,
-        shadow_ref,
+        compact,
     )
 }
 
@@ -241,9 +248,9 @@ fn local_capabilities_summary(
                 ))
                 .child(ui_components::status_pill(
                     if assessment.classifier_available {
-                        "Classifier ready"
+                        "Natural classifier available"
                     } else {
-                        "Classifier absent"
+                        "Natural classifier unavailable"
                     },
                     None,
                     if assessment.classifier_available {
@@ -297,7 +304,7 @@ fn local_runtime_diagnostics(
         diagnostics = diagnostics.child(
             ui_components::async_status_strip(
                 "local-pipe-closed-alert",
-                "Local IPC disconnected",
+                "Embedded IPC disconnected",
                 error.clone(),
                 false,
                 StatusTone::Err,
@@ -312,7 +319,7 @@ fn local_runtime_diagnostics(
         diagnostics = diagnostics.child(
             ui_components::async_status_strip(
                 "local-pressure-paused-alert",
-                "Local backend paused under resource pressure",
+                "Embedded backend paused under resource pressure",
                 format!(
                     "Reason code: {reason_code}. Active work paused safely until pressure clears."
                 ),
@@ -342,7 +349,7 @@ fn local_runtime_diagnostics(
         diagnostics = diagnostics.child(
             ui_components::async_status_strip(
                 "local-shutdown-status",
-                "Local companion lifecycle",
+                "Embedded companion lifecycle",
                 message.clone(),
                 state.local_backend.stopping,
                 StatusTone::Neutral,
@@ -367,10 +374,11 @@ fn local_runtime_diagnostics(
 fn local_backend_setup_card(
     state: &State,
     narrow: bool,
+    compact: bool,
     preferences: crate::accessibility::ViewPreferences,
     kit: &Kit,
     pointer_ref: Option<&rune::Live<[f32; 2]>>,
-    shadow_ref: Option<&rune::Live<[f32; 2]>>,
+    _shadow_ref: Option<&rune::Live<[f32; 2]>>,
 ) -> El {
     let mut body = rune::col()
         .padding(16.0)
@@ -378,7 +386,7 @@ fn local_backend_setup_card(
         .key("local-backend-card")
         .child(ui_components::section_header(
             &icons::WORKSTATION,
-            "Local Embedded Backend",
+            "Embedded backend",
             Some(&state.connection.origin.text),
             Some(ui_components::status_pill(
                 if state.connected() {
@@ -454,7 +462,7 @@ fn local_backend_setup_card(
         body = body
             .child(ui_components::async_status_strip(
                 "connection-status",
-                "Connected to local embedded backend",
+                "Connected to the embedded backend",
                 "Framed stdio IPC verified (no HTTP fallback)",
                 false,
                 StatusTone::Ok,
@@ -468,7 +476,7 @@ fn local_backend_setup_card(
         body = body.child(ui_components::inline_toggle_row(
             "setup-advanced-toggle",
             state.setup_advanced_open,
-            "Inspect local readiness checks",
+            "Inspect embedded readiness checks",
             Some("Reveal per-service probes and observation freshness"),
             false,
             kit,
@@ -477,13 +485,13 @@ fn local_backend_setup_card(
         if state.setup_advanced_open {
             body = body.child(crate::readiness_cards::checks(state, preferences, kit));
         }
-        let stop_btn = ActionButton::new("Stop Local Backend")
+        let stop_btn = ActionButton::new("Stop Embedded Backend")
             .key("stop-local-backend")
             .finish(MetalFinish::Gunmetal)
             .disabled(state.local_backend.stopping)
             .on_press(|state: &mut State| state.stop_local_backend())
             .build(kit, preferences, pointer_ref);
-        let switch_btn = ActionButton::new("Open Gateway")
+        let switch_btn = ActionButton::new("Switch to Distributed")
             .key("switch-remote-gateway")
             .finish(MetalFinish::Gunmetal)
             .on_press(|state: &mut State| state.set_backend_kind(BackendKind::Remote))
@@ -499,18 +507,21 @@ fn local_backend_setup_card(
                     .key("gateway-setup-done")
                     .icon(&icons::SHIELD_CHECK)
                     .finish(MetalFinish::GoldCta)
-                    .on_press(|state: &mut State| state.setup_gateway = false)
+                    .on_press_tx(State::finish_gateway_setup)
                     .build(kit, preferences, pointer_ref),
             );
         }
-        actions = actions.child(stop_btn).child(switch_btn);
+        actions = actions.child(stop_btn);
+        if !state.startup.active() {
+            actions = actions.child(switch_btn);
+        }
         body = body.child(actions);
     } else {
         if let ConnectionStatus::Failed(error) = &state.connection.status {
             body = body.child(
                 ui_components::async_status_strip(
                     "local-connection-error",
-                    "Local companion backend failed to start",
+                    "Embedded backend failed to start",
                     error.clone(),
                     false,
                     StatusTone::Err,
@@ -521,7 +532,7 @@ fn local_backend_setup_card(
             );
         }
         let connecting = state.connection.status == ConnectionStatus::Connecting;
-        let start_btn = ActionButton::new("Start Local Backend")
+        let start_btn = ActionButton::new("Start Embedded Backend")
             .key("connect-local")
             .icon(&icons::WORKSTATION)
             .finish(MetalFinish::GoldCta)
@@ -529,19 +540,21 @@ fn local_backend_setup_card(
             .disabled(connecting)
             .on_press(|state: &mut State| state.connect_local())
             .build(kit, preferences, pointer_ref);
-        let switch_btn = ActionButton::new("Open Gateway")
+        let switch_btn = ActionButton::new("Switch to Distributed")
             .key("switch-remote-gateway")
             .finish(MetalFinish::Gunmetal)
             .disabled(connecting)
             .on_press(|state: &mut State| state.set_backend_kind(BackendKind::Remote))
             .build(kit, preferences, pointer_ref);
-        let actions = if narrow {
+        let mut actions = if narrow {
             rune::col().w_full().gap(8.0)
         } else {
             rune::row().w_full().gap(8.0)
         }
-        .child(start_btn)
-        .child(switch_btn);
+        .child(start_btn);
+        if !state.startup.active() {
+            actions = actions.child(switch_btn);
+        }
         body = body.child(actions);
     }
 
@@ -552,18 +565,23 @@ fn local_backend_setup_card(
     } else {
         StatusTone::Accent
     };
-    material::luminous_card(body, tone, false, preferences, pointer_ref, shadow_ref)
+    material::responsive_card(body, tone, false, compact)
 }
 
-fn setup_gateway(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
+pub(crate) fn setup_gateway(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
     let preferences = state
         .accessibility
         .for_view(state.fixture, cx.is_reduced_motion());
     let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
     let shadow_ref = (!preferences.matte()).then_some(&state.shadow_offset);
-    let narrow = cx
-        .layout_size("page-content")
-        .is_some_and(|size| size[0] < 520.0);
+    let size = if state.startup.active() {
+        cx.layout_size("startup").or(Some([640.0, 480.0]))
+    } else {
+        cx.layout_size("page-content")
+    };
+    let narrow = size.is_some_and(|size| size[0] < 520.0);
+    // A short window also takes the compact group edge so every setup control stays reachable.
+    let compact = narrow || size.is_some_and(|size| size[1] < 560.0);
     let busy = state.pairing.busy()
         || state.connection.status == ConnectionStatus::Connecting
         || state.local_backend.stopping;
@@ -584,7 +602,7 @@ fn setup_gateway(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
         &icons::KEY,
         "Setup Gateway",
         Some(if state.is_local_backend() {
-            "Start and supervise the local companion backend over framed stdio IPC."
+            "Start the embedded backend on this workstation."
         } else if cfg!(target_os = "macos") {
             "Pair once via macOS Keychain. Accepted jobs persist independently."
         } else {
@@ -594,7 +612,7 @@ fn setup_gateway(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
             match active_step {
                 2 => {
                     if state.is_local_backend() {
-                        "Local Ready"
+                        "Ready"
                     } else {
                         "Paired"
                     }
@@ -608,7 +626,7 @@ fn setup_gateway(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
                 }
                 _ => {
                     if state.is_local_backend() {
-                        "Local Setup"
+                        "Embedded setup"
                     } else {
                         "Origin Setup"
                     }
@@ -632,28 +650,31 @@ fn setup_gateway(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
         .child(ui_components::stage_stepper(
             "gateway-setup-stepper",
             if state.is_local_backend() {
-                &["Local Backend", "IPC Handshake", "Backend Ready"]
+                &["Embedded backend", "IPC handshake", "Backend ready"]
             } else {
                 &["Origin URL", "Workstation Pair", "Gateway Ready"]
             },
             active_step,
             preferences,
             kit,
-        ))
-        .child(backend_mode_card(
+        ));
+    if !state.startup.active() {
+        body = body.child(backend_mode_card(
             state,
             narrow,
+            compact,
             busy,
             preferences,
             kit,
             pointer_ref,
-            shadow_ref,
         ));
+    }
 
     if state.is_local_backend() {
         body = body.child(local_backend_setup_card(
             state,
             narrow,
+            compact,
             preferences,
             kit,
             pointer_ref,
@@ -754,7 +775,7 @@ fn pairing_status(
                     .key("gateway-setup-done")
                     .icon(&icons::SHIELD_CHECK)
                     .finish(MetalFinish::GoldCta)
-                    .on_press(|state: &mut State| state.setup_gateway = false)
+                    .on_press_tx(State::finish_gateway_setup)
                     .build(kit, preferences, pointer_ref),
             );
         }
@@ -773,7 +794,7 @@ fn pairing_status(
                     ActionButton::new("Connect")
                         .key("connect")
                         .icon(&icons::KEY)
-                        .finish(MetalFinish::GoldCta)
+                        .finish(MetalFinish::Fractured)
                         .busy(state.connection.status == ConnectionStatus::Connecting)
                         .disabled(
                             state.connection.status == ConnectionStatus::Connecting
@@ -1025,7 +1046,7 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
             &icons::SERVER,
             "Gateway Backend",
             Some(if state.is_local_backend() {
-                "Local Embedded (framed stdio IPC)"
+                "Embedded (framed stdio IPC)"
             } else {
                 &state.connection.origin.text
             }),
@@ -1070,7 +1091,7 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
                     gateway_body.child(local_capabilities_summary(capabilities, preferences, kit));
             }
             gateway_body = gateway_body.child(
-                ActionButton::new("Stop Local Backend")
+                ActionButton::new("Stop Embedded Backend")
                     .key("workstation-stop-local-backend")
                     .finish(MetalFinish::Gunmetal)
                     .disabled(state.local_backend.stopping)
@@ -1090,6 +1111,16 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
         );
     } else {
         gateway_body = gateway_body.child(crate::readiness_cards::checks(state, preferences, kit));
+        if matches!(state.readiness, Load::Failed(_)) {
+            gateway_body = gateway_body.child(
+                ActionButton::new("Retry")
+                    .key("workstation-readiness-retry")
+                    .icon(&icons::REFRESH)
+                    .finish(MetalFinish::Gunmetal)
+                    .on_press(|state: &mut State| state.refresh_readiness())
+                    .build(kit, preferences, pointer_ref),
+            );
+        }
     }
     let gateway = material::luminous_card(
         gateway_body,
@@ -1119,7 +1150,7 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
                     .width(width)
                     .fit()
                     .click_outside(true)
-                    .on_close(|state: &mut State| state.cancel_maintenance_confirmation())
+                    .on_close(State::close_workstation_index_confirmation)
                     .child(rune::col().w_full().px(16.0).pb(16.0).child(
                         crate::backend_views::maintenance_confirmation_content(
                             state,
@@ -1131,6 +1162,10 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
                     .build(kit, layers);
             }
         }
+        let stale_notice = state.host_metrics_stale_notice();
+        let metrics_unsynced = stale_notice
+            .as_ref()
+            .map(|notice| unsynced_glyph("host-metrics-unsynced", notice.clone(), kit));
         let mut resources = rune::col()
             .padding(16.0)
             .gap(12.0)
@@ -1139,7 +1174,7 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
                 &icons::CPU,
                 "Host Resources",
                 Some("Click a telemetry tile to inspect host specifications"),
-                None,
+                metrics_unsynced,
                 None,
                 kit,
             ));
@@ -1162,21 +1197,6 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
                 resources = resources.child(line(error.clone(), kit).role("alert"));
             }
             Load::Ready(metrics) => {
-                let stale_notice = state.host_metrics_stale_notice();
-                if let Some(notice) = &stale_notice {
-                    resources = resources.child(
-                        ui_components::async_status_strip(
-                            "host-metrics-stale",
-                            "Telemetry unavailable",
-                            notice.clone(),
-                            false,
-                            StatusTone::Warn,
-                            preferences,
-                            kit,
-                        )
-                        .role("alert"),
-                    );
-                }
                 let mut tiles = if narrow_workstation {
                     rune::col().w_full().gap(10.0)
                 } else {
@@ -1214,9 +1234,7 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
                         formatted,
                         valid,
                         valid.map(|v| (v / 100.0) as f32),
-                        if stale_notice.is_some() {
-                            "Stale"
-                        } else if valid.is_some() {
+                        if valid.is_some() {
                             "API host load"
                         } else {
                             "Unavailable"
@@ -1304,11 +1322,32 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
     scroll(body.child(native), "workstation-body")
 }
 
+/// Small, muted unsynced indicator for last-good data whose refresh is out of sync.
+/// Distinct from the offline gateway indicator; exposes age/reason on demand via accessibility.
+pub(crate) fn unsynced_glyph(key: &str, reason: impl Into<String>, kit: &Kit) -> El {
+    let reason = reason.into();
+    rune::row()
+        .key(key.to_owned())
+        .center()
+        .w(20.0)
+        .h(20.0)
+        .radius(999.0)
+        .fill(StatusTone::Warn.bg())
+        .role("status")
+        .label(reason)
+        .child(
+            rune::icon(&icons::REFRESH, 12.0)
+                .color(kit.c.text_muted)
+                .a11y_hidden(),
+        )
+}
+
 struct ActorSearchSummary {
     status_label: &'static str,
     tone: StatusTone,
     next_action: String,
     freshness: String,
+    unsynced_reason: Option<String>,
     can_search: bool,
     building: bool,
     stage: Option<String>,
@@ -1320,12 +1359,16 @@ struct ActorSearchSummary {
 
 fn summarize_actor_search(state: &State) -> ActorSearchSummary {
     let reindex_job = active_or_selected_reindex_job(state);
-    let receipt_job = match &state.maintenance.receipt {
-        Load::Ready(receipt) if receipt.operation == MaintenanceOperation::ReindexActors => {
-            Some(receipt.job_id.as_str())
-        }
-        _ => None,
-    };
+    let receipt_job = state
+        .maintenance
+        .operation_job(MaintenanceOperation::ReindexActors)
+        .map(|record| record.job_id.as_str())
+        .or(match &state.maintenance.receipt {
+            Load::Ready(receipt) if receipt.operation == MaintenanceOperation::ReindexActors => {
+                Some(receipt.job_id.as_str())
+            }
+            _ => None,
+        });
     let mut details = Vec::new();
     let (catalog_check, search_check, observed_at) = match &state.readiness {
         Load::Ready(readiness) => (
@@ -1367,10 +1410,17 @@ fn summarize_actor_search(state: &State) -> ActorSearchSummary {
         details.push(format!("Pending request: {}", pending.request.request_id));
     }
 
-    let freshness = match (observed_at, search_check) {
-        (Some(ts), Some(_)) if search_fresh => format!("Observed {ts} · Fresh"),
-        (Some(ts), _) => format!("Observed {ts} · Stale — refresh checks"),
-        (None, _) => "Readiness has not been observed yet.".to_owned(),
+    let freshness = match observed_at {
+        Some(ts) => format!("Observed {ts}"),
+        None => "Readiness has not been observed yet.".to_owned(),
+    };
+    let unsynced_reason = match (observed_at, search_check) {
+        (Some(_), Some(_)) if search_fresh && state.readiness_error.is_none() => None,
+        (Some(ts), _) => Some(match &state.readiness_error {
+            Some(error) => format!("Observation unsynced (last observed {ts}): {error}"),
+            None => format!("Observation unsynced (last observed {ts}); refresh checks"),
+        }),
+        (None, _) => None,
     };
 
     let (status_label, tone, next_action, can_search, building, needs_seed) = if state
@@ -1512,6 +1562,7 @@ fn summarize_actor_search(state: &State) -> ActorSearchSummary {
         tone,
         next_action,
         freshness,
+        unsynced_reason,
         can_search,
         building,
         stage,
@@ -1523,6 +1574,13 @@ fn summarize_actor_search(state: &State) -> ActorSearchSummary {
 }
 
 fn active_or_selected_reindex_job(state: &State) -> Option<&crate::backend::ActivityJob> {
+    if let Some(detail) = state
+        .maintenance
+        .operation_job(MaintenanceOperation::ReindexActors)
+        .and_then(|record| record.detail.as_ref())
+    {
+        return Some(&detail.job);
+    }
     if let Load::Ready(detail) = &state.backend.detail {
         if detail.job.operation == "actor_reindex" {
             return Some(&detail.job);
@@ -1546,6 +1604,20 @@ fn actor_search_summary_card(state: &State, preferences: ViewPreferences, kit: &
     let busy_submit =
         state.maintenance.busy() || matches!(state.maintenance.receipt, Load::Loading);
 
+    let mut status_slot = rune::row()
+        .center_y()
+        .gap(6.0)
+        .child(ui_components::status_pill(
+            summary.status_label,
+            None,
+            summary.tone,
+            kit,
+        ));
+    if let Some(reason) = &summary.unsynced_reason {
+        status_slot =
+            status_slot.child(unsynced_glyph("actor-search-unsynced", reason.clone(), kit));
+    }
+
     let mut card_body = rune::col()
         .padding(16.0)
         .gap(10.0)
@@ -1554,12 +1626,7 @@ fn actor_search_summary_card(state: &State, preferences: ViewPreferences, kit: &
             &icons::BRAIN,
             "Actor search",
             Some(&summary.freshness),
-            Some(ui_components::status_pill(
-                summary.status_label,
-                None,
-                summary.tone,
-                kit,
-            )),
+            Some(status_slot),
             Some(ui_components::status_pill(
                 "Connected",
                 None,
@@ -1596,7 +1663,7 @@ fn actor_search_summary_card(state: &State, preferences: ViewPreferences, kit: &
     let mut actions = rune::row().w_full().gap(8.0).center_y();
     actions = actions.child(
         ActionButton::new("Build actor index")
-            .key("workstation-build-actor-index")
+            .key(crate::maintenance::WORKSTATION_REINDEX_ACTION_KEY)
             .icon(&icons::BRAIN)
             .finish(if disabled_reason.is_none() && !summary.can_search {
                 MetalFinish::GoldCta
@@ -1691,36 +1758,33 @@ fn actor_search_summary_card(state: &State, preferences: ViewPreferences, kit: &
     )
 }
 
+fn index_state_label(state: IndexState) -> (&'static str, StatusTone) {
+    match state {
+        IndexState::Ready => ("Search ready", StatusTone::Ok),
+        IndexState::Indexing
+        | IndexState::Paused
+        | IndexState::Throttled
+        | IndexState::Stale
+        | IndexState::Degraded => ("Index catching up", StatusTone::Warn),
+        IndexState::NotBuilt | IndexState::Unavailable | IndexState::Unknown | _ => {
+            ("Not built", StatusTone::Warn)
+        }
+    }
+}
+
 fn brain(state: &State, cx: &mut Cx<State>, kit: &Kit) -> El {
     let preferences = state
         .accessibility
         .for_view(state.fixture, cx.is_reduced_motion());
     let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
     let shadow_ref = (!preferences.matte()).then_some(&state.shadow_offset);
-    let narrow = cx
-        .layout_size("page-content")
-        .is_some_and(|size| size[0] < 720.0);
-    if narrow && state.brain.showing_detail {
-        return rune::col()
-            .w_full()
-            .grow(1.0)
-            .min_h(0.0)
-            .child(
-                ActionButton::new("Back to results")
-                    .key("brain-back")
-                    .finish(MetalFinish::Gunmetal)
-                    .on_press(|state: &mut State| state.brain.showing_detail = false)
-                    .build(kit, preferences, pointer_ref),
-            )
-            .child(dossier(state, preferences, kit));
-    }
     let search = TextInput::new(&state.brain.query)
         .label("Search actors")
         .placeholder("Search actors")
         .width(None)
         .on_edit(|state: &mut State| &mut state.brain.query)
         .on_change(|state: &mut State, tx| state.query_edited(tx))
-        .on_key(|state: &mut State, event, _| state.search_key(event))
+        .on_key(|state: &mut State, event, tx| state.search_key(event, tx.key_repeat()))
         .on_submit(|state: &mut State, _| state.search_now())
         .build(kit)
         .key("actor-search");
@@ -1745,34 +1809,38 @@ fn brain(state: &State, cx: &mut Cx<State>, kit: &Kit) -> El {
                 .key("search-prompt"),
             );
         }
-        Load::Pending => {
-            list = list.child(ui_components::async_status_strip(
-                "search-pending",
-                "Preparing query",
-                "Debouncing catalog lookup…",
-                true,
-                StatusTone::Neutral,
-                preferences,
-                kit,
-            ));
-        }
-        Load::Loading => {
+        Load::Pending | Load::Loading => {
+            // Debounce and the first fetch share one results-shaped skeleton: no narration, no
+            // layout change when the request starts.
             list = list.child(ui_components::skeleton_actor_results(preferences, kit));
         }
         Load::Failed(error) => {
-            list = list.child(line(error.clone(), kit).key("search-error").role("alert"));
+            list = list.child(
+                rune::col()
+                    .gap(8.0)
+                    .child(line(error.clone(), kit).key("search-error").role("alert"))
+                    .child(
+                        ActionButton::new("Retry search")
+                            .key("search-retry")
+                            .icon(&icons::REFRESH)
+                            .finish(MetalFinish::Gunmetal)
+                            .disabled(
+                                !state.search_available()
+                                    || state.brain.query.text.trim().is_empty(),
+                            )
+                            .on_press(|state: &mut State| state.search_now())
+                            .build(kit, preferences, pointer_ref),
+                    ),
+            );
         }
         Load::Ready(response) => {
             let current = response.index.state == IndexState::Ready;
             if !current {
+                let (index_label, index_tone) = index_state_label(response.index.state);
                 list = list.child(
-                    ui_components::status_pill(
-                        format!("Index: {:?}", response.index.state),
-                        Some(&icons::ALERT),
-                        StatusTone::Warn,
-                        kit,
-                    )
-                    .key("index-status"),
+                    ui_components::status_pill(index_label, Some(&icons::ALERT), index_tone, kit)
+                        .label(format!("{index_label} ({})", response.index.state))
+                        .key("index-status"),
                 );
             }
             if response.rows.is_empty() && current {
@@ -1780,6 +1848,8 @@ fn brain(state: &State, cx: &mut Cx<State>, kit: &Kit) -> El {
             }
             for (index, hit) in response.rows.iter().enumerate() {
                 let selected = state.brain.highlighted == Some(index);
+                let expanded = state.brain.showing_detail
+                    && state.brain.selected_actor.as_deref() == Some(hit.actor_id.as_str());
                 let tile = material::interactive_tile(
                     rune::row()
                         .w_full()
@@ -1809,9 +1879,16 @@ fn brain(state: &State, cx: &mut Cx<State>, kit: &Kit) -> El {
                                 )),
                         )
                         .child(
-                            rune::icon(&icons::CHEVRON_RIGHT, 14.0)
-                                .color(kit.c.icon_muted)
-                                .a11y_hidden(),
+                            rune::icon(
+                                if expanded {
+                                    &icons::CHEVRON_DOWN
+                                } else {
+                                    &icons::CHEVRON_RIGHT
+                                },
+                                14.0,
+                            )
+                            .color(kit.c.icon_muted)
+                            .a11y_hidden(),
                         ),
                     selected,
                     if selected {
@@ -1826,9 +1903,30 @@ fn brain(state: &State, cx: &mut Cx<State>, kit: &Kit) -> El {
                 .key(format!("actor-hit-{}", hit.actor_id))
                 .role("button")
                 .label(hit.label.clone())
+                .expanded(expanded)
                 .focusable(true)
-                .on_press(move |state: &mut State| state.select_actor(index));
-                list = list.child(tile);
+                .focus_ring(2.0, 2.0, theme::hex(theme::ACCENT_HIGHLIGHT))
+                .press(theme::hex(theme::SELECTION_SURFACE))
+                .on_press(move |state: &mut State| state.toggle_actor(index))
+                .on_key(move |state: &mut State, event, tx| {
+                    if event.key == rune::Key::Enter && event.mods == rune::Mods::default() {
+                        if !tx.key_repeat() {
+                            state.toggle_actor(index);
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                });
+                let mut record = rune::col()
+                    .key(format!("actor-record-{}", hit.actor_id))
+                    .w_full()
+                    .gap(8.0)
+                    .child(tile);
+                if expanded {
+                    record = record.child(dossier(state, preferences, kit));
+                }
+                list = list.child(record);
             }
             if response.truncated {
                 list = list.child(quiet(
@@ -1838,31 +1936,7 @@ fn brain(state: &State, cx: &mut Cx<State>, kit: &Kit) -> El {
             }
         }
     }
-    let results = scroll(list, "actor-results");
-    if narrow {
-        results
-    } else {
-        let detail_panel = if preferences.reduced_motion {
-            dossier(state, preferences, kit).grow(1.0).min_w(0.0)
-        } else {
-            rune::col()
-                .key(format!(
-                    "dossier-pane-{}",
-                    state.brain.highlighted.unwrap_or(9999)
-                ))
-                .grow(1.0)
-                .min_w(0.0)
-                .transition(Transition::offset(8.0, 0.0).combined(Transition::opacity()))
-                .child(dossier(state, preferences, kit))
-        };
-        rune::row()
-            .w_full()
-            .grow(1.0)
-            .min_h(0.0)
-            .gap(16.0)
-            .child(results.w(340.0).min_w(300.0).grow(0.0))
-            .child(detail_panel)
-    }
+    scroll(list, "actor-results")
 }
 
 fn dossier(state: &State, preferences: crate::accessibility::ViewPreferences, kit: &Kit) -> El {
@@ -1888,9 +1962,18 @@ fn dossier(state: &State, preferences: crate::accessibility::ViewPreferences, ki
             shadow_ref,
         ),
         Load::Pending | Load::Loading => ui_components::skeleton_dossier(preferences, kit),
-        Load::Failed(error) => {
-            rune::col().child(line(error.clone(), kit).key("dossier-error").role("alert"))
-        }
+        Load::Failed(error) => rune::col()
+            .gap(8.0)
+            .child(line(error.clone(), kit).key("dossier-error").role("alert"))
+            .child(
+                ActionButton::new("Retry dossier")
+                    .key("dossier-retry")
+                    .finish(MetalFinish::Gunmetal)
+                    .on_press(|state: &mut State| {
+                        state.retry_dossier();
+                    })
+                    .build(kit, preferences, pointer_ref),
+            ),
         Load::Ready(actor) => {
             let facet_idx = match state.brain_facet {
                 DossierFacet::Overview => 0,
@@ -1913,9 +1996,8 @@ fn dossier(state: &State, preferences: crate::accessibility::ViewPreferences, ki
                 .padding(16.0)
                 .gap(12.0)
                 .child(
-                    rune::row()
+                    rune::col()
                         .w_full()
-                        .center_y()
                         .gap(10.0)
                         .child(
                             rune::col()
@@ -2016,7 +2098,16 @@ fn dossier(state: &State, preferences: crate::accessibility::ViewPreferences, ki
             )
         }
     };
-    scroll(body, "actor-dossier")
+    rune::col()
+        .key("actor-dossier")
+        .w_full()
+        .transition(crate::app::surface_transition(
+            preferences.reduced_motion,
+            Transition::offset(0.0, -4.0),
+        ))
+        // The disclosure owns the entrance. Loading and resolved content share its position.
+        .instant_changes()
+        .child(body.w_full())
 }
 
 fn associations(label: &str, rows: &[Association], kit: &Kit) -> El {
@@ -2819,8 +2910,19 @@ mod tests {
             let mut clock = 0.0;
             rt.frame(clock);
             assert!(rt.find("backend-mode").is_some());
-            assert!(rt.find("backend-mode-remote").is_some());
-            assert!(rt.find("backend-mode-local").is_some());
+            let elements = rt.elements();
+            for (key, label) in [
+                ("backend-mode-local", "Embedded"),
+                ("backend-mode-remote", "Distributed"),
+            ] {
+                assert!(
+                    elements.iter().any(|element| {
+                        element.key.as_deref() == Some(key)
+                            && element.label.as_deref() == Some(label)
+                    }),
+                    "missing {label} backend option at {size:?}"
+                );
+            }
             assert!(rt.find("gateway-origin").is_some());
             assert!(rt.find("connect").is_some());
             assert!(rt.find("local-backend-card").is_none());
@@ -2867,7 +2969,7 @@ mod tests {
         caps.features = vec![CONNECT_REGISTRY_FEATURE.into()];
         base.connection.capabilities = Some(caps);
 
-        // Setup Gateway view in connected Local Embedded mode.
+        // Setup Gateway view with the embedded backend connected.
         base.setup_gateway = true;
         let mut setup_rt = Runtime::new(
             base,
@@ -2888,7 +2990,7 @@ mod tests {
         assert!(setup_tree.contains("Optional capabilities unavailable"));
         assert!(setup_tree.contains("memory_pressure"));
 
-        // Workstation Status view in connected Local Embedded mode.
+        // Workstation Status view with the embedded backend connected.
         setup_rt.update(|state, _| state.setup_gateway = false);
         setup_rt.frame(1.0 / 60.0);
         assert!(setup_rt.find("gateway-backend-card").is_some());

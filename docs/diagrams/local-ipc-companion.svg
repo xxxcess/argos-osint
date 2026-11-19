@@ -37,8 +37,8 @@
 <text x="904" y="426" class="note">Jobs SQLite + RocksDB queue</text>
 <text x="904" y="454" class="note">Tantivy search service, in-process</text>
 <rect x="468" y="336" width="360" height="136" rx="6" class="node"/>
-<text x="484" y="368" class="label">Same contracts as HTTP</text>
-<text x="484" y="398" class="note">HTTP and IPC parity test covers both</text>
+<text x="484" y="368" class="label">Shared native contracts</text>
+<text x="484" y="398" class="note">Distributed HTTP / Embedded IPC parity</text>
 <text x="484" y="426" class="note">Seed → reindex → reader-visible search</text>
 <text x="484" y="454" class="note">Same job ID after shutdown and restart</text>
 <rect x="48" y="336" width="360" height="136" rx="6" class="node"/>

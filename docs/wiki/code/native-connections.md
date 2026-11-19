@@ -4,15 +4,48 @@
 
 [![Native pairing and authenticated reconnect](../../diagrams/native-connections.svg)](../../diagrams/native-connections.html)
 
+## Cold-launch startup
+
+A cold launch opens **Choose a backend** with **Embedded** and **Distributed** available from the first frame. [Quiet Orbit](../../design/matte-canvas/motion.md) plays at its reference pace above the tiles and settles into a still. Reduced Motion uses the still immediately. The orbit scales as one unit on the same `#060709` canvas as setup and the services.
+
+Choosing a tile opens **Setup Gateway** with that backend selected. Use **Start Embedded Backend** or **Connect** to proceed. **Back** returns to the chooser without replaying the launch animation.
+
+A launch with `--api-origin` or `--api-token-file` skips the chooser. The `backend-choice` fixture exercises the production chooser with synthetic effects. The startup controls are in `apps/fleetworks-desktop/src/startup.rs` and the scene is in `apps/fleetworks-desktop/src/orbit.rs`.
+
+On **Start Embedded Backend**, the embedded companion warms its bundled Compromise NLP engine when built with NLP support. That check measures the bundled engine. Atlas and Focus Brief depend on their own advertised services. The bundled Natural classifier supports explicitly confirmed, candidate-only training through **DB Seed & Train**. Starting the backend never trains or activates a model. Natural training availability does not establish readiness for Atlas's separate Rust-BERT classifier. The base Embedded connection remains available when an optional engine is unavailable.
+
+If readiness expires while you review a validated CSV in **DB Seed & Train**, the app keeps the dataset and review visible. Use **Refresh checks** in the review and confirm explicitly once the operation is available for the same registration and configuration revision. Changes to the backend context or configuration require a new review.
+
+## Backend types and parity
+
+| Backend type | Setup and ownership |
+| --- | --- |
+| **Embedded** | **Start Embedded Backend** starts the bundled companion with a private state directory. The app uses framed stdio IPC. **Stop Embedded Backend** stops the companion after its shutdown handoff. |
+| **Distributed** | **Connect** authenticates to the selected operator-managed gateway over HTTP(S). This type also covers a Compose gateway on the same machine. The operator owns the service lifecycle, deployment credentials and persistent stores. |
+
+Both types use the shared native contract for registered identity, readiness, actor CSV seeding and search, Natural training where offered, and scoped jobs and logs. Equivalent operations use the same permission, revision, acceptance and recovery rules. Availability comes from the selected backend's capabilities and readiness. Embedded startup readiness reflects its bundled engine probes. Distributed readiness reflects its configured service probes and worker owners. Atlas collection uses the Distributed Atlas overlay’s worker, private NLP and Rust-BERT runtime. Intel Web uses a Distributed relay credential and its own session boundary. The app fences requests and clears state when the backend context changes. Existing saved profiles keep the `local` and `remote` transport identifiers. Embedded uses the `local://` profile origin and the `local-ipc` companion role. Distributed uses the saved HTTP(S) origin.
+
+The [HTTP/IPC parity test](../../../services/api-host/tests/http_ipc_parity.rs) uses a real HTTP gateway and the Embedded companion with disposable storage. It verifies common behavior, including availability and validation for configured Natural maintenance, and records transport-specific authority and shutdown behavior. Distributed Compose and installed GUI evidence are tracked as separate journeys. The [Linux CI guide](ci.md#nightly-gsd-order) describes how parity and visual evidence fit into the first pass.
+
+## Inbox and Assistant dock
+
+The toolbar **Inbox** bell opens a popover with **All** and **Unread**, a list, and expandable detail. It lists only changes this app already observed: a visible job that stops being active, a readiness check that enters or leaves ready, not ready, degraded or unavailable, and the connection becoming ready or failing. Item text is fixed wording plus a job title or check name, never error text, URLs or credentials. It keeps at most 50 items, records one transition per job once, and clears when the connection authority changes. It sends nothing and makes no claim about device-wide alerts.
+
+The contextual **Assistant** dock is built and tested but **disabled** (`Assistant::enabled` is false). It needs the typed chat capability, which the backend does not advertise yet, so sending would stay gated even if shown. While it is disabled the original context rail stays in place. When enabled it docks at 380 pt if the center view keeps at least 640 pt, stays hidden otherwise, and floats over the right edge only when the operator asks. Enter sends, Shift+Enter adds a line, and an input method that is composing keeps Enter. The draft stays with its pinned context, and a new connection authority clears both.
+
+## Command panel
+
+Cmd/Ctrl+K or the toolbar magnifier opens a grouped list of known actions: go to a page, Setup Gateway, Settings, Open Inbox, and Show or hide Assistant when it is enabled. Typing only filters that fixed list, and there is no arbitrary command runner. Arrow keys move, Enter runs, and Escape closes and returns focus to the toolbar button. Actions that could accept work, such as seed or index, only open their page, where the existing review step still applies. While the panel is open it is the only overlay.
+
 <a id="pairing-and-keychain-agreed-target"></a>
 
 ## Pairing and Keychain
 
-**Implemented flow:** Gateway URL → operator approval once → macOS Keychain or Linux D-Bus Secret Service (or explicit Linux session-only mode) → authenticated reconnect. [Verification status](../../../.planning/2026-11-12-native-pairing-implementation/acceptance.md) records actual checks; injected secret-store tests do not establish live Keychain/Secret Service or installed-app passes.
+**Distributed flow:** Gateway URL → operator approval once → macOS Keychain or Linux D-Bus Secret Service (or explicit Linux session-only mode) → authenticated reconnect. [Verification status](../../../.planning/2026-11-12-native-pairing-implementation/acceptance.md) records actual checks; injected secret-store tests do not establish live Keychain/Secret Service or installed-app passes.
 
 | Step | Behavior |
 | --- | --- |
-| Enter URL | Pin one validated origin: remote HTTPS or loopback HTTP. A new installation waits for Connect. A known selected pairing/access reference may reconnect on startup; an explicit URL restores only its own known reference. |
+| Enter URL | Pin one validated origin: remote HTTPS or loopback HTTP. A new installation waits for Connect. Explicit connection may reuse a known pairing/access reference for the selected origin. An explicit URL restores only its own known reference. |
 | Start / approve | Persist the exact request ID and pairing polling secret before HTTP (written to macOS Keychain, Linux Secret Service, or held in process memory when Linux session-only mode is active). The app displays request ID/code; an independently authenticated Operator approves it within the ten-minute challenge window. IDs/codes/installation markers alone grant no API access. |
 | Save / connect | Authenticate the issued scoped Native credential, check compatibility, then save its secret in Keychain/Secret Service (or memory in Linux session-only mode) before reporting connected. Register/reuse the protected installation. Settings retain only origin/deployment/credential references (`system_keyring` or `session_only` storage mode) and recovery state. |
 | Reconnect | Read the exact installation/origin keyring item (`system_keyring`) or live session memory, authenticate and verify the saved deployment. Never scan other items or fall back silently to files or unauthenticated access. Missing/locked Linux Secret Service requires either unlocking it and retrying or explicitly choosing session-only mode. |
@@ -21,7 +54,7 @@
 
 ### Pairing API
 
-All routes are POST. `PairingClient` exposes only start/poll; protected APIs retain authenticated `Client` behavior. Both transports disable redirects/proxies and bound bodies/timeouts. Polling/access secrets never enter URLs, UI state, Debug or diagnostics.
+All routes are POST. `PairingClient` exposes only start/poll; protected APIs retain authenticated `Client` behavior. The pairing and authenticated HTTP clients disable redirects and environment proxies and bound bodies and timeouts. Polling/access secrets never enter URLs, UI state, Debug or diagnostics.
 
 | Route | Authority / result |
 | --- | --- |
@@ -60,9 +93,9 @@ Normal GUI setup needs no token file. Explicit `--api-origin <origin> --api-toke
 | Boundary | Contract |
 | --- | --- |
 | Credentials | Native, WebRelay, InternalService and Operator purposes have explicit permissions. Connect IDs and caller-supplied headers grant no authority. |
-| Local access | Operator-approved origin-bound Keychain access for normal GUI; explicit file-based launch mode remains separate. Neither forwards another origin’s credential. |
+| Distributed credentials | Operator-approved, origin-bound credentials use the operating system keyring or explicit Linux session-only mode. Explicit file-based launch keeps its own exact-origin binding. |
 | Identity | Connect/activity contract 2: opaque workstation ID = Connect ID; authenticated scope + protected installation marker determine identity. Optional IP never merges installations. New requests contain no workspace fields. |
-| Transport | Pin origin; disable environment proxy/redirect forwarding; bound responses. Gateway admission/read boundaries revalidate current proof, permissions and revisions. |
+| Transport | Distributed pins the HTTP origin and disables environment proxy/redirect forwarding. Embedded negotiates a bounded IPC session with its companion. Both revalidate current proof, permissions and revisions at admission and reads. |
 | Invalidation | Gateway/access changes fence old clients, reads, caches and confirmations. Missing registration or optional services disables only dependent actions; permitted shared reads remain usable. |
 | Retirement | Fence admission and sessions; drain associated jobs and uncertain effects, then retire the workstation. Retained v1 folders keep their protection; accepted causal work may finish while retiring. |
 
@@ -96,9 +129,11 @@ Jobs SQLite owns safe summaries, not provider stdout/payloads. Membership/privat
 
 Richer backend APIs retain independent permissions. Opaque cursors bind proof/scope/snapshot, expire and require restart after invalidation. Follow/export stay bounded; partial exports and unavailable counts remain explicit.
 
+**Layout.** When the Jobs page is at least 940 pt wide, the paged list is a 300 pt column beside the selected job's detail. Below that the two stack, and below 660 pt the list and detail alternate with **Back to jobs**. Refreshes keep the selected job and page.
+
 ## Readiness and maintenance
 
-CSV picker → local column check → authenticated gateway upload URL → streamed bytes → backend-validated dataset → confirmed actor/Natural job. No Mac path or local download server enters the handoff. Index build requires completed seeding with actors present; training creates a candidate without activation. Readiness and optional host metrics keep missing/stale observations distinct from success. [Maintenance figure](../../diagrams/workstation-readiness.html) · [Dataset workflow](../../../deploy/README.md#configured-native-maintenance-inputs)
+A picked or typed CSV gets a column check on the workstation, then transfers bounded bytes through an authenticated Distributed upload or framed Embedded IPC. Both stage a validated dataset before explicit actor seeding or Natural training confirmation. The source path stays on the workstation. Index build requires completed seeding with actors present; training creates a candidate without activation. Readiness and optional host metrics keep missing/stale observations distinct from success. [Maintenance figure](../../diagrams/workstation-readiness.html) · [Dataset workflow](../../../deploy/README.md#configured-native-maintenance-inputs)
 
 Cycles use bounded workstation summaries and revision/idempotency-bound association tombstones. Delete preserves shared evidence/audit and does not cancel a cycle. Accepted receipts mean queued, not completed.
 

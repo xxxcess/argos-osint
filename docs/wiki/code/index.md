@@ -6,7 +6,7 @@ Start with the [workspace manifest](../../../Cargo.toml). The native macOS app c
 
 | Branch | What to inspect | Next page |
 | --- | --- | --- |
-| [Native app](../../../apps/fleetworks-desktop) · [Client contracts](../../../crates/fleetworks-contracts) | Six sidebar destinations plus Status/setup, origin-pinned SDK and protected workstation identity | [Connections](native-connections.md) · [Identity](native-workspaces.md) · [Design system](native-design-system.md) |
+| [Native app](../../../apps/fleetworks-desktop) · [Client contracts](../../../crates/fleetworks-contracts) | Six sidebar destinations plus Status/setup, origin-pinned SDK and protected workstation identity | [Connections](native-connections.md) · [Identity](native-workspaces.md) · [Design system](native-design-system.md) · [Assistant chat contract](assistant-chat-contract.md) |
 | [Core](../../../crates/argos-osint-core/src) | Atlas, Intel, Brain, providers and NLP | [Core map](core.md) |
 | [HTTP adapter](../../../crates/argos-osint-api) · [Service host](../../../services/api-host) | Versioned API, authenticated gateway, private Brain, readiness and worker roles | [Intel web](intel-web.md) |
 | [Compose](../../../deploy) · [Jobs stores](../../../crates/fleetworks-jobs) | Local service graph and embedded durable delivery | [Deployment](../../../deploy/README.md) |
@@ -30,6 +30,7 @@ Start with the [workspace manifest](../../../Cargo.toml). The native macOS app c
 | Six-domain classifier | [Classifier](classifier.md) |
 | Model and provider scheduling | [Providers](../concepts/providers.md) |
 | Rust style | [Repository Rust style](../../../.opencode/skills/argos-rust-style/SKILL.md) · [Conventions](conventions.md#rust-style) |
+| Approved theme and live-state target | [Matte canvas reproduction](../../design/matte-canvas/README.md) · [Implementation handoff](../../../.planning/2026-11-16-matte-canvas/handoff.md) |
 | React UI and fixture review | [Design rules](react-ui.md) · [Browser checks](react-ui-testing.md) |
 | Build tools, outputs and cache paths | [Visual artifact map](build-artifacts.md) |
 | Native Runtime captures and inspection | [Selected native UI verification](native-verification.md) |

@@ -47,6 +47,10 @@ pub struct Capabilities {
     pub configuration_epoch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build: Option<BuildIdentity>,
+    /// Chat availability, advertised apart from permissions and configuration. Absent means the
+    /// backend does not implement chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat: Option<crate::chat::ChatCapabilities>,
     #[serde(default)]
     pub links: CapabilityLinks,
     /// Effective server grants for presentation; the server rechecks operations.
@@ -70,6 +74,7 @@ impl Default for Capabilities {
             search: None,
             configuration_epoch: None,
             build: None,
+            chat: None,
             links: CapabilityLinks::default(),
             permissions: Vec::new(),
         }
@@ -412,6 +417,20 @@ mod tests {
             Err(CapabilityError::MissingDeploymentIdentity)
         );
         assert!(current().require_native_contract().is_ok());
+    }
+
+    #[test]
+    fn chat_is_absent_until_advertised_and_decodes_without_other_changes() {
+        assert!(current().chat.is_none());
+        let mut advertised = current();
+        advertised.chat = Some(crate::chat::ChatCapabilities::new(
+            crate::chat::ChatAvailability::Unavailable,
+        ));
+        let wire = serde_json::to_value(&advertised).expect("encodes");
+        assert_eq!(wire["chat"]["availability"], "unavailable");
+        let back: Capabilities = serde_json::from_value(wire).expect("decodes");
+        assert!(!back.chat.expect("chat").can_send());
+        assert!(advertised.require_native_contract().is_ok());
     }
 
     #[test]

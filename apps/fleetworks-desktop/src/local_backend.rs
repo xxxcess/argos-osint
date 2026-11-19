@@ -79,18 +79,17 @@ pub fn assess_local_capabilities(capabilities: &Capabilities) -> LocalCapability
 
     let mut warnings = Vec::new();
     if !nlp_available {
-        warnings.push(
-            "Optional `nlp` capability is absent in this local companion binary; language-processing features are disabled.".into(),
-        );
+        warnings.push("The embedded backend is not advertising NLP support.".into());
     }
     if !classifier_available {
         warnings.push(
-            "Optional `classifier` capability is absent in this local companion binary; classifier training and activation are disabled.".into(),
+            "The embedded backend is not advertising Natural classifier support. Training and activation are unavailable.".into(),
         );
     }
     if !actor_search_available {
         warnings.push(
-            "Actor search capability (`tantivy`) is absent in this local companion binary.".into(),
+            "Actor search capability (`tantivy`) is absent in this embedded companion binary."
+                .into(),
         );
     }
     LocalCapabilityAssessment {
@@ -173,16 +172,15 @@ impl LocalBackendProcess {
         let validated_dir = validate_private_state_dir(state_dir)?;
         let mut command = build_companion_command(&validated_bin, &validated_dir)?;
         let ipc = Arc::new(
-            LocalIpcClient::spawn_command(
+            LocalIpcClient::spawn_command_with_diagnostics(
                 &mut command,
                 "fleetworks-desktop",
                 env!("CARGO_PKG_VERSION"),
             )
             .await
             .map_err(|error| {
-                LocalBackendError::Transport(format!(
-                    "failed to start local companion backend over stdio IPC: {error}"
-                ))
+                let message = format!("Embedded backend Hello/HelloAck handshake failed: {error}");
+                backend_transport_error(message, error.captured_stderr())
             })?,
         );
         Self::finish_attach(Some(validated_bin), validated_dir, ipc).await
@@ -206,8 +204,7 @@ impl LocalBackendProcess {
             None => {
                 let _ = ipc.shutdown("missing_capabilities").await;
                 return Err(LocalBackendError::IncompatibleCapabilities(
-                    "local companion backend did not advertise capabilities during IPC handshake"
-                        .into(),
+                    "embedded backend did not advertise capabilities during IPC handshake".into(),
                 ));
             }
         };
@@ -223,23 +220,17 @@ impl LocalBackendProcess {
                 if ready.api_version != fleetworks_contracts::API_VERSION {
                     let _ = ipc.shutdown("unsupported_api_version").await;
                     return Err(LocalBackendError::IncompatibleCapabilities(format!(
-                        "unsupported local backend API version {}",
+                        "unsupported embedded backend API version {}",
                         ready.api_version
                     )));
                 }
                 ready.clone()
             }
             None => client.ready().await.map_err(|error| {
-                let stderr = sanitize_stderr_excerpt(&ipc.captured_stderr());
-                if stderr.is_empty() {
-                    LocalBackendError::Transport(format!(
-                        "local backend readiness handshake failed: {error}"
-                    ))
-                } else {
-                    LocalBackendError::Transport(format!(
-                        "local backend readiness handshake failed: {error} ({stderr})"
-                    ))
-                }
+                backend_transport_error(
+                    format!("Embedded backend Ready RPC failed: {error}"),
+                    &ipc.captured_stderr(),
+                )
             })?,
         };
         Ok(Self {
@@ -483,37 +474,37 @@ fn verify_executable_metadata(
 pub fn validate_private_state_dir(path: &Path) -> Result<PathBuf, LocalBackendError> {
     let text = path.to_str().ok_or_else(|| {
         LocalBackendError::InvalidStateDir(
-            "local backend state directory must be valid UTF-8".into(),
+            "embedded backend state directory must be valid UTF-8".into(),
         )
     })?;
     if !path.is_absolute() || text.chars().any(char::is_control) {
         return Err(LocalBackendError::InvalidStateDir(
-            "local backend state directory must be an absolute path".into(),
+            "embedded backend state directory must be an absolute path".into(),
         ));
     }
     let meta = std::fs::symlink_metadata(path).map_err(|error| {
         LocalBackendError::InvalidStateDir(format!(
-            "local backend state directory `{}` is missing or inaccessible: {error}",
+            "embedded backend state directory `{}` is missing or inaccessible: {error}",
             path.display()
         ))
     })?;
     if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
         return Err(LocalBackendError::InvalidStateDir(format!(
-            "local backend state directory `{}` must be a real directory without symlinks",
+            "embedded backend state directory `{}` must be a real directory without symlinks",
             path.display()
         )));
     }
     let mode = meta.permissions().mode();
     if mode & 0o077 != 0 {
         return Err(LocalBackendError::InvalidStateDir(format!(
-            "local backend state directory `{}` must use private 0700 permissions",
+            "embedded backend state directory `{}` must use private 0700 permissions",
             path.display()
         )));
     }
     let current_euid = unsafe { libc::geteuid() };
     if meta.uid() != current_euid {
         return Err(LocalBackendError::InvalidStateDir(format!(
-            "local backend state directory `{}` owner does not match the current user",
+            "embedded backend state directory `{}` owner does not match the current user",
             path.display()
         )));
     }
@@ -553,15 +544,96 @@ pub fn build_companion_command(
     Ok(command)
 }
 
-/// Bounded lossy stderr sanitization for diagnostics display without control codes.
+/// Removes terminal escape sequences so only readable text is left: CSI (`ESC [ ... final`, the
+/// colors and cursor moves a logger writes), OSC and the other string sequences (`ESC ] ...` up
+/// to BEL or `ESC \`), two-byte and intermediate escapes, and a stray `ESC`. An unterminated
+/// string sequence ends at the next newline, so one bad line never hides the diagnostics after it.
+#[must_use]
+pub fn strip_terminal_escapes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\u{1b}' {
+            out.push(ch);
+            continue;
+        }
+        match chars.peek().copied() {
+            Some('[') => {
+                chars.next();
+                // Parameters and intermediates, then one final byte.
+                while let Some(&c) = chars.peek() {
+                    if ('\u{20}'..='\u{3f}').contains(&c) {
+                        chars.next();
+                    } else {
+                        if ('\u{40}'..='\u{7e}').contains(&c) {
+                            chars.next();
+                        }
+                        break;
+                    }
+                }
+            }
+            Some(']' | 'P' | 'X' | '^' | '_') => {
+                chars.next();
+                while let Some(c) = chars.next() {
+                    if c == '\u{7}' {
+                        break;
+                    }
+                    if c == '\u{1b}' {
+                        if chars.peek() == Some(&'\\') {
+                            chars.next();
+                        }
+                        break;
+                    }
+                    if c == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            Some(c) if ('\u{20}'..='\u{2f}').contains(&c) => {
+                // Intermediates (such as the charset selector `ESC ( B`), then a final byte.
+                while chars
+                    .peek()
+                    .is_some_and(|c| ('\u{20}'..='\u{2f}').contains(c))
+                {
+                    chars.next();
+                }
+                if chars
+                    .peek()
+                    .is_some_and(|c| ('\u{30}'..='\u{7e}').contains(c))
+                {
+                    chars.next();
+                }
+            }
+            Some(c) if ('\u{30}'..='\u{7e}').contains(&c) => {
+                chars.next();
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn backend_transport_error(message: String, stderr: &[u8]) -> LocalBackendError {
+    let stderr = sanitize_stderr_excerpt(stderr);
+    if stderr.is_empty() {
+        LocalBackendError::Transport(message)
+    } else {
+        LocalBackendError::Transport(format!("{message} ({stderr})"))
+    }
+}
+
+/// Bounded lossy stderr sanitization for diagnostics display without control codes. Terminal
+/// escape sequences are removed whole before the tail is taken, so a cut never leaves a
+/// fragment such as `[0m`.
 #[must_use]
 pub fn sanitize_stderr_excerpt(bytes: &[u8]) -> String {
-    let tail = if bytes.len() > MAX_STDERR_EXCERPT_BYTES {
-        &bytes[bytes.len() - MAX_STDERR_EXCERPT_BYTES..]
-    } else {
-        bytes
-    };
-    String::from_utf8_lossy(tail)
+    let text = strip_terminal_escapes(&String::from_utf8_lossy(bytes));
+    let mut start = text.len().saturating_sub(MAX_STDERR_EXCERPT_BYTES);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    text[start..]
         .chars()
         .filter(|ch| *ch == '\n' || !ch.is_control())
         .collect::<String>()

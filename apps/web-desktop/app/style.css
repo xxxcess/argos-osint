@@ -3,8 +3,14 @@
 nextjs-portal {
   display: none !important;
 }
+/* One density for the whole browser UI. The layout sets the same value inline from
+   WEB_UI_SCALE; this default only covers pages rendered outside that layout, and a test
+   keeps the two equal. Everything below derives from the variable. */
+:root {
+  --intel-ui-scale: 0.75;
+}
 html {
-  zoom: var(--intel-ui-scale, 0.75);
+  zoom: var(--intel-ui-scale);
 }
 #intel-web-workspace {
   position: fixed;
@@ -12,18 +18,18 @@ html {
   overflow: hidden;
 }
 #intel-content-frame {
-  max-width: calc(1440px / var(--intel-ui-scale, 0.75));
+  max-width: calc(1440px / var(--intel-ui-scale));
 }
 /* Topology uses full-size type, controls and graph tiles inside the compact shell. */
 #intel-topology-workspace {
-  zoom: calc(1 / var(--intel-ui-scale, 0.75));
+  zoom: calc(1 / var(--intel-ui-scale));
   overflow: hidden;
 }
 /* Matte Fleetworks paint; existing geometry and semantic colors are separate. */
 * {
   box-sizing: border-box;
   scrollbar-width: thin;
-  scrollbar-color: #898274 transparent;
+  scrollbar-color: #647587 transparent;
 }
 html,
 body {
@@ -31,7 +37,7 @@ body {
   height: 100%;
   min-height: 100%;
   background-color: #060709;
-  color: #f3eee4;
+  color: #d5dce5;
   font-family:
     var(--intel-body, Inter),
     system-ui,
@@ -62,7 +68,7 @@ body {
 #intel-topology-node-scroll,
 #intel-topology-connection-scroll {
   scrollbar-width: thin;
-  scrollbar-color: #898274 transparent;
+  scrollbar-color: #647587 transparent;
 }
 #intel-topology-node-scroll::-webkit-scrollbar,
 #intel-topology-connection-scroll::-webkit-scrollbar {
@@ -72,7 +78,7 @@ body {
 }
 #intel-topology-node-scroll::-webkit-scrollbar-thumb,
 #intel-topology-connection-scroll::-webkit-scrollbar-thumb {
-  background: #898274;
+  background: #647587;
 }
 /* Keep list wheel/trackpad scrolling inside its panel at either boundary. */
 #intel-topology-node-scroll,
@@ -153,26 +159,26 @@ select {
   font: inherit;
 }
 a {
-  color: #c6a56e;
+  color: #24dce3;
   text-decoration: underline;
 }
 input,
 select {
   background: #060709;
-  border: 1px solid #898274;
+  border: 1px solid #647587;
   border-radius: 8px;
-  color: #f3eee4;
+  color: #d5dce5;
   min-width: 0;
 }
 :focus-visible {
-  outline: 2px solid #d8bd8c;
+  outline: 2px solid #72e9ff;
   outline-offset: 2px;
   /* A dark gap keeps the focus ring distinct even on a gold primary body. */
   box-shadow: 0 0 0 2px #060709;
 }
 ::selection {
-  background: #322c22;
-  color: #f3eee4;
+  background: #10272d;
+  color: #d5dce5;
 }
 /* Existing view geometry stays fixed; surface finishes remain static. */
 #intel-home {
@@ -191,16 +197,16 @@ select {
 #intel-home-launcher:is(:hover, :focus-visible)
   [data-testid="intel-launcher-tile"] {
   box-shadow: none;
-  border-color: #c6a56e;
+  border-color: #24dce3;
 }
 [data-testid^="article-card-"] {
   transition: border-color 120ms;
 }
 #intel-bulletin input:focus-visible {
-  border-color: #d8bd8c;
+  border-color: #68e7eb;
 }
 [data-testid="bulletin-skeleton"] {
-  background-color: #111317;
+  background-color: #121820;
   background-image: none;
 }
 @media (prefers-reduced-motion: reduce) {
@@ -296,7 +302,7 @@ select {
 }
 
 [data-testid="skeleton-line"] {
-  background-color: #111317;
+  background-color: #27313b;
   background-image: none;
 }
 

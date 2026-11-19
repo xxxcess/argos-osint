@@ -34,6 +34,10 @@ for synthetic gateway credentials/cookies. Repository Playwright uses
 `ARGOS_WEB_TEST_DEV=1` isolation. Fixtures do not prove datastore persistence,
 Linux execution, public TLS/ingress or installed native behavior.
 
-The [shared matte design](../../docs/wiki/code/native-design-system.md) changes
-paint/logo within existing web layout and topology/list behavior.
+The [approved matte canvas design](../../docs/design/matte-canvas/README.md) changes
+paint/logo, shared loading treatment and continuous-list presentation within existing web routes, evidence layout and topology/list behavior. Smooth matte utility controls, cool text and symbol-only branding replace gold/ivory primary accents; the crescent texture is limited to submitting, confirming, creating and deleting actions. Runtime adoption is pending.
 [Verification status](../../.planning/2026-11-12-native-workstation-redesign/acceptance.md)
+
+## Footer and search
+
+The bottom bar names the **Home** control from the backend's display name (set with `argos-api-host --role bootstrap --platform-display-name`) and shows **Backend** when none is set. It never uses the host OS, chip, hostname or address. The CPU, memory, disk and network readings are labelled **Backend host**. The header search runs when Enter is pressed. It looks at article titles and descriptions through the indexed `articles/search` route and at actors through the `actors/search` discovery route (`mode=discovery`), in separate groups. The relay allows `articles/search`, `actors/search` and `workstation/readiness`, all read-only.

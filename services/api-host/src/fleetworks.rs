@@ -232,6 +232,7 @@ pub(crate) async fn workstation_services(
         Ok(services
             .with_workstation(
                 ReadinessOwners::new(deployment.deployment_id, probes)?
+                    .with_platform_display_name(deployment.platform_display_name)?
                     .with_configured_inputs_file(
                         env::var_os("FLEETWORKS_MAINTENANCE_INPUTS_FILE")
                             .as_deref()

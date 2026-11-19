@@ -52,6 +52,10 @@ struct Args {
     /// Optional canonical absolute path to a supervised classifier helper command.
     #[arg(long)]
     classifier_cmd: Option<std::path::PathBuf>,
+    /// Operator-chosen label for this backend, shown to operators. Bootstrap only. Leaving it out
+    /// keeps any stored label. Up to 64 printable characters; never derived from the host.
+    #[arg(long)]
+    platform_display_name: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -106,10 +110,19 @@ fn init_tracing() {
         .try_init();
 }
 
+fn ensure_platform_name_is_bootstrap_only(args: &Args) -> Result<()> {
+    ensure!(
+        args.platform_display_name.is_none() || args.role == Role::Bootstrap,
+        "--platform-display-name requires --role bootstrap"
+    );
+    Ok(())
+}
+
 fn main() -> Result<()> {
     init_tracing();
     let args = Args::parse();
     let runtime = tokio::runtime::Runtime::new()?;
+    ensure_platform_name_is_bootstrap_only(&args)?;
     if args.role == Role::LocalIpc {
         ensure!(
             args.file.is_none() && args.expected_sha256.is_none() && !args.activate,
@@ -140,6 +153,7 @@ async fn run_non_ipc(args: Args) -> Result<()> {
         state_dir,
         nlp_cmd,
         classifier_cmd,
+        platform_display_name,
     } = args;
     ensure!(
         state_dir.is_none() && nlp_cmd.is_none() && classifier_cmd.is_none(),
@@ -268,6 +282,11 @@ async fn run_non_ipc(args: Args) -> Result<()> {
             atlas_dispatch,
         )
         .await?;
+        if let Some(name) = &platform_display_name {
+            storage::connect_registry::set_platform_display_name(&repo, name)
+                .await
+                .map_err(|_| anyhow::anyhow!("invalid --platform-display-name"))?;
+        }
         fleetworks::export_deployment_identity(&repo).await?;
         tracing::info!(
             role = ?role,
@@ -696,5 +715,30 @@ mod tests {
             Some(std::path::PathBuf::from("/usr/local/bin/classifier-helper"))
         );
         assert!(Args::try_parse_from(["argos-api-host", "--role", "local-ipc"]).is_err());
+    }
+
+    #[test]
+    fn platform_display_name_is_accepted_only_for_bootstrap() {
+        let bootstrap = Args::try_parse_from([
+            "argos-api-host",
+            "--role",
+            "bootstrap",
+            "--platform-display-name",
+            "Studio rack",
+        ])
+        .expect("bootstrap CLI parses");
+        assert_eq!(
+            bootstrap.platform_display_name.as_deref(),
+            Some("Studio rack")
+        );
+        assert!(ensure_platform_name_is_bootstrap_only(&bootstrap).is_ok());
+        let combined =
+            Args::try_parse_from(["argos-api-host", "--platform-display-name", "Studio rack"])
+                .expect("flag parses before the role rule");
+        assert!(ensure_platform_name_is_bootstrap_only(&combined).is_err());
+        let absent =
+            Args::try_parse_from(["argos-api-host", "--role", "bootstrap"]).expect("parses");
+        assert!(absent.platform_display_name.is_none());
+        assert!(ensure_platform_name_is_bootstrap_only(&absent).is_ok());
     }
 }

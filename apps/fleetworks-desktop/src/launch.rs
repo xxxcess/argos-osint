@@ -160,6 +160,8 @@ pub fn run() -> anyhow::Result<()> {
         .build()?;
     let services = Arc::new(GatewayEffects::new(runtime.handle().clone()));
     let init_services = services.clone();
+    // A scripted launch with an explicit gateway skips the interactive splash and choice.
+    let interactive_startup = options.api_origin.is_none() && options.api_token_file.is_none();
     let app = App::new(app::spec())
         .init(move || {
             let mut state = State::with_services(init_services.clone());
@@ -172,8 +174,13 @@ pub fn run() -> anyhow::Result<()> {
             if let Some(path) = &options.api_token_file {
                 state.connection.token_file = TextEdit::new(path.to_string_lossy());
             }
+            if interactive_startup {
+                state.startup = crate::startup::Startup::cold_launch();
+            }
             state.local_backend.cli_binary_override = options.local_backend_bin.clone();
             state.local_backend.refresh_binary_status();
+            // Load local workstation metadata and preload any saved origin only;
+            // neither Embedded nor Distributed starts or connects until explicit user action.
             state.initialize_workspaces(options.workspace.clone());
             state
         })

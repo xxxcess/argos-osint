@@ -835,6 +835,42 @@ fn unavailable_logs_hide_empty_summary_and_render_worker_sync_status() {
 }
 
 #[test]
+fn brain_debounce_and_first_fetch_share_one_results_skeleton() {
+    let mut runtime = Runtime::new(
+        shell(),
+        crate::app::view,
+        (1180.0, 800.0),
+        Env {
+            system_dark: true,
+            scale: 1.0,
+        },
+    );
+    runtime.update(|state, _| {
+        state.navigate(crate::app::Page::Brain);
+        state.brain.results = Load::Pending;
+    });
+    runtime.frame(0.0);
+    assert!(
+        runtime.find("search-loading").is_some(),
+        "debounce shows the skeleton"
+    );
+    assert!(
+        runtime.find("search-pending").is_none(),
+        "no debounce narration strip"
+    );
+    let debounce_size = runtime.find("search-loading");
+
+    runtime.update(|state, _| state.brain.results = Load::Loading);
+    runtime.frame(1.0 / 60.0);
+    assert!(runtime.find("search-loading").is_some());
+    assert_eq!(
+        runtime.find("search-loading"),
+        debounce_size,
+        "the first fetch does not move or replace the skeleton"
+    );
+}
+
+#[test]
 fn loading_list_areas_render_shape_accurate_shimmering_skeletons_with_reduced_motion_fallback() {
     let mut state = shell();
     state.host_metrics = Load::Loading;
@@ -861,11 +897,17 @@ fn loading_list_areas_render_shape_accurate_shimmering_skeletons_with_reduced_mo
     runtime.update(|state, _| {
         state.navigate(crate::app::Page::Brain);
         state.brain.results = Load::Loading;
-        state.brain.showing_detail = true;
-        state.brain.dossier = Load::Loading;
     });
     runtime.frame(2.0 / 60.0);
     assert!(runtime.find("search-loading").is_some());
+    assert!(runtime.find("dossier-loading").is_none());
+
+    runtime.update(|state, _| {
+        state.brain.results = Load::Ready(crate::tests::brain_search_response_fixture());
+        state.toggle_actor(0);
+    });
+    runtime.frame(3.0 / 60.0);
+    assert!(runtime.find("actor-hit-first").is_some());
     assert!(runtime.find("dossier-loading").is_some());
 
     runtime.update(|state, _| {
@@ -876,7 +918,7 @@ fn loading_list_areas_render_shape_accurate_shimmering_skeletons_with_reduced_mo
             ..crate::accessibility::FixtureAccessibility::default()
         });
     });
-    runtime.frame(3.0 / 60.0);
+    runtime.frame(4.0 / 60.0);
     assert!(runtime.find("models-loading").is_some());
     assert!(
         runtime.find("skeleton-shimmer").is_none(),
@@ -1381,4 +1423,303 @@ async fn simulated_actor_reindex_post_reconcile_job_projection_and_readiness_tra
     assert!(requests[2].starts_with("GET "));
     assert!(requests[3].starts_with("GET "));
     assert!(requests[4].starts_with("GET "));
+}
+
+#[test]
+fn jobs_list_sits_beside_the_detail_only_when_the_page_is_wide_enough() {
+    for (width, side_by_side) in [(1700.0, true), (1100.0, false)] {
+        let mut state = shell();
+        state.fixture_effect = Some(fake_reply);
+        let mut runtime = Runtime::new(
+            state,
+            crate::app::view,
+            (width, 900.0),
+            Env {
+                system_dark: true,
+                scale: 1.0,
+            },
+        );
+        runtime.frame(0.0);
+        runtime.frame(1.0 / 60.0);
+        assert!(runtime.find("activity-job-fixture-job").is_some());
+        assert_eq!(runtime.find("jobs-workbench").is_some(), side_by_side);
+        if side_by_side {
+            let (list_x, _) = runtime.find("activity-job-fixture-job").expect("list row");
+            assert!(list_x < 700.0, "the list stays in the left column");
+        }
+    }
+}
+
+#[test]
+fn older_logs_load_by_themselves_only_while_nothing_pauses_them() {
+    let mut logs = ready();
+    assert!(logs.auto_load_older(), "a continuation and no message");
+    let ticket = logs.older().expect("older read");
+    assert!(
+        !logs.auto_load_older(),
+        "no second read while one is in flight"
+    );
+    assert!(logs.complete(
+        &ticket,
+        Ok(LogReply::Page(page(
+            1,
+            1,
+            10,
+            Some(cursor(3)),
+            Some(cursor(4))
+        )))
+    ));
+    assert!(logs.auto_load_older(), "the next page is eligible");
+    logs.message = Some("Operational log follow was interrupted.".into());
+    assert!(!logs.auto_load_older(), "a message keeps loading manual");
+    logs.message = None;
+    let last = logs.older().expect("last older read");
+    assert!(logs.complete(
+        &last,
+        Ok(LogReply::Page(page(2, 1, 10, None, Some(cursor(5)))))
+    ));
+    assert!(!logs.auto_load_older(), "no continuation, no auto-load");
+}
+
+#[test]
+fn only_a_fresh_read_is_unresolved_while_follow_and_older_keep_the_resolved_status() {
+    let mut logs = ready();
+    logs.set_following(true);
+    let follow = logs.follow().expect("follow read");
+    assert!(logs.busy());
+    assert_eq!(
+        logs.status,
+        LogStatus::Ready,
+        "a follow poll must not turn resolved rows or a resolved empty result back into loading"
+    );
+    logs.cancel_requests();
+    assert_eq!(logs.status, LogStatus::Ready);
+    assert!(!logs.complete(&follow, Ok(LogReply::Page(page(1, 0, 10, None, None)))));
+
+    let same_query = logs.refresh().expect("same-query refresh");
+    assert_eq!(
+        logs.status,
+        LogStatus::Ready,
+        "a same-query refresh preserves resolved rows without flashing back to loading"
+    );
+    assert!(logs.busy());
+    drop(same_query);
+
+    logs.draft.min_rank = Some(2);
+    let fresh = logs.refresh().expect("changed-query read");
+    assert_eq!(
+        logs.status,
+        LogStatus::Loading,
+        "a fresh query read is unresolved"
+    );
+    assert!(logs.busy());
+    drop(fresh);
+}
+
+fn follow_with(logs: &mut LogState, start: usize, length: usize, next: usize) {
+    logs.set_following(true);
+    let ticket = logs.follow().expect("follow read");
+    assert!(logs.complete(
+        &ticket,
+        Ok(LogReply::Page(page(
+            start,
+            length,
+            30,
+            Some(cursor(next)),
+            None
+        )))
+    ));
+}
+
+#[test]
+fn unread_counts_followed_rows_only_while_the_reader_is_away_from_the_newest() {
+    let mut logs = ready();
+    follow_with(&mut logs, 10, 2, 3);
+    assert_eq!(logs.unread(), 0, "at the newest rows nothing is unread");
+
+    assert!(logs.set_away(true), "scrolling away is a change");
+    assert!(!logs.set_away(true), "a repeated frame changes nothing");
+    follow_with(&mut logs, 20, 3, 4);
+    assert_eq!(logs.unread(), 3);
+    follow_with(&mut logs, 30, 1, 5);
+    assert_eq!(logs.unread(), 4, "arrivals accumulate");
+    assert_eq!(
+        logs.rows[0].id, "event-30",
+        "newest first; rows were prepended"
+    );
+}
+
+#[test]
+fn unread_clears_on_reaching_the_newest_rows_and_on_the_jump_control() {
+    let mut logs = ready();
+    logs.set_away(true);
+    follow_with(&mut logs, 10, 2, 3);
+    assert_eq!(logs.unread(), 2);
+    assert!(logs.set_away(false), "reaching the newest rows");
+    assert_eq!(logs.unread(), 0);
+    follow_with(&mut logs, 20, 1, 4);
+    assert_eq!(logs.unread(), 0, "following at the newest rows stays read");
+
+    logs.set_away(true);
+    follow_with(&mut logs, 30, 2, 5);
+    assert_eq!(logs.unread(), 2);
+    assert_eq!(logs.jump_to_newest().as_deref(), Some("event-31"));
+    assert_eq!(logs.unread(), 0, "the jump control clears the count");
+    assert!(
+        logs.set_away(true),
+        "the jump left the away state, so a later scroll counts again"
+    );
+}
+
+#[test]
+fn unread_never_counts_a_row_twice_or_a_refresh() {
+    let mut logs = ready();
+    logs.set_away(true);
+    // The follow reply repeats the row already loaded and adds one new row.
+    follow_with(&mut logs, 0, 2, 3);
+    assert_eq!(
+        logs.unread(),
+        1,
+        "only the row new to the loaded set counts"
+    );
+
+    // A same-query refresh preserves unread IDs while away and never counts
+    // duplicate or older rows appearing after already-known rows.
+    let refresh = logs.refresh().expect("refresh read");
+    assert_eq!(
+        logs.unread(),
+        1,
+        "starting a same-query refresh preserves unread IDs before the response arrives"
+    );
+    assert!(logs.complete(
+        &refresh,
+        Ok(LogReply::Page(page(
+            0,
+            3,
+            30,
+            Some(cursor(4)),
+            Some(cursor(5))
+        )))
+    ));
+    assert_eq!(
+        logs.unread(),
+        1,
+        "refresh keeps existing unread IDs without counting duplicates or older rows"
+    );
+    assert!(logs.set_away(false));
+    assert_eq!(logs.unread(), 0);
+}
+
+#[test]
+fn transient_refresh_and_older_errors_preserve_loaded_page_viewport_and_unread_ids() {
+    let mut logs = ready();
+    logs.table.select("event-0");
+    logs.set_away(true);
+    follow_with(&mut logs, 10, 2, 3);
+    assert_eq!(logs.rows.len(), 3);
+    assert_eq!(logs.unread(), 2);
+
+    // Transient Refresh error keeps loaded rows, viewport cursor, and unread IDs.
+    let refresh = logs.refresh().expect("same-query refresh");
+    assert_eq!(logs.rows.len(), 3);
+    assert!(logs.complete(&refresh, Err(ClientError::Status(503))));
+    assert_eq!(logs.status, LogStatus::Unavailable);
+    assert_eq!(logs.rows.len(), 3);
+    assert_eq!(logs.table.cursor(), Some("event-0"));
+    assert_eq!(logs.unread(), 2);
+    assert!(logs.available());
+
+    // Transient Older error also preserves loaded rows, viewport cursor, and unread IDs.
+    let older = logs.older().expect("older page retry");
+    assert!(logs.complete(&older, Err(ClientError::Timeout)));
+    assert_eq!(logs.status, LogStatus::Unavailable);
+    assert_eq!(logs.rows.len(), 3);
+    assert_eq!(logs.table.cursor(), Some("event-0"));
+    assert_eq!(logs.unread(), 2);
+
+    // Job/scope change clears rows, viewport cursor, and unread IDs.
+    logs.select_target(LogTarget::Job {
+        id: "other-job".into(),
+        descendants: false,
+    });
+    assert!(logs.rows.is_empty());
+    assert!(logs.table.cursor().is_none());
+    assert_eq!(logs.unread(), 0);
+}
+
+#[test]
+fn same_query_refresh_preserves_unread_ids_and_counts_only_new_newer_rows() {
+    let mut logs = ready();
+    logs.set_away(true);
+    follow_with(&mut logs, 10, 1, 3);
+    assert_eq!(logs.unread(), 1);
+
+    // Loading an older page never increments unread.
+    let older = logs.older().expect("older page");
+    assert!(logs.complete(
+        &older,
+        Ok(LogReply::Page(page(100, 2, 20, Some(cursor(4)), None)))
+    ));
+    assert_eq!(logs.unread(), 1);
+
+    // Same-query refresh catch-up with two brand-new newer rows at the head
+    // before already-known rows counts only those two new newer IDs plus the preserved unread ID.
+    let refresh = logs.refresh().expect("catch-up refresh");
+    let catchup: LogPage = serde_json::from_value(json!({
+        "rows": [row(30), row(29), row(10), row(0)],
+        "counts": {"total": 22, "info": 22, "error": 0, "warn": 0, "debug": 0},
+        "apps": ["tools"],
+        "apps_complete": true,
+        "next_cursor": cursor(5),
+        "follow_cursor": cursor(6),
+        "available": true,
+        "private_logs_only": true,
+        "shared_private_logs_available": true,
+        "reason_code": null,
+        "narrowing_hint": null,
+        "has_more": true
+    }))
+    .expect("catch-up page");
+    assert!(logs.complete(&refresh, Ok(LogReply::Page(catchup))));
+    assert_eq!(logs.unread(), 3);
+
+    // Re-refreshing the exact same head page never double-counts.
+    let repeat = logs.refresh().expect("repeat refresh");
+    let same_head: LogPage = serde_json::from_value(json!({
+        "rows": [row(30), row(29), row(10), row(0)],
+        "counts": {"total": 22, "info": 22, "error": 0, "warn": 0, "debug": 0},
+        "apps": ["tools"],
+        "apps_complete": true,
+        "next_cursor": cursor(5),
+        "follow_cursor": cursor(6),
+        "available": true,
+        "private_logs_only": true,
+        "shared_private_logs_available": true,
+        "reason_code": null,
+        "narrowing_hint": null,
+        "has_more": true
+    }))
+    .expect("same head page");
+    assert!(logs.complete(&repeat, Ok(LogReply::Page(same_head))));
+    assert_eq!(logs.unread(), 3);
+
+    // Reaching the newest row clears unread.
+    assert_eq!(logs.jump_to_newest().as_deref(), Some("event-30"));
+    assert_eq!(logs.unread(), 0);
+}
+
+#[test]
+fn unread_resets_on_a_scope_or_backend_switch() {
+    let mut logs = ready();
+    logs.set_away(true);
+    follow_with(&mut logs, 10, 2, 3);
+    assert_eq!(logs.unread(), 2);
+    logs.bind(Some(binding("b")), true);
+    assert_eq!(logs.unread(), 0, "another scope starts with nothing unread");
+    assert!(
+        logs.set_away(true),
+        "and the away state was reset with it, so scrolling away is a change again"
+    );
+    logs.bind(None, false);
+    assert_eq!(logs.unread(), 0, "a backend switch keeps nothing");
 }

@@ -125,7 +125,7 @@ fn uploaded(kind: DatasetKind) -> DatasetUpload {
 }
 
 #[test]
-fn actor_and_training_buttons_request_their_own_csv_picker_without_submitting_jobs() {
+fn actor_and_training_buttons_choose_their_own_csv_source_without_submitting_jobs() {
     for (key, kind) in [
         ("maintenance-seed", DatasetKind::ActorCatalog),
         ("maintenance-train", DatasetKind::ClassifierTraining),
@@ -133,8 +133,79 @@ fn actor_and_training_buttons_request_their_own_csv_picker_without_submitting_jo
         let mut runtime = runtime(state(false));
         let mut clock = 0.0;
         click(&mut runtime, key, &mut clock);
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                runtime
+                    .state
+                    .maintenance
+                    .csv_path_prompt
+                    .as_ref()
+                    .map(|prompt| prompt.kind),
+                Some(kind),
+                "the primary action must reveal typed input before opening a file chooser"
+            );
+            assert!(runtime.state.intents.is_empty());
+            click(&mut runtime, "maintenance-csv-path-browse", &mut clock);
+        }
         assert_eq!(runtime.state.intents, vec![Intent::ChooseDataset { kind }]);
         assert!(runtime.state.maintenance.confirmation.is_none());
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn opening_csv_entry_accepts_immediate_typing_and_cancel_restores_focus() {
+    let press = |runtime: &mut Runtime<State>, key| {
+        runtime.key(rune::KeyEvent {
+            key,
+            mods: rune::Mods::default(),
+        });
+    };
+    for opener in ["maintenance-seed", "maintenance-train"] {
+        let mut runtime = runtime(state(false));
+        runtime.update(|_, tx| {
+            tx.scroll_into_view(opener);
+            tx.focus(opener, true);
+        });
+        runtime.frame(1.0 / 60.0);
+        assert!(runtime
+            .elements()
+            .iter()
+            .any(|element| { element.focused && element.key.as_deref() == Some(opener) }));
+
+        press(&mut runtime, rune::Key::Text(" ".into()));
+        runtime.frame(1.0 / 60.0);
+        assert!(
+            runtime.elements().iter().any(|element| {
+                element.focused
+                    && element.key.as_deref() == Some("input")
+                    && element.path.contains("maintenance-csv-path")
+            }),
+            "the CSV editor has focus on its first rendered frame"
+        );
+
+        press(&mut runtime, rune::Key::Text("/".into()));
+        runtime.frame(1.0 / 60.0);
+        let prompt = runtime
+            .state
+            .maintenance
+            .csv_path_prompt
+            .as_ref()
+            .expect("path prompt");
+        assert_eq!(
+            prompt.input.text, "/",
+            "the first key reaches the CSV editor"
+        );
+        assert!(prompt.input.focused);
+
+        let mut clock = 3.0 / 60.0;
+        click(&mut runtime, "maintenance-csv-path-cancel", &mut clock);
+        assert!(runtime.state.maintenance.csv_path_prompt.is_none());
+        assert!(runtime
+            .elements()
+            .iter()
+            .any(|element| { element.focused && element.key.as_deref() == Some(opener) }));
+        assert!(runtime.state.intents.is_empty());
     }
 }
 
@@ -171,6 +242,200 @@ fn uploaded_csv_requires_confirmation_and_keeps_initial_configuration_revision()
             .intents
             .contains(&Intent::Maintenance { operation }));
     }
+}
+
+#[test]
+fn keyboard_dismissal_restores_each_maintenance_opener_without_admitting_work() {
+    for (page, kind, opener, viewport) in [
+        (
+            Page::Seed,
+            Some(DatasetKind::ActorCatalog),
+            SEED_ACTION_KEY,
+            "seed-body",
+        ),
+        (
+            Page::Seed,
+            Some(DatasetKind::ClassifierTraining),
+            TRAIN_ACTION_KEY,
+            "seed-body",
+        ),
+        (Page::Seed, None, REINDEX_ACTION_KEY, "seed-body"),
+        (
+            Page::Workstation,
+            None,
+            WORKSTATION_REINDEX_ACTION_KEY,
+            "workstation-body",
+        ),
+    ] {
+        for dismiss in [rune::Key::Escape, rune::Key::Text(" ".into())] {
+            let mut state = state(true);
+            state.page = page;
+            let mut runtime = Runtime::new(
+                state,
+                app::view,
+                (640.0, 480.0),
+                Env {
+                    system_dark: true,
+                    scale: 1.0,
+                },
+            );
+            let spec = app::spec();
+            runtime.on_key = spec.on_key;
+            runtime.poll = spec.poll;
+            runtime.set_system_reduced_motion(true);
+            runtime.frame(0.0);
+
+            let press = |runtime: &mut Runtime<State>, key| {
+                runtime.key(rune::KeyEvent {
+                    key,
+                    mods: rune::Mods::default(),
+                });
+                runtime.frame(1.0 / 60.0);
+            };
+            let dataset = kind.map(uploaded);
+            if let Some(upload) = dataset.clone() {
+                runtime.update(|state, _| {
+                    state.complete_dataset_upload(
+                        state.connection.epoch,
+                        state.maintenance.upload_revision,
+                        state.origin_revision,
+                        upload.dataset.kind,
+                        Ok(upload),
+                    );
+                });
+                runtime.frame(1.0 / 60.0);
+            } else {
+                runtime.update(|_, tx| tx.focus(opener, true));
+                runtime.frame(1.0 / 60.0);
+                press(&mut runtime, rune::Key::Text(" ".into()));
+            }
+            assert!(runtime.state.maintenance.confirmation.is_some(), "{opener}");
+            runtime.update(|_, tx| {
+                tx.scroll_into_view("maintenance-cancel");
+                tx.focus("maintenance-cancel", true);
+            });
+            runtime.frame(1.0 / 60.0);
+            assert!(runtime.elements().iter().any(|element| {
+                element.key.as_deref() == Some("maintenance-cancel") && element.focused
+            }));
+
+            press(&mut runtime, dismiss);
+            assert!(runtime.state.maintenance.confirmation.is_none(), "{opener}");
+            assert!(!runtime.state.confirm_maintenance_dialog);
+            // RuneKit's modal close schedules a focus request on the next app poll.
+            runtime.frame(1.0 / 60.0);
+            let elements = runtime.elements();
+            let action = elements
+                .iter()
+                .find(|element| element.key.as_deref() == Some(opener))
+                .expect("the originating action");
+            assert!(
+                action.focused && action.focus_visible,
+                "{opener} has visible keyboard focus"
+            );
+            let view = elements
+                .iter()
+                .find(|element| element.key.as_deref() == Some(viewport))
+                .expect("maintenance viewport");
+            let action_center_y = action.rect[1] + action.rect[3] / 2.0;
+            assert!(
+                (view.rect[1]..view.rect[1] + view.rect[3]).contains(&action_center_y),
+                "{opener} is scrolled into view"
+            );
+            assert_eq!(
+                runtime.state.maintenance.selected_dataset.as_ref(),
+                dataset.as_ref().map(|upload| &upload.dataset)
+            );
+            assert!(matches!(runtime.state.maintenance.receipt, Load::Idle));
+            assert!(!runtime
+                .state
+                .intents
+                .iter()
+                .any(|intent| matches!(intent, Intent::Maintenance { .. })));
+        }
+    }
+}
+
+#[test]
+fn expired_training_review_survives_refresh_and_requires_explicit_confirmation() {
+    let kind = DatasetKind::ClassifierTraining;
+    let operation = MaintenanceOperation::TrainClassifier;
+    let upload = uploaded(kind);
+    let mut state = state(false);
+    let Load::Ready(readiness) = state.readiness.clone() else {
+        panic!("fixture readiness");
+    };
+    state.complete_dataset_upload(
+        state.connection.epoch,
+        0,
+        state.origin_revision,
+        kind,
+        Ok(upload.clone()),
+    );
+    assert!(state.maintenance.confirmation.is_some());
+
+    let mut runtime = runtime(state);
+    let mut clock = 6.0;
+    runtime.update(|state, _| state.clock = 6.0);
+    runtime.frame(clock);
+    click(&mut runtime, "maintenance-confirm", &mut clock);
+    click(&mut runtime, "maintenance-confirm-refresh", &mut clock);
+    runtime.update(|state, _| {
+        state.confirm_maintenance();
+        state.complete_readiness(Err("temporary failure".into()));
+        state.confirm_maintenance();
+
+        let mut wrong_registration = readiness.clone();
+        wrong_registration.registration.as_mut().unwrap().revision += 1;
+        state.complete_readiness(Ok(wrong_registration));
+        state.confirm_maintenance();
+        assert!(state.maintenance.confirmation.is_some());
+        assert_eq!(
+            state.maintenance.selected_dataset.as_ref(),
+            Some(&upload.dataset)
+        );
+        assert!(!state.intents.contains(&Intent::Maintenance { operation }));
+
+        state.complete_readiness(Ok(readiness));
+        assert!(!state.intents.contains(&Intent::Maintenance { operation }));
+    });
+    clock += 1.0 / 60.0;
+    runtime.frame(clock);
+    assert!(runtime.find("maintenance-confirm-refresh").is_none());
+    click(&mut runtime, "maintenance-confirm", &mut clock);
+    assert!(runtime.state.maintenance.confirmation.is_none());
+    assert_eq!(
+        runtime
+            .state
+            .intents
+            .iter()
+            .filter(|intent| *intent == &Intent::Maintenance { operation })
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn changed_configuration_requires_a_new_training_review() {
+    let kind = DatasetKind::ClassifierTraining;
+    let operation = MaintenanceOperation::TrainClassifier;
+    let mut state = state(false);
+    state.complete_dataset_upload(
+        state.connection.epoch,
+        0,
+        state.origin_revision,
+        kind,
+        Ok(uploaded(kind)),
+    );
+    assert!(state.maintenance.confirmation.is_some());
+    let Load::Ready(profile) = &mut state.backend.profile else {
+        panic!("fixture profile");
+    };
+    profile.configuration_revision += 1;
+
+    state.confirm_maintenance();
+    assert!(state.maintenance.confirmation.is_none());
+    assert!(!state.intents.contains(&Intent::Maintenance { operation }));
 }
 
 #[test]
@@ -345,10 +610,14 @@ async fn delayed_readiness_reply_controls_reindex_confirmation_and_failure() {
         .state
         .maintenance_disabled_reason(MaintenanceOperation::ReindexActors)
         .is_some());
-    assert!(matches!(
-        runtime.state.readiness,
-        Load::Failed(ref message) if message == "synthetic readiness outage"
-    ));
+    assert!(
+        matches!(runtime.state.readiness, Load::Ready(_)),
+        "a transient failure keeps the last same-scope checks as stale"
+    );
+    assert_eq!(
+        runtime.state.readiness_error.as_deref(),
+        Some("synthetic readiness outage")
+    );
     click(&mut runtime, "maintenance-reindex", &mut clock);
     assert!(runtime.state.maintenance.confirmation.is_none());
     assert_eq!(
@@ -1479,6 +1748,7 @@ mod csv_path_fallback {
     use std::path::PathBuf;
 
     use fleetworks_contracts::readiness::DatasetKind;
+    use rune::Tx;
 
     use crate::app::Intent;
     use crate::maintenance::parse_local_csv_path;
@@ -1532,7 +1802,7 @@ mod csv_path_fallback {
     #[test]
     fn an_unavailable_chooser_opens_the_prompt_and_a_valid_path_reuses_the_upload_flow() {
         let mut state = super::state(false);
-        state.open_csv_path_prompt(DatasetKind::ActorCatalog);
+        state.open_csv_path_prompt(DatasetKind::ActorCatalog, &mut Tx::default());
         assert!(state
             .maintenance
             .message
@@ -1582,7 +1852,7 @@ mod csv_path_fallback {
     #[test]
     fn the_prompt_is_drawn_in_the_matching_card_and_submits_from_its_button() {
         let mut runtime = super::runtime(super::state(false));
-        runtime.update(|state, _| state.open_csv_path_prompt(DatasetKind::ActorCatalog));
+        runtime.update(|state, tx| state.open_csv_path_prompt(DatasetKind::ActorCatalog, tx));
         runtime.frame(1.0 / 60.0);
         assert!(
             runtime.find("maintenance-csv-path").is_some(),
@@ -1590,6 +1860,16 @@ mod csv_path_fallback {
         );
         assert!(runtime.find("maintenance-csv-path-submit").is_some());
         assert!(runtime.find("maintenance-csv-path-cancel").is_some());
+        assert!(
+            runtime
+                .state
+                .maintenance
+                .csv_path_prompt
+                .as_ref()
+                .expect("prompt")
+                .input
+                .focused
+        );
 
         runtime.update(|state, _| {
             state
@@ -1616,11 +1896,11 @@ mod csv_path_fallback {
     #[test]
     fn cancel_and_origin_change_close_the_prompt() {
         let mut state = crate::tests::registered_fixture();
-        state.open_csv_path_prompt(DatasetKind::ClassifierTraining);
-        state.cancel_csv_path_prompt();
+        state.open_csv_path_prompt(DatasetKind::ClassifierTraining, &mut Tx::default());
+        state.cancel_csv_path_prompt(&mut Tx::default());
         assert!(state.maintenance.csv_path_prompt.is_none());
 
-        state.open_csv_path_prompt(DatasetKind::ActorCatalog);
+        state.open_csv_path_prompt(DatasetKind::ActorCatalog, &mut Tx::default());
         state.maintenance.invalidate_origin();
         assert!(state.maintenance.csv_path_prompt.is_none());
     }
@@ -1652,4 +1932,418 @@ mod csv_path_fallback {
         .expect_err("symlink rejected");
         assert!(error.contains("symbolic links are rejected"), "{error}");
     }
+}
+
+#[test]
+fn a_failed_readiness_refresh_keeps_same_scope_checks_as_stale_and_recovery_clears_it() {
+    let mut state = state(true);
+    let Load::Ready(ready) = state.readiness.clone() else {
+        panic!("synthetic readiness must start available")
+    };
+    state.readiness_received_at = Some(state.clock);
+    state.complete_readiness(Err("synthetic outage".into()));
+    let Load::Ready(kept) = &state.readiness else {
+        panic!("a transient failure keeps the last checks")
+    };
+    assert_eq!(state.readiness_error.as_deref(), Some("synthetic outage"));
+    assert!(!kept.checks.is_empty());
+    assert!(kept.checks.iter().all(|c| !state.readiness_check_fresh(c)));
+
+    state.complete_readiness(Ok(ready.clone()));
+    assert!(matches!(state.readiness, Load::Ready(_)));
+    assert!(state.readiness_error.is_none() && state.readiness_received_at.is_some());
+
+    // Checks for another deployment are an error, never kept.
+    let mut other = ready;
+    other.deployment_id = "another-deployment".into();
+    state.complete_readiness(Ok(other));
+    assert!(matches!(state.readiness, Load::Failed(_)));
+    assert!(state.readiness_error.is_none() && state.readiness_received_at.is_none());
+}
+
+#[test]
+fn a_first_readiness_failure_shows_an_error_with_nothing_to_keep() {
+    let mut state = state(true);
+    state.readiness = Load::Idle;
+    state.complete_readiness(Err("synthetic outage".into()));
+    assert!(matches!(state.readiness, Load::Failed(_)));
+    assert!(state.readiness_error.is_none());
+}
+
+fn synthetic_job_detail(
+    id: &str,
+    operation: &str,
+    job_state: &str,
+    phase: &str,
+    maintenance_result: Option<serde_json::Value>,
+) -> crate::backend::JobDetail {
+    serde_json::from_value(synthetic_job_detail_json(
+        id,
+        operation,
+        job_state,
+        phase,
+        maintenance_result,
+    ))
+    .expect("synthetic job detail")
+}
+
+fn synthetic_job_detail_json(
+    id: &str,
+    operation: &str,
+    job_state: &str,
+    phase: &str,
+    maintenance_result: Option<serde_json::Value>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "job": {
+            "id": id,
+            "app": "fleetworks",
+            "title": operation,
+            "operation": operation,
+            "state": job_state,
+            "phase": phase,
+            "progress_done": 10,
+            "progress_total": 10,
+            "error_summary": "",
+            "private_details_available": true,
+            "activity_actions_available": false,
+            "status_only": false
+        },
+        "stages": [],
+        "private_details_available": true,
+        "activity_actions_available": false,
+        "maintenance_result": maintenance_result
+    })
+}
+
+#[test]
+fn window_focus_reaches_maintenance_state_during_cold_start() {
+    let mut state = state(false);
+    state.startup = crate::startup::Startup::cold_launch();
+    let mut runtime = runtime(state);
+    assert!(!runtime.state.scoped_logs.window_focused);
+
+    runtime.window_focus(true);
+    runtime.frame(1.0 / 60.0);
+
+    assert!(
+        runtime.state.scoped_logs.window_focused,
+        "maintenance polling must see focus received before the main shell is shown"
+    );
+}
+
+#[tokio::test]
+async fn seed_card_refresh_reconciles_the_registered_job_and_keeps_the_terminal_count() {
+    use std::time::Duration;
+
+    use serde_json::json;
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+
+    let mut state = state(true);
+    state
+        .connection
+        .capabilities
+        .as_mut()
+        .expect("capabilities")
+        .permissions
+        .push(Permission::ReadWorkstationActivity);
+    state.scoped_jobs.draft.status = crate::jobs_query::JobsStatusFilter::Failed;
+    let context = state
+        .registration
+        .context
+        .clone()
+        .expect("registered context");
+    let job_id = "seed-two-actors";
+    let operation = MaintenanceOperation::SeedActors;
+    state
+        .maintenance
+        .set_operation_job(operation, job_id.into(), false);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept scoped detail read");
+        let mut headers = Vec::new();
+        while !headers.ends_with(b"\r\n\r\n") {
+            assert!(headers.len() < 4096, "request headers must be bounded");
+            headers.push(stream.read_u8().await.expect("read headers"));
+        }
+        let headers = String::from_utf8(headers).unwrap().to_ascii_lowercase();
+        assert!(
+            headers.starts_with("get /api/v1/jobs/detail?id=seed-two-actors&limit=100 http/1.1")
+        );
+        assert!(headers.contains("\r\nx-fleetworks-registration: synthetic-registration\r\n"));
+        assert!(headers.contains("\r\nx-fleetworks-registration-revision: 1\r\n"));
+        assert!(headers.contains("\r\nauthorization: bearer fixture-token\r\n"));
+        let mut detail = synthetic_job_detail_json(
+            job_id,
+            "actor_seed",
+            "completed",
+            "done",
+            Some(
+                json!({"operation":"actor_seed", "processed":2, "total":2, "database_seeded":true}),
+            ),
+        );
+        detail["job"]["progress_done"] = json!(2);
+        detail["job"]["progress_total"] = json!(2);
+        let body = detail.to_string();
+        stream
+            .write_all(
+                format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes(),
+            )
+            .await
+            .expect("send the authorized terminal detail");
+    });
+
+    let mut runtime = runtime(state);
+    let mut clock = 0.0;
+    click(&mut runtime, "maintenance-refresh", &mut clock);
+    assert!(runtime
+        .state
+        .intents
+        .contains(&Intent::MaintenanceJobStatus {
+            job_id: job_id.into(),
+        }));
+    let client = Client::new(&origin, Some("fixture-token"))
+        .unwrap()
+        .with_registered_context(&context)
+        .unwrap();
+    let (detail, served) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(backend::read_job_detail(&client, job_id), server)
+    })
+    .await
+    .expect("scoped detail exchange must finish");
+    served.expect("gateway checked the registered request");
+    let detail = detail.expect("read exact job");
+    runtime.update(move |state, _| {
+        let revision = state.maintenance.receipt_poll_revisions[0];
+        state.complete_maintenance_job_detail(
+            state.connection.epoch,
+            state.origin_revision,
+            operation,
+            revision,
+            job_id,
+            Ok(detail),
+        );
+    });
+    runtime.frame(1.0 / 60.0);
+    assert_eq!(runtime.state.page, Page::Seed);
+    assert!(runtime.state.backend.selected_job.is_none());
+    assert!(runtime.state.maintenance.active_receipt_jobs().is_empty());
+    assert!(runtime
+        .elements()
+        .iter()
+        .any(|el| el.text.as_deref() == Some("Completed (2/2)")));
+
+    runtime.update(|state, _| state.navigate(Page::Brain));
+    runtime.frame(1.0 / 60.0);
+    runtime.update(|state, _| state.navigate(Page::Seed));
+    runtime.frame(1.0 / 60.0);
+    assert!(runtime
+        .elements()
+        .iter()
+        .any(|el| el.text.as_deref() == Some("Completed (2/2)")));
+}
+
+#[test]
+fn per_operation_receipt_retention_keeps_training_result_when_seed_or_reindex_starts() {
+    let mut state = state(true);
+    let epoch = state.connection.epoch;
+    let origin = state.origin_revision;
+
+    state.maintenance.set_operation_job(
+        MaintenanceOperation::TrainClassifier,
+        "job-train-1".into(),
+        false,
+    );
+    let train_rev = state.maintenance.receipt_poll_revisions[2];
+    state.complete_maintenance_job_detail(
+        epoch,
+        origin,
+        MaintenanceOperation::TrainClassifier,
+        train_rev,
+        "job-train-1",
+        Ok(synthetic_job_detail(
+            "job-train-1",
+            "classifier_train",
+            "completed",
+            "done",
+            Some(serde_json::json!({
+                "operation": "classifier_train",
+                "engine": "natural",
+                "candidate_model_id": "cand-001"
+            })),
+        )),
+    );
+
+    // Starting Seed and Reindex must not erase the completed TrainClassifier result.
+    state.maintenance.set_operation_job(
+        MaintenanceOperation::SeedActors,
+        "job-seed-1".into(),
+        false,
+    );
+    state.maintenance.set_operation_job(
+        MaintenanceOperation::ReindexActors,
+        "job-reindex-1".into(),
+        false,
+    );
+    let seed_rev = state.maintenance.receipt_poll_revisions[0];
+    state.complete_maintenance_job_detail(
+        epoch,
+        origin,
+        MaintenanceOperation::SeedActors,
+        seed_rev,
+        "job-seed-1",
+        Ok(synthetic_job_detail(
+            "job-seed-1",
+            "actor_seed",
+            "completed",
+            "done",
+            Some(serde_json::json!({
+                "operation": "actor_seed",
+                "processed": 42,
+                "total": 42,
+                "database_seeded": true
+            })),
+        )),
+    );
+
+    assert_eq!(
+        state
+            .maintenance
+            .operation_job(MaintenanceOperation::TrainClassifier)
+            .map(|r| r.job_id.as_str()),
+        Some("job-train-1")
+    );
+    assert_eq!(
+        state
+            .maintenance
+            .operation_job(MaintenanceOperation::SeedActors)
+            .map(|r| r.job_id.as_str()),
+        Some("job-seed-1")
+    );
+    assert_eq!(
+        state
+            .maintenance
+            .operation_job(MaintenanceOperation::ReindexActors)
+            .map(|r| r.job_id.as_str()),
+        Some("job-reindex-1")
+    );
+
+    let runtime = runtime(state);
+    let elements = runtime.elements();
+    let texts: Vec<&str> = elements
+        .iter()
+        .filter_map(|el| el.text.as_deref())
+        .collect();
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("Candidate trained · Not activated")),
+        "training card must keep its candidate-not-activated result: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t.contains("Actors seeded")),
+        "seed card must distinguish Actors seeded from search index ready: {texts:?}"
+    );
+    assert!(runtime.find("maintenance-op-job-train").is_some());
+    assert!(runtime.find("maintenance-op-job-seed").is_some());
+    assert!(runtime.find("maintenance-op-job-reindex").is_some());
+}
+
+#[test]
+fn seed_and_train_active_job_polling_is_independent_of_jobs_filter_and_selection() {
+    let mut state = state(true);
+    state
+        .connection
+        .capabilities
+        .as_mut()
+        .expect("capabilities")
+        .permissions
+        .push(Permission::ReadWorkstationActivity);
+    // Jobs page is filtered to Failed and has an unrelated job selected.
+    state.scoped_jobs.draft.status = crate::jobs_query::JobsStatusFilter::Failed;
+    state.backend.selected_job = Some("unrelated-job-99".into());
+
+    state.maintenance.set_operation_job(
+        MaintenanceOperation::SeedActors,
+        "job-seed-live".into(),
+        false,
+    );
+    state.maintenance.set_operation_job(
+        MaintenanceOperation::TrainClassifier,
+        "job-train-live".into(),
+        false,
+    );
+
+    let active = state.maintenance.active_receipt_jobs();
+    assert_eq!(active.len(), 2);
+    assert_eq!(state.poll_maintenance_receipt_jobs(), 2);
+    assert_eq!(
+        state.backend.selected_job.as_deref(),
+        Some("unrelated-job-99"),
+        "polling Seed & Train receipts must not disturb Jobs selection"
+    );
+
+    // Completing SeedActors removes it from active_receipt_jobs while TrainClassifier stays active.
+    let epoch = state.connection.epoch;
+    let origin = state.origin_revision;
+    let seed_rev = state.maintenance.receipt_poll_revisions[0];
+    state.complete_maintenance_job_detail(
+        epoch,
+        origin,
+        MaintenanceOperation::SeedActors,
+        seed_rev,
+        "job-seed-live",
+        Ok(synthetic_job_detail(
+            "job-seed-live",
+            "actor_seed",
+            "completed",
+            "done",
+            None,
+        )),
+    );
+    let remaining = state.maintenance.active_receipt_jobs();
+    assert_eq!(
+        remaining,
+        vec![(
+            MaintenanceOperation::TrainClassifier,
+            "job-train-live".to_owned()
+        )]
+    );
+}
+
+#[test]
+fn initial_workstation_readiness_failure_offers_local_retry_and_defers_commands_during_confirmation(
+) {
+    let mut state = state(true);
+    state.page = Page::Workstation;
+    state.scoped_logs.window_focused = true;
+    state.readiness = Load::Failed("temporary gateway error".into());
+    assert!(
+        state.maintenance_checks_due(10.0),
+        "Workstation initial readiness failure must allow retry"
+    );
+
+    // Commands overlay is deferred while a maintenance confirmation is active.
+    state.maintenance.confirmation = Some(MaintenanceConfirmation {
+        operation: MaintenanceOperation::ReindexActors,
+        context: state.registration.context.clone().expect("context"),
+        origin_revision: state.origin_revision,
+        configuration_revision: 0,
+        dataset: None,
+    });
+    state.commands.open = true;
+    assert!(state.has_active_confirmation());
+
+    let runtime = runtime(state);
+    assert!(
+        runtime.find("workstation-readiness-retry").is_some(),
+        "Workstation readiness failure must expose a local Retry control"
+    );
+    assert!(
+        runtime.find("command-panel").is_none(),
+        "Commands overlay must not render over an active confirmation"
+    );
 }

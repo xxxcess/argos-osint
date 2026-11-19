@@ -47,6 +47,19 @@ python3 scripts/fleetworks_verify.py dispatch pr --ref <branch> --base <full-bas
 python3 scripts/fleetworks_verify.py dispatch full --ref <branch>
 ```
 
+## Depot image build pilot
+
+The [image helper](../../../.github/scripts/release_images.py) accepts `--builder depot --depot-project <id>`. Buildx is the default. The Depot path uses the same Bake file, targets, tags and version, and loads each single-architecture build into the matching GitHub runner's Docker daemon. The runner checks the loaded images and runs the existing Compose smoke with `--no-build` or the web-only smoke. A Depot build or load failure fails the selected image check.
+
+Provision a dedicated review project with GitHub OIDC trust for this repository and keep public fork PR access disabled. Set the repository variable `DEPOT_REVIEW_PROJECT_ID` to enable the pilot on same-repository PRs into `nightly` and on standard dispatches of the `nightly` branch. Forks use the Buildx job, which has no OIDC permission. Clear the variable to roll back. Trusted release staging uses Buildx during the pilot. Enable Depot for releases only after verifying that review jobs cannot exchange their OIDC identity for release-project access and that releases still publish the exact bytes smoked on the runner. [Depot GitHub OIDC](https://depot.dev/docs/container-builds/integrations/github-actions#authentication)
+
+Compare `image_builder=depot` and `image_builder=buildx` dispatches at the same exact head with the same scope and both Linux architectures. Use a backend/Compose selection and a web-only selection. Compare first runs on cold builders and repeat on warm builders, using the per-architecture image-check artifact's `timings_seconds.bake_and_load` and `timings_seconds.smoke` alongside total job duration and GitHub runner minutes. Record which project/cache was used for each Depot measurement. Verify the fork lane, then confirm digest/config equality, archive checksums and immutable tag reuse in an authorized release pilot before switching trusted staging.
+
+```sh
+gh workflow run fleetworks.yml --ref <branch> \
+  -f mode=pr -f base=<full-base-sha> -f head=<full-head-sha> -f image_builder=depot
+```
+
 ## Native app review evidence
 
 [Native verification](native-verification.md) uses [fleetworks-native.yml](../../../.github/workflows/fleetworks-native.yml) on `macos-15-intel` (`x86_64-apple-darwin`) and `macos-15` (`aarch64-apple-darwin`), plus [fleetworks-native-linux.yml](../../../.github/workflows/fleetworks-native-linux.yml) (`desktop_linux`) on `ubuntu-24.04` (`x86_64-unknown-linux-gnu`), when `desktop` or `local_backend` scopes match their pass, caching `target/agents` by target, toolchain, `Cargo.lock` and native/companion manifests. The native workflows run `verify-engine-free`, `cargo fmt --check`, scoped unit tests (`fleetworks-desktop`, `fleetworks-workstation`, `fleetworks-contracts`) via `scripts/agent_cargo.py`, explicit `fleetworks_verify.py native-ui --agent --require-clean` captures (using Mesa Lavapipe on Ubuntu), `scripts/fleetworks_candidate.py build-native` (bundling desktop + companion `argos-api-host`), and Docker-free `scripts/fleetworks_local_backend_smoke.py`. The Linux job includes the `backend-choice` capture and exercises Embedded IPC alongside a real HTTP gateway fixture with disposable storage. The selected backend jobs supply separate Distributed Compose and service evidence. PRs build debug apps and fixture evidence; a selected trusted channel build packages a release macOS ZIP / Linux `.tar.gz` with the calculated artifact version and verifies the archive's ID, SHA256, source revision, architecture, linked libraries, and local-IPC smoke on the extracted bundle. Release promotion currently attaches the macOS ZIPs while Linux candidate archives remain non-release CI artifacts (`Fleetworks-linux-app-*`).

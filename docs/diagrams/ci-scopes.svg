@@ -28,7 +28,7 @@
 <rect x="368" y="220" width="512" height="108" rx="6" class="node"/>
 <text x="384" y="252" class="label">Linux backend + affected storage</text>
 <text x="384" y="280" class="note">First: AMD64 · second: ARM64 when selected</text>
-<text x="384" y="304" class="note">Selected Compose and exact-image smoke checks</text>
+<text x="384" y="304" class="note">Scoped Buildx or Depot build, then exact-image smoke</text>
 <rect x="368" y="352" width="512" height="108" rx="6" class="node"/>
 <text x="384" y="384" class="label">RN Web · web / web_dev</text>
 <text x="384" y="412" class="note">Second: affected web checks and web image</text>

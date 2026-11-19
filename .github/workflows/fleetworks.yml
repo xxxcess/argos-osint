@@ -34,6 +34,11 @@ on:
         type: choice
         options: [auto, native, backend, all]
         default: auto
+      image_builder:
+        description: Use the nightly pilot, or select a builder for an exact-head pilot
+        type: choice
+        options: [auto, buildx, depot]
+        default: auto
 
 permissions:
   contents: read
@@ -68,6 +73,14 @@ jobs:
       backend_matrix: ${{ steps.verification.outputs.backend_matrix }}
       backend_arch: ${{ steps.verification.outputs.backend_arch }}
       image_matrix: ${{ steps.verification.outputs.image_matrix }}
+      depot_review: >-
+        ${{ vars.DEPOT_REVIEW_PROJECT_ID != '' && inputs.image_builder != 'buildx'
+          && ((github.event_name == 'pull_request'
+            && github.event.pull_request.head.repo.full_name == github.repository
+            && github.event.pull_request.base.ref == 'nightly')
+          || (github.event_name == 'workflow_dispatch'
+            && ((github.ref == 'refs/heads/nightly' && inputs.stage == 'standard')
+              || inputs.image_builder == 'depot'))) }}
       local_backend: ${{ steps.verification.outputs.local_backend }}
       server: ${{ steps.verification.outputs.server }}
       compose: ${{ steps.verification.outputs.compose }}
@@ -85,6 +98,17 @@ jobs:
       release_image_tag: ${{ steps.release.outputs.image_tag }}
       release_plan: ${{ steps.release.outputs.plan }}
     steps:
+      - name: Validate explicitly requested Depot pilot
+        if: github.event_name == 'workflow_dispatch' && inputs.image_builder == 'depot'
+        env:
+          DEPOT_REVIEW_PROJECT_ID: ${{ vars.DEPOT_REVIEW_PROJECT_ID }}
+          EXPECTED_HEAD: ${{ inputs.head }}
+        shell: bash
+        run: |
+          if [[ -z "$DEPOT_REVIEW_PROJECT_ID" || "$GITHUB_REF" != refs/heads/* || "$EXPECTED_HEAD" != "$GITHUB_SHA" ]]; then
+            echo '::error::A Depot pilot needs DEPOT_REVIEW_PROJECT_ID and an exact head on a repository branch'
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ env.FLEETWORKS_HEAD }}
@@ -515,14 +539,16 @@ jobs:
   images:
     name: Image checks / Linux ${{ matrix.arch }}
     needs: scope
-    if: needs.scope.outputs.images == 'true' && needs.scope.outputs.publish != 'true'
+    if: needs.scope.outputs.images == 'true' && needs.scope.outputs.publish != 'true' && needs.scope.outputs.depot_review != 'true'
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJson(needs.scope.outputs.image_matrix) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
-    steps:
+    env:
+      IMAGE_BUILDER: buildx
+    steps: &image_check_steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.scope.outputs.head }}
@@ -533,6 +559,11 @@ jobs:
         run: |
           rustup toolchain install 1.95.0 --profile minimal
           python3 scripts/agent_cargo.py test --locked --no-default-features -p fleetworks-search-index
+      - name: Install pinned Depot CLI
+        if: env.IMAGE_BUILDER == 'depot'
+        uses: depot/setup-action@91bc8495a33ebfc504ffc89e5674379ccf23c29c # v1
+        with:
+          version: 2.103.29
       - name: Build selected image closure and smoke exact container IDs
         env:
           IMAGE_TARGETS: ${{ matrix.targets }}
@@ -544,11 +575,15 @@ jobs:
           set -euo pipefail
           compose=()
           if [[ "$COMPOSE_SELECTED" == true ]]; then compose=(--compose); fi
+          builder=(--builder "$IMAGE_BUILDER")
+          if [[ "$IMAGE_BUILDER" == depot ]]; then
+            builder+=(--depot-project "${DEPOT_REVIEW_PROJECT_ID:?Depot review project is required}")
+          fi
           python3 -B -m unittest discover -s deploy -p 'test_*.py'
           python3 .github/scripts/release_images.py --revision "$FLEETWORKS_HEAD" \
             --version "$(cat version.txt)" --image-tag "review-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             --targets "$IMAGE_TARGETS" --arch "$IMAGE_ARCH" --registry "ghcr.io/${OWNER,,}" \
-            --directory "$RUNNER_TEMP/image-checks" "${compose[@]}"
+            --directory "$RUNNER_TEMP/image-checks" "${builder[@]}" "${compose[@]}"
       - name: Retain exact image smoke evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -559,6 +594,24 @@ jobs:
             .agent-scratch/native-review/images-*/public-smoke-*.json
           if-no-files-found: ignore
           retention-days: 7
+
+  images_depot:
+    name: Image checks (Depot) / Linux ${{ matrix.arch }}
+    needs: scope
+    if: needs.scope.outputs.images == 'true' && needs.scope.outputs.publish != 'true' && needs.scope.outputs.depot_review == 'true'
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.scope.outputs.image_matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      IMAGE_BUILDER: depot
+      DEPOT_REVIEW_PROJECT_ID: ${{ vars.DEPOT_REVIEW_PROJECT_ID }}
+    steps: *image_check_steps
 
   compose:
     name: Packaged Compose / ${{ matrix.name }}
@@ -628,7 +681,7 @@ jobs:
 
   source_checks:
     name: ${{ inputs.stage == 'second' && 'Fleetworks second pass source checks' || github.event_name == 'workflow_dispatch' && 'Fleetworks manual source checks' || 'Fleetworks source checks' }}
-    needs: [scope, desktop, desktop_linux, server, embedded, compose, bert, web, images]
+    needs: [scope, desktop, desktop_linux, server, embedded, compose, bert, web, images, images_depot]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -645,7 +698,8 @@ jobs:
           BERT_SELECTED: ${{ needs.scope.outputs.bert }}
           WEB_SELECTED: ${{ needs.scope.outputs.web }}
           WEB_DEV_SELECTED: ${{ needs.scope.outputs.web_dev }}
-          IMAGES_SELECTED: ${{ needs.scope.outputs.images == 'true' && needs.scope.outputs.publish != 'true' }}
+          IMAGES_SELECTED: ${{ needs.scope.outputs.images == 'true' && needs.scope.outputs.publish != 'true' && needs.scope.outputs.depot_review != 'true' }}
+          DEPOT_IMAGES_SELECTED: ${{ needs.scope.outputs.images == 'true' && needs.scope.outputs.publish != 'true' && needs.scope.outputs.depot_review == 'true' }}
           RELEASE_IMAGES_SELECTED: ${{ needs.scope.outputs.images == 'true' && needs.scope.outputs.publish == 'true' }}
           IMAGE_TARGETS: ${{ needs.scope.outputs.image_targets }}
           QUEUE_SELECTED: ${{ needs.scope.outputs.queue }}
@@ -658,6 +712,7 @@ jobs:
           BERT_RESULT: ${{ needs.bert.result }}
           WEB_RESULT: ${{ needs.web.result }}
           IMAGES_RESULT: ${{ needs.images.result }}
+          DEPOT_IMAGES_RESULT: ${{ needs.images_depot.result }}
         shell: bash
         run: |
           set -euo pipefail
@@ -707,6 +762,7 @@ jobs:
           verify bert "$BERT_SELECTED" "$BERT_RESULT" || failed=1
           verify web "$WEB_SELECTED" "$WEB_RESULT" || failed=1
           verify images "$IMAGES_SELECTED" "$IMAGES_RESULT" || failed=1
+          verify images_depot "$DEPOT_IMAGES_SELECTED" "$DEPOT_IMAGES_RESULT" || failed=1
           printf 'Server images: %s\n' "${IMAGE_TARGETS:-none}" >> "$GITHUB_STEP_SUMMARY"
           printf 'Queue selected: %s. Storage selected: %s. Local backend selected: %s. Development browser selected: %s.\n' \
             "${QUEUE_SELECTED:-missing}" "${STORAGE_SELECTED:-missing}" \

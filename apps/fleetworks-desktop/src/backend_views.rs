@@ -26,6 +26,7 @@ use crate::app::State;
 use crate::icons;
 use crate::job_actions::JobAction;
 use crate::logs::LogStatus;
+use crate::maintenance;
 use crate::material;
 use crate::material::MetalFinish;
 use crate::submission::AcceptedReceipt;
@@ -2302,7 +2303,7 @@ pub(crate) fn maintenance(
             SeedStage::Seed,
             "1. Seed Actors",
             MaintenanceOperation::SeedActors,
-            "maintenance-seed",
+            maintenance::SEED_ACTION_KEY,
             "Use a CSV to add or update actors. Existing actors outside this CSV are kept.",
             &icons::SEED,
             MetalFinish::GoldCta,
@@ -2320,7 +2321,7 @@ pub(crate) fn maintenance(
             SeedStage::Classifier,
             "Optional · Train Classifier (Natural)",
             MaintenanceOperation::TrainClassifier,
-            "maintenance-train",
+            maintenance::TRAIN_ACTION_KEY,
             "Independent of search indexing. Use a training CSV for a Natural candidate. Activation is separate.",
             &icons::MODELS,
             MetalFinish::Gunmetal,
@@ -2461,7 +2462,7 @@ fn csv_path_prompt(
         })
         .on_submit(|state: &mut State, _| state.submit_csv_path())
         .build(kit)
-        .key("maintenance-csv-path");
+        .key(maintenance::CSV_PATH_KEY);
     let mut column = rune::col()
         .gap(8.0)
         .key("maintenance-csv-path-prompt")
@@ -2486,7 +2487,7 @@ fn csv_path_prompt(
             ActionButton::new("Cancel")
                 .key("maintenance-csv-path-cancel")
                 .finish(MetalFinish::Gunmetal)
-                .on_press(|state: &mut State| state.cancel_csv_path_prompt())
+                .on_press_tx(State::cancel_csv_path_prompt)
                 .build(kit, preferences, pointer_ref),
         );
     if cfg!(target_os = "linux") {

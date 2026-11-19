@@ -175,6 +175,9 @@ pub struct OperationJobRecord {
 }
 
 const OPERATION_SLOTS: usize = 3;
+pub(crate) const SEED_ACTION_KEY: &str = "maintenance-seed";
+pub(crate) const TRAIN_ACTION_KEY: &str = "maintenance-train";
+pub(crate) const CSV_PATH_KEY: &str = "maintenance-csv-path";
 
 fn operation_slot(operation: MaintenanceOperation) -> Option<usize> {
     match operation {
@@ -366,7 +369,8 @@ impl Maintenance {
 impl State {
     pub(crate) fn enter_csv_path(&mut self, kind: DatasetKind, tx: &mut Tx) {
         self.prepare_csv_path_prompt(kind);
-        tx.focus("maintenance-csv-path/value/input", true);
+        tx.focus(CSV_PATH_KEY, true);
+        tx.scroll_into_view(CSV_PATH_KEY);
     }
 
     fn prepare_csv_path_prompt(&mut self, kind: DatasetKind) {
@@ -405,7 +409,7 @@ impl State {
                 ..Default::default()
             }
             .filter("CSV", &["csv"]),
-            move |state: &mut State, result, _| {
+            move |state: &mut State, result, tx| {
                 if state.connection.epoch != epoch {
                     return;
                 }
@@ -416,23 +420,32 @@ impl State {
                         state.upload_selected_dataset();
                     }
                     Ok(None) => {}
-                    Err(_) => state.open_csv_path_prompt(kind),
+                    Err(_) => state.open_csv_path_prompt(kind, tx),
                 }
             },
         );
     }
 
     /// The chooser is unavailable: let the operator type the path of a local CSV instead.
-    pub(crate) fn open_csv_path_prompt(&mut self, kind: DatasetKind) {
+    pub(crate) fn open_csv_path_prompt(&mut self, kind: DatasetKind, tx: &mut Tx) {
         self.maintenance.message = Some(
             "The dataset chooser could not open a file. Enter the path of a local CSV instead."
                 .into(),
         );
-        self.prepare_csv_path_prompt(kind);
+        self.enter_csv_path(kind, tx);
     }
 
-    pub fn cancel_csv_path_prompt(&mut self) {
-        self.maintenance.csv_path_prompt = None;
+    pub(crate) fn cancel_csv_path_prompt(&mut self, tx: &mut Tx) {
+        let Some(prompt) = self.maintenance.csv_path_prompt.take() else {
+            return;
+        };
+        let opener = match prompt.kind {
+            DatasetKind::ActorCatalog => SEED_ACTION_KEY,
+            DatasetKind::ClassifierTraining => TRAIN_ACTION_KEY,
+            _ => return,
+        };
+        tx.focus(opener, tx.focus_visible());
+        tx.scroll_into_view(opener);
     }
 
     /// Reuses the picker's selection, validation, upload and confirmation flow for a typed path.

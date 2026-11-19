@@ -152,6 +152,53 @@ fn actor_and_training_buttons_choose_their_own_csv_source_without_submitting_job
     }
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn opening_csv_entry_accepts_immediate_typing_and_cancel_restores_focus() {
+    let press = |runtime: &mut Runtime<State>, key| {
+        runtime.key(rune::KeyEvent {
+            key,
+            mods: rune::Mods::default(),
+        });
+    };
+    for opener in ["maintenance-seed", "maintenance-train"] {
+        let mut runtime = runtime(state(false));
+        runtime.update(|_, tx| {
+            tx.scroll_into_view(opener);
+            tx.focus(opener, true);
+        });
+        runtime.frame(1.0 / 60.0);
+        assert!(runtime
+            .elements()
+            .iter()
+            .any(|element| { element.focused && element.key.as_deref() == Some(opener) }));
+
+        press(&mut runtime, rune::Key::Text(" ".into()));
+        press(&mut runtime, rune::Key::Text("/".into()));
+        runtime.frame(1.0 / 60.0);
+        let prompt = runtime
+            .state
+            .maintenance
+            .csv_path_prompt
+            .as_ref()
+            .expect("path prompt");
+        assert_eq!(
+            prompt.input.text, "/",
+            "the first key reaches the CSV editor"
+        );
+        assert!(prompt.input.focused);
+
+        let mut clock = 2.0 / 60.0;
+        click(&mut runtime, "maintenance-csv-path-cancel", &mut clock);
+        assert!(runtime.state.maintenance.csv_path_prompt.is_none());
+        assert!(runtime
+            .elements()
+            .iter()
+            .any(|element| { element.focused && element.key.as_deref() == Some(opener) }));
+        assert!(runtime.state.intents.is_empty());
+    }
+}
+
 #[test]
 fn uploaded_csv_requires_confirmation_and_keeps_initial_configuration_revision() {
     for (kind, operation) in [
@@ -1579,6 +1626,7 @@ mod csv_path_fallback {
     use std::path::PathBuf;
 
     use fleetworks_contracts::readiness::DatasetKind;
+    use rune::Tx;
 
     use crate::app::Intent;
     use crate::maintenance::parse_local_csv_path;
@@ -1632,7 +1680,7 @@ mod csv_path_fallback {
     #[test]
     fn an_unavailable_chooser_opens_the_prompt_and_a_valid_path_reuses_the_upload_flow() {
         let mut state = super::state(false);
-        state.open_csv_path_prompt(DatasetKind::ActorCatalog);
+        state.open_csv_path_prompt(DatasetKind::ActorCatalog, &mut Tx::default());
         assert!(state
             .maintenance
             .message
@@ -1682,7 +1730,7 @@ mod csv_path_fallback {
     #[test]
     fn the_prompt_is_drawn_in_the_matching_card_and_submits_from_its_button() {
         let mut runtime = super::runtime(super::state(false));
-        runtime.update(|state, _| state.open_csv_path_prompt(DatasetKind::ActorCatalog));
+        runtime.update(|state, tx| state.open_csv_path_prompt(DatasetKind::ActorCatalog, tx));
         runtime.frame(1.0 / 60.0);
         assert!(
             runtime.find("maintenance-csv-path").is_some(),
@@ -1690,6 +1738,16 @@ mod csv_path_fallback {
         );
         assert!(runtime.find("maintenance-csv-path-submit").is_some());
         assert!(runtime.find("maintenance-csv-path-cancel").is_some());
+        assert!(
+            runtime
+                .state
+                .maintenance
+                .csv_path_prompt
+                .as_ref()
+                .expect("prompt")
+                .input
+                .focused
+        );
 
         runtime.update(|state, _| {
             state
@@ -1716,11 +1774,11 @@ mod csv_path_fallback {
     #[test]
     fn cancel_and_origin_change_close_the_prompt() {
         let mut state = crate::tests::registered_fixture();
-        state.open_csv_path_prompt(DatasetKind::ClassifierTraining);
-        state.cancel_csv_path_prompt();
+        state.open_csv_path_prompt(DatasetKind::ClassifierTraining, &mut Tx::default());
+        state.cancel_csv_path_prompt(&mut Tx::default());
         assert!(state.maintenance.csv_path_prompt.is_none());
 
-        state.open_csv_path_prompt(DatasetKind::ActorCatalog);
+        state.open_csv_path_prompt(DatasetKind::ActorCatalog, &mut Tx::default());
         state.maintenance.invalidate_origin();
         assert!(state.maintenance.csv_path_prompt.is_none());
     }

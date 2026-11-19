@@ -711,6 +711,16 @@ mod native {
                 }),
                 ("workstation-status-checks-mixed", |state| {
                     readiness_scenes::mixed_status_checks(state);
+                    state.backend_kind = fleetworks_workstation::native::BackendKind::Local;
+                    state.connection.origin = TextEdit::new("local://embedded");
+                    state.host_metrics =
+                        Load::Ready(fleetworks_desktop::workstation_dashboard::HostMetrics {
+                            cpu_percent: Some(18.0),
+                            memory_percent: Some(0.0),
+                            disk_percent: None,
+                            ..Default::default()
+                        });
+                    jobs_scenes::install(state, Vec::new());
                     state.workstation_status_checks_open = true;
                 }),
                 ("workstation-observed", readiness_scenes::observed),

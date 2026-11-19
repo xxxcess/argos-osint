@@ -529,7 +529,7 @@ fn setup_advanced_toggle_switch_reveals_and_hides_readiness_checks() {
         !runtime
             .accessibility_json()
             .to_string()
-            .contains("Gateway: Passed"),
+            .contains("Gateway: Ready"),
         "readiness checks stay collapsed behind the Switch until toggled"
     );
 
@@ -545,7 +545,7 @@ fn setup_advanced_toggle_switch_reveals_and_hides_readiness_checks() {
     assert!(runtime
         .accessibility_json()
         .to_string()
-        .contains("Gateway: Passed"));
+        .contains("Gateway: Ready"));
 
     runtime.update(|_, tx| tx.blur());
     runtime.frame(3.0 / 60.0);
@@ -561,7 +561,7 @@ fn setup_advanced_toggle_switch_reveals_and_hides_readiness_checks() {
     assert!(!runtime
         .accessibility_json()
         .to_string()
-        .contains("Gateway: Passed"));
+        .contains("Gateway: Ready"));
 }
 
 fn compact_connected_setup_readiness_toggle(kind: fleetworks_workstation::native::BackendKind) {
@@ -653,7 +653,7 @@ fn compact_connected_setup_readiness_toggle(kind: fleetworks_workstation::native
     assert!(runtime
         .accessibility_json()
         .to_string()
-        .contains("Gateway: Passed"));
+        .contains("Gateway: Ready"));
 
     runtime.update(|_, tx| tx.focus("setup-advanced-toggle", true));
     runtime.frame(5.0 / 60.0);
@@ -670,7 +670,7 @@ fn compact_connected_setup_readiness_toggle(kind: fleetworks_workstation::native
     assert!(!runtime
         .accessibility_json()
         .to_string()
-        .contains("Gateway: Passed"));
+        .contains("Gateway: Ready"));
 }
 
 #[test]
@@ -803,7 +803,7 @@ fn status_checks_share_the_compact_keyboard_disclosures_and_keep_the_blocker_vis
         let passed = status_check_element(&runtime, PASSED_ROW);
         assert_eq!(failed.label.as_deref(), Some("Jobs: Failed"));
         assert_eq!(checking.label.as_deref(), Some("Actor search: Checking"));
-        assert_eq!(passed.label.as_deref(), Some("Gateway: Passed"));
+        assert_eq!(passed.label.as_deref(), Some("Gateway: Ready"));
         assert!(failed.target[1] < checking.target[1], "{kind:?}");
         assert!(checking.target[1] < passed.target[1], "{kind:?}");
         for key in ["readiness-icon-jobs", "readiness-icon-gateway"] {
@@ -864,6 +864,108 @@ fn status_checks_share_the_compact_keyboard_disclosures_and_keep_the_blocker_vis
         tick_status_checks(&mut runtime, &mut frame);
         assert_status_check_fully_visible(&runtime, CRITICAL);
     }
+}
+
+#[test]
+fn desktop_status_table_aligns_columns_and_exposes_the_granted_row_action() {
+    use fleetworks_contracts::readiness::DatasetKind;
+    use fleetworks_contracts::readiness::ReadinessAction;
+    use fleetworks_contracts::readiness::ReadinessActionId;
+    use fleetworks_contracts::readiness::ReadinessCheck;
+    use fleetworks_contracts::readiness::ReadinessCheckId;
+    use fleetworks_contracts::readiness::ReadinessState;
+    use fleetworks_contracts::readiness::WorkstationReadiness;
+
+    const OBSERVED: &str = "2026-01-01T00:00:00Z";
+    const SEED: &str = "readiness-action-actor_catalog-SeedActors";
+    let mut state = registered_fixture();
+    state.backend.profile = Load::Ready(crate::backend::ProfileSnapshot {
+        configuration_revision: 0,
+        configuration_format: 1,
+        accounts: vec![],
+        tool_credentials: vec![],
+        setup_required: false,
+        portable_schema_version: 4,
+    });
+    let mut gateway = ReadinessCheck::new(
+        ReadinessCheckId::Gateway,
+        ReadinessState::Ready,
+        "gateway_reachable".into(),
+        "The gateway accepted the request.".into(),
+        OBSERVED.into(),
+    );
+    gateway.fresh_for_ms = 60_000;
+    let mut catalog = ReadinessCheck::new(
+        ReadinessCheckId::ActorCatalog,
+        ReadinessState::NotReady,
+        "database_catalog_empty".into(),
+        "The catalog is empty at the current checkpoint.".into(),
+        OBSERVED.into(),
+    );
+    catalog.fresh_for_ms = 60_000;
+    catalog.actions.push(ReadinessAction::new(
+        ReadinessActionId::SeedActors,
+        Permission::MaintainBackend,
+        true,
+    ));
+    let mut readiness = WorkstationReadiness::new(
+        "synthetic-deployment".into(),
+        OBSERVED.into(),
+        vec![gateway, catalog],
+    );
+    readiness.registration = Some(RegistrationReceipt::new(
+        "synthetic-deployment".into(),
+        "synthetic-node".into(),
+        "synthetic-registration".into(),
+        Some("192.0.2.42".parse().unwrap()),
+        1,
+    ));
+    state.complete_readiness(Ok(readiness));
+    let mut runtime = Runtime::new(
+        state,
+        app::view,
+        (1280.0, 800.0),
+        Env {
+            system_dark: true,
+            scale: 1.0,
+        },
+    );
+    runtime.reduced_motion = true;
+    let mut frame = 0;
+    tick_status_checks(&mut runtime, &mut frame);
+    assert!(runtime.find("workstation-open-seed").is_some());
+    assert!(runtime.find(SEED).is_none());
+    runtime.update(|_, tx| tx.focus("status-checks-toggle", true));
+    tick_status_checks(&mut runtime, &mut frame);
+    press_status_check(&mut runtime, &mut frame);
+    let header = status_check_element(&runtime, "readiness-status-table-header");
+    let column_labels: Vec<_> = runtime
+        .elements()
+        .into_iter()
+        .filter(|element| element.path.starts_with(&format!("{}/", header.path)))
+        .filter_map(|element| element.text)
+        .collect();
+    assert_eq!(column_labels, ["Service", "Status", "Action"]);
+    let catalog_status = status_check_element(&runtime, "readiness-status-actor_catalog");
+    let gateway_status = status_check_element(&runtime, "readiness-status-gateway");
+    assert_eq!(catalog_status.target[0], gateway_status.target[0]);
+    assert!(catalog_status.target[1] < gateway_status.target[1]);
+    assert!(runtime.find("readiness-details-actor_catalog").is_none());
+    let seed = status_check_element(&runtime, SEED);
+    assert!(seed.focusable);
+    assert!(seed.target[0] > catalog_status.target[0]);
+    runtime.update(|_, tx| {
+        tx.scroll_into_view(SEED);
+        tx.focus(SEED, true);
+    });
+    tick_status_checks(&mut runtime, &mut frame);
+    assert!(status_check_element(&runtime, SEED).focused);
+    runtime.state.intents.clear();
+    press_status_check(&mut runtime, &mut frame);
+    assert!(runtime.state.intents.contains(&Intent::ChooseDataset {
+        kind: DatasetKind::ActorCatalog,
+    }));
+    assert!(runtime.find("readiness-details-actor_catalog").is_none());
 }
 
 fn tick_status_checks(runtime: &mut Runtime<State>, frame: &mut u32) {
@@ -948,22 +1050,13 @@ fn workstation_metric_tile_opens_and_closes_telemetry_modal() {
         .to_string()
         .contains("CPU Telemetry"));
 
-    runtime.update(|_, tx| tx.scroll_into_view("workstation-host-metrics"));
-    runtime.frame(1.0 / 60.0);
-    let (x, y) = runtime
-        .find("workstation-host-metrics/trigger")
-        .expect("host resource disclosure");
-    runtime.pointer_down(x, y);
-    runtime.pointer_up(x, y);
-    runtime.frame(2.0 / 60.0);
-    runtime.update(|_, tx| tx.scroll_into_view("workstation-tile-cpu"));
-    runtime.frame(3.0 / 60.0);
+    assert!(runtime.find("host-resources-card").is_some());
     let (x, y) = runtime
         .find("workstation-tile-cpu")
-        .expect("clickable CPU metric ring tile");
+        .expect("CPU dial is available on the dashboard without disclosure");
     runtime.pointer_down(x, y);
     runtime.pointer_up(x, y);
-    runtime.frame(4.0 / 60.0);
+    runtime.frame(1.0 / 60.0);
     assert_eq!(
         runtime.state.workstation_inspector,
         Some(WorkstationInspector::Cpu)
@@ -973,8 +1066,21 @@ fn workstation_metric_tile_opens_and_closes_telemetry_modal() {
     assert!(tree.contains("Observed reading: 42.5%"));
     assert!(tree.contains("Measurements describe the API host"));
 
+    runtime.update(|state, _| {
+        state.apply_host_metrics(Err("gateway timed out".into()));
+    });
+    runtime.frame(2.0 / 60.0);
+    assert_eq!(
+        runtime.state.workstation_inspector,
+        Some(WorkstationInspector::Cpu)
+    );
+    assert!(runtime
+        .accessibility_json()
+        .to_string()
+        .contains("Observed reading: 42.5%"));
+
     runtime.update(|state, _| state.workstation_inspector = None);
-    runtime.frame(5.0 / 60.0);
+    runtime.frame(3.0 / 60.0);
     assert!(!runtime
         .accessibility_json()
         .to_string()
@@ -1119,40 +1225,93 @@ fn seed_button_preflight_status_shimmer_and_progressive_disclosure_reflect_state
 }
 
 #[test]
-fn host_resources_show_stale_marker_after_a_failed_refresh() {
+fn dashboard_metrics_distinguish_unavailable_zero_and_last_known_samples() {
     use crate::workstation_dashboard::HostMetrics;
+    use fleetworks_workstation::native::BackendKind;
 
+    const CPU: &str = "workstation-tile-cpu";
+    const MEMORY: &str = "workstation-tile-memory";
+    const DISK: &str = "workstation-tile-disk";
+    const UNSYNCED: &str = "host-metrics-unsynced";
     let mut state = registered_fixture();
-    state.page = Page::Workstation;
-    state.host_metrics = Load::Ready(HostMetrics {
-        cpu_percent: Some(42.5),
-        ..HostMetrics::default()
-    });
-    state.host_metrics_observed_at = Some(0.0);
+    state.backend_kind = BackendKind::Local;
+    state.connection.origin = TextEdit::new("local://embedded");
+    state.host_metrics = Load::Loading;
+    state.readiness = Load::Loading;
     let mut runtime = Runtime::new(
         state,
         app::view,
-        (1180.0, 780.0),
+        (640.0, 480.0),
         Env {
             system_dark: true,
             scale: 1.0,
         },
     );
-    runtime.frame(0.0);
-    assert!(runtime.find("host-metrics-unsynced").is_none());
-
-    runtime.update(|state, _| state.apply_host_metrics(Err("gateway timed out".into())));
-    runtime.frame(1.0 / 60.0);
+    runtime.reduced_motion = true;
+    let mut frame = 0;
+    tick_status_checks(&mut runtime, &mut frame);
+    assert!(runtime.find("workstation-status-header").is_some());
+    assert!(runtime.find("host-metrics-loading").is_some());
     let tree = runtime.accessibility_json().to_string();
-    assert!(
-        runtime.find("host-metrics-unsynced").is_some(),
-        "unsynced glyph missing"
-    );
-    assert!(tree.contains("Latest refresh failed: gateway timed out"));
+    assert!(tree.contains("API host resources"));
+    assert!(tree.contains("Status checks · checking"));
+    for (key, label) in [
+        (CPU, "CPU: Unavailable"),
+        (MEMORY, "Memory: Unavailable"),
+        (DISK, "Disk: Unavailable"),
+    ] {
+        assert_eq!(
+            status_check_element(&runtime, key).label.as_deref(),
+            Some(label)
+        );
+    }
+
+    runtime.update(|state, _| {
+        state.apply_host_metrics(Ok(HostMetrics {
+            cpu_percent: Some(0.0),
+            disk_percent: Some(42.5),
+            ..HostMetrics::default()
+        }));
+    });
+    tick_status_checks(&mut runtime, &mut frame);
+    assert!(runtime.find("host-metrics-loading").is_none());
+    assert!(runtime.find(UNSYNCED).is_none());
+    let values = [
+        (CPU, "CPU: 0.0%"),
+        (MEMORY, "Memory: Unavailable"),
+        (DISK, "Disk: 42.5%"),
+    ];
+    for (key, label) in values {
+        runtime.update(|_, tx| tx.scroll_into_view(key));
+        tick_status_checks(&mut runtime, &mut frame);
+        let tile = assert_status_check_fully_visible(&runtime, key);
+        assert_eq!(tile.scrolled[0], 0.0, "{key} required horizontal scrolling");
+        assert_eq!(tile.label.as_deref(), Some(label));
+    }
+
+    focus_status_check(&mut runtime, DISK, &mut frame);
+    runtime.update(|state, _| state.apply_host_metrics(Err("gateway timed out".into())));
+    tick_status_checks(&mut runtime, &mut frame);
+    for (key, label) in values {
+        assert_eq!(
+            status_check_element(&runtime, key).label.as_deref(),
+            Some(label)
+        );
+    }
+    assert!(status_check_element(&runtime, DISK).focused);
+    assert!(runtime.find(UNSYNCED).is_some());
+    assert!(runtime
+        .accessibility_json()
+        .to_string()
+        .contains("Last known API host readings. Open a metric for details."));
 
     runtime.update(|state, _| state.apply_host_metrics(Ok(HostMetrics::default())));
-    runtime.frame(2.0 / 60.0);
-    assert!(runtime.find("host-metrics-unsynced").is_none());
+    tick_status_checks(&mut runtime, &mut frame);
+    assert!(runtime.find(UNSYNCED).is_none());
+    assert_eq!(
+        status_check_element(&runtime, DISK).label.as_deref(),
+        Some("Disk: Unavailable")
+    );
 }
 
 pub(crate) fn brain_search_response_fixture() -> ActorSearchResponse {

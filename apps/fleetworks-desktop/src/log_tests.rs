@@ -892,15 +892,6 @@ fn loading_list_areas_render_shape_accurate_shimmering_skeletons_with_reduced_mo
 
     runtime.update(|state, _| state.navigate(crate::app::Page::Workstation));
     runtime.frame(1.0 / 60.0);
-    assert!(runtime.find("host-metrics-loading").is_none());
-    let key = "workstation-host-metrics/trigger";
-    runtime.update(|_, tx| tx.scroll_into_view(key));
-    runtime.frame(1.25 / 60.0);
-    let (x, y) = runtime.find(key).expect("host metrics disclosure trigger");
-    runtime.pointer_down(x, y);
-    runtime.pointer_up(x, y);
-    runtime.frame(1.5 / 60.0);
-    assert!(runtime.state.workstation_metrics_open);
     assert!(runtime.find("host-metrics-loading").is_some());
 
     runtime.update(|state, _| {

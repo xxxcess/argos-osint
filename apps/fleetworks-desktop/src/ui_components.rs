@@ -18,7 +18,6 @@ use rune_kit::Dialog;
 use rune_kit::Kit;
 use rune_kit::Progress;
 use rune_kit::ProgressCircle;
-use rune_kit::RollingText;
 use rune_kit::Spinner;
 use rune_kit::Switch;
 
@@ -296,15 +295,12 @@ pub(crate) fn async_status_strip(
     strip
 }
 
-/// Interactive visual telemetry tile using `ProgressCircle`, `RollingText` and pointer-reactive glow.
+/// Compact, interactive 0–100% telemetry dial.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn metric_ring_tile(
-    key: impl Into<String>,
-    label: impl Into<String>,
-    value_text: impl Into<String>,
-    numeric_value: Option<f64>,
-    fraction: Option<f32>,
-    subtitle: impl Into<String>,
+    key: &str,
+    label: &str,
+    reading: Option<f64>,
     glyph: &'static Icon,
     tone: StatusTone,
     active: bool,
@@ -313,62 +309,44 @@ pub(crate) fn metric_ring_tile(
     pointer_offset: Option<&Live<[f32; 2]>>,
     shadow_offset: Option<&Live<[f32; 2]>>,
 ) -> El {
-    let key = key.into();
-    let label = label.into();
-    let value_text = value_text.into();
-    let subtitle = subtitle.into();
-    let fg = tone.fg();
-
-    let ring = match fraction {
-        Some(value) => ProgressCircle::new(value.clamp(0.0, 1.0))
-            .size(34.0)
-            .label(label.clone())
+    let value = reading.map(|value| format!("{value:.1}%"));
+    let accessible_label = format!("{label}: {}", value.as_deref().unwrap_or("Unavailable"));
+    let ring = match reading {
+        Some(value) => ProgressCircle::new((value / 100.0) as f32)
+            .size(26.0)
             .build(kit),
         None => el()
-            .size(34.0, 34.0)
+            .size(26.0, 26.0)
             .radius(999.0)
             .fill(tone.bg())
             .border(1.0, tone.border())
             .center()
-            .child(icon(glyph, 16.0).color(fg).a11y_hidden()),
+            .child(icon(glyph, 14.0).color(tone.fg())),
     };
-
-    let mut rolling = RollingText::new(format!("{key}-value"), value_text.clone())
-        .font(TextStyle {
-            size: 18.0,
-            line_height: 22.0,
-            ..kit.ty.ui_medium
-        })
-        .color(theme::hex(theme::TEXT_PRIMARY));
-    if let Some(num) = numeric_value {
-        rolling = rolling.value(num);
-    }
-
-    let body = col()
+    let body = row()
         .w_full()
-        .padding(12.0)
-        .gap(8.0)
+        .min_w(0.0)
+        .padding(7.0)
+        .gap(6.0)
+        .center_y()
+        .child(ring.a11y_hidden())
         .child(
-            row()
-                .w_full()
-                .center_y()
-                .gap(8.0)
-                .child(icon(glyph, 14.0).color(fg).a11y_hidden())
+            col()
+                .min_w(0.0)
+                .grow(1.0)
+                .gap(1.0)
                 .child(
-                    text(label.clone())
-                        .font(kit.ty.small_medium)
-                        .color(kit.c.text_muted),
+                    text(label)
+                        .font(kit.ty.small)
+                        .color(kit.c.text_muted)
+                        .wrap(),
                 )
-                .child(spacer())
-                .child(status_dot(tone, preferences)),
-        )
-        .child(
-            row().w_full().center_y().gap(10.0).child(ring).child(
-                col()
-                    .gap(2.0)
-                    .child(rolling.build(kit))
-                    .child(text(subtitle).font(kit.ty.small).color(kit.c.text_faint)),
-            ),
+                .child(
+                    text(value.unwrap_or_else(|| "—".to_owned()))
+                        .font(kit.ty.body_medium)
+                        .color(kit.c.text_base),
+                )
+                .a11y_hidden(),
         );
 
     material::interactive_tile(
@@ -381,7 +359,7 @@ pub(crate) fn metric_ring_tile(
     )
     .key(key)
     .role("button")
-    .label(format!("{label}: {value_text}"))
+    .label(accessible_label)
     .focusable(true)
     .focus_ring(2.0, 2.0, theme::hex(theme::ACCENT_HIGHLIGHT))
 }
@@ -623,90 +601,6 @@ fn skeleton_card_shell(body: El, tone: StatusTone, preferences: ViewPreferences,
         tone.border().alpha(0.50)
     };
     body.w_full().fill(fill).border(1.0, border).radius(10.0)
-}
-
-/// 3-column Workstation host telemetry skeleton mirroring `metric_ring_tile`.
-pub(crate) fn skeleton_metric_tiles(preferences: ViewPreferences, kit: &Kit) -> El {
-    let mut tiles = row()
-        .key("host-metrics-loading")
-        .role("status")
-        .label("Reading API host resources")
-        .w_full()
-        .gap(10.0);
-    for tone in [StatusTone::Ok, StatusTone::Info, StatusTone::Accent] {
-        let tile = col()
-            .w_full()
-            .padding(12.0)
-            .gap(8.0)
-            .child(
-                row()
-                    .w_full()
-                    .center_y()
-                    .gap(8.0)
-                    .child(material::skeleton_block(
-                        None,
-                        Some(14.0),
-                        14.0,
-                        4.0,
-                        tone,
-                        preferences,
-                    ))
-                    .child(material::skeleton_block(
-                        None,
-                        Some(54.0),
-                        12.0,
-                        4.0,
-                        StatusTone::Neutral,
-                        preferences,
-                    ))
-                    .child(spacer())
-                    .child(material::skeleton_block(
-                        None,
-                        Some(7.0),
-                        7.0,
-                        999.0,
-                        tone,
-                        preferences,
-                    )),
-            )
-            .child(
-                row()
-                    .w_full()
-                    .center_y()
-                    .gap(10.0)
-                    .child(material::skeleton_block(
-                        None,
-                        Some(34.0),
-                        34.0,
-                        999.0,
-                        tone,
-                        preferences,
-                    ))
-                    .child(
-                        col()
-                            .grow(1.0)
-                            .gap(4.0)
-                            .child(material::skeleton_block(
-                                None,
-                                Some(64.0),
-                                18.0,
-                                5.0,
-                                StatusTone::Neutral,
-                                preferences,
-                            ))
-                            .child(material::skeleton_block(
-                                None,
-                                Some(84.0),
-                                11.0,
-                                4.0,
-                                StatusTone::Neutral,
-                                preferences,
-                            )),
-                    ),
-            );
-        tiles = tiles.child(skeleton_card_shell(tile, tone, preferences, kit).grow(1.0));
-    }
-    tiles
 }
 
 /// Readiness check list skeleton mirroring gateway readiness rows.

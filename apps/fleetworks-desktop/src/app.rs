@@ -297,7 +297,6 @@ pub struct State {
     pub tool_key_dialog: bool,
     pub setup_advanced_open: bool,
     pub workstation_inspector: Option<WorkstationInspector>,
-    pub(crate) workstation_metrics_open: bool,
     pub(crate) workstation_diagnostics_open: bool,
     pub workstation_status_checks_open: bool,
     pub seed_stage: SeedStage,
@@ -385,7 +384,6 @@ impl Default for State {
             tool_key_dialog: false,
             setup_advanced_open: false,
             workstation_inspector: None,
-            workstation_metrics_open: false,
             workstation_diagnostics_open: false,
             workstation_status_checks_open: false,
             seed_stage: SeedStage::Seed,
@@ -657,7 +655,6 @@ impl State {
     fn reset_connection_state(&mut self) {
         self.cancel_requests();
         self.activity_tab = ActivityTab::Jobs;
-        self.workstation_metrics_open = false;
         self.workstation_diagnostics_open = false;
         self.workstation_status_checks_open = false;
         self.setup_advanced_open = false;

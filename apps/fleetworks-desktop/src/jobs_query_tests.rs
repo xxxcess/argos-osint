@@ -939,6 +939,123 @@ fn jobs_nav_badge_counts_in_progress_buckets_omits_unknown_and_clears_on_authori
     );
 }
 
+#[test]
+fn workstation_job_tiles_use_scoped_counts_and_open_jobs() {
+    use crate::app;
+    use crate::app::Page;
+    use crate::logs::ActivityTab;
+
+    let mut state = registered_app();
+    state.page = Page::Workstation;
+    state.activity_tab = ActivityTab::Logs;
+    let mut runtime = Runtime::new(
+        state,
+        app::view,
+        (640.0, 480.0),
+        Env {
+            system_dark: true,
+            scale: 1.0,
+        },
+    );
+    runtime.reduced_motion = true;
+    runtime.frame(0.0);
+    let label_for = |runtime: &Runtime<app::State>, key: &str| {
+        runtime
+            .elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some(key) && !element.exiting)
+            .and_then(|element| element.label)
+    };
+    let keys = [
+        ("workstation-jobs-queued", "Queued"),
+        ("workstation-jobs-running", "Running"),
+        ("workstation-jobs-retrying", "Retrying"),
+    ];
+    for (key, label) in keys {
+        let unavailable = format!("{label}: Unavailable");
+        assert_eq!(
+            label_for(&runtime, key).as_deref(),
+            Some(unavailable.as_str())
+        );
+    }
+
+    runtime.update(|state, _| {
+        state.request_jobs(JobsEvent::Apply);
+        let ticket = state
+            .scoped_jobs
+            .active_ticket()
+            .expect("registered jobs read")
+            .clone();
+        let mut reply = page(&ticket.binding, 1, None);
+        reply.counts = Some(JobsDashboardCounts {
+            active: 2,
+            queued: 3,
+            retrying: 0,
+            failed: 4,
+            completed_recent: 9,
+        });
+        state.complete_scoped_jobs(ticket, Ok(reply));
+    });
+    runtime.frame(1.0 / 60.0);
+    for ((key, _), expected) in keys
+        .into_iter()
+        .zip(["Queued: 3", "Running: 2", "Retrying: 0"])
+    {
+        assert_eq!(label_for(&runtime, key).as_deref(), Some(expected));
+    }
+
+    runtime.update(|state, _| {
+        state.request_jobs(JobsEvent::Poll);
+        let ticket = state
+            .scoped_jobs
+            .active_ticket()
+            .expect("registered poll")
+            .clone();
+        let mut reply = page(&ticket.binding, 1, None);
+        reply.counts = None;
+        reply.observed_at = "2026-11-12T12:01:00Z".into();
+        state.complete_scoped_jobs(ticket, Ok(reply));
+    });
+    runtime.frame(2.0 / 60.0);
+    for (key, label) in keys {
+        let unavailable = format!("{label}: Unavailable");
+        assert_eq!(
+            label_for(&runtime, key).as_deref(),
+            Some(unavailable.as_str())
+        );
+    }
+
+    runtime.update(|state, tx| {
+        state.request_jobs(JobsEvent::Poll);
+        let ticket = state
+            .scoped_jobs
+            .active_ticket()
+            .expect("registered poll")
+            .clone();
+        let mut reply = page(&ticket.binding, 1, None);
+        reply.observed_at = "2026-11-12T12:02:00Z".into();
+        state.complete_scoped_jobs(ticket, Ok(reply));
+        tx.scroll_into_view("workstation-jobs-queued");
+        tx.focus("workstation-jobs-queued", true);
+    });
+    runtime.frame(3.0 / 60.0);
+    let queued = runtime
+        .elements()
+        .into_iter()
+        .find(|element| element.key.as_deref() == Some("workstation-jobs-queued"))
+        .expect("visible Jobs link");
+    assert_eq!(queued.visible, queued.rect);
+    assert_eq!(queued.scrolled[0], 0.0);
+    assert!(queued.focused);
+    runtime.key(rune::KeyEvent {
+        key: rune::Key::Text(" ".into()),
+        mods: rune::Mods::default(),
+    });
+    runtime.frame(4.0 / 60.0);
+    assert_eq!(runtime.state.page, Page::Jobs);
+    assert_eq!(runtime.state.activity_tab, ActivityTab::Jobs);
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn actor_reindex_is_listed_and_updates_the_jobs_badge_from_workstation() {
     use crate::app;

@@ -206,9 +206,9 @@ fn actual_readiness_view_distinguishes_stale_ready_and_unverified_inference() {
         .find(|element| element.key.as_deref() == Some("readiness-unsynced-gateway"))
         .expect("unsynced glyph for the last gateway observation");
     assert!(unsynced_glyph.visible[2] > 0.0 && unsynced_glyph.visible[3] > 0.0);
-    assert!(tree.contains("Gateway: Ready"));
+    assert!(tree.contains("Gateway: Last ready"));
     assert!(tree.contains("Gateway observation unsynced."));
-    assert!(!tree.contains("Gateway: Passed"));
+    assert!(!tree.contains("Gateway: Ready"));
     assert!(!tree.contains("Synthetic previous gateway check"));
     assert!(tree.contains("Classifier inference: Unknown"));
     assert!(!tree.contains("Classifier inference: Ready"));
@@ -255,7 +255,6 @@ fn material_and_matte_preserve_interactive_hit_bounds_and_a11y_on_status_and_see
             let mut state = crate::tests::registered_fixture();
             state.page = page;
             state.accessibility.fixture_override = Some(preferences);
-            state.workstation_metrics_open = true;
             state.host_metrics = Load::Ready(metrics.clone());
             state.readiness = Load::Ready(WorkstationReadiness::new(
                 "synthetic-deployment".into(),

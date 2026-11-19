@@ -89,9 +89,9 @@ impl State {
         }
         self.expanded_readiness.insert(id);
         self.selected_readiness = Some(id.as_str().to_owned());
-        let trigger = format!("readiness-{}/trigger", id.as_str());
-        tx.scroll_into_view(&trigger);
-        tx.focus(trigger, tx.focus_visible());
+        let row = format!("readiness-{}", id.as_str());
+        tx.scroll_into_view(format!("{row}/trigger"));
+        tx.focus(row, tx.focus_visible());
     }
 }
 

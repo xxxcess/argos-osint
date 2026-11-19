@@ -1452,6 +1452,9 @@ mod tests {
         assert!(!runtime.state.inbox.open);
         assert!(runtime.state.workstation_status_checks_open);
         assert!(runtime.find("readiness-details-actor_search").is_some());
+        assert!(runtime.elements().iter().any(|element| {
+            element.path.ends_with("/readiness-actor_search/trigger") && element.focused
+        }));
         assert_eq!(runtime.state.inbox.unread(), 3);
     }
 

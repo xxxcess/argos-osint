@@ -5,6 +5,9 @@ use fleetworks_contracts::readiness::ReadinessCheckId;
 use fleetworks_contracts::readiness::ReadinessState;
 use fleetworks_contracts::readiness::WorkstationReadiness;
 use rune::Env;
+use rune::Key;
+use rune::KeyEvent;
+use rune::Mods;
 use rune::Runtime;
 
 use crate::accessibility::FixtureAccessibility;
@@ -177,15 +180,42 @@ fn actual_readiness_view_distinguishes_stale_ready_and_unverified_inference() {
     ));
     runtime.state.readiness_received_at = Some(0.0);
     runtime.frame(0.0);
+    let collapsed = runtime.accessibility_json().to_string();
+    assert!(collapsed.contains("Status checks · 2 unresolved"));
+    assert!(!collapsed.contains("passed"));
+    assert!(runtime.find("readiness-gateway/trigger").is_none());
+    assert!(runtime
+        .find("readiness-classifier_inference/trigger")
+        .is_none());
+
+    runtime.update(|_, tx| tx.focus("status-checks-toggle", true));
+    runtime.frame(1.0 / 60.0);
+    assert!(runtime.elements().iter().any(|element| {
+        element.focused && element.path.ends_with("/status-checks-toggle/trigger")
+    }));
+    runtime.key(KeyEvent {
+        key: Key::Text(" ".into()),
+        mods: Mods::default(),
+    });
+    runtime.frame(2.0 / 60.0);
+
     let tree = runtime.accessibility_json().to_string();
+    let unsynced_glyph = runtime
+        .elements()
+        .into_iter()
+        .find(|element| element.key.as_deref() == Some("readiness-unsynced-gateway"))
+        .expect("unsynced glyph for the last gateway observation");
+    assert!(unsynced_glyph.visible[2] > 0.0 && unsynced_glyph.visible[3] > 0.0);
     assert!(tree.contains("Gateway: Ready"));
-    assert!(tree.contains("Gateway is unsynced. Last observed"));
-    assert!(!tree.contains("stale observation"));
+    assert!(tree.contains("Gateway observation unsynced."));
+    assert!(!tree.contains("Gateway: Passed"));
+    assert!(!tree.contains("Synthetic previous gateway check"));
     assert!(tree.contains("Classifier inference: Unknown"));
     assert!(!tree.contains("Classifier inference: Ready"));
+    assert!(!tree.contains("Classifier inference: Passed"));
     assert!(
         runtime.state.intents.is_empty(),
-        "rendering status never starts maintenance or inference"
+        "opening status never starts maintenance or inference"
     );
 }
 

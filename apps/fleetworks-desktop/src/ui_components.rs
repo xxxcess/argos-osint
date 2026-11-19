@@ -434,7 +434,7 @@ pub(crate) fn inline_toggle_row<S: 'static>(
         switch = switch.description(desc);
     }
 
-    let focus_key = format!("{key}/switch");
+    let focus_key = key.clone();
     let control = row()
         .key(key)
         .w_full()

@@ -547,13 +547,17 @@ fn setup_advanced_toggle_switch_reveals_and_hides_readiness_checks() {
         .to_string()
         .contains("Gateway: Passed"));
 
+    runtime.update(|_, tx| tx.blur());
+    runtime.frame(3.0 / 60.0);
+    assert!(!status_check_element(&runtime, "setup-advanced-toggle/switch").focused);
     let (x, y) = runtime
         .find("setup-advanced-toggle")
         .expect("the original readiness row remains a pointer target");
     runtime.pointer_down(x, y);
     runtime.pointer_up(x, y);
-    runtime.frame(3.0 / 60.0);
+    runtime.frame(4.0 / 60.0);
     assert!(!runtime.state.setup_advanced_open);
+    assert!(status_check_element(&runtime, "setup-advanced-toggle/switch").focused);
     assert!(!runtime
         .accessibility_json()
         .to_string()
@@ -651,7 +655,7 @@ fn compact_connected_setup_readiness_toggle(kind: fleetworks_workstation::native
         .to_string()
         .contains("Gateway: Passed"));
 
-    runtime.update(|_, tx| tx.focus(key, true));
+    runtime.update(|_, tx| tx.focus("setup-advanced-toggle", true));
     runtime.frame(5.0 / 60.0);
     assert!(runtime
         .elements()
@@ -891,13 +895,19 @@ fn assert_status_check_fully_visible(runtime: &Runtime<State>, key: &str) -> run
     element
 }
 
-fn focus_status_check(runtime: &mut Runtime<State>, key: &str, frame: &mut u32) {
+fn focus_status_check(runtime: &mut Runtime<State>, path: &str, frame: &mut u32) {
+    // Rune's focus request accepts an element key and chooses its first focusable
+    // descendant. The scroll request and assertions can target the exact child path.
+    let anchor = path.split_once('/').map_or(path, |(key, _)| key);
     runtime.update(move |_, tx| {
-        tx.scroll_into_view(key);
-        tx.focus(key, true);
+        tx.scroll_into_view(path);
+        tx.focus(anchor, true);
     });
     tick_status_checks(runtime, frame);
-    assert!(assert_status_check_fully_visible(runtime, key).focused);
+    assert!(
+        assert_status_check_fully_visible(runtime, path).focused,
+        "expected keyboard focus at {path} within {anchor}",
+    );
 }
 
 fn press_status_check(runtime: &mut Runtime<State>, frame: &mut u32) {

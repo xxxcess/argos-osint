@@ -688,10 +688,12 @@ fn seed_button_preflight_status_shimmer_and_progressive_disclosure_reflect_state
     assert!(runtime.find("maintenance-reindex").is_some());
     let seed_tree = runtime.accessibility_json().to_string();
     assert!(!seed_tree.contains("Pre-flight Checklist"));
-    assert!(seed_tree.contains("Seed Actors (Ready)"));
-    assert!(seed_tree.contains("Build Search Index (Unavailable)"));
-    assert!(seed_tree.contains("Train Classifier — Natural (Unavailable)"));
-    assert!(seed_tree.contains("Choose a CSV to add or update actors."));
+    assert!(seed_tree.contains("1. Seed Actors (Ready)"));
+    assert!(seed_tree.contains("2. Build Search Index (Unavailable)"));
+    assert!(seed_tree.contains("Optional · Train Classifier (Natural) (Unavailable)"));
+    assert!(seed_tree.contains(
+        "Choose a CSV to add or update actors. Existing actors outside this CSV are kept."
+    ));
     assert!(!seed_tree.contains("Choose a training CSV for a Natural candidate."));
     assert!(runtime.find("loading-shimmer").is_none());
 
@@ -704,7 +706,7 @@ fn seed_button_preflight_status_shimmer_and_progressive_disclosure_reflect_state
     });
     runtime.frame(0.5 / 60.0);
     let uploading_tree = runtime.accessibility_json().to_string();
-    assert!(uploading_tree.contains("Seed Actors (Uploading…)"));
+    assert!(uploading_tree.contains("1. Seed Actors (Uploading…)"));
     assert!(runtime.find("loading-shimmer").is_some());
     runtime.update(|state, _| {
         state.maintenance.upload = Load::Idle;
@@ -720,7 +722,9 @@ fn seed_button_preflight_status_shimmer_and_progressive_disclosure_reflect_state
     runtime.update(|state, _| state.seed_stage = SeedStage::Maintenance);
     runtime.frame(2.0 / 60.0);
     let reindex_tree = runtime.accessibility_json().to_string();
-    assert!(reindex_tree.contains("Build the actor-search projection from the backend catalog."));
+    assert!(
+        reindex_tree.contains("Build the actor-search projection from the seeded backend catalog.")
+    );
     assert!(!reindex_tree.contains("Choose a training CSV for a Natural candidate."));
 
     runtime.update(|state, _| {
@@ -762,26 +766,20 @@ fn host_resources_show_stale_marker_after_a_failed_refresh() {
         },
     );
     runtime.frame(0.0);
-    assert!(!runtime
-        .accessibility_json()
-        .to_string()
-        .contains("Telemetry unavailable"));
+    assert!(runtime.find("host-metrics-unsynced").is_none());
 
     runtime.update(|state, _| state.apply_host_metrics(Err("gateway timed out".into())));
     runtime.frame(1.0 / 60.0);
     let tree = runtime.accessibility_json().to_string();
     assert!(
-        tree.contains("Telemetry unavailable"),
-        "stale strip missing"
+        runtime.find("host-metrics-unsynced").is_some(),
+        "unsynced glyph missing"
     );
-    assert!(tree.contains("gateway timed out"));
+    assert!(tree.contains("Latest refresh failed: gateway timed out"));
 
     runtime.update(|state, _| state.apply_host_metrics(Ok(HostMetrics::default())));
     runtime.frame(2.0 / 60.0);
-    assert!(!runtime
-        .accessibility_json()
-        .to_string()
-        .contains("Telemetry unavailable"));
+    assert!(runtime.find("host-metrics-unsynced").is_none());
 }
 
 pub(crate) fn brain_search_response_fixture() -> ActorSearchResponse {

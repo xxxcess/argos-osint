@@ -1496,14 +1496,25 @@ fn only_a_fresh_read_is_unresolved_while_follow_and_older_keep_the_resolved_stat
     assert_eq!(logs.status, LogStatus::Ready);
     assert!(!logs.complete(&follow, Ok(LogReply::Page(page(1, 0, 10, None, None)))));
 
-    let refresh = logs.refresh().expect("explicit refresh");
+    let same_query = logs.refresh().expect("same-query refresh");
+    assert_eq!(
+        logs.status,
+        LogStatus::Ready,
+        "a same-query refresh preserves resolved rows without flashing back to loading"
+    );
+    assert!(logs.busy());
+    drop(same_query);
+
+    let mut changed = LogQuery::default();
+    changed.level = Some(LogLevel::Error);
+    let fresh = logs.refresh_with(changed).expect("changed-query read");
     assert_eq!(
         logs.status,
         LogStatus::Loading,
-        "a fresh read is unresolved"
+        "a fresh query read is unresolved"
     );
     assert!(logs.busy());
-    drop(refresh);
+    drop(fresh);
 }
 
 fn follow_with(logs: &mut LogState, start: usize, length: usize, next: usize) {

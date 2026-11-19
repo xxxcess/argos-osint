@@ -233,6 +233,9 @@ pub(crate) fn view(
         .center()
         .fill(theme::hex(theme::BACKGROUND))
         .transition(Transition::none());
+    if preferences.reduced_motion {
+        root = root.instant_changes();
+    }
     if state.setup_gateway {
         remember_mark(state, cx, SETUP_MARK);
         let setup_mark_height = 47.0;
@@ -433,6 +436,11 @@ fn activate_on_return(
 impl State {
     fn open_startup_setup(&mut self, kind: BackendKind, tx: &mut Tx) {
         self.choose_startup_destination(kind);
+        // The input-triggered commit would otherwise fade newly mounted descendants, even
+        // when the setup container itself has no transition.
+        if self.startup.reduced_motion.get() {
+            tx.settle();
+        }
         if self.startup.flight.is_some() {
             tx.wake_after(std::time::Duration::from_secs_f64(1.0 / 60.0));
         }
@@ -482,6 +490,9 @@ impl State {
         }
         self.setup_gateway = false;
         self.startup.flight = None;
+        if self.startup.reduced_motion.get() {
+            tx.settle();
+        }
         tx.focus(
             if self.is_local_backend() {
                 LOCAL
@@ -563,6 +574,13 @@ mod tests {
         runtime.pointer_up(x, y);
     }
 
+    fn assert_opaque(runtime: &rune::Runtime<State>, key: &str) {
+        let (_, opacity) = runtime
+            .presented(key)
+            .unwrap_or_else(|| panic!("expected presented {key}"));
+        assert_eq!(opacity, 1.0, "{key} must be fully visible");
+    }
+
     #[test]
     fn both_paths_are_keyboard_usable_on_the_first_frame_and_back_does_not_replay() {
         for (size, reduced) in [
@@ -605,6 +623,12 @@ mod tests {
             assert!(runtime.find("connect-local").is_some());
 
             click(&mut runtime, "startup-back");
+            if reduced {
+                runtime.frame(0.0);
+                assert_opaque(&runtime, LOCAL);
+                assert_opaque(&runtime, REMOTE);
+                assert_opaque(&runtime, "startup-orbit");
+            }
             runtime.frame(0.60);
             assert_eq!(runtime.state.startup.seconds(0.6), INTRO_SECONDS);
             assert!(runtime.find("startup-orbit").is_some());
@@ -613,6 +637,11 @@ mod tests {
             key(&mut runtime, rune::Key::Tab);
             runtime.frame(0.62);
             key(&mut runtime, rune::Key::Text(" ".into()));
+            if reduced {
+                runtime.frame(0.0);
+                assert_opaque(&runtime, "gateway-origin");
+                assert_opaque(&runtime, "connect");
+            }
             runtime.frame(0.90);
             assert_eq!(runtime.state.backend_kind, BackendKind::Remote);
             assert!(runtime.find("gateway-origin").is_some());
@@ -652,6 +681,9 @@ mod tests {
             runtime.frame(0.02);
             assert_eq!(runtime.state.startup.docked_pose, 1.0);
             assert!(runtime.find("connect-local").is_some());
+            if reduced {
+                assert_opaque(&runtime, "connect-local");
+            }
             tick(&mut runtime, 1.11);
             let (dock, _) = runtime.presented(SETUP_MARK).expect("setup mark slot");
             if reduced {

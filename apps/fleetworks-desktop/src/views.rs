@@ -371,6 +371,23 @@ fn local_runtime_diagnostics(
     has_any.then_some(diagnostics)
 }
 
+fn local_setup_diagnostic(
+    key: &str,
+    title: &str,
+    detail: impl Into<String>,
+    tone: StatusTone,
+    preferences: ViewPreferences,
+    kit: &Kit,
+) -> El {
+    ui_components::async_status_strip(key, title, "", false, tone, preferences, kit).child(
+        quiet(detail, kit)
+            .key(format!("{key}-detail"))
+            .w_full()
+            .min_w(0.0)
+            .wrap_anywhere(),
+    )
+}
+
 fn local_backend_setup_card(
     state: &State,
     narrow: bool,
@@ -422,35 +439,32 @@ fn local_backend_setup_card(
             .key("local-state-dir"),
         );
 
-    let binary_strip = match &state.local_backend.binary_status {
-        BinaryDiscoveryStatus::Ready(path) => ui_components::async_status_strip(
-            "local-binary-status",
+    let (title, detail, tone) = match &state.local_backend.binary_status {
+        BinaryDiscoveryStatus::Ready(path) => (
             "Companion binary verified",
             path.display().to_string(),
-            false,
             StatusTone::Ok,
-            preferences,
-            kit,
         ),
-        BinaryDiscoveryStatus::Missing(reason) => ui_components::async_status_strip(
-            "local-binary-status",
+        BinaryDiscoveryStatus::Missing(reason) => (
             "Companion binary missing or invalid",
             reason.clone(),
-            false,
             StatusTone::Err,
-            preferences,
-            kit,
-        )
-        .role("alert"),
-        BinaryDiscoveryStatus::Unknown => ui_components::async_status_strip(
-            "local-binary-status",
-            "Companion binary resolution pending",
-            "Sibling `argos-api-host`, `FLEETWORKS_LOCAL_BACKEND_BIN`, or `--local-backend-bin <PATH>` will be checked on start (PATH is never searched).",
-            false,
-            StatusTone::Neutral,
-            preferences,
-            kit,
         ),
+        BinaryDiscoveryStatus::Unknown => (
+            "Companion binary resolution pending",
+            "Sibling `argos-api-host`, `FLEETWORKS_LOCAL_BACKEND_BIN`, or `--local-backend-bin <PATH>` will be checked on start (PATH is never searched).".to_owned(),
+            StatusTone::Neutral,
+        ),
+    };
+    let binary_strip =
+        local_setup_diagnostic("local-binary-status", title, detail, tone, preferences, kit);
+    let binary_strip = if matches!(
+        state.local_backend.binary_status,
+        BinaryDiscoveryStatus::Missing(_)
+    ) {
+        binary_strip.role("alert")
+    } else {
+        binary_strip
     };
     body = body.child(binary_strip);
 
@@ -519,11 +533,10 @@ fn local_backend_setup_card(
     } else {
         if let ConnectionStatus::Failed(error) = &state.connection.status {
             body = body.child(
-                ui_components::async_status_strip(
+                local_setup_diagnostic(
                     "local-connection-error",
                     "Embedded backend failed to start",
                     error.clone(),
-                    false,
                     StatusTone::Err,
                     preferences,
                     kit,
@@ -3170,6 +3183,53 @@ mod tests {
             assert_eq!(rt.state.backend_kind, BackendKind::Remote);
             assert!(rt.find("gateway-origin").is_some());
             assert!(rt.find("local-backend-card").is_none());
+        }
+    }
+
+    #[test]
+    fn embedded_startup_companion_diagnostic_wraps_inside_its_strip() {
+        use crate::local_backend::BinaryDiscoveryStatus;
+        use fleetworks_workstation::native::BackendKind;
+
+        let reason = format!(
+            "Companion executable was not found at /private/{}/argos-api-host. Select a verified companion before starting the embedded backend.",
+            "synthetic-path".repeat(12),
+        );
+        for size in [(640.0, 480.0), (1280.0, 800.0)] {
+            let mut state = State::fixture();
+            state.fixture_show_startup_setup(BackendKind::Local);
+            state.local_backend.binary_status = BinaryDiscoveryStatus::Missing(reason.clone());
+            let mut runtime = Runtime::new(
+                state,
+                app::view,
+                size,
+                Env {
+                    system_dark: true,
+                    scale: 1.0,
+                },
+            );
+            runtime.frame(0.0);
+            runtime.frame(1.0 / 60.0);
+            let elements = runtime.elements();
+            let strip = elements
+                .iter()
+                .find(|el| el.key.as_deref() == Some("local-binary-status"))
+                .expect("companion diagnostic");
+            let detail = elements
+                .iter()
+                .find(|el| el.key.as_deref() == Some("local-binary-status-detail"))
+                .expect("wrapped diagnostic detail");
+            assert_eq!(strip.role, "alert");
+            assert_eq!(detail.text.as_deref(), Some(reason.as_str()));
+            assert!(detail.rect[3] > 20.0, "diagnostic must wrap at {size:?}");
+            assert!(
+                detail.rect[0] >= strip.rect[0]
+                    && detail.rect[0] + detail.rect[2] <= strip.rect[0] + strip.rect[2],
+                "diagnostic must fit its strip at {size:?}: {:?} inside {:?}",
+                detail.rect,
+                strip.rect,
+            );
+            assert!(runtime.find("connect-local").is_some());
         }
     }
 

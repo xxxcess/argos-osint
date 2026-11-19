@@ -354,6 +354,11 @@ select {
   height: 100% !important;
   max-width: 100%;
 }
+#intel-landing:has(.scene-container canvas) #intel-landing-controls {
+  /* The WebGL crescent reaches about 8.2% of scene height below center. */
+  top: max(calc(50% + 40px), calc(59% + 12px));
+  padding-top: 0;
+}
 
 @keyframes intel-landing-status-cycle {
   0% {

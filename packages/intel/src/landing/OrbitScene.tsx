@@ -115,17 +115,7 @@ export function OrbitScene({
           <OrbitFallback coreColor={coreColor} />
         )}
       </View>
-      <View
-        style={{
-          position: "absolute",
-          top: "50%",
-          left: 16,
-          right: 16,
-          paddingTop: 40,
-          alignItems: "center",
-          gap: 8,
-        }}
-      >
+      <View nativeID="intel-landing-controls" style={s.controls}>
         <StatusMessage
           key={message}
           message={message}
@@ -200,6 +190,15 @@ class OrbitBoundary extends React.Component<
 }
 
 const s = StyleSheet.create({
+  controls: {
+    position: "absolute",
+    top: "50%",
+    left: 16,
+    right: 16,
+    paddingTop: 40,
+    alignItems: "center",
+    gap: 8,
+  },
   fallback: {
     position: "absolute",
     top: 0,

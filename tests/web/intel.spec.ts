@@ -2622,6 +2622,12 @@ test.describe("revamp connection scene", () => {
     ).toBeLessThanOrEqual(1);
     expect(Math.abs(canvas.width - stage.width)).toBeLessThanOrEqual(1);
     expect(Math.abs(canvas.height - stage.height)).toBeLessThanOrEqual(1);
+    const status = (await page.locator("#intel-landing-status").boundingBox())!;
+    const scale = await page
+      .locator("html")
+      .evaluate((element) => Number(getComputedStyle(element).zoom));
+    const markBottom = canvas.y + canvas.height * 0.59;
+    expect(status.y - markBottom).toBeGreaterThanOrEqual(12 * scale - 1);
 
     await page.screenshot({
       path: `${captureDir}/landing-orbit.png`,

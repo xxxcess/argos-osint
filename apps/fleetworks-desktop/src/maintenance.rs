@@ -370,11 +370,11 @@ impl State {
     }
 
     fn prepare_csv_path_prompt(&mut self, kind: DatasetKind) {
-        if !self
+        if self
             .maintenance
             .csv_path_prompt
             .as_ref()
-            .is_some_and(|prompt| prompt.kind == kind)
+            .is_none_or(|prompt| prompt.kind != kind)
         {
             self.maintenance.csv_path_prompt = Some(CsvPathPrompt {
                 kind,

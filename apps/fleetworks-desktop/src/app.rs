@@ -1841,11 +1841,19 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     }
     let base = split.build(&kit).key("app-shell");
     let base = mark_fixture(state, &kit, base);
-    if let Some(mark) = crate::startup::rail_handoff(state, cx, preferences) {
+    let rail_handoff = crate::startup::rail_handoff(state, cx, preferences);
+    let flying = rail_handoff.is_some();
+    if let Some(mark) = rail_handoff {
         layers.insert(0, mark);
     }
-    rune_kit::root(base, layers)
-        .on_window_focus(State::log_window_focus)
+    let root = rune_kit::root(base, layers);
+    // Only the mark should animate when the newly registered workstation appears.
+    let root = if flying {
+        root.transition(Transition::none()).instant_changes()
+    } else {
+        root
+    };
+    root.on_window_focus(State::log_window_focus)
         .on_pointer_move_local(|state: &mut State, pointer, tx| {
             let nx = (pointer.window_x / 1180.0).clamp(0.0, 1.0);
             let ny = (pointer.window_y / 780.0).clamp(0.0, 1.0);

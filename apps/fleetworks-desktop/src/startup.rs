@@ -184,6 +184,7 @@ fn moving_mark(
         orbit::handoff(state.startup.docked_pose, blend, width, height)
             .key("startup-orbit-flight")
             .absolute(x - root_x, y - root_y)
+            .transition(Transition::none())
             .instant_changes()
             .inert()
             .a11y_hidden(),
@@ -192,11 +193,14 @@ fn moving_mark(
 
 /// Keep the rail mark's layout slot while the pointer-transparent orbit moves toward it.
 pub(crate) fn rail_mark(state: &State, height: f32, preferences: ViewPreferences) -> El {
-    orbit::mark(height).opacity(if state.startup.flying_to(Dock::Rail, preferences) {
-        0.0
-    } else {
-        1.0
-    })
+    orbit::mark(height)
+        .transition(Transition::none())
+        .instant_changes()
+        .opacity(if state.startup.flying_to(Dock::Rail, preferences) {
+            0.0
+        } else {
+            1.0
+        })
 }
 
 pub(crate) fn rail_handoff(
@@ -221,7 +225,8 @@ pub(crate) fn view(
         .w_full()
         .h_full()
         .center()
-        .fill(theme::hex(theme::BACKGROUND));
+        .fill(theme::hex(theme::BACKGROUND))
+        .transition(Transition::none());
     if state.setup_gateway {
         remember_mark(state, cx, SETUP_MARK);
         let setup_mark_height = 47.0;
@@ -232,6 +237,8 @@ pub(crate) fn view(
             setup_mark_height,
         )
         .key(SETUP_MARK)
+        .transition(Transition::none())
+        .instant_changes()
         .opacity(if state.startup.flying_to(Dock::Setup, preferences) {
             0.0
         } else {
@@ -248,6 +255,8 @@ pub(crate) fn view(
             });
         let mut header = rune::row()
             .key("startup-setup-header")
+            .transition(Transition::none())
+            .instant_changes()
             .w_full()
             .px(20.0)
             .gap(12.0)
@@ -269,6 +278,7 @@ pub(crate) fn view(
         }
         let setup = rune::col()
             .key("startup-setup")
+            .transition(Transition::none())
             .w_full()
             .max_w(820.0)
             .h_full()
@@ -297,6 +307,7 @@ fn choose(state: &State, preferences: ViewPreferences, kit: &Kit, window: Option
     let scrim = theme::hex(theme::CAST_SHADOW);
     rune::col()
         .key("startup-choose")
+        .transition(Transition::none())
         .w_full()
         .items_center()
         .gap(8.0)
@@ -307,6 +318,7 @@ fn choose(state: &State, preferences: ViewPreferences, kit: &Kit, window: Option
                 orbit_width,
                 orbit_height,
             )
+            .transition(Transition::none())
             .inert(),
         )
         .child(

@@ -1653,6 +1653,13 @@ fn active_or_selected_reindex_job(state: &State) -> Option<&crate::backend::Acti
     None
 }
 
+fn open_workstation_seed(state: &mut State) {
+    if summarize_actor_search(state).needs_seed {
+        state.seed_stage = SeedStage::Seed;
+        state.navigate(Page::Seed);
+    }
+}
+
 fn actor_search_summary_card(
     state: &State,
     preferences: ViewPreferences,
@@ -1704,12 +1711,7 @@ fn actor_search_summary_card(
         ActionButton::new("Seed actors…")
             .key("workstation-open-seed")
             .icon(&icons::SEED)
-            .on_press(|state: &mut State| {
-                if summarize_actor_search(state).needs_seed {
-                    state.seed_stage = SeedStage::Seed;
-                    state.navigate(Page::Seed);
-                }
-            })
+            .on_press(open_workstation_seed)
     } else if summary.can_search {
         ActionButton::new("Search actors")
             .key("workstation-search-actors")
@@ -1745,6 +1747,22 @@ fn actor_search_summary_card(
             .disabled(refreshing)
             .on_press(|state: &mut State| state.refresh_readiness())
     };
+    let primary = primary
+        .finish(MetalFinish::Gunmetal)
+        .build(kit, preferences, pointer_ref);
+    let primary = if summary.needs_seed {
+        primary.on_key(|state: &mut State, event, tx| {
+            if event.key != rune::Key::Enter || event.mods != rune::Mods::default() {
+                return false;
+            }
+            if !tx.key_repeat() {
+                open_workstation_seed(state);
+            }
+            true
+        })
+    } else {
+        primary
+    };
     let mut card_body = rune::col()
         .padding(10.0)
         .gap(6.0)
@@ -1764,11 +1782,7 @@ fn actor_search_summary_card(
                     kit,
                 ))
                 .child(status_slot)
-                .child(
-                    primary
-                        .finish(MetalFinish::Gunmetal)
-                        .build(kit, preferences, pointer_ref),
-                ),
+                .child(primary),
         );
 
     if summary.building {
@@ -2247,18 +2261,23 @@ mod tests {
     }
 
     #[test]
-    fn status_uses_only_identity_gateway_and_resource_cards_at_both_sizes() {
+    fn status_exposes_identity_and_scoped_disclosures_at_both_sizes() {
         for size in [(1180.0, 780.0), (640.0, 480.0)] {
             let runtime = runtime(Page::Workstation, false, size);
             let tree = runtime.accessibility_json().to_string();
-            for title in ["Native Client", "Gateway Backend"] {
-                assert!(tree.contains(title), "missing {title} at {size:?}");
+            for label in [
+                "Workstation Status",
+                "Transport: Disconnected",
+                "Unregistered",
+            ] {
+                assert!(tree.contains(label), "missing {label} at {size:?}");
             }
+            assert!(runtime.find("workstation-diagnostics/trigger").is_some());
+            assert!(runtime.find("gateway-backend-card").is_none());
             assert!(
-                !tree.contains("Host Resources"),
-                "disconnected workstation must hide Host Resources card at {size:?}"
+                runtime.find("workstation-host-metrics").is_none(),
+                "disconnected workstation must hide the Host resources disclosure at {size:?}"
             );
-            assert!(runtime.find("host-resources-card").is_none());
             assert!(!tree.contains("6 checks"));
             assert!(!tree.contains("Workstation activity: registration required"));
             assert!(!tree.contains("Permitted shared backend reads"));
@@ -2310,13 +2329,33 @@ mod tests {
             );
             connected.frame(0.0);
             let connected_tree = connected.accessibility_json().to_string();
-            for title in ["Native Client", "Gateway Backend", "Host Resources"] {
+            for label in [
+                "Distributed · synthetic-deployment",
+                "Transport: Connected",
+                "Workstation registered",
+            ] {
                 assert!(
-                    connected_tree.contains(title),
-                    "missing connected {title} at {size:?}"
+                    connected_tree.contains(label),
+                    "missing connected {label} at {size:?}"
                 );
             }
+            assert!(connected.find("host-resources-card").is_none());
+            let mut clock = 0.0;
+            click_within(
+                &mut connected,
+                "workstation-host-metrics/trigger",
+                size,
+                &mut clock,
+            );
             assert!(connected.find("host-resources-card").is_some());
+            assert!(connected.find("gateway-backend-card").is_none());
+            click_within(
+                &mut connected,
+                "workstation-diagnostics/trigger",
+                size,
+                &mut clock,
+            );
+            assert!(connected.find("gateway-backend-card").is_some());
         }
     }
 

@@ -10,8 +10,8 @@ const fs=require('fs'),path=require('path');
 const arg=Object.fromEntries(process.argv.slice(2).reduce((a,v,i,all)=>v.startsWith('--')?[...a,[v.slice(2),all[i+1]]]:a,[]));
 const SOURCE=arg.source||path.join(__dirname,'..','..','..','source','fleetworks-liquid-metal-glass.png');
 const variant=1,W=+(arg.width||800),H=Math.round(W*941/1672),FPS=20,N=+(arg.frames||160);
-// Validated fixed orbit: sampled polygon clearance ~13.323px at 800px width.
-const geometry={radiusRatio:1.3031175059952038,inclinationDegrees:66,liftAt800:38,prismScale:.70};
+// Validated fixed orbit: +30% upward lift (49.4px at 800px width, up from 38px baseline; animations/videos only).
+const geometry={radiusRatio:1.3031175059952038,inclinationDegrees:66,liftAt800:49.4,prismScale:.70};
 const OUT=arg.out||path.join(__dirname,'quiet-orbit');fs.mkdirSync(OUT,{recursive:true});
 const sx=W/1672,sy=H/941,cx=834.5*sx,cy=435.5*sy,rx=208.5*sx,ry=208.5*sy;
 const sat=[

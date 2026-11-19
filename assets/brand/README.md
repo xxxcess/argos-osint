@@ -1,6 +1,6 @@
 # Brand and motion assets
 
-The approved visual source is [source/fleetworks-liquid-metal-glass.png](source/fleetworks-liquid-metal-glass.png): molten glass core, fractured obsidian crescent and five triangular satellites. The selected animation is [reference/fleetworks-quiet-orbit.gif](reference/fleetworks-quiet-orbit.gif), with [MP4](reference/fleetworks-quiet-orbit.mp4) and [poster](reference/fleetworks-quiet-orbit.png) companions.
+The approved visual source is [source/fleetworks-liquid-metal-glass.png](source/fleetworks-liquid-metal-glass.png): molten glass core, fractured obsidian crescent and five triangular satellites. The selected animation is [reference/fleetworks-quiet-orbit.gif](reference/fleetworks-quiet-orbit.gif), with [MP4](reference/fleetworks-quiet-orbit.mp4) and [poster](reference/fleetworks-quiet-orbit.png) companions. The +30% orbital triangle elevation (`49.4 px` upward offset at 800 px width) applies to animations and videos (and their derived still/proof frames) only; static brand images remain unchanged.
 
 Follow the [matte canvas design](../../docs/design/matte-canvas/README.md) and [motion reproduction guide](../../docs/design/matte-canvas/motion.md). The [reference manifest](../../docs/design/matte-canvas/reference-manifest.json) records exact source and mockup hashes. `reference/quiet-orbit/` preserves the offline renderer, export helper and prior finite clearance evidence.
 

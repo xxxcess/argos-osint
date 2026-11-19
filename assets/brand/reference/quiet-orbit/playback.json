@@ -9,7 +9,7 @@
   ],
   "reference": {
     "gif": "../fleetworks-quiet-orbit.gif",
-    "gif_sha256": "277238bf79ec2519dba4341383d21a37881952b7994934d2b44ec0cb232e95f3",
+    "gif_sha256": "772a48940527a5fe04121bb7cc5aec443cf33ffbec9ec518b960ac041096c797",
     "dimensions": [
       800,
       450
@@ -18,9 +18,9 @@
     "fps": 15,
     "seconds": 16,
     "mp4": "../fleetworks-quiet-orbit.mp4",
-    "mp4_sha256": "19ea0032410c098b1eba6714945f7765947c6d6900cd8113007199259b1070cf",
+    "mp4_sha256": "d3871331a96c2a8ffcc859c10cadc63992b70fe428751d990983e463f76fa650",
     "poster": "../fleetworks-quiet-orbit.png",
-    "poster_sha256": "073e956f34647be8ceaee8ef4134eb70b7ba0f2dd6d215a061e79cd611fef6cf"
+    "poster_sha256": "c247cf0cc97c1beec3ad077e372b8bbb8ef032ed070e3a58eb714515369b5463"
   },
   "canvas": {
     "color": "#060709",
@@ -42,7 +42,8 @@
     "phase_spacing_degrees": 72,
     "radius_at_width_800_px": 130,
     "inclination_degrees": 66,
-    "projected_upward_offset_at_width_800_px": 38,
+    "projected_upward_offset_at_width_800_px": 49.4,
+    "elevation_scope": "animations and videos only (+30% over 38 px static baseline); static brand images keep the original material source",
     "prism_scale": 0.7,
     "core_reference_radius_at_width_800_px": 99.76,
     "clearance": "full painted triangle silhouettes, before occlusion, never intersect the crescent",

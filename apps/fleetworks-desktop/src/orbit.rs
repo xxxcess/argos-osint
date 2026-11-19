@@ -3,9 +3,10 @@
 //! The orbit follows the owner's reference geometry (`assets/brand/reference/quiet-orbit/playback.json`, checked by a test below): five
 //! persistent obsidian-glass prisms on one inclined, lifted ring around a smoky glass sphere of
 //! flowing molten liquid, above a fixed obsidian crescent. Orbit radius is 1.303 core radii, the
-//! inclination is 66 degrees, the ring is lifted 0.381 core radii, prisms are 0.70 scale, phases
-//! are 72 degrees apart and one revolution takes eight seconds. The three-second startup samples
-//! the first part of that same loop; it never speeds up to finish a turn.
+//! inclination is 66 degrees, the ring is lifted 0.495 core radii (+30% over the 0.381 static
+//! baseline, animations and videos only), prisms are 0.70 scale, phases are 72 degrees apart and
+//! one revolution takes sixteen seconds. The three-second startup samples the first part of that
+//! same loop; it never speeds up to finish a turn.
 //!
 //! The scene is one 144 x 176 envelope that scales as a unit. It is vector geometry for the
 //! crescent and prisms plus one derived texture for the core, with no decoder and no media
@@ -13,7 +14,7 @@
 //!
 //! Materials: the core is the approved smoky glass sphere with its molten ivory and amber flow,
 //! cropped from the approved source (`assets/brand/orbit/`) and drawn in a circle as two layers
-//! that drift against each other (whole turns of the eight-second loop); the crescent is coarse
+//! that drift against each other (whole turns of the sixteen-second loop); the crescent is coarse
 //! fractured obsidian (about eighty angular facets from the shared [`rock::noise`] hash) with a
 //! polished edge and faint flecks; each prism is glass with a lit and a shaded facet, an inner
 //! bevel, a lit edge and a warm reflection. See `docs/design/matte-canvas/motion.md`.
@@ -41,10 +42,10 @@ use crate::theme;
 
 /// Scene envelope in scene units; the element scales it uniformly.
 pub(crate) const ENVELOPE: [f32; 2] = [144.0, 176.0];
-/// One orbital revolution, matching the eight-second motion reference.
-pub(crate) const LOOP_SECONDS: f32 = 8.0;
-/// Closest any prism edge may come to the crescent polygon, in scene units. The reference scene
-/// keeps about 5.3 units at this scale; the geometry below measures about 8.
+/// One orbital revolution, matching the sixteen-second motion reference.
+pub(crate) const LOOP_SECONDS: f32 = 16.0;
+/// Closest any prism edge may come to the crescent polygon, in scene units. The prior 38 px
+/// baseline kept about 5.3 units at this scale; the +30% lifted geometry below measures ~12.5.
 #[cfg(test)]
 pub(crate) const MIN_CLEARANCE: f32 = 5.3;
 /// The moment the static, reduced-motion pose is taken from.
@@ -60,8 +61,9 @@ const CUT_RADIUS: f32 = 50.0;
 const ARC_STEPS: usize = 40;
 
 const RADIUS_RATIO: f32 = 1.303_117_5;
-/// 38 px of lift at the 800 px reference, where the core radius is 99.76 px.
-const LIFT: f32 = 38.0 / 99.760_765 * CORE_RADIUS;
+/// 49.4 px of lift (+30% over the 38 px baseline, animations and videos only) at the 800 px
+/// reference, where the core radius is 99.76 px.
+const LIFT: f32 = 49.4 / 99.760_765 * CORE_RADIUS;
 const INCLINATION: f32 = 66.0 * PI / 180.0;
 const PRISM_SCALE: f32 = 0.70;
 /// Reference prism size before `PRISM_SCALE`, in scene units.
@@ -173,7 +175,7 @@ thread_local! {
 
 /// Where the two core layers sit `seconds` into the loop, as fractions of the sphere diameter
 /// from the centred rest position: `[front, back]`, each `[x, y]`. Both are whole turns of the
-/// eight-second loop, so the flow repeats seamlessly, and the layers move in opposite senses at
+/// sixteen-second loop, so the flow repeats seamlessly, and the layers move in opposite senses at
 /// different rates so the texture shears like liquid.
 pub(crate) fn core_drift(seconds: f32) -> [[f32; 2]; 2] {
     let turn = phase(seconds);
@@ -608,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn the_loop_is_eight_seconds_and_seamless() {
+    fn the_loop_is_sixteen_seconds_and_seamless() {
         let start = satellites(0.0);
         let end = satellites(LOOP_SECONDS - 1e-3);
         for (a, b) in start.iter().zip(end.iter()) {

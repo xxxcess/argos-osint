@@ -1,11 +1,13 @@
 //! Shared production state and shell; all boundary results are revision fenced.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use fleetworks_contracts::ipc::IpcEvent;
 use fleetworks_contracts::ipc::ShutdownAck;
+use fleetworks_contracts::readiness::ReadinessCheckId;
 use fleetworks_contracts::readiness::ReadinessState;
 use fleetworks_contracts::readiness::WorkstationReadiness;
 use fleetworks_contracts::search::ActorSearchQuery;
@@ -297,12 +299,14 @@ pub struct State {
     pub workstation_inspector: Option<WorkstationInspector>,
     pub(crate) workstation_metrics_open: bool,
     pub(crate) workstation_diagnostics_open: bool,
+    pub workstation_status_checks_open: bool,
     pub seed_stage: SeedStage,
     pub models_tab: ModelsTab,
     pub models_provider_dialog: bool,
     pub models_role_dialog: bool,
     pub brain_facet: DossierFacet,
     pub selected_readiness: Option<String>,
+    pub(crate) expanded_readiness: BTreeSet<ReadinessCheckId>,
     pub selected_cycle_id: Option<String>,
     pub selected_job_id: Option<String>,
     pub confirm_cycle_delete: bool,
@@ -383,12 +387,14 @@ impl Default for State {
             workstation_inspector: None,
             workstation_metrics_open: false,
             workstation_diagnostics_open: false,
+            workstation_status_checks_open: false,
             seed_stage: SeedStage::Seed,
             models_tab: ModelsTab::Roles,
             models_provider_dialog: false,
             models_role_dialog: false,
             brain_facet: DossierFacet::Overview,
             selected_readiness: None,
+            expanded_readiness: BTreeSet::new(),
             selected_cycle_id: None,
             selected_job_id: None,
             confirm_cycle_delete: false,
@@ -653,6 +659,10 @@ impl State {
         self.activity_tab = ActivityTab::Jobs;
         self.workstation_metrics_open = false;
         self.workstation_diagnostics_open = false;
+        self.workstation_status_checks_open = false;
+        self.setup_advanced_open = false;
+        self.expanded_readiness.clear();
+        self.selected_readiness = None;
         self.workstation_inspector = None;
         self.invalidate_origin();
         self.registration.interfaces = Load::Idle;

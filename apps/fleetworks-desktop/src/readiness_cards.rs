@@ -1,4 +1,6 @@
-//! Check cards distinguish observed state from freshness and offer admitted repairs.
+//! Shared status check summaries, disclosures, and admitted repairs.
+
+use std::fmt::Write as _;
 
 use fleetworks_contracts::readiness::DatasetKind;
 use fleetworks_contracts::readiness::MaintenanceOperation;
@@ -7,12 +9,14 @@ use fleetworks_contracts::readiness::ReadinessCheck;
 use fleetworks_contracts::readiness::ReadinessCheckId;
 use fleetworks_contracts::readiness::ReadinessState;
 use rune::El;
-use rune_kit::Collapsible;
+use rune::Tx;
+use rune_kit::glyphs;
 use rune_kit::Kit;
 
 use crate::accessibility::ViewPreferences;
 use crate::app::Load;
 use crate::app::State;
+use crate::icons;
 use crate::material::MetalFinish;
 use crate::theme::StatusTone;
 use crate::ui_components;
@@ -36,197 +40,365 @@ impl State {
     }
 }
 
-pub(crate) fn checks(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
-    let mut body = rune::col().key("backend-readiness-checks").gap(8.0);
-    match &state.readiness {
+pub(crate) fn workstation_section(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
+    let open = state.workstation_status_checks_open;
+    let summary = summary_label(state);
+    rune::col()
+        .key("status-checks-toggle")
+        .w_full()
+        .gap(6.0)
+        .child(
+            disclosure_trigger(summary.clone(), open, kit)
+                .fill(kit.c.layer_01)
+                .child(disclosure_text(summary, kit))
+                .child(chevron(open, kit))
+                .on_press(|state: &mut State| {
+                    state.workstation_status_checks_open = !state.workstation_status_checks_open;
+                }),
+        )
+        .children(open.then(|| checks(state, preferences, kit)))
+}
+
+pub(crate) fn setup_section(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
+    rune::col()
+        .w_full()
+        .gap(6.0)
+        .children(primary_issue(state, true, preferences, kit))
+        .child(ui_components::inline_toggle_row(
+            "setup-advanced-toggle",
+            state.setup_advanced_open,
+            summary_label(state),
+            Some("Show individual checks and their details"),
+            false,
+            kit,
+            |state: &mut State| state.setup_advanced_open = !state.setup_advanced_open,
+        ))
+        .children(
+            state
+                .setup_advanced_open
+                .then(|| checks(state, preferences, kit)),
+        )
+}
+
+impl State {
+    pub(crate) fn reveal_readiness_check(&mut self, id: ReadinessCheckId, tx: &mut Tx) {
+        if self.setup_gateway {
+            self.setup_advanced_open = true;
+        } else {
+            self.workstation_status_checks_open = true;
+        }
+        self.expanded_readiness.insert(id);
+        self.selected_readiness = Some(id.as_str().to_owned());
+        let trigger = format!("readiness-{}/trigger", id.as_str());
+        tx.scroll_into_view(&trigger);
+        tx.focus(trigger, tx.focus_visible());
+    }
+}
+
+fn summary_label(state: &State) -> String {
+    let Load::Ready(readiness) = &state.readiness else {
+        let progress = match state.readiness {
+            Load::Idle => "not observed",
+            Load::Pending | Load::Loading => "checking",
+            Load::Failed(_) => "refresh failed",
+            Load::Ready(_) => unreachable!(),
+        };
+        return format!("Status checks · {progress}");
+    };
+    if readiness.checks.is_empty() {
+        return "Status checks · no observations".to_owned();
+    }
+    let (mut passed, mut failed, mut unresolved) = (0, 0, 0);
+    for check in &readiness.checks {
+        let fresh = state.readiness_check_fresh(check);
+        match CheckStatus::of(check, fresh) {
+            CheckStatus::NotApplicable => (),
+            CheckStatus::Passed => passed += 1,
+            CheckStatus::Failed if fresh => failed += 1,
+            _ => unresolved += 1,
+        }
+    }
+    if passed + failed + unresolved == 0 {
+        return "Status checks · none applicable".to_owned();
+    }
+    let mut label = "Status checks".to_owned();
+    for (count, caption) in [
+        (passed, "passed"),
+        (failed, "failed"),
+        (unresolved, "unresolved"),
+    ] {
+        if count > 0 {
+            let _ = write!(label, " · {count} {caption}");
+        }
+    }
+    label
+}
+
+fn checks(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
+    let mut body = rune::col()
+        .key("backend-readiness-checks")
+        .w_full()
+        .gap(4.0);
+    let readiness = match &state.readiness {
         Load::Idle => {
-            return body.child(ui_components::async_status_strip(
-                "readiness-idle",
-                "Readiness not observed",
-                "Refresh checks to inspect current backend health.",
-                false,
-                StatusTone::Neutral,
-                preferences,
-                kit,
-            ));
+            return body
+                .child(quiet(
+                    "Refresh checks to inspect current backend health.",
+                    kit,
+                ))
+                .child(refresh_button("readiness-retry", state, preferences, kit));
         }
         Load::Pending | Load::Loading => {
             return body.child(ui_components::skeleton_readiness_list(preferences, kit));
         }
         Load::Failed(error) => {
-            return body.child(
-                ui_components::async_status_strip(
-                    "readiness-failed",
-                    "Readiness check failed",
-                    error.clone(),
-                    false,
-                    StatusTone::Err,
-                    preferences,
+            return body.child(line(error.clone(), kit).role("alert"));
+        }
+        Load::Ready(readiness) => readiness,
+    };
+    if let Some(error) = &state.readiness_error {
+        body = body.child(
+            rune::row()
+                .key("readiness-update-failed")
+                .center_y()
+                .gap(6.0)
+                .child(unsynced_glyph(
+                    "readiness-refresh-unsynced",
+                    format!("Status check refresh failed: {error}"),
                     kit,
-                )
-                .role("alert"),
-            );
-        }
-        Load::Ready(readiness) => {
-            let applicable = readiness
-                .checks
-                .iter()
-                .filter(|check| check.state != ReadinessState::NotApplicable)
-                .count();
-            body = body.child(quiet(
-                if applicable == 1 {
-                    "1 applicable check".to_owned()
-                } else {
-                    format!("{applicable} applicable checks")
-                },
-                kit,
-            ));
-            if let Some(error) = &state.readiness_error {
-                body = body.child(
-                    rune::row()
-                        .key("readiness-update-failed")
-                        .center_y()
-                        .gap(6.0)
-                        .child(unsynced_glyph(
-                            "readiness-refresh-unsynced",
-                            format!("Readiness refresh failed: {error}"),
-                            kit,
-                        ))
-                        .child(quiet("Showing last observed checks", kit))
-                        .child(
-                            ActionButton::new("Retry")
-                                .key("readiness-retry")
-                                .finish(MetalFinish::Gunmetal)
-                                .on_press(|state: &mut State| state.refresh_readiness())
-                                .build(kit, preferences, None),
-                        ),
-                );
-            }
-            if readiness.checks.is_empty() {
-                body = body.child(quiet("No check observations", kit));
-            }
-            for check in &readiness.checks {
-                let fresh = state.readiness_check_fresh(check);
-                let check_id = check.id.as_str();
-                let expanded = state.selected_readiness.as_deref() == Some(check_id);
-                let background_indexing = check.id == ReadinessCheckId::ActorSearch
-                    && check.state == ReadinessState::Running
-                    && crate::views::active_actor_reindex(state).is_none()
-                    && crate::views::queued_actor_reindex_id(state).is_none();
-                let heading = if background_indexing {
-                    ACTOR_INDEX_CATCH_UP.to_owned()
-                } else {
-                    format!("{}: {}", title(check.id), label(check.state))
-                };
-                let mut disclosure =
-                    Collapsible::new(heading, expanded).on_toggle(move |state: &mut State| {
-                        state.selected_readiness =
-                            if state.selected_readiness.as_deref() == Some(check_id) {
-                                None
-                            } else {
-                                Some(check_id.to_owned())
-                            };
-                    });
-                if expanded {
-                    let mut detail = rune::col()
-                        .w_full()
-                        .gap(4.0)
-                        .child(line(check.explanation.clone(), kit))
-                        .child(quiet(
-                            format!("Observed {} · {}", check.observed_at, check.reason_code),
-                            kit,
-                        ));
-                    for action in &check.actions {
-                        if let Some((button, reason)) =
-                            maintenance_button(state, preferences, kit, check.id, action.id)
-                        {
-                            detail = detail
-                                .child(button)
-                                .children(reason.map(|reason| quiet(reason, kit)));
-                        }
-                    }
-                    disclosure = disclosure.child(detail);
-                }
-                let indicator =
-                    (!fresh && check.state != ReadinessState::NotApplicable).then(|| {
-                        unsynced_glyph(
-                            "unsynced",
-                            format!(
-                                "{} is unsynced. Last observed {}.",
-                                title(check.id),
-                                check.observed_at
-                            ),
-                            kit,
-                        )
-                    });
-                body = body.child(
-                    rune::row()
-                        .w_full()
-                        .gap(6.0)
-                        .key(format!("readiness-{check_id}"))
-                        .child(disclosure.build(kit).grow(1.0))
-                        .children(indicator),
-                );
-            }
-        }
+                ))
+                .child(refresh_button("readiness-retry", state, preferences, kit)),
+        );
     }
-    body
+    let mut checks: Vec<_> = readiness.checks.iter().collect();
+    checks.sort_by_key(|check| {
+        (
+            CheckStatus::of(check, state.readiness_check_fresh(check)).rank(),
+            check.id,
+        )
+    });
+    body.children(
+        checks
+            .into_iter()
+            .map(|check| check_row(state, check, preferences, kit)),
+    )
 }
 
-/// Present the next non-actor issue when the actor summary has no work to advance.
-pub(crate) fn primary_issue(state: &State, preferences: ViewPreferences, kit: &Kit) -> Option<El> {
+fn check_row(state: &State, check: &ReadinessCheck, preferences: ViewPreferences, kit: &Kit) -> El {
+    let id = check.id;
+    let check_id = id.as_str();
+    let fresh = state.readiness_check_fresh(check);
+    let status = CheckStatus::of(check, fresh);
+    let expanded = state.expanded_readiness.contains(&id);
+    let name = title(id);
+    let stale_reason = (!fresh && check.state != ReadinessState::NotApplicable)
+        .then(|| format!("{name} observation unsynced. Open details for the last observation."));
+    let label = format!("{name}: {}", status.label());
+    let mut trigger = disclosure_trigger(label, expanded, kit)
+        .child(status_icon(status, format!("readiness-icon-{check_id}")))
+        .child(disclosure_text(name, kit))
+        .child(
+            rune::text(status.label())
+                .font(kit.ty.text_xsmall)
+                .color(status.tone().fg())
+                .wrap()
+                .a11y_hidden(),
+        )
+        .children(stale_reason.as_ref().map(|description| {
+            unsynced_glyph(
+                &format!("readiness-unsynced-{check_id}"),
+                description.clone(),
+                kit,
+            )
+            .a11y_hidden()
+        }))
+        .child(chevron(expanded, kit))
+        .on_press(move |state: &mut State| {
+            if state.expanded_readiness.remove(&id) {
+                if state.selected_readiness.as_deref() == Some(check_id) {
+                    state.selected_readiness = None;
+                }
+            } else {
+                state.expanded_readiness.insert(id);
+                state.selected_readiness = Some(check_id.to_owned());
+            }
+        });
+    if let Some(description) = stale_reason {
+        trigger = trigger.description(description);
+    }
+    let mut row = rune::col()
+        .key(format!("readiness-{check_id}"))
+        .w_full()
+        .min_w(0.0)
+        .child(trigger);
+    if expanded {
+        let mut detail = rune::col()
+            .key(format!("readiness-details-{check_id}"))
+            .role("region")
+            .label(format!("{name} details"))
+            .w_full()
+            .min_w(0.0)
+            .px(8.0)
+            .pb(6.0)
+            .gap(4.0)
+            .child(line(check.explanation.clone(), kit))
+            .child(quiet(
+                format!("Observed {} · {}", check.observed_at, check.reason_code),
+                kit,
+            ));
+        if !check.job_ids.is_empty() {
+            detail = detail.child(quiet(format!("Jobs: {}", check.job_ids.join(", ")), kit));
+        }
+        if !check.artifact_ids.is_empty() {
+            detail = detail.child(quiet(
+                format!("Serving refs: {}", check.artifact_ids.join(", ")),
+                kit,
+            ));
+        }
+        for action in &check.actions {
+            if let Some((button, reason)) =
+                maintenance_button(state, preferences, kit, check.id, action.id)
+            {
+                detail = detail
+                    .child(button)
+                    .children(reason.map(|reason| quiet(reason, kit)));
+            }
+        }
+        row = row.child(detail);
+    }
+    row
+}
+
+fn disclosure_trigger(label: String, expanded: bool, kit: &Kit) -> El {
+    rune::row()
+        .key("trigger")
+        .role("button")
+        .label(label)
+        .expanded(expanded)
+        .focusable(true)
+        .focus_ring(2.0, 0.0, kit.c.border_focus)
+        .radius(6.0)
+        .hover(kit.c.layer_02)
+        .w_full()
+        .min_w(0.0)
+        .min_h(32.0)
+        .px(8.0)
+        .py(4.0)
+        .gap(6.0)
+        .center_y()
+}
+
+fn disclosure_text(text: impl Into<String>, kit: &Kit) -> El {
+    rune::text(text.into())
+        .font(kit.ty.text_small_medium)
+        .color(kit.c.std_text)
+        .grow(1.0)
+        .min_w(0.0)
+        .wrap()
+        .a11y_hidden()
+}
+
+fn chevron(expanded: bool, kit: &Kit) -> El {
+    rune::icon(
+        if expanded {
+            &icons::CHEVRON_DOWN
+        } else {
+            &icons::CHEVRON_RIGHT
+        },
+        14.0,
+    )
+    .color(kit.c.icon_weaker)
+    .a11y_hidden()
+}
+
+fn refresh_button(key: &str, state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
+    ActionButton::new("Refresh checks")
+        .key(key)
+        .icon(&icons::REFRESH)
+        .finish(MetalFinish::Gunmetal)
+        .busy(state.readiness_pending())
+        .disabled(state.readiness_pending())
+        .on_press(|state: &mut State| state.refresh_readiness())
+        .build(kit, preferences, None)
+}
+
+/// Keep the highest-priority observed blocker and a safe next action above the disclosure.
+pub(crate) fn primary_issue(
+    state: &State,
+    include_other_blockers: bool,
+    preferences: ViewPreferences,
+    kit: &Kit,
+) -> Option<El> {
+    if state.setup_gateway && matches!(state.readiness, Load::Failed(_)) {
+        return Some(
+            rune::row()
+                .key("readiness-critical")
+                .w_full()
+                .flex_wrap()
+                .center_y()
+                .gap(6.0)
+                .child(line("Status checks unavailable", kit))
+                .child(refresh_button(
+                    "readiness-critical-action",
+                    state,
+                    preferences,
+                    kit,
+                )),
+        );
+    }
     let Load::Ready(readiness) = &state.readiness else {
         return None;
     };
-    let check = readiness.checks.iter().find(|check| {
-        !matches!(
-            check.id,
-            ReadinessCheckId::ActorCatalog
-                | ReadinessCheckId::ActorSearch
-                | ReadinessCheckId::Registration
-        ) && matches!(
-            check.state,
-            ReadinessState::Running
-                | ReadinessState::NotReady
-                | ReadinessState::Degraded
-                | ReadinessState::Unavailable
-        ) && state.readiness_check_fresh(check)
-    })?;
-    let check_id = check.id.as_str();
+    let (check, status) = readiness
+        .checks
+        .iter()
+        .filter(|check| {
+            check.id != ReadinessCheckId::Registration
+                && (state.setup_gateway
+                    || !matches!(
+                        check.id,
+                        ReadinessCheckId::ActorCatalog | ReadinessCheckId::ActorSearch
+                    ))
+        })
+        .filter_map(|check| {
+            if !state.readiness_check_fresh(check) {
+                return None;
+            }
+            let status = CheckStatus::of(check, true);
+            (status == CheckStatus::Failed || include_other_blockers && status.rank() <= 2)
+                .then_some((check, status))
+        })
+        .min_by_key(|(check, status)| (status.rank(), check.id))?;
+    let id = check.id;
     let button = check
         .actions
         .iter()
+        .filter(|action| action.allowed)
         .find_map(|action| {
-            let (button, reason) =
-                maintenance_button(state, preferences, kit, check.id, action.id)?;
+            let (button, reason) = maintenance_button(state, preferences, kit, id, action.id)?;
             reason
                 .is_none()
-                .then_some(button.key("workstation-primary-action"))
+                .then_some(button.key("readiness-critical-action"))
         })
         .unwrap_or_else(|| {
+            if status == CheckStatus::Failed || status == CheckStatus::Unavailable {
+                return refresh_button("readiness-critical-action", state, preferences, kit);
+            }
             ActionButton::new("Inspect check")
-                .key("workstation-inspect-check")
+                .key("readiness-critical-action")
                 .finish(MetalFinish::Gunmetal)
-                .on_press_tx(move |state: &mut State, tx| {
-                    state.selected_readiness = Some(check_id.to_owned());
-                    tx.scroll_into_view(format!("readiness-{check_id}"));
-                    tx.focus(format!("readiness-{check_id}/trigger"), tx.focus_visible());
-                })
+                .on_press_tx(move |state: &mut State, tx| state.reveal_readiness_check(id, tx))
                 .build(kit, preferences, None)
         });
     Some(
         rune::row()
-            .key("workstation-primary-check")
+            .key("readiness-critical")
+            .w_full()
             .flex_wrap()
             .center_y()
             .gap(6.0)
-            .child(line(title(check.id), kit))
-            .child(ui_components::status_pill(
-                label(check.state),
-                None,
-                tone_for_check(check.state),
-                kit,
-            ))
+            .child(status_icon(status, "status".to_owned()))
+            .child(line(format!("{} · {}", title(id), status.label()), kit))
             .child(button),
     )
 }
@@ -269,27 +441,93 @@ fn maintenance_button(
     Some((button, reason))
 }
 
-fn tone_for_check(state: ReadinessState) -> StatusTone {
-    match state {
-        ReadinessState::Ready => StatusTone::Ok,
-        ReadinessState::Running => StatusTone::Info,
-        ReadinessState::Degraded | ReadinessState::NotReady => StatusTone::Warn,
-        ReadinessState::Unavailable => StatusTone::Err,
-        _ => StatusTone::Neutral,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CheckStatus {
+    Failed,
+    NeedsData,
+    NotReady,
+    Degraded,
+    Unavailable,
+    Checking,
+    Unknown,
+    RememberedReady,
+    Passed,
+    NotApplicable,
+}
+
+impl CheckStatus {
+    fn of(check: &ReadinessCheck, fresh: bool) -> Self {
+        match check.state {
+            ReadinessState::Ready if fresh => Self::Passed,
+            ReadinessState::Ready => Self::RememberedReady,
+            ReadinessState::NotReady if check.reason_code == "process_not_ready" => Self::Failed,
+            ReadinessState::NotReady if check.id == ReadinessCheckId::ActorCatalog => {
+                Self::NeedsData
+            }
+            ReadinessState::NotReady => Self::NotReady,
+            ReadinessState::Degraded => Self::Degraded,
+            ReadinessState::Running => Self::Checking,
+            ReadinessState::Unavailable => Self::Unavailable,
+            ReadinessState::NotApplicable => Self::NotApplicable,
+            _ => Self::Unknown,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Failed => "Failed",
+            Self::NeedsData => "Needs data",
+            Self::NotReady => "Not ready",
+            Self::Degraded => "Degraded",
+            Self::Unavailable => "Unavailable",
+            Self::Checking => "Checking",
+            Self::Unknown => "Unknown",
+            Self::RememberedReady => "Ready",
+            Self::Passed => "Passed",
+            Self::NotApplicable => "N/A",
+        }
+    }
+
+    fn rank(self) -> u8 {
+        match self {
+            Self::Failed => 0,
+            Self::NeedsData | Self::NotReady | Self::Degraded => 1,
+            Self::Unavailable => 2,
+            Self::Checking => 3,
+            Self::Unknown | Self::RememberedReady => 4,
+            Self::Passed => 5,
+            Self::NotApplicable => 6,
+        }
+    }
+
+    fn tone(self) -> StatusTone {
+        match self {
+            Self::Failed => StatusTone::Err,
+            Self::NeedsData | Self::NotReady | Self::Degraded => StatusTone::Warn,
+            Self::Checking => StatusTone::Info,
+            Self::Passed => StatusTone::Ok,
+            Self::Unavailable | Self::Unknown | Self::RememberedReady | Self::NotApplicable => {
+                StatusTone::Neutral
+            }
+        }
     }
 }
 
-fn label(state: ReadinessState) -> &'static str {
-    match state {
-        ReadinessState::Ready => "Ready",
-        ReadinessState::NotReady => "Not ready",
-        ReadinessState::Running => "Running",
-        ReadinessState::Degraded => "Degraded",
-        ReadinessState::Unknown => "Unknown",
-        ReadinessState::Unavailable => "Unavailable",
-        ReadinessState::NotApplicable => "Not applicable",
-        _ => "Unknown",
-    }
+fn status_icon(status: CheckStatus, key: String) -> El {
+    let icon = match status {
+        CheckStatus::Failed => &glyphs::CLOSE,
+        CheckStatus::NeedsData | CheckStatus::NotReady | CheckStatus::Degraded => &icons::ALERT,
+        CheckStatus::Checking => &icons::JOBS,
+        CheckStatus::Passed => &glyphs::CHECK,
+        CheckStatus::Unavailable
+        | CheckStatus::Unknown
+        | CheckStatus::RememberedReady
+        | CheckStatus::NotApplicable => &glyphs::DASH,
+    };
+    rune::icon(icon, 14.0)
+        .key(key)
+        .color(status.tone().fg())
+        .a11y_hidden()
 }
 
 fn title(check: ReadinessCheckId) -> &'static str {
@@ -299,7 +537,7 @@ fn title(check: ReadinessCheckId) -> &'static str {
         ReadinessCheckId::Jobs => "Jobs",
         ReadinessCheckId::Brain => "Brain",
         ReadinessCheckId::Control => "Backend control",
-        ReadinessCheckId::Nlp => "Language processing",
+        ReadinessCheckId::Nlp => "Language service",
         ReadinessCheckId::Classifier => "Classifier",
         ReadinessCheckId::Registration => "Registration",
         ReadinessCheckId::ActorCatalog => "Actor catalog",

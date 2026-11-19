@@ -955,18 +955,16 @@ fn row(item: &Item, state: &State, kit: &Kit) -> El {
                         }
                         Topic::Readiness(name) => {
                             state.navigate(crate::app::Page::Workstation);
-                            state.workstation_diagnostics_open = true;
-                            if let crate::app::Load::Ready(readiness) = &state.readiness {
-                                if let Some(check) = readiness
+                            let check = match &state.readiness {
+                                crate::app::Load::Ready(readiness) => readiness
                                     .checks
                                     .iter()
                                     .find(|check| humanize(&format!("{:?}", check.id)) == *name)
-                                {
-                                    let id = check.id.as_str();
-                                    state.selected_readiness = Some(id.to_owned());
-                                    tx.scroll_into_view(format!("readiness-{id}"));
-                                    tx.focus(format!("readiness-{id}/trigger"), tx.focus_visible());
-                                }
+                                    .map(|check| check.id),
+                                _ => None,
+                            };
+                            if let Some(id) = check {
+                                state.reveal_readiness_check(id, tx);
                             }
                         }
                         Topic::Connection => {}
@@ -1420,6 +1418,41 @@ mod tests {
             );
             assert_eq!(runtime.state.page, crate::app::Page::Workstation);
         }
+    }
+
+    #[test]
+    fn drawer_view_status_reveals_the_matching_readiness_disclosure() {
+        use fleetworks_contracts::readiness::ReadinessCheck;
+        use fleetworks_contracts::readiness::ReadinessCheckId;
+        use fleetworks_contracts::readiness::WorkstationReadiness;
+
+        let mut state = crate::tests::registered_fixture();
+        state.page = crate::app::Page::Tools;
+        let stamp = "2026-01-01T00:00:00Z";
+        let mut check = ReadinessCheck::new(
+            ReadinessCheckId::ActorSearch,
+            ReadinessState::Running,
+            "index_catching_up".into(),
+            "Synthetic actor index catch-up".into(),
+            stamp.into(),
+        );
+        check.fresh_for_ms = 30_000;
+        state.readiness = crate::app::Load::Ready(WorkstationReadiness::new(
+            "synthetic-deployment".into(),
+            stamp.into(),
+            vec![check],
+        ));
+        state.readiness_received_at = Some(0.0);
+        seed_drawer(&mut state.inbox, 900.0);
+        let mut runtime = runtime(state, (640.0, 480.0));
+        click(&mut runtime, "inbox-item-2-action", 1.0);
+        runtime.frame(1.3);
+
+        assert_eq!(runtime.state.page, crate::app::Page::Workstation);
+        assert!(!runtime.state.inbox.open);
+        assert!(runtime.state.workstation_status_checks_open);
+        assert!(runtime.find("readiness-details-actor_search").is_some());
+        assert_eq!(runtime.state.inbox.unread(), 3);
     }
 
     #[test]

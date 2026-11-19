@@ -690,7 +690,7 @@ mod native {
                 ),
                 ("appearance-material-fallback", appearance_scenes::fallback),
                 ("setup-connected-embedded", |state| {
-                    registered(state);
+                    readiness_scenes::mixed_status_checks(state);
                     state.backend_kind = fleetworks_workstation::native::BackendKind::Local;
                     state.connection.origin = TextEdit::new("local://embedded");
                     state.local_backend.binary_status =
@@ -701,13 +701,17 @@ mod native {
                     state.setup_advanced_open = true;
                 }),
                 ("setup-connected-distributed", |state| {
-                    registered(state);
+                    readiness_scenes::mixed_status_checks(state);
                     state.setup_gateway = true;
                     state.setup_advanced_open = true;
                 }),
                 ("inbox-drawer", |state| {
                     registered(state);
                     state.seed_inbox_drawer_fixture();
+                }),
+                ("workstation-status-checks-mixed", |state| {
+                    readiness_scenes::mixed_status_checks(state);
+                    state.workstation_status_checks_open = true;
                 }),
                 ("workstation-observed", readiness_scenes::observed),
                 ("workstation-connecting", readiness_scenes::connecting),

@@ -90,6 +90,41 @@ pub fn observed(state: &mut State) {
     state.page = Page::Workstation;
 }
 
+pub fn mixed_status_checks(state: &mut State) {
+    observed(state);
+    if let Load::Ready(readiness) = &mut state.readiness {
+        for probe in &mut readiness.checks {
+            *probe = match probe.id {
+                ReadinessCheckId::Jobs => check(
+                    probe.id,
+                    ReadinessState::NotReady,
+                    "process_not_ready",
+                    "The Jobs service reported that its dispatcher was not ready.",
+                ),
+                ReadinessCheckId::ActorSearch => check(
+                    probe.id,
+                    ReadinessState::Running,
+                    "index_catching_up",
+                    "The actor index reader is catching up with committed data.",
+                ),
+                _ => continue,
+            };
+        }
+        readiness.checks.push(check(
+            ReadinessCheckId::Brain,
+            ReadinessState::Degraded,
+            "limited_probe",
+            "Brain is serving traffic with a degraded capability.",
+        ));
+        readiness.checks.push(check(
+            ReadinessCheckId::Control,
+            ReadinessState::Unavailable,
+            "owner_unavailable",
+            "The Control service is unavailable in this configuration.",
+        ));
+    }
+}
+
 pub fn connecting(state: &mut State) {
     state.page = Page::Workstation;
     state.connection.status = ConnectionStatus::Connecting;

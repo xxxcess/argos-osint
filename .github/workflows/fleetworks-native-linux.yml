@@ -139,6 +139,7 @@ jobs:
             --scene setup-connected-distributed \
             --scene registration-ready \
             --scene workstation-partial-seed \
+            --scene workstation-status-checks-mixed \
             --scene pairing-waiting \
             --scene pairing-keychain-denied \
             --scene assistant-open \

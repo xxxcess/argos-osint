@@ -485,18 +485,11 @@ fn local_backend_setup_card(
         if let Some(capabilities) = &state.connection.capabilities {
             body = body.child(local_capabilities_summary(capabilities, preferences, kit));
         }
-        body = body.child(ui_components::inline_toggle_row(
-            "setup-advanced-toggle",
-            state.setup_advanced_open,
-            "Inspect embedded readiness checks",
-            Some("Reveal per-service probes and observation freshness"),
-            false,
+        body = body.child(crate::readiness_cards::setup_section(
+            state,
+            preferences,
             kit,
-            |state: &mut State| state.setup_advanced_open = !state.setup_advanced_open,
         ));
-        if state.setup_advanced_open {
-            body = body.child(crate::readiness_cards::checks(state, preferences, kit));
-        }
         let stop_btn = ActionButton::new("Stop Embedded Backend")
             .key("stop-local-backend")
             .finish(MetalFinish::Gunmetal)
@@ -771,18 +764,11 @@ fn pairing_status(
                 kit,
             ))
             .child(registration_status(state, kit))
-            .child(ui_components::inline_toggle_row(
-                "setup-advanced-toggle",
-                state.setup_advanced_open,
-                "Inspect gateway readiness checks",
-                Some("Reveal per-service probes and observation freshness"),
-                false,
+            .child(crate::readiness_cards::setup_section(
+                state,
+                preferences,
                 kit,
-                |state: &mut State| state.setup_advanced_open = !state.setup_advanced_open,
             ));
-        if state.setup_advanced_open {
-            body = body.child(crate::readiness_cards::checks(state, preferences, kit));
-        }
         if !state.startup.active() && state.registration.context.is_some() {
             body = body.child(
                 ActionButton::new("Done")
@@ -1082,15 +1068,17 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
                     .maintenance_disabled_reason(MaintenanceOperation::ReindexActors)
                     .is_none()
                     && !actor.can_search;
-            let issue = workstation_active_operation(state, preferences, kit).or_else(|| {
-                if prefer_actor {
-                    None
-                } else {
-                    crate::readiness_cards::primary_issue(state, preferences, kit)
-                }
-            });
+            let active_operation = workstation_active_operation(state, preferences, kit);
+            let issue = crate::readiness_cards::primary_issue(
+                state,
+                !prefer_actor && active_operation.is_none(),
+                preferences,
+                kit,
+            );
             body = body.child(
-                issue.unwrap_or_else(|| actor_search_summary_card(state, preferences, kit, actor)),
+                issue
+                    .or(active_operation)
+                    .unwrap_or_else(|| actor_search_summary_card(state, preferences, kit, actor)),
             );
         }
         if state.confirm_maintenance_dialog {
@@ -1251,7 +1239,11 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
             }
         }
         body = body
-            .child(crate::readiness_cards::checks(state, preferences, kit))
+            .child(crate::readiness_cards::workstation_section(
+                state,
+                preferences,
+                kit,
+            ))
             .child(
                 rune::row()
                     .center_y()
@@ -1410,8 +1402,7 @@ struct ActorSearchSummary {
     status_label: &'static str,
     tone: StatusTone,
     next_action: String,
-    freshness: String,
-    unsynced_reason: Option<String>,
+    unsynced_reason: Option<&'static str>,
     can_search: bool,
     building: bool,
     background_indexing: bool,
@@ -1419,13 +1410,11 @@ struct ActorSearchSummary {
     scanned: Option<u64>,
     total: Option<u64>,
     needs_seed: bool,
-    details: Vec<String>,
 }
 
 fn summarize_actor_search(state: &State) -> ActorSearchSummary {
     let reindex_job = active_actor_reindex(state);
     let receipt_job = queued_actor_reindex_id(state);
-    let mut details = Vec::new();
     let (catalog_check, search_check, observed_at) = match &state.readiness {
         Load::Ready(readiness) => (
             readiness
@@ -1447,34 +1436,9 @@ fn summarize_actor_search(state: &State) -> ActorSearchSummary {
         .as_ref()
         .is_some_and(|capabilities| capabilities.require_actor_search().is_ok());
 
-    if let Some(check) = search_check {
-        details.push(format!("Reason: {}", check.reason_code));
-        if !check.job_ids.is_empty() {
-            details.push(format!("Jobs: {}", check.job_ids.join(", ")));
-        }
-        if !check.artifact_ids.is_empty() {
-            details.push(format!("Serving refs: {}", check.artifact_ids.join(", ")));
-        }
-        if !check.explanation.is_empty() {
-            details.push(check.explanation.clone());
-        }
-    }
-    if let Some(pending) = &state.maintenance.pending_reindex {
-        details.push(format!("Pending request: {}", pending.request.request_id));
-    }
-
-    let freshness = match observed_at {
-        Some(ts) => format!("Observed {ts}"),
-        None => "Readiness has not been observed yet.".to_owned(),
-    };
-    let unsynced_reason = match (observed_at, search_check) {
-        (Some(_), Some(_)) if search_fresh && state.readiness_error.is_none() => None,
-        (Some(ts), _) => Some(match &state.readiness_error {
-            Some(error) => format!("Observation unsynced (last observed {ts}): {error}"),
-            None => format!("Observation unsynced (last observed {ts}); refresh checks"),
-        }),
-        (None, _) => None,
-    };
+    let unsynced_reason = (observed_at.is_some()
+        && (!search_fresh || state.readiness_error.is_some()))
+    .then_some("Actor search observation unsynced. Open Status checks for details.");
 
     let paused = search_check.is_some_and(|check| {
         let reason = check.reason_code.to_ascii_lowercase();
@@ -1542,13 +1506,15 @@ fn summarize_actor_search(state: &State) -> ActorSearchSummary {
             false,
             false,
         )
-    } else if let Some(catalog) = catalog_needs_data {
-        let guidance = if catalog.explanation.is_empty() {
-            "Seed an actor CSV catalog before building the search index.".to_owned()
-        } else {
-            catalog.explanation.clone()
-        };
-        ("Needs data", StatusTone::Warn, guidance, false, false, true)
+    } else if catalog_needs_data.is_some() {
+        (
+            "Needs data",
+            StatusTone::Warn,
+            "Seed an actor CSV catalog before building the search index.".to_owned(),
+            false,
+            false,
+            true,
+        )
     } else if let Some(check) = search_check {
         if check.state == ReadinessState::Ready && search_fresh {
             (
@@ -1563,7 +1529,7 @@ fn summarize_actor_search(state: &State) -> ActorSearchSummary {
             (
                 "Paused",
                 StatusTone::Warn,
-                "Indexing is paused or write-paced on the backend; refresh checks for details."
+                "Indexing is paused or write-paced on the backend. Open Status checks for details."
                     .to_owned(),
                 false,
                 false,
@@ -1583,8 +1549,7 @@ fn summarize_actor_search(state: &State) -> ActorSearchSummary {
             (
                 "Needs attention",
                 StatusTone::Warn,
-                "Refresh checks or inspect backend diagnostics to resolve actor search status."
-                    .to_owned(),
+                "Refresh checks or open Status checks for details on actor search.".to_owned(),
                 false,
                 false,
                 false,
@@ -1593,7 +1558,7 @@ fn summarize_actor_search(state: &State) -> ActorSearchSummary {
             (
                     "Unavailable",
                     StatusTone::Err,
-                    "Actor search backend status is currently unavailable; refresh checks or inspect gateway health."
+                    "Actor search status is unavailable. Refresh checks or open Status checks for details."
                         .to_owned(),
                     false,
                     false,
@@ -1630,7 +1595,6 @@ fn summarize_actor_search(state: &State) -> ActorSearchSummary {
         status_label,
         tone,
         next_action,
-        freshness,
         unsynced_reason,
         can_search,
         building,
@@ -1639,7 +1603,6 @@ fn summarize_actor_search(state: &State) -> ActorSearchSummary {
         scanned,
         total,
         needs_seed,
-        details,
     }
 }
 
@@ -1737,9 +1700,8 @@ fn actor_search_summary_card(
             summary.tone,
             kit,
         ));
-    if let Some(reason) = &summary.unsynced_reason {
-        status_slot =
-            status_slot.child(unsynced_glyph("actor-search-unsynced", reason.clone(), kit));
+    if let Some(reason) = summary.unsynced_reason {
+        status_slot = status_slot.child(unsynced_glyph("actor-search-unsynced", reason, kit));
     }
 
     let relevant_job = active_actor_reindex(state)
@@ -1848,10 +1810,12 @@ fn actor_search_summary_card(
     {
         let mut details_col = rune::col()
             .gap(4.0)
-            .children((!summary.background_indexing).then(|| quiet(summary.next_action, kit)))
-            .child(quiet(summary.freshness, kit));
-        for detail in summary.details.iter().take(6) {
-            details_col = details_col.child(quiet(detail.clone(), kit));
+            .children((!summary.background_indexing).then(|| quiet(summary.next_action, kit)));
+        if let Some(pending) = &state.maintenance.pending_reindex {
+            details_col = details_col.child(quiet(
+                format!("Pending request: {}", pending.request.request_id),
+                kit,
+            ));
         }
         if let Some(reason) = disabled_reason {
             details_col = details_col.child(quiet(reason, kit));

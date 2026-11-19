@@ -21,7 +21,7 @@ ARGOS_WEB_TEST_DEV=1 pnpm check:web-build
 
 Without that setting, both retain the normal launcher `.next` behavior. The isolated build/check pair does not establish a production browser pass or the full frontend gate. After that pair, `ARGOS_WEB_TEST_DEV=1 pnpm test:e2e` runs the repository’s default production browser profile against the same isolated output. Development uses `ARGOS_WEB_PROFILE=dev pnpm test:e2e` and always isolates output. Never stop the user’s launcher or remove its lock to make verification run.
 
-Rust 1.95.0 is pinned. Agents build through `python3 scripts/agent_cargo.py … --locked`, which writes to `target/agents`. Leave `ARGOS_EMBED` unset. The wrapper also removes inherited values. Use `cargo fmt` directly. Keep `target/debug` for the user's builds. Local checks use the host's native architecture.
+Rust 1.95.0 is pinned. Agents build through `python3 scripts/agent_cargo.py … --locked`, which writes to `target/agents` to avoid evicting the user's `target/debug` cache. Leave `ARGOS_EMBED` unset. The wrapper also removes inherited values. Use `cargo fmt` directly. Local checks use the host's native architecture.
 
 Run `cargo fmt --all -- --check` before costly Rust checks. If it fails, inspect the dirty diff, format the affected task-owned files under the existing authorization, preserve semantics and unrelated work, then rerun the check. Formatting failure must be resolved or reported; never silently waive the gate.
 
@@ -144,7 +144,25 @@ Never run blanket `cargo clean`, remove locks to bypass contention or erase user
 
 ### Targeted local Rust builds and tests (fast iteration)
 
-Detect the native host with `uname -ms` and `rustc -vV | grep '^host:'`. Reuse one feature graph and `target/agents`. Set `CARGO_BUILD_JOBS` from memory pressure. For an affected embedded contract, keep the workspace's compatibility features `embedded,nlp,classifier`.
+Detect the native host with `uname -ms` and `rustc -vV | grep '^host:'`. Reuse one feature graph and `target/agents`. The workspace `.cargo/config.toml` sets `jobs = 2` to avoid OOM on hosts with 8 GB RAM — override with `CARGO_BUILD_JOBS=4` on larger machines.
+
+**Desktop app (lightweight).** The native app depends only on `fleetworks-contracts`, `fleetworks-workstation`, and `fleetworks-broker` — no RocksDB, tract-core, or tokenizers. Build or test just the app:
+
+```sh
+cargo check -p fleetworks-desktop
+cargo test -p fleetworks-desktop --lib
+```
+
+In RustRover, use the **Test fleetworks-desktop** run configuration (`.idea/runConfigurations/`) instead of the default workspace test. The heavy backend crates are excluded from IDE indexing (`.idea/argos-osint.iml`) to save memory and disk.
+
+**Companion backend.** The companion (`argos-api-host`) enables `embedded,nlp,classifier` features by default, pulling in RocksDB, tract-core and tokenizers. Build it only when needed:
+
+```sh
+cargo check --manifest-path services/api-host/Cargo.toml
+python3 scripts/fleetworks_candidate.py build-native --target host --profile debug
+```
+
+**Workspace-wide backend tests.** For an affected embedded contract, keep the workspace's compatibility features `embedded,nlp,classifier`:
 
 ```sh
 python3 scripts/agent_cargo.py check --locked -p argos-osint-core

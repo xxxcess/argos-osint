@@ -1,0 +1,9 @@
+# Limit parallel jobs to avoid OOM on hosts with 8GB RAM.
+# RustRover's F9 runs `cargo test argos-osint` which builds the entire workspace
+# (including heavy crates like RocksDB, tract-core, tokenizers). The terminal
+# scripts build only specific packages, so they don't hit this limit.
+#
+# On CI (GitHub Actions runners have 7GB RAM, 3 CPUs) this limit is also safe.
+# On local hosts with more RAM, override with: CARGO_BUILD_JOBS=4 cargo test ...
+[build]
+jobs = 2

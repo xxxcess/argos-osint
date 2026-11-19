@@ -12,6 +12,10 @@ members = [
     "apps/fleetworks-desktop",
 ]
 
+# Default to the desktop app only. IDE "Run Tests" (F9) builds the entire workspace,
+# but `cargo build` / `cargo check` without `-p` or `--workspace` flags only touches
+# the default member. The heavy backend crates (argos-osint-core, argos-api-host)
+# have empty default features so they compile quickly when pulled in transitively.
 default-members = ["apps/fleetworks-desktop"]
 
 [workspace.package]

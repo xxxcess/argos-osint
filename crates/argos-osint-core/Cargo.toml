@@ -30,9 +30,9 @@ surrealdb = { workspace = true, optional = true }
 sysinfo.workspace = true
 tokio.workspace = true
 tempfile.workspace = true
-tokenizers.workspace = true
+tokenizers = { workspace = true, optional = true }
 toml.workspace = true
-tract-onnx.workspace = true
+tract-onnx = { workspace = true, optional = true }
 unicode-normalization.workspace = true
 url.workspace = true
 scraper.workspace = true
@@ -40,10 +40,14 @@ webpki-roots = { version = "1", optional = true }
 
 [features]
 # A local build runs Argos on embedded SurrealDB (RocksDB on disk, no network).
-default = ["embedded", "nlp", "classifier"]
+# Defaults are empty so that workspace-wide builds (e.g. `cargo test argos-osint` in
+# RustRover) skip heavy dependencies like RocksDB, tract-core and tokenizers.
+# The companion (`argos-api-host`) enables the features it needs via its own defaults.
+default = []
 nlp = ["dep:rquickjs"]
 # Local six-domain classifier (QuickJS + Natural engine). Independent of `nlp`.
-classifier = ["dep:rquickjs"]
+# Makes heavy deps (tokenizers, tract-onnx) optional so workspace-wide builds skip them.
+classifier = ["dep:rquickjs", "dep:tokenizers", "dep:tract-onnx"]
 # SurrealDB storage API without an engine; pick `embedded` and/or `server`.
 surreal = ["dep:surrealdb"]
 # Embedded RocksDB engine in-process (single owner per Argos home). Default.

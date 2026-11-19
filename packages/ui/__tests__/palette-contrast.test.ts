@@ -101,7 +101,7 @@ describe("Fleetworks palette compositing contracts (rendered verification remain
       colors.selectionSurface,
     ]);
   });
-  it("uses the canonical fixed crown and transparent crescent across web assets", () => {
+  it("uses the canonical core and transparent crescent across web assets", () => {
     const canonical = readFileSync(
       new URL("../../../assets/brand/fleetworks-mark.svg", import.meta.url),
       "utf8",
@@ -119,7 +119,8 @@ describe("Fleetworks palette compositing contracts (rendered verification remain
     );
     expect(publicMark).toBe(canonical);
     expect(shared).toContain(canonical.trim());
-    expect(canonical.match(/<polygon /g)).toHaveLength(5);
+    expect(canonical).not.toContain("<polygon");
+    expect(canonical).toContain('fill="url(#core)"');
     expect(canonical).toContain('mask="url(#crescent)"');
     expect(canonical).not.toContain("#141414");
     for (const name of ["icon.svg", "apple-icon.svg"]) {
@@ -127,7 +128,8 @@ describe("Fleetworks palette compositing contracts (rendered verification remain
         new URL(`../../../apps/web-desktop/app/${name}`, import.meta.url),
         "utf8",
       );
-      expect(icon.match(/<polygon /g)).toHaveLength(5);
+      expect(icon).not.toContain("<polygon");
+      expect(icon).toContain('fill="url(#core)"');
       expect(icon).toContain('fill="#060709"');
       expect(icon).toContain('mask="url(#crescent)"');
     }

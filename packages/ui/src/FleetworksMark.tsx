@@ -23,17 +23,10 @@ const MARK = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 144 176" role
   </defs>
   <circle cx="72" cy="105" r="62" fill="url(#obsidian)" stroke="#566170" stroke-width="2" mask="url(#crescent)"/>
   <circle cx="72" cy="61" r="40" fill="url(#core)" stroke="#8F8372" stroke-width="2"/>
-  <g fill="url(#obsidian)" stroke="#9AA9BD" stroke-width="1.5" stroke-linejoin="round">
-    <polygon points="72,3 65,17 79,17"/>
-    <polygon points="41,8 33,24 48,23"/>
-    <polygon points="103,8 96,23 111,24"/>
-    <polygon points="17,23 10,40 26,38"/>
-    <polygon points="127,23 118,38 134,40"/>
-  </g>
 </svg>`;
 const SOURCE = { uri: `data:image/svg+xml,${encodeURIComponent(MARK)}` };
 
-/** Decorative glass core, obsidian crescent and fixed five-satellite crown. */
+/** Decorative glass core and obsidian crescent. */
 export function FleetworksMark({ size = 18 }: { size?: number }) {
   return (
     <Image

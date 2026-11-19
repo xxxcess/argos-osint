@@ -16,7 +16,6 @@ import { BriefSection } from "../src/views/brief/BriefSection";
 import { InspectorPresence } from "../src/topology/InspectorPresence";
 import { labelZoomOpacity } from "../src/topology/labelLayout";
 import { OrbitScene } from "../src/landing/OrbitScene";
-import { spawnOrbiter, stepOrbiter } from "../src/landing/orbit";
 import { intelColors } from "../src/shell/intel-theme";
 const progress = (overrides: Partial<BriefProgress> = {}): BriefProgress => ({
   run: "r",
@@ -278,34 +277,6 @@ describe("loading and transitions", () => {
   });
 });
 describe("connection orbit", () => {
-  it("spawns deterministically on the far sphere", () => {
-    const o = spawnOrbiter(42);
-    expect(o).toEqual(spawnOrbiter(42));
-    expect(Math.hypot(o.x, o.y, o.z)).toBeCloseTo(600);
-    expect(o.target).toBeGreaterThanOrEqual(80);
-    expect(o.target).toBeLessThanOrEqual(160);
-  });
-  it("approaches the ring monotonically while angular velocity increases", () => {
-    let o = spawnOrbiter(42);
-    for (let i = 0; i < 20; i++) {
-      const next = stepOrbiter(o, 0.25);
-      expect(next.radius).toBeLessThanOrEqual(o.radius);
-      expect(next.radius).toBeGreaterThanOrEqual(o.target);
-      expect(next.speed).toBeGreaterThanOrEqual(o.speed);
-      o = next;
-    }
-    expect(o.radius).toBe(o.target);
-    expect(o.speed).toBeCloseTo(1.2);
-  });
-  it("gives the same position regardless of frame partitioning", () => {
-    const o = spawnOrbiter(7);
-    let split = o;
-    for (let i = 0; i < 60; i++) split = stepOrbiter(split, 1 / 60);
-    const once = stepOrbiter(o, 1);
-    expect(split.x).toBeCloseTo(once.x);
-    expect(split.y).toBeCloseTo(once.y);
-    expect(split.z).toBeCloseTo(once.z);
-  });
   it("has an accessible status and decorative fallback without WebGL", async () => {
     render(<OrbitScene />);
     await waitFor(() =>

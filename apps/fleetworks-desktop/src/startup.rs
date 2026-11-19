@@ -180,13 +180,13 @@ fn moving_mark(
     state.startup.mark_rect.set(Some(rect));
     let [x, y, width, height] = rect;
     let [root_x, root_y, _, _] = root.unwrap_or_default();
-    let blend = if dock == Dock::Rail {
+    let settle = if dock == Dock::Rail {
         ((progress - 0.55) / 0.45).clamp(0.0, 1.0)
     } else {
         0.0
     };
     Some(
-        orbit::handoff(state.startup.docked_pose, blend, width, height)
+        orbit::handoff(state.startup.docked_pose, settle, width, height)
             .key("startup-orbit-flight")
             .absolute(x - root_x, y - root_y)
             .transition(Transition::none())

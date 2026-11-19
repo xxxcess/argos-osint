@@ -2,6 +2,7 @@
 import React, { lazy, Suspense, useState, useSyncExternalStore } from "react";
 import { View, Text, Pressable, StyleSheet } from "react-native";
 import type { Health } from "@argos/api-client";
+import { FleetworksMark } from "@argos/ui";
 import { StatusMessage } from "./StatusMessage";
 import { useConnectionSequence } from "./sequence";
 import { useReducedMotion } from "../shell/motion";
@@ -16,50 +17,19 @@ import { webGL } from "./webgl.web";
 const Canvas = lazy(() => import("./OrbitCanvas"));
 const subscribe = () => () => {};
 export function OrbitFallback({
-  count = 0,
   coreColor = landingColors.core,
 }: {
-  count?: number;
   coreColor?: string;
 }) {
   return (
-    <View
-      testID="landing-fallback"
-      style={[
-        StyleSheet.absoluteFill,
-        { alignItems: "center", justifyContent: "center" },
-      ]}
-    >
+    <View testID="landing-fallback" style={s.fallback}>
       <View
         testID="landing-core"
-        style={{
-          width: 28,
-          height: 28,
-          borderRadius: 14,
-          backgroundColor: coreColor,
-          boxShadow: `0 0 80px ${coreColor}`,
-        }}
+        style={[s.halo, { boxShadow: `0 0 80px ${coreColor}` }]}
       />
-      {Array.from({ length: count }, (_, i) => (
-        <View
-          key={i}
-          style={{
-            position: "absolute",
-            left: "50%",
-            top: "50%",
-            width: 8,
-            height: 8,
-            borderRadius: 4,
-            backgroundColor:
-              i % 2 ? landingColors.orbiterAlt : landingColors.orbiter,
-            transform: [
-              { translateX: Math.cos(i * 2.399) * 110 },
-              { translateY: Math.sin(i * 2.399) * 110 },
-            ],
-            boxShadow: `0 0 12px ${landingColors.orbiter}`,
-          }}
-        />
-      ))}
+      <View testID="landing-mark" style={s.mark}>
+        <FleetworksMark size={52} />
+      </View>
     </View>
   );
 }
@@ -131,18 +101,10 @@ export function OrbitScene({
         style={StyleSheet.absoluteFill}
       >
         {supported && box.width > 0 && box.height > 0 ? (
-          <OrbitBoundary count={sequence.revealed.length} coreColor={coreColor}>
-            <Suspense
-              fallback={
-                <OrbitFallback
-                  count={sequence.revealed.length}
-                  coreColor={coreColor}
-                />
-              }
-            >
+          <OrbitBoundary coreColor={coreColor}>
+            <Suspense fallback={<OrbitFallback coreColor={coreColor} />}>
               <Canvas
                 reduced={reduced}
-                checks={sequence.revealed.map((check) => check.id)}
                 width={box.width}
                 height={box.height}
                 coreColor={coreColor}
@@ -150,10 +112,7 @@ export function OrbitScene({
             </Suspense>
           </OrbitBoundary>
         ) : (
-          <OrbitFallback
-            count={sequence.revealed.length}
-            coreColor={coreColor}
-          />
+          <OrbitFallback coreColor={coreColor} />
         )}
       </View>
       <View
@@ -223,7 +182,6 @@ export function OrbitScene({
 class OrbitBoundary extends React.Component<
   {
     children: React.ReactNode;
-    count: number;
     coreColor: string;
   },
   { failed: boolean }
@@ -234,12 +192,25 @@ class OrbitBoundary extends React.Component<
   }
   render() {
     return this.state.failed ? (
-      <OrbitFallback
-        count={this.props.count}
-        coreColor={this.props.coreColor}
-      />
+      <OrbitFallback coreColor={this.props.coreColor} />
     ) : (
       this.props.children
     );
   }
 }
+
+const s = StyleSheet.create({
+  fallback: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  halo: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: landingColors.core,
+  },
+  // Align the SVG's warm center (at y=61 of 176) with the halo.
+  mark: { position: "absolute", transform: [{ translateY: 10 }] },
+});

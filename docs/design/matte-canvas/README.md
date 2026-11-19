@@ -6,7 +6,7 @@ Approved visual target for the native client and shared web paint. The four gene
 
 1. [Theme recipe](theme.md): exact palette, matte compositing, softly blended group edges, action-role texture rules, component states and responsive geometry.
 2. [Live state and continuous scrolling](interaction-state.md): snapshot retention, local skeletons, opaque cursors, bounded rendering and stable scroll position.
-3. [Logo and Quiet Orbit](motion.md): source assets, startup timing, proportional sizing, alpha handling and crescent clearance.
+3. [Logo and Quiet Orbit](motion.md): source assets, startup timing, proportional sizing, alpha handling and the settled mark.
 4. [Implementation handoff](../../../.planning/2026-11-16-matte-canvas/handoff.md): verified code edit map, dependency order and future validation.
 5. [Reference manifest](reference-manifest.json): exact approved image identities, dimensions and provenance.
 

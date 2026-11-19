@@ -534,7 +534,7 @@ fn setup_advanced_toggle_switch_reveals_and_hides_readiness_checks() {
     runtime.update(|_, tx| tx.scroll_into_view("setup-advanced-toggle"));
     runtime.frame(1.0 / 60.0);
     let (x, y) = runtime
-        .find("setup-advanced-toggle")
+        .find("setup-advanced-toggle/switch")
         .expect("setup advanced readiness Switch");
     runtime.pointer_down(x, y);
     runtime.pointer_up(x, y);
@@ -547,7 +547,7 @@ fn setup_advanced_toggle_switch_reveals_and_hides_readiness_checks() {
 
     let (x, y) = runtime
         .find("setup-advanced-toggle")
-        .expect("setup advanced readiness Switch remains reachable");
+        .expect("the original readiness row remains a pointer target");
     runtime.pointer_down(x, y);
     runtime.pointer_up(x, y);
     runtime.frame(3.0 / 60.0);
@@ -556,6 +556,132 @@ fn setup_advanced_toggle_switch_reveals_and_hides_readiness_checks() {
         .accessibility_json()
         .to_string()
         .contains("Gateway: Ready"));
+}
+
+fn compact_connected_setup_readiness_toggle(kind: fleetworks_workstation::native::BackendKind) {
+    use fleetworks_contracts::readiness::ReadinessCheck;
+    use fleetworks_contracts::readiness::ReadinessCheckId;
+    use fleetworks_contracts::readiness::ReadinessState;
+    use fleetworks_contracts::readiness::WorkstationReadiness;
+    use fleetworks_workstation::native::BackendKind;
+
+    let mut state = registered_fixture();
+    state.backend_kind = kind;
+    if kind == BackendKind::Local {
+        state.connection.origin = TextEdit::new("local://embedded");
+    }
+    let mut gateway = ReadinessCheck::new(
+        ReadinessCheckId::Gateway,
+        ReadinessState::Ready,
+        "ok".into(),
+        "Synthetic gateway probe".into(),
+        "2026-01-01T00:00:00Z".into(),
+    );
+    gateway.fresh_for_ms = 60_000;
+    state.readiness = Load::Ready(WorkstationReadiness::new(
+        "synthetic-deployment".into(),
+        "2026-01-01T00:00:00Z".into(),
+        vec![gateway],
+    ));
+    state.readiness_received_at = Some(0.0);
+
+    let mut runtime = Runtime::new(
+        state,
+        app::view,
+        (640.0, 480.0),
+        Env {
+            system_dark: true,
+            scale: 1.0,
+        },
+    );
+    runtime.frame(0.0);
+    runtime.frame(1.0 / 60.0);
+    assert!(!runtime.state.setup_gateway);
+    let (x, y) = runtime
+        .find("connection-editor")
+        .expect("reopen Setup Gateway");
+    runtime.pointer_down(x, y);
+    runtime.pointer_up(x, y);
+    runtime.frame(2.0 / 60.0);
+    assert!(runtime.state.setup_gateway);
+    assert!(runtime.state.connected());
+    assert!(runtime.state.registration.context.is_some());
+
+    let key = "setup-advanced-toggle/switch";
+    runtime.update(|_, tx| tx.scroll_into_view("setup-advanced-toggle"));
+    runtime.frame(3.0 / 60.0);
+    let elements = runtime.elements();
+    let switch = elements
+        .iter()
+        .find(|element| element.path.ends_with(key))
+        .expect("actual readiness switch");
+    let copy = elements
+        .iter()
+        .find(|element| {
+            element
+                .path
+                .ends_with("setup-advanced-toggle/copy/description")
+        })
+        .expect("visible readiness switch description");
+    assert_eq!(switch.role, "switch");
+    assert_eq!(
+        switch.label.as_deref(),
+        Some(if kind == BackendKind::Local {
+            "Inspect embedded readiness checks"
+        } else {
+            "Inspect gateway readiness checks"
+        }),
+    );
+    assert_eq!(
+        switch.visible, switch.rect,
+        "entire {kind:?} switch must fit"
+    );
+    assert_eq!(
+        copy.visible, copy.rect,
+        "entire {kind:?} description must fit"
+    );
+    assert!(switch.rect[2] >= 44.0 && switch.rect[3] >= 32.0);
+    let [x, y, w, h] = switch.rect;
+    assert!(x >= 0.0 && y >= 0.0 && x + w <= 640.0 && y + h <= 480.0);
+    assert!(!runtime.state.setup_advanced_open);
+
+    // Press the switch itself, rather than the centre of its enclosing row.
+    let (x, y) = runtime.find(key).expect("switch pointer target");
+    runtime.pointer_down(x, y);
+    runtime.pointer_up(x, y);
+    runtime.frame(4.0 / 60.0);
+    assert!(runtime.state.setup_advanced_open);
+    assert!(runtime
+        .accessibility_json()
+        .to_string()
+        .contains("Gateway: Ready"));
+
+    runtime.update(|_, tx| tx.focus(key, true));
+    runtime.frame(5.0 / 60.0);
+    assert!(runtime
+        .elements()
+        .iter()
+        .any(|element| element.path.ends_with(key) && element.focused));
+    runtime.key(rune::KeyEvent {
+        key: rune::Key::Text(" ".into()),
+        mods: rune::Mods::default(),
+    });
+    runtime.frame(6.0 / 60.0);
+    assert!(!runtime.state.setup_advanced_open);
+    assert!(!runtime
+        .accessibility_json()
+        .to_string()
+        .contains("Gateway: Ready"));
+}
+
+#[test]
+fn compact_connected_embedded_setup_keeps_readiness_switch_usable() {
+    compact_connected_setup_readiness_toggle(fleetworks_workstation::native::BackendKind::Local);
+}
+
+#[test]
+fn compact_connected_distributed_setup_keeps_readiness_switch_usable() {
+    compact_connected_setup_readiness_toggle(fleetworks_workstation::native::BackendKind::Remote);
 }
 
 #[test]

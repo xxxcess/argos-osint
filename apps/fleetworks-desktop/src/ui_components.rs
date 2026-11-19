@@ -1,5 +1,7 @@
 //! Shared workstation UI components built atop Rune and `rune_kit`.
 
+use std::rc::Rc;
+
 use rune::col;
 use rune::el;
 use rune::icon;
@@ -394,18 +396,51 @@ pub(crate) fn inline_toggle_row<S: 'static>(
     kit: &Kit,
     on_toggle: impl Fn(&mut S) + 'static,
 ) -> El {
-    let mut sw = Switch::new(checked)
-        .label(label)
+    let key = key.into();
+    let label = label.into();
+    let on_toggle = Rc::new(on_toggle);
+    let toggle_switch = Rc::clone(&on_toggle);
+    // The kit's inline label and description have intrinsic widths. Lay out the
+    // copy separately so it can shrink and wrap while the switch keeps its hit area.
+    let mut switch = Switch::new(checked)
+        .label(label.clone())
+        .hide_label()
         .standard()
         .disabled(disabled)
-        .on_toggle(on_toggle);
+        .on_toggle(move |state| toggle_switch(state))
+        .build(kit)
+        .key("switch")
+        .min_w(44.0)
+        .min_h(32.0)
+        .center();
+
+    let mut copy = col().key("copy").grow(1.0).min_w(0.0).gap(2.0).child(
+        text(label)
+            .key("label")
+            .font(kit.ty.text_small)
+            .color(kit.c.std_text)
+            .wrap()
+            .a11y_hidden(),
+    );
     if let Some(desc) = description {
-        sw = sw.description(desc);
+        copy = copy.child(
+            text(desc)
+                .key("description")
+                .font(kit.ty.text_xsmall)
+                .color(kit.c.std_text)
+                .wrap()
+                .a11y_hidden(),
+        );
+        switch = switch.description(desc);
     }
-    row()
+
+    let focus_key = format!("{key}/switch");
+    let control = row()
         .key(key)
         .w_full()
+        .min_w(0.0)
         .padding(10.0)
+        .gap(8.0)
         .radius(8.0)
         .fill(theme::hex(theme::SURFACE_RAISED))
         .border(
@@ -417,7 +452,18 @@ pub(crate) fn inline_toggle_row<S: 'static>(
             },
         )
         .center_y()
-        .child(sw.build(kit))
+        .child(copy)
+        .child(switch);
+    if disabled {
+        control
+    } else {
+        control
+            .on_press_tx(move |state, tx| {
+                on_toggle(state);
+                tx.focus(&focus_key, false);
+            })
+            .role("group")
+    }
 }
 
 /// Horizontal workflow stage stepper showing progress and current active step.

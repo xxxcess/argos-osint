@@ -149,8 +149,7 @@ impl State {
             return;
         }
         self.settings_open = false;
-        self.inbox.open = false;
-        self.inbox.selected = None;
+        self.inbox.close();
         let mut query = TextEdit::new("");
         query.focused = true;
         self.commands.query = query;

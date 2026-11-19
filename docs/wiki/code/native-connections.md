@@ -29,7 +29,11 @@ The [HTTP/IPC parity test](../../../services/api-host/tests/http_ipc_parity.rs) 
 
 ## Inbox and Assistant dock
 
-The toolbar **Inbox** bell opens a popover with **All** and **Unread**, a list, and expandable detail. It lists only changes this app already observed: a visible job that stops being active, a readiness check that enters or leaves ready, not ready, degraded or unavailable, and the connection becoming ready or failing. Item text is fixed wording plus a job title or check name, never error text, URLs or credentials. It keeps at most 50 items, records one transition per job once, and clears when the connection authority changes. It sends nothing and makes no claim about device-wide alerts.
+The toolbar **Inbox** tray shows the unread count and toggles a right-edge drawer over the current page. The page, its scroll position, and the Assistant stay in place. The backdrop dims the workspace and adds a subtle blur when supported. Reduced Transparency uses dimming alone. Use the tray, **Close**, Escape, or the backdrop to dismiss it. Focus stays in the open drawer and returns to the tray on dismissal. Reduced Motion shows the drawer in place immediately.
+
+The drawer groups this workstation’s observed notifications by job, service, or connection. Unread groups lead, ordered by their oldest unread item. Expand a group to read items in chronological order. Opening the drawer leaves items unread. Mark an individual item or all items read. **Open job** goes to a tracked job and **View status** opens Workstation Status for readiness. Background actor indexing is a readiness update and leaves the Jobs & Logs count unchanged.
+
+The app keeps at most 50 items and clears them when the connection authority changes. Notifications cover visible job completion, readiness transitions, and connection success or failure. Item text uses fixed wording and bounded titles without exposing error text, URLs, or credentials.
 
 The contextual **Assistant** dock is built and tested but **disabled** (`Assistant::enabled` is false). It needs the typed chat capability, which the backend does not advertise yet, so sending would stay gated even if shown. While it is disabled the original context rail stays in place. When enabled it docks at 380 pt if the center view keeps at least 640 pt, stays hidden otherwise, and floats over the right edge only when the operator asks. Enter sends, Shift+Enter adds a line, and an input method that is composing keeps Enter. The draft stays with its pinned context, and a new connection authority clears both.
 

@@ -1391,6 +1391,13 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         }
         return false;
     }
+    if state.inbox.open {
+        if event.key == Key::Escape {
+            state.close_inbox(tx);
+            return true;
+        }
+        return false;
+    }
     if event.is_command('k') && !event.mods.shift {
         if state.commands.open {
             state.commands.close();
@@ -1633,12 +1640,7 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
         .gap(8.0)
         .center_y()
         .child(crate::command_panel::toolbar_button(&kit))
-        .child(crate::inbox::toolbar_item(
-            state,
-            &kit,
-            preferences,
-            &mut layers,
-        ));
+        .child(crate::inbox::toolbar_item(state, &kit));
     if state.assistant.enabled && state.connected() && !state.setup_gateway {
         trailing = trailing.child(crate::assistant::toggle(
             assistant_placement != crate::assistant::Placement::Hidden,
@@ -1826,6 +1828,10 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
 
     if !state.has_active_confirmation() {
         crate::command_panel::view(state, &kit, preferences, &mut layers);
+    }
+
+    if let Some(drawer) = crate::inbox::drawer(state, cx, &kit, preferences) {
+        layers.push(drawer);
     }
 
     let mut split = SplitView::new(main)

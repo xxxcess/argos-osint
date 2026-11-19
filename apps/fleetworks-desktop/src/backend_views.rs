@@ -2336,10 +2336,12 @@ pub(crate) fn maintenance(
             MaintenanceOperation::TrainClassifier => Some(DatasetKind::ClassifierTraining),
             _ => None,
         };
-        let action_label = if cfg!(target_os = "linux") && dataset.is_some() {
-            "Enter CSV path"
-        } else {
-            label
+        let action_label = match dataset {
+            Some(DatasetKind::ActorCatalog) if cfg!(target_os = "linux") => "Enter actor CSV path",
+            Some(DatasetKind::ClassifierTraining) if cfg!(target_os = "linux") => {
+                "Enter training CSV path"
+            }
+            _ => label,
         };
         let mut operation_card = rune::col().padding(14.0).gap(8.0).child(
             rune::row()

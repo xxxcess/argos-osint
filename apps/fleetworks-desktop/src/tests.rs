@@ -686,15 +686,20 @@ fn seed_button_preflight_status_shimmer_and_progressive_disclosure_reflect_state
     assert!(runtime.find("maintenance-seed").is_some());
     assert!(runtime.find("maintenance-train").is_some());
     assert!(runtime.find("maintenance-reindex").is_some());
+    let (seed_action, train_action) = if cfg!(target_os = "linux") {
+        ("Enter actor CSV path", "Enter training CSV path")
+    } else {
+        ("1. Seed Actors", "Optional · Train Classifier (Natural)")
+    };
+    let seed_explanation =
+        "Use a CSV to add or update actors. Existing actors outside this CSV are kept.";
     let seed_tree = runtime.accessibility_json().to_string();
     assert!(!seed_tree.contains("Pre-flight Checklist"));
-    assert!(seed_tree.contains("1. Seed Actors (Ready)"));
+    assert!(seed_tree.contains(&format!("{seed_action} (Ready)")));
     assert!(seed_tree.contains("2. Build Search Index (Unavailable)"));
-    assert!(seed_tree.contains("Optional · Train Classifier (Natural) (Unavailable)"));
-    assert!(seed_tree.contains(
-        "Choose a CSV to add or update actors. Existing actors outside this CSV are kept."
-    ));
-    assert!(!seed_tree.contains("Choose a training CSV for a Natural candidate."));
+    assert!(seed_tree.contains(&format!("{train_action} (Unavailable)")));
+    assert!(seed_tree.contains(seed_explanation));
+    assert!(!seed_tree.contains("Use a training CSV for a Natural candidate."));
     assert!(runtime.find("loading-shimmer").is_none());
 
     runtime.update(|state, _| state.maintenance.upload = Load::Loading);
@@ -706,7 +711,7 @@ fn seed_button_preflight_status_shimmer_and_progressive_disclosure_reflect_state
     });
     runtime.frame(0.5 / 60.0);
     let uploading_tree = runtime.accessibility_json().to_string();
-    assert!(uploading_tree.contains("1. Seed Actors (Uploading…)"));
+    assert!(uploading_tree.contains(&format!("{seed_action} (Uploading…)")));
     assert!(runtime.find("loading-shimmer").is_some());
     runtime.update(|state, _| {
         state.maintenance.upload = Load::Idle;
@@ -718,14 +723,14 @@ fn seed_button_preflight_status_shimmer_and_progressive_disclosure_reflect_state
     let classifier_tree = runtime.accessibility_json().to_string();
     assert!(classifier_tree
         .contains("This gateway has not advertised a durable consumer for this operation"));
-    assert!(!classifier_tree.contains("Choose a CSV to add or update actors."));
+    assert!(!classifier_tree.contains(seed_explanation));
 
     runtime.update(|state, _| state.seed_stage = SeedStage::Maintenance);
     runtime.frame(2.0 / 60.0);
     let reindex_tree = runtime.accessibility_json().to_string();
     assert!(reindex_tree
         .contains("This gateway has not advertised a durable consumer for this operation"));
-    assert!(!reindex_tree.contains("Choose a CSV to add or update actors."));
+    assert!(!reindex_tree.contains(seed_explanation));
 
     runtime.update(|state, _| {
         state.page = Page::Models;

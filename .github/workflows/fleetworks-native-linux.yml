@@ -135,11 +135,14 @@ jobs:
             --output "${{ runner.temp }}/linux-native-evidence/ui" \
             --scene backend-choice \
             --scene redesign-setup \
+            --scene setup-connected-embedded \
+            --scene setup-connected-distributed \
             --scene registration-ready \
             --scene workstation-partial-seed \
             --scene pairing-waiting \
             --scene pairing-keychain-denied \
             --scene assistant-open \
+            --scene inbox-drawer \
             --scene command-panel \
             --scene catalog \
             --size 1280x800 --size 640x480 --scale 1

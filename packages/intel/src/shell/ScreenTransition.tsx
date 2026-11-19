@@ -20,10 +20,12 @@ export function ScreenTransition({
   children,
   screen,
   fill = false,
+  fade = false,
 }: {
   children: React.ReactNode;
   screen: string;
   fill?: boolean;
+  fade?: boolean;
 }) {
   const reduced = useReducedMotion();
   const [snapshot, setSnapshot] = useState({
@@ -71,6 +73,8 @@ export function ScreenTransition({
           key={view.screen}
           exiting={view.exiting}
           fill={fill}
+          fade={fade}
+          initiallyVisible={fade || snapshot.previous === null}
           direction={snapshot.direction}
         >
           {view.content}
@@ -84,13 +88,17 @@ function Transition({
   direction,
   exiting,
   fill,
+  fade,
+  initiallyVisible,
 }: {
   children: React.ReactNode;
   direction: number;
   exiting: boolean;
   fill: boolean;
+  fade: boolean;
+  initiallyVisible: boolean;
 }) {
-  const presence = usePresence(!exiting, intelMotion.page);
+  const presence = usePresence(!exiting, intelMotion.page, initiallyVisible);
   return (
     <Animated.View
       aria-hidden={exiting || undefined}
@@ -101,17 +109,20 @@ function Transition({
         { minWidth: 0, width: "100%" },
         fill && { flex: 1, minHeight: 0 },
         exiting && { position: "absolute", top: 0, left: 0, right: 0 },
-        presence,
-        {
-          transform: [
-            {
-              translateY: presence.opacity.interpolate({
-                inputRange: [0, 1],
-                outputRange: [8 * direction, 0],
-              }),
+        exiting && fill && fade && { bottom: 0 },
+        fade
+          ? exiting && { opacity: presence.opacity, zIndex: 1 }
+          : {
+              opacity: presence.opacity,
+              transform: [
+                {
+                  translateY: presence.opacity.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [8 * direction, 0],
+                  }),
+                },
+              ],
             },
-          ],
-        },
       ]}
     >
       {children}

@@ -44,12 +44,14 @@ export function DeskButton({
   label,
   active = false,
   disabled = false,
+  density = "regular",
 }: {
   children: React.ReactNode;
   onPress: () => void;
   label?: string;
   active?: boolean;
   disabled?: boolean;
+  density?: "regular" | "compact";
 }) {
   const [hovered, setHovered] = useState(false);
   return (
@@ -64,6 +66,7 @@ export function DeskButton({
       onHoverOut={() => setHovered(false)}
       style={({ pressed }) => [
         s.button,
+        density === "compact" && s.compactButton,
         active && s.active,
         hovered && !disabled && { borderColor: c.accentBorder },
         pressed && { backgroundColor: c.panelRaised },
@@ -72,6 +75,7 @@ export function DeskButton({
       <Text
         style={[
           s.buttonText,
+          density === "compact" && s.compactButtonText,
           active && { color: c.accent },
           disabled && { color: c.dim },
         ]}
@@ -99,6 +103,8 @@ const s = StyleSheet.create({
     justifyContent: "center",
     alignItems: "center",
   },
+  compactButton: { paddingHorizontal: 8, paddingVertical: 6 },
+  compactButtonText: { fontSize: 13 },
   buttonText: {
     fontFamily: intelFonts.mono,
     fontSize: 14,

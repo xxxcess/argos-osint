@@ -1,12 +1,5 @@
 "use client";
-import React, {
-  lazy,
-  Suspense,
-  useEffect,
-  useCallback,
-  useState,
-  useSyncExternalStore,
-} from "react";
+import React, { lazy, Suspense, useState, useSyncExternalStore } from "react";
 import { View, Text, Pressable, StyleSheet } from "react-native";
 import type { Health } from "@argos/api-client";
 import { StatusMessage } from "./StatusMessage";
@@ -71,14 +64,12 @@ export function OrbitFallback({
   );
 }
 export function OrbitScene({
-  onComplete,
   ready = false,
   health,
   connecting = true,
   error,
   onRetry,
 }: {
-  onComplete?: () => void;
   ready?: boolean;
   health?: Health;
   connecting?: boolean;
@@ -99,22 +90,6 @@ export function OrbitScene({
     ready,
     animated,
   );
-  const revealKey = sequence.revealed.map((check) => check.id).join(":");
-  const [settled, setSettled] = useState("");
-  const markSettled = useCallback(() => setSettled(revealKey), [revealKey]);
-  useEffect(() => {
-    if (!hydrated || !ready) return;
-    if (!animated || (sequence.finished && settled === revealKey))
-      onComplete?.();
-  }, [
-    hydrated,
-    ready,
-    animated,
-    sequence.finished,
-    settled,
-    revealKey,
-    onComplete,
-  ]);
   const coreColor = {
     offline: intelColors.danger,
     checking: landingColors.core,
@@ -156,11 +131,7 @@ export function OrbitScene({
         style={StyleSheet.absoluteFill}
       >
         {supported && box.width > 0 && box.height > 0 ? (
-          <OrbitBoundary
-            onComplete={markSettled}
-            count={sequence.revealed.length}
-            coreColor={coreColor}
-          >
+          <OrbitBoundary count={sequence.revealed.length} coreColor={coreColor}>
             <Suspense
               fallback={
                 <OrbitFallback
@@ -171,10 +142,6 @@ export function OrbitScene({
             >
               <Canvas
                 reduced={reduced}
-                onComplete={markSettled}
-                ready={
-                  ready && sequence.revealed.length === sequence.passed.length
-                }
                 checks={sequence.revealed.map((check) => check.id)}
                 width={box.width}
                 height={box.height}
@@ -253,22 +220,9 @@ export function OrbitScene({
     </View>
   );
 }
-function CompletedFallback({
-  onComplete,
-  count,
-  coreColor,
-}: {
-  onComplete?: () => void;
-  count: number;
-  coreColor: string;
-}) {
-  useEffect(() => onComplete?.(), [onComplete]);
-  return <OrbitFallback count={count} coreColor={coreColor} />;
-}
 class OrbitBoundary extends React.Component<
   {
     children: React.ReactNode;
-    onComplete?: () => void;
     count: number;
     coreColor: string;
   },
@@ -280,8 +234,7 @@ class OrbitBoundary extends React.Component<
   }
   render() {
     return this.state.failed ? (
-      <CompletedFallback
-        onComplete={this.props.onComplete}
+      <OrbitFallback
         count={this.props.count}
         coreColor={this.props.coreColor}
       />

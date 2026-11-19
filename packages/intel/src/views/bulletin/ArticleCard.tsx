@@ -48,6 +48,7 @@ export function ArticleCard({
       onHoverOut={() => setHovered(false)}
       style={({ pressed }) => [
         s.card,
+        thumbnail && s.withThumbnail,
         (hovered || focused || pressed) && {
           borderColor: c.accent,
           backgroundColor: c.panelRaised,
@@ -84,7 +85,6 @@ export function ArticleCard({
 }
 const s = StyleSheet.create({
   card: {
-    minHeight: bulletinCardMinHeight,
     flexDirection: "row",
     alignItems: "stretch",
     gap: 12,
@@ -95,6 +95,7 @@ const s = StyleSheet.create({
     backgroundColor: c.panel,
     minWidth: 0,
   },
+  withThumbnail: { minHeight: bulletinCardMinHeight },
   thumb: {
     width: bulletinThumb,
     height: bulletinThumb,

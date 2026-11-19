@@ -466,14 +466,12 @@ fn local_backend_setup_card(
     } else {
         binary_strip
     };
-    body = body.child(binary_strip);
-
-    if let Some(diagnostics) = local_runtime_diagnostics(state, preferences, kit) {
-        body = body.child(diagnostics);
-    }
+    let diagnostics = local_runtime_diagnostics(state, preferences, kit);
 
     if state.connected() {
         body = body
+            .child(binary_strip)
+            .children(diagnostics)
             .child(ui_components::async_status_strip(
                 "connection-status",
                 "Connected to the embedded backend",
@@ -531,19 +529,6 @@ fn local_backend_setup_card(
         }
         body = body.child(actions);
     } else {
-        if let ConnectionStatus::Failed(error) = &state.connection.status {
-            body = body.child(
-                local_setup_diagnostic(
-                    "local-connection-error",
-                    "Embedded backend failed to start",
-                    error.clone(),
-                    StatusTone::Err,
-                    preferences,
-                    kit,
-                )
-                .role("alert"),
-            );
-        }
         let connecting = state.connection.status == ConnectionStatus::Connecting;
         let start_btn = ActionButton::new("Start Embedded Backend")
             .key("connect-local")
@@ -568,7 +553,23 @@ fn local_backend_setup_card(
         if !state.startup.active() {
             actions = actions.child(switch_btn);
         }
-        body = body.child(actions);
+        body = body
+            .child(actions)
+            .child(binary_strip)
+            .children(diagnostics);
+        if let ConnectionStatus::Failed(error) = &state.connection.status {
+            body = body.child(
+                local_setup_diagnostic(
+                    "local-connection-error",
+                    "Embedded backend failed to start",
+                    error.clone(),
+                    StatusTone::Err,
+                    preferences,
+                    kit,
+                )
+                .role("alert"),
+            );
+        }
     }
 
     let tone = if state.connected() {
@@ -3229,7 +3230,15 @@ mod tests {
                 detail.rect,
                 strip.rect,
             );
-            assert!(runtime.find("connect-local").is_some());
+            let start = elements
+                .iter()
+                .find(|el| el.key.as_deref() == Some("connect-local"))
+                .expect("Start Embedded Backend");
+            assert_eq!(start.visible, start.rect, "Start must fit at {size:?}");
+            assert!(
+                start.rect[1] + start.rect[3] <= strip.rect[1],
+                "the diagnostic must follow Start at {size:?}"
+            );
         }
     }
 

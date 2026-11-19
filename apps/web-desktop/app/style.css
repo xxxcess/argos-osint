@@ -298,6 +298,14 @@ select {
     bottom: 64px;
   }
 }
+@media (max-width: 599px) and (pointer: coarse) {
+  #intel-content-frame[data-testid="intel-bulletin-frame"] {
+    padding-top: 4px;
+  }
+  #intel-article-feed {
+    gap: 2px;
+  }
+}
 @media (pointer: coarse) {
   #intel-bulletin :is([role="button"], input),
   #intel-status-bar [role="button"],

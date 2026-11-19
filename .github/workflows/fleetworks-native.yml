@@ -268,7 +268,7 @@ jobs:
         id: upload
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: Fleetworks-app-${{ inputs.target }}-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}
+          name: Fleetworks-macOS-Desktop-App-${{ inputs.target }}-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/fleetworks-native-candidate/Fleetworks-*.zip
             ${{ runner.temp }}/fleetworks-native-candidate/Fleetworks-*.zip.sha256
@@ -281,7 +281,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: Fleetworks-native-evidence-${{ inputs.target }}-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}
+          name: Fleetworks-macOS-Desktop-Verification-${{ inputs.target }}-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}
           path: ${{ runner.temp }}/fleetworks-native-evidence/
           if-no-files-found: ignore
           retention-days: 14

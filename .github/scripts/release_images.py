@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """Build native images once, smoke their exact IDs, then stage immutable digests."""
 import argparse
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 import fleetworks_candidate_images as images
+from fleetworks_image_builder import bake_command
 
 ROLES = frozenset({"runtime", "surrealdb", "search-index", "web"})
 
@@ -22,8 +25,56 @@ def run(*command, capture=False, env=None):
     return result.stdout if capture else None
 
 
+def bake(args, platform, tags, pending):
+    settings = [part for role in sorted(pending)
+                for part in ("--set", f"{role}.tags={tags[role]}")]
+    if "web-dev" in pending:
+        settings.extend(("--set", f"web-dev.args.FLEETWORKS_UID={os.getuid()}",
+                         "--set", f"web-dev.args.FLEETWORKS_GID={os.getgid()}"))
+    environment = {**os.environ, "VERSION": args.version}
+    docker_config = nullcontext()
+    if args.builder == "depot" and args.push:
+        # BuildKit registry auth can consult the client config. Keep the
+        # release write credential available only to local registry commands.
+        host = environment.get("DOCKER_HOST")
+        if not host or environment.get("DOCKER_CONTEXT"):
+            host = run("docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}",
+                       capture=True).decode().strip()
+        if not host.startswith("unix:///"):
+            raise ValueError("Depot release loading requires a local Unix Docker daemon")
+        environment.pop("DOCKER_CONTEXT", None)
+        environment.pop("DOCKER_AUTH_CONFIG", None)
+        environment["DOCKER_HOST"] = host
+        docker_config = tempfile.TemporaryDirectory(prefix="fleetworks-depot-docker-")
+    with docker_config as credential_free_config:
+        if credential_free_config is not None:
+            # An explicit anonymous entry also disables Docker's default
+            # credential-store discovery on runners with a helper installed.
+            config = Path(credential_free_config) / "config.json"
+            config.write_text(json.dumps({"auths": {"ghcr.io": {}}}), encoding="utf-8")
+            environment["DOCKER_CONFIG"] = credential_free_config
+        command = bake_command("deploy/docker-bake.hcl", platform, sorted(pending), settings,
+                               builder=args.builder, project=args.depot_project)
+        run(*command, env=environment)
+
+
+def smoke_compose(args, platform, inspected, *, web, dev=False):
+    overrides = {name: inspected[role]["tag"] for role, name in images.image_environment(web).items()}
+    expected = images.service_image_ids(overrides, inspected, platform, web=web)
+    kind = "-dev" if dev else ""
+    ids = args.directory / f"service-image-ids{kind}-{args.arch}.json"
+    ids.write_text(json.dumps(expected, sort_keys=True) + "\n")
+    run(sys.executable, "deploy/verify.py", "--name",
+        f"images{kind}-{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}-{args.arch}",
+        "--platform", platform, *(["--web"] if web else []), "--atlas",
+        *(["--dev"] if dev else ["--source-journey"]), "--no-build", "--image-ids", str(ids),
+        env={**images.deploy_verify.isolated_environment(os.environ), **overrides})
+
+
 def build(args):
     selected = set(args.targets.split(","))
+    if args.push and args.dev_smoke:
+        raise ValueError("Development Web smoke is available for review builds only")
     if not selected or not selected <= ROLES:
         raise ValueError("Unsupported image selection")
     if not re.fullmatch(r"[0-9a-f]{40}", args.revision):
@@ -39,10 +90,11 @@ def build(args):
     web = "web" in selected
     # Compose verifies the complete runtime dependency closure, while only
     # source-selected images are published and exported for release assets.
-    compose = args.compose or bool(selected - {"web"})
+    compose = args.compose or args.dev_smoke or bool(selected - {"web"})
     closure = ({"runtime", "surrealdb", "search-index"} if compose else set()) | ({"web"} if web else set())
+    build_roles = closure | ({"web-dev"} if args.dev_smoke else set())
     tags = {role: f"{args.registry}/fleetworks-{role}:{args.image_tag}-{args.arch}"
-            for role in closure}
+            for role in build_roles}
     reused = set()
     if args.push:
         for role in sorted(selected):
@@ -54,33 +106,21 @@ def build(args):
                 reused.add(role)
             elif not any(marker in probe.stderr.lower() for marker in (b"not found", b"manifest unknown", b"name unknown")):
                 raise ValueError("Cannot establish registry tag absence safely")
-    pending = closure - reused
-    settings = [part for role, tag in sorted(tags.items()) if role in pending
-                for part in ("--set", f"{role}.tags={tag}")]
+    pending = build_roles - reused
     started = time.monotonic()
     if pending:
-        if args.builder == "depot":
-            builder = ("depot", "bake", "--project", args.depot_project, "--build-platform", platform)
-        else:
-            builder = ("docker", "buildx", "bake")
-        run(*builder, "-f", "deploy/docker-bake.hcl", "--load",
-            "--set", f"*.platforms={platform}", *settings, *sorted(pending),
-            env={**os.environ, "VERSION": args.version})
+        bake(args, platform, tags, pending)
     smoke_started = time.monotonic()
-    inspected = images.inspect_images(tags, platform)
+    inspected = images.inspect_images({role: tags[role] for role in closure}, platform)
     args.directory.mkdir(parents=True, exist_ok=True)
     if compose:
-        overrides = {name: tags[role] for role, name in images.image_environment(web).items()}
-        expected = images.service_image_ids(overrides, inspected, platform, web=web)
-        ids = args.directory / f"service-image-ids-{args.arch}.json"
-        ids.write_text(json.dumps(expected, sort_keys=True) + "\n")
-        run(sys.executable, "deploy/verify.py", "--name",
-            f"images-{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}-{args.arch}",
-            "--platform", platform, *(["--web"] if web else []), "--atlas", "--source-journey",
-            "--no-build", "--image-ids", str(ids), env={**images.deploy_verify.isolated_environment(os.environ), **overrides})
+        smoke_compose(args, platform, inspected, web=web)
     else:
         # Web-only UI packaging does not compile or launch backend engines.
         run("docker", "run", "--rm", "--entrypoint", "node", tags["web"], "-e", "process.exit(0)")
+    if args.dev_smoke:
+        development_web = images.inspect_images({"web": tags["web-dev"]}, platform)
+        smoke_compose(args, platform, {**inspected, **development_web}, web=True, dev=True)
     smoke_finished = time.monotonic()
     published = {}
     archive_info = None
@@ -137,9 +177,12 @@ def main():
     parser.add_argument("--depot-project", help="Depot project ID for --builder depot")
     parser.add_argument("--push", action="store_true")
     parser.add_argument("--compose", action="store_true", help="also verify the complete backend closure for relay/deployment changes")
+    parser.add_argument("--dev-smoke", action="store_true", help="also verify the development Web overlay in a review build")
     args = parser.parse_args()
     if args.builder == "depot" and not args.depot_project:
         parser.error("--builder depot requires --depot-project")
+    if args.push and args.dev_smoke:
+        parser.error("--dev-smoke cannot be combined with --push")
     build(args)
 
 

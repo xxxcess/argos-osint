@@ -29,6 +29,7 @@ SCOPES = {
     "bert", "compose", "desktop", "images", "local_backend",
     "queue", "server", "storage", "web", "web_dev",
 }
+BACKEND_IMAGES = {"runtime", "search-index", "surrealdb"}
 
 
 def path_selection(planner, path):
@@ -104,6 +105,28 @@ def image_matrix(stage, targets, compose):
     return entries
 
 
+def review_image_matrix(stage, images, scopes, *, publish, full):
+    """Select builds for smoke without adding verification targets to publication."""
+    if publish and images:
+        return []
+    if not images and "compose" in scopes:
+        targets = BACKEND_IMAGES | ({"web"} if "web" in scopes else set())
+        images = image_matrix(stage, targets, True)
+        if stage == "second":
+            # A standalone Compose check uses only this pass's backend runner.
+            images = [entry for entry in images if entry["arch"] == "arm64"]
+
+    entries = []
+    for image in images:
+        dev = full and not publish and "web_dev" in scopes and image["arch"] == "amd64"
+        entry = {**image, "dev": dev}
+        if dev:
+            targets = set(image["targets"].split(",")) | {"web"}
+            entry.update(targets=",".join(sorted(targets)), compose=True)
+        entries.append(entry)
+    return entries
+
+
 def verification(stage, plan):
     """Apply the pass to checks while leaving release publication inputs intact."""
     scope = plan["scope"]
@@ -121,6 +144,8 @@ def verification(stage, plan):
         "standard": list(ARCHITECTURES),
     }[stage]
     images = image_matrix(stage, targets, "compose" in scopes)
+    full = stage == "standard" and scope["full"]
+    review_images = review_image_matrix(stage, images, scopes, publish=plan.get("publish", False), full=full)
     if not images:
         scopes.discard("images")
     native = bool(scopes & {"desktop", "local_backend"})
@@ -132,7 +157,9 @@ def verification(stage, plan):
         "backend_arch": arches[0] if len(arches) == 1 else "both",
         "image_matrix": images,
         "image_targets": ",".join(sorted(targets)),
-        "full": stage == "standard" and scope["full"],
+        "review_image_matrix": review_images,
+        "review_images": bool(review_images),
+        "full": full,
     }
 
 
@@ -179,7 +206,7 @@ def promote(repository, branch, number, head, revision, standard_base, component
     ), None)
     if latest is None or latest["conclusion"] != "success":
         raise ValueError("The latest first pass must succeed for this PR, head, and base before second pass")
-    return base, latest["id"]
+    return base, destination["ref"], latest["id"]
 
 
 def main():
@@ -206,7 +233,7 @@ def main():
         args.output.write_text(json.dumps(plan), encoding="utf-8")
     elif args.command == "promote":
         try:
-            base, first_run = promote(
+            base, base_ref, first_run = promote(
                 os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_REF"], os.environ["PR_NUMBER"],
                 os.environ["EXPECTED_HEAD"], os.environ["FLEETWORKS_HEAD"], os.environ["STANDARD_BASE"],
                 os.environ["COMPONENTS"],
@@ -215,6 +242,7 @@ def main():
             raise SystemExit(str(error)) from error
         with args.output.open("a", encoding="utf-8") as output:
             print(f"base={base}", file=output)
+            print(f"base_ref={base_ref}", file=output)
         with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
             print(f"Second pass follows successful first-pass run {first_run}.", file=summary)
     else:

@@ -42,6 +42,8 @@ class VerificationPassTests(unittest.TestCase):
         self.assertEqual(first["backend_arch"], "amd64")
         self.assertEqual(first["image_matrix"][0]["targets"], "runtime")
         self.assertEqual(len(first["image_matrix"]), 1)
+        self.assertTrue(first["review_images"])
+        self.assertEqual(first["review_image_matrix"], [{**first["image_matrix"][0], "dev": False}])
         self.assertFalse(first["full"])
 
     def test_workflow_only_pr_exercises_native_candidate_instead_of_all_services(self):
@@ -56,9 +58,11 @@ class VerificationPassTests(unittest.TestCase):
         for skipped in ("desktop_linux", "desktop_macos", "server", "compose", "images", "web"):
             self.assertFalse(first[skipped], skipped)
         self.assertEqual(first["image_matrix"], [])
+        self.assertFalse(first["review_images"])
         second = ci.verification("second", plan)
         self.assertTrue(second["web"])
         self.assertEqual({entry["targets"] for entry in second["image_matrix"]}, {"web"})
+        self.assertEqual({entry["targets"] for entry in second["review_image_matrix"]}, {"web"})
 
     def test_second_pass_defers_only_the_remaining_architectures_and_web(self):
         plan = self.scopes("Cargo.lock", "package.json")
@@ -83,8 +87,48 @@ class VerificationPassTests(unittest.TestCase):
         self.assertTrue(standard["full"])
         self.assertEqual(standard["backend_arch"], "both")
         self.assertEqual(standard["image_targets"], "runtime,search-index,web")
+        self.assertFalse(standard["review_images"])
+        self.assertEqual(standard["review_image_matrix"], [])
         self.assertTrue(plan["publish"])
         self.assertEqual(plan["scope"]["image_arches"], ["amd64", "arm64"])
+
+    def test_compose_only_checks_use_the_review_builder_on_each_pass(self):
+        plan = self.scopes("deploy/compose.yml")
+        first = ci.verification("first", plan)
+        self.assertFalse(first["images"])
+        self.assertEqual(first["image_targets"], "")
+        self.assertTrue(first["review_images"])
+        self.assertEqual(first["review_image_matrix"], [{
+            "arch": "amd64", "runner": "ubuntu-24.04",
+            "targets": "runtime,search-index,surrealdb", "compose": True, "dev": False,
+        }])
+        second = ci.verification("second", plan)
+        self.assertEqual(second["review_image_matrix"], [{
+            "arch": "arm64", "runner": "ubuntu-24.04-arm",
+            "targets": "runtime,search-index,surrealdb,web", "compose": True, "dev": False,
+        }])
+
+    def test_compose_only_release_still_checks_both_loaded_images(self):
+        plan = self.scopes("deploy/compose.yml")
+        plan["publish"] = True
+        standard = ci.verification("standard", plan)
+        self.assertFalse(standard["images"])
+        self.assertEqual(standard["image_targets"], "")
+        self.assertTrue(standard["review_images"])
+        review = standard["review_image_matrix"]
+        self.assertEqual([entry["arch"] for entry in review], ["amd64", "arm64"])
+        self.assertEqual({entry["targets"] for entry in review}, {"runtime,search-index,surrealdb,web"})
+        self.assertTrue(all(entry["compose"] and not entry["dev"] for entry in review))
+
+    def test_full_review_smokes_dev_only_for_amd64_when_selected(self):
+        plan = self.scopes("deploy/compose.yml", "Cargo.lock")
+        plan["scope"]["full"] = True
+        standard = ci.verification("standard", plan)
+        self.assertEqual(standard["image_targets"], "runtime,search-index")
+        self.assertTrue(standard["review_images"])
+        amd64, arm64 = standard["review_image_matrix"]
+        self.assertEqual((amd64["arch"], amd64["targets"], amd64["dev"]), ("amd64", "runtime,search-index,web", True))
+        self.assertEqual((arm64["arch"], arm64["targets"], arm64["dev"]), ("arm64", "runtime,search-index", False))
 
     def test_reviewer_pass_uses_real_three_dot_diff_and_ignores_empty_path(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -143,7 +187,7 @@ class SecondPassPromotionTests(unittest.TestCase):
         }
 
     def test_exact_open_pr_and_successful_first_pass_allow_promotion(self):
-        self.assertEqual(self.promotion([self.first_run()]), (self.base, 42))
+        self.assertEqual(self.promotion([self.first_run()]), (self.base, "nightly", 42))
 
     def test_stale_branch_head_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "exact branch head"):

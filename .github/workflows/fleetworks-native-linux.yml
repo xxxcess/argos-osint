@@ -145,7 +145,7 @@ jobs:
       - name: Publish Linux UI captures for early review
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: Fleetworks-linux-ui-${{ matrix.target }}-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}
+          name: Fleetworks-Linux-Desktop-UI-Captures-x86_64-${{ inputs.profile }}-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}
           path: ${{ runner.temp }}/linux-native-evidence/ui/
           if-no-files-found: error
           retention-days: 7
@@ -236,7 +236,7 @@ jobs:
       - name: Upload Linux native candidate archive
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: Fleetworks-linux-app-${{ matrix.target }}-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}
+          name: Fleetworks-Linux-Desktop-App-x86_64-${{ inputs.profile }}-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/linux-native-dist/Fleetworks-*.tar.gz
             ${{ runner.temp }}/linux-native-dist/Fleetworks-*.tar.gz.sha256
@@ -260,7 +260,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: Fleetworks-linux-evidence-${{ matrix.target }}-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}
+          name: Fleetworks-Linux-Desktop-Verification-x86_64-${{ inputs.profile }}-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}
           path: ${{ runner.temp }}/linux-native-evidence/**
           if-no-files-found: ignore
           retention-days: 7

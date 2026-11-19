@@ -138,7 +138,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: Fleetworks-ui-native-${{ inputs.head }}
+          name: Fleetworks-Native-UI-PNGs-and-Accessibility-Trees-${{ inputs.head }}-${{ github.run_id }}.${{ github.run_attempt }}
           path: ${{ runner.temp }}/ui-review-native/
           if-no-files-found: ignore
           retention-days: 14
@@ -203,7 +203,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: Fleetworks-ui-web-${{ inputs.head }}
+          name: Fleetworks-Intel-Web-UI-Screenshots-and-Browser-Evidence-${{ inputs.head }}-${{ github.run_id }}.${{ github.run_attempt }}
           path: ${{ runner.temp }}/ui-review-web/
           if-no-files-found: ignore
           retention-days: 14
@@ -250,13 +250,13 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: inputs.scope == 'native' || inputs.scope == 'both'
         with:
-          name: Fleetworks-ui-native-${{ inputs.head }}
+          name: Fleetworks-Native-UI-PNGs-and-Accessibility-Trees-${{ inputs.head }}-${{ github.run_id }}.${{ github.run_attempt }}
           path: ${{ runner.temp }}/ui-review-download/Fleetworks-ui-native-${{ inputs.head }}
           digest-mismatch: error
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: inputs.scope == 'web' || inputs.scope == 'both'
         with:
-          name: Fleetworks-ui-web-${{ inputs.head }}
+          name: Fleetworks-Intel-Web-UI-Screenshots-and-Browser-Evidence-${{ inputs.head }}-${{ github.run_id }}.${{ github.run_attempt }}
           path: ${{ runner.temp }}/ui-review-download/Fleetworks-ui-web-${{ inputs.head }}
           digest-mismatch: error
       - name: Validate downloaded PNGs and prepare inline images
@@ -274,7 +274,7 @@ jobs:
       - name: Retain selected visual-reference archive
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: Fleetworks-ui-review-${{ inputs.head }}
+          name: Fleetworks-UI-Visual-Reference-Archive-${{ inputs.head }}-${{ github.run_id }}.${{ github.run_attempt }}
           path: ${{ runner.temp }}/Fleetworks-ui-review-${{ inputs.head }}.zip
           if-no-files-found: error
           retention-days: 14

@@ -56,3 +56,16 @@ target "web" {
   tags       = IMAGE_TAG != "" ? ["fleetworks-web:${IMAGE_TAG}"] : ["fleetworks-web:local", "fleetworks-web:${VERSION}"]
   platforms  = ["${PLATFORM}"]
 }
+
+# Development Web is selected explicitly for isolated Compose verification.
+target "web-dev" {
+  context    = "cwd://."
+  dockerfile = "deploy/Dockerfile"
+  target     = "web_dev"
+  tags       = IMAGE_TAG != "" ? ["fleetworks-web-dev:${IMAGE_TAG}"] : ["fleetworks-web-dev:local", "fleetworks-web-dev:${VERSION}"]
+  platforms  = ["${PLATFORM}"]
+  args = {
+    FLEETWORKS_UID = "1000"
+    FLEETWORKS_GID = "1000"
+  }
+}

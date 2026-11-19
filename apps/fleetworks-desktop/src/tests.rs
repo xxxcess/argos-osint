@@ -20,7 +20,7 @@ use fleetworks_contracts::context::RegisteredContext;
 use fleetworks_workstation::native::WorkspaceState;
 
 #[test]
-fn the_sidebar_header_shows_the_symbol_alone_and_the_compact_rail_keeps_none() {
+fn wide_and_compact_sidebar_headers_show_the_symbol_alone() {
     let env = Env {
         system_dark: true,
         scale: 1.0,
@@ -34,7 +34,7 @@ fn the_sidebar_header_shows_the_symbol_alone_and_the_compact_rail_keeps_none() {
     let mut narrow = Runtime::new(State::fixture(), app::view, (640.0, 480.0), env);
     narrow.frame(0.0);
     assert!(narrow.find("compact-icon-rail").is_some());
-    assert!(narrow.find("brand-mark").is_none());
+    assert!(narrow.find("brand-mark").is_some());
 }
 
 #[test]
@@ -588,14 +588,22 @@ fn workstation_metric_tile_opens_and_closes_telemetry_modal() {
         .to_string()
         .contains("CPU Telemetry"));
 
-    runtime.update(|_, tx| tx.scroll_into_view("workstation-tile-cpu"));
+    runtime.update(|_, tx| tx.scroll_into_view("workstation-host-metrics"));
     runtime.frame(1.0 / 60.0);
+    let (x, y) = runtime
+        .find("workstation-host-metrics/trigger")
+        .expect("host resource disclosure");
+    runtime.pointer_down(x, y);
+    runtime.pointer_up(x, y);
+    runtime.frame(2.0 / 60.0);
+    runtime.update(|_, tx| tx.scroll_into_view("workstation-tile-cpu"));
+    runtime.frame(3.0 / 60.0);
     let (x, y) = runtime
         .find("workstation-tile-cpu")
         .expect("clickable CPU metric ring tile");
     runtime.pointer_down(x, y);
     runtime.pointer_up(x, y);
-    runtime.frame(2.0 / 60.0);
+    runtime.frame(4.0 / 60.0);
     assert_eq!(
         runtime.state.workstation_inspector,
         Some(WorkstationInspector::Cpu)
@@ -606,7 +614,7 @@ fn workstation_metric_tile_opens_and_closes_telemetry_modal() {
     assert!(tree.contains("Measurements describe the API host"));
 
     runtime.update(|state, _| state.workstation_inspector = None);
-    runtime.frame(3.0 / 60.0);
+    runtime.frame(5.0 / 60.0);
     assert!(!runtime
         .accessibility_json()
         .to_string()

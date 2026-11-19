@@ -8,7 +8,7 @@
 
 A cold launch opens **Choose a backend** with **Embedded** and **Distributed** available from the first frame. [Quiet Orbit](../../design/matte-canvas/motion.md) plays at its reference pace above the tiles and settles into a still. Reduced Motion uses the still immediately. The orbit scales as one unit on the same `#060709` canvas as setup and the services.
 
-Choosing a tile opens **Setup Gateway** with that backend selected. Use **Start Embedded Backend** or **Connect** to proceed. **Back** returns to the chooser without replaying the launch animation.
+Choosing a tile opens **Setup Gateway** with that backend selected. Quiet Orbit carries its current pose into the setup header and stays docked through connection and registration. Use **Start Embedded Backend** or **Connect** to proceed. **Back** returns focus to the selected tile without replaying launch. **Done** opens Workstation Status immediately and the mark settles into the sidebar. Reduced Motion places the static mark directly in each destination.
 
 A launch with `--api-origin` or `--api-token-file` skips the chooser. The `backend-choice` fixture exercises the production chooser with synthetic effects. The startup controls are in `apps/fleetworks-desktop/src/startup.rs` and the scene is in `apps/fleetworks-desktop/src/orbit.rs`.
 

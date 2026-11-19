@@ -101,7 +101,7 @@ describe("Fleetworks palette compositing contracts (rendered verification remain
       colors.selectionSurface,
     ]);
   });
-  it("uses canonical five-ray geometry with a transparent crescent across web assets", () => {
+  it("uses the canonical fixed crown and transparent crescent across web assets", () => {
     const canonical = readFileSync(
       new URL("../../../assets/brand/fleetworks-mark.svg", import.meta.url),
       "utf8",

@@ -309,6 +309,16 @@ pub(crate) fn display_size(window: Option<[f32; 2]>) -> [f32; 2] {
     [ENVELOPE[0] * scale, ENVELOPE[1] * scale]
 }
 
+/// The five satellites of the static mark. Coordinates are shared with the canonical SVG
+/// in `assets/brand/fleetworks-mark.svg`, using this scene's 144 × 176 envelope.
+const CROWN: [[[f32; 2]; 3]; SATELLITE_COUNT] = [
+    [[72.0, 3.0], [65.0, 17.0], [79.0, 17.0]],
+    [[41.0, 8.0], [33.0, 24.0], [48.0, 23.0]],
+    [[103.0, 8.0], [96.0, 23.0], [111.0, 24.0]],
+    [[17.0, 23.0], [10.0, 40.0], [26.0, 38.0]],
+    [[127.0, 23.0], [118.0, 38.0], [134.0, 40.0]],
+];
+
 /// One glass prism: a smoky body, a lit and a shaded facet, an inner bevel that gives it
 /// thickness, a bright lit edge, a faint rim and a warm sliver of the core reflected near its
 /// base. Every layer stays inside the prism's own triangle (plus the 0.3 unit rim).
@@ -355,7 +365,14 @@ fn prism(shape: Shape, satellite: &Satellite) -> Shape {
 /// Reduced motion passes `animated = false`, which freezes every layer at one complete pose.
 pub(crate) fn layers(seconds: f32, animated: bool) -> (Shape, Shape) {
     let seconds = if animated { seconds } else { STILL_SECONDS };
-    let prisms = satellites(seconds);
+    let prisms = if animated {
+        satellites(seconds)
+    } else {
+        CROWN.map(|vertices| Satellite {
+            vertices,
+            depth: 1.0,
+        })
+    };
     let mut back = Shape::new();
     for satellite in prisms.iter().filter(|s| s.depth < 0.0) {
         back = prism(back, satellite);
@@ -468,7 +485,7 @@ fn stack(seconds: f32, animated: bool, width: f32, height: f32) -> El {
 }
 
 /// The symbol alone at rest, `height` points tall, for chrome such as the sidebar header: the
-/// reduced-motion still pose of the orbit with no wordmark. Its accessible name is the product
+/// fixed crown of the reduced-motion mark with no wordmark. Its accessible name is the product
 /// name, which the visible UI no longer prints beside it.
 pub(crate) fn mark(height: f32) -> El {
     stack(
@@ -479,6 +496,24 @@ pub(crate) fn mark(height: f32) -> El {
     )
     .key("brand-mark")
     .label("Fleetworks")
+}
+
+/// Draw the selected pose in flight, blending into the fixed crown at the rail.
+pub(crate) fn handoff(seconds: f32, crown: f32, width: f32, height: f32) -> El {
+    if crown == 0.0 {
+        return stack(seconds, true, width, height);
+    }
+    el().size(width, height)
+        .child(
+            stack(seconds, true, width, height)
+                .absolute(0.0, 0.0)
+                .opacity(1.0 - crown),
+        )
+        .child(
+            stack(seconds, false, width, height)
+                .absolute(0.0, 0.0)
+                .opacity(crown),
+        )
 }
 
 /// The orbit as one element within the chooser's uniformly scaled envelope.
@@ -536,6 +571,23 @@ mod tests {
             "reduced motion ignores the clock"
         );
         assert!(!back.is_empty() && !front.is_empty());
+    }
+
+    #[test]
+    fn fixed_crown_matches_the_canonical_symbol_and_clears_the_glass() {
+        let svg = include_str!("../../../assets/brand/fleetworks-mark.svg");
+        let crescent = crescent();
+        for [apex, left, right] in CROWN {
+            let points = format!(
+                "points=\"{},{} {},{} {},{}\"",
+                apex[0], apex[1], left[0], left[1], right[0], right[1],
+            );
+            assert!(svg.contains(&points));
+            for p in edge_points([apex, left, right]) {
+                assert!(distance_to_polygon(p, &crescent) > MIN_CLEARANCE);
+                assert!((p[0] - CORE[0]).hypot(p[1] - CORE[1]) > CORE_RADIUS);
+            }
+        }
     }
 
     #[test]

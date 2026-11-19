@@ -1235,6 +1235,7 @@ const JOBS_BACKGROUND_DISCOVERY_SECS: f64 = 15.0;
 /// Jobs scheduling. On the Jobs page, two independent loops share the tick:
 /// - follow known active work, or recover unavailable logs of the selected job;
 /// - discover newly admitted work for the registered workstation.
+///
 /// Off the Jobs page, refresh the shared registered job aggregate at a bounded low cadence
 /// while focused without changing the current list query or scroll position.
 pub(crate) fn poll_jobs(state: &mut State, now: f64, tx: &mut Tx) -> bool {

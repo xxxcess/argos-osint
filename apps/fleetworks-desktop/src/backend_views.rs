@@ -1213,7 +1213,7 @@ fn jobs(
         },
     };
     let jobs_unsynced = (state.scoped_jobs.status == crate::jobs_query::JobsLoad::Ready)
-        .then(|| state.scoped_jobs.message.as_ref())
+        .then_some(state.scoped_jobs.message.as_ref())
         .flatten()
         .map(|error| {
             crate::views::unsynced_glyph(

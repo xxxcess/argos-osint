@@ -160,8 +160,8 @@ impl Inbox {
     }
 
     fn record_known_job(&mut self, id: String, state: String) {
-        if self.known_jobs.contains_key(&id) {
-            self.known_jobs.insert(id, state);
+        if let Some(known_state) = self.known_jobs.get_mut(&id) {
+            *known_state = state;
             return;
         }
         while self.known_jobs.len() >= MAX_TRACKED_JOBS {

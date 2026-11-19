@@ -26,7 +26,7 @@ pub(crate) const INTRO_SECONDS: f64 = 3.0;
 const LOCAL: &str = "startup-local";
 const REMOTE: &str = "startup-remote";
 const SETUP_MARK: &str = "startup-setup-mark";
-const RAIL_MARK: &str = "brand-mark";
+const RAIL_SLOT: &str = "startup-rail-mark-slot";
 const SETUP_SECONDS: f64 = 0.22;
 const RAIL_SECONDS: f64 = 0.21;
 
@@ -40,7 +40,7 @@ impl Dock {
     fn key(self) -> &'static str {
         match self {
             Self::Setup => SETUP_MARK,
-            Self::Rail => RAIL_MARK,
+            Self::Rail => RAIL_SLOT,
         }
     }
 
@@ -139,6 +139,11 @@ impl Startup {
         let remaining = flight.started_at + flight.dock.duration() - now;
         if self.reduced_motion.get() || remaining <= 0.0 {
             self.flight = None;
+            if flight.dock == Dock::Rail {
+                // The first layout may change from the wide pane to the compact rail. Land
+                // any presence tracks from that change as the floating mark is replaced.
+                tx.settle();
+            }
         } else {
             tx.wake_after(std::time::Duration::from_secs_f64(
                 remaining.min(1.0 / 60.0),
@@ -193,14 +198,15 @@ fn moving_mark(
 
 /// Keep the rail mark's layout slot while the pointer-transparent orbit moves toward it.
 pub(crate) fn rail_mark(state: &State, height: f32, preferences: ViewPreferences) -> El {
-    orbit::mark(height)
-        .transition(Transition::none())
-        .instant_changes()
-        .opacity(if state.startup.flying_to(Dock::Rail, preferences) {
-            0.0
-        } else {
-            1.0
-        })
+    let slot = rune::el()
+        .key(RAIL_SLOT)
+        .size(height * orbit::ENVELOPE[0] / orbit::ENVELOPE[1], height)
+        .transition(Transition::none());
+    if state.startup.flying_to(Dock::Rail, preferences) {
+        slot
+    } else {
+        slot.child(orbit::mark(height).transition(Transition::none()))
+    }
 }
 
 pub(crate) fn rail_handoff(
@@ -494,6 +500,9 @@ impl State {
             }
             self.startup.finish();
             self.page = app::Page::Workstation;
+            // On-press commits animate by default. Mount the workstation and its layout
+            // now, so no shell entrance is layered over the orbit's own flight.
+            tx.instant();
             tx.focus("nav-workstation", tx.by_keys());
         }
         self.setup_gateway = false;
@@ -686,7 +695,9 @@ mod tests {
             assert_eq!(runtime.find("startup-orbit-flight").is_some(), !reduced);
             tick(&mut runtime, 1.48);
             assert!(runtime.find("startup-orbit-flight").is_none());
-            assert_eq!(runtime.presented(RAIL_MARK).unwrap().1, 1.0);
+            let (rail, opacity) = runtime.presented("brand-mark").expect("landed rail mark");
+            assert_eq!(opacity, 1.0);
+            assert!(rail[0] >= 0.0 && rail[1] >= 0.0);
         }
     }
 

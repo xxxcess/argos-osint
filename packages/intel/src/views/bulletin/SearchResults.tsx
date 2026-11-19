@@ -23,7 +23,24 @@ import { DeskButton } from "../desk-ui";
 import { intelColors as c } from "../../shell/intel-theme";
 import { intelFonts } from "../../shell/intel-fonts";
 
-const UNAVAILABLE_STATUS = [404, 405, 501, 503];
+const UNAVAILABLE_STATUS = [404, 405, 501];
+
+function formatSyncTime(updatedAt?: number): string | null {
+  if (!updatedAt || !Number.isFinite(updatedAt)) return null;
+  return new Date(updatedAt).toLocaleTimeString("en-US");
+}
+
+function unsyncedSearchLabel(
+  subject: string,
+  updatedAt?: number,
+  reason?: string,
+): string {
+  const parts = [`${subject} unsynced`];
+  const at = formatSyncTime(updatedAt);
+  if (at) parts.push(`last updated ${at}`);
+  if (reason?.trim()) parts.push(reason.trim());
+  return parts.join(" · ");
+}
 
 /** Actor discovery hits for the submitted query, ranked and reported apart from articles. */
 function ActorResults({
@@ -36,6 +53,7 @@ function ActorResults({
   onActor: (actorId: string) => void;
 }) {
   const problem = actorSearchProblem(query);
+  const hasData = actors.data !== undefined;
   const availability = actorAvailability(actors.data);
   const views = actorHitViews(actorHits(actors.data?.rows));
   const failed = actors.isError;
@@ -43,19 +61,34 @@ function ActorResults({
     failed &&
     actors.error instanceof ApiError &&
     UNAVAILABLE_STATUS.includes(actors.error.status);
+  const retainedRefreshError = hasData && failed;
   const state = availability.kind === "ready" ? "" : availability.state;
   return (
     <View nativeID="intel-actor-results" style={s.group}>
-      <Text accessibilityRole="header" style={s.groupHeading}>
-        Actors
-      </Text>
+      <View style={s.groupHeader}>
+        <Text accessibilityRole="header" style={s.groupHeading}>
+          Actors
+        </Text>
+        {retainedRefreshError ? (
+          <Text
+            accessibilityLabel={unsyncedSearchLabel(
+              "Actor results",
+              actors.dataUpdatedAt,
+              actors.error?.message,
+            )}
+            style={s.unsyncedGlyph}
+          >
+            ◇
+          </Text>
+        ) : null}
+      </View>
       {problem ? (
         <Notice>Actor search skipped. {problem}</Notice>
-      ) : actors.isLoading ? (
+      ) : actors.isLoading && !hasData ? (
         <LoadingState label="Searching actors…" compact />
-      ) : missingRoute ? (
+      ) : missingRoute && !hasData ? (
         <Notice>Actor search is unavailable on this backend.</Notice>
-      ) : failed ? (
+      ) : failed && !hasData ? (
         <View style={{ gap: 12 }}>
           <Notice>{actors.error?.message || "Actor search failed."}</Notice>
           <DeskButton
@@ -66,34 +99,55 @@ function ActorResults({
             Retry actor search
           </DeskButton>
         </View>
-      ) : actors.isSuccess && availability.kind === "unavailable" ? (
-        <Notice>
-          Actor index is {state.replace("_", " ")}. Actor results are not
-          available.
-        </Notice>
-      ) : actors.isSuccess ? (
+      ) : hasData ? (
         <>
-          {availability.kind === "partial" ? (
+          {retainedRefreshError ? (
+            missingRoute ? (
+              <Notice>Actor search is unavailable on this backend.</Notice>
+            ) : (
+              <View style={{ gap: 12 }}>
+                <DeskButton
+                  disabled={actors.isFetching}
+                  onPress={() => {
+                    void actors.refetch();
+                  }}
+                >
+                  Retry actor search
+                </DeskButton>
+              </View>
+            )
+          ) : null}
+          {availability.kind === "unavailable" ? (
             <Notice>
-              Actor index is {state}. Results may be incomplete or out of date.
+              Actor index is {state.replace("_", " ")}. Actor results are not
+              available.
             </Notice>
-          ) : views.length === 0 ? (
-            <EmptyState title="NO MATCHING ACTORS">
-              No actor name, alias or description matches this search.
-            </EmptyState>
-          ) : null}
-          <View style={s.cards}>
-            {views.map((view) => (
-              <ActorHitCard
-                key={view.hit.actor_id}
-                view={view}
-                onPress={() => onActor(view.hit.actor_id)}
-              />
-            ))}
-          </View>
-          {actors.data?.truncated ? (
-            <Notice>Showing the best actor matches only.</Notice>
-          ) : null}
+          ) : (
+            <>
+              {availability.kind === "partial" ? (
+                <Notice>
+                  Actor index is {state}. Results may be incomplete or out of
+                  date.
+                </Notice>
+              ) : views.length === 0 ? (
+                <EmptyState title="NO MATCHING ACTORS">
+                  No actor name, alias or description matches this search.
+                </EmptyState>
+              ) : null}
+              <View style={s.cards}>
+                {views.map((view) => (
+                  <ActorHitCard
+                    key={view.hit.actor_id}
+                    view={view}
+                    onPress={() => onActor(view.hit.actor_id)}
+                  />
+                ))}
+              </View>
+              {actors.data?.truncated ? (
+                <Notice>Showing the best actor matches only.</Notice>
+              ) : null}
+            </>
+          )}
         </>
       ) : null}
     </View>
@@ -149,11 +203,28 @@ export function SearchResults({
     error &&
     search.error instanceof ApiError &&
     UNAVAILABLE_STATUS.includes(search.error.status);
+  const retainedSearchError = error && hits.length > 0;
   return (
     <ScrollView
       nativeID="intel-search-results"
       style={s.list}
       contentContainerStyle={s.content}
+      scrollEventThrottle={100}
+      onScroll={({
+        nativeEvent: { contentOffset, contentSize, layoutMeasurement },
+      }) => {
+        if (
+          !search.hasNextPage ||
+          search.isFetching ||
+          search.isFetchNextPageError
+        )
+          return;
+        if (
+          contentOffset.y + layoutMeasurement.height >=
+          contentSize.height - 240
+        )
+          void search.fetchNextPage({ cancelRefetch: false });
+      }}
     >
       <View style={s.bar}>
         <Text accessibilityRole="header" style={s.heading}>
@@ -162,9 +233,23 @@ export function SearchResults({
         <DeskButton onPress={onClear}>Clear search</DeskButton>
       </View>
       <ActorResults query={query} actors={actors} onActor={onActor} />
-      <Text accessibilityRole="header" style={s.groupHeading}>
-        Articles
-      </Text>
+      <View style={s.groupHeader}>
+        <Text accessibilityRole="header" style={s.groupHeading}>
+          Articles
+        </Text>
+        {retainedSearchError ? (
+          <Text
+            accessibilityLabel={unsyncedSearchLabel(
+              "Article results",
+              search.dataUpdatedAt,
+              search.error?.message,
+            )}
+            style={s.unsyncedGlyph}
+          >
+            ◇
+          </Text>
+        ) : null}
+      </View>
       <View nativeID="intel-search-filters" style={s.filters}>
         <Text style={s.filterLabel}>Narrow by</Text>
         {day ? (
@@ -289,6 +374,11 @@ const s = StyleSheet.create({
   },
   cards: { gap: 12 },
   group: { gap: 12 },
+  groupHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
   groupHeading: {
     color: c.dim,
     fontFamily: intelFonts.mono,
@@ -296,6 +386,11 @@ const s = StyleSheet.create({
     fontWeight: "700",
     letterSpacing: 1,
     textTransform: "uppercase",
+  },
+  unsyncedGlyph: {
+    color: c.muted,
+    fontFamily: intelFonts.mono,
+    fontSize: 13,
   },
   filters: {
     flexDirection: "row",
@@ -309,6 +404,7 @@ const s = StyleSheet.create({
     fontSize: 12,
   },
   sourceInput: {
+    minHeight: 44,
     minWidth: 200,
     flexGrow: 1,
     maxWidth: 320,
@@ -316,7 +412,7 @@ const s = StyleSheet.create({
     fontFamily: intelFonts.body,
     fontSize: 14,
     borderWidth: 1,
-    borderColor: c.border,
+    borderColor: c.borderStrong,
     borderRadius: 6,
     paddingHorizontal: 10,
     paddingVertical: 6,

@@ -227,6 +227,10 @@ interface Backend {
   setBase: (s: string) => void;
   instance: string;
   connected: boolean;
+  /** True when a previously ready same-scope connection failed its latest readiness refresh. */
+  stale: boolean;
+  /** Timestamp (ms since epoch) of the last successful readiness response for this scope. */
+  lastSyncedAt?: number;
   live?: LiveTransport;
   scope?: ConnectionRequestScope;
   connecting: boolean;
@@ -432,6 +436,23 @@ export function BackendProvider({
 }
 const READY_POLL_MS = 60_000;
 
+function isHealthReady(data: Health | undefined): data is Health {
+  return Boolean(
+    data &&
+      data.ready &&
+      data.storage &&
+      data.service === "argos-intel" &&
+      data.api_version === 1,
+  );
+}
+
+function isRevocationError(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    (error.status === 401 || error.status === 403 || error.status === 409)
+  );
+}
+
 function Connection({
   children,
   settings,
@@ -470,15 +491,23 @@ function Connection({
     refetchInterval: READY_POLL_MS,
     retry: false,
   });
-  const connected =
-    health.isSuccess &&
-    health.data.ready &&
-    health.data.storage &&
-    health.data.service === "argos-intel" &&
-    health.data.api_version === 1;
-  const instance = connected
+  const revoked = health.isError && isRevocationError(health.error);
+  useEffect(() => {
+    if (!revoked) return;
+    client.removeQueries({
+      predicate: (query) => query.queryKey[0] !== "health",
+    });
+  }, [revoked, client]);
+  const hasReadySnapshot = isHealthReady(health.data) && !revoked;
+  const stale = hasReadySnapshot && health.isError;
+  const connected = hasReadySnapshot;
+  const instance = hasReadySnapshot
     ? `${health.data.instance_id}${namespace ? `:${namespace}` : ""}`
     : "";
+  const lastSyncedAt =
+    hasReadySnapshot && health.dataUpdatedAt > 0
+      ? health.dataUpdatedAt
+      : undefined;
   const setBase = (raw: string) => {
     const next = safeBackend(raw);
     client.clear();
@@ -489,10 +518,12 @@ function Connection({
     setBase,
     instance,
     connected,
+    stale,
+    lastSyncedAt,
     live,
     scope,
     connecting: health.isFetching,
-    health: health.isSuccess ? health.data : undefined,
+    health: hasReadySnapshot ? health.data : undefined,
     connectionError: health.error?.message,
     createRequestId: settings.createRequestId,
     retry: () => {
@@ -504,6 +535,9 @@ function Connection({
   return (
     <BackendContext.Provider value={value}>{children}</BackendContext.Provider>
   );
+}
+export function useOptionalBackend() {
+  return useContext(BackendContext);
 }
 export function useBackend() {
   const v = useContext(BackendContext);
@@ -656,6 +690,10 @@ export function useAction<T>(path: string, signal?: AbortSignal) {
   return useMutation({
     mutationFn: (body: unknown) => {
       if (!b.connected) throw new Error("API offline");
+      if (b.stale && path !== "topology/resolve")
+        throw new Error(
+          "Connection unsynced; retry connection before running this action",
+        );
       return request<T>(
         b.base,
         path,
@@ -947,15 +985,21 @@ export function useGenerateTopologySummary() {
   const b = useBackend();
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (key: TopologySummaryKey) =>
-      request<TopologySummaryView>(
+    mutationFn: (key: TopologySummaryKey) => {
+      if (!b.connected) throw new Error("API offline");
+      if (b.stale)
+        throw new Error(
+          "Connection unsynced; retry connection before generating a summary",
+        );
+      return request<TopologySummaryView>(
         b.base,
         "topology/summary/generate",
         key,
         undefined,
         REQUEST_TIMEOUT_MS,
         b.scope,
-      ),
+      );
+    },
     retry: false,
     onSuccess: (view, key) =>
       client.setQueryData(

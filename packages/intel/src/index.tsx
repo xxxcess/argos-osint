@@ -47,6 +47,7 @@ import { ActorDossierView } from "./views/actor/ActorDossierView";
 import { Topology } from "./topology/Topology";
 import { HomeView } from "./views/HomeView";
 import { BulletinView } from "./views/BulletinView";
+import { CategoryCountsSyncContext } from "./views/bulletin/CategoryRail";
 import { BriefProgressStepper } from "./views/brief/BriefProgressStepper";
 import { ContextRail } from "./views/brief/ContextRail";
 import { BriefSkeleton } from "./views/brief/BriefSkeleton";
@@ -122,9 +123,27 @@ export function IntelApp({
 function WorkspaceStatusBar(
   props: Omit<React.ComponentProps<typeof IntelStatusBar>, "clock">,
 ) {
+  const b = useBackend();
   const metrics = useHostMetrics();
   const identity = usePlatformIdentity();
-  const host = metrics.isError ? undefined : metrics.data;
+  const host = props.connected ? metrics.data : undefined;
+  const hasSample =
+    host != null &&
+    [
+      host.cpu_percent,
+      host.memory_percent,
+      host.disk_percent,
+      host.network_kbps,
+    ].some((value) => value != null && Number.isFinite(value));
+  const metricsUnsynced =
+    props.connected && hasSample && (metrics.isError || b.stale)
+      ? {
+          updatedAt: metrics.dataUpdatedAt || b.lastSyncedAt,
+          reason:
+            metrics.error?.message ||
+            (b.stale ? b.connectionError : undefined),
+        }
+      : undefined;
   const [clock, setClock] = useState("");
   useEffect(() => {
     const update = () => setClock(new Date().toLocaleTimeString("en-US"));
@@ -136,6 +155,7 @@ function WorkspaceStatusBar(
       {...props}
       clock={clock}
       backendName={props.connected ? identity.data : undefined}
+      metricsUnsynced={metricsUnsynced}
       metrics={
         props.connected && host
           ? {
@@ -150,6 +170,7 @@ function WorkspaceStatusBar(
   );
 }
 function Workspace({ navigation }: { navigation: IntelNavigation }) {
+  const b = useBackend();
   const route = useSyncExternalStore(
     navigation.subscribe,
     navigation.getSnapshot,
@@ -375,12 +396,17 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
                   ).map(([label, id]) => (
                     <Button
                       key={id}
-                      onPress={() =>
+                      onPress={() => {
+                        const reduced =
+                          typeof window !== "undefined" &&
+                          window.matchMedia?.(
+                            "(prefers-reduced-motion: reduce)",
+                          )?.matches;
                         document.getElementById(id)?.scrollIntoView({
-                          behavior: "smooth",
+                          behavior: reduced ? "auto" : "smooth",
                           block: "start",
-                        })
-                      }
+                        });
+                      }}
                     >
                       {label}
                     </Button>
@@ -489,55 +515,78 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
               )}
             </ScrollView>
           ) : (
-            <BulletinView
-              sort={feedSort}
-              onSort={setFeedSort}
-              categories={categories}
-              category={category}
-              onCategory={setCategory}
-              search={search}
-              onSearch={setSearch}
-              submittedSearch={submittedSearch}
-              searchResults={searchResults}
-              actorResults={actorResults}
-              onActor={(actorId) => navigate(actorRouteFor(actorId))}
-              searchFilters={searchFilters}
-              onSearchFilters={setSearchFilters}
-              onSubmitSearch={() => {
-                if (articleSearchProblem(search) === null)
-                  setSubmittedSearch(search.trim());
+            <CategoryCountsSyncContext.Provider
+              value={{
+                unsynced: Boolean(counts.data && (counts.isError || b.stale)),
+                updatedAt: counts.dataUpdatedAt || b.lastSyncedAt,
+                reason:
+                  counts.error?.message ||
+                  (b.stale ? b.connectionError : undefined),
               }}
-              onClearSearch={() => {
-                setSearch("");
-                setSubmittedSearch("");
-                setSearchFilters({});
-              }}
-              days={days.data?.days || []}
-              selectedDay={selectedDay}
-              onDay={setDay}
-              daysPending={days.isLoading}
-              daysSuccess={days.isSuccess}
-              daysError={days.error}
-              onRetryDays={() => {
-                void days.refetch();
-              }}
-              articles={articles}
-              counts={counts.data?.counts}
-              list={list}
-              onArticle={openArticle}
-              onReset={() => {
-                setCategory(INTEL_CATEGORIES[0]);
-                setDay("");
-                setSearch("");
-                setSubmittedSearch("");
-                setSearchFilters({});
-              }}
-            />
+            >
+              <BulletinView
+                sort={feedSort}
+                onSort={setFeedSort}
+                categories={categories}
+                category={category}
+                onCategory={setCategory}
+                search={search}
+                onSearch={setSearch}
+                submittedSearch={submittedSearch}
+                searchResults={searchResults}
+                actorResults={actorResults}
+                onActor={(actorId) => navigate(actorRouteFor(actorId))}
+                searchFilters={searchFilters}
+                onSearchFilters={setSearchFilters}
+                onSubmitSearch={() => {
+                  if (articleSearchProblem(search) !== null) return;
+                  const trimmed = search.trim();
+                  if (trimmed === submittedSearch) {
+                    void searchResults.refetch();
+                    void actorResults.refetch();
+                  } else {
+                    setSubmittedSearch(trimmed);
+                  }
+                }}
+                onClearSearch={() => {
+                  setSearch("");
+                  setSubmittedSearch("");
+                  setSearchFilters({});
+                }}
+                days={days.data?.days || []}
+                selectedDay={selectedDay}
+                onDay={setDay}
+                daysPending={days.isLoading}
+                daysSuccess={days.isSuccess}
+                daysError={days.error}
+                onRetryDays={() => {
+                  void days.refetch();
+                }}
+                articles={articles}
+                counts={counts.data?.counts}
+                list={list}
+                onArticle={openArticle}
+                onReset={() => {
+                  setCategory(INTEL_CATEGORIES[0]);
+                  setDay("");
+                  setSearch("");
+                  setSubmittedSearch("");
+                  setSearchFilters({});
+                }}
+              />
+            </CategoryCountsSyncContext.Provider>
           )}
         </ScreenTransition>
       </View>
       <WorkspaceStatusBar
-        connected
+        connected={b.connected}
+        connectionUnsynced={
+          b.stale
+            ? { updatedAt: b.lastSyncedAt, reason: b.connectionError }
+            : undefined
+        }
+        connectionRetrying={b.connecting}
+        onRetryConnection={b.retry}
         job={
           screen === "home" ? undefined : (
             <PageJobs
@@ -744,7 +793,8 @@ function Focus({
   const admit = ensure.mutate;
   const alreadyRan = Boolean(detail.data?.job_id || detail.data?.publication);
   useEffect(() => {
-    if (!backend.connected || !detail.isSuccess || alreadyRan) return;
+    if (!backend.connected || backend.stale || !detail.isSuccess || alreadyRan)
+      return;
     const key = JSON.stringify([
       backend.base,
       backend.instance,
@@ -763,6 +813,7 @@ function Focus({
     backend.base,
     backend.instance,
     backend.connected,
+    backend.stale,
     detail.isSuccess,
     admit,
   ]);

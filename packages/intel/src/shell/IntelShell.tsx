@@ -35,6 +35,26 @@ export type IntelMetrics = {
   platform?: string | null;
   chipset?: string | null;
 };
+export type UnsyncedMeta = {
+  /** Timestamp (ms since epoch) of the last successful sample or sync. */
+  updatedAt?: number;
+  /** Brief failure reason for accessible details. */
+  reason?: string;
+};
+
+function formatSyncTime(updatedAt?: number): string | null {
+  if (!updatedAt || !Number.isFinite(updatedAt)) return null;
+  return new Date(updatedAt).toLocaleTimeString("en-US");
+}
+
+function unsyncedLabel(subject: string, meta?: UnsyncedMeta): string {
+  const parts = [`${subject} unsynced`];
+  const at = formatSyncTime(meta?.updatedAt);
+  if (at) parts.push(`last updated ${at}`);
+  if (meta?.reason?.trim()) parts.push(meta.reason.trim());
+  return parts.join(" · ");
+}
+
 function metric(value: number | null | undefined, suffix: string) {
   return value != null && Number.isFinite(value) && value >= 0
     ? `${Math.round(value)}${suffix}`
@@ -46,6 +66,10 @@ export function IntelStatusBar({
   connected,
   activeApp,
   metrics,
+  metricsUnsynced,
+  connectionUnsynced,
+  connectionRetrying = false,
+  onRetryConnection,
   backendName,
   clock,
   onHome,
@@ -58,6 +82,12 @@ export function IntelStatusBar({
   connected: boolean;
   activeApp: boolean;
   metrics?: IntelMetrics;
+  /** Present when displayed metrics are retained from an earlier sample after a read error. */
+  metricsUnsynced?: UnsyncedMeta;
+  /** Present when an authorized same-scope connection failed its latest readiness refresh. */
+  connectionUnsynced?: UnsyncedMeta;
+  connectionRetrying?: boolean;
+  onRetryConnection?: () => void;
   /** Operator-chosen backend label; never derived from host OS, chipset or address. */
   backendName?: string | null;
   clock?: string;
@@ -172,22 +202,66 @@ export function IntelStatusBar({
                 {networkAvailable ? " KB/s" : ""}
               </Text>
             </View>
+            {metrics && metricsUnsynced ? (
+              <Text
+                nativeID="intel-status-metrics-unsynced"
+                accessibilityLabel={unsyncedLabel(
+                  "Host metrics",
+                  metricsUnsynced,
+                )}
+                style={s.unsyncedGlyph}
+              >
+                ◇
+              </Text>
+            ) : null}
             <View nativeID="intel-status-metric-divider" style={s.divider} />
           </>
         ) : null}
         {job}
         {!hideConnectionIndicator ? (
-          <Text
-            nativeID="intel-status-api"
-            accessibilityLabel={connected ? "API connected" : "API offline"}
-            style={[
-              s.api,
-              { fontSize: navSize },
-              { color: connected ? c.success : c.danger },
-            ]}
-          >
-            ● {connected ? "API_OK" : "OFFLINE"}
-          </Text>
+          connected && connectionUnsynced ? (
+            <View style={s.unsyncedRow}>
+              <Text
+                nativeID="intel-status-api"
+                accessibilityLabel={unsyncedLabel(
+                  "API connection",
+                  connectionUnsynced,
+                )}
+                style={[s.api, { fontSize: navSize, color: c.muted }]}
+              >
+                ◇
+              </Text>
+              {onRetryConnection ? (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Retry connection"
+                  disabled={connectionRetrying}
+                  onPress={onRetryConnection}
+                  style={({ pressed }) => [
+                    s.retryButton,
+                    pressed && { borderColor: c.select },
+                    connectionRetrying && { opacity: 0.6 },
+                  ]}
+                >
+                  <Text style={s.retryText}>
+                    {connectionRetrying ? "Retrying…" : "Retry"}
+                  </Text>
+                </Pressable>
+              ) : null}
+            </View>
+          ) : (
+            <Text
+              nativeID="intel-status-api"
+              accessibilityLabel={connected ? "API connected" : "API offline"}
+              style={[
+                s.api,
+                { fontSize: navSize },
+                { color: connected ? c.success : c.danger },
+              ]}
+            >
+              ● {connected ? "API_OK" : "OFFLINE"}
+            </Text>
+          )
         ) : null}
         {wide ? (
           <Text nativeID="intel-status-clock" style={s.clock}>
@@ -409,6 +483,31 @@ const s = StyleSheet.create({
     fontVariant: ["tabular-nums"],
   },
   api: { fontFamily: intelFonts.mono, fontSize: 13, fontWeight: "600" },
+  unsyncedGlyph: {
+    fontFamily: intelFonts.mono,
+    fontSize: 14,
+    color: c.muted,
+  },
+  unsyncedRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  retryButton: {
+    minHeight: 36,
+    paddingHorizontal: 10,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: c.borderStrong,
+    backgroundColor: c.panelRaised,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  retryText: {
+    fontFamily: intelFonts.mono,
+    fontSize: 13,
+    color: c.text,
+  },
   networkMetric: { flexDirection: "row", alignItems: "center", gap: 8 },
   clock: {
     fontFamily: intelFonts.mono,

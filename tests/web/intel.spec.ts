@@ -582,15 +582,17 @@ test("browse, search, brief, related, topology and reconnect", async ({
   ).toBeVisible();
   f.offline();
   await page.clock.fastForward(60_000);
+  // Transient same-scope readiness failure keeps Workspace mounted and offers local Retry.
   await expect(
-    page.getByRole("alert").filter({ hasText: "Failed to fetch" }),
+    page.getByRole("button", {
+      name: "Select node Port authority, entity",
+      exact: true,
+    }),
   ).toBeVisible();
-  await expect(page.getByLabel("API offline", { exact: true })).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Jobs", exact: true }),
-  ).toHaveCount(0);
+  await expect(page.getByLabel(/^API connection unsynced/)).toBeVisible();
   f.online();
-  await page.getByRole("button", { name: "Connect / retry" }).click();
+  await page.getByRole("button", { name: "Retry connection" }).click();
+  await expect(page.getByLabel("API connected", { exact: true })).toBeVisible();
   await expect(
     page.getByRole("button", {
       name: "Select node Port authority, entity",

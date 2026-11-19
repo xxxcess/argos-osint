@@ -1,10 +1,11 @@
 import React from "react";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { BackendProvider, type Article } from "@argos/api-client";
-import { IntelApp } from "../src";
+import { IntelApp, type IntelNavigation } from "../src";
+import { createMemoryNavigation } from "../src/navigation";
 import { mswServer, testBase } from "../../../vitest.setup";
 import { sheetProp } from "../../../vitest.test-support";
 
@@ -59,7 +60,7 @@ const requests: {
   search: string | null;
   cursor: string | null;
 }[] = [];
-function App() {
+function App({ navigation }: { navigation?: IntelNavigation } = {}) {
   return (
     <BackendProvider
       settings={{
@@ -70,7 +71,7 @@ function App() {
         createRequestId: () => "fixture-request",
       }}
     >
-      <IntelApp />
+      <IntelApp navigation={navigation} />
     </BackendProvider>
   );
 }
@@ -332,7 +333,7 @@ describe("Nexus Desk Bulletin", () => {
   it.each([
     [
       "an unavailable route",
-      () => HttpResponse.json({ error: "down" }, { status: 503 }),
+      () => HttpResponse.json({ error: "not found" }, { status: 404 }),
       "Actor search is unavailable on this backend.",
     ],
     [
@@ -573,5 +574,271 @@ describe("Nexus Desk Bulletin", () => {
       name: `Open Focus Brief: ${row.title}`,
     });
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("keeps Workspace mounted with filters and retained metrics on transient 503 readiness refresh, then recovers on Retry", async () => {
+    let healthStatus = 200;
+    mswServer.use(
+      http.get(`${testBase}/api/v1/health/ready`, () =>
+        healthStatus === 200
+          ? HttpResponse.json({
+              ready: true,
+              storage: true,
+              service: "argos-intel",
+              api_version: 1,
+              instance_id: "bulletin-fixture",
+            })
+          : HttpResponse.json(
+              { error: "Temporary readiness outage" },
+              { status: healthStatus },
+            ),
+      ),
+      http.get(`${testBase}/api/v1/host/metrics`, () =>
+        HttpResponse.json({
+          cpu_percent: 37,
+          memory_percent: 58,
+          disk_percent: 44,
+          network_kbps: 250,
+        }),
+      ),
+    );
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "Open Intel" }));
+    await screen.findByRole("button", {
+      name: `Open Focus Brief: ${row.title}`,
+    });
+    await user.click(
+      screen.getByRole("button", { name: /^Economy & Supply Chains$/ }),
+    );
+    expect(
+      screen.getByRole("button", { name: /^Economy & Supply Chains$/ }),
+    ).toHaveAttribute("aria-pressed", "true");
+
+    healthStatus = 503;
+    window.dispatchEvent(new Event("visibilitychange"));
+    const retry = await screen.findByRole("button", {
+      name: "Retry connection",
+    });
+    expect(
+      screen.getByLabelText(/API connection unsynced.*Temporary readiness outage/),
+    ).toHaveTextContent("◇");
+    expect(screen.queryByText(/stale/i)).not.toBeInTheDocument();
+    // Workspace stayed mounted and preserved the selected category filter.
+    expect(
+      screen.getByRole("button", { name: /^Economy & Supply Chains$/ }),
+    ).toHaveAttribute("aria-pressed", "true");
+
+    healthStatus = 200;
+    await user.click(retry);
+    await screen.findByLabelText("API connected");
+    expect(
+      screen.getByRole("button", { name: /^Economy & Supply Chains$/ }),
+    ).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it.each([401, 403, 409])(
+    "disconnects and unmounts Workspace on %i readiness revocation",
+    async (status) => {
+      let revoked = false;
+      mswServer.use(
+        http.get(`${testBase}/api/v1/health/ready`, () =>
+          revoked
+            ? HttpResponse.json({ error: "Session revoked" }, { status })
+            : HttpResponse.json({
+                ready: true,
+                storage: true,
+                service: "argos-intel",
+                api_version: 1,
+                instance_id: "bulletin-fixture",
+              }),
+        ),
+      );
+      const user = userEvent.setup();
+      render(<App />);
+      await user.click(
+        await screen.findByRole("button", { name: "Open Intel" }),
+      );
+      await screen.findByRole("button", {
+        name: `Open Focus Brief: ${row.title}`,
+      });
+      revoked = true;
+      window.dispatchEvent(new Event("visibilitychange"));
+      await screen.findByRole("button", { name: "Connect / retry" });
+      expect(
+        screen.queryByRole("button", { name: `Open Focus Brief: ${row.title}` }),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  it("offers Retry on transient 503 search errors, retains cached actor hits on refresh failure, and refetches on resubmitting unchanged query", async () => {
+    let actorStatus = 503;
+    let articleStatus = 200;
+    mswServer.use(
+      http.get(`${testBase}/api/v1/articles/search`, ({ request }) => {
+        searches.push(new URL(request.url).searchParams.get("query") || "");
+        if (articleStatus !== 200) {
+          return HttpResponse.json(
+            { error: "Article search busy" },
+            { status: articleStatus },
+          );
+        }
+        return HttpResponse.json({
+          hits: [articleHit],
+          next_cursor: null,
+          revision: "s",
+        });
+      }),
+      http.get(`${testBase}/api/v1/actors/search`, ({ request }) => {
+        actorSearches.push(new URL(request.url).searchParams);
+        if (actorStatus !== 200) {
+          return HttpResponse.json(
+            { error: "Actor search busy" },
+            { status: actorStatus },
+          );
+        }
+        return HttpResponse.json(
+          actorPage([actorHit("actor:one", "Orion Group")]),
+        );
+      }),
+    );
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "Open Intel" }));
+    const search = await screen.findByRole("textbox", {
+      name: "Search articles and actors",
+    });
+    await user.type(search, "orion{Enter}");
+    const retryActors = await screen.findByRole("button", {
+      name: "Retry actor search",
+    });
+    expect(
+      screen.queryByText("Actor search is unavailable on this backend."),
+    ).not.toBeInTheDocument();
+    expect(await screen.findByText("Matched title")).toBeVisible();
+
+    actorStatus = 200;
+    await user.click(retryActors);
+    await screen.findByRole("link", { name: "Open actor dossier: Orion Group" });
+
+    // Resubmitting unchanged query refetches both searches; a 503 on actors retains cached actor hits.
+    actorStatus = 503;
+    articleStatus = 503;
+    const prevSearches = searches.length;
+    const prevActorSearches = actorSearches.length;
+    await user.click(search);
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(searches.length).toBeGreaterThan(prevSearches));
+    await waitFor(() =>
+      expect(actorSearches.length).toBeGreaterThan(prevActorSearches),
+    );
+    expect(
+      screen.getByRole("link", { name: "Open actor dossier: Orion Group" }),
+    ).toBeVisible();
+    expect(
+      await screen.findByLabelText(/Actor results unsynced.*Actor search busy/),
+    ).toHaveTextContent("◇");
+    expect(
+      screen.getByRole("button", { name: "Retry actor search" }),
+    ).toBeVisible();
+    expect(
+      await screen.findByRole("button", { name: "Retry search" }),
+    ).toBeVisible();
+  });
+
+  it("distinguishes unavailable category counts from confirmed zero", async () => {
+    let countsReady = false;
+    mswServer.use(
+      http.get(`${testBase}/api/v1/articles/counts`, () =>
+        countsReady
+          ? HttpResponse.json({
+              counts: { governance: 0, security: 4 },
+            })
+          : HttpResponse.json({ error: "Counts unavailable" }, { status: 503 }),
+      ),
+    );
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "Open Intel" }));
+    const unavailableBadge = await screen.findByLabelText(
+      "Article count for Politics & Governance: unavailable",
+    );
+    expect(unavailableBadge).toHaveTextContent("—");
+    expect(
+      screen.queryByLabelText("Article count for Politics & Governance: 0"),
+    ).not.toBeInTheDocument();
+
+    countsReady = true;
+    await user.click(
+      screen.getByRole("button", { name: "Retained day 2026-10-29" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Day 2026-10-28" }));
+    expect(
+      await screen.findByLabelText("Article count for Politics & Governance: 0"),
+    ).toHaveTextContent("0");
+    expect(
+      screen.getByLabelText("Article count for Security & Conflict: 4"),
+    ).toHaveTextContent("4");
+  });
+
+  it("honors prefers-reduced-motion on Topology section jump buttons", async () => {
+    mswServer.use(
+      http.get(`${testBase}/api/v1/topology`, () =>
+        HttpResponse.json({
+          root_label: "Orion Group",
+          nodes: [
+            {
+              id: "actor:one",
+              label: "Orion Group",
+              kind: "actor",
+              detail: "Organization",
+              topology_seed: { Actor: "actor:one" },
+              is_root: true,
+            },
+          ],
+          edges: [],
+          findings: { gaps: [] },
+          has_continuation: false,
+        }),
+      ),
+    );
+    const scrollIntoView = vi.fn();
+    const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
+    const originalMatchMedia = window.matchMedia;
+    HTMLElement.prototype.scrollIntoView = scrollIntoView;
+    let reduced = true;
+    window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+      matches: query === "(prefers-reduced-motion: reduce)" ? reduced : false,
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+    try {
+      const nav = createMemoryNavigation();
+      nav.navigate({ screen: "topology", seed: "actor:one" });
+      const user = userEvent.setup();
+      render(<App navigation={nav} />);
+      await waitFor(() =>
+        expect(document.getElementById("intel-topology-nodes")).toBeTruthy(),
+      );
+      await user.click(screen.getByRole("button", { name: "Nodes" }));
+      expect(scrollIntoView).toHaveBeenLastCalledWith({
+        behavior: "auto",
+        block: "start",
+      });
+      reduced = false;
+      await user.click(screen.getByRole("button", { name: "Connections" }));
+      expect(scrollIntoView).toHaveBeenLastCalledWith({
+        behavior: "smooth",
+        block: "start",
+      });
+    } finally {
+      HTMLElement.prototype.scrollIntoView = originalScrollIntoView;
+      window.matchMedia = originalMatchMedia;
+    }
   });
 });

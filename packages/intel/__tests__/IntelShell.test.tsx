@@ -170,6 +170,55 @@ describe("Intel status bar", () => {
       expect(intel).toHaveBeenCalledOnce();
     },
   );
+
+  it("retains last valid metrics with a muted unsynced glyph and accessible details without a visible Stale label", () => {
+    render(
+      <IntelStatusBar
+        connected
+        activeApp
+        metrics={{
+          cpuPercent: 34,
+          memoryPercent: 61,
+          diskPercent: 22,
+          networkKBps: 128,
+        }}
+        metricsUnsynced={{
+          updatedAt: Date.UTC(2026, 10, 18, 12, 0, 0),
+          reason: "HTTP 503",
+        }}
+      />,
+    );
+    expect(screen.getByText("34%")).toBeVisible();
+    expect(screen.getByText("61%")).toBeVisible();
+    expect(screen.getByText("22%")).toBeVisible();
+    expect(screen.getByText("128 KB/s")).toBeVisible();
+    const glyph = screen.getByLabelText(/Host metrics unsynced.*HTTP 503/);
+    expect(glyph).toBeVisible();
+    expect(glyph).toHaveTextContent("◇");
+    expect(screen.queryByText(/stale/i)).not.toBeInTheDocument();
+  });
+
+  it("shows a muted unsynced connection glyph and local Retry control without a visible Stale banner", async () => {
+    const retry = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <IntelStatusBar
+        connected
+        activeApp
+        connectionUnsynced={{
+          updatedAt: Date.UTC(2026, 10, 18, 12, 0, 0),
+          reason: "HTTP 503",
+        }}
+        onRetryConnection={retry}
+      />,
+    );
+    const glyph = screen.getByLabelText(/API connection unsynced.*HTTP 503/);
+    expect(glyph).toBeVisible();
+    expect(glyph).toHaveTextContent("◇");
+    expect(screen.queryByText(/stale/i)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Retry connection" }));
+    expect(retry).toHaveBeenCalledOnce();
+  });
 });
 
 describe("Intel scroll-to-bottom control", () => {

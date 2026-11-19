@@ -9,14 +9,18 @@
   ],
   "reference": {
     "gif": "../fleetworks-quiet-orbit.gif",
-    "gif_sha256": "22d4e6a281c74aebdcb64d80a8f0cda82b98a580aaf73dbef1b56a85c7103d57",
+    "gif_sha256": "277238bf79ec2519dba4341383d21a37881952b7994934d2b44ec0cb232e95f3",
     "dimensions": [
       800,
       450
     ],
-    "frames": 160,
-    "fps": 20,
-    "seconds": 8
+    "frames": 240,
+    "fps": 15,
+    "seconds": 16,
+    "mp4": "../fleetworks-quiet-orbit.mp4",
+    "mp4_sha256": "19ea0032410c098b1eba6714945f7765947c6d6900cd8113007199259b1070cf",
+    "poster": "../fleetworks-quiet-orbit.png",
+    "poster_sha256": "073e956f34647be8ceaee8ef4134eb70b7ba0f2dd6d215a061e79cd611fef6cf"
   },
   "canvas": {
     "color": "#060709",

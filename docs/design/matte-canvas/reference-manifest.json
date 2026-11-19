@@ -71,28 +71,33 @@
     },
     {
       "path": "assets/brand/reference/fleetworks-quiet-orbit.gif",
-      "role": "Selected eight-second animation reference",
-      "sha256": "22d4e6a281c74aebdcb64d80a8f0cda82b98a580aaf73dbef1b56a85c7103d57",
-      "bytes": 2853083,
+      "role": "Selected sixteen-second animation reference",
+      "sha256": "277238bf79ec2519dba4341383d21a37881952b7994934d2b44ec0cb232e95f3",
+      "bytes": 4442104,
       "evidence": "generated concept / design reference; not a native or web runtime capture",
       "dimensions": [
         800,
         450
       ],
-      "frames": 160
+      "frames": 240
     },
     {
       "path": "assets/brand/reference/fleetworks-quiet-orbit.mp4",
       "role": "Higher tonal fidelity motion reference",
-      "sha256": "ba32533623c274fa87c7ad45ce1a57c756c785993bd628516ce5ae2dc51ba8d8",
-      "bytes": 264164,
-      "evidence": "generated concept / design reference; not a native or web runtime capture"
+      "sha256": "19ea0032410c098b1eba6714945f7765947c6d6900cd8113007199259b1070cf",
+      "bytes": 607321,
+      "evidence": "generated concept / design reference; not a native or web runtime capture",
+      "dimensions": [
+        800,
+        450
+      ],
+      "frames": 480
     },
     {
       "path": "assets/brand/reference/fleetworks-quiet-orbit.png",
       "role": "Orbit poster",
-      "sha256": "35c13debc012a6bb40fc9d377af46f6085a45561ac29d5d3c39e2993d18c7e03",
-      "bytes": 205327,
+      "sha256": "073e956f34647be8ceaee8ef4134eb70b7ba0f2dd6d215a061e79cd611fef6cf",
+      "bytes": 155505,
       "evidence": "generated concept / design reference; not a native or web runtime capture",
       "dimensions": [
         800,

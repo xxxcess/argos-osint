@@ -8,7 +8,7 @@ Use the approved [material source](../../../assets/brand/source/fleetworks-liqui
 
 Brand display areas contain the symbol alone. Remove the visible wordmark in the splash, navigation header and setup brand region; preserve the product name in accessibility labels, window titles, package metadata and documentation. This is not a repository, API, package or application-identity rename. Screen titles such as Setup Gateway remain functional headings outside the brand region.
 
-All materials are visible in the first frame. There is no flat-shape, outline-only, assembly or shape-to-glass introduction. Use the selected [Quiet Orbit GIF](../../../assets/brand/reference/fleetworks-quiet-orbit.gif), SHA-256 `22d4e6a281c74aebdcb64d80a8f0cda82b98a580aaf73dbef1b56a85c7103d57`. The [MP4](../../../assets/brand/reference/fleetworks-quiet-orbit.mp4) retains smoother tonal detail; the [poster](../../../assets/brand/reference/fleetworks-quiet-orbit.png) supplies a static reference. These are 2.5D texture-backed design studies, not volumetric simulation or application recordings.
+All materials are visible in the first frame. There is no flat-shape, outline-only, assembly or shape-to-glass introduction. Use the selected [Quiet Orbit GIF](../../../assets/brand/reference/fleetworks-quiet-orbit.gif), SHA-256 `277238bf79ec2519dba4341383d21a37881952b7994934d2b44ec0cb232e95f3`. The [MP4](../../../assets/brand/reference/fleetworks-quiet-orbit.mp4) (SHA-256 `19ea0032410c098b1eba6714945f7765947c6d6900cd8113007199259b1070cf`, 30 fps) retains smoother tonal detail; the [poster](../../../assets/brand/reference/fleetworks-quiet-orbit.png) (SHA-256 `073e956f34647be8ceaee8ef4134eb70b7ba0f2dd6d215a061e79cd611fef6cf`) supplies a static reference. These are 2.5D texture-backed design studies, not volumetric simulation or application recordings.
 
 The [playback manifest](../../../assets/brand/reference/quiet-orbit/playback.json) records these design constants and source identities; it is not an implemented native runtime manifest.
 
@@ -16,7 +16,7 @@ The [playback manifest](../../../assets/brand/reference/quiet-orbit/playback.jso
 
 | Item | Contract |
 | --- | --- |
-| Review loop | 800×450, 160 frames, 20 fps, 8 seconds; seamless periodic orbit and core flow |
+| Review loop | 800×450, 16 seconds (MP4: 480 frames at 30 fps; GIF: 240 frames at 15 fps); seamless periodic orbit and core flow |
 | Native startup | 3 seconds at the quiet orbital pace; do not accelerate a full revolution into that interval |
 | Transition | Setup appears beneath the scene at 2.65 seconds; opacity handoff and input/focus transfer finish by 3.00 seconds |
 | Scope | One startup presentation; no replay on navigation, dialog close, refresh or in-app reconnect |

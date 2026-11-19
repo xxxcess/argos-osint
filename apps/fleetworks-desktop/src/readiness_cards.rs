@@ -63,7 +63,6 @@ pub(crate) fn setup_section(state: &State, preferences: ViewPreferences, kit: &K
     rune::col()
         .w_full()
         .gap(6.0)
-        .children(primary_issue(state, true, preferences, kit))
         .child(ui_components::inline_toggle_row(
             "setup-advanced-toggle",
             state.setup_advanced_open,

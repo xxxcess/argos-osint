@@ -93,6 +93,12 @@ pub fn observed(state: &mut State) {
 pub fn mixed_status_checks(state: &mut State) {
     observed(state);
     if let Load::Ready(readiness) = &mut state.readiness {
+        readiness.checks.retain(|probe| {
+            !matches!(
+                probe.id,
+                ReadinessCheckId::ClassifierInference | ReadinessCheckId::ClassifierTraining
+            )
+        });
         for probe in &mut readiness.checks {
             *probe = match probe.id {
                 ReadinessCheckId::Jobs => check(
@@ -110,12 +116,6 @@ pub fn mixed_status_checks(state: &mut State) {
                 _ => continue,
             };
         }
-        readiness.checks.push(check(
-            ReadinessCheckId::Brain,
-            ReadinessState::Degraded,
-            "limited_probe",
-            "Brain is serving traffic with a degraded capability.",
-        ));
         readiness.checks.push(check(
             ReadinessCheckId::Control,
             ReadinessState::Unavailable,

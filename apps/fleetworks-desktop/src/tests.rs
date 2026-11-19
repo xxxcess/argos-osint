@@ -782,9 +782,9 @@ fn status_checks_share_the_compact_keyboard_disclosures_and_keep_the_blocker_vis
         assert!(runtime.find(FAILED_ROW).is_none());
         assert!(runtime.find(FAILED_DETAIL).is_none());
 
-        runtime.update(|_, tx| tx.scroll_into_view(CRITICAL));
-        tick_status_checks(&mut runtime, &mut frame);
+        // The blocker must be visible in the initial viewport on all three surfaces.
         let critical = assert_status_check_fully_visible(&runtime, CRITICAL);
+        assert_eq!(critical.scrolled, [0.0, 0.0], "{kind:?}, setup={setup}");
         assert_eq!(critical.label.as_deref(), Some("Refresh checks"));
         assert!(critical.focusable);
         focus_status_check(&mut runtime, CRITICAL, &mut frame);

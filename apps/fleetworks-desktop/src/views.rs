@@ -665,6 +665,14 @@ pub(crate) fn setup_gateway(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
             preferences,
             kit,
         ));
+    if state.connected() {
+        body = body.children(crate::readiness_cards::primary_issue(
+            state,
+            true,
+            preferences,
+            kit,
+        ));
+    }
     if !state.startup.active() {
         body = body.child(backend_mode_card(
             state,

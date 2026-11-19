@@ -1,0 +1,74 @@
+# Fleetworks UI handoff · From Quiet Orbit to the workstation
+
+**Baseline.** Reviewed 19 November 2026. [PR #69](https://github.com/xxxcess/argos-osint/pull/69) targets [nightly at 00b700a](https://github.com/xxxcess/argos-osint/tree/00b700afd77ddac6cba2e2bd7ae91ab3802b7197). The implementation reviewed is [8195836](https://github.com/xxxcess/argos-osint/tree/819583664995ead58c1b256efb18750dbc70507e), from a clean checkout. Use its source and fixtures over the PR’s original spec-only description. This handoff extends the [original plan](fleetworks-native-web-ui-overhaul.md) and the [interactive chooser decision](https://github.com/xxxcess/argos-osint/pull/69#issuecomment-7000790099) with the changes below.
+
+**Outcome.** Let an operator enter the workstation without losing sight of the chosen backend, see the first problem and its remedy on one screen, and scan work in a list without opening every row. On Intel Web, give the reader immediate access when the connection is ready and bring the first headline closer to the search field.
+
+## What the current UI does
+
+| Surface | Evidence from the reviewed head | Design consequence |
+|---|---|---|
+| Native launch | Both 150 pt tiles already work on frame one. Selecting either sets the orbit to its settled time and replaces the chooser with a form. After registration, **Done** replaces the startup root with the shell. | Carry the emblem through these two changes. A longer splash would miss the break. |
+| Workstation Status | At 640×480 in the partial-seed Rune fixture, the page title appears twice. The Actor search card is about 258 pt tall, displays an empty progress track, and the first **Actor catalog · Not ready** check starts near y=766. At 1280×800, two healthy checks each take about 89 pt before the issue. | Put the actionable exception first. Give healthy checks and machine details one disclosure each. [Linux fixture PNGs and layout trees](https://github.com/xxxcess/argos-osint/actions/runs/44522694424/artifacts/14529066847) |
+| Intel Web entry | Five health observations can already pass while the animated Home gate advances seven 3 s presentation ticks and waits for the renderer. Roughly 21 s is derived from code for that case. | End the gate on actual readiness. The last orbit frame can finish over an interactive page. |
+| Intel Bulletin | In the committed 320×1000 baseline the first article begins around y=377. Connection actions wrap, Day/Sort/Refresh stack, and a text-only article reserves the same 154 logical px minimum as an article with a thumbnail. CI’s image-rich mobile fixture squeezes headlines further. | Recover space in the header and row structure. Keep full article and evidence text in the reader. [Committed baseline](../../tests/web/visual-regression.spec.ts-snapshots/bulletin-320.png) · [Hosted web captures](https://github.com/xxxcess/argos-osint/actions/runs/44536125380/artifacts/14536393947) |
+
+### Reference decisions
+
+In the supplied Kiro Crew **gateway** recording, the settings view around 0:14–0:28 places short rows against a stable rail. Around 1:10–1:17, Notifications opens at the upper right. Around 1:38–1:45, the command panel takes focus over the current task. Adapt those three relationships. Keep Fleetworks operations in the center and its transcript in the optional right sidebar. Crew’s summary of current work plus one next step is the model for readiness. Antigravity’s overview beside the active task informs how selecting a job can expose its logs without losing the list position. [Kiro Crew dashboard](https://kiro.dev/changelog/crew/0-9/) · [Google Antigravity side and Overview panels](https://antigravity.google/docs/side-panel/)
+
+## 1 · Carry the orbit into the first screen
+
+Use one inert presentation layer on the existing opaque `#060709` root. The moon, molten core and five satellites are one rigid scene under a moving camera. Preserve their relative geometry, orbital phase, front/back occlusion and clearance. Use the existing Rune renderer, clock and springs. Matte surfaces, cool ink and cyan focus belong to the working UI. The emblem carries the warm glass and sparse stars.
+
+| Trigger | Motion and input contract |
+|---|---|
+| First frame | Show **Embedded** and **Distributed** with immediate pointer and keyboard input. Keep the existing three-second sample and settled hold. |
+| Choose a tile | Capture the current presented pose. Over roughly 220 ms, uniformly scale and move the emblem to the setup header using a critically damped spring. Let the form enter by 6 pt on the same background. Mount the real controls immediately and focus Back as today. Tile selection has no connection side effect. |
+| Start or Connect | Keep the mark docked and the selected form in place through launch, pairing, registration, failure and retry. Show only the current real stage. Back follows existing cancellation and returns focus to the selected tile without replay. |
+| Done after registration | Mount Workstation Status immediately and move the docked emblem to the measured shell brand slot over 180–240 ms. Blend into the fixed-crown static mark over the last few frames. Provide a measured anchor in both the wide rail and the compact rail under 820 pt. If an anchor is missing or the window resizes mid-flight, finish at the current destination. |
+| Reduced motion or missing artwork | Paint the final static mark and content together. Keep focus, contrast, labels and identical action timing. Rapid Back, repeated clicks and focus loss must leave just one interactive destination. Stop animation wakeups when settled. |
+
+**Intel Web.** After the existing authenticated workstation connection resolves, use `b.connected` to admit Home on the next render. Keep a short, pointer-transparent fade of the previous orbit only if already painted. Retire the presentation timer as a navigation dependency. While waiting, show one truthful connection line, a failure-specific Retry and optional check detail. Preserve Connect, deep links, return navigation and the static WebGL fallback. The web globe remains the Intel entry point.
+
+## 2 · Give readiness one owner and one next action
+
+Keep the title **Workstation Status** once. Below it show backend identity, transport/registration state and a **Checks** disclosure. Show the highest-priority exception or running operation directly below, with one applicable action. For example, when the backend reports an empty catalog and permits seeding, show **Actor catalog · Needs data** and **Seed actors…**. When a build is active, show **Actor search · Building** and **View job** if a scoped receipt exists. A missing total gets a phase label. Use a determinate bar only when both counts are known.
+
+| Evidence | Default presentation |
+|---|---|
+| Disconnected, pending registration or initial read failure | Name the actual condition. Offer the existing setup, registration or Retry action as applicable. Connection and registration each have independent meaning. |
+| Fresh observations | Prioritize a current blocking failure for the selected operation, then other actionable problems, running work, then advisory issues. Tie-break by stable check ID. A healthy summary counts only observed applicable checks. Optional training degradation can surface as an advisory while search stays usable. |
+| Expired observation or refresh failure | Keep last-good rows, selection and measured values within the same authority. Add the existing unsynced glyph with accessible reason/age and **Refresh checks**. Use the offline glyph for disconnection. Re-evaluate action guards against fresh evidence. |
+| Empty, unknown or not applicable | Show **Checks unavailable** for an empty response, keep unknown outcomes explicit and exclude N/A from totals. In a partial response label counts as reported checks. Clear prior observations when authority changes. |
+
+Inside **Checks**, render one 32–36 pt minimum-height row per check. Show name, state, and a disclosure. Expand to the reason code, explanation, observed time and allowed actions. Preserve every typed server state, operation precondition, grant, receipt and existing confirmation. Use the same projection in the two setup paths. Put CPU, memory and disk in a compact **Host** row with the existing inspectors. Put version, architecture, state directory and runtime diagnostics under **Technical details**. Keep registration distinct from deployment-wide health, preserve genuine zeroes, and retain a screen-reader path to every field.
+
+## 3 · Compact the work surfaces
+
+| Surface | Implementation contract |
+|---|---|
+| Native shell and utilities | Keep the existing destinations and compact icon rail. Give the current page one heading and one toolbar. Anchor Inbox to the bell, keep Commands keyboard-first, and open Assistant at the right. Allow one overlay to own focus. Escape returns to its opener. Use the existing compact overlay when a docked pane would crowd the task. |
+| Jobs & Logs / Brain Search | Use 36 pt minimum pointer rows with 8 pt horizontal inset. Jobs show task, one phase and time. Put ID, progress and scoped logs in the selected inspector. Brain shows actor name and one disambiguator, with the selected dossier anchored to its result. Preserve stable IDs, filter, scroll anchor, log Follow and focus when fresh data arrives. |
+| Seed & Train / News Cycles / Tools / Models | Keep one line per operation, cycle, provider or assignment, with its current state and primary control. Expand the selected record for CSV validation, receipts, counters, credentials or routing details. Keep the typed-path fallback, confirmation and job result visible at the step where they matter. A trained candidate and an active classifier are separate states. |
+| Intel Home and Bulletin | Retain the backend display name, Home/Bulletin navigation and host telemetry. At narrow widths put workstation ID, Change and Disconnect in a connection disclosure. Keep search on top; group Day, Sort and Refresh in a compact toolbar with overflow at 320 px. Keep the desktop category rail and mobile category selector. |
+| Intel articles and evidence | Use 48–64 logical px thumbnails only for rows with usable images. Text-only rows collapse to their text. Match skeleton dimensions, allow a two-line title, retain source/date and expose the full title accessibly. Keep independently recoverable Articles and Actors results, canonical dossier links, Brief claims/evidence, and the topology graph/list pair. Preserve route/Back, pagination and last-good data. |
+
+Use 4/8/12 pt spacing increments. Rows grow for enlarged text. Maintain 44 CSS px coarse-pointer targets measured after the web shell’s existing scale. Keep the accent on selection or a single primary action. Readiness changes should never shift a focused row under the pointer. Defer visual reordering while the operator is interacting.
+
+## Edit map and verification order
+
+Paths below are relative to the repository root. Apply phases in order and inspect the affected diff first if PR #69 moves.
+
+| Owner | Edit points |
+|---|---|
+| Native motion and shell | `apps/fleetworks-desktop/src/startup.rs` (`choose_startup_destination`, `return_to_startup_choice`, `finish_gateway_setup`), `orbit.rs` (`view`, `mark`, `satellites`), `app.rs` (`view`, `surface_transition`). Update [motion contract](../design/matte-canvas/motion.md). |
+| Native status and density | In that crate’s `src/`, use `readiness_cards.rs::checks`, `views.rs` (`workstation`, `actor_search_summary_card`, `brain`), `backend_views.rs` (`jobs`, `safe_log_table`, `maintenance`, `atlas`, `tools`, `models`), `ui_components.rs` and `material.rs`. Consume the existing [typed readiness contract](../../crates/fleetworks-contracts/src/readiness.rs). |
+| Web gate and shell | `packages/intel/src/index.tsx`, `landing/OrbitScene.tsx`, `landing/sequence.ts`, `shell/IntelShell.tsx`. Find workstation actions in `apps/web-desktop/app/workspace.tsx`. |
+| Web density | Under `packages/intel/src/views/bulletin/`, edit `BulletinView.tsx`, `FeedHeader.tsx`, `ArticleCard.tsx`, `BulletinSkeleton.tsx`, and `SearchResults.tsx`. Keep the API/query owners. |
+| Brand | [Static brand assets and consumers](../../assets/brand/README.md). Keep the production Quiet Orbit artwork and clearance references as the motion source. Use the new fixed-crown symbol at the motion destination. |
+
+1. **Native motion.** Capture launch, mid-flight choice, both setup paths, Back and registered Done at 640×480 and 1280×800, 1×/2×, motion on/off. Check no blank frame, clipped satellites, late focus, duplicate action, animation-gated input or replay. Test resize during travel. Use Rune production views first and repeat on the packaged Linux app.
+2. **Native status and density.** In `workstation-partial-seed` at 640×480, show the first actionable issue and its control inside the viewport before scrolling. Exercise all healthy, disconnected, registration-only, running with unknown total, stale, empty, first error/retry and scope switch. Verify filtered Jobs, actor selection and keyboard focus survive refresh. Run `python3 scripts/agent_cargo.py test --locked -p fleetworks-desktop`, then `python3 scripts/fleetworks_verify.py native-ui --agent --scene workstation-partial-seed --size 640x480 --scale 1`. Inspect PNGs and trees. Verify both Mac architectures on the same revision.
+3. **Web.** Replace delayed-Home assertions in `packages/intel/__tests__/landing-{gate,core,sequence}.test.tsx`. With fake time held fixed, a healthy connection exposes an interactive Home. Pending and failed connections still show recovery. Exercise ready, slow, error, reduced motion and missing WebGL. At 320×1000 and 100% browser zoom, target first article top ≤270 CSS px on the committed layout fixture. Recheck 390, 768 and 1440 px, images present/absent, long headlines, enlarged text, keyboard traversal and focus return. Run `pnpm typecheck`, `pnpm lint`, affected `pnpm test`, and `ARGOS_WEB_TEST_DEV=1 pnpm test:e2e tests/web/intel.spec.ts tests/web/visual-regression.spec.ts tests/web/brief-layout.spec.ts tests/web/actor-dossier.spec.ts tests/web/connect-gate.spec.ts`. Inspect refreshed captures before accepting new baselines.
+4. **Report.** Record exact SHA, measured before/after positions, captures and interaction results. Distinguish hosted fixtures, installed-app observations and outstanding platform verification. This review inspected the PR source, Linux Rune fixtures, web Playwright captures and Kiro Crew recording. The verified Linux package could not open a window on the audit host because an X display was unavailable. The static brand exports, shared web mark and launcher resources ship with this handoff. Their resource staging was checked with synthetic executables; installed Dock, launcher and browser appearance remain open. Phases 1–3 are implementation targets.

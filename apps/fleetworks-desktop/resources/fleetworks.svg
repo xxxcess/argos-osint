@@ -1,6 +1,44 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
-  <rect width="128" height="128" rx="28" fill="#14161B"/>
-  <rect x="6" y="6" width="116" height="116" rx="22" stroke="#D4A853" stroke-opacity="0.35" stroke-width="2"/>
-  <path d="M34 36H94V49H49V59H82V71H49V92H34V36Z" fill="#F2ECE1"/>
-  <circle cx="88" cy="84" r="10" fill="#D4A853"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Fleetworks">
+  <rect rx="56" width="256" height="256" fill="#060709"/>
+  <defs>
+    <linearGradient id="prism" x2=".85" y2="1" gradientUnits="objectBoundingBox">
+      <stop stop-color="#EEE6D9"/>
+      <stop offset=".31" stop-color="#C8BFB0"/>
+      <stop offset=".34" stop-color="#625C55"/>
+      <stop offset=".71" stop-color="#332F2C"/>
+      <stop offset="1" stop-color="#958675"/>
+    </linearGradient>
+    <linearGradient id="mineral" x2=".89" y2=".78" gradientUnits="objectBoundingBox">
+      <stop stop-color="#D5C9B4"/>
+      <stop offset=".22" stop-color="#4B4643"/>
+      <stop offset=".42" stop-color="#312F30"/>
+      <stop offset=".58" stop-color="#B4A69A"/>
+      <stop offset=".62" stop-color="#70645B"/>
+      <stop offset=".88" stop-color="#423B36"/>
+      <stop offset="1" stop-color="#C3AE93"/>
+    </linearGradient>
+    <linearGradient id="core" x1=".18" y1=".05" x2=".86" y2=".9" gradientUnits="objectBoundingBox">
+      <stop stop-color="#F2EDE5"/>
+      <stop offset=".21" stop-color="#A7947F"/>
+      <stop offset=".36" stop-color="#423930"/>
+      <stop offset=".48" stop-color="#796350"/>
+      <stop offset=".58" stop-color="#ECBD83"/>
+      <stop offset=".63" stop-color="#F7E4C8"/>
+      <stop offset=".73" stop-color="#BA9670"/>
+      <stop offset="1" stop-color="#514336"/>
+    </linearGradient>
+    <mask id="crescent" maskUnits="userSpaceOnUse" x="0" y="0" width="256" height="256">
+      <rect width="256" height="256" fill="white"/>
+      <circle cx="128" cy="108" r="69" fill="black"/>
+    </mask>
+  </defs>
+  <g fill="url(#prism)" stroke="#C9BEAA" stroke-width="3" stroke-linejoin="round">
+    <polygon points="128,11 143,42 113,42"/>
+    <polygon points="66,29 96,46 72,63"/>
+    <polygon points="190,29 184,63 160,46"/>
+    <polygon points="26,78 63,76 51,104"/>
+    <polygon points="230,78 205,104 193,76"/>
+  </g>
+  <circle cx="128" cy="160" r="78" fill="url(#mineral)" stroke="#B6AC9D" stroke-width="3" mask="url(#crescent)"/>
+  <circle cx="128" cy="115" r="54" fill="url(#core)" stroke="#D0C1A9" stroke-width="3"/>
 </svg>

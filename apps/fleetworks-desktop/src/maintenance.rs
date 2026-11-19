@@ -39,6 +39,7 @@ use sha2::Sha256;
 
 use crate::app::Intent;
 use crate::app::Load;
+use crate::app::Page;
 use crate::app::State;
 use crate::backend;
 use crate::backend::JobDetail;
@@ -177,6 +178,8 @@ pub struct OperationJobRecord {
 const OPERATION_SLOTS: usize = 3;
 pub(crate) const SEED_ACTION_KEY: &str = "maintenance-seed";
 pub(crate) const TRAIN_ACTION_KEY: &str = "maintenance-train";
+pub(crate) const REINDEX_ACTION_KEY: &str = "maintenance-reindex";
+pub(crate) const WORKSTATION_REINDEX_ACTION_KEY: &str = "workstation-build-actor-index";
 pub(crate) const CSV_PATH_KEY: &str = "maintenance-csv-path";
 
 fn operation_slot(operation: MaintenanceOperation) -> Option<usize> {
@@ -200,6 +203,7 @@ pub struct Maintenance {
     pub message: Option<String>,
     pub(crate) active_operation: Option<MaintenanceOperation>,
     pub(crate) pending_preview: Option<MaintenanceOperation>,
+    restore_workstation_index_focus: bool,
     pub(crate) seed_accepted_at: Option<String>,
     pub(crate) last_request: Option<MaintenanceRequest>,
     pub(crate) pending_reindex: Option<PendingActorReindex>,
@@ -231,6 +235,7 @@ impl Default for Maintenance {
             message: None,
             active_operation: None,
             pending_preview: None,
+            restore_workstation_index_focus: false,
             seed_accepted_at: None,
             last_request: None,
             pending_reindex: None,
@@ -339,6 +344,7 @@ impl Maintenance {
         self.datasets_revision = self.datasets_revision.wrapping_add(1);
         self.active_operation = None;
         self.pending_preview = None;
+        self.restore_workstation_index_focus = false;
         self.seed_accepted_at = None;
         self.confirmation = None;
         self.last_request = None;
@@ -739,6 +745,51 @@ impl State {
     pub fn cancel_maintenance_confirmation(&mut self) {
         self.maintenance.confirmation = None;
         self.confirm_maintenance_dialog = false;
+    }
+
+    pub(crate) fn dismiss_maintenance_confirmation(&mut self, tx: &mut Tx) {
+        let opener = self
+            .maintenance
+            .confirmation
+            .as_ref()
+            .and_then(|confirmation| match confirmation.operation {
+                MaintenanceOperation::SeedActors => Some(SEED_ACTION_KEY),
+                MaintenanceOperation::TrainClassifier => Some(TRAIN_ACTION_KEY),
+                MaintenanceOperation::ReindexActors if self.confirm_maintenance_dialog => {
+                    Some(WORKSTATION_REINDEX_ACTION_KEY)
+                }
+                MaintenanceOperation::ReindexActors => Some(REINDEX_ACTION_KEY),
+                _ => None,
+            });
+        self.cancel_maintenance_confirmation();
+        if let Some(opener) = opener {
+            tx.focus(opener, true);
+            tx.scroll_into_view(opener);
+        }
+    }
+
+    /// RuneKit's modal Escape and close callbacks do not receive a transaction.
+    pub(crate) fn close_workstation_index_confirmation(&mut self) {
+        self.cancel_maintenance_confirmation();
+        self.maintenance.restore_workstation_index_focus = true;
+        if let Some(ui) = self
+            .services
+            .as_ref()
+            .and_then(|services| services.ui.get())
+        {
+            ui.wake();
+        }
+    }
+
+    pub(crate) fn restore_workstation_index_focus(&mut self, tx: &mut Tx) {
+        if std::mem::take(&mut self.maintenance.restore_workstation_index_focus)
+            && self.page == Page::Workstation
+            && !self.setup_gateway
+            && !self.has_active_confirmation()
+        {
+            tx.focus(WORKSTATION_REINDEX_ACTION_KEY, true);
+            tx.scroll_into_view(WORKSTATION_REINDEX_ACTION_KEY);
+        }
     }
 
     pub(crate) fn maintenance_confirmation_matches(

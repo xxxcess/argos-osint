@@ -1362,6 +1362,7 @@ fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
         tx.scroll_into_view(key);
         changed = true;
     }
+    state.restore_workstation_index_focus(tx);
     if !state.brain.in_flight
         && state
             .brain
@@ -1398,13 +1399,7 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
             return true;
         }
         if state.confirm_maintenance_dialog || state.maintenance.confirmation.is_some() {
-            let target = if state.page == Page::Workstation {
-                "workstation-build-actor-index"
-            } else {
-                "maintenance-reindex"
-            };
-            state.cancel_maintenance_confirmation();
-            tx.focus(target, false);
+            state.dismiss_maintenance_confirmation(tx);
             return true;
         }
         if state.settings_open {

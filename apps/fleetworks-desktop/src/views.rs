@@ -1150,7 +1150,7 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
                     .width(width)
                     .fit()
                     .click_outside(true)
-                    .on_close(|state: &mut State| state.cancel_maintenance_confirmation())
+                    .on_close(State::close_workstation_index_confirmation)
                     .child(rune::col().w_full().px(16.0).pb(16.0).child(
                         crate::backend_views::maintenance_confirmation_content(
                             state,
@@ -1663,7 +1663,7 @@ fn actor_search_summary_card(state: &State, preferences: ViewPreferences, kit: &
     let mut actions = rune::row().w_full().gap(8.0).center_y();
     actions = actions.child(
         ActionButton::new("Build actor index")
-            .key("workstation-build-actor-index")
+            .key(crate::maintenance::WORKSTATION_REINDEX_ACTION_KEY)
             .icon(&icons::BRAIN)
             .finish(if disabled_reason.is_none() && !summary.can_search {
                 MetalFinish::GoldCta

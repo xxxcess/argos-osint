@@ -245,6 +245,118 @@ fn uploaded_csv_requires_confirmation_and_keeps_initial_configuration_revision()
 }
 
 #[test]
+fn keyboard_dismissal_restores_each_maintenance_opener_without_admitting_work() {
+    for (page, kind, opener, viewport) in [
+        (
+            Page::Seed,
+            Some(DatasetKind::ActorCatalog),
+            SEED_ACTION_KEY,
+            "seed-body",
+        ),
+        (
+            Page::Seed,
+            Some(DatasetKind::ClassifierTraining),
+            TRAIN_ACTION_KEY,
+            "seed-body",
+        ),
+        (Page::Seed, None, REINDEX_ACTION_KEY, "seed-body"),
+        (
+            Page::Workstation,
+            None,
+            WORKSTATION_REINDEX_ACTION_KEY,
+            "workstation-body",
+        ),
+    ] {
+        for dismiss in [rune::Key::Escape, rune::Key::Text(" ".into())] {
+            let mut state = state(true);
+            state.page = page;
+            let mut runtime = Runtime::new(
+                state,
+                app::view,
+                (640.0, 480.0),
+                Env {
+                    system_dark: true,
+                    scale: 1.0,
+                },
+            );
+            let spec = app::spec();
+            runtime.on_key = spec.on_key;
+            runtime.poll = spec.poll;
+            runtime.set_system_reduced_motion(true);
+            runtime.frame(0.0);
+
+            let press = |runtime: &mut Runtime<State>, key| {
+                runtime.key(rune::KeyEvent {
+                    key,
+                    mods: rune::Mods::default(),
+                });
+                runtime.frame(1.0 / 60.0);
+            };
+            let dataset = kind.map(uploaded);
+            if let Some(upload) = dataset.clone() {
+                runtime.update(|state, _| {
+                    state.complete_dataset_upload(
+                        state.connection.epoch,
+                        state.maintenance.upload_revision,
+                        state.origin_revision,
+                        upload.dataset.kind,
+                        Ok(upload),
+                    );
+                });
+                runtime.frame(1.0 / 60.0);
+            } else {
+                runtime.update(|_, tx| tx.focus(opener, true));
+                runtime.frame(1.0 / 60.0);
+                press(&mut runtime, rune::Key::Text(" ".into()));
+            }
+            assert!(runtime.state.maintenance.confirmation.is_some(), "{opener}");
+            runtime.update(|_, tx| {
+                tx.scroll_into_view("maintenance-cancel");
+                tx.focus("maintenance-cancel", true);
+            });
+            runtime.frame(1.0 / 60.0);
+            assert!(runtime.elements().iter().any(|element| {
+                element.key.as_deref() == Some("maintenance-cancel") && element.focused
+            }));
+
+            press(&mut runtime, dismiss);
+            assert!(runtime.state.maintenance.confirmation.is_none(), "{opener}");
+            assert!(!runtime.state.confirm_maintenance_dialog);
+            // RuneKit's modal close schedules a focus request on the next app poll.
+            runtime.frame(1.0 / 60.0);
+            let elements = runtime.elements();
+            let action = elements
+                .iter()
+                .find(|element| element.key.as_deref() == Some(opener))
+                .expect("the originating action");
+            assert!(
+                action.focused && action.focus_visible,
+                "{opener} has visible keyboard focus"
+            );
+            let view = elements
+                .iter()
+                .find(|element| element.key.as_deref() == Some(viewport))
+                .expect("maintenance viewport");
+            let action_center_y = action.rect[1] + action.rect[3] / 2.0;
+            assert!(
+                (view.rect[1]..view.rect[1] + view.rect[3]).contains(&action_center_y),
+                "{opener} is scrolled into view"
+            );
+            assert_eq!(
+                runtime.state.maintenance.selected_dataset.as_ref(),
+                dataset.as_ref().map(|upload| &upload.dataset)
+            );
+            assert!(matches!(runtime.state.maintenance.receipt, Load::Idle));
+            assert!(!runtime
+                .state
+                .intents
+                .iter()
+                .any(|intent| matches!(intent, Intent::Maintenance { .. })));
+        }
+    }
+}
+
+#[test]
 fn expired_training_review_survives_refresh_and_requires_explicit_confirmation() {
     let kind = DatasetKind::ClassifierTraining;
     let operation = MaintenanceOperation::TrainClassifier;

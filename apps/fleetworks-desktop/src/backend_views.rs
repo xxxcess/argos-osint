@@ -2312,7 +2312,7 @@ pub(crate) fn maintenance(
             SeedStage::Maintenance,
             "2. Build Search Index",
             MaintenanceOperation::ReindexActors,
-            "maintenance-reindex",
+            maintenance::REINDEX_ACTION_KEY,
             "Build the actor-search projection from the seeded backend catalog.",
             &icons::BRAIN,
             MetalFinish::Gunmetal,
@@ -2621,7 +2621,7 @@ pub(crate) fn maintenance_confirmation_content(
                 ActionButton::new(cancel_label)
                     .key("maintenance-cancel")
                     .finish(MetalFinish::Gunmetal)
-                    .on_press(|state: &mut State| state.cancel_maintenance_confirmation())
+                    .on_press_tx(State::dismiss_maintenance_confirmation)
                     .build(kit, preferences, pointer_ref),
             ),
     )

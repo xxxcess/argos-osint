@@ -35,7 +35,7 @@ on:
         options: [auto, native, backend, all]
         default: auto
       image_builder:
-        description: Use the nightly pilot, or select a builder for an exact-head pilot
+        description: Use Depot for nightly reviews, or select an exact-head benchmark builder
         type: choice
         options: [auto, buildx, depot]
         default: auto
@@ -76,18 +76,9 @@ jobs:
       desktop_macos: ${{ steps.verification.outputs.desktop_macos }}
       backend_matrix: ${{ steps.verification.outputs.backend_matrix }}
       backend_arch: ${{ steps.verification.outputs.backend_arch }}
-      review_images: ${{ steps.verification.outputs.review_images }}
       review_image_matrix: ${{ steps.verification.outputs.review_image_matrix }}
-      depot_review: >-
-        ${{ vars.DEPOT_REVIEW_PROJECT_ID != '' && inputs.image_builder != 'buildx'
-          && ((github.event_name == 'pull_request'
-            && github.event.pull_request.head.repo.full_name == github.repository
-            && github.event.pull_request.base.ref == 'nightly')
-          || (github.event_name == 'workflow_dispatch'
-            && ((github.ref == 'refs/heads/nightly' && inputs.stage == 'standard')
-              || (inputs.stage == 'second' && steps.promotion.outputs.base_ref == 'nightly')
-              || inputs.image_builder == 'depot'))
-          || (github.event_name == 'push' && github.ref == 'refs/heads/nightly')) }}
+      review_image_builder: ${{ steps.image_execution.outputs.builder }}
+      review_image_skip_reason: ${{ steps.image_execution.outputs.skip_reason }}
       depot_release: ${{ github.event_name == 'push' && github.ref == 'refs/heads/nightly' && vars.DEPOT_RELEASE_PROJECT_ID != '' }}
       local_backend: ${{ steps.verification.outputs.local_backend }}
       server: ${{ steps.verification.outputs.server }}
@@ -106,8 +97,8 @@ jobs:
       release_image_tag: ${{ steps.release.outputs.image_tag }}
       release_plan: ${{ steps.release.outputs.plan }}
     steps:
-      - name: Validate explicitly requested Depot pilot
-        if: github.event_name == 'workflow_dispatch' && (inputs.image_builder == 'depot' || inputs.native_embedded_image)
+      - name: Validate explicitly requested image build
+        if: github.event_name == 'workflow_dispatch' && (inputs.image_builder != 'auto' || inputs.native_embedded_image)
         env:
           DEPOT_REVIEW_PROJECT_ID: ${{ vars.DEPOT_REVIEW_PROJECT_ID }}
           EXPECTED_HEAD: ${{ inputs.head }}
@@ -118,8 +109,16 @@ jobs:
           COMPONENTS: ${{ inputs.components }}
         shell: bash
         run: |
-          if [[ -z "$DEPOT_REVIEW_PROJECT_ID" || "$GITHUB_REF" != refs/heads/* || "$EXPECTED_HEAD" != "$GITHUB_SHA" ]]; then
-            echo '::error::A Depot pilot needs DEPOT_REVIEW_PROJECT_ID and an exact head on a repository branch'
+          if [[ "$GITHUB_REF" != refs/heads/* || "$EXPECTED_HEAD" != "$GITHUB_SHA" ]]; then
+            echo '::error::An explicitly requested image build requires an exact head on a repository branch'
+            exit 1
+          fi
+          if [[ ( "$IMAGE_BUILDER" == depot || "$NATIVE_EMBEDDED_IMAGE" == true ) && -z "$DEPOT_REVIEW_PROJECT_ID" ]]; then
+            echo '::error::Depot image builds require DEPOT_REVIEW_PROJECT_ID'
+            exit 1
+          fi
+          if [[ "$IMAGE_BUILDER" == buildx && "$STAGE" != standard ]]; then
+            echo '::error::Buildx image benchmarks require a standard manual dispatch'
             exit 1
           fi
           if [[ "$NATIVE_EMBEDDED_IMAGE" == true && ( "$IMAGE_BUILDER" == buildx || "$MODE" != full || "$STAGE" != standard || ( "$COMPONENTS" != native && "$COMPONENTS" != all ) ) ]]; then
@@ -349,6 +348,37 @@ jobs:
           python3 .github/scripts/fleetworks_ci.py select --stage "$FLEETWORKS_STAGE" \
             --plan "$RUNNER_TEMP/release.json" --output "$GITHUB_OUTPUT"
 
+      - name: Route selected review image builds
+        id: image_execution
+        if: steps.verification.outputs.review_images == 'true'
+        env:
+          FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          BUILDX_BENCHMARK: ${{ github.event_name == 'workflow_dispatch' && inputs.stage == 'standard' && inputs.image_builder == 'buildx' }}
+          DEPOT_ELIGIBLE: >-
+            ${{ (github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'nightly')
+              || (github.event_name == 'workflow_dispatch'
+                && ((github.ref == 'refs/heads/nightly' && inputs.stage == 'standard')
+                  || (inputs.stage == 'second' && steps.promotion.outputs.base_ref == 'nightly')
+                  || inputs.image_builder == 'depot'))
+              || (github.event_name == 'push' && github.ref == 'refs/heads/nightly') }}
+          DEPOT_REVIEW_PROJECT_ID: ${{ vars.DEPOT_REVIEW_PROJECT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$FORK_PR" == true ]]; then
+            printf '%s\n' 'skip_reason=fork' >> "$GITHUB_OUTPUT"
+          elif [[ "$BUILDX_BENCHMARK" == true ]]; then
+            printf '%s\n' 'builder=buildx' >> "$GITHUB_OUTPUT"
+          elif [[ "$DEPOT_ELIGIBLE" == true ]]; then
+            if [[ -z "$DEPOT_REVIEW_PROJECT_ID" ]]; then
+              echo '::error::Selected Docker review images require DEPOT_REVIEW_PROJECT_ID'
+              exit 1
+            fi
+            printf '%s\n' 'builder=depot' >> "$GITHUB_OUTPUT"
+          else
+            printf '%s\n' 'skip_reason=outside_nightly' >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Clean up trusted planner checkout
         if: always()
         shell: bash
@@ -553,10 +583,10 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  images:
-    name: Image checks / Linux ${{ matrix.arch }}
+  images_buildx_benchmark:
+    name: Docker image benchmark (Buildx) / Linux ${{ matrix.arch }}
     needs: scope
-    if: needs.scope.outputs.review_images == 'true' && needs.scope.outputs.depot_review != 'true'
+    if: github.event_name == 'workflow_dispatch' && inputs.stage == 'standard' && inputs.image_builder == 'buildx' && needs.scope.outputs.review_image_builder == 'buildx'
     strategy:
       fail-fast: false
       matrix:
@@ -619,7 +649,7 @@ jobs:
   images_depot:
     name: Image checks (Depot) / Linux ${{ matrix.arch }}
     needs: scope
-    if: needs.scope.outputs.review_images == 'true' && needs.scope.outputs.depot_review == 'true'
+    if: needs.scope.outputs.review_image_builder == 'depot'
     permissions:
       contents: read
       id-token: write
@@ -747,7 +777,7 @@ jobs:
 
   source_checks:
     name: ${{ inputs.stage == 'second' && 'Fleetworks second pass source checks' || github.event_name == 'workflow_dispatch' && 'Fleetworks manual source checks' || 'Fleetworks source checks' }}
-    needs: [scope, desktop, desktop_linux, server, embedded, bert, web, images, images_depot, native_embedded_image]
+    needs: [scope, desktop, desktop_linux, server, embedded, bert, web, images_buildx_benchmark, images_depot, native_embedded_image]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -763,8 +793,9 @@ jobs:
           BERT_SELECTED: ${{ needs.scope.outputs.bert }}
           WEB_SELECTED: ${{ needs.scope.outputs.web }}
           WEB_DEV_SELECTED: ${{ needs.scope.outputs.web_dev }}
-          IMAGES_SELECTED: ${{ needs.scope.outputs.review_images == 'true' && needs.scope.outputs.depot_review != 'true' }}
-          DEPOT_IMAGES_SELECTED: ${{ needs.scope.outputs.review_images == 'true' && needs.scope.outputs.depot_review == 'true' }}
+          BUILDX_BENCHMARK_SELECTED: ${{ needs.scope.outputs.review_image_builder == 'buildx' }}
+          DEPOT_IMAGES_SELECTED: ${{ needs.scope.outputs.review_image_builder == 'depot' }}
+          REVIEW_IMAGE_SKIP_REASON: ${{ needs.scope.outputs.review_image_skip_reason }}
           NATIVE_EMBEDDED_IMAGE_SELECTED: ${{ github.event_name == 'workflow_dispatch' && inputs.native_embedded_image }}
           IMAGE_TARGETS: ${{ needs.scope.outputs.image_targets }}
           QUEUE_SELECTED: ${{ needs.scope.outputs.queue }}
@@ -775,7 +806,7 @@ jobs:
           EMBEDDED_RESULT: ${{ needs.embedded.result }}
           BERT_RESULT: ${{ needs.bert.result }}
           WEB_RESULT: ${{ needs.web.result }}
-          IMAGES_RESULT: ${{ needs.images.result }}
+          BUILDX_BENCHMARK_RESULT: ${{ needs.images_buildx_benchmark.result }}
           DEPOT_IMAGES_RESULT: ${{ needs.images_depot.result }}
           NATIVE_EMBEDDED_IMAGE_RESULT: ${{ needs.native_embedded_image.result }}
         shell: bash
@@ -825,9 +856,18 @@ jobs:
           verify embedded "$STORAGE_SELECTED" "$EMBEDDED_RESULT" || failed=1
           verify bert "$BERT_SELECTED" "$BERT_RESULT" || failed=1
           verify web "$WEB_SELECTED" "$WEB_RESULT" || failed=1
-          verify images "$IMAGES_SELECTED" "$IMAGES_RESULT" || failed=1
+          verify images_buildx_benchmark "$BUILDX_BENCHMARK_SELECTED" "$BUILDX_BENCHMARK_RESULT" || failed=1
           verify images_depot "$DEPOT_IMAGES_SELECTED" "$DEPOT_IMAGES_RESULT" || failed=1
           verify native_embedded_image "$NATIVE_EMBEDDED_IMAGE_SELECTED" "$NATIVE_EMBEDDED_IMAGE_RESULT" || failed=1
+          case "$REVIEW_IMAGE_SKIP_REASON" in
+            fork) reason='fork pull requests cannot use the Depot review project' ;;
+            outside_nightly) reason='outside the nightly rollout; use an exact-head manual Depot dispatch to verify' ;;
+            *) reason='' ;;
+          esac
+          if [[ -n "$reason" ]]; then
+            printf '::notice::Docker review images skipped: %s\n' "$reason"
+            printf 'Docker review images: skipped (%s).\n' "$reason" >> "$GITHUB_STEP_SUMMARY"
+          fi
           printf 'Server images: %s\n' "${IMAGE_TARGETS:-none}" >> "$GITHUB_STEP_SUMMARY"
           printf 'Queue selected: %s. Storage selected: %s. Local backend selected: %s. Development browser selected: %s.\n' \
             "${QUEUE_SELECTED:-missing}" "${STORAGE_SELECTED:-missing}" \

@@ -1505,9 +1505,8 @@ fn only_a_fresh_read_is_unresolved_while_follow_and_older_keep_the_resolved_stat
     assert!(logs.busy());
     drop(same_query);
 
-    let mut changed = LogQuery::default();
-    changed.level = Some(LogLevel::Error);
-    let fresh = logs.refresh_with(changed).expect("changed-query read");
+    logs.draft.min_rank = Some(2);
+    let fresh = logs.refresh().expect("changed-query read");
     assert_eq!(
         logs.status,
         LogStatus::Loading,

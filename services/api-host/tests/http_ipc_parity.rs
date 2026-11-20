@@ -1056,14 +1056,30 @@ async fn run_shared_flow(
         stale_mutation.clone(),
     )
     .expect("build reindex request");
-    let reindex_receipt = client
-        .reindex_actors(&reindex_req)
-        .await
-        .expect("submit reindex actors");
+    let admission_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let reindex_receipt = loop {
+        match client.reindex_actors(&reindex_req).await {
+            Ok(receipt) => break receipt,
+            Err(ClientError::Status(422)) if transport == "ipc" => {
+                assert!(
+                    tokio::time::Instant::now() < admission_deadline,
+                    "Embedded actor index observation did not settle before reindex admission"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(error) => panic!("{transport}: submit reindex actors: {error}"),
+        }
+    };
     assert_eq!(
         reindex_receipt.operation,
         MaintenanceOperation::ReindexActors
     );
+    if reindex_receipt.already_completed {
+        assert_eq!(transport, "ipc", "only Embedded reuses a serving index");
+        assert!(reindex_receipt.reused && reindex_receipt.job_id.is_empty());
+    } else {
+        assert!(!reindex_receipt.job_id.is_empty());
+    }
     let reindex_replay = client
         .reindex_actors(&reindex_req)
         .await

@@ -553,19 +553,36 @@ def run_smoke(binary, *, state_dir=None, check_sockets=True, run_rust_probe=True
                     raise TimeoutError(f"Seed job {seed_job_id} did not complete within 30s; rows={jobs!r}")
                 time.sleep(0.1)
 
-            # Dispatch ReindexActors, then immediately trigger graceful Shutdown before it finishes.
-            reindex_receipt, lat = session1.request_json(
-                {
-                    "op": "reindex_actors",
-                    "args": {
-                        "request_id": "smoke-reindex-1",
-                        "context": mutation_context,
-                    },
-                },
-                registration=registration,
-            )
-            rpc_latencies_ms.append(lat)
+            # Reuse the same request as normal index observations settle. A caught-up
+            # generation is accepted without creating a job.
+            reindex_request = {
+                "op": "reindex_actors",
+                "args": {"request_id": "smoke-reindex-1", "context": mutation_context},
+            }
+            deadline = time.monotonic() + 30.0
+            while True:
+                outcome, lat = session1.request(reindex_request, registration=registration)
+                rpc_latencies_ms.append(lat)
+                data = outcome.get("data", {})
+                if outcome.get("outcome") == "ok" and data.get("payload") == "json":
+                    reindex_receipt = data["value"]
+                    break
+                if not (
+                    data.get("status") == 422
+                    and data.get("message", "").startswith("Actor index status is still checking or catching up.")
+                ):
+                    raise ValueError(f"IPC reindex admission failed: {outcome!r}")
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Actor index status did not settle before reindex admission")
+                time.sleep(0.1)
+
             reindex_job_id = reindex_receipt["job_id"]
+            reindex_already_completed = reindex_receipt.get("already_completed", False)
+            if reindex_already_completed:
+                if reindex_job_id or not reindex_receipt.get("reused"):
+                    raise ValueError("Completed reindex must reuse coverage without creating a job")
+            elif not reindex_job_id:
+                raise ValueError("Accepted reindex is missing its job ID")
             rss1 = read_process_rss_bytes(session1.proc.pid) or 0
             peak_rss_bytes = max(peak_rss_bytes, rss1)
 
@@ -575,7 +592,7 @@ def run_smoke(binary, *, state_dir=None, check_sockets=True, run_rust_probe=True
         finally:
             session1.close_unconditionally()
 
-        # 3. Restart on the EXACT SAME state directory and verify same job_id resumes with zero duplicates.
+        # 3. Verify the same state directory retains the admitted job or completed reuse.
         session2 = LocalIpcSession(binary, live_dir)
         try:
             ack2 = session2.hello()
@@ -622,6 +639,14 @@ def run_smoke(binary, *, state_dir=None, check_sockets=True, run_rust_probe=True
                     row for row in jobs2.get("rows", [])
                     if row.get("operation") == "actor_reindex"
                 ]
+                if reindex_already_completed:
+                    if reindex_rows:
+                        raise ValueError(f"Reusing the index created reindex jobs: {reindex_rows!r}")
+                    replay, lat = session2.request_json(reindex_request, registration=registration2)
+                    rpc_latencies_ms.append(lat)
+                    if replay != reindex_receipt:
+                        raise ValueError("Completed reindex receipt changed after restart")
+                    break
                 if len(reindex_rows) != 1:
                     raise ValueError(
                         f"Expected exactly 1 actor_reindex job after restart (no duplicates), found {len(reindex_rows)}: {reindex_rows!r}"
@@ -638,23 +663,24 @@ def run_smoke(binary, *, state_dir=None, check_sockets=True, run_rust_probe=True
                     raise TimeoutError(f"Resumed reindex job {reindex_job_id} timed out: {reindex_rows[0]!r}")
                 time.sleep(0.1)
 
-            search_resp, lat = session2.request_json(
-                {
-                    "op": "actors_search",
-                    "args": {
-                        "query": "Harbor Beacon",
-                        "mode": "discovery",
-                        "limit": 10,
+            deadline = time.monotonic() + 30.0
+            while True:
+                search_resp, lat = session2.request_json(
+                    {
+                        "op": "actors_search",
+                        "args": {"query": "Harbor Beacon", "mode": "discovery", "limit": 10},
                     },
-                },
-                registration=registration2,
-            )
-            rpc_latencies_ms.append(lat)
-            hits = search_resp.get("rows", [])
-            if search_resp.get("index", {}).get("state") != "ready":
-                raise ValueError(f"Actor search index not ready after restart completion: {search_resp!r}")
-            if not any(hit.get("label") == "Harbor Beacon Collective" for hit in hits):
-                raise ValueError(f"Seeded actor missing from local search results: {hits!r}")
+                    registration=registration2,
+                )
+                rpc_latencies_ms.append(lat)
+                hits = search_resp.get("rows", [])
+                if search_resp.get("index", {}).get("state") == "ready" and any(
+                    hit.get("label") == "Harbor Beacon Collective" for hit in hits
+                ):
+                    break
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"Seeded actor was not searchable after restart: {search_resp!r}")
+                time.sleep(0.1)
 
             rss2 = read_process_rss_bytes(session2.proc.pid) or 0
             peak_rss_bytes = max(peak_rss_bytes, rss2)
@@ -685,7 +711,8 @@ def run_smoke(binary, *, state_dir=None, check_sockets=True, run_rust_probe=True
             "capabilities": capabilities,
             "rust_client_probe": rust_client_probe,
             "seed_job_id": seed_job_id,
-            "restart_resume_job_id": reindex_job_id,
+            "restart_resume_job_id": reindex_job_id or None,
+            "reindex_already_completed": reindex_already_completed,
             "shutdown_ack_1": shutdown_ack,
             "shutdown_ack_2": shutdown_ack2,
             "search_hits": len(hits),

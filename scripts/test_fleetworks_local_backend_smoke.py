@@ -87,7 +87,7 @@ class LocalBackendSmokeTests(unittest.TestCase):
             self.assertNotIn("ARGOS_OPERATOR_TOKEN", cleaned)
             self.assertEqual(cleaned["PATH"], "/bin")
 
-    def test_run_smoke_exercises_version_mismatch_and_restart_resume_with_mock_child(self):
+    def test_run_smoke_verifies_restart_for_a_new_job_or_completed_index(self):
         mock_bin = self.root / "mock-companion.py"
         state_db = self.root / "mock-state.json"
         mock_bin.write_text(
@@ -166,8 +166,15 @@ while True:
         state["jobs"].append({{"id": "job-seed-1", "operation": "actor_seed", "state": "completed"}})
         ok(req_id, {{"job_id": "job-seed-1"}})
     elif op == "reindex_actors":
-        state["jobs"].append({{"id": "job-reindex-1", "operation": "actor_reindex", "state": "running"}})
-        ok(req_id, {{"job_id": "job-reindex-1"}})
+        assert args["request_id"] == "smoke-reindex-1"
+        if not state.get("index_observed"):
+            state["index_observed"] = True
+            write_f({{"frame": "response", "body": {{"request_id": req_id, "outcome": {{"outcome": "err", "data": {{"status": 422, "message": "Actor index status is still checking or catching up. Refresh status before building."}}}}}}}})
+        elif state.get("already_indexed"):
+            ok(req_id, {{"job_id": "", "already_completed": True, "reused": True}})
+        else:
+            state["jobs"].append({{"id": "job-reindex-1", "operation": "actor_reindex", "state": "running"}})
+            ok(req_id, {{"job_id": "job-reindex-1"}})
     elif op == "jobs_list":
         ok(req_id, {{"rows": state["jobs"]}})
     elif op == "actors_search":
@@ -177,11 +184,15 @@ while True:
         )
         mock_bin.chmod(stat.S_IRWXU)
 
-        summary = run_smoke(mock_bin, state_dir=self.root / "smoke-run", check_sockets=False, run_rust_probe=False)
-        self.assertEqual(summary["status"], "pass")
-        self.assertEqual(summary["rust_client_probe"], {"status": "skipped"})
-        self.assertEqual(summary["restart_resume_job_id"], "job-reindex-1")
-        self.assertEqual(summary["search_hits"], 1)
+        for already_indexed, expected_job in ((False, "job-reindex-1"), (True, None)):
+            with self.subTest(already_indexed=already_indexed):
+                state_db.write_text(json.dumps({"jobs": [], "already_indexed": already_indexed}), encoding="utf-8")
+                summary = run_smoke(mock_bin, state_dir=self.root / f"smoke-run-{already_indexed}", check_sockets=False, run_rust_probe=False)
+                self.assertEqual(summary["status"], "pass")
+                self.assertEqual(summary["rust_client_probe"], {"status": "skipped"})
+                self.assertEqual(summary["restart_resume_job_id"], expected_job)
+                self.assertEqual(summary["reindex_already_completed"], already_indexed)
+                self.assertEqual(summary["search_hits"], 1)
 
     def test_validate_native_contract_enforces_required_fields(self):
         valid = {

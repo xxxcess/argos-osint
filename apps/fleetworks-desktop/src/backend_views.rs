@@ -26,6 +26,7 @@ use crate::app::ModelsTab;
 use crate::app::Page;
 use crate::app::SeedStage;
 use crate::app::State;
+use crate::backend::ReadRequest;
 use crate::icons;
 use crate::job_actions::JobAction;
 use crate::logs::LogStatus;
@@ -236,6 +237,7 @@ fn atlas(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
 
     if state.atlas_advertised() {
         action = action.child(atlas_prerequisites(state, preferences, kit));
+        tool_key_dialog(state, preferences, kit, layers);
     }
     if let Some(reason) = &reason {
         action = action.child(quiet(reason.as_str(), kit));
@@ -649,15 +651,38 @@ fn atlas_prerequisites(state: &State, preferences: ViewPreferences, kit: &Kit) -
             None,
             None,
             Some(
-                ActionButton::new("Refresh checks")
-                    .key("atlas-preflight-refresh")
-                    .icon(&icons::REFRESH)
-                    .finish(MetalFinish::ObsidianPill)
-                    .disabled(
-                        !state.permission(Permission::ReadBackend) || state.readiness_pending(),
+                rune::row()
+                    .gap(6.0)
+                    .center_y()
+                    .child(
+                        ActionButton::new("Configure API keys")
+                            .key("atlas-configure-provider-keys")
+                            .icon(&icons::KEY)
+                            .finish(MetalFinish::ObsidianPill)
+                            .disabled(!can_configure_atlas_keys(state))
+                            .on_press(|state: &mut State| {
+                                if !can_configure_atlas_keys(state) {
+                                    return;
+                                }
+                                reset_tool_key_editor(state);
+                                state.tool_key_dialog = true;
+                                state.submissions.atlas.confirmation = None;
+                                state.backend_read(ReadRequest::Profile);
+                            })
+                            .build(kit, preferences, None),
                     )
-                    .on_press(|state: &mut State| state.refresh_readiness())
-                    .build(kit, preferences, None),
+                    .child(
+                        ActionButton::new("Refresh checks")
+                            .key("atlas-preflight-refresh")
+                            .icon(&icons::REFRESH)
+                            .finish(MetalFinish::ObsidianPill)
+                            .disabled(
+                                !state.permission(Permission::ReadBackend)
+                                    || state.readiness_pending(),
+                            )
+                            .on_press(|state: &mut State| state.refresh_readiness())
+                            .build(kit, preferences, None),
+                    ),
             ),
             kit,
         ));
@@ -697,14 +722,8 @@ fn atlas_prerequisites(state: &State, preferences: ViewPreferences, kit: &Kit) -
     let keys = state.atlas_key_states();
     let mut have_saved_key = false;
     for (provider, label, presence) in keys {
-        let (status, tone) = match presence {
-            AtlasKeyPresence::Missing => ("Missing key", StatusTone::Warn),
-            AtlasKeyPresence::Saved => {
-                have_saved_key = true;
-                ("Key saved", StatusTone::Neutral)
-            }
-            _ => ("Unchecked", StatusTone::Neutral),
-        };
+        let (status, tone) = atlas_key_status(presence);
+        have_saved_key |= presence == AtlasKeyPresence::Saved;
         let action = (presence == AtlasKeyPresence::Missing).then(|| {
             ActionButton::new("OSINT Tools")
                 .key(format!("atlas-key-open-{provider}"))
@@ -722,6 +741,14 @@ fn atlas_prerequisites(state: &State, preferences: ViewPreferences, kit: &Kit) -
         checks = checks.child(quiet("Saved keys still need provider authentication.", kit));
     }
     checks
+}
+
+fn atlas_key_status(presence: AtlasKeyPresence) -> (&'static str, StatusTone) {
+    match presence {
+        AtlasKeyPresence::Missing => ("Missing key", StatusTone::Warn),
+        AtlasKeyPresence::Saved => ("Key saved", StatusTone::Neutral),
+        _ => ("Unchecked", StatusTone::Neutral),
+    }
 }
 
 fn atlas_check_row(
@@ -744,16 +771,55 @@ fn atlas_check_row(
         .children(action)
 }
 
+fn can_configure_atlas_keys(state: &State) -> bool {
+    state.page == Page::Atlas
+        && state.atlas_advertised()
+        && state.connected()
+        && state.registration.context.is_some()
+        && state.permission(Permission::ManageConfiguration)
+        && !matches!(state.configuration.result, Load::Loading)
+}
+
+fn current_tool_credential_slot<'a>(
+    state: &'a State,
+    provider: &str,
+) -> Option<&'a crate::backend::ToolCredentialMetadata> {
+    let Load::Ready(profile) = &state.backend.profile else {
+        return None;
+    };
+    if state.configuration_revision() != Some(profile.configuration_revision) {
+        return None;
+    }
+    profile
+        .tool_credentials
+        .iter()
+        .find(|slot| slot.provider == provider)
+}
+
+fn reset_tool_key_editor(state: &mut State) {
+    state.configuration.tool_provider.replace_text("");
+    state.clear_tool_credential_draft();
+    state.configuration_edited();
+    if !matches!(state.configuration.result, Load::Loading) {
+        state.configuration.result = Load::Idle;
+        state.configuration.message = None;
+    }
+}
+
 fn open_tool_credential_editor(state: &mut State, provider: &str) {
-    if state.page != Page::Tools || !state.permission(Permission::ManageConfiguration) {
+    let available = match state.page {
+        Page::Tools => state.permission(Permission::ManageConfiguration),
+        Page::Atlas => {
+            can_configure_atlas_keys(state)
+                && current_tool_credential_slot(state, provider).is_some()
+        }
+        _ => false,
+    };
+    if !available {
         return;
     }
+    reset_tool_key_editor(state);
     state.configuration.tool_provider = TextEdit::new(provider);
-    state.configuration.tool_primary.replace_text("");
-    state.configuration.tool_fallback.replace_text("");
-    state.configuration.clear_tool_primary = false;
-    state.configuration.clear_tool_fallback = false;
-    state.configuration_edited();
     state.tool_key_dialog = true;
 }
 
@@ -898,31 +964,142 @@ fn tools(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
             ));
         }
     }
-    Dialog::new(
-        "tool-api-key",
-        format!("{} API keys", state.configuration.tool_provider.text),
-    )
-    .open(state.tool_key_dialog)
-    .width(480.0)
-    .click_outside(false)
-    .on_close(|state: &mut State| {
-        state.tool_key_dialog = false;
-        state.configuration.tool_primary.replace_text("");
-        state.configuration.tool_fallback.replace_text("");
-        state.configuration.clear_tool_primary = false;
-        state.configuration.clear_tool_fallback = false;
-        state.configuration_edited();
-    })
-    .child(
-        rune::col()
-            .grow(1.0)
-            .min_h(0.0)
-            .scroll(ScrollSpec {
-                stick_bottom: false,
-            })
-            .padding(16.0)
-            .gap(12.0)
-            .child(quiet(
+    tool_key_dialog(state, preferences, kit, layers);
+    scroll(body, "tools-body")
+}
+
+fn tool_key_dialog(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Vec<El>) {
+    if !state.tool_key_dialog {
+        return;
+    }
+    let atlas = state.page == Page::Atlas;
+    let provider = state.configuration.tool_provider.text.as_str();
+    let editing = !provider.is_empty();
+    let title = if atlas {
+        "Atlas provider keys".into()
+    } else {
+        format!("{provider} API keys")
+    };
+    let editor = if atlas && !editing {
+        atlas_key_sources(state, preferences, kit)
+    } else {
+        tool_key_editor(state, atlas, provider, preferences, kit)
+    };
+    Dialog::new("tool-api-key", title)
+        .open(true)
+        .width(480.0)
+        .click_outside(false)
+        .on_close(|state: &mut State| {
+            state.tool_key_dialog = false;
+            reset_tool_key_editor(state);
+        })
+        .child(
+            rune::col()
+                .key(if editing {
+                    "provider-key-editor"
+                } else {
+                    "atlas-key-sources"
+                })
+                .grow(1.0)
+                .min_h(0.0)
+                .scroll(ScrollSpec {
+                    stick_bottom: false,
+                })
+                .padding(16.0)
+                .gap(12.0)
+                .child(editor)
+                .child(configuration_status(state, preferences, kit)),
+        )
+        .build(kit, layers);
+}
+
+fn atlas_key_sources(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
+    let mut body = rune::col().gap(6.0).child(quiet(
+        "Save a primary or fallback key for each source. Saved keys still need provider authentication.",
+        kit,
+    ));
+    for (provider, label, presence) in state.atlas_key_states() {
+        let (status, tone) = atlas_key_status(presence);
+        let editor = ActionButton::new("Edit key")
+            .key(format!("atlas-key-edit-{provider}"))
+            .finish(MetalFinish::ObsidianPill)
+            .disabled(
+                !can_configure_atlas_keys(state)
+                    || current_tool_credential_slot(state, provider).is_none(),
+            )
+            .on_press(move |state: &mut State| open_tool_credential_editor(state, provider))
+            .build(kit, preferences, None)
+            .label(format!("Edit {label} API keys"));
+        body = body.child(atlas_check_row(
+            &format!("source-{provider}"),
+            label,
+            status,
+            tone,
+            Some(editor),
+            kit,
+        ));
+    }
+    if let Some(message) = load_message(
+        &state.backend.profile,
+        "Saved provider slots have not been loaded.",
+        preferences,
+        kit,
+    ) {
+        body = body.child(message);
+    }
+    if !matches!(state.backend.profile, Load::Loading | Load::Pending)
+        && state
+            .atlas_key_states()
+            .iter()
+            .any(|(provider, _, _)| current_tool_credential_slot(state, provider).is_none())
+    {
+        body = body.child(
+            ActionButton::new("Refresh provider slots")
+                .key("atlas-key-refresh-slots")
+                .on_press(|state: &mut State| state.backend_read(ReadRequest::Profile))
+                .build(kit, preferences, None),
+        );
+    }
+    body
+}
+
+fn tool_key_editor(
+    state: &State,
+    atlas: bool,
+    provider: &str,
+    preferences: ViewPreferences,
+    kit: &Kit,
+) -> El {
+    let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
+    let changed = !state.configuration.tool_primary.text.is_empty()
+        || !state.configuration.tool_fallback.text.is_empty()
+        || state.configuration.clear_tool_primary
+        || state.configuration.clear_tool_fallback;
+    let mut body = rune::col().gap(12.0);
+    if atlas {
+        let provider_name = state
+            .atlas_key_states()
+            .into_iter()
+            .find_map(|(id, name, _)| (id == provider).then_some(name))
+            .unwrap_or(provider);
+        body = body.child(
+            rune::row()
+                .w_full()
+                .center_y()
+                .flex_wrap()
+                .gap(8.0)
+                .child(heading(provider_name, kit).grow(1.0))
+                .child(
+                    ActionButton::new("All providers")
+                        .key("atlas-key-back")
+                        .finish(MetalFinish::ObsidianPill)
+                        .disabled(matches!(state.configuration.result, Load::Loading))
+                        .on_press(|state: &mut State| reset_tool_key_editor(state))
+                        .build(kit, preferences, None),
+                ),
+        );
+    }
+    body.child(quiet(
                 "Keys remain masked and are sent only after confirmation. Blank fields preserve saved keys; clearing a slot requires its explicit toggle.",
                 kit,
             ))
@@ -971,19 +1148,18 @@ fn tools(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
                 },
             ))
             .child(
-                ActionButton::new("Review key replacement")
+                ActionButton::new(if atlas { "Review API keys" } else { "Review key replacement" })
                     .key("tool-credentials-preview")
                     .icon(&icons::SHIELD_CHECK)
                     .finish(MetalFinish::GoldCta)
                     .busy(matches!(state.configuration.result, Load::Loading))
-                    .disabled(!state.permission(Permission::ManageConfiguration))
+                    .disabled(
+                        !state.permission(Permission::ManageConfiguration)
+                            || (atlas && (!changed || current_tool_credential_slot(state, provider).is_none())),
+                    )
                     .on_press(|state: &mut State| state.preview_tool_credentials())
                     .build(kit, preferences, pointer_ref),
             )
-            .child(configuration_status(state, preferences, kit)),
-    )
-    .build(kit, layers);
-    scroll(body, "tools-body")
 }
 
 fn input(

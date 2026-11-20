@@ -761,6 +761,10 @@ mod native {
                     "atlas-prerequisites",
                     submission_scenes::atlas_prerequisites,
                 ),
+                (
+                    "atlas-provider-keys",
+                    submission_scenes::atlas_provider_keys,
+                ),
                 ("atlas-submit-preview", submission_scenes::atlas_preview),
                 ("atlas-submit-accepted", submission_scenes::atlas_accepted),
                 ("atlas-submit-uncertain", submission_scenes::atlas_uncertain),

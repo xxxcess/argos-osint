@@ -485,7 +485,11 @@ impl State {
         }
         self.setup_gateway = false;
         self.settings_open = false;
-        self.tool_key_dialog = false;
+        if self.tool_key_dialog {
+            self.tool_key_dialog = false;
+            self.clear_tool_credential_draft();
+            self.configuration_edited();
+        }
         self.workstation_inspector = None;
         self.models_provider_dialog = false;
         self.models_role_dialog = false;
@@ -661,6 +665,7 @@ impl State {
         self.workstation_diagnostics_open = false;
         self.workstation_status_checks_open = false;
         self.setup_advanced_open = false;
+        self.tool_key_dialog = false;
         self.expanded_readiness.clear();
         self.selected_readiness = None;
         self.workstation_inspector = None;

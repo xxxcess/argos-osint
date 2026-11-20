@@ -33,7 +33,10 @@ use crate::backend::ActivityJob;
 use crate::backend::JobDetail;
 use crate::backend::ProfileSnapshot;
 use crate::backend::ToolCatalog;
+use crate::backend::ToolCredentialMetadata;
 use crate::backend::ToolDefinition;
+use crate::configuration::ConfigurationAction;
+use crate::configuration::ConfigurationSaved;
 use crate::connection::ConnectionStatus;
 
 fn fixture() -> State {
@@ -455,7 +458,7 @@ fn distributed_atlas_prerequisites_gate_creation_and_open_the_missing_key_editor
     assert!(runtime
         .accessibility_json()
         .to_string()
-        .contains("Add a Currents API key in OSINT Tools"));
+        .contains("Add a Currents API key using Configure API keys"));
     runtime.update(|state, tx| {
         state.preview_atlas_cycle();
         tx.scroll_into_view("atlas-key-open-currents");
@@ -508,6 +511,171 @@ fn embedded_atlas_links_to_setup_without_stopping_the_companion() {
         .accessibility_json()
         .to_string()
         .contains(super::ATLAS_DISTRIBUTED_REQUIREMENT));
+}
+
+#[test]
+fn atlas_provider_keys_save_in_news_cycles_and_wait_for_current_readiness() {
+    let mut state = fixture();
+    state.page = Page::Atlas;
+    state.clock = 0.0;
+    state
+        .connection
+        .capabilities
+        .as_mut()
+        .unwrap()
+        .permissions
+        .push(Permission::ManageConfiguration);
+    let Load::Ready(profile) = &mut state.backend.profile else {
+        panic!("configuration fixture")
+    };
+    profile.tool_credentials = ["gnews", "newsdata", "newsapi", "currents"]
+        .into_iter()
+        .map(|provider| ToolCredentialMetadata {
+            provider: provider.into(),
+            primary_present: provider != "currents",
+            fallback_present: false,
+        })
+        .collect();
+    let Load::Ready(ready) = &mut state.readiness else {
+        panic!("readiness fixture")
+    };
+    ready.atlas_preflight.as_mut().unwrap().currents = AtlasKeyPresence::Missing;
+
+    let mut runtime = Runtime::new(state, app::view, (640.0, 480.0), Env::default());
+    runtime.reduced_motion = true;
+    runtime.frame(0.0);
+    runtime.frame(0.01);
+    assert!(runtime
+        .state
+        .submission_disabled_reason(SubmissionKind::Atlas)
+        .is_some());
+
+    let opener = "atlas-configure-provider-keys";
+    for key in [opener, "atlas-preflight-refresh", "atlas-submit-preview"] {
+        let visible = runtime
+            .elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some(key))
+            .unwrap();
+        assert_eq!(
+            visible.visible, visible.rect,
+            "{key} must fit the compact News Cycles viewport"
+        );
+    }
+    runtime.update(|_, tx| tx.focus(opener, true));
+    runtime.frame(0.021);
+    runtime.key(rune::KeyEvent {
+        key: rune::Key::Text(" ".into()),
+        mods: rune::Mods::default(),
+    });
+    runtime.frame(0.042);
+    assert!(runtime.state.tool_key_dialog);
+    for key in ["gnews", "newsdata", "newsapi", "currents"] {
+        let editor = format!("atlas-key-edit-{key}");
+        let element = runtime
+            .elements()
+            .into_iter()
+            .find(|el| el.key.as_deref() == Some(editor.as_str()))
+            .expect("provider edit action");
+        assert_eq!(
+            element.visible, element.rect,
+            "{key} editor action must fit the compact dialog"
+        );
+        assert!(element.focusable);
+    }
+
+    fn click(runtime: &mut Runtime<State>, key: &str, at: f64) {
+        runtime.update(|_, tx| tx.scroll_into_view(key));
+        runtime.frame(at);
+        let (x, y) = runtime.find(key).expect("visible credential control");
+        assert!((0.0..640.0).contains(&x) && (0.0..480.0).contains(&y));
+        runtime.pointer_down(x, y);
+        runtime.pointer_up(x, y);
+        runtime.frame(at + 0.021);
+    }
+    click(&mut runtime, "atlas-key-edit-currents", 0.063);
+    runtime.update(|state, _| {
+        state
+            .configuration
+            .tool_fallback
+            .replace_text("fixture-key-never-visible");
+        state.configuration_edited();
+    });
+    runtime.frame(0.105);
+    let tree = runtime.accessibility_json().to_string();
+    assert!(tree.contains("Primary API key") && tree.contains("Fallback API key"));
+    assert!(!tree.contains("fixture-key-never-visible"));
+    click(&mut runtime, "tool-credentials-preview", 0.126);
+    assert!(runtime.state.configuration.confirmation.is_some());
+    assert!(!runtime
+        .state
+        .intents
+        .iter()
+        .any(|intent| matches!(intent, Intent::Configuration { .. })));
+    click(&mut runtime, "configuration-confirm", 0.168);
+    assert!(runtime.state.intents.contains(&Intent::Configuration {
+        action: ConfigurationAction::ToolCredentials
+    }));
+
+    runtime.update(|state, _| {
+        state.intents.clear();
+        state.complete_configuration(
+            state.connection.epoch,
+            state.configuration.revision,
+            state.configuration.draft_revision,
+            0,
+            ConfigurationAction::ToolCredentials,
+            Ok(ConfigurationSaved {
+                saved: true,
+                configuration_revision: 1,
+            }),
+        );
+        let Load::Ready(profile) = &mut state.backend.profile else {
+            panic!("profile fixture")
+        };
+        profile.configuration_revision = 1;
+    });
+    runtime.frame(0.21);
+    assert_eq!(runtime.state.page, Page::Atlas);
+    assert!(runtime.state.tool_key_dialog);
+    assert!(runtime.state.configuration.tool_fallback.text.is_empty());
+    assert!(runtime.find("atlas-key-sources").is_some());
+    assert!(runtime.state.intents.contains(&Intent::Readiness));
+    assert!(runtime
+        .state
+        .submission_disabled_reason(SubmissionKind::Atlas)
+        .is_some());
+
+    runtime.update(|state, _| {
+        let Load::Ready(readiness) = &state.readiness else {
+            panic!("readiness fixture")
+        };
+        let mut refreshed = readiness.clone();
+        let preflight = refreshed.atlas_preflight.as_mut().unwrap();
+        preflight.configuration_revision = Some(1);
+        preflight.currents = AtlasKeyPresence::Saved;
+        state.complete_readiness(Ok(refreshed));
+    });
+    runtime.frame(0.231);
+    assert!(runtime
+        .state
+        .submission_disabled_reason(SubmissionKind::Atlas)
+        .is_none());
+    runtime.key(rune::KeyEvent {
+        key: rune::Key::Escape,
+        mods: rune::Mods::default(),
+    });
+    runtime.frame(0.252);
+    assert!(!runtime.state.tool_key_dialog);
+    assert!(runtime
+        .elements()
+        .into_iter()
+        .any(|el| el.key.as_deref() == Some(opener) && el.focused));
+    assert!(!runtime
+        .state
+        .intents
+        .iter()
+        .any(|intent| matches!(intent, Intent::PostInteractive { .. })));
 }
 
 #[test]

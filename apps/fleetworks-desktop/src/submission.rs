@@ -535,7 +535,13 @@ impl State {
         for (_, provider, status) in self.atlas_key_states() {
             match status {
                 AtlasKeyPresence::Missing => {
-                    return Some(format!("Add a {provider} API key in OSINT Tools"))
+                    return Some(if self.permission(Permission::ManageConfiguration) {
+                        format!("Add a {provider} API key using Configure API keys")
+                    } else {
+                        format!(
+                            "Ask the gateway operator to add a {provider} API key in OSINT Tools"
+                        )
+                    })
                 }
                 AtlasKeyPresence::Saved => {}
                 _ => return Some(format!("Refresh the saved key check for {provider}")),

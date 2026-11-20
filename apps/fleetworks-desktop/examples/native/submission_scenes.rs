@@ -11,6 +11,7 @@ use fleetworks_desktop::app::Intent;
 use fleetworks_desktop::app::Load;
 use fleetworks_desktop::backend::ActivityJob;
 use fleetworks_desktop::backend::JobDetail;
+use fleetworks_desktop::backend::ToolCredentialMetadata;
 use fleetworks_desktop::submission::AcceptedReceipt;
 use fleetworks_desktop::submission::SubmissionAttempt;
 use fleetworks_desktop::submission::SubmissionFailure;
@@ -74,6 +75,20 @@ pub fn atlas_prerequisites(state: &mut State) {
             preflight.currents = AtlasKeyPresence::Missing;
         }
     }
+}
+pub fn atlas_provider_keys(state: &mut State) {
+    atlas_prerequisites(state);
+    if let Load::Ready(profile) = &mut state.backend.profile {
+        profile.tool_credentials = ["gnews", "newsdata", "newsapi", "currents"]
+            .into_iter()
+            .map(|provider| ToolCredentialMetadata {
+                provider: provider.into(),
+                primary_present: matches!(provider, "gnews" | "newsdata"),
+                fallback_present: false,
+            })
+            .collect();
+    }
+    state.tool_key_dialog = true;
 }
 pub fn atlas_accepted(state: &mut State) {
     atlas_preview(state);

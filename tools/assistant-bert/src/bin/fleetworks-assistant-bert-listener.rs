@@ -440,6 +440,7 @@ fn serve(stream: UnixStream, worker: &Path, model: &Path, libraries: &Path) -> R
             .env(library_variable, libraries)
             .env("OMP_NUM_THREADS", "1")
             .env("MKL_NUM_THREADS", "1")
+            .env("RAYON_NUM_THREADS", "1")
             .stdin(Stdio::from(input))
             .stdout(Stdio::from(output))
             .stderr(Stdio::null())

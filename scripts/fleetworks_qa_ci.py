@@ -139,7 +139,8 @@ def mac_libraries(binary, directory, torch_root):
 def verify_inference(root, loader_key):
     # The extracted pack must find all runtime libraries and use the exact
     # checkpoint without inheriting Torch or model-cache environment variables.
-    model_env = {loader_key: str(root / "lib"), "OMP_NUM_THREADS": "1"}
+    model_env = {loader_key: str(root / "lib"), "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
+                 "RAYON_NUM_THREADS": "1"}
     started = time.monotonic()
     process = subprocess.Popen([str(root / pack.WORKER), "--model-dir", str(root / "model")],
                                env=model_env, cwd=root, stdin=subprocess.PIPE, stdout=subprocess.PIPE,

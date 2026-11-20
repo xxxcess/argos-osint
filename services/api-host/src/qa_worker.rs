@@ -355,6 +355,7 @@ impl WorkerSession {
             .current_dir(&model)
             .env("OMP_NUM_THREADS", "1")
             .env("MKL_NUM_THREADS", "1")
+            .env("RAYON_NUM_THREADS", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

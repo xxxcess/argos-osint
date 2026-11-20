@@ -151,8 +151,13 @@ fn load_model(dir: &Path) -> Result<QuestionAnsweringModel> {
         );
         Ok(LocalResource { local_path })
     };
-    tch::set_num_threads(1);
+    // The launcher's OpenMP and MKL limits apply before LibTorch initializes. The
+    // explicit intra-op setter also initializes an unrelated native thread pool.
     tch::set_num_interop_threads(1);
+    ensure!(
+        tch::get_num_threads() == 1 && tch::get_num_interop_threads() == 1,
+        "QA model did not honor its Torch thread limits"
+    );
     QuestionAnsweringModel::new(QuestionAnsweringConfig {
         model_resource: ModelResource::Torch(Box::new(resource("rust_model.ot")?)),
         config_resource: Box::new(resource("config.json")?),

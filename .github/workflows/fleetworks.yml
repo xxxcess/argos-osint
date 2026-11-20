@@ -87,6 +87,7 @@ jobs:
     outputs:
       head: ${{ steps.release.outputs.head }}
       desktop_linux: ${{ steps.verification.outputs.desktop_linux }}
+      core_native_linux: ${{ steps.verification.outputs.core_native_linux }}
       desktop_macos: ${{ steps.verification.outputs.desktop_macos }}
       backend_matrix: ${{ steps.verification.outputs.backend_matrix }}
       backend_arch: ${{ steps.verification.outputs.backend_arch }}
@@ -411,205 +412,46 @@ jobs:
         run: |
           rm -rf "$RUNNER_TEMP/trusted-planner" "$RUNNER_TEMP/trusted-planner-ready"
 
-  desktop:
-    name: Mac app / ${{ matrix.target }}
-    needs: [scope, desktop_linux]
-    if: always() && needs.scope.result == 'success' && needs.scope.outputs.desktop_macos == 'true' && (needs.desktop_linux.result == 'success' || needs.desktop_linux.result == 'skipped')
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-apple-darwin
-            runner: macos-15-intel
-          - target: aarch64-apple-darwin
-            runner: macos-15
-    uses: ./.github/workflows/fleetworks-native.yml
-    with:
-      expected-head: ${{ needs.scope.outputs.head }}
-      target: ${{ matrix.target }}
-      runner: ${{ matrix.runner }}
-      release-version: ${{ needs.scope.outputs.publish == 'true' && needs.scope.outputs.release_version || '' }}
-
-  desktop_linux:
-    name: Linux app / x86_64-unknown-linux-gnu
+  gsd_core:
+    name: "GSD Nightly: Core"
     needs: scope
-    if: needs.scope.outputs.desktop_linux == 'true'
-    uses: ./.github/workflows/fleetworks-native-linux-route.yml
-    with:
-      expected-head: ${{ needs.scope.outputs.head }}
-      mode: ${{ needs.scope.outputs.full == 'true' && 'full' || 'pr' }}
-      profile: ${{ needs.scope.outputs.publish == 'true' && 'release' || 'debug' }}
-      release-version: ${{ needs.scope.outputs.publish == 'true' && needs.scope.outputs.release_version || '' }}
-    secrets:
-      depot-ci-token: ${{ github.event_name == 'push' && github.ref == 'refs/heads/nightly' && needs.scope.outputs.publish == 'true' && vars.DEPOT_NIGHTLY_NATIVE_ENABLED == 'true' && secrets.DEPOT_LINUX_NATIVE_PILOT_TOKEN || '' }}
-
-  embedded:
-    name: Affected embedded storage
-    needs: scope
-    if: needs.scope.outputs.storage == 'true'
-    uses: ./.github/workflows/embedded.yml
+    if: >-
+      needs.scope.outputs.core_native_linux == 'true' || needs.scope.outputs.server == 'true' ||
+      needs.scope.outputs.storage == 'true' || needs.scope.outputs.bert == 'true'
+    uses: ./.github/workflows/gsd-nightly-core.yml
     with:
       head: ${{ needs.scope.outputs.head }}
-      arch: ${{ needs.scope.outputs.backend_arch }}
-      scoped: ${{ github.event_name == 'pull_request' }}
+      full: ${{ needs.scope.outputs.full == 'true' }}
+      publish: ${{ needs.scope.outputs.publish == 'true' }}
+      release-version: ${{ needs.scope.outputs.publish == 'true' && needs.scope.outputs.release_version || '' }}
+      linux-native: ${{ needs.scope.outputs.core_native_linux == 'true' }}
+      backend-arch: ${{ needs.scope.outputs.backend_arch }}
+      backend-matrix: ${{ needs.scope.outputs.backend_matrix }}
+      server: ${{ needs.scope.outputs.server == 'true' }}
+      storage: ${{ needs.scope.outputs.storage == 'true' }}
+      queue: ${{ needs.scope.outputs.queue == 'true' }}
+      bert: ${{ needs.scope.outputs.bert == 'true' }}
+    secrets:
+      depot-ci-token: ${{ github.event_name == 'push' && github.ref == 'refs/heads/nightly' && needs.scope.outputs.core_native_linux == 'true' && needs.scope.outputs.publish == 'true' && vars.DEPOT_NIGHTLY_NATIVE_ENABLED == 'true' && secrets.DEPOT_LINUX_NATIVE_PILOT_TOKEN || '' }}
 
-  server:
-    name: Backend suite / Linux ${{ matrix.arch }}
+  gsd_ui:
+    name: "GSD Nightly: UI"
     needs: scope
-    if: needs.scope.outputs.server == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.scope.outputs.backend_matrix) }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
-    env:
-      EXPECTED_MACHINE: ${{ matrix.machine }}
-      EXPECTED_TARGET: ${{ matrix.target }}
-      EXPECTED_EXECUTABLE: ${{ matrix.executable }}
-      REVIEW_ARCH: ${{ matrix.arch }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ env.FLEETWORKS_HEAD }}
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@1.95.0
-        with:
-          components: rustfmt
-      - name: Install libclang for the embedded delivery queue
-        run: sudo apt-get update && sudo apt-get install -y libclang-dev
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: distributed-backend-${{ matrix.arch }}
-          workspaces: . -> target/agents
-          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-      - name: Resolve pinned isolated datastore before API tests
-        id: surreal
-        shell: bash
-        run: |
-          set -euo pipefail
-          binary="$(python3 scripts/test_surreal.py --mode server --fetch-only |
-            sed -n 's/^test-surreal: server binary //p')"
-          test -x "$binary"
-          printf 'binary=%s\n' "$binary" >> "$GITHUB_OUTPUT"
-          printf 'ARGOS_SURREAL_BIN=%s\nARGOS_SURREAL_MODE=server\nARGOS_SURREAL_REQUIRED=1\n' "$binary" >> "$GITHUB_ENV"
-      - name: Check, build, and test the backend
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$FLEETWORKS_HEAD"
-          test "$(uname -m)" = "$EXPECTED_MACHINE"
-          test "$(rustc -vV | sed -n 's/^host: //p')" = "$EXPECTED_TARGET"
-          rustc --version | grep -q '^rustc 1\.95\.0 '
-          cargo fmt --all -- --check
-          features=(--no-default-features --features server,nlp,classifier)
-          python3 scripts/fleetworks_verify.py timed --phase server-check -- \
-            python3 scripts/agent_cargo.py check --timings --locked -p argos-api-host "${features[@]}"
-          python3 scripts/fleetworks_verify.py timed --phase server-build -- \
-            python3 scripts/agent_cargo.py build --timings --locked -p argos-api-host --bin argos-api-host "${features[@]}"
-          file target/agents/debug/argos-api-host | grep -Ei "$EXPECTED_EXECUTABLE"
-          python3 scripts/fleetworks_verify.py timed --phase server-test -- \
-            python3 scripts/agent_cargo.py test --timings --locked -p argos-api-host -p argos-osint-api \
-              "${features[@]}" --bin argos-api-host --lib
-          verify_core_tests() {
-            local phase="$1" filter="$2" log
-            log="$RUNNER_TEMP/fleetworks-$phase.log"
-            python3 scripts/fleetworks_verify.py timed --phase "$phase" -- \
-              python3 scripts/agent_cargo.py test --timings --locked -p argos-osint-core \
-                "${features[@]}" --features fixtures --lib "$filter" | tee "$log"
-            if ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored' "$log"; then
-              echo "::error::The required $filter tests did not pass"
-              exit 1
-            fi
-          }
-          verify_core_tests execution-transport-test provider_attempt::remote::tests
-          verify_core_tests config-commit-test config_commit::tests
-      - name: Exercise bootstrap and network service roles on loopback
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -x "$ARGOS_SURREAL_BIN"
-          python3 scripts/fleetworks_verify.py timed --phase network-smoke -- \
-            python3 scripts/fleetworks_network_smoke.py --host target/agents/debug/argos-api-host --surreal "$ARGOS_SURREAL_BIN"
-      - name: Run pinned disk storage contracts
-        if: needs.scope.outputs.full == 'true'
-        env:
-          SURREAL_BIN: ${{ steps.surreal.outputs.binary }}
-        run: |
-          python3 scripts/fleetworks_verify.py timed --phase storage-contracts -- \
-            python3 scripts/test_surreal.py --mode server --bin "$SURREAL_BIN" --timings
-      - name: Test affected storage and brief recovery contracts
-        if: needs.scope.outputs.storage == 'true' && needs.scope.outputs.full != 'true'
-        env:
-          ARGOS_SURREAL_MODE: server
-          ARGOS_SURREAL_REQUIRED: "1"
-          ARGOS_SURREAL_BIN: ${{ steps.surreal.outputs.binary }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          unset SURREAL_USER SURREAL_PASS
-          test -x "$ARGOS_SURREAL_BIN"
-          python3 scripts/fleetworks_verify.py timed --phase storage-affected -- \
-            python3 scripts/agent_cargo.py test --timings --locked -p argos-osint-core \
-              --no-default-features --features server,nlp,classifier,fixtures \
-              --test storage_contracts --test storage_jobs --test storage_brief --test storage_brief_publish \
-              --test storage_provider_pacer --test storage_provider_account --test storage_credits \
-              --test storage_actor_catalog --test storage_atlas_delete
-      - name: Test shared Atlas provider quota reservations
-        if: needs.scope.outputs.queue == 'true' && needs.scope.outputs.full != 'true'
-        env:
-          ARGOS_SURREAL_MODE: server
-          ARGOS_SURREAL_REQUIRED: "1"
-          ARGOS_SURREAL_BIN: ${{ steps.surreal.outputs.binary }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          unset SURREAL_USER SURREAL_PASS
-          test -x "$ARGOS_SURREAL_BIN"
-          log="$RUNNER_TEMP/fleetworks-atlas-quota-test.log"
-          python3 scripts/agent_cargo.py test --locked -p argos-osint-core \
-            --no-default-features --features server,nlp,classifier,fixtures --test storage_atlas \
-            quota_reservations_share_daily_account_caps -- --exact --nocapture | tee "$log"
-          if ! grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored' "$log"; then
-            echo '::error::The required Atlas quota reservation test did not pass'
-            exit 1
-          fi
-      - name: Exercise SQLite jobs and embedded queue dispatch
-        if: needs.scope.outputs.queue == 'true'
-        timeout-minutes: 12
-        env:
-          SURREAL_BIN: ${{ steps.surreal.outputs.binary }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Keep the server feature graph: a Jobs-only selection rebuilds RocksDB's C++ archive.
-          python3 scripts/agent_cargo.py test --locked -p argos-api-host -p fleetworks-jobs \
-            --no-default-features --features server,nlp,classifier
-          python3 scripts/fleetworks_verify.py timed --phase queue-smoke -- \
-            python3 scripts/fleetworks_atlas_smoke.py \
-              --host target/agents/debug/argos-api-host --surreal "$SURREAL_BIN"
-      - name: Validate scoped standalone Compose and optional overlays
-        shell: bash
-        run: |
-          set -euo pipefail
-          review="config-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$REVIEW_ARCH"
-          python3 deploy/native_review.py init --name "$review" --api-port 18091 --web-port 18092 --platform "linux/$REVIEW_ARCH"
-          workspace="$(python3 deploy/native_review.py value --name "$review" --field workspace)"
-          base=(docker compose --env-file "$workspace/compose.env" -f deploy/compose.native-review.yml)
-          "${base[@]}" config --quiet
-          "${base[@]}" -f deploy/compose.yml config --quiet
-          "${base[@]}" -f deploy/compose.yml -f deploy/compose.dev.yml config --quiet
-          "${base[@]}" -f deploy/compose.atlas.yml config --quiet
-      - name: Retain server phase timings
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: Fleetworks-Backend-Test-Timings-Linux-${{ matrix.arch }}
-          path: |
-            ${{ runner.temp }}/fleetworks-timings.jsonl
-            target/agents/cargo-timings/*.html
-          if-no-files-found: ignore
-          retention-days: 7
+    if: >-
+      (needs.scope.outputs.desktop_linux == 'true' && needs.scope.outputs.core_native_linux != 'true') ||
+      needs.scope.outputs.desktop_macos == 'true' || needs.scope.outputs.web == 'true'
+    uses: ./.github/workflows/gsd-nightly-ui.yml
+    with:
+      head: ${{ needs.scope.outputs.head }}
+      full: ${{ needs.scope.outputs.full == 'true' }}
+      publish: ${{ needs.scope.outputs.publish == 'true' }}
+      release-version: ${{ needs.scope.outputs.publish == 'true' && needs.scope.outputs.release_version || '' }}
+      linux-native: ${{ needs.scope.outputs.desktop_linux == 'true' && needs.scope.outputs.core_native_linux != 'true' }}
+      macos: ${{ needs.scope.outputs.desktop_macos == 'true' }}
+      web: ${{ needs.scope.outputs.web == 'true' }}
+      web-dev: ${{ needs.scope.outputs.web_dev == 'true' }}
+    secrets:
+      depot-ci-token: ${{ github.event_name == 'push' && github.ref == 'refs/heads/nightly' && needs.scope.outputs.desktop_linux == 'true' && needs.scope.outputs.core_native_linux != 'true' && needs.scope.outputs.publish == 'true' && vars.DEPOT_NIGHTLY_NATIVE_ENABLED == 'true' && secrets.DEPOT_LINUX_NATIVE_PILOT_TOKEN || '' }}
 
   images_buildx_benchmark:
     name: Docker image benchmark (Buildx) / Linux ${{ matrix.arch }}
@@ -694,8 +536,11 @@ jobs:
 
   native_embedded_image:
     name: Embedded desktop development image (Depot) / Linux x86_64
-    needs: [scope, desktop_linux]
-    if: github.event_name == 'workflow_dispatch' && inputs.native_embedded_image && needs.scope.outputs.desktop_linux == 'true' && needs.scope.outputs.publish != 'true'
+    needs: [scope, gsd_ui]
+    if: >-
+      always() && needs.scope.result == 'success' && github.event_name == 'workflow_dispatch' &&
+      inputs.native_embedded_image && needs.gsd_ui.outputs.desktop_linux_result == 'success' &&
+      needs.scope.outputs.publish != 'true'
     permissions:
       actions: read
       contents: read
@@ -785,27 +630,9 @@ jobs:
           compression-level: 0
           retention-days: 7
 
-  bert:
-    name: Atlas BERT runtime
-    needs: scope
-    if: needs.scope.outputs.bert == 'true'
-    uses: ./.github/workflows/atlas-bert.yml
-    with:
-      head: ${{ needs.scope.outputs.head }}
-      arch: ${{ needs.scope.outputs.backend_arch }}
-
-  web:
-    name: Scoped web
-    needs: scope
-    if: needs.scope.outputs.web == 'true'
-    uses: ./.github/workflows/intel-web.yml
-    with:
-      head: ${{ github.event.pull_request.head.sha || github.sha }}
-      development: ${{ needs.scope.outputs.web_dev == 'true' }}
-
   source_checks:
     name: ${{ inputs.stage == 'second' && 'Fleetworks second pass source checks' || github.event_name == 'workflow_dispatch' && 'Fleetworks manual source checks' || 'Fleetworks source checks' }}
-    needs: [scope, desktop, desktop_linux, server, embedded, bert, web, images_buildx_benchmark, images_depot, native_embedded_image]
+    needs: [scope, gsd_core, gsd_ui, images_buildx_benchmark, images_depot, native_embedded_image]
     if: always() && !(github.event_name == 'workflow_dispatch' && inputs.depot_linux_native_pilot)
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -815,7 +642,8 @@ jobs:
           SCOPE_RESULT: ${{ needs.scope.result }}
           PUBLISH_SELECTED: ${{ needs.scope.outputs.publish }}
           MAC_SELECTED: ${{ needs.scope.outputs.desktop_macos }}
-          LINUX_SELECTED: ${{ needs.scope.outputs.desktop_linux }}
+          CORE_LINUX_SELECTED: ${{ needs.scope.outputs.core_native_linux }}
+          UI_LINUX_SELECTED: ${{ needs.scope.outputs.desktop_linux == 'true' && needs.scope.outputs.core_native_linux != 'true' }}
           LOCAL_BACKEND_SELECTED: ${{ needs.scope.outputs.local_backend }}
           SERVER_SELECTED: ${{ needs.scope.outputs.server }}
           BERT_SELECTED: ${{ needs.scope.outputs.bert }}
@@ -828,12 +656,13 @@ jobs:
           IMAGE_TARGETS: ${{ needs.scope.outputs.image_targets }}
           QUEUE_SELECTED: ${{ needs.scope.outputs.queue }}
           STORAGE_SELECTED: ${{ needs.scope.outputs.storage }}
-          DESKTOP_RESULT: ${{ needs.desktop.result }}
-          DESKTOP_LINUX_RESULT: ${{ needs.desktop_linux.result }}
-          SERVER_RESULT: ${{ needs.server.result }}
-          EMBEDDED_RESULT: ${{ needs.embedded.result }}
-          BERT_RESULT: ${{ needs.bert.result }}
-          WEB_RESULT: ${{ needs.web.result }}
+          DESKTOP_RESULT: ${{ needs.gsd_ui.result == 'skipped' && 'skipped' || needs.gsd_ui.outputs.desktop_result }}
+          CORE_LINUX_RESULT: ${{ needs.gsd_core.result == 'skipped' && 'skipped' || needs.gsd_core.outputs.desktop_linux_result }}
+          UI_LINUX_RESULT: ${{ needs.gsd_ui.result == 'skipped' && 'skipped' || needs.gsd_ui.outputs.desktop_linux_result }}
+          SERVER_RESULT: ${{ needs.gsd_core.result == 'skipped' && 'skipped' || needs.gsd_core.outputs.server_result }}
+          EMBEDDED_RESULT: ${{ needs.gsd_core.result == 'skipped' && 'skipped' || needs.gsd_core.outputs.embedded_result }}
+          BERT_RESULT: ${{ needs.gsd_core.result == 'skipped' && 'skipped' || needs.gsd_core.outputs.bert_result }}
+          WEB_RESULT: ${{ needs.gsd_ui.result == 'skipped' && 'skipped' || needs.gsd_ui.outputs.web_result }}
           BUILDX_BENCHMARK_RESULT: ${{ needs.images_buildx_benchmark.result }}
           DEPOT_IMAGES_RESULT: ${{ needs.images_depot.result }}
           NATIVE_EMBEDDED_IMAGE_RESULT: ${{ needs.native_embedded_image.result }}
@@ -879,7 +708,8 @@ jobs:
           else
             report desktop "$MAC_SELECTED" "$DESKTOP_RESULT"
           fi
-          verify desktop_linux "$LINUX_SELECTED" "$DESKTOP_LINUX_RESULT" || failed=1
+          verify "Core Linux native" "$CORE_LINUX_SELECTED" "$CORE_LINUX_RESULT" || failed=1
+          verify "UI Linux native" "$UI_LINUX_SELECTED" "$UI_LINUX_RESULT" || failed=1
           verify server "$SERVER_SELECTED" "$SERVER_RESULT" || failed=1
           verify embedded "$STORAGE_SELECTED" "$EMBEDDED_RESULT" || failed=1
           verify bert "$BERT_SELECTED" "$BERT_RESULT" || failed=1

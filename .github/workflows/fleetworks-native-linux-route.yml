@@ -12,6 +12,9 @@ on:
       profile:
         required: true
         type: string
+      capture-ui:
+        type: boolean
+        default: true
       release-version:
         required: false
         type: string
@@ -94,4 +97,5 @@ jobs:
       expected-head: ${{ inputs.expected-head }}
       mode: ${{ inputs.mode }}
       profile: ${{ inputs.profile }}
+      capture-ui: ${{ inputs.capture-ui }}
       release-version: ${{ inputs.release-version }}

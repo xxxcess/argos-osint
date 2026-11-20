@@ -2,7 +2,7 @@
 
 [Code route](index.md) · [Contributing](contributing.md) · [Versioning](versioning.md)
 
-One [Fleetworks workflow](../../../.github/workflows/fleetworks.yml) selects current product checks. Feature and fix PRs into `dev`, `nightly` or `main` run the Linux first pass on creation and every pushed update. The remaining affected targets run in an explicit second pass after first-pass CI succeeds. Integration-branch pushes verify the merged revision and publish only selected, verified artifacts.
+The [Fleetworks workflow](../../../.github/workflows/fleetworks.yml) selects checks, calls GSD Nightly Core and UI, and gates publication. Feature and fix PRs into `dev`, `nightly` or `main` run the Linux first pass on creation and every pushed update. The remaining affected targets run in an explicit second pass after first-pass CI succeeds. Integration-branch pushes verify the merged revision and publish only selected, verified artifacts.
 
 [![Events, selected checks and channel publication](../../diagrams/ci-scopes.svg)](../../diagrams/ci-scopes.html)
 
@@ -19,7 +19,7 @@ PR synchronization covers each feature or fix push. The second pass is a dispatc
 
 ## `fleetworks.yml` — scoped branch checks
 
-The [shared planner](../../../scripts/fleetworks_verify.py) compares PR merge bases or push revisions; pull requests run the planner from the trusted base revision (or fall back directly to the full matrix when the base lacks the planner). Pure web UI changes select web checks and its image for the second pass. Native and workstation changes select Linux x86_64 for the first pass and the two Mac legs for the second. Shared Rust contracts widen backend/native checks. Known workflow and planner paths select their owning checks and a native candidate where applicable. Unknown inputs or unavailable comparisons widen the applicable pass. Documentation alone selects repository policy checks (`scripts/fleetworks_doc_links.py`, `scripts/release_check.mjs`, `.opencode/tests/*.test.mjs`, `.github/scripts/test_*.py` and `scripts/test_fleetworks_*.py`). Standard manual dispatch accepts `mode` (`full` or `pr`), `base`, `head` and `components` (`auto`, `native`, `backend`, `all`). Scoped `pr` dispatches require an exact `base` SHA. Explicit component dispatches require an exact `head` SHA.
+The [shared planner](../../../scripts/fleetworks_verify.py) compares PR merge bases or push revisions; pull requests run the planner from the trusted base revision (or fall back directly to the full matrix when the base lacks the planner). Pure web UI changes select web checks and its image for the second pass. Changes to the native app select Linux x86_64 for the first pass and the two Mac legs for the second. Backend-only changes can select Linux companion parity under Core. Shared Rust contracts select both backend and native checks. Known workflow and planner paths select their owning checks and a native candidate where applicable. Unknown inputs or unavailable comparisons widen the applicable pass. Documentation alone selects repository policy checks (`scripts/fleetworks_doc_links.py`, `scripts/release_check.mjs`, `.opencode/tests/*.test.mjs`, `.github/scripts/test_*.py` and `scripts/test_fleetworks_*.py`). Standard manual dispatch accepts `mode` (`full` or `pr`), `base`, `head` and `components` (`auto`, `native`, `backend`, `all`). Scoped `pr` dispatches require an exact `base` SHA. Explicit component dispatches require an exact `head` SHA.
 
 For trusted publication, the [release planner](../../../scripts/fleetworks_release.py) widens the same check/build plan to include changes since the last reachable published artifact. The first publication covers every production target. This prevents a replaced pending run or earlier failure from losing an unpublished component. Checks and publication consume this one authoritative plan.
 
@@ -154,6 +154,18 @@ Policy/helper tests run in the lightweight scope job. The backend resolves `ARGO
 Only trusted integration pushes get publication writes, with packages permissions confined to image staging/promotion and contents writes confined to the publisher. All selected artifacts must verify before channel aliases move. Retries preserve existing immutable assets. [Artifact identities, channels and recovery](versioning.md#release-automation)
 
 ## Nightly gsd order
+
+[GSD Nightly: Core](../../../.github/workflows/gsd-nightly-core.yml) covers functional application logic across the Cargo workspace. [GSD Nightly: UI](../../../.github/workflows/gsd-nightly-ui.yml) focuses on review, polish, and refinement of Rune, Rune Kit, and React Native Web production views. The shared planner dispatches the selected work to each reusable workflow and keeps one required result per pass.
+
+| Changed scope | Core | UI |
+| --- | --- | --- |
+| Backend, storage, queue, or classifier implementation | Affected backend checks and Linux companion parity when selected | |
+| Rune views, theme, or accessibility | | Linux native checks, then affected Mac apps and visual review |
+| React Native Web presentation | | Web build, browser checks and visual review in pass two |
+| Shared Rust API contracts or mixed logic and UI | Affected backend checks | Affected native or Web checks |
+| Documentation only | | |
+
+A mixed plan runs the Linux native package and parity once. A Core-only debug companion build runs unit tests, package verification, smoke, and parity. UI captures run when the UI track owns the native check or when a release build requires them. Image and Compose checks use one shared matrix so both workflows can rely on the same verified images. The [GSD poll report](../../../.agents/skills/gsd/scripts/gsd_poll.py) tracks Core and UI outcomes alongside the two required passes. Record performance, scalability, and security evidence by track and exact revision. Use comparable measurements or focused contract evidence and label unmeasured gains. [KPI evidence](../../../.agents/skills/gsd/SKILL.md#kpi-evidence)
 
 1. Push a focused change. The automatic first pass uses the PR merge-base diff to select only affected Linux x86_64 app and AMD64 backend work. This can include services, embedded storage, backend images, packaged Compose or classifier checks. Mac apps, web checks and the web image wait for the second pass.
 2. As soon as the exact-head [Linux app and Rune evidence](#native-app-review-evidence) are available, reviewers can test the package while affected backend jobs continue. Exercise affected behavior on Linux, using both **Embedded** and **Distributed** when a shared contract changes. Record the reviewer verdict and the inspected captures or walkthrough on the PR. Fix reported regressions and review the new head.

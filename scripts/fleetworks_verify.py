@@ -105,7 +105,8 @@ def path_images(path):
         return {"search-index"}
     if path == "deploy/start-surreal.sh":
         return {"surrealdb"}
-    if path == "deploy/check-api.sh" or path.startswith(("crates/fleetworks-jobs/", *SERVER_PREFIXES)):
+    runtime_paths = ("crates/fleetworks-broker/", "crates/fleetworks-jobs/", *SERVER_PREFIXES)
+    if path == "deploy/check-api.sh" or path.startswith(runtime_paths):
         return {"runtime"}
     if path in {"deploy/Dockerfile", "deploy/Dockerfile.dockerignore", "deploy/docker-bake.hcl"}:
         return set(ALL_IMAGES)
@@ -130,6 +131,8 @@ def raw_path_scopes(path):
         return PRIMARY_SCOPES | {"desktop", "local_backend"}
     if path.startswith(WORKSTATION_PREFIXES):
         return {"desktop", "local_backend"}
+    if path.startswith("crates/fleetworks-broker/"):
+        return {"server", "queue"}
     if path in {"scripts/test_surreal.py", "scripts/test_surreal_release.py", "scripts/surrealdb-release.json"}:
         return {"server", "storage", "queue"}
     if path == "scripts/fixtures/atlas_bert":

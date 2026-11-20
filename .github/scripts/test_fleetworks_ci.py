@@ -27,15 +27,18 @@ class VerificationPassTests(unittest.TestCase):
         )
         first = ci.verification("first", plan)
         self.assertTrue(first["desktop_linux"])
+        self.assertFalse(first["core_native_linux"])
         self.assertFalse(first["desktop_macos"])
         self.assertFalse(first["server"])
         self.assertFalse(first["images"])
         self.assertFalse(first["web"])
+        self.assertTrue(ci.verification("second", plan)["desktop_macos"])
 
     def test_backend_change_selects_linux_native_parity_and_scoped_checks(self):
         plan = self.scopes("crates/argos-osint-core/src/storage/setup_jobs.rs")
         first = ci.verification("first", plan)
         self.assertTrue(first["desktop_linux"])
+        self.assertTrue(first["core_native_linux"])
         for selected in ("server", "storage", "queue", "images"):
             self.assertTrue(first[selected], selected)
         self.assertFalse(first["web"])
@@ -45,6 +48,67 @@ class VerificationPassTests(unittest.TestCase):
         self.assertTrue(first["review_images"])
         self.assertEqual(first["review_image_matrix"], [{**first["image_matrix"][0], "dev": False}])
         self.assertFalse(first["full"])
+        second = ci.verification("second", plan)
+        self.assertTrue(second["server"])
+        self.assertFalse(second["core_native_linux"])
+        self.assertFalse(second["desktop_macos"])
+
+    def test_mixed_core_and_ui_paths_build_the_linux_package_once_in_ui(self):
+        plan = self.scopes(
+            "crates/argos-osint-core/src/storage/setup_jobs.rs",
+            "apps/fleetworks-desktop/src/startup.rs",
+            "packages/intel/src/views/bulletin/SearchResults.tsx",
+        )
+        first = ci.verification("first", plan)
+        self.assertTrue(first["desktop_linux"])
+        self.assertFalse(first["core_native_linux"])
+        self.assertTrue(first["server"])
+        self.assertFalse(first["web"])
+        second = ci.verification("second", plan)
+        self.assertFalse(second["desktop_linux"])
+        self.assertTrue(second["desktop_macos"])
+        self.assertTrue(second["server"])
+        self.assertTrue(second["web"])
+
+    def test_shared_rust_contracts_select_core_and_ui(self):
+        plan = self.scopes("crates/fleetworks-contracts/src/lib.rs")
+        first = ci.verification("first", plan)
+        self.assertTrue(first["desktop_linux"])
+        self.assertFalse(first["core_native_linux"])
+        self.assertTrue(first["server"])
+        self.assertTrue(first["storage"])
+        self.assertTrue(ci.verification("second", plan)["desktop_macos"])
+
+    def test_broker_selects_its_core_runtime_lanes(self):
+        plan = self.scopes("crates/fleetworks-broker/src/lib.rs")
+        self.assertEqual(plan["scope"]["scopes"], ["images", "queue", "server"])
+        self.assertEqual(plan["scope"]["image_targets"], ["runtime"])
+
+    def test_documentation_only_selects_neither_track(self):
+        plan = self.scopes(
+            "docs/wiki/code/ci.md",
+            "docs/design/matte-canvas/mockup.png",
+            "crates/fleetworks-broker/README.md",
+        )
+        for stage in ("first", "second", "standard"):
+            with self.subTest(stage=stage):
+                selection = ci.verification(stage, plan)
+                for lane in ("core_native_linux", "server", "storage", "bert",
+                             "desktop_linux", "desktop_macos", "web", "review_images"):
+                    self.assertFalse(selection[lane], lane)
+
+    def test_track_workflow_edits_select_only_their_own_checks(self):
+        core = ci.verification("standard", self.scopes(".github/workflows/gsd-nightly-core.yml"))
+        ui = ci.verification("standard", self.scopes(".github/workflows/gsd-nightly-ui.yml"))
+        for lane in ("core_native_linux", "server", "storage", "bert"):
+            self.assertTrue(core[lane], lane)
+            self.assertFalse(ui[lane], lane)
+        for lane in ("desktop_macos", "web"):
+            self.assertFalse(core[lane], lane)
+            self.assertTrue(ui[lane], lane)
+        self.assertTrue(ui["desktop_linux"])
+        self.assertFalse(core["review_images"])
+        self.assertFalse(ui["review_images"])
 
     def test_workflow_only_pr_exercises_native_candidate_instead_of_all_services(self):
         first = ci.verification("first", self.scopes(".github/workflows/fleetworks.yml"))

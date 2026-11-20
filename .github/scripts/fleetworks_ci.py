@@ -14,8 +14,13 @@ from pathlib import Path
 POLICY_SCOPES = {
     ".github/workflows/fleetworks.yml": {"desktop", "local_backend"},
     ".github/workflows/embedded.yml": {"server", "storage", "local_backend"},
+    ".github/workflows/gsd-nightly-core.yml": {"server", "storage", "queue", "bert", "local_backend"},
+    ".github/workflows/gsd-nightly-ui.yml": {"desktop", "local_backend", "web"},
+    ".github/workflows/fleetworks-native-linux-route.yml": {"desktop", "local_backend"},
+    ".github/workflows/fleetworks-native-linux-depot-pilot.yml": {"desktop", "local_backend"},
     ".github/scripts/fleetworks_ci.py": {"desktop", "local_backend"},
     ".github/scripts/test_fleetworks_ci.py": {"desktop", "local_backend"},
+    "scripts/depot_native_ci.py": {"desktop", "local_backend"},
     "scripts/fleetworks_verify.py": {"desktop", "local_backend"},
     "scripts/test_fleetworks_verify.py": {"desktop", "local_backend"},
     "deploy/compose.yml": {"server", "compose", "web", "web_dev"},
@@ -37,6 +42,9 @@ def path_selection(planner, path):
         return set(), set()
     if path in POLICY_SCOPES:
         return POLICY_SCOPES[path], set()
+    # Older trusted nightly planners do not yet classify the broker crate.
+    if path.startswith("crates/fleetworks-broker/") and not path.endswith(".md"):
+        return {"server", "queue", "images"}, {"runtime"}
     if path.startswith("assets/brand/"):
         scopes = {"desktop", "local_backend"}
         if not path.startswith(("assets/brand/orbit/", "assets/brand/reference/")):
@@ -148,11 +156,16 @@ def verification(stage, plan):
     review_images = review_image_matrix(stage, images, scopes, publish=plan.get("publish", False), full=full)
     if not images:
         scopes.discard("images")
-    native = bool(scopes & {"desktop", "local_backend"})
+    desktop = "desktop" in scopes
+    companion = "local_backend" in scopes
+    desktop_linux = (desktop or companion) and stage != "second"
     return {
         **{name: name in scopes for name in sorted(SCOPES)},
-        "desktop_linux": native and stage != "second",
-        "desktop_macos": native and stage != "first",
+        "desktop_linux": desktop_linux,
+        # The Linux package exercises HTTP/IPC parity. The Mac app gate covers
+        # client changes, so a companion-only change needs the Linux package.
+        "core_native_linux": desktop_linux and companion and not desktop,
+        "desktop_macos": desktop and stage != "first",
         "backend_matrix": backend_matrix(arches),
         "backend_arch": arches[0] if len(arches) == 1 else "both",
         "image_matrix": images,

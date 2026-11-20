@@ -48,6 +48,7 @@ def render_workflow(source, sha, pair, phase, release_version=""):
         "mode": "nightly",
         "profile": "release" if release_version else "debug",
         "release-version": release_version,
+        "capture-ui": True,
         "pilot-cache-key": pair,
         "pilot-cache-phase": phase,
     }

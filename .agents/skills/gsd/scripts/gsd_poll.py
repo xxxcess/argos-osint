@@ -134,6 +134,30 @@ def verification_passes(rollup: list[dict] | None) -> dict:
     }
 
 
+def verification_tracks(rollup: list[dict] | None) -> dict:
+    tracks = {}
+    for track, name in (("core", "GSD Nightly: Core"), ("ui", "GSD Nightly: UI")):
+        selected = []
+        for check in rollup or []:
+            label = check.get("name") or check.get("context") or ""
+            if label == name or label.startswith(f"{name} / "):
+                selected.append(check)
+        summary = summarize_checks(selected)
+        counts = summary["counts"]
+        if counts["fail"]:
+            status = "failing"
+        elif counts["pending"]:
+            status = "pending"
+        elif counts["pass"]:
+            status = "green"
+        elif counts["skip"]:
+            status = "skipped"
+        else:
+            status = "unavailable"
+        tracks[track] = {"status": status, **summary}
+    return tracks
+
+
 def load_state(path: Path, hours: float, reset: bool) -> dict:
     now = datetime.now(timezone.utc)
     if path.exists() and not reset:
@@ -191,7 +215,13 @@ def main() -> int:
         rollup = pr.get("statusCheckRollup")
         checks = summarize_checks(rollup)
         passes = verification_passes(rollup)
+        tracks = verification_tracks(rollup)
         prev = state["prs"].get(num, {})
+        kpis = {
+            track: evidence.get("kpis", [])
+            for track, evidence in prev.get("nightly", {}).items()
+            if track in tracks and evidence.get("head_sha") == head_sha
+        }
         addressed_ids = set(prev.get("addressed_cursor_comments", []))
 
         if pr.get("isCrossRepository") or branch.startswith(SKIP_BRANCH_PREFIXES):
@@ -217,6 +247,8 @@ def main() -> int:
             "url": pr["url"],
             "checks": checks["counts"],
             "verification_passes": passes,
+            "verification_tracks": tracks,
+            "nightly_kpis": kpis,
             "failed_checks": checks["failed"],
             "pending_checks": len(checks["pending"]),
             "cursor_security_findings": cursor_findings,
@@ -236,6 +268,7 @@ def main() -> int:
             "kind": "spec_impl" if spec_match else "babysit",
             "last_checks": checks["counts"],
             "verification_passes": passes,
+            "verification_tracks": tracks,
             "last_unaddressed_cursor_count": len(unaddressed_cursor),
         }
 

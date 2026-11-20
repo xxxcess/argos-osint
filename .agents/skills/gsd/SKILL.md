@@ -2,8 +2,8 @@
 name: gsd
 description: >-
   Monitor open Argos PRs, address CI and Cursor review findings, and delegate
-  spec implementation PRs. Run affected Linux native and backend checks first,
-  then promote the exact green head to affected macOS and React Native Web checks.
+  spec implementation PRs through GSD Nightly Core and UI. Verify selected
+  checks on the exact PR head and report performance, scalability, and security evidence.
 ---
 
 # GSD — PR Babysitter, Security Responder & Spec Implementer
@@ -17,16 +17,40 @@ Run a bounded (~1 hour) autonomous monitoring and delivery loop in the active co
 
 ## Nightly workflow (canonical)
 
-Each push runs the [Linux-first CI pass](../../../docs/wiki/code/ci.md#nightly-gsd-order) for the affected Linux x86-64 native app and AMD64 backend. Use [UI scope guidance](../../../AGENTS.md#ui-changes) to select the native or Web skill. Track the exact-head Linux package, inspected fixtures and live verdict as they become available. Preserve shared behavior and authority across [Embedded and Distributed](../../../docs/wiki/code/native-connections.md#backend-types-and-parity).
+Select Core, UI, or both from the [CI path plan](../../../docs/wiki/code/ci.md#nightly-gsd-order) for the exact PR head. A change that affects behavior across a shared contract selects the affected work in both workflows. Keep one PR lead and one verification record for a mixed change.
 
-After **Fleetworks required** is green, dispatch pass two for the same PR and SHA. It covers affected macOS Intel and Apple Silicon apps, React Native Web and remaining backend lanes. Every new head starts a new first pass. Trusted integration pushes retain release verification.
+### GSD Nightly: Core
+
+Improve functional application logic through incremental Cargo workspace changes. Cover the affected domain, storage, jobs, API, transport, worker, and workstation logic. Run the selected AMD64 backend, Embedded compatibility, image, and integration checks in the first pass, including Linux companion and HTTP/IPC parity for affected backend-only changes. Verify affected ARM64 backend and image lanes in the second pass. Exercise the affected transports under equivalent authorization when a change crosses [Embedded and Distributed](../../../docs/wiki/code/native-connections.md#backend-types-and-parity).
+
+### GSD Nightly: UI
+
+Review, polish, and refine the Rune and Rune Kit desktop app and React Native Web. Start with the affected production views and [UI scope guidance](../../../AGENTS.md#ui-changes). Review theme and layout, keyboard and pointer interaction, focus and accessibility, and behavior at small native window sizes or responsive web widths. Make targeted UI fixes and verify the changed states. Route functional findings to Core and use both workflows when the fix crosses the UI and application logic boundary.
+
+Verify affected native views in the first-pass Linux x86-64 app. Record the exact-head package, inspected screenshots and accessibility trees, and live verdict as evidence becomes available. The second pass covers affected Intel and Apple Silicon Mac apps, Web checks, and Web images. Inspect the browser captures and record which interactions and states were exercised.
+
+After **Fleetworks required** is green, dispatch any selected second-pass checks for the same PR and SHA. Every new head starts a new first pass. Trusted integration pushes retain release verification.
+
+### KPI evidence
+
+For each selected workflow, track performance, scalability, and security evidence alongside implementation and verification. Choose evidence that reflects the changed behavior.
+
+| Axis | Core examples | UI examples |
+| --- | --- | --- |
+| Performance | Job elapsed time, throughput, query count, peak memory | Startup or interaction latency, dropped frames, rendering work |
+| Scalability | Batch and queue limits, throughput at increasing data or concurrency | Scrolling and rendering with large datasets, bounded request or render state |
+| Security | Authorization, isolation, input limits, redaction | Credential exposure, trust and permission handling, private content display |
+
+For a measured KPI, record the baseline and candidate SHAs, workload and input size, platform or runner, build and cache state when relevant, samples, values and units, change, and evidence link. Use comparable runs for before and after claims. For a security or boundedness improvement, identify the invariant and link the focused test or inspection that verifies it. Label a plausible gain as **unmeasured** until comparable evidence exists. Report regressions and trade-offs alongside improvements.
+
+### Shared delivery loop
 
 Run these steps in order. The loop sections below keep their detail.
 
 1. **Poll.** Run `gsd_poll.py` ([Routine Loop](#routine-loop-per-poll-cycle) step 1). Skip release-bot and fork (`isCrossRepository`) PRs. Never merge.
 2. **Work in the PR worktree.** For each actionable PR use `.agent-scratch/worktrees/pr-<n>`, checked out to the PR head. Do not touch the main checkout, `main` or `nightly`.
 3. **Read owner comments as requirements.** New owner comments on the PR (and in the session) are new requirements. Track each one in `.agent-scratch/gsd-state.json` under `prs.<n>.requirements` with its comment id and `open | done`; mark one done only with the pushed sha that satisfies it.
-4. **Iterate on the Linux first pass.** Fix affected backend, parity and native regressions. Record skipped lanes and any pending Linux review.
+4. **Iterate on the first pass.** Fix affected Core and UI regressions. Record which checks were selected, which were skipped by scope, and any pending Linux review.
 5. **Cheap local checks only.** CI is the test runner. Run locally only: `rustfmt --check --edition 2021 apps/fleetworks-desktop/src/lib.rs` (it follows the module tree) or `cargo fmt --check`, `prettier --check` on changed web and Markdown files, `python3 scripts/fleetworks_doc_links.py` (0 broken), and `node scripts/release_check.mjs message --file <msg>` with `node scripts/release_check.mjs versions`. No full builds, no full test suites and no mutation runs ([root rules](../../../AGENTS.md)).
 6. **Commit and push.** Stage exact paths, use Conventional Commits and one small commit per slice. Before the first push of a run, check `git merge-tree --write-tree origin/<base> HEAD`. Push with the full branch name and a literal sha: `git push origin <sha>:refs/heads/<headRefName>`, with no shell variables, substitutions or brace expansion. Never force-push.
 7. **Read failed CI once.** After a push, read each failed job log once (`gh api --allow-escape-sequences repos/xxxcess/argos-osint/actions/jobs/<id>/logs`) instead of waiting in a loop; the owner or the next scheduled wake reports CI events. Plain `gh pr view` can fail, so read PRs through `gh api repos/xxxcess/argos-osint/pulls/<n>`.
@@ -41,8 +65,9 @@ Run these steps in order. The loop sections below keep their detail.
    A runner-capacity or toolchain failure (lost runner, no capacity, GitHub 5xx, a C build such as `blake3`) is not our code: rerun the failed jobs at most twice per commit with `gh api -X POST repos/xxxcess/argos-osint/actions/runs/<id>/rerun-failed-jobs` once the run has completed, then report it without changing code. Fix real failures at the root cause. Refresh visual-regression baselines only from CI capture artifacts, never from local renders.
 9. **Keep docs and design in sync.** Update affected docs, tags and diagrams in the same change ([conventions](../../../docs/wiki/code/conventions.md)). Keep [docs/design/matte-canvas](../../../docs/design/matte-canvas/README.md) consistent with the code and add reproduction steps for anything generated or derived. Do not touch work the owner put on hold.
 10. **Update state.** After each push and each CI read, write `head_sha`, `status`, `backend_gate` and `linux_gate` (each `pending | failing | green`), the Linux review verdict and second-pass run/result, `requirements`, `addressed_cursor_comments`, `worktree` and `notes` to `.agent-scratch/gsd-state.json`.
-    The poll output's `verification_passes` reports the aggregate checks for the first and second passes separately.
-11. **One status comment.** Post or update a single PR comment that starts with `<!-- gsd-status -->`: head SHA, first-pass backend and Linux gates, Linux review, second-pass result and open requirements. Create it with `gh api repos/xxxcess/argos-osint/issues/<n>/comments -f body='...'` and update it with `gh api -X PATCH repos/xxxcess/argos-osint/issues/comments/<id> -f body='...'`. Always pass the body inline, never read from a file.
+    The poll output reports aggregate `verification_passes` and separate Core and UI `verification_tracks`.
+    Under `prs.<n>.nightly`, record `core` and `ui` with `head_sha`, scope reason, check status by pass, links, and a `kpis` list for [KPI evidence](#kpi-evidence). The poll reports those KPIs under `nightly_kpis` when their recorded SHA matches the PR head. Use `skipped` when the plan confirms the workflow has no selected checks. Start selected checks at `pending` on each new head and retain earlier results as history.
+11. **One status report.** Report the head SHA, first- and second-pass gates, Core and UI evidence and KPIs, Linux review, and open requirements together. When the owner has authorized PR comments, post or update a single comment that starts with `<!-- gsd-status -->`. Create it with `gh api repos/xxxcess/argos-osint/issues/<n>/comments -f body='...'` and update it with `gh api -X PATCH repos/xxxcess/argos-osint/issues/comments/<id> -f body='...'`. Always pass the body inline, never read from a file.
 12. **Track both passes.** Record the [second-pass run and results](../../../docs/wiki/code/ci.md#nightly-gsd-order) separately from Linux package, fixture and live evidence. Refresh visual baselines from CI captures.
 
 ---
@@ -60,7 +85,7 @@ Every implementation and fix produced by GSD or its subagents must satisfy all t
 - **Scalability**:
   - Enforce explicit upper bounds on queues, concurrency (`Semaphore` / bounded channels), batch sizes, cursor/keyset pagination, memory/CPU cgroup budgets, and retry backoff with idempotency keys so throughput holds as datasets and active jobs grow.
 - **Backend Container Log Hygiene & Semantic Warning Triage**:
-  - Inspect backend service container logs (from CI image/Compose smoke logs and any authorized isolated Compose stack under verification) for `ERROR`, `PANIC`, `FATAL`, crash restarts, and `WARN` entries.
+  - When the scope selects backend image or Compose verification, inspect service logs for `ERROR`, `PANIC`, `FATAL`, crash restarts, and `WARN` entries. Use CI smoke logs and any authorized isolated Compose stack under verification.
   - **Resolve all container `ERROR` logs** from first-party backend services (`api`, `brain`, `brief-worker`, `worker`, `native-worker`, `control`, `execution`, `tools`, `jobs`, `search-index`) with a root-cause fix and regression test before considering work complete.
   - **Evaluate every `WARN` log semantically** rather than ignoring or blindly muting it:
     - Fix warnings whose semantics indicate silent fallback, lost leases/locks, dropped batches/messages, resource/cgroup saturation, unbounded queues, broken config/wiring, or security exposure.
@@ -141,7 +166,7 @@ For each new or updated `spec implementation: <feature name>` PR, spawn a dedica
 5. **Commit, push & report back**:
    - Stage only the exact changed files (`git add <paths...>`, never `git add .`).
    - Commit and push with the full branch name and a literal sha (`git push origin <sha>:refs/heads/<headRefName>`), never force-push.
-   - Return the new `headRefOid` (`pushed_sha`), changed file list, and exact test results so the parent records `status: "ci_pending"` in `.agent-scratch/gsd-state.json` and monitors the resulting CI run.
+   - Return the new `headRefOid` (`pushed_sha`), changed files, selected workflows, exact test results, and KPI evidence so the parent records `status: "ci_pending"` in `.agent-scratch/gsd-state.json` and monitors the resulting CI run.
 
 ### 3. Dispatch fixes for Cursor bot (`cursor[bot]`) security findings
 
@@ -175,4 +200,4 @@ For each tracked open PR (both regular open PRs and pushed `spec implementation:
   1. Current time >= `end_at` (~1 hour after `started_at`), **and**
   2. All triggered `spec implementation:` implementations, active `cursor[bot]` security findings, active PR subagents, and their latest CI checks have finished (or are explicitly reported as blocked/failing after retry).
 - If `end_at` is reached while a triggered PR subagent, security fix, or its final CI verification is still in flight, finish that item before stopping.
-- Provide a concise status table on exit (and whenever new specs complete, security fixes land, or checks turn green/blocked), with clickable `file://` and PR links.
+- Provide a concise status table with separate Core and UI rows on exit and whenever new specs complete, security fixes land, or checks turn green or become blocked. Link the PR, exact-head check runs, and KPI evidence.

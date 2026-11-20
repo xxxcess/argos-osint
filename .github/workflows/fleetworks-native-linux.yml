@@ -16,6 +16,14 @@ on:
         required: false
         type: string
         default: ""
+      pilot-cache-key:
+        required: false
+        type: string
+        default: ""
+      pilot-cache-phase:
+        required: false
+        type: string
+        default: ""
   workflow_dispatch:
     inputs:
       expected-head:
@@ -35,13 +43,14 @@ permissions:
   contents: read
 
 env:
+  FLEETWORKS_HEAD: ${{ inputs.expected-head }}
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   CARGO_INCREMENTAL: 0
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
 
 concurrency:
-  group: fleetworks-native-linux-${{ github.workflow }}-${{ github.ref }}
+  group: fleetworks-native-linux-${{ github.workflow }}-${{ github.ref }}${{ inputs.mode == 'pilot-baseline' && '-pilot-baseline' || '' }}
   cancel-in-progress: true
 
 jobs:
@@ -90,11 +99,70 @@ jobs:
           python3 scripts/fleetworks_verify.py platform --format json
 
       - uses: Swatinem/rust-cache@v2
+        if: inputs.pilot-cache-key == '' && inputs.pilot-cache-phase == ''
         with:
           key: linux-native-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'apps/fleetworks-desktop/Cargo.toml', 'services/api-host/Cargo.toml', 'services/search-index/Cargo.toml', 'rust-toolchain.toml') }}
           workspaces: . -> target/agents
           cache-on-failure: true
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+
+      - name: Isolate the pilot Cargo cache
+        if: inputs.pilot-cache-key != '' || inputs.pilot-cache-phase != ''
+        env:
+          CACHE_KEY: ${{ inputs.pilot-cache-key }}
+          CACHE_PHASE: ${{ inputs.pilot-cache-phase }}
+          EXPECTED_HEAD: ${{ inputs.expected-head }}
+        shell: bash
+        run: |
+          if [[ ! "$CACHE_KEY" =~ ^linux-native-pilot-v1-[0-9]+-[0-9]+-${EXPECTED_HEAD}$ ]] ||
+             [[ "$CACHE_PHASE" != cold && "$CACHE_PHASE" != warm ]]; then
+            echo '::error::The cache key and phase must identify this pilot run and revision'
+            exit 1
+          fi
+          if [[ -e target/agents ]]; then
+            echo '::error::The pilot requires a fresh Cargo build directory before restore'
+            exit 1
+          fi
+          mkdir -p target/agents/.pilot-cargo
+          printf 'CARGO_HOME=%s/target/agents/.pilot-cargo\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+
+      - name: Restore the exact pilot Cargo cache
+        if: inputs.pilot-cache-key != ''
+        id: pilot_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/agents
+          key: ${{ inputs.pilot-cache-key }}
+
+      - name: Verify the pilot cache state
+        if: inputs.pilot-cache-key != ''
+        env:
+          CACHE_HIT: ${{ steps.pilot_cache.outputs.cache-hit }}
+          CACHE_MATCHED_KEY: ${{ steps.pilot_cache.outputs.cache-matched-key }}
+          CACHE_PHASE: ${{ inputs.pilot-cache-phase }}
+          LINUX_TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          case "$CACHE_PHASE:${CACHE_HIT:-false}" in
+            cold:false)
+              if [[ -n "$CACHE_MATCHED_KEY" ]]; then
+                echo '::error::The cold pilot restored a partial Cargo cache match'
+                exit 1
+              fi
+              result=miss ;;
+            warm:true)
+              if [[ ! -d "target/agents/$LINUX_TARGET/debug" || ! -d "$CARGO_HOME/registry" ]]; then
+                echo '::error::The restored pilot cache has no Cargo build graph or registry'
+                exit 1
+              fi
+              result=hit ;;
+            *)
+              echo "::error::Unexpected Cargo cache state for the $CACHE_PHASE pilot (cache-hit=${CACHE_HIT:-unset})"
+              exit 1 ;;
+          esac
+          mkdir -p "$RUNNER_TEMP/linux-native-evidence"
+          printf '%s: Cargo cache %s\n' "$CACHE_PHASE" "$result" \
+            | tee "$RUNNER_TEMP/linux-native-evidence/pilot-cache-state.txt"
 
       - name: Verify Linux packaging and scope scripts offline
         run: |
@@ -109,7 +177,8 @@ jobs:
           set -euo pipefail
           mkdir -p "${{ runner.temp }}/linux-native-evidence"
           cargo fmt -p fleetworks-desktop -p fleetworks-workstation -p fleetworks-contracts -- --check
-          python3 scripts/agent_cargo.py test --locked --target ${{ matrix.target }} -p fleetworks-contracts -p fleetworks-workstation -p fleetworks-desktop -- --test-threads=1 \
+          python3 scripts/fleetworks_verify.py timed --phase linux-native-unit-tests -- \
+            python3 scripts/agent_cargo.py test --locked --target ${{ matrix.target }} -p fleetworks-contracts -p fleetworks-workstation -p fleetworks-desktop -- --test-threads=1 \
             | tee "${{ runner.temp }}/linux-native-evidence/unit-tests.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "${{ runner.temp }}/linux-native-evidence/unit-tests.log"
           ! grep -Eq 'test result: FAILED\.' "${{ runner.temp }}/linux-native-evidence/unit-tests.log"
@@ -129,7 +198,8 @@ jobs:
             printf 'icd=%s\n' "$icd" >> "$GITHUB_OUTPUT"
           fi
           vulkaninfo --summary | tee "${{ runner.temp }}/linux-native-evidence/vulkaninfo-summary.txt"
-          python3 scripts/fleetworks_verify.py native-ui --agent --require-clean \
+          python3 scripts/fleetworks_verify.py timed --phase linux-native-ui-fixtures -- \
+            python3 scripts/fleetworks_verify.py native-ui --agent --require-clean \
             --target ${{ matrix.target }} \
             --revision "${{ inputs.expected-head }}" \
             --output "${{ runner.temp }}/linux-native-evidence/ui" \
@@ -159,6 +229,7 @@ jobs:
           LINUX_TARGET: ${{ matrix.target }}
         shell: bash
         run: |
+          python3 scripts/fleetworks_verify.py timed --phase linux-native-startup-motion -- bash -s <<'FLEETWORKS_MOTION'
           set -euo pipefail
           if [[ -n "$LAVAPIPE_ICD" ]]; then
             export VK_ICD_FILENAMES="$LAVAPIPE_ICD"
@@ -215,11 +286,12 @@ jobs:
           "${capture[@]}" --scene startup-health-checks-mixed --output "$evidence/startup-health-checks" --script-at "$wizard_settled_at" \
             --script "startup-health-checks-mixed=$scripts/startup-done.json" \
             --script-expect-key startup-health-checks-mixed=startup-data-checklist
+          FLEETWORKS_MOTION
 
       - name: Publish Linux UI captures for early review
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: Fleetworks-Linux-Desktop-UI-Captures-x86_64-${{ inputs.profile }}-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}
+          name: Fleetworks-Linux-Desktop-UI-Captures-x86_64-${{ inputs.profile }}-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}${{ inputs.pilot-cache-phase && format('-{0}', inputs.pilot-cache-phase) || '' }}
           path: ${{ runner.temp }}/linux-native-evidence/ui/
           if-no-files-found: error
           retention-days: 7
@@ -232,6 +304,7 @@ jobs:
           LINUX_PROFILE: ${{ inputs.profile }}
           RELEASE_VERSION: ${{ inputs.release-version }}
         run: |
+          python3 scripts/fleetworks_verify.py timed --phase linux-native-package-verification -- bash -s <<'FLEETWORKS_PACKAGE'
           set -euo pipefail
           dist="${{ runner.temp }}/linux-native-dist"
           extracted="${{ runner.temp }}/linux-native-extract"
@@ -306,11 +379,12 @@ jobs:
           python3 scripts/fleetworks_local_backend_smoke.py \
             --app "$extracted/Fleetworks-linux-x86_64" \
             --output "${{ runner.temp }}/linux-native-evidence/local-backend-smoke-$LINUX_TARGET.json"
+          FLEETWORKS_PACKAGE
 
       - name: Upload Linux native candidate archive
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: Fleetworks-Linux-Desktop-App-x86_64-${{ inputs.profile }}-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}
+          name: Fleetworks-Linux-Desktop-App-x86_64-${{ inputs.profile }}-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}${{ inputs.pilot-cache-phase && format('-{0}', inputs.pilot-cache-phase) || '' }}
           path: |
             ${{ runner.temp }}/linux-native-dist/Fleetworks-*.tar.gz
             ${{ runner.temp }}/linux-native-dist/Fleetworks-*.tar.gz.sha256
@@ -327,14 +401,29 @@ jobs:
           FLEETWORKS_PARITY_COMPANION_PATH: ${{ runner.temp }}/linux-native-extract/Fleetworks-linux-x86_64/bin/argos-api-host
           FLEETWORKS_PARITY_REPORT_PATH: ${{ runner.temp }}/linux-native-evidence/http-ipc-parity-${{ matrix.target }}.json
         run: |
-          python3 scripts/agent_cargo.py test --locked --target ${{ matrix.target }} \
-            -p argos-api-host --features embedded --test http_ipc_parity -- --nocapture --test-threads=1
+          python3 scripts/fleetworks_verify.py timed --phase linux-native-http-ipc-parity -- \
+            python3 scripts/agent_cargo.py test --locked --target ${{ matrix.target }} \
+              -p argos-api-host --features embedded --test http_ipc_parity -- --nocapture --test-threads=1
+
+      - name: Include phase timings in Linux native evidence
+        if: always()
+        run: |
+          if [[ -f "$RUNNER_TEMP/fleetworks-timings.jsonl" ]]; then
+            cp "$RUNNER_TEMP/fleetworks-timings.jsonl" "$RUNNER_TEMP/linux-native-evidence/"
+          fi
 
       - name: Upload Linux native headless fixture evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: Fleetworks-Linux-Desktop-Verification-x86_64-${{ inputs.profile }}-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}
+          name: Fleetworks-Linux-Desktop-Verification-x86_64-${{ inputs.profile }}-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}${{ inputs.pilot-cache-phase && format('-{0}', inputs.pilot-cache-phase) || '' }}
           path: ${{ runner.temp }}/linux-native-evidence/**
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Save the cold run's exact pilot Cargo cache
+        if: inputs.pilot-cache-phase == 'cold'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/agents
+          key: ${{ inputs.pilot-cache-key }}

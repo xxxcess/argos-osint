@@ -43,13 +43,17 @@ on:
         description: Build a Linux x86_64 Embedded development image from the native package
         type: boolean
         default: false
+      depot_linux_native_pilot:
+        description: Compare Depot cold and warm Linux native builds with a same-revision GitHub baseline
+        type: boolean
+        default: false
 
 permissions:
   contents: read
   actions: read
 
 concurrency:
-  group: fleetworks-${{ github.event_name }}-${{ github.event_name == 'push' && github.ref != 'refs/heads/nightly' && 'stable' || github.event.pull_request.number || github.ref }}-${{ inputs.stage || 'standard' }}
+  group: fleetworks-${{ github.event_name }}-${{ github.event_name == 'push' && github.ref != 'refs/heads/nightly' && 'stable' || github.event.pull_request.number || github.ref }}-${{ inputs.depot_linux_native_pilot && 'depot-linux-native-pilot' || inputs.stage || 'standard' }}
   cancel-in-progress: ${{ github.event_name != 'push' }}
 
 env:
@@ -62,8 +66,20 @@ env:
   CARGO_PROFILE_TEST_DEBUG: 0
 
 jobs:
+  linux_native_depot_pilot:
+    name: Linux native Depot pilot
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.depot_linux_native_pilot) ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/nightly' && vars.DEPOT_LINUX_NATIVE_PILOT_ENABLED == 'true')
+    uses: ./.github/workflows/fleetworks-native-linux-depot-pilot.yml
+    with:
+      expected-head: ${{ github.event_name == 'workflow_dispatch' && inputs.head || github.event_name == 'push' && github.sha || '' }}
+    secrets:
+      depot-ci-token: ${{ secrets.DEPOT_LINUX_NATIVE_PILOT_TOKEN }}
+
   scope:
     name: Select verification scopes
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.depot_linux_native_pilot) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -778,7 +794,7 @@ jobs:
   source_checks:
     name: ${{ inputs.stage == 'second' && 'Fleetworks second pass source checks' || github.event_name == 'workflow_dispatch' && 'Fleetworks manual source checks' || 'Fleetworks source checks' }}
     needs: [scope, desktop, desktop_linux, server, embedded, bert, web, images_buildx_benchmark, images_depot, native_embedded_image]
-    if: always()
+    if: always() && !(github.event_name == 'workflow_dispatch' && inputs.depot_linux_native_pilot)
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -980,7 +996,7 @@ jobs:
   prepublish:
     name: ${{ inputs.stage == 'second' && 'Fleetworks second pass artifact checks' || github.event_name == 'workflow_dispatch' && 'Fleetworks manual artifact checks' || 'Fleetworks artifact checks' }}
     needs: [scope, source_checks, release_images, release_images_depot]
-    if: always()
+    if: always() && !(github.event_name == 'workflow_dispatch' && inputs.depot_linux_native_pilot)
     runs-on: ubuntu-24.04
     steps:
       - name: Require source checks and every selected release image
@@ -1054,7 +1070,7 @@ jobs:
   required:
     name: ${{ inputs.stage == 'second' && 'Fleetworks second pass' || github.event_name == 'workflow_dispatch' && 'Fleetworks manual verification' || 'Fleetworks required' }}
     needs: [scope, prepublish, publish]
-    if: always()
+    if: always() && !(github.event_name == 'workflow_dispatch' && inputs.depot_linux_native_pilot)
     runs-on: ubuntu-24.04
     steps:
       - name: Require every selected check and publication

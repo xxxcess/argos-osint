@@ -1,0 +1,78 @@
+name: Fleetworks Linux native Depot pilot
+
+on:
+  workflow_call:
+    inputs:
+      expected-head:
+        required: true
+        type: string
+    secrets:
+      depot-ci-token:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  revision:
+    name: Verify the pilot revision
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require a full SHA matching the workflow revision
+        env:
+          EXPECTED_HEAD: ${{ inputs.expected-head }}
+        shell: bash
+        run: |
+          if [[ ! "$EXPECTED_HEAD" =~ ^[0-9a-f]{40}$ || "$EXPECTED_HEAD" != "$GITHUB_SHA" ]]; then
+            echo '::error::The Linux native pilot requires a full expected head SHA matching this run'
+            exit 1
+          fi
+
+  github_baseline:
+    name: GitHub Linux native baseline
+    needs: revision
+    uses: ./.github/workflows/fleetworks-native-linux.yml
+    with:
+      expected-head: ${{ inputs.expected-head }}
+      mode: pilot-baseline
+      profile: debug
+
+  depot:
+    name: Depot Linux native cold and warm builds
+    needs: revision
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      EXPECTED_HEAD: ${{ inputs.expected-head }}
+      PILOT_PAIR: linux-native-pilot-v1-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.expected-head }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.expected-head }}
+          persist-credentials: false
+          lfs: false
+
+      - name: Launch, monitor, and collect the Depot pilot
+        env:
+          DEPOT_CI_TOKEN: ${{ secrets.depot-ci-token }}
+        shell: bash
+        run: |
+          if [[ -z "$DEPOT_CI_TOKEN" ]]; then
+            echo '::error::The DEPOT_LINUX_NATIVE_PILOT_TOKEN GitHub Actions secret must hold a Depot CI API token'
+            exit 1
+          fi
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          python3 scripts/depot_native_pilot.py \
+            --repo "$GITHUB_REPOSITORY" --sha "$EXPECTED_HEAD" --ref "$GITHUB_REF" \
+            --pair "$PILOT_PAIR" --output "$RUNNER_TEMP/depot-linux-native-pilot"
+
+      - name: Upload the Depot timing report, native packages, and verification evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: Fleetworks-Linux-Desktop-Depot-Pilot-x86_64-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}
+          path: ${{ runner.temp }}/depot-linux-native-pilot/
+          if-no-files-found: ignore
+          compression-level: 0
+          retention-days: 7

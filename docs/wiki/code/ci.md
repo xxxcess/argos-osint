@@ -68,6 +68,23 @@ gh workflow run fleetworks.yml --ref "$review_branch" \
   -f mode=full -f components=backend -f head="$review_head" -f image_builder=depot
 ```
 
+## Nightly Linux native pilot on Depot
+
+GitHub Actions runs the normal Linux debug verification as a baseline and dispatches two replays of the same native job to Depot’s Ubuntu 24.04 x86_64 runner with 8 vCPUs. Every job checks out the exact same SHA, runs the native tests and Lavapipe fixtures, verifies the package and packaged companion, and checks HTTP/IPC parity.
+
+The Depot cold run must miss its isolated Cargo cache. It saves the registry and build graph after verification passes. The warm run must restore that exact cache and reruns the verification. The GitHub baseline uses its standard cache. Read the Actions job summary and the `Fleetworks-Linux-Desktop-Depot-Pilot-x86_64-*` artifact for the run links, phase timings, cache evidence and verified packages.
+
+Add the Depot CI organization token to GitHub Actions as `DEPOT_LINUX_NATIVE_PILOT_TOKEN`. The Depot Code Access app must have access to the repository. The existing container-build OIDC trust covers Docker image builds. [Depot CI quickstart](https://depot.dev/docs/ci/quickstart) · [Depot authentication](https://depot.dev/docs/cli/authentication)
+
+Run the pilot against a pushed branch and its current exact SHA:
+
+```sh
+gh workflow run fleetworks.yml --ref "$review_branch" \
+  -f head="$review_head" -f depot_linux_native_pilot=true
+```
+
+Set the repository variable `DEPOT_LINUX_NATIVE_PILOT_ENABLED=true` to run the pilot on pushes to `nightly`. The existing review and publication checks continue to run through their normal gates.
+
 ## Embedded desktop Docker image
 
 A standard manual Fleetworks run with `native_embedded_image=true` builds a Linux x86_64 development image from its verified Linux app package. It uses the shared Depot Bake command, verifies the loaded image with the Embedded stdio smoke, and uploads `Fleetworks-Embedded-Desktop-Docker-Archive-*` with a loadable compressed image and checksum. It requires an exact commit, an enabled Depot review project, and `components=native` or `components=all`. This optional image belongs to the development loop and does not publish to GHCR.

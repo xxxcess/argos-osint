@@ -7,6 +7,7 @@ use fleetworks_contracts::readiness::MaintenanceOperation;
 use fleetworks_contracts::readiness::ReadinessState;
 use rune::Cx;
 use rune::El;
+use rune::Key;
 use rune::ScrollSpec;
 use rune::TextEdit;
 use rune_kit::Cell;
@@ -2617,6 +2618,15 @@ pub(crate) fn csv_path_prompt(
                 .as_mut()
                 .expect("path prompt is open while its field is shown")
                 .input
+        })
+        .on_key(|state: &mut State, event, tx| {
+            if event.key != Key::Escape {
+                return false;
+            }
+            if !tx.key_repeat() {
+                state.cancel_csv_path_prompt(tx);
+            }
+            true
         })
         .on_submit(|state: &mut State, _| state.submit_csv_path())
         .build(kit)

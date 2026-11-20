@@ -1087,8 +1087,9 @@ mod tests {
     fn canceling_typed_startup_csv_restores_focus_without_an_error_or_a_job() {
         use ReadinessState::NotReady;
 
-        for dismiss_with_escape in [false, true] {
+        for (dismiss_with_escape, dismissal) in [(false, "Cancel"), (true, "Escape")] {
             let (mut runtime, _) = data_setup_runtime([NotReady; 3]);
+            runtime.on_key = app::spec().on_key;
             runtime.frame(0.0);
             click(&mut runtime, "gateway-setup-done");
             runtime.frame(0.02);
@@ -1118,20 +1119,23 @@ mod tests {
             runtime.frame(0.06);
 
             let maintenance = &runtime.state.maintenance;
-            assert!(maintenance.csv_path_prompt.is_none());
+            assert!(
+                maintenance.csv_path_prompt.is_none(),
+                "{dismissal} must dismiss the CSV prompt"
+            );
             assert!(maintenance.message.is_none());
             assert!(maintenance.local_dataset.is_none());
             assert!(maintenance.confirmation.is_none());
             assert!(matches!(maintenance.receipt, app::Load::Idle));
             assert!(
                 runtime.state.intents.is_empty(),
-                "cancel must not submit work"
+                "{dismissal} must not submit work"
             );
             assert!(
                 runtime.elements().iter().any(|element| {
                     element.key.as_deref() == Some(startup_data::PRIMARY) && element.focused
                 }),
-                "cancel must return focus to the CSV entry"
+                "{dismissal} must return focus to the CSV entry"
             );
         }
     }

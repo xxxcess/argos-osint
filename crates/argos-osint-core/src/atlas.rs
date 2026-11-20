@@ -4463,10 +4463,13 @@ mod acquisition_tests {
 
 #[cfg(test)]
 mod classifier_preflight_tests {
+    #[cfg(feature = "embedded")]
+    use surrealdb::types::SurrealValue;
+
     use super::*;
 
     #[cfg(feature = "embedded")]
-    #[derive(Debug, PartialEq, surrealdb::types::SurrealValue)]
+    #[derive(Debug, PartialEq, SurrealValue)]
     struct QuotaState {
         key: String,
         used: i64,

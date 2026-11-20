@@ -200,7 +200,8 @@ def exercise_atlas(port, token, proof):
         value = expect_status(request(port, f"/api/v1/jobs/detail?id={receipt['job_id']}", token, headers=proof),
                               200, "Atlas job detail")
         if value["job"]["state"] == "failed":
-            assert value["job"]["error_summary"] == "atlas_classifier_model_not_configured", "Atlas fixture failed for an unexpected reason"
+            reason = value["job"]["error_summary"]
+            assert reason == "atlas_gnews_key_missing", f"Atlas fixture reported {reason!r} before provider acquisition"
             assert value["job"]["attempts_used"] == 1, "Atlas fixture retry count changed"
             return
         time.sleep(0.25)

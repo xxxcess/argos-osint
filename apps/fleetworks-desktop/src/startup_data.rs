@@ -486,6 +486,8 @@ fn panel(kit: &Kit, title: &str) -> El {
 
 pub(crate) fn checks_view(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
     let panel = panel(kit, "Workstation checks")
+        .py(8.0)
+        .gap(6.0)
         .child(crate::startup_checks::content(state, kit))
         .child(
             ActionButton::new("Open Workstation")

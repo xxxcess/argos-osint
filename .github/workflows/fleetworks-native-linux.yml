@@ -164,6 +164,7 @@ jobs:
           fi
           evidence="$RUNNER_TEMP/linux-native-evidence/ui"
           scripts=apps/fleetworks-desktop/tests/fixtures/scripts
+          wizard_settled_at=1.0
           capture=(python3 scripts/fleetworks_verify.py native-ui --agent --require-clean
             --target "$LINUX_TARGET" --revision "$EXPECTED_HEAD" --size 640x480 --size 1280x800 --scale 1 --at 0)
           chooser=(--scene backend-choice-opening --scene backend-choice-reduced-motion)
@@ -180,7 +181,7 @@ jobs:
             --script-expect-key backend-choice-opening=startup-choose \
             --script-expect-key backend-choice-reduced-motion=startup-choose
 
-          "${capture[@]}" --output "$evidence/startup-done" --script-at 0.20 \
+          "${capture[@]}" --output "$evidence/startup-done" --script-at "$wizard_settled_at" \
             --scene startup-embedded-registered --scene startup-embedded-registered-reduced-motion \
             --script "startup-embedded-registered=$scripts/startup-done.json" \
             --script "startup-embedded-registered-reduced-motion=$scripts/startup-done.json" \
@@ -194,7 +195,7 @@ jobs:
             --script-expect-key startup-embedded-registered=screen-workstation \
             --script-expect-key startup-embedded-registered-reduced-motion=screen-workstation
 
-          "${capture[@]}" --scene startup-embedded-registered --output "$evidence/startup-data-reset" --script-at 0.45 \
+          "${capture[@]}" --scene startup-embedded-registered --output "$evidence/startup-data-reset" --script-at "$wizard_settled_at" \
             --script "startup-embedded-registered=$scripts/startup-data-reset-seed.json" \
             --script-expect-key startup-embedded-registered=startup-data-primary
 
@@ -203,13 +204,13 @@ jobs:
             wizard+=(--scene "$scene" --script "$scene=$scripts/startup-done.json"
               --script-expect-key "$scene=startup-data-setup")
           done
-          "${capture[@]}" "${wizard[@]}" --output "$evidence/startup-data" --script-at 0.25
+          "${capture[@]}" "${wizard[@]}" --output "$evidence/startup-data" --script-at "$wizard_settled_at"
 
-          "${capture[@]}" --scene startup-data-train --output "$evidence/startup-data-skip" --script-at 0.45 \
+          "${capture[@]}" --scene startup-data-train --output "$evidence/startup-data-skip" --script-at "$wizard_settled_at" \
             --script "startup-data-train=$scripts/startup-data-skip-training.json" \
             --script-expect-key startup-data-train=startup-data-checklist
 
-          "${capture[@]}" --scene startup-health-checks-mixed --output "$evidence/startup-health-checks" --script-at 0.25 \
+          "${capture[@]}" --scene startup-health-checks-mixed --output "$evidence/startup-health-checks" --script-at "$wizard_settled_at" \
             --script "startup-health-checks-mixed=$scripts/startup-done.json" \
             --script-expect-key startup-health-checks-mixed=startup-data-checklist
 

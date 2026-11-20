@@ -1092,18 +1092,23 @@ mod tests {
             "startup-data-reset-seed",
             "startup-data-reset-index",
             "startup-data-reset-classifier",
+            "startup-data-checklist",
+            "startup-data-continue",
+            "startup-data-step-seed",
+            "startup-data-step-index",
+            "startup-data-step-classifier",
+            "startup-data-step-checks",
         ] {
-            runtime.update(|_, tx| tx.scroll_into_view(key));
-            runtime.frame(0.04);
             let element = runtime
                 .elements()
                 .into_iter()
                 .find(|element| element.key.as_deref() == Some(key) && !element.exiting)
                 .unwrap_or_else(|| panic!("missing registered setup control {key}"));
             let [x, y, width, height] = element.rect;
+            assert_eq!(element.scrolled, [0.0, 0.0], "{key} required scrolling");
             assert_eq!(element.visible, element.rect, "{key} is clipped");
             assert!(
-                x >= 0.0 && y >= 0.0 && x + width <= 640.5 && y + height <= 480.5,
+                x >= 0.0 && y >= 0.0 && x + width <= 640.5 && y + height <= 472.5,
                 "{key} must stay inside the compact window"
             );
         }

@@ -27,7 +27,12 @@ Improve functional application logic through incremental Cargo workspace changes
 
 Review, polish, and refine the Rune and Rune Kit desktop app and React Native Web. Start with the affected production views and [UI scope guidance](../../../AGENTS.md#ui-changes). Review theme and layout, keyboard and pointer interaction, focus and accessibility, and behavior at small native window sizes or responsive web widths. Make targeted UI fixes and verify the changed states. Route functional findings to Core and use both workflows when the fix crosses the UI and application logic boundary.
 
-Verify affected native views in the first-pass Linux x86-64 app. Record the exact-head package, inspected screenshots and accessibility trees, and live verdict as evidence becomes available. The second pass covers affected Intel and Apple Silicon Mac apps, Web checks, and Web images. Inspect the browser captures and record which interactions and states were exercised.
+Use generated images of the affected production UI states for every selected client review.
+
+- **Native.** Use `fleetworks_verify.py native-ui` to capture Rune Runtime fixture PNGs and accessibility trees. Inspect both from the first-pass Linux x86-64 artifacts and affected second-pass Mac artifacts. [Native capture guide](../../../docs/wiki/code/native-verification.md)
+- **Web.** Use Playwright to capture the affected React Native Web views in the compiled browser build during the second pass. Open the screenshots and record the exercised interactions and states. [Web capture guide](../../../docs/wiki/code/react-ui-testing.md)
+
+For each capture, record the exact head SHA, platform and window or viewport size, Rune scene or Playwright test, UI state, artifact link, and inspection result. Use scoped visual review when the regular CI artifacts lack an affected state. Keep visual review pending when an expected capture is unavailable or still needs inspection. Record live app or browser review as additional evidence. [Scoped visual review](../../../docs/wiki/code/native-verification.md#dispatchable-ui-visual-review)
 
 After **Fleetworks required** is green, dispatch any selected second-pass checks for the same PR and SHA. Every new head starts a new first pass. Trusted integration pushes retain release verification.
 

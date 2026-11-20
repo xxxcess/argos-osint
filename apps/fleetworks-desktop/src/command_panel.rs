@@ -201,12 +201,20 @@ fn on_field_key(state: &mut State, event: &KeyEvent) -> bool {
     true
 }
 
+pub(crate) const TOOLBAR_COMMAND_COMPACT_WIDTH: f32 = 88.0;
+pub(crate) const TOOLBAR_COMMAND_LABELED_WIDTH: f32 = 192.0;
+
 /// The toolbar button.
 pub(crate) fn toolbar_button(kit: &Kit, compact: bool, preferences: ViewPreferences) -> El {
     let shortcut = if cfg!(target_os = "macos") {
         "⌘K"
     } else {
         "Ctrl+K"
+    };
+    let width = if compact {
+        TOOLBAR_COMMAND_COMPACT_WIDTH
+    } else {
+        TOOLBAR_COMMAND_LABELED_WIDTH
     };
     let button = rune_kit::Button::new("Run a command")
         .variant(rune_kit::ButtonVariant::Ghost)
@@ -215,7 +223,12 @@ pub(crate) fn toolbar_button(kit: &Kit, compact: bool, preferences: ViewPreferen
         .label_with(move |font, color| {
             let mut label = rune::row().gap(8.0).center_y();
             if !compact {
-                label = label.child(rune::text("Run a command").font(font).color(color));
+                label = label.child(
+                    rune::text("Run a command")
+                        .key("command-toolbar-label")
+                        .font(font)
+                        .color(color),
+                );
             }
             label.child(
                 rune::text(shortcut)
@@ -226,6 +239,7 @@ pub(crate) fn toolbar_button(kit: &Kit, compact: bool, preferences: ViewPreferen
         .on_press(|state: &mut State| state.open_command_panel())
         .build(kit)
         .key("command-open")
+        .w(width)
         .h(28.0)
         .px(11.0)
         .radius(999.0);
@@ -659,6 +673,121 @@ mod tests {
             runtime.frame(0.0);
             assert_eq!(runtime.state.commands.query.text, "jobs");
             assert_eq!(runtime.presented("app-shell"), Some(stable_shell));
+        }
+    }
+
+    #[test]
+    fn populated_telemetry_has_separate_hit_bounds_from_the_command_trigger() {
+        use crate::app::Load;
+        use crate::workstation_dashboard::HostMetrics;
+
+        let mut state = crate::tests::registered_fixture();
+        state.page = Page::Workstation;
+        state.assistant.enabled = true;
+        state.host_metrics = Load::Ready(HostMetrics {
+            cpu_percent: Some(100.0),
+            memory_percent: Some(89.0),
+            disk_percent: Some(73.0),
+            ..HostMetrics::default()
+        });
+        state.seed_inbox_drawer_fixture();
+        state.inbox.close();
+        let mut runtime = rune::Runtime::new(
+            state,
+            crate::app::view,
+            (1180.0, 812.0),
+            rune::Env {
+                system_dark: true,
+                scale: 1.0,
+            },
+        );
+        runtime.on_key = crate::app::spec().on_key;
+        let bounds = |runtime: &rune::Runtime<State>, key: &str| {
+            runtime
+                .presented(key)
+                .unwrap_or_else(|| panic!("missing {key}"))
+                .0
+        };
+        let click = |runtime: &mut rune::Runtime<State>, key, now| {
+            let (x, y) = runtime.find(key).unwrap_or_else(|| panic!("missing {key}"));
+            runtime.pointer_down(x, y);
+            runtime.pointer_up(x, y);
+            runtime.frame(now);
+        };
+        for (step, (width, sidebar, labeled_metrics, labeled_command)) in [
+            (1180.0, 188.0, true, false),
+            (1203.0, 188.0, true, false),
+            (1205.0, 188.0, true, true),
+            (1099.0, 188.0, false, false),
+            (1101.0, 188.0, true, false),
+            (1180.0, 340.0, false, false),
+            (819.0, 340.0, false, false),
+            (821.0, 340.0, false, false),
+            (640.0, 340.0, false, false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let now = 2.0 * step as f64;
+            runtime.update(|state, _| state.sidebar.set_width(sidebar));
+            runtime.set_viewport((width, 812.0), 1.0);
+            runtime.frame(now);
+            runtime.frame(now + 0.5);
+            let command = bounds(&runtime, "command-open");
+            let telemetry = bounds(&runtime, "toolbar-telemetry");
+            let assistant = bounds(&runtime, "assistant-toggle");
+            let bell = bounds(&runtime, "inbox-toggle");
+            assert!(
+                command[0] + command[2] <= assistant[0],
+                "{width} / {sidebar}"
+            );
+            assert!(
+                assistant[0] + assistant[2] <= telemetry[0],
+                "{width} / {sidebar}"
+            );
+            assert!(bell[0] + bell[2] <= width + 0.5);
+            assert_eq!(
+                runtime.find("command-toolbar-label").is_some(),
+                labeled_command
+            );
+            assert_eq!(
+                runtime.find("toolbar-telemetry/CPU").is_some(),
+                labeled_metrics
+            );
+
+            let telemetry_key = if labeled_metrics {
+                "toolbar-telemetry/CPU"
+            } else {
+                "telemetry-summary"
+            };
+            click(&mut runtime, telemetry_key, now + 0.6);
+            assert!(
+                !runtime.state.commands.open,
+                "telemetry opened Commands at {width}"
+            );
+            click(&mut runtime, "command-open", now + 0.7);
+            assert!(runtime.state.commands.open);
+            runtime.key(KeyEvent {
+                key: Key::Escape,
+                mods: rune::Mods::default(),
+            });
+            runtime.frame(now + 0.8);
+            assert!(!runtime.state.commands.open);
+            runtime.key(KeyEvent {
+                key: Key::Command('k'),
+                mods: rune::Mods {
+                    ctrl: true,
+                    ..rune::Mods::default()
+                },
+            });
+            runtime.frame(now + 0.9);
+            assert!(runtime.state.commands.open);
+            runtime.key(KeyEvent {
+                key: Key::Escape,
+                mods: rune::Mods::default(),
+            });
+            runtime.frame(now + 1.0);
+            assert!(!runtime.state.commands.open);
         }
     }
 

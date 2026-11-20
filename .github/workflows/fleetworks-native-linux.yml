@@ -315,6 +315,23 @@ jobs:
             --script-expect-key startup-health-checks-mixed=startup-data-checklist
           FLEETWORKS_MOTION
 
+      - name: Capture the connected toolbar with populated telemetry
+        if: inputs.capture-ui && inputs.profile == 'debug'
+        env:
+          LAVAPIPE_ICD: ${{ steps.native_ui.outputs.icd }}
+          EXPECTED_HEAD: ${{ inputs.expected-head }}
+          LINUX_TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          if [[ -n "$LAVAPIPE_ICD" ]]; then
+            export VK_ICD_FILENAMES="$LAVAPIPE_ICD"
+            export VK_DRIVER_FILES="$LAVAPIPE_ICD"
+          fi
+          python3 scripts/fleetworks_verify.py native-ui --agent --require-clean \
+            --target "$LINUX_TARGET" --revision "$EXPECTED_HEAD" \
+            --scene toolbar-telemetry-populated --size 1180x812 --scale 1 \
+            --output "$RUNNER_TEMP/linux-native-evidence/ui/toolbar-telemetry"
+
       - name: Publish Linux UI captures for early review
         if: inputs.capture-ui
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

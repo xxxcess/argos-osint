@@ -1527,7 +1527,6 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     }
     let shell_width = cx.layout_size("app-shell").map(|size| size[0]);
     let compact_rail = shell_width.is_some_and(|width| width < 820.0);
-    let compact_toolbar = shell_width.is_none_or(|width| width < 1000.0);
     let mut selected_rail_kit = kit.clone();
     selected_rail_kit.c.pressed = theme::hex(theme::MOLTEN_SELECTION);
     selected_rail_kit.c.text_base = theme::hex(theme::MOLTEN_ACCENT);
@@ -1647,19 +1646,6 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     } else {
         "Workstation activity: registration required".to_owned()
     };
-    let title_page = if state.connected() {
-        state.page
-    } else {
-        Page::Workstation
-    };
-    let toolbar_title = match (state.setup_gateway, compact_toolbar) {
-        (true, true) => "Setup",
-        (true, false) => "Setup Gateway",
-        (false, true) => title_page.compact_title(),
-        (false, false) => title_page.title(),
-    };
-    let gateway = gateway_toolbar_button(state, &kit, compact_toolbar, connection_tone);
-    let gateway = material::glass_control(gateway, preferences);
     // The chat aux panel stays off until the typed chat contract lands. The original context
     // rail keeps its place meanwhile.
     let assistant_room = if state.assistant.enabled && state.connected() && !state.setup_gateway {
@@ -1670,38 +1656,15 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     let assistant_placement = assistant_room.map_or(crate::assistant::Placement::Hidden, |room| {
         state.assistant.preference.placement(room)
     });
-    let mut trailing = rune::row().gap(6.0).center_y();
-    if state.assistant.enabled && state.connected() && !state.setup_gateway {
-        let toggle = crate::assistant::toggle(
-            assistant_placement != crate::assistant::Placement::Hidden,
-            &kit,
-        );
-        trailing = trailing.child(material::glass_control(toggle, preferences));
-    }
-    if state.connected() {
-        trailing = trailing.child(material::glass(
-            toolbar_telemetry(state, &kit, compact_toolbar),
-            GlassSurface::Control,
-            preferences,
-        ));
-    }
-    let toolbar = Toolbar::new()
-        .leading(
-            rune::text(toolbar_title)
-                .font(kit.ty.ui_medium)
-                .color(kit.c.text_base)
-                .truncate(),
-        )
-        .center(crate::command_panel::toolbar_button(
-            &kit,
-            compact_toolbar,
-            preferences,
-        ))
-        .trailing(trailing.child(gateway).child(crate::inbox::toolbar_item(
-            state,
-            &kit,
-            preferences,
-        )));
+    let toolbar = workstation_toolbar(
+        state,
+        cx,
+        &kit,
+        preferences,
+        sidebar_el.is_some(),
+        assistant_placement,
+        connection_tone,
+    );
 
     let any_busy = state.connection.status == ConnectionStatus::Connecting
         || state.pairing.busy()
@@ -1953,6 +1916,152 @@ fn mark_fixture(state: &State, kit: &rune_kit::Kit, view: El) -> El {
         .child(view.grow(1.0).min_h(0.0))
 }
 
+fn workstation_toolbar(
+    state: &State,
+    cx: &Cx<State>,
+    kit: &rune_kit::Kit,
+    preferences: ViewPreferences,
+    has_sidebar: bool,
+    assistant_placement: crate::assistant::Placement,
+    tone: StatusTone,
+) -> Toolbar {
+    use crate::command_panel::TOOLBAR_COMMAND_COMPACT_WIDTH;
+    use crate::command_panel::TOOLBAR_COMMAND_LABELED_WIDTH;
+
+    const TRAILING_GAP: f32 = 6.0;
+    const GATEWAY_ICON: f32 = 32.0;
+    const GATEWAY_LABELED: f32 = 152.0;
+    const TELEMETRY_COMPACT: f32 = 76.0;
+    const TELEMETRY_LABELED: f32 = 244.0;
+    const ASSISTANT_WIDTH: f32 = 24.0;
+
+    // Match the outer padding and the two 8pt flow gaps on either side of the
+    // Rune Kit toolbar's flexible spacer. When the sidebar is open the toolbar
+    // starts at its inner edge, and SplitView supplies the standard leading pad.
+    let open_sidebar = has_sidebar && state.sidebar.is_open();
+    let shell_width = cx.layout_size("app-shell").map_or(640.0, |size| size[0]);
+    let width = shell_width
+        - if open_sidebar {
+            state.sidebar.shown_width()
+        } else {
+            0.0
+        };
+    let leading_inset = if open_sidebar {
+        12.0
+    } else {
+        let lights = cx.titlebar_inset();
+        let edge = if lights > 0.0 { lights + 8.0 } else { 12.0 };
+        edge + if has_sidebar { 32.0 } else { 0.0 }
+    };
+    let show_assistant = state.assistant.enabled && state.connected() && !state.setup_gateway;
+    let bell_width = if state.inbox.unread() == 0 {
+        38.0
+    } else {
+        66.0
+    };
+    let trailing_width = |gateway, telemetry| {
+        let assistant = if show_assistant {
+            ASSISTANT_WIDTH + TRAILING_GAP
+        } else {
+            0.0
+        };
+        let metrics = if telemetry > 0.0 {
+            telemetry + TRAILING_GAP
+        } else {
+            0.0
+        };
+        gateway + bell_width + TRAILING_GAP + assistant + metrics
+    };
+    let fits = |command, gateway, telemetry| {
+        let half_room = (width - command) / 2.0;
+        half_room >= leading_inset + 8.0
+            && half_room >= trailing_width(gateway, telemetry) + 12.0 + 16.0
+    };
+    let telemetry_width = if state.connected() {
+        if fits(
+            TOOLBAR_COMMAND_COMPACT_WIDTH,
+            GATEWAY_ICON,
+            TELEMETRY_LABELED,
+        ) {
+            TELEMETRY_LABELED
+        } else {
+            TELEMETRY_COMPACT
+        }
+    } else {
+        0.0
+    };
+    let wide_gateway = fits(
+        TOOLBAR_COMMAND_LABELED_WIDTH,
+        GATEWAY_LABELED,
+        telemetry_width,
+    );
+    let gateway_width = if wide_gateway {
+        GATEWAY_LABELED
+    } else {
+        GATEWAY_ICON
+    };
+    let compact_command = !fits(
+        TOOLBAR_COMMAND_LABELED_WIDTH,
+        gateway_width,
+        telemetry_width,
+    ) || (state.connected() && telemetry_width == TELEMETRY_COMPACT);
+    let command_width = if compact_command {
+        TOOLBAR_COMMAND_COMPACT_WIDTH
+    } else {
+        TOOLBAR_COMMAND_LABELED_WIDTH
+    };
+    let title_width = ((width - command_width) / 2.0 - leading_inset).max(0.0);
+    let title_page = if state.connected() {
+        state.page
+    } else {
+        Page::Workstation
+    };
+    let title = match (state.setup_gateway, title_width < 140.0) {
+        (true, true) => "Setup",
+        (true, false) => "Setup Gateway",
+        (false, true) => title_page.compact_title(),
+        (false, false) => title_page.title(),
+    };
+    let leading = rune::row()
+        .shrink()
+        .center_y()
+        .child(
+            rune::row().w(title_width).pr(8.0).shrink().child(
+                rune::text(title)
+                    .font(kit.ty.ui_medium)
+                    .color(kit.c.text_base)
+                    .truncate(),
+            ),
+        )
+        .child(crate::command_panel::toolbar_button(
+            kit,
+            compact_command,
+            preferences,
+        ));
+    let mut trailing = rune::row().gap(TRAILING_GAP).center_y();
+    if show_assistant {
+        let toggle = crate::assistant::toggle(
+            assistant_placement != crate::assistant::Placement::Hidden,
+            kit,
+        )
+        .w(ASSISTANT_WIDTH);
+        trailing = trailing.child(material::glass_control(toggle, preferences));
+    }
+    if telemetry_width > 0.0 {
+        trailing = trailing.child(material::glass(
+            toolbar_telemetry(state, kit, telemetry_width == TELEMETRY_COMPACT).w(telemetry_width),
+            GlassSurface::Control,
+            preferences,
+        ));
+    }
+    let gateway = gateway_toolbar_button(state, kit, !wide_gateway, tone).w(gateway_width);
+    Toolbar::new().leading(leading).trailing(
+        trailing
+            .child(material::glass_control(gateway, preferences))
+            .child(crate::inbox::toolbar_item(state, kit, preferences).w(bell_width)),
+    )
+}
+
 fn gateway_toolbar_button(
     state: &State,
     kit: &rune_kit::Kit,
@@ -2037,8 +2146,9 @@ fn toolbar_telemetry(state: &State, kit: &rune_kit::Kit, compact: bool) -> El {
             None => theme::TEXT_MUTED,
         })
     };
-    let badge = |icon, label: String, sample| {
+    let badge = |key, icon, label: String, sample| {
         rune::row()
+            .key(key)
             .gap(4.0)
             .center_y()
             .a11y_hidden()
@@ -2067,10 +2177,15 @@ fn toolbar_telemetry(state: &State, kit: &rune_kit::Kit, compact: bool) -> El {
         let (icon, sample) = busiest.map_or((&icons::WORKSTATION, None), |(icon, value)| {
             (icon, Some(value))
         });
-        strip.child(badge(icon, percent(sample), sample))
+        strip.child(badge("telemetry-summary", icon, percent(sample), sample))
     } else {
         for (name, icon, sample) in samples {
-            strip = strip.child(badge(icon, format!("{name} {}", percent(sample)), sample));
+            strip = strip.child(badge(
+                name,
+                icon,
+                format!("{name} {}", percent(sample)),
+                sample,
+            ));
         }
         strip
     }

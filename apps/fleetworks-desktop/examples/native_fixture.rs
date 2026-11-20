@@ -613,6 +613,16 @@ mod native {
         state.fixture_show_workstation_settings();
     }
 
+    fn toolbar_telemetry_populated(state: &mut State) {
+        workstation_status(state);
+        state.host_metrics = Load::Ready(fleetworks_desktop::workstation_dashboard::HostMetrics {
+            cpu_percent: Some(100.0),
+            memory_percent: Some(89.0),
+            disk_percent: Some(73.0),
+            ..Default::default()
+        });
+    }
+
     enum ReviewAppearance {
         Matte,
         ReducedMotion,
@@ -763,6 +773,7 @@ mod native {
                 ("inbox-drawer", inbox),
                 ("workstation-status-checks-mixed", workstation_status),
                 ("workstation-settings", workstation_settings),
+                ("toolbar-telemetry-populated", toolbar_telemetry_populated),
                 ("tools-catalog-ready-matte", |state| {
                     review_appearance(state, tools_ready, ReviewAppearance::Matte);
                 }),

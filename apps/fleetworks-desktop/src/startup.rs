@@ -545,8 +545,8 @@ impl State {
         if self.startup.flight.is_some() {
             tx.wake_after(std::time::Duration::from_secs_f64(1.0 / 60.0));
         }
-        self.startup.data_step =
-            Some(startup_data::first_unfinished(self).unwrap_or(startup_data::Step::Classifier));
+        self.startup.data_step = startup_data::first_unfinished(self);
+        self.startup.data_checks = self.startup.data_step.is_none();
         self.backend_read(crate::backend::ReadRequest::Profile);
         if !self.readiness_pending() {
             self.refresh_readiness();

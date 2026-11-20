@@ -1805,10 +1805,11 @@ mod csv_path_fallback {
         state.open_csv_path_prompt(DatasetKind::ActorCatalog, &mut Tx::default());
         assert!(state
             .maintenance
-            .message
-            .as_deref()
+            .csv_path_prompt
+            .as_ref()
+            .and_then(|prompt| prompt.error.as_deref())
             .is_some_and(|m| m.contains("could not open")));
-        assert!(state.maintenance.csv_path_prompt.is_some());
+        assert!(state.maintenance.message.is_none());
 
         // A bad path keeps the prompt open with the reason and starts nothing.
         state
@@ -1899,6 +1900,7 @@ mod csv_path_fallback {
         state.open_csv_path_prompt(DatasetKind::ClassifierTraining, &mut Tx::default());
         state.cancel_csv_path_prompt(&mut Tx::default());
         assert!(state.maintenance.csv_path_prompt.is_none());
+        assert!(state.maintenance.message.is_none());
 
         state.open_csv_path_prompt(DatasetKind::ActorCatalog, &mut Tx::default());
         state.maintenance.invalidate_origin();

@@ -442,11 +442,13 @@ impl State {
 
     /// The chooser is unavailable: let the operator type the path of a local CSV instead.
     pub(crate) fn open_csv_path_prompt(&mut self, kind: DatasetKind, tx: &mut Tx) {
-        self.maintenance.message = Some(
-            "The dataset chooser could not open a file. Enter the path of a local CSV instead."
-                .into(),
-        );
         self.enter_csv_path(kind, tx);
+        if let Some(prompt) = &mut self.maintenance.csv_path_prompt {
+            prompt.error = Some(
+                "The dataset chooser could not open a file. Enter the path of a local CSV instead."
+                    .into(),
+            );
+        }
     }
 
     pub(crate) fn cancel_csv_path_prompt(&mut self, tx: &mut Tx) {

@@ -964,9 +964,27 @@ mod tests {
 
         click(&mut runtime, startup_data::PRIMARY);
         runtime.frame(0.04);
-        assert!(runtime.state.intents.contains(&Intent::ChooseDataset {
-            kind: DatasetKind::ActorCatalog,
-        }));
+        if cfg!(target_os = "linux") {
+            runtime.update(|state, _| {
+                let prompt = state
+                    .maintenance
+                    .csv_path_prompt
+                    .as_mut()
+                    .expect("CSV prompt");
+                assert_eq!(prompt.kind, DatasetKind::ActorCatalog);
+                prompt.input.text = "/fixture/actors.csv".into();
+            });
+            runtime.frame(0.045);
+            click(&mut runtime, "maintenance-csv-path-submit");
+            runtime.frame(0.05);
+            assert!(runtime.state.intents.contains(&Intent::UploadDataset {
+                kind: DatasetKind::ActorCatalog,
+            }));
+        } else {
+            assert!(runtime.state.intents.contains(&Intent::ChooseDataset {
+                kind: DatasetKind::ActorCatalog,
+            }));
+        }
         runtime.update(|state, _| {
             state.maintenance.set_operation_job(
                 MaintenanceOperation::SeedActors,
@@ -1062,6 +1080,60 @@ mod tests {
         assert!(runtime.find("screen-workstation").is_some());
         assert!(runtime.find("startup-data-setup").is_none());
         assert!(runtime.find("nav-seed").is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn canceling_typed_startup_csv_restores_focus_without_an_error_or_a_job() {
+        use ReadinessState::NotReady;
+
+        for dismiss_with_escape in [false, true] {
+            let (mut runtime, _) = data_setup_runtime([NotReady; 3]);
+            runtime.frame(0.0);
+            click(&mut runtime, "gateway-setup-done");
+            runtime.frame(0.02);
+            runtime.state.intents.clear();
+
+            click(&mut runtime, startup_data::PRIMARY);
+            runtime.frame(0.04);
+            let prompt = runtime
+                .state
+                .maintenance
+                .csv_path_prompt
+                .as_ref()
+                .expect("opening typed entry shows the CSV prompt");
+            assert_eq!(prompt.kind, DatasetKind::ActorCatalog);
+            assert!(prompt.input.focused);
+            assert!(prompt.error.is_none());
+            assert!(
+                runtime.state.intents.is_empty(),
+                "opening typed entry must not browse"
+            );
+
+            if dismiss_with_escape {
+                key(&mut runtime, rune::Key::Escape);
+            } else {
+                click(&mut runtime, "maintenance-csv-path-cancel");
+            }
+            runtime.frame(0.06);
+
+            let maintenance = &runtime.state.maintenance;
+            assert!(maintenance.csv_path_prompt.is_none());
+            assert!(maintenance.message.is_none());
+            assert!(maintenance.local_dataset.is_none());
+            assert!(maintenance.confirmation.is_none());
+            assert!(matches!(maintenance.receipt, app::Load::Idle));
+            assert!(
+                runtime.state.intents.is_empty(),
+                "cancel must not submit work"
+            );
+            assert!(
+                runtime.elements().iter().any(|element| {
+                    element.key.as_deref() == Some(startup_data::PRIMARY) && element.focused
+                }),
+                "cancel must return focus to the CSV entry"
+            );
+        }
     }
 
     #[test]

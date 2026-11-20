@@ -138,8 +138,10 @@ impl Step {
 
     fn action(self) -> &'static str {
         match self {
+            Self::Seed if cfg!(target_os = "linux") => "Enter actor CSV path",
             Self::Seed => "Choose actor CSV…",
             Self::Index => "Build actor index",
+            Self::Classifier if cfg!(target_os = "linux") => "Enter training CSV path",
             Self::Classifier => "Choose classifier CSV…",
         }
     }
@@ -171,7 +173,11 @@ impl Step {
             tx.scroll_into_view("maintenance-confirmation");
             tx.focus("maintenance-confirm", tx.by_keys());
         } else if let Some(kind) = self.dataset_kind() {
-            state.choose_dataset(kind, tx);
+            if cfg!(target_os = "linux") {
+                state.enter_csv_path(kind, tx);
+            } else {
+                state.choose_dataset(kind, tx);
+            }
         }
     }
 }
@@ -288,7 +294,7 @@ fn stage(state: &State, step: Step) -> Stage<'_> {
             }
             return Stage::Verifying;
         }
-        if !observation.is_some_and(|check| check.state == ReadinessState::Ready) {
+        if observation.is_none_or(|check| check.state != ReadinessState::Ready) {
             return Stage::Verifying;
         }
     }
@@ -336,7 +342,7 @@ fn can_reset(state: &State, step: Step) -> bool {
     can_review(state, step)
         && !state.maintenance.busy()
         && !matches!(stage(state, step), Stage::Working(_))
-        && !(step == Step::Index && state.maintenance.pending_reindex.is_some())
+        && (step != Step::Index || state.maintenance.pending_reindex.is_none())
 }
 
 fn focus_stage(tx: &mut Tx) {
@@ -653,8 +659,8 @@ pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit:
             let choose_catalog = step == Step::Index && step.reset(state);
             let blocked = if choose_catalog {
                 (state.readiness_pending()
-                    || !current_check(state, Step::Seed)
-                        .is_some_and(|check| check.state == ReadinessState::Ready))
+                    || current_check(state, Step::Seed)
+                        .is_none_or(|check| check.state != ReadinessState::Ready))
                 .then(|| "Wait for the backend to verify the current actor catalog.".into())
             } else {
                 preflight.disabled_reason()

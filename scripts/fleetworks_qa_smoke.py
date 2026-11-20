@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 QA = "/api/v2/workstation/chat/"
 TERMINAL = {"answered", "insufficient_context", "canceled", "failed"}
 QUESTION = "What is the state of the gateway?"
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
 DIAGNOSTIC = re.compile(r'\b(qa_(?:warm|replica|queue)_stage)="?([a-z0-9_]{1,40})\b')
 DIAGNOSTIC_DETAIL = re.compile(
     r'\b(qa_warm_reason|qa_warm_elapsed_ms|landlock_abi|sanitized_os_error|worker_exit_code|worker_signal)'
@@ -53,13 +54,16 @@ def until(probe, ready, description, *, timeout=90):
 
 def report_diagnostics(logs):
     stages = set()
-    for line in logs.splitlines():
+    lines = ANSI.sub("", logs).splitlines()
+    for line in lines:
         for stage, code in DIAGNOSTIC.findall(line):
             stages.add((stage, code, tuple(sorted(DIAGNOSTIC_DETAIL.findall(line)))))
-    if stages:
-        print(json.dumps({"qa_failure_stages": [
+    print(json.dumps({
+        "qa_failure_stages": [
             {"stage": stage, "code": code, **dict(details)} for stage, code, details in sorted(stages)
-        ]}), file=sys.stderr)
+        ],
+        "diagnostic_log_lines": len(lines),
+    }), file=sys.stderr)
 
 
 def exercise(request, manage, registration, manager, model, readiness):
@@ -288,6 +292,7 @@ def run_distributed(args):
         def paired(directory, workstation_ip):
             directory.mkdir(mode=0o700)
             identity = verify.native_fixture(directory)
+            identity["request_id"] = "qa-register-" + directory.name
             identity["workstation_ip"] = workstation_ip
             polling_secret = secrets.token_hex(32)
             challenge = verify.expect_status(verify.request(port, "/api/v1/pairing/start", payload={
@@ -309,7 +314,8 @@ def run_distributed(args):
         other_token, other = paired(workspace / "other-paired-qa", "192.0.2.92")
         manager_dir = workspace / "operator-qa"
         manager_dir.mkdir(mode=0o700)
-        manager = verify.register_native(port, manager_token, verify.native_fixture(manager_dir))
+        manager_identity = {**verify.native_fixture(manager_dir), "request_id": "qa-register-operator"}
+        manager = verify.register_native(port, manager_token, manager_identity)
 
         def client(bearer, context):
             def request(path, payload=None, *, query=None, expected=200):
@@ -374,7 +380,11 @@ def main():
     remote.add_argument("--image", required=True)
     remote.add_argument("--platform", choices=("linux/amd64", "linux/arm64"), required=True)
     args = parser.parse_args()
-    result = run_embedded(args) if args.runtime == "embedded" else run_distributed(args)
+    if args.runtime == "embedded":
+        os.environ["RUST_LOG"] = "warn,argos_api_host::inbox_qa_service=info"
+        result = run_embedded(args)
+    else:
+        result = run_distributed(args)
     print(json.dumps(result, indent=2))
 
 

@@ -142,10 +142,19 @@ mod linux {
                 LANDLOCK_VERSION,
             )
         };
-        ensure!(
-            abi >= MIN_LANDLOCK_ABI,
-            "Inbox QA requires Linux Landlock ABI 3 or newer"
-        );
+        if abi < MIN_LANDLOCK_ABI {
+            let os_error = (abi < 0).then(io::Error::last_os_error);
+            tracing::warn!(
+                qa_warm_stage = "sandbox_setup",
+                qa_warm_reason = "landlock_abi",
+                landlock_abi = abi,
+                sanitized_os_error = ?os_error.as_ref().and_then(io::Error::raw_os_error),
+                "Inbox QA requires Linux Landlock ABI 3 or newer"
+            );
+            return Err(anyhow::anyhow!(
+                "Inbox QA requires Linux Landlock ABI 3 or newer"
+            ));
+        }
         let handled_access_fs = FS_ABI_3 | if abi >= 5 { FS_IOCTL_DEV } else { 0 };
         // SAFETY: The first field of landlock_ruleset_attr is the initialized u64 filesystem mask.
         let raw = unsafe {

@@ -27,6 +27,8 @@ The executor uses the review deployment’s datastore and a dedicated credential
 
 Grant `manage_inbox_qa` explicitly to a registered configuration manager. A pairing operator that has this explicit grant also passes it to the workstations it approves. Pairing operators can issue ordinary Native access without the QA management grant. Enable QA after the pair is deployed. Use the gateway lifecycle state to confirm readiness and unload.
 
+Off fences new work immediately. The model listener reaps an unresponsive child when its 30-second session deadline expires. The gateway reports **Stopping** while a replica still owes unload confirmation. Retain the replica identity when recovering its executor so it can reconcile the prior model session.
+
 The smoke test uses the exact preloaded runtime, datastore, search, and QA image tags. It creates and tears down its own Compose project, pairs against its gateway, and exercises the same contract as the packaged Embedded test.
 
 ```sh

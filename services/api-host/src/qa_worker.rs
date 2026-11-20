@@ -12,11 +12,13 @@ use std::io::Read;
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::process::ExitStatusExt;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::anyhow;
 use anyhow::ensure;
@@ -56,13 +58,56 @@ const WORKER_BINARY: &str = "bin/fleetworks-assistant-bert";
 const SOCKET_LISTENER_BINARY: &str = "bin/fleetworks-assistant-bert-listener";
 const MAX_POINTER_BYTES: u64 = 4 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
-const MAX_PACK_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-const MAX_PACK_FILES: usize = 128;
+const MAX_PACK_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_PACK_FILES: usize = 32;
 const WARM_LIMIT: Duration = Duration::from_secs(45);
 const TURN_LIMIT: Duration = Duration::from_secs(25);
 const PING_LIMIT: Duration = Duration::from_secs(2);
 const UNLOAD_LIMIT: Duration = Duration::from_secs(3);
 const MAX_RESIDENT_BYTES: u64 = 1536 * 1024 * 1024;
+
+fn warm_error(stage: &'static str, error: anyhow::Error) -> anyhow::Error {
+    tracing::warn!(
+        qa_warm_stage = stage,
+        sanitized_os_error = ?error.downcast_ref::<io::Error>().and_then(io::Error::raw_os_error),
+        "Inbox QA worker warmup failed"
+    );
+    error
+}
+
+/// The executor may drop a warmup future before the supervisor's own deadline.
+struct WarmStage {
+    name: &'static str,
+    started: Instant,
+    completed: bool,
+}
+
+impl WarmStage {
+    fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            started: Instant::now(),
+            completed: false,
+        }
+    }
+
+    fn finish(&mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for WarmStage {
+    fn drop(&mut self) {
+        if !self.completed {
+            tracing::warn!(
+                qa_warm_stage = self.name,
+                qa_warm_reason = "abandoned",
+                qa_warm_elapsed_ms = self.started.elapsed().as_millis() as u64,
+                "Inbox QA worker warmup ended before the stage completed"
+            );
+        }
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -120,23 +165,39 @@ impl QaWorkerSupervisor {
     async fn connect(&self) -> Result<WorkerSession> {
         match &self.target {
             WorkerTarget::Distributed(socket) => {
-                let mut session = WorkerSession::socket(socket).await?;
-                session.send(&QaWorkerCommand::Open).await?;
+                let mut session = WorkerSession::socket(socket)
+                    .await
+                    .map_err(|error| warm_error("worker_socket", error))?;
+                session
+                    .send(&QaWorkerCommand::Open)
+                    .await
+                    .map_err(|error| warm_error("worker_socket_open", error))?;
                 Ok(session)
             }
             WorkerTarget::EmbeddedState(state_dir) => {
                 let state_dir = state_dir.clone();
-                let pack = tokio::task::spawn_blocking(move || {
-                    let pointer = match override_pack()? {
-                        Some(pointer) => pointer,
-                        None => load_installed_pointer(&state_dir)?,
-                    };
-                    let pack = verify_pack(&pointer)?;
-                    sandbox::protect_state(&state_dir, &pack)?;
+                let mut stage = WarmStage::new("pack_verification");
+                let verified = tokio::task::spawn_blocking(move || {
+                    let pointer =
+                        match override_pack().map_err(|error| warm_error("pack_pointer", error))? {
+                            Some(pointer) => pointer,
+                            None => load_installed_pointer(&state_dir)
+                                .map_err(|error| warm_error("pack_pointer", error))?,
+                        };
+                    let pack = verify_pack(&pointer)
+                        .map_err(|error| warm_error("pack_verification", error))?;
+                    sandbox::protect_state(&state_dir, &pack)
+                        .map_err(|error| warm_error("sandbox_state_boundary", error))?;
                     Ok::<_, anyhow::Error>(pack)
                 })
-                .await
-                .map_err(|_| anyhow!("QA pack verification did not finish"))??;
+                .await;
+                stage.finish();
+                let pack = verified.map_err(|_| {
+                    warm_error(
+                        "pack_verification",
+                        anyhow!("QA pack verification did not finish"),
+                    )
+                })??;
                 WorkerSession::child(&pack)
             }
         }
@@ -154,14 +215,32 @@ impl QaWorkerSupervisor {
             result = timeout(WARM_LIMIT, self.connect()) => result??,
         };
         let child_pid = session.child_id();
-        let ready = tokio::select! {
+        let mut stage = WarmStage::new("worker_ready_frame");
+        let (ready, failure_stage) = tokio::select! {
             biased;
-            _ = stopped.changed() => Err(anyhow!("QA worker is stopping")),
-            _ = cancel.cancelled() => Err(anyhow!("QA request was canceled")),
-            error = guard_resident(child_pid) => Err(error),
-            result = timeout(WARM_LIMIT, session.ready()) => result.unwrap_or_else(|_| Err(anyhow!("QA worker did not load in time"))),
+            _ = stopped.changed() => (Err(anyhow!("QA worker is stopping")), None),
+            _ = cancel.cancelled() => (Err(anyhow!("QA request was canceled")), None),
+            error = guard_resident(child_pid) => (Err(error), Some("worker_memory_limit")),
+            result = timeout(WARM_LIMIT, session.ready()) => match result {
+                Ok(result) => (result, Some("worker_ready_frame")),
+                Err(_) => (Err(anyhow!("QA worker did not load in time")), Some("worker_ready_timeout")),
+            },
         };
+        stage.finish();
         if let Err(error) = ready {
+            if let Some(stage) = failure_stage {
+                let status = session
+                    .child
+                    .as_mut()
+                    .and_then(|child| child.try_wait().ok().flatten());
+                tracing::warn!(
+                    qa_warm_stage = stage,
+                    sanitized_os_error = ?error.downcast_ref::<io::Error>().and_then(io::Error::raw_os_error),
+                    worker_exit_code = ?status.and_then(|status| status.code()),
+                    worker_signal = ?status.and_then(|status| status.signal()),
+                    "Inbox QA worker warmup failed"
+                );
+            }
             let _ = session.stop().await;
             return Err(error);
         }
@@ -268,7 +347,8 @@ struct WorkerSession {
 impl WorkerSession {
     fn child(pack: &Path) -> Result<Self> {
         let model = pack.join("model");
-        let mut command = sandbox::command(pack, &pack.join(WORKER_BINARY))?;
+        let mut command = sandbox::command(pack, &pack.join(WORKER_BINARY))
+            .map_err(|error| warm_error("sandbox_setup", error))?;
         command
             .arg("--model-dir")
             .arg(&model)
@@ -283,15 +363,15 @@ impl WorkerSession {
         limit_embedded_memory(&mut command);
         let mut child = command
             .spawn()
-            .map_err(|_| anyhow!("could not start QA worker"))?;
+            .map_err(|error| warm_error("worker_spawn", error.into()))?;
         let input = child
             .stdin
             .take()
-            .ok_or_else(|| anyhow!("missing QA worker input"))?;
+            .ok_or_else(|| warm_error("worker_spawn", anyhow!("missing QA worker input")))?;
         let output = child
             .stdout
             .take()
-            .ok_or_else(|| anyhow!("missing QA worker output"))?;
+            .ok_or_else(|| warm_error("worker_spawn", anyhow!("missing QA worker output")))?;
         Ok(Self {
             input: Box::new(input),
             output: Box::new(output),

@@ -24,7 +24,8 @@ const DELIVERY_SECS: i64 = 12;
 const POLL: Duration = Duration::from_millis(250);
 const CHECK: Duration = Duration::from_secs(2);
 const AUTH_TIMEOUT: Duration = Duration::from_secs(2);
-const WARM_TIMEOUT: Duration = Duration::from_secs(20);
+// The supervisor separately bounds pack verification and the model readiness handshake.
+const WARM_TIMEOUT: Duration = Duration::from_secs(90);
 const STOP_TIMEOUT: Duration = Duration::from_secs(8);
 const TURN_TIMEOUT: Duration = Duration::from_secs(30);
 const WARM_RETRY: Duration = Duration::from_secs(10);
@@ -105,10 +106,19 @@ impl Executor {
         let mut next_dispatch = Instant::now();
         let mut next_cleanup = Instant::now();
         let mut initialized = false;
+        let mut next_store_notice = Instant::now();
+        let mut next_queue_notice = Instant::now();
         while !stop.is_cancelled() {
             let setting = match timeout(AUTH_TIMEOUT, store::setting(&self.repo)).await {
                 Ok(Ok(setting)) => setting,
                 _ => {
+                    if Instant::now() >= next_store_notice {
+                        next_store_notice = Instant::now() + WARM_RETRY;
+                        tracing::warn!(
+                            qa_replica_stage = "settings_read",
+                            "Inbox QA settings unavailable"
+                        );
+                    }
                     if loaded.take().is_some() {
                         self.unload().await;
                     }
@@ -132,10 +142,26 @@ impl Executor {
             }
             if setting.enabled && !initialized {
                 let initialize = async {
-                    job_dispatch::ensure_queue_transport(self.repo.db(), POOL).await?;
-                    job_dispatch::enable_pool(self.repo.db(), POOL).await
+                    job_dispatch::ensure_queue_transport(self.repo.db(), POOL)
+                        .await
+                        .map_err(|_| "queue_transport")?;
+                    job_dispatch::enable_pool(self.repo.db(), POOL)
+                        .await
+                        .map_err(|_| "queue_pool")
                 };
-                if !matches!(timeout(AUTH_TIMEOUT, initialize).await, Ok(Ok(()))) {
+                let failure = match timeout(AUTH_TIMEOUT, initialize).await {
+                    Ok(Ok(())) => None,
+                    Ok(Err(stage)) => Some(stage),
+                    Err(_) => Some("queue_setup_timeout"),
+                };
+                if let Some(stage) = failure {
+                    if Instant::now() >= next_queue_notice {
+                        next_queue_notice = Instant::now() + WARM_RETRY;
+                        tracing::warn!(
+                            qa_queue_stage = stage,
+                            "Inbox QA queue initialization failed"
+                        );
+                    }
                     self.pause(stop).await;
                     continue;
                 }
@@ -158,6 +184,7 @@ impl Executor {
                         self.lease_held = true;
                         if self.warm(setting.generation, stop).await {
                             loaded = Some(setting.generation);
+                            tracing::info!(qa_replica_stage = "ready", "Inbox QA replica ready");
                         } else {
                             self.unload().await;
                         }
@@ -166,7 +193,11 @@ impl Executor {
                         self.lease_held = true;
                         self.unload().await;
                     }
-                    _ => {}
+                    Ok(Ok(store::ReplicaClaim::Wait)) => {}
+                    _ => tracing::warn!(
+                        qa_replica_stage = "replica_claim",
+                        "Inbox QA replica could not claim startup"
+                    ),
                 }
             }
             let Some(generation) = loaded else {
@@ -185,14 +216,22 @@ impl Executor {
             if Instant::now() >= next_dispatch {
                 next_dispatch = Instant::now() + CHECK;
                 if !matches!(timeout(AUTH_TIMEOUT, self.relay()).await, Ok(Ok(()))) {
-                    tracing::debug!("Inbox QA wake-up relay exceeded its deadline");
+                    tracing::warn!(
+                        qa_queue_stage = "relay",
+                        "Inbox QA wake-up relay unavailable"
+                    );
                 }
             }
             match timeout(AUTH_TIMEOUT, self.broker.claim(&self.owner)).await {
                 Ok(Ok(Some(delivery))) => {
                     let result = self.handle(delivery, generation, stop).await;
+                    if result.is_err() {
+                        tracing::warn!(
+                            qa_queue_stage = "delivery",
+                            "Inbox QA delivery did not settle"
+                        );
+                    }
                     if !matches!(result, Ok(true)) {
-                        tracing::debug!("Inbox QA execution session ended");
                         self.unload().await;
                         loaded = None;
                         next_warm = Instant::now() + WARM_RETRY;
@@ -200,6 +239,7 @@ impl Executor {
                 }
                 Ok(Ok(None)) => {}
                 _ => {
+                    tracing::warn!(qa_queue_stage = "claim", "Inbox QA queue claim unavailable");
                     self.unload().await;
                     loaded = None;
                     next_warm = Instant::now() + WARM_RETRY;
@@ -218,13 +258,7 @@ impl Executor {
     }
 
     async fn warm(&self, generation: i64, stop: &CancellationToken) -> bool {
-        let lease = || {
-            timeout(
-                AUTH_TIMEOUT,
-                store::beat(&self.repo, &self.placement, &self.owner, generation, false),
-            )
-        };
-        if !matches!(lease().await, Ok(Ok(true))) {
+        if !self.renew_replica(generation, false, "warm_lease").await {
             return false;
         }
         let warm = timeout(WARM_TIMEOUT, self.model.warm());
@@ -234,11 +268,15 @@ impl Executor {
             tokio::select! {
                 () = stop.cancelled() => return false,
                 result = &mut warm => {
-                    return matches!(result, Ok(Ok(())))
-                        && matches!(timeout(AUTH_TIMEOUT, store::beat(&self.repo, &self.placement, &self.owner, generation, true)).await, Ok(Ok(true)));
+                    match result {
+                        Ok(Ok(())) => return self.renew_replica(generation, true, "ready_lease").await,
+                        Ok(Err(_)) => tracing::warn!(qa_replica_stage = "warm_model", "Inbox QA model did not warm"),
+                        Err(_) => tracing::warn!(qa_replica_stage = "warm_timeout", "Inbox QA model did not warm within its budget"),
+                    }
+                    return false;
                 }
                 () = tokio::time::sleep_until(next) => {
-                    if !matches!(lease().await, Ok(Ok(true))) {
+                    if !self.renew_replica(generation, false, "warm_lease").await {
                         return false;
                     }
                     next = Instant::now() + CHECK;
@@ -247,31 +285,72 @@ impl Executor {
         }
     }
 
+    async fn renew_replica(&self, generation: i64, ready: bool, stage: &'static str) -> bool {
+        let result = timeout(
+            AUTH_TIMEOUT,
+            store::beat(&self.repo, &self.placement, &self.owner, generation, ready),
+        )
+        .await;
+        match result {
+            Ok(Ok(true)) => true,
+            Ok(Ok(false)) => {
+                tracing::info!(qa_replica_stage = stage, "Inbox QA replica permit ended");
+                false
+            }
+            _ => {
+                tracing::warn!(
+                    qa_replica_stage = stage,
+                    "Inbox QA replica permit could not be renewed"
+                );
+                false
+            }
+        }
+    }
+
     async fn heartbeat(&self, generation: i64) -> bool {
         // Refresh the datastore permit before touching the independently supervised model.
-        matches!(
-            timeout(
-                AUTH_TIMEOUT,
-                store::beat(&self.repo, &self.placement, &self.owner, generation, true)
-            )
-            .await,
-            Ok(Ok(true))
-        ) && matches!(timeout(AUTH_TIMEOUT, self.model.warm()).await, Ok(Ok(())))
+        if !self
+            .renew_replica(generation, true, "heartbeat_lease")
+            .await
+        {
+            return false;
+        }
+        if !matches!(timeout(AUTH_TIMEOUT, self.model.warm()).await, Ok(Ok(()))) {
+            tracing::warn!(
+                qa_replica_stage = "heartbeat_model",
+                "Inbox QA model heartbeat failed"
+            );
+            return false;
+        }
+        true
     }
 
     async fn unload(&mut self) {
         if !std::mem::take(&mut self.lease_held) {
             return;
         }
-        if matches!(
+        if !matches!(
             timeout(STOP_TIMEOUT, self.model.shutdown()).await,
             Ok(Ok(()))
         ) {
-            let _ = timeout(
+            tracing::warn!(
+                qa_replica_stage = "reap_confirmation",
+                "Inbox QA model reap is unconfirmed"
+            );
+            return;
+        }
+        if !matches!(
+            timeout(
                 AUTH_TIMEOUT,
                 store::forget_replica(&self.repo, &self.placement, &self.owner),
             )
-            .await;
+            .await,
+            Ok(Ok(()))
+        ) {
+            tracing::warn!(
+                qa_replica_stage = "reap_record",
+                "Inbox QA reap confirmation could not be recorded"
+            );
         }
     }
 

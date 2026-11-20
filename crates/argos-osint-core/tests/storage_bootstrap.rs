@@ -114,6 +114,7 @@ async fn ensure_schema_defines_everything_once_and_refuses_newer_databases() {
         "inbox_qa_exchange",
         "inbox_qa_latest",
         "inbox_qa_health",
+        "inbox_qa_event",
     ] {
         assert!(info.contains(&format!("\"{table}\"")), "missing {table}");
     }

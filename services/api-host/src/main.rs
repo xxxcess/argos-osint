@@ -299,6 +299,12 @@ async fn run_non_ipc(args: Args) -> Result<()> {
         );
         return Ok(());
     }
+    // QA owns a queue-only Jobs credential and has no shared Jobs client.
+    if role == Role::AssistantQa {
+        let result = inbox_qa_service::run_distributed(repo, shutdown_signal()).await;
+        drain_storage().await;
+        return result;
+    }
     let jobs_store = if role == Role::Jobs {
         let workspace = fleetworks::workspace_path()?;
         let store = jobs_service::open(workspace.clone()).await?;
@@ -349,11 +355,6 @@ async fn run_non_ipc(args: Args) -> Result<()> {
             Duration::from_secs(15),
         )
         .await;
-        drain_storage().await;
-        return result;
-    }
-    if role == Role::AssistantQa {
-        let result = inbox_qa_service::run_distributed(repo, shutdown_signal()).await;
         drain_storage().await;
         return result;
     }

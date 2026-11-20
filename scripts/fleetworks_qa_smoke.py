@@ -6,6 +6,7 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import subprocess
 import sys
@@ -20,6 +21,11 @@ ROOT = Path(__file__).resolve().parents[1]
 QA = "/api/v2/workstation/chat/"
 TERMINAL = {"answered", "insufficient_context", "canceled", "failed"}
 QUESTION = "What is the state of the gateway?"
+DIAGNOSTIC = re.compile(r'\b(qa_(?:warm|replica|queue)_stage)="?([a-z0-9_]{1,40})\b')
+DIAGNOSTIC_DETAIL = re.compile(
+    r'\b(qa_warm_reason|qa_warm_elapsed_ms|landlock_abi|sanitized_os_error|worker_exit_code|worker_signal)'
+    r'="?(Some\(-?\d{1,9}\)|-?\d{1,9}|abandoned|landlock_abi)(?=["\s,|]|$)'
+)
 
 
 def require(condition, description):
@@ -45,6 +51,17 @@ def until(probe, ready, description, *, timeout=90):
     raise TimeoutError(description)
 
 
+def report_diagnostics(logs):
+    stages = set()
+    for line in logs.splitlines():
+        for stage, code in DIAGNOSTIC.findall(line):
+            stages.add((stage, code, tuple(sorted(DIAGNOSTIC_DETAIL.findall(line)))))
+    if stages:
+        print(json.dumps({"qa_failure_stages": [
+            {"stage": stage, "code": code, **dict(details)} for stage, code, details in sorted(stages)
+        ]}), file=sys.stderr)
+
+
 def exercise(request, manage, registration, manager, model, readiness):
     """Run the same real QA lifecycle over the supplied transport."""
     before = request("settings")
@@ -57,8 +74,15 @@ def exercise(request, manage, registration, manager, model, readiness):
     revision = before["revision"]
     started = time.monotonic()
     manage("settings", {"context": authorize(manager), "expected_revision": revision, "enabled": True})
-    current = until(lambda: request("settings"), lambda value: value["phase"] == "ready",
-                    "QA worker did not warm")
+    try:
+        current = until(lambda: request("settings"), lambda value: value["phase"] == "ready",
+                        "QA worker did not warm", timeout=110)
+    except TimeoutError:
+        current = request("settings")
+        phase = current.get("phase")
+        if phase not in {"off", "starting", "ready", "stopping", "unavailable"}:
+            phase = "unknown"
+        raise TimeoutError(f"QA worker did not warm (last phase {phase})") from None
     ready_ms = round((time.monotonic() - started) * 1000, 1)
     active = model()
     require(len(active) == 1, "Ready did not retain one live model process")
@@ -202,6 +226,9 @@ def run_embedded(args):
             _, exit_code = session.shutdown()
             require(exit_code == 0, "companion shutdown failed after unloading QA")
             return {"runtime": "embedded-stdio", "target": digests["target"], **result}
+        except Exception:
+            report_diagnostics(session.stderr_excerpt())
+            raise
         finally:
             session.close_unconditionally()
 
@@ -324,6 +351,13 @@ def run_distributed(args):
         result = exercise(request, manage, registration, manager, model, readiness)
         failed = False
         return {"runtime": "distributed-paired-http", "platform": args.platform, "model_image_id": info["Image"], **result}
+    except Exception:
+        try:
+            report_diagnostics(compose("logs", "--no-color", "--tail", "100", "assistant-qa-executor",
+                                       capture=True, check=False) or "")
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        raise
     finally:
         compose("down", check=not failed, timeout=120)
 

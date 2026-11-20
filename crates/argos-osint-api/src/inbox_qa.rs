@@ -2,10 +2,11 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use argos_osint_core::storage::inbox_qa as store;
+use argos_osint_core::storage::repo::Repository;
 use argos_osint_core::storage::tx::TxError;
 use axum::extract::{Extension, Query, State};
 use axum::http::{header, HeaderValue, StatusCode};
@@ -19,6 +20,7 @@ use fleetworks_contracts::chat::{
 };
 use fleetworks_contracts::context::{CredentialPurpose, MutationContext, Permission};
 use fleetworks_contracts::qa_worker::{QaPassage, QaWorkerEvent, QaWorkerRequest};
+use futures_util::StreamExt;
 use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::time::Instant;
 
@@ -74,12 +76,106 @@ pub trait QaInference: Send + Sync {
     fn shutdown(&self) -> QaInferenceFuture<'_>;
 }
 
+/// Every active long poll on a target shares a single backend subscription.
+struct EventWake {
+    revision: watch::Sender<i64>,
+    waiters: watch::Sender<usize>,
+    observer: OnceLock<()>,
+}
+
+impl EventWake {
+    fn new() -> Self {
+        Self {
+            revision: watch::channel(0).0,
+            waiters: watch::channel(0).0,
+            observer: OnceLock::new(),
+        }
+    }
+
+    fn subscribe(&self, repo: &Repository) -> EventWaiter<'_> {
+        let revision = self.revision.subscribe();
+        self.waiters.send_modify(|count| *count += 1);
+        self.observer.get_or_init(|| {
+            tokio::spawn(observe_events(
+                repo.clone(),
+                self.waiters.subscribe(),
+                self.revision.clone(),
+            ));
+        });
+        EventWaiter {
+            wake: self,
+            revision,
+        }
+    }
+}
+
+struct EventWaiter<'a> {
+    wake: &'a EventWake,
+    revision: watch::Receiver<i64>,
+}
+
+impl Drop for EventWaiter<'_> {
+    fn drop(&mut self) {
+        self.wake.waiters.send_modify(|count| *count -= 1);
+    }
+}
+
+async fn observe_events(
+    repo: Repository,
+    mut waiters: watch::Receiver<usize>,
+    revision: watch::Sender<i64>,
+) {
+    const FALLBACK: Duration = Duration::from_millis(200);
+    const RESAMPLE: Duration = Duration::from_secs(1);
+    while waiters.wait_for(|count| *count > 0).await.is_ok() {
+        let mut live = tokio::select! {
+            result = tokio::time::timeout(FALLBACK, store::event_changes(&repo)) => result.ok().and_then(Result::ok),
+            _ = waiters.wait_for(|count| *count == 0) => continue,
+        };
+        loop {
+            // Subscribe before the first read so a change during setup is observed by at
+            // least one mechanism. Resample even on a quiet live connection after a reconnect.
+            let sample = tokio::time::timeout(FALLBACK, store::event_revision(&repo)).await;
+            if let Ok(Ok(sample)) = sample {
+                wake_at(&revision, sample);
+            }
+            let delay = if live.is_some() { RESAMPLE } else { FALLBACK };
+            let notice = async {
+                if let Some(stream) = live.as_mut() {
+                    stream.next().await
+                } else {
+                    std::future::pending().await
+                }
+            };
+            tokio::select! {
+                _ = waiters.wait_for(|count| *count == 0) => break,
+                _ = tokio::time::sleep(delay) => {},
+                notice = notice => match notice {
+                    Some(Ok(sample)) => wake_at(&revision, sample),
+                    _ => live = None,
+                },
+            }
+        }
+    }
+}
+
+fn wake_at(revision: &watch::Sender<i64>, sample: i64) {
+    revision.send_if_modified(|current| {
+        if sample <= *current {
+            return false;
+        }
+        *current = sample;
+        true
+    });
+}
+
 #[derive(Clone)]
 pub(crate) struct QaTarget {
     readiness: Option<ReadinessOwners>,
     search: Option<SearchClient>,
     embedded: bool,
     subscribers: Arc<Semaphore>,
+    events: Arc<EventWake>,
     probes: Arc<Semaphore>,
 }
 
@@ -94,6 +190,7 @@ impl QaTarget {
             search,
             embedded,
             subscribers: Arc::new(Semaphore::new(8)),
+            events: Arc::new(EventWake::new()),
             probes: Arc::new(Semaphore::new(4)),
         }
     }
@@ -480,16 +577,18 @@ pub(crate) async fn events_request(
     let actor = require(context, Permission::ReadWorkstationActivity, None)?;
     query.validate().map_err(|_| crate::bad())?;
     let deadline = Instant::now() + Duration::from_secs(u64::from(query.wait_seconds));
-    let _permit = if query.wait_seconds == 0 {
+    let long_poll = if query.wait_seconds == 0 {
         None
     } else {
-        Some(target.subscribers.try_acquire().map_err(|_| {
+        let permit = target.subscribers.try_acquire().map_err(|_| {
             ApiError(
                 StatusCode::TOO_MANY_REQUESTS,
                 "Inbox event subscribers are at capacity",
             )
-        })?)
+        })?;
+        Some((permit, target.events.subscribe(&state.repo)))
     };
+    let mut long_poll = long_poll;
     loop {
         let Some((turn, mut events)) = store::latest(&state.repo, &actor)
             .await
@@ -511,7 +610,9 @@ pub(crate) async fn events_request(
             events.retain(|event| event.sequence > query.after && !gap);
             return Ok(QaEventPage::new(turn, events, gap));
         }
-        tokio::time::sleep_until((Instant::now() + Duration::from_millis(200)).min(deadline)).await;
+        if let Some((_, waiter)) = &mut long_poll {
+            let _ = tokio::time::timeout_at(deadline, waiter.revision.changed()).await;
+        }
     }
 }
 

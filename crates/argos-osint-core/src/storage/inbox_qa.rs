@@ -11,6 +11,7 @@ use fleetworks_contracts::chat::QA_MAX_FINDINGS;
 use fleetworks_contracts::chat::QA_MAX_WORDS;
 use fleetworks_contracts::context::RegisteredContext;
 use fleetworks_contracts::qa_worker::QaWorkerRequest;
+use futures_util::{Stream, StreamExt};
 use serde::Deserialize;
 use serde::Serialize;
 use sha2::Digest;
@@ -74,6 +75,8 @@ DEFINE FIELD IF NOT EXISTS sampled_at ON inbox_qa_health TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS publisher ON inbox_qa_health TYPE string DEFAULT '';
 DEFINE FIELD IF NOT EXISTS lease_until ON inbox_qa_health TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS payload ON inbox_qa_health TYPE string DEFAULT '';
+DEFINE TABLE IF NOT EXISTS inbox_qa_event SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS event_revision ON inbox_qa_event TYPE int;
 "#;
 
 /// Trusted registration identity stored only in the protected coordinator.
@@ -242,6 +245,48 @@ pub async fn setting(repo: &Repository) -> Result<Setting, TxError> {
     .value)
 }
 
+#[derive(SurrealValue)]
+struct EventMarker {
+    event_revision: i64,
+}
+
+async fn bump_event_revision(tx: &Tx) -> Result<(), TxError> {
+    jobs::run(
+        tx,
+        tx.query(
+            "UPSERT inbox_qa_event:current SET event_revision=(event_revision ?? 0)+1 RETURN NONE",
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+/// A lightweight target-wide wake hint. It contains no authority or exchange data.
+pub async fn event_revision(repo: &Repository) -> Result<i64, TxError> {
+    let mut reply = repo
+        .db()
+        .query("SELECT VALUE event_revision FROM ONLY inbox_qa_event:current")
+        .await?
+        .check()?;
+    Ok(reply.take::<Option<i64>>(0)?.unwrap_or_default())
+}
+
+/// Observe committed revisions over the pinned SDK's record subscription.
+pub async fn event_changes(
+    repo: &Repository,
+) -> Result<impl Stream<Item = Result<i64, TxError>> + Send + Unpin, TxError> {
+    let changes = repo
+        .db()
+        .select::<Option<EventMarker>>(("inbox_qa_event", "current"))
+        .live()
+        .await?;
+    Ok(changes.map(|result| {
+        result
+            .map(|notice| notice.data.event_revision)
+            .map_err(TxError::from)
+    }))
+}
+
 /// Serialize settings updates with native registration rebind and reset.
 pub async fn set(
     repo: &Repository,
@@ -272,6 +317,7 @@ pub async fn set(
         ).bind(("limit", MAX_RETAINED))).await?;
         retire_in(&tx, jobs::take::<Vec<String>>(&mut reply, 0)?).await?;
         jobs::run(&tx, tx.query("DELETE inbox_qa_latest RETURN NONE; DELETE inbox_qa_exchange RETURN NONE; DELETE inbox_qa_health:current RETURN NONE;")).await?;
+        bump_event_revision(&tx).await?;
         Ok(Setting { enabled, revision, generation, changed_at_ms })
     }).await?.value)
 }
@@ -581,6 +627,7 @@ pub async fn admit(
                 id, job: id, pool: POOL, operation: POOL, priority: 0,
                 deps: Vec::new(), input_hash: id, created_at: now,
             }).await?;
+            bump_event_revision(&tx).await?;
             Ok(exchange.turn)
         }
     }).await?.value)
@@ -680,6 +727,7 @@ async fn append_in(
             .bind(("latest", jobs::rid("inbox_qa_latest", &row.owner))).bind(("at", at))
             .bind(("gen", row.generation)).bind(("turn", jobs::rid("inbox_qa_exchange", &exchange.turn.turn_id)))).await?;
     }
+    bump_event_revision(tx).await?;
     Ok(())
 }
 
@@ -947,6 +995,7 @@ pub async fn cleanup(repo: &Repository) -> Result<(), TxError> {
                 "DELETE inbox_qa_latest WHERE turn IN $turns AND required_after<$cutoff RETURN NONE;
                  DELETE inbox_qa_exchange WHERE id IN $turns RETURN NONE;",
             ).bind(("turns", turns)).bind(("cutoff", now_ms() - EXCHANGE_TTL_MS))).await?;
+            bump_event_revision(&tx).await?;
         }
         Ok(())
     }).await?;

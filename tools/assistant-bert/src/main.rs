@@ -13,6 +13,7 @@ use std::io::BufReader;
 use std::io::BufWriter;
 use std::io::Read;
 use std::io::Write;
+use std::panic;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -20,6 +21,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::thread;
 
 use anyhow::anyhow;
@@ -40,6 +42,8 @@ use protocol::QaPassage;
 use protocol::QaWorkerCommand;
 use protocol::QaWorkerEvent;
 use protocol::QaWorkerOutcome;
+use protocol::QaWorkerPanicCause;
+use protocol::QaWorkerPanicSource;
 use protocol::QaWorkerReply;
 use protocol::QaWorkerRequest;
 use protocol::QaWorkerSequence;
@@ -60,6 +64,65 @@ const MAX_PHYSICAL_BATCH: usize = 2;
 const CANDIDATES_PER_PASSAGE: i64 = 4;
 const MIN_SCORE: f64 = 0.12;
 const COMPETITOR_RATIO: f64 = 0.72;
+
+static STARTUP_PANIC: OnceLock<(QaWorkerPanicSource, u32, QaWorkerPanicCause)> = OnceLock::new();
+
+fn startup_panic(info: &panic::PanicHookInfo<'_>) {
+    let (source, line) = match info.location() {
+        Some(location) => {
+            let path = location.file();
+            let source = if path.contains("tch-0.14.0/") {
+                match path.rsplit('/').next() {
+                    Some("utils.rs") => QaWorkerPanicSource::TorchUtils,
+                    Some("tensor.rs" | "tensor_generated.rs") => QaWorkerPanicSource::TorchTensor,
+                    _ => QaWorkerPanicSource::TorchOther,
+                }
+            } else if path.contains("rust-bert-0.22.0/") {
+                QaWorkerPanicSource::RustBert
+            } else if path.ends_with("src/main.rs") {
+                QaWorkerPanicSource::Worker
+            } else {
+                QaWorkerPanicSource::Other
+            };
+            (source, location.line())
+        }
+        None => (QaWorkerPanicSource::Other, 0),
+    };
+    let message = info
+        .payload()
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| info.payload().downcast_ref::<&'static str>().copied())
+        .unwrap_or_default();
+    let cause = if [
+        "Cannot allocate memory",
+        "can't allocate memory",
+        "DefaultCPUAllocator",
+        "std::bad_alloc",
+    ]
+    .iter()
+    .any(|&needle| message.contains(needle))
+    {
+        QaWorkerPanicCause::Memory
+    } else if ["Permission denied", "Operation not permitted"]
+        .iter()
+        .any(|&needle| message.contains(needle))
+    {
+        QaWorkerPanicCause::Permission
+    } else if [
+        "set_num_interop_threads",
+        "cannot set number of interop threads",
+        "Resource temporarily unavailable",
+    ]
+    .iter()
+    .any(|&needle| message.contains(needle))
+    {
+        QaWorkerPanicCause::Threads
+    } else {
+        QaWorkerPanicCause::Other
+    };
+    let _ = STARTUP_PANIC.set((source, line, cause));
+}
 
 fn load_model(dir: &Path) -> Result<QuestionAnsweringModel> {
     ensure!(dir.is_absolute(), "QA model directory must be absolute");
@@ -273,8 +336,26 @@ fn run() -> Result<()> {
 
     let stopping = Arc::new(AtomicBool::new(false));
     let commands = receive_commands(stopping.clone())?;
-    let model = load_model(&dir)?;
     let mut output = BufWriter::new(io::stdout().lock());
+    let model = match panic::catch_unwind(|| load_model(&dir)) {
+        Ok(model) => model?,
+        Err(_) => {
+            let (source, line, cause) = STARTUP_PANIC.get().copied().unwrap_or((
+                QaWorkerPanicSource::Other,
+                0,
+                QaWorkerPanicCause::Other,
+            ));
+            frame::write(
+                &mut output,
+                &QaWorkerReply::StartupFailed {
+                    source,
+                    line,
+                    cause,
+                },
+            )?;
+            return Err(anyhow!("QA model process panicked during startup"));
+        }
+    };
     ready(&mut output)?;
     for command in commands {
         if stopping.load(Ordering::Acquire) {
@@ -292,7 +373,7 @@ fn run() -> Result<()> {
 
 fn main() -> ExitCode {
     // Even an unexpected parser or model failure must not write request data to stderr.
-    std::panic::set_hook(Box::new(|_| eprintln!("QA model process stopped")));
+    panic::set_hook(Box::new(startup_panic));
     if run().is_ok() {
         ExitCode::SUCCESS
     } else {

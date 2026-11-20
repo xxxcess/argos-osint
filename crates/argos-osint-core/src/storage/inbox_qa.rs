@@ -945,6 +945,16 @@ pub async fn put_health(
     }).await?.value)
 }
 
+/// Release a failed/obsolete probe without canceling a successor's lease.
+pub async fn abandon_health(repo: &Repository, publisher: &str) -> Result<(), TxError> {
+    repo.db()
+        .query("UPDATE inbox_qa_health:current SET lease_until=0 WHERE publisher=$publisher AND lease_until>0 RETURN NONE")
+        .bind(("publisher", publisher.to_owned()))
+        .await?
+        .check()?;
+    Ok(())
+}
+
 async fn retire_in(tx: &Tx, ids: Vec<String>) -> Result<(), TxError> {
     if ids.is_empty() {
         return Ok(());

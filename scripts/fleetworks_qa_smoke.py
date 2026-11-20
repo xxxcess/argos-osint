@@ -27,6 +27,16 @@ DIAGNOSTIC_DETAIL = re.compile(
     r'\b(qa_warm_reason|qa_warm_elapsed_ms|landlock_abi|sanitized_os_error|worker_exit_code|worker_signal)'
     r'="?(Some\(-?\d{1,9}\)|-?\d{1,9}|abandoned|landlock_abi)(?=["\s,|]|$)'
 )
+PANIC_DETAIL = re.compile(
+    r'\b(worker_panic_source|worker_panic_line|worker_panic_cause)="?([a-z0-9_]{1,40})(?=["\s,|]|$)'
+)
+SAFE_REJECTION = {
+    "Backend inference is off": "inference_off",
+    "Backend inference has no ready worker": "no_ready_worker",
+    "Backend inference is unavailable": "coordinator_unavailable",
+    "Current backend health could not be verified": "fresh_health_unavailable",
+    "Inbox inference is busy": "busy",
+}
 
 
 def require(condition, description):
@@ -57,7 +67,8 @@ def report_diagnostics(logs):
     lines = ANSI.sub("", logs).splitlines()
     for line in lines:
         for stage, code in DIAGNOSTIC.findall(line):
-            stages.add((stage, code, tuple(sorted(DIAGNOSTIC_DETAIL.findall(line)))))
+            details = DIAGNOSTIC_DETAIL.findall(line) + PANIC_DETAIL.findall(line)
+            stages.add((stage, code, tuple(sorted(details))))
     print(json.dumps({
         "qa_failure_stages": [
             {"stage": stage, "code": code, **dict(details)} for stage, code, details in sorted(stages)
@@ -131,6 +142,10 @@ def exercise(request, manage, registration, manager, model, readiness):
     resumed = request("events", query={"turn_id": turn_id, "after": cursor, "wait_seconds": 0})
     require(not resumed["events"] and resumed["turn"] == snapshot, "terminal replay duplicated an event")
     require(readiness(), "ordinary readiness failed after QA inference")
+    print(json.dumps({"qa_smoke_stage": "first_turn_answered", "model_warm_ms": ready_ms,
+                      "admission_ms": admission_ms, "first_cited_finding_ms": first_finding_ms,
+                      "completion_ms": completed_ms, "warm_model_rss_bytes": worker_rss_bytes}),
+          file=sys.stderr)
 
     follow_up = request("turns", {**turn, "request_id": "inbox-qa-smoke-2"}, expected=(200, 201, 202))
     follow_up_id = follow_up["turn_id"]
@@ -216,7 +231,9 @@ def run_embedded(args):
                 if result["outcome"] == "ok":
                     require(200 in statuses, f"IPC {operation} unexpectedly succeeded")
                     return data["value"]
-                require(data["status"] in statuses, f"IPC {operation} failed with HTTP-equivalent {data['status']}")
+                reason = SAFE_REJECTION.get(data.get("message"), "unclassified")
+                require(data["status"] in statuses,
+                        f"IPC {operation} received {data['status']} ({reason})")
                 return None
 
             def model():
@@ -320,9 +337,12 @@ def run_distributed(args):
         def client(bearer, context):
             def request(path, payload=None, *, query=None, expected=200):
                 route = QA + path + ("?" + urlencode(query) if query else "")
-                return verify.expect_status(verify.request(port, route, bearer, payload,
-                                                           headers=verify.native_headers(context)),
-                                            expected, route.split("?")[0])
+                status, value = verify.request(port, route, bearer, payload, headers=verify.native_headers(context))
+                statuses = (expected,) if isinstance(expected, int) else expected
+                error = value.get("error") if isinstance(value, dict) else None
+                reason = SAFE_REJECTION.get(error if isinstance(error, str) else None, "unclassified")
+                require(status in statuses, f"{path} received HTTP {status} ({reason})")
+                return value
             return request
 
         native = client(token, registration)

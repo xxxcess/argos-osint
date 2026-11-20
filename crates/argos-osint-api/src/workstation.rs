@@ -645,10 +645,18 @@ async fn collect(
 ) -> Observations {
     let at = Utc::now().to_rfc3339();
     let database_repo = state.repo.clone();
-    let database = crate::run_shielded_timeout(DEADLINE, async move {
-        database_repo.db().query("RETURN 1").await?.check()
-    })
-    .await;
+    let natural_repo = state.repo.clone();
+    let (database, catalog, search, services, natural) = tokio::join!(
+        crate::run_shielded_timeout(DEADLINE, async move {
+            database_repo.db().query("RETURN 1").await?.check()
+        }),
+        catalog(state, &at),
+        search(state, owners, client, &at),
+        join_all(owners.probes.iter().map(|probe| probe.observe(&at))),
+        crate::run_shielded_timeout(DEADLINE, async move {
+            classifier_activation::observation(&natural_repo).await
+        })
+    );
     let mut checks = vec![
         check(
             ReadinessCheckId::Gateway,
@@ -675,15 +683,6 @@ async fn collect(
             )
         },
     ];
-    let natural_repo = state.repo.clone();
-    let (catalog, search, services, natural) = tokio::join!(
-        catalog(state, &at),
-        search(state, owners, client, &at),
-        join_all(owners.probes.iter().map(|probe| probe.observe(&at))),
-        crate::run_shielded_timeout(DEADLINE, async move {
-            classifier_activation::observation(&natural_repo).await
-        })
-    );
     let natural = natural.and_then(Result::ok);
     checks.push(catalog);
     let mut atlas_checkpoint = AtlasCheckpoint::from_service(None);
@@ -859,38 +858,50 @@ pub(crate) async fn qa_snapshot(
     observed_after_ms: i64,
     embedded: bool,
 ) -> Option<(chrono::DateTime<Utc>, Vec<QaReadinessFact>)> {
-    let mut cache = owners.cache.lock().await;
-    if cache.as_ref().is_none_or(|cached| {
-        cached.captured.elapsed() >= CACHE_AGE
-            || sample_time(cached).is_none_or(|at| at.timestamp_millis() <= observed_after_ms)
-    }) {
-        *cache = Some(collect(state, owners, search).await);
+    // The protocol persists millisecond boundaries, so every independent check
+    // must start strictly after the last terminal boundary.
+    if Utc::now().timestamp_millis() <= observed_after_ms {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        if Utc::now().timestamp_millis() <= observed_after_ms {
+            return None;
+        }
     }
-    let observations = cache.as_ref()?;
-    let at = sample_time(observations).filter(|at| at.timestamp_millis() > observed_after_ms)?;
-    if observations.captured.elapsed() >= CACHE_AGE {
-        return None;
-    }
-    let mut checks = observations.checks.clone();
-    drop(cache);
-    if embedded
-        && checks.iter().any(|check| {
-            check.id == ReadinessCheckId::ClassifierTraining
-                && check.reason_code == "natural_resource_idle"
-        })
-    {
+    let projection = async {
+        let mut cache = owners.cache.lock().await;
+        if cache.as_ref().is_none_or(|cached| {
+            cached.captured.elapsed() >= CACHE_AGE
+                || sample_time(cached).is_none_or(|at| at.timestamp_millis() <= observed_after_ms)
+        }) {
+            *cache = Some(collect(state, owners, search).await);
+        }
+        let observations = cache.as_ref()?;
+        let at =
+            sample_time(observations).filter(|at| at.timestamp_millis() > observed_after_ms)?;
+        if observations.captured.elapsed() >= CACHE_AGE {
+            return None;
+        }
+        Some((at, observations.checks.clone()))
+    };
+    let embedded_training = async {
+        if !embedded {
+            return false;
+        }
         let repo = state.repo.clone();
-        if let Some(Ok(setup)) = crate::run_shielded_timeout(DEADLINE, async move {
-            setup_jobs::embedded_setup_observation(&repo).await
-        })
-        .await
-        {
-            if setup.training_completed {
-                for check in &mut checks {
-                    if check.id == ReadinessCheckId::ClassifierTraining {
-                        check.state = ReadinessState::Ready;
-                    }
-                }
+        matches!(
+            crate::run_shielded_timeout(DEADLINE, async move {
+                setup_jobs::embedded_setup_observation(&repo).await
+            }).await,
+            Some(Ok(setup)) if setup.training_completed
+        )
+    };
+    let (projection, training_completed) = tokio::join!(projection, embedded_training);
+    let (at, mut checks) = projection?;
+    if training_completed {
+        for check in &mut checks {
+            if check.id == ReadinessCheckId::ClassifierTraining
+                && check.reason_code == "natural_resource_idle"
+            {
+                check.state = ReadinessState::Ready;
             }
         }
     }

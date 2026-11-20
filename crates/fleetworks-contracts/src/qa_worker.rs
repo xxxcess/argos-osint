@@ -155,10 +155,60 @@ pub enum QaWorkerReply {
         protocol: u16,
         model_revision: String,
     },
+    StartupFailed {
+        source: QaWorkerPanicSource,
+        line: u32,
+        cause: QaWorkerPanicCause,
+    },
     Event {
         event: QaWorkerEvent,
     },
     Stopped,
+}
+
+/// Fixed diagnostic categories. Source paths and panic messages stay in the model process.
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QaWorkerPanicSource {
+    TorchUtils,
+    TorchTensor,
+    TorchOther,
+    RustBert,
+    Worker,
+    Other,
+}
+
+impl QaWorkerPanicSource {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::TorchUtils => "torch_utils",
+            Self::TorchTensor => "torch_tensor",
+            Self::TorchOther => "torch_other",
+            Self::RustBert => "rust_bert",
+            Self::Worker => "worker",
+            Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QaWorkerPanicCause {
+    Memory,
+    Permission,
+    Threads,
+    Other,
+}
+
+impl QaWorkerPanicCause {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::Permission => "permission",
+            Self::Threads => "threads",
+            Self::Other => "other",
+        }
+    }
 }
 
 /// A shared check used before any worker event can enter the durable event log.

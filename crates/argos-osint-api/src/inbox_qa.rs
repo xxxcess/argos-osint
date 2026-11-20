@@ -202,10 +202,9 @@ impl QaTarget {
         boundary: i64,
         admission: bool,
     ) -> Result<Option<store::HealthSample>, ApiError> {
-        let readiness = self
-            .readiness
-            .as_ref()
-            .ok_or_else(current_health_unavailable)?;
+        if self.readiness.is_none() {
+            return Err(current_health_unavailable());
+        }
         let publisher = argos_osint_core::store::new_id();
         match store::claim_health(&state.repo, &publisher, generation, boundary, admission)
             .await
@@ -214,33 +213,71 @@ impl QaTarget {
             store::HealthClaim::Ready(sample) => Ok(Some(sample)),
             store::HealthClaim::Pending => Ok(None),
             store::HealthClaim::Probe(boundary) => {
-                let (at, facts) = workstation::qa_snapshot(
-                    state,
-                    readiness,
-                    self.search.as_ref(),
-                    boundary,
-                    self.embedded,
-                )
+                // The durable claim outlives a disconnected or timed-out HTTP/IPC reader.
+                let target = self.clone();
+                let state = state.clone();
+                tokio::spawn(async move {
+                    target
+                        .probe_health(&state, &publisher, generation, boundary)
+                        .await
+                })
                 .await
-                .ok_or_else(current_health_unavailable)?;
-                let sample = store::HealthSample {
-                    sampled_at_ms: at.timestamp_millis(),
-                    facts: facts
-                        .into_iter()
-                        .map(|(id, label, status, explanation)| store::HealthFact {
-                            id: id.to_owned(),
-                            label: label.to_owned(),
-                            status: status.to_owned(),
-                            explanation: explanation.to_owned(),
-                        })
-                        .collect(),
-                };
-                let published = store::put_health(&state.repo, &publisher, generation, &sample)
-                    .await
-                    .map_err(storage_error)?;
-                Ok(published.then_some(sample))
+                .map_err(|_| current_health_unavailable())?
             }
         }
+    }
+
+    async fn probe_health(
+        &self,
+        state: &ApiState,
+        publisher: &str,
+        generation: i64,
+        boundary: i64,
+    ) -> Result<Option<store::HealthSample>, ApiError> {
+        let observation = async {
+            let readiness = self
+                .readiness
+                .as_ref()
+                .ok_or_else(current_health_unavailable)?;
+            let Some((at, facts)) = workstation::qa_snapshot(
+                state,
+                readiness,
+                self.search.as_ref(),
+                boundary,
+                self.embedded,
+            )
+            .await
+            else {
+                return Ok(None);
+            };
+            let sample = store::HealthSample {
+                sampled_at_ms: at.timestamp_millis(),
+                facts: facts
+                    .into_iter()
+                    .map(|(id, label, status, explanation)| store::HealthFact {
+                        id: id.to_owned(),
+                        label: label.to_owned(),
+                        status: status.to_owned(),
+                        explanation: explanation.to_owned(),
+                    })
+                    .collect(),
+            };
+            let published = store::put_health(&state.repo, publisher, generation, &sample)
+                .await
+                .map_err(storage_error)?;
+            Ok(published.then_some(sample))
+        };
+        let result = tokio::time::timeout(Duration::from_millis(3_500), observation)
+            .await
+            .unwrap_or_else(|_| Err(current_health_unavailable()));
+        if !matches!(&result, Ok(Some(_))) {
+            let _ = tokio::time::timeout(
+                Duration::from_millis(500),
+                store::abandon_health(&state.repo, publisher),
+            )
+            .await;
+        }
+        result
     }
 
     pub(crate) async fn refresh(&self, state: &ApiState, stop: &CancellationToken) {
@@ -447,13 +484,29 @@ pub(crate) async fn submit_request(
             "Backend inference has no ready worker",
         ));
     }
-    let evidence = snapshot(state, context, target, &actor, &request, setting.generation).await?;
-    context.revalidate(&state.repo).await?;
-    let turn = store::admit(&state.repo, &actor, &request, evidence, setting.generation)
-        .await
-        .map_err(storage_error)?;
-    context.revalidate(&state.repo).await?;
-    Ok(turn)
+    let deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        let evidence = snapshot(
+            state,
+            context,
+            target,
+            &actor,
+            &request,
+            setting.generation,
+            deadline,
+        )
+        .await?;
+        context.revalidate(&state.repo).await?;
+        match store::admit(&state.repo, &actor, &request, evidence, setting.generation).await {
+            Ok(turn) => {
+                context.revalidate(&state.repo).await?;
+                return Ok(turn);
+            }
+            Err(TxError::Abort(reason))
+                if reason == "inbox_qa:freshness" && Instant::now() < deadline => {}
+            Err(error) => return Err(storage_error(error)),
+        }
+    }
 }
 
 async fn snapshot(
@@ -463,6 +516,7 @@ async fn snapshot(
     actor: &store::Actor,
     request: &QaTurnRequest,
     generation: i64,
+    deadline: Instant,
 ) -> Result<store::FrozenEvidence, ApiError> {
     let _permit = target.probes.try_acquire().map_err(|_| {
         ApiError(
@@ -473,7 +527,7 @@ async fn snapshot(
     let boundary = store::freshness_boundary(&state.repo, actor)
         .await
         .map_err(storage_error)?;
-    let sample = tokio::time::timeout(Duration::from_secs(4), async {
+    let sample = tokio::time::timeout_at(deadline, async {
         loop {
             if let Some(sample) = target.observe(state, generation, boundary, true).await? {
                 return Ok::<_, ApiError>(sample);

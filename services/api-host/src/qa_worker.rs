@@ -432,6 +432,20 @@ impl WorkerSession {
                 protocol,
                 model_revision,
             } if protocol == QA_WORKER_PROTOCOL && model_revision == QA_MODEL_REVISION => Ok(()),
+            QaWorkerReply::StartupFailed {
+                source,
+                line,
+                cause,
+            } => {
+                tracing::warn!(
+                    qa_warm_stage = "worker_startup_panic",
+                    worker_panic_source = source.code(),
+                    worker_panic_line = line,
+                    worker_panic_cause = cause.code(),
+                    "Inbox QA worker reported a startup panic"
+                );
+                Err(anyhow!("QA model process panicked during startup"))
+            }
             _ => Err(anyhow!(
                 "QA worker could not confirm the expected checkpoint"
             )),

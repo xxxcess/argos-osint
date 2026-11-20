@@ -8,7 +8,13 @@ import {
   StyleSheet,
   useWindowDimensions,
 } from "react-native";
-import { Notice, LoadingState, EmptyState, FleetworksMark } from "@argos/ui";
+import {
+  Notice,
+  LoadingState,
+  EmptyState,
+  FleetworksMark,
+  glassProps,
+} from "@argos/ui";
 import {
   articleSearchProblem,
   keyFor,
@@ -71,6 +77,7 @@ export function BulletinView(p: Props) {
   return (
     <View nativeID="intel-bulletin" style={s.shell}>
       <View
+        {...glassProps.chrome}
         nativeID="intel-bulletin-header"
         style={[s.header, !wide && { paddingHorizontal: 24 }]}
       >
@@ -105,6 +112,7 @@ export function BulletinView(p: Props) {
       </View>
       <View style={[s.body, wide && { flexDirection: "row" }]}>
         <View
+          {...glassProps.chrome}
           nativeID="intel-category-rail"
           role="group"
           aria-label="Categories"

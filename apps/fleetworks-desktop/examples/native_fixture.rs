@@ -635,6 +635,13 @@ mod native {
                 ("backend-choice-opening", |state| {
                     state.startup = fleetworks_desktop::startup::Startup::cold_launch();
                 }),
+                ("backend-choice-matte", |state| {
+                    review_appearance(
+                        state,
+                        State::fixture_show_backend_choice,
+                        ReviewAppearance::Matte,
+                    );
+                }),
                 ("backend-choice-reduced-motion", |state| {
                     state.fixture_show_backend_choice();
                     state.accessibility.fixture_override =
@@ -756,6 +763,12 @@ mod native {
                 ("inbox-drawer", inbox),
                 ("workstation-status-checks-mixed", workstation_status),
                 ("workstation-settings", workstation_settings),
+                ("tools-catalog-ready-matte", |state| {
+                    review_appearance(state, tools_ready, ReviewAppearance::Matte);
+                }),
+                ("models-ready-matte", |state| {
+                    review_appearance(state, models_ready, ReviewAppearance::Matte);
+                }),
                 ("workstation-status-checks-mixed-matte", |state| {
                     review_appearance(state, workstation_status, ReviewAppearance::Matte);
                 }),

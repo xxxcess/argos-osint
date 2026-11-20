@@ -2,6 +2,7 @@
 import React, { useState } from "react";
 import { Pressable, Text } from "react-native";
 import type { Seed } from "@argos/api-client";
+import { glassProps } from "@argos/ui";
 import { intelColors as c, intelEffects } from "../../shell/intel-theme";
 import { briefStyles as s } from "./briefStyles";
 export function hasMemorySeed(seed: Seed | null | undefined): seed is Seed {
@@ -59,6 +60,7 @@ export function BriefAction({
   const [focused, setFocused] = useState(false);
   return (
     <Pressable
+      {...(!cta && glassProps.control)}
       accessibilityRole="button"
       accessibilityLabel={label}
       accessibilityState={{ disabled }}
@@ -73,11 +75,12 @@ export function BriefAction({
         disabled && { opacity: 0.45 },
         cta && s.cta,
         back && s.back,
-        (hovered || focused) && {
-          borderColor: c.accent,
-          backgroundColor: back ? "transparent" : c.accentSoft,
-        },
-        cta && (hovered || focused) && { boxShadow: intelEffects.accentGlow },
+        (hovered || focused) && { borderColor: c.accent },
+        cta &&
+          (hovered || focused) && {
+            backgroundColor: c.accentSoft,
+            boxShadow: intelEffects.accentGlow,
+          },
         pressed && { backgroundColor: c.panelRaised },
       ]}
     >

@@ -8,6 +8,7 @@ use rune_kit::Kit;
 use crate::accessibility::ViewPreferences;
 use crate::app::Page;
 use crate::app::State;
+use crate::material;
 use crate::material::MetalFinish;
 use crate::theme;
 use crate::theme::StatusTone;
@@ -103,7 +104,7 @@ fn setting_divider() -> El {
         .a11y_hidden()
 }
 
-fn setting_group(title: &str, body: El, kit: &Kit) -> El {
+fn setting_group(title: &str, body: El, preferences: ViewPreferences, kit: &Kit) -> El {
     rune::col()
         .w_full()
         .gap(8.0)
@@ -112,13 +113,10 @@ fn setting_group(title: &str, body: El, kit: &Kit) -> El {
                 .font(kit.ty.small_medium)
                 .color(theme::hex(theme::TEXT_SECONDARY)),
         )
-        .child(
-            body.w_full()
-                .radius(8.0)
-                .clip_rounded(8.0)
-                .fill(theme::hex(theme::SURFACE))
-                .border(1.0, theme::hex(theme::BORDER_SUBTLE)),
-        )
+        .child(material::glass_panel(
+            body.w_full().radius(8.0).clip_rounded(8.0),
+            preferences,
+        ))
 }
 
 fn destination_action(
@@ -189,6 +187,7 @@ fn section_content(state: &State, preferences: ViewPreferences, kit: &Kit) -> El
                         )),
                         kit,
                     )),
+                preferences,
                 kit,
             ))
             .child(setting_group(
@@ -212,6 +211,7 @@ fn section_content(state: &State, preferences: ViewPreferences, kit: &Kit) -> El
                     )),
                     kit,
                 )),
+                preferences,
                 kit,
             )),
         SettingsSection::Appearance => rune::col().w_full().gap(22.0).child(setting_group(
@@ -248,6 +248,7 @@ fn section_content(state: &State, preferences: ViewPreferences, kit: &Kit) -> El
                     )),
                     kit,
                 )),
+            preferences,
             kit,
         )),
         SettingsSection::Gateway => {
@@ -312,10 +313,12 @@ fn section_content(state: &State, preferences: ViewPreferences, kit: &Kit) -> El
                 ),
                 kit,
             ));
-            rune::col()
-                .w_full()
-                .gap(22.0)
-                .child(setting_group("Connection", rows, kit))
+            rune::col().w_full().gap(22.0).child(setting_group(
+                "Connection",
+                rows,
+                preferences,
+                kit,
+            ))
         }
         SettingsSection::Models => rune::col().w_full().gap(22.0).child(setting_group(
             "Routing",
@@ -333,6 +336,7 @@ fn section_content(state: &State, preferences: ViewPreferences, kit: &Kit) -> El
                 )),
                 kit,
             )),
+            preferences,
             kit,
         )),
         SettingsSection::Tools => rune::col().w_full().gap(22.0).child(setting_group(
@@ -351,6 +355,7 @@ fn section_content(state: &State, preferences: ViewPreferences, kit: &Kit) -> El
                 )),
                 kit,
             )),
+            preferences,
             kit,
         )),
     }
@@ -375,7 +380,7 @@ pub(crate) fn page(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
         .h_full()
         .padding(10.0)
         .gap(4.0)
-        .fill(theme::hex(theme::SURFACE))
+        .fill(kit.c.surface_base)
         .border_sides([0.0, 1.0, 0.0, 0.0], theme::hex(theme::BORDER_SUBTLE));
     for section in SettingsSection::ALL {
         let selected = state.settings_section == section;
@@ -395,16 +400,16 @@ pub(crate) fn page(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
                 .px(12.0)
                 .center_y()
                 .radius(17.0)
-                .fill(theme::hex(if selected {
-                    theme::MOLTEN_SELECTION
+                .fill(if selected {
+                    theme::hex(theme::MOLTEN_SELECTION)
                 } else {
-                    theme::SURFACE
-                }))
-                .hover(theme::hex(if selected {
-                    theme::MOLTEN_SELECTION
+                    rune::Color::TRANSPARENT
+                })
+                .hover(if selected {
+                    theme::hex(theme::MOLTEN_SELECTION)
                 } else {
-                    theme::SURFACE_ELEVATED
-                }))
+                    kit.c.layer_03
+                })
                 .child(
                     rune::text(section.title())
                         .font(if selected {

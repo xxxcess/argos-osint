@@ -211,6 +211,7 @@ jobs:
             --revision "${{ inputs.expected-head }}" \
             --output "${{ runner.temp }}/linux-native-evidence/ui" \
             --scene backend-choice \
+            --scene backend-choice-matte \
             --scene redesign-setup \
             --scene setup-connected-embedded \
             --scene setup-connected-distributed \
@@ -241,6 +242,10 @@ jobs:
             --scene workstation-settings \
             --scene workstation-settings-matte \
             --scene workstation-settings-reduced-motion \
+            --scene tools-catalog-ready \
+            --scene tools-catalog-ready-matte \
+            --scene models-ready \
+            --scene models-ready-matte \
             --size 1280x800 --size 640x480 --scale 1
 
       - name: Capture startup motion and reduced-motion transitions (Lavapipe)

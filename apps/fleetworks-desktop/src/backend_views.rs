@@ -256,13 +256,11 @@ fn atlas(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
     action = action.child(rune::row().child(trigger));
     if !lane.busy() {
         if let Some(snapshot) = &lane.confirmation {
-            action = action.child(
+            action = action.child(material::glass_panel(
                 rune::col()
                     .gap(8.0)
                     .padding(12.0)
                     .radius(8.0)
-                    .fill(theme::hex(theme::SURFACE_RAISED))
-                    .border(1.0, theme::hex(theme::ACCENT_DEEP))
                     .key("atlas-submit-confirmation")
                     .child(heading("Confirm New Cycle", kit))
                     .child(quiet(
@@ -297,7 +295,8 @@ fn atlas(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
                                     .build(kit, preferences, pointer_ref),
                             ),
                     ),
-            );
+                preferences,
+            ));
         }
     }
     let status = match lane.phase {

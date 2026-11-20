@@ -169,16 +169,26 @@ describe("Fleetworks palette compositing contracts (rendered verification remain
       expect(contrast(colors.onAccent, accent)).toBeGreaterThanOrEqual(4.5);
     expect(contrast(colors.text, colors.accent)).toBeLessThan(4.5);
   });
-  it("keeps glass menus and warm selection legible on both finishes", () => {
-    const frost = "rgba(18, 24, 32, 0.88)";
-    for (const background of [
-      colors.elevated,
-      css(composite(frost, colors.bg)),
-      css(composite(frost, colors.raised)),
-    ]) {
-      for (const ink of [colors.text, colors.dim, colors.muted]) {
-        expect(contrast(ink, background)).toBeGreaterThanOrEqual(4.5);
+  it("keeps Glass Canvas text and functional edges readable over the desk", () => {
+    const materials = [
+      "rgba(11, 15, 20, 0.8)",
+      "rgba(11, 15, 20, 0.82)",
+      "rgba(18, 24, 32, 0.82)",
+      "rgba(25, 33, 43, 0.88)",
+    ];
+    for (const face of materials) {
+      const overBrightImage = css(composite(face, "#FFFFFF"));
+      for (const ink of [colors.text, colors.dim]) {
+        expect(contrast(ink, overBrightImage)).toBeGreaterThanOrEqual(4.5);
       }
+    }
+    for (const background of [
+      colors.panel,
+      colors.raised,
+      colors.elevated,
+      ...materials.map((face) => css(composite(face, colors.elevated))),
+    ]) {
+      expect(contrast(colors.muted, background)).toBeGreaterThanOrEqual(4.5);
       expect(contrast(colors.border, background)).toBeGreaterThanOrEqual(3);
       expect(contrast("#72E9FF", background)).toBeGreaterThanOrEqual(3);
     }

@@ -15,6 +15,7 @@ use crate::accessibility::ViewPreferences;
 use crate::app;
 use crate::connection::ConnectionStatus;
 use crate::icons;
+use crate::material;
 use crate::orbit;
 use crate::startup_data;
 use crate::theme;
@@ -382,6 +383,7 @@ fn choose(state: &State, preferences: ViewPreferences, kit: &Kit, window: Option
                         .center()
                         .child(destination(
                             kit,
+                            preferences,
                             LOCAL,
                             &icons::WORKSTATION,
                             "Embedded",
@@ -390,6 +392,7 @@ fn choose(state: &State, preferences: ViewPreferences, kit: &Kit, window: Option
                         ))
                         .child(destination(
                             kit,
+                            preferences,
                             REMOTE,
                             &icons::SERVER,
                             "Distributed",
@@ -402,22 +405,21 @@ fn choose(state: &State, preferences: ViewPreferences, kit: &Kit, window: Option
 
 fn destination(
     kit: &Kit,
+    preferences: ViewPreferences,
     key: &'static str,
     glyph: &'static rune::Icon,
     title: &'static str,
     detail: &'static str,
     kind: BackendKind,
 ) -> El {
-    rune::col()
+    let tile = rune::col()
         .key(key)
         .size(150.0, 150.0)
         .center()
         .gap(7.0)
         .radius(12.0)
-        .fill(theme::hex(theme::SURFACE_RAISED))
         .hover(theme::hex(theme::SURFACE_ELEVATED))
         .press(theme::hex(theme::SURFACE))
-        .border(1.0, theme::hex(theme::BORDER_CONTROL))
         .focus_ring(2.0, 2.0, theme::hex(theme::ACCENT_HIGHLIGHT))
         .role("button")
         .focusable(true)
@@ -444,7 +446,8 @@ fn destination(
                 .font(kit.ty.small)
                 .color(theme::hex(theme::TEXT_SECONDARY))
                 .a11y_hidden(),
-        )
+        );
+    material::glass_control(tile, preferences)
 }
 
 fn activate_on_return(

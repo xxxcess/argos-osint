@@ -1,5 +1,5 @@
 import { installLiveFixture } from "./live-fixture";
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type CDPSession, type Page } from "@playwright/test";
 
 test.use({ reducedMotion: "reduce" });
 
@@ -206,10 +206,24 @@ const VIEWPORTS: Array<{ name: string; width: number; height: number }> = [
   { name: "320x800", width: 320, height: 800 },
 ];
 
+async function emulateTransparency(
+  session: CDPSession,
+  value: "no-preference" | "reduce",
+) {
+  await session.send("Emulation.setEmulatedMedia", {
+    features: [
+      { name: "prefers-reduced-motion", value: "reduce" },
+      { name: "prefers-reduced-transparency", value },
+    ],
+  });
+}
+
 for (const vp of VIEWPORTS) {
   test(`bulletin pressable article card @ ${vp.name}`, async ({ page }) => {
     await page.setViewportSize({ width: vp.width, height: vp.height });
     await mockApi(page);
+    const session = await page.context().newCDPSession(page);
+    await emulateTransparency(session, "no-preference");
     await page.goto("/");
     const launcher = page.getByRole("button", {
       name: "Open Intel",
@@ -221,28 +235,67 @@ for (const vp of VIEWPORTS) {
     ).toBeVisible();
     await page.screenshot({
       path: `${CAPTURE}/${vp.name}-home-ready.png`,
-      fullPage: true,
     });
     await launcher.click();
+    await page.mouse.move(0, 0);
+    const card = page
+      .getByRole("button", { name: /^Open Focus Brief:/ })
+      .first();
+    const header = page.locator("#intel-bulletin-header");
+    const taskbar = page.locator("#intel-status-bar");
+    const filter = page.getByRole("button", {
+      name: "Refresh feed",
+      exact: true,
+    });
+    const search = page.getByRole("textbox", {
+      name: "Search articles and actors",
+    });
+    await expect(card).toBeVisible();
+    const surfaces = [header, taskbar, card, filter, search];
+    const measureSurfaces = () =>
+      Promise.all(surfaces.map((surface) => surface.boundingBox()));
+    const taskbarPaint = () =>
+      taskbar.evaluate((element) => {
+        const paint = getComputedStyle(element, "::before");
+        return [paint.backgroundColor, paint.backdropFilter];
+      });
+    await expect(header).toHaveCSS(
+      "background-color",
+      "rgba(11, 15, 20, 0.82)",
+    );
+    await expect(header).toHaveCSS("backdrop-filter", "blur(10px)");
+    await expect
+      .poll(taskbarPaint)
+      .toEqual(["rgba(11, 15, 20, 0.82)", "blur(10px)"]);
+    await expect(card).toHaveCSS("background-color", "rgba(11, 15, 20, 0.8)");
+    await expect(card).toHaveCSS("border-top-color", "rgb(43, 52, 63)");
+    await expect(card).toHaveCSS("box-shadow", /inset/);
     await expect(
-      page.getByRole("button", { name: /^Open Focus Brief:/ }).first(),
-    ).toBeVisible();
+      page.getByRole("button", { name: "Bulletin", exact: true }),
+    ).toHaveCSS("background-color", "rgb(36, 29, 18)");
+    for (const control of [filter, search]) {
+      await expect(control).toHaveCSS(
+        "background-color",
+        "rgba(18, 24, 32, 0.82)",
+      );
+      await expect(control).toHaveCSS("border-top-color", "rgb(100, 117, 135)");
+      await expect(control).toHaveCSS("backdrop-filter", "none");
+    }
     await page.screenshot({
       path: `${CAPTURE}/${vp.name}-bulletin-quiet-action.png`,
       fullPage: true,
     });
-
-    const session = await page.context().newCDPSession(page);
-    await session.send("Emulation.setEmulatedMedia", {
-      features: [
-        { name: "prefers-reduced-motion", value: "reduce" },
-        { name: "prefers-reduced-transparency", value: "no-preference" },
-      ],
+    await page.screenshot({
+      path: `${CAPTURE}/${vp.name}-bulletin-glass-canvas.png`,
     });
+    await card.hover();
+    await expect(card).toHaveCSS("background-color", "rgba(25, 33, 43, 0.88)");
+    await expect(card).toHaveCSS("backdrop-filter", "blur(12px)");
+
     await page.getByRole("button", { name: /^Retained day / }).click();
     const menu = page.getByRole("menu");
-    await expect(menu).toHaveCSS("backdrop-filter", "blur(12px)");
-    await expect(menu).toHaveCSS("background-color", "rgba(18, 24, 32, 0.88)");
+    await expect(menu).toHaveCSS("backdrop-filter", "blur(16px)");
+    await expect(menu).toHaveCSS("background-color", "rgba(25, 33, 43, 0.88)");
     await expect(menu).toHaveCSS("box-shadow", /inset/);
     const day = menu.getByRole("button", { name: "Day 2026-10-25" });
     await expect(day).toHaveCSS("background-color", "rgb(36, 29, 18)");
@@ -256,31 +309,41 @@ for (const vp of VIEWPORTS) {
     ).toBe(true);
     await page.screenshot({
       path: `${CAPTURE}/${vp.name}-bulletin-glass-day-menu.png`,
-      fullPage: true,
     });
+    const surfaceBounds = await measureSurfaces();
 
-    await session.send("Emulation.setEmulatedMedia", {
-      features: [
-        { name: "prefers-reduced-motion", value: "reduce" },
-        { name: "prefers-reduced-transparency", value: "reduce" },
-      ],
-    });
+    await emulateTransparency(session, "reduce");
     await expect(menu).toHaveCSS("backdrop-filter", "none");
     await expect(menu).toHaveCSS("background-color", "rgb(25, 33, 43)");
     await expect(menu).toHaveCSS("border-top-color", "rgb(100, 117, 135)");
     expect(await day.boundingBox()).toEqual(bounds);
+    expect(await measureSurfaces()).toEqual(surfaceBounds);
     await page.screenshot({
       path: `${CAPTURE}/${vp.name}-bulletin-opaque-day-menu.png`,
-      fullPage: true,
     });
     await day.click();
     await expect(menu).toHaveCount(0);
+    await page.mouse.move(0, 0);
+    await expect(header).toHaveCSS("background-color", "rgb(11, 15, 20)");
+    await expect(header).toHaveCSS("backdrop-filter", "none");
+    await expect.poll(taskbarPaint).toEqual(["rgb(11, 15, 20)", "none"]);
+    await expect(card).toHaveCSS("background-color", "rgb(11, 15, 20)");
+    await expect(card).toHaveCSS("border-top-color", "rgb(100, 117, 135)");
+    for (const control of [filter, search]) {
+      await expect(control).toHaveCSS("background-color", "rgb(18, 24, 32)");
+    }
+    await page.screenshot({
+      path: `${CAPTURE}/${vp.name}-bulletin-opaque-canvas.png`,
+    });
 
     await page
       .getByRole("button", { name: "Background jobs", exact: true })
       .click();
     await expect(menu).toHaveCSS("backdrop-filter", "none");
     await expect(menu).toHaveCSS("background-color", "rgb(25, 33, 43)");
+    const jobMenuBounds = (await menu.boundingBox())!;
+    expect(jobMenuBounds.x).toBeGreaterThanOrEqual(0);
+    expect(jobMenuBounds.x + jobMenuBounds.width).toBeLessThanOrEqual(vp.width);
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth,
@@ -294,12 +357,18 @@ for (const vp of VIEWPORTS) {
   }) => {
     await page.setViewportSize({ width: vp.width, height: vp.height });
     await mockApi(page);
+    const session = await page.context().newCDPSession(page);
+    await emulateTransparency(session, "no-preference");
     await page.goto("/");
     await page.getByRole("button", { name: "Open Intel", exact: true }).click();
     await page
       .getByRole("button", { name: /^Open Focus Brief:/ })
       .first()
       .click();
+    const panel = page.locator("#intel-brief");
+    await expect(panel).toHaveCSS("background-color", "rgba(11, 15, 20, 0.8)");
+    await expect(panel).toHaveCSS("backdrop-filter", "blur(12px)");
+    await expect(panel).toHaveCSS("border-top-color", "rgb(43, 52, 63)");
     const ensure = page.getByRole("button", { name: "Ensure / resume brief" });
     const reload = page.getByRole("button", {
       name: "Reload article / new generation",
@@ -323,8 +392,17 @@ for (const vp of VIEWPORTS) {
     await expect(reload).toBeInViewport();
     await page.screenshot({
       path: `${CAPTURE}/${vp.name}-focus-brief-committing-actions.png`,
-      fullPage: true,
     });
+    const panelBounds = await panel.boundingBox();
+    await emulateTransparency(session, "reduce");
+    await expect(panel).toHaveCSS("background-color", "rgb(11, 15, 20)");
+    await expect(panel).toHaveCSS("backdrop-filter", "none");
+    await expect(panel).toHaveCSS("border-top-color", "rgb(100, 117, 135)");
+    expect(await panel.boundingBox()).toEqual(panelBounds);
+    await page.screenshot({
+      path: `${CAPTURE}/${vp.name}-focus-brief-opaque-panel.png`,
+    });
+    await session.detach();
   });
 
   test(`topology empty-selection state @ ${vp.name}`, async ({ page }) => {

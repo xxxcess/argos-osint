@@ -11,8 +11,11 @@ use rune::TextEdit;
 use rune::Transition;
 use rune_kit::Kit;
 
+use crate::accessibility::ViewPreferences;
 use crate::app::Page;
 use crate::icons;
+use crate::material;
+use crate::material::GlassSurface;
 use crate::theme;
 use crate::State;
 
@@ -199,13 +202,13 @@ fn on_field_key(state: &mut State, event: &KeyEvent) -> bool {
 }
 
 /// The toolbar button.
-pub(crate) fn toolbar_button(kit: &Kit, compact: bool) -> El {
+pub(crate) fn toolbar_button(kit: &Kit, compact: bool, preferences: ViewPreferences) -> El {
     let shortcut = if cfg!(target_os = "macos") {
         "⌘K"
     } else {
         "Ctrl+K"
     };
-    rune_kit::Button::new("Run a command")
+    let button = rune_kit::Button::new("Run a command")
         .variant(rune_kit::ButtonVariant::Ghost)
         .icon(&icons::COMMAND)
         .shortcut(shortcut)
@@ -225,9 +228,8 @@ pub(crate) fn toolbar_button(kit: &Kit, compact: bool) -> El {
         .key("command-open")
         .h(28.0)
         .px(11.0)
-        .radius(999.0)
-        .fill(theme::hex(theme::SURFACE_RAISED))
-        .border(1.0, theme::hex(theme::BORDER_SUBTLE))
+        .radius(999.0);
+    material::glass_control(button, preferences)
 }
 
 /// The command overlay, pushed to `layers` while it is open. It keeps the modal contract of a
@@ -236,7 +238,7 @@ pub(crate) fn toolbar_button(kit: &Kit, compact: bool) -> El {
 pub(crate) fn view(
     state: &State,
     kit: &Kit,
-    preferences: crate::accessibility::ViewPreferences,
+    preferences: ViewPreferences,
     narrow: bool,
     layers: &mut Vec<El>,
 ) {
@@ -320,14 +322,14 @@ pub(crate) fn view(
                     .color(kit.c.text_base),
             ),
         )
-        .child(close);
+        .child(material::glass_control(close, preferences));
     let body = rune::col()
         .key("body")
         .w_full()
         .px(16.0)
         .pb(16.0)
         .gap(10.0)
-        .child(search)
+        .child(material::glass_control(search, preferences))
         .child(rune_kit::popover::fit_scroll(list));
     let mut panel = rune::col()
         .key("command-panel-dialog")
@@ -347,7 +349,7 @@ pub(crate) fn view(
     for shadow in kit.shadow_layers(&kit.elevation.overlay) {
         panel = panel.box_shadow(shadow);
     }
-    let panel = crate::material::glass(panel, crate::material::GlassSurface::Overlay, preferences)
+    let panel = material::glass(panel, GlassSurface::Overlay, preferences)
         .focus_return("command-open")
         .modal(true, |state: &mut State| state.commands.close())
         .modal_click_outside(true);

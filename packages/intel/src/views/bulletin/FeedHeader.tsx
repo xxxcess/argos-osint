@@ -1,6 +1,6 @@
 "use client";
 // @tag:react-ui — bulletin feed date filter overlays cards instead of expanding the list.
-import { colors } from "@argos/ui";
+import { colors, glassProps } from "@argos/ui";
 import React, { useState } from "react";
 import { View, Text, Pressable, StyleSheet } from "react-native";
 import { DeskButton } from "../desk-ui";
@@ -39,6 +39,7 @@ export function FeedHeader({
         {days.length > 0 ? (
           <View style={[s.dayMenu, compact && s.compactDayMenu]}>
             <Pressable
+              {...glassProps.control}
               accessibilityRole="button"
               accessibilityLabel={`Retained day ${selectedDay}`}
               accessibilityState={{ expanded: daysOpen }}
@@ -56,6 +57,7 @@ export function FeedHeader({
             </Pressable>
             {daysOpen ? (
               <View
+                {...glassProps.overlay}
                 nativeID="intel-day-overlay"
                 accessibilityRole="menu"
                 style={s.dayOverlay}

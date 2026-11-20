@@ -1,4 +1,5 @@
 "use client";
+import { glassProps } from "@argos/ui";
 import React, { useState } from "react";
 import { View, Text, Pressable, StyleSheet } from "react-native";
 import { intelColors as c, intelRadius } from "../shell/intel-theme";
@@ -56,6 +57,7 @@ export function DeskButton({
   const [hovered, setHovered] = useState(false);
   return (
     <Pressable
+      {...glassProps.control}
       accessibilityRole="button"
       accessibilityLabel={label}
       accessibilityState={{ disabled }}

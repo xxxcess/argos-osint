@@ -8,6 +8,16 @@ nextjs-portal {
    keeps the two equal. Everything below derives from the variable. */
 :root {
   --intel-ui-scale: 0.75;
+  --glass-panel: #0b0f14;
+  --glass-chrome: #0b0f14;
+  --glass-control: #121820;
+  --glass-overlay: #19212b;
+  --glass-selected: #10272d;
+  --glass-hairline: #647587;
+  --glass-panel-blur: none;
+  --glass-chrome-blur: none;
+  --glass-overlay-blur: none;
+  --glass-rim: inset 0 1px 0 rgba(213, 220, 229, 0.14);
   --fleetworks-specular-rim: rgba(213, 220, 229, 0.2);
 }
 html {
@@ -26,7 +36,7 @@ html {
   zoom: calc(1 / var(--intel-ui-scale));
   overflow: hidden;
 }
-/* Matte Fleetworks paint; existing geometry and semantic colors are separate. */
+/* Glass Canvas paint. Geometry and semantic colors are separate. */
 * {
   box-sizing: border-box;
   scrollbar-width: thin;
@@ -165,7 +175,7 @@ a {
 }
 input,
 select {
-  background: #060709;
+  background: var(--glass-control);
   border: 1px solid #647587;
   border-radius: 8px;
   color: #d5dce5;
@@ -197,8 +207,10 @@ select {
 }
 #intel-home-launcher:is(:hover, :focus-visible)
   [data-testid="intel-launcher-tile"] {
-  background-color: #19212b;
+  background-color: var(--glass-overlay);
   box-shadow: inset 0 1px 0 var(--fleetworks-specular-rim);
+  -webkit-backdrop-filter: var(--glass-panel-blur);
+  backdrop-filter: var(--glass-panel-blur);
   border-color: #24dce3;
 }
 [data-testid^="article-card-"] {
@@ -275,8 +287,94 @@ select {
   z-index: 2;
   padding-bottom: 12px;
 }
-:is(#intel-day-overlay, #intel-job-menu) {
+/* Cards and frequent controls share translucent paint without individual blur
+   layers. Backdrop sampling is reserved for bounded, larger surfaces. */
+@media (prefers-reduced-transparency: no-preference) and (forced-colors: none) {
+  :root {
+    --glass-panel: rgba(11, 15, 20, 0.8);
+    --glass-chrome: rgba(11, 15, 20, 0.82);
+    --glass-control: rgba(18, 24, 32, 0.82);
+    --glass-overlay: rgba(25, 33, 43, 0.88);
+    --glass-selected: rgba(16, 39, 45, 0.84);
+    --glass-hairline: #2b343f;
+  }
+  @supports (backdrop-filter: blur(12px)) or
+    (-webkit-backdrop-filter: blur(12px)) {
+    :root {
+      --glass-panel-blur: blur(12px);
+      --glass-chrome-blur: blur(10px);
+      --glass-overlay-blur: blur(16px);
+    }
+  }
+}
+:root :is([data-glass="panel"], [data-glass="frame"]) {
+  background-color: var(--glass-panel);
+  border-inline-color: var(--glass-hairline);
+  border-bottom-color: var(--glass-hairline);
+  box-shadow: var(--glass-rim);
+  -webkit-backdrop-filter: var(--glass-panel-blur);
+  backdrop-filter: var(--glass-panel-blur);
+}
+:root [data-glass="panel"] {
+  border-top-color: var(--glass-hairline);
+}
+[data-glass="card"]:not(:hover, :focus-visible, :active) {
+  background-color: var(--glass-panel);
+  border-color: var(--glass-hairline);
+  box-shadow: var(--glass-rim);
+}
+[data-glass="card"]:is(:hover, :focus-visible, :active) {
+  background-color: var(--glass-overlay);
+  -webkit-backdrop-filter: var(--glass-panel-blur);
+  backdrop-filter: var(--glass-panel-blur);
+}
+[data-glass="card"]:is(:hover, :active):not(:focus-visible) {
   box-shadow: inset 0 1px 0 var(--fleetworks-specular-rim);
+}
+:root [data-glass="chrome"] {
+  background-color: var(--glass-chrome);
+  border-color: var(--glass-hairline);
+  box-shadow: var(--glass-rim);
+  -webkit-backdrop-filter: var(--glass-chrome-blur);
+  backdrop-filter: var(--glass-chrome-blur);
+}
+#intel-status-bar {
+  background-color: transparent;
+  border-top-color: var(--glass-hairline);
+}
+/* Keep the blur off the taskbar itself so the compact fixed Jobs menu stays
+   viewport-relative in both material preferences. */
+#intel-status-bar::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-color: var(--glass-chrome);
+  box-shadow: var(--glass-rim);
+  -webkit-backdrop-filter: var(--glass-chrome-blur);
+  backdrop-filter: var(--glass-chrome-blur);
+}
+:is(input, select, [data-glass="control"]):not(:focus-visible) {
+  box-shadow: var(--glass-rim);
+}
+:root :is(input, select),
+:root [data-glass="control"]:not([aria-pressed="true"]) {
+  background-color: var(--glass-control);
+}
+:root
+  [data-glass="control"]:is([aria-pressed="true"], :hover):not(
+    [aria-disabled="true"],
+    :active
+  ) {
+  background-color: var(--glass-selected);
+}
+:root [data-glass="overlay"] {
+  background-color: var(--glass-overlay);
+  border-color: var(--glass-hairline);
+  box-shadow: inset 0 1px 0 var(--fleetworks-specular-rim);
+  -webkit-backdrop-filter: var(--glass-overlay-blur);
+  backdrop-filter: var(--glass-overlay-blur);
 }
 #intel-day-overlay {
   min-width: 144px;
@@ -284,14 +382,9 @@ select {
   overflow-y: auto;
   overscroll-behavior: contain;
 }
-@media (prefers-reduced-transparency: no-preference) and (forced-colors: none) {
-  @supports (backdrop-filter: blur(12px)) or
-    (-webkit-backdrop-filter: blur(12px)) {
-    :is(#intel-day-overlay, #intel-job-menu) {
-      background-color: rgba(18, 24, 32, 0.88);
-      -webkit-backdrop-filter: blur(12px);
-      backdrop-filter: blur(12px);
-    }
+@media (forced-colors: active) {
+  [data-glass-texture="crescent"] {
+    visibility: hidden;
   }
 }
 @media (max-width: 599px) {

@@ -226,7 +226,7 @@ pub(crate) fn status_pill(
         .h(22.0)
         .px(8.0)
         .radius(999.0)
-        .fill(tone.bg())
+        .fill(tone.bg().alpha(kit.c.bg_button_neutral.a))
         .border(1.0, tone.border());
     if let Some(glyph) = glyph {
         badge = badge.child(icon(glyph, 12.0).color(fg).a11y_hidden());
@@ -506,18 +506,13 @@ pub(crate) fn inline_toggle_row<S: 'static>(
         .padding(10.0)
         .gap(8.0)
         .radius(8.0)
-        .fill(theme::hex(theme::SURFACE_RAISED))
-        .border(
-            1.0,
-            if checked {
-                theme::hex(theme::ACCENT_DEEP)
-            } else {
-                theme::hex(theme::BORDER_SUBTLE)
-            },
-        )
+        .fill(kit.c.bg_button_neutral)
         .center_y()
         .child(copy)
         .child(switch);
+    let control = kit
+        .shadow_layers(&kit.elevation.button_neutral)
+        .fold(control, El::box_shadow);
     if disabled {
         control
     } else {

@@ -10,10 +10,11 @@ import {
 import {
   intelColors as c,
   intelMetricColors,
+  intelRadius,
   intelStatus,
 } from "./intel-theme";
 import { intelFonts } from "./intel-fonts";
-import { colors, FleetworksMark } from "@argos/ui";
+import { colors, FleetworksMark, glassProps } from "@argos/ui";
 import type { JobState } from "./jobState";
 
 const subscribeHydration = () => () => {};
@@ -322,6 +323,7 @@ export function JobDropUp({ jobs }: { jobs: StatusJob[] }) {
       </Pressable>
       {open ? (
         <View
+          {...glassProps.overlay}
           nativeID="intel-job-menu"
           accessibilityRole="menu"
           style={s.jobMenu}
@@ -414,7 +416,7 @@ const s = StyleSheet.create({
   jobHeading: {
     fontFamily: intelFonts.mono,
     fontSize: 13,
-    color: c.muted,
+    color: c.dim,
   },
   jobRow: { flexDirection: "row", alignItems: "flex-start", gap: 8 },
   jobLabel: {
@@ -472,15 +474,16 @@ const s = StyleSheet.create({
     height: "100%",
     justifyContent: "center",
     paddingHorizontal: 12,
-    backgroundColor: c.inset,
-    borderBottomWidth: 2,
-    borderBottomColor: c.accent,
+    backgroundColor: colors.moltenSurface,
+    borderRadius: intelRadius.control,
+    borderWidth: 1,
+    borderColor: colors.molten,
   },
   appText: {
     fontFamily: intelFonts.mono,
     fontSize: 17,
     fontWeight: "700",
-    color: c.accent,
+    color: colors.molten,
   },
   appTextWide: { fontSize: 21 },
   telemetry: {

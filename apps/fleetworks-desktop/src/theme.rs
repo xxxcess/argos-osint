@@ -1,4 +1,4 @@
-//! Matte deep-space colors shared by the actual views and their fixtures.
+//! Glass Canvas colors shared by the production views and fixtures.
 //!
 //! One uninterrupted `#060709` canvas, charcoal tonal steps, cool gray text and seven status
 //! hues that always travel with a label or icon. Warm accents identify current selections.
@@ -72,10 +72,6 @@ pub const ENTITY_TECH: &str = "#21D9EE";
 pub const ENTITY_COMPUTE: &str = "#FFB347";
 pub const ENTITY_CLUSTER: &str = "#CAD9F0";
 pub const ENTITY_GRAPH: &str = "#B48EFF";
-
-/// Static decorative edge opacity, independent of functional boundaries/focus.
-pub const CARD_EDGE_ALPHA: f32 = 0.04;
-pub const SATIN_CONTROL_EDGE_ALPHA: f32 = 0.07;
 
 /// Parse a static theme hex color into a `rune::Color`.
 pub(crate) fn hex(value: &str) -> Color {

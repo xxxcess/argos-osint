@@ -34,6 +34,7 @@ use rune_kit::shell::SidebarHeader;
 use rune_kit::shell::SidebarRow;
 use rune_kit::shell::SplitView;
 use rune_kit::shell::Toolbar;
+use rune_kit::shell::TOOLBAR_HEIGHT;
 use rune_kit::Button;
 use rune_kit::ButtonVariant;
 use rune_kit::ControlSize;
@@ -41,6 +42,7 @@ use rune_kit::IconButton;
 use rune_kit::IconButtonVariant;
 
 use crate::accessibility::Accessibility;
+use crate::accessibility::ViewPreferences;
 use crate::backend::Backend;
 use crate::backend::ReadKind;
 use crate::brain::Brain;
@@ -66,6 +68,8 @@ use crate::logs::ActivityTab;
 use crate::logs::LogAction;
 use crate::logs::LogState;
 use crate::maintenance::Maintenance;
+use crate::material;
+use crate::material::GlassSurface;
 use crate::rebind::Rebind;
 use crate::registration::Registration;
 use crate::submission::SubmissionKind;
@@ -1655,6 +1659,7 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
         (false, false) => title_page.title(),
     };
     let gateway = gateway_toolbar_button(state, &kit, compact_toolbar, connection_tone);
+    let gateway = material::glass_control(gateway, preferences);
     // The chat aux panel stays off until the typed chat contract lands. The original context
     // rail keeps its place meanwhile.
     let assistant_room = if state.assistant.enabled && state.connected() && !state.setup_gateway {
@@ -1667,13 +1672,18 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     });
     let mut trailing = rune::row().gap(6.0).center_y();
     if state.assistant.enabled && state.connected() && !state.setup_gateway {
-        trailing = trailing.child(crate::assistant::toggle(
+        let toggle = crate::assistant::toggle(
             assistant_placement != crate::assistant::Placement::Hidden,
             &kit,
-        ));
+        );
+        trailing = trailing.child(material::glass_control(toggle, preferences));
     }
     if state.connected() {
-        trailing = trailing.child(toolbar_telemetry(state, &kit, compact_toolbar));
+        trailing = trailing.child(material::glass(
+            toolbar_telemetry(state, &kit, compact_toolbar),
+            GlassSurface::Control,
+            preferences,
+        ));
     }
     let toolbar = Toolbar::new()
         .leading(
@@ -1682,12 +1692,16 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
                 .color(kit.c.text_base)
                 .truncate(),
         )
-        .center(crate::command_panel::toolbar_button(&kit, compact_toolbar))
-        .trailing(
-            trailing
-                .child(gateway)
-                .child(crate::inbox::toolbar_item(state, &kit)),
-        );
+        .center(crate::command_panel::toolbar_button(
+            &kit,
+            compact_toolbar,
+            preferences,
+        ))
+        .trailing(trailing.child(gateway).child(crate::inbox::toolbar_item(
+            state,
+            &kit,
+            preferences,
+        )));
 
     let any_busy = state.connection.status == ConnectionStatus::Connecting
         || state.pairing.busy()
@@ -1705,14 +1719,7 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
         .min_w(0.0)
         .min_h(0.0);
     if !state.setup_gateway {
-        let mut scope_bar = rune::row()
-            .w_full()
-            .px(20.0)
-            .py(10.0)
-            .gap(10.0)
-            .center_y()
-            .fill(theme::hex(theme::SURFACE))
-            .border_sides([0.0, 0.0, 1.0, 0.0], theme::hex(theme::BORDER_SUBTLE));
+        let mut scope_bar = rune::row().w_full().px(20.0).py(10.0).gap(10.0).center_y();
         if state.connected() {
             scope_bar = scope_bar.child(
                 rune::text(scope)
@@ -1762,7 +1769,9 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
                 connection_tone,
                 &kit,
             ));
-        content = content.child(scope_bar);
+        content = content.child(
+            material::glass(scope_bar, GlassSurface::Chrome, preferences).backdrop_blur(0.0),
+        );
     }
 
     let screen_key = if state.setup_gateway {
@@ -1773,6 +1782,18 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
         format!("screen-{}", state.page.key())
     };
     let page_body = views::page(state, cx, &kit, &mut layers);
+    let floating_layer_open =
+        !layers.is_empty() || state.settings_open || state.inbox.open || state.commands.open;
+    let chrome = |el| {
+        let glass = material::glass(el, GlassSurface::Chrome, preferences);
+        if floating_layer_open {
+            // Leave Rune's limited backdrop slots available for the open overlay.
+            glass.backdrop_blur(0.0)
+        } else {
+            glass
+        }
+    };
+
     // Only the content changes identity on navigation. Keep the shell, toolbar and canvas in place.
     let page_transition = if state.setup_gateway {
         Transition::offset(0.0, 5.0)
@@ -1797,13 +1818,13 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     let content = content.child(screen);
     let mut main = rune::row().key("main-area").w_full().h_full().min_h(0.0);
     if compact_rail {
-        main = main.child(compact_icon_rail(
+        main = main.child(chrome(compact_icon_rail(
             state,
             &kit,
             &selected_rail_kit,
             connection_tone,
             preferences,
-        ));
+        )));
     }
     main = main.child(content);
     if !state.assistant.enabled
@@ -1888,27 +1909,31 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
         split = split.sidebar(
             &state.sidebar,
             |state: &mut State| &mut state.sidebar,
-            sidebar_el,
+            chrome(sidebar_el),
         );
     }
-    let base = split.build(&kit).key("app-shell");
+    // The split shell owns the controls, window drag region, and sidebar grip. Paint its
+    // full-width top band as a sibling underlay so those hit regions stay in place.
+    let toolbar_glass = chrome(
+        rune::el()
+            .key("toolbar-glass")
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h(TOOLBAR_HEIGHT)
+            .paint_order(-1)
+            .a11y_hidden(),
+    );
+    let mut shell_kit = kit.clone();
+    shell_kit.c.bg_base = theme::hex(theme::BACKGROUND);
+    let base = split
+        .build(&shell_kit)
+        .key("app-shell")
+        .child(toolbar_glass);
     let base = mark_fixture(state, &kit, base);
     if let Some(mark) = crate::startup::rail_handoff(state, cx, preferences) {
         layers.insert(0, mark);
     }
-    rune_kit::root(base, layers)
-        .on_window_focus(State::log_window_focus)
-        .on_pointer_move_local(|state: &mut State, pointer, tx| {
-            let nx = (pointer.window_x / 1180.0).clamp(0.0, 1.0);
-            let ny = (pointer.window_y / 780.0).clamp(0.0, 1.0);
-            state
-                .pointer_offset
-                .set([(nx - 0.5) * 56.0, (ny - 0.5) * 38.0]);
-            state
-                .shadow_offset
-                .set([(0.5 - nx) * 16.0, (0.5 - ny) * 14.0]);
-            tx.live_only();
-        })
+    rune_kit::root(base, layers).on_window_focus(State::log_window_focus)
 }
 
 fn mark_fixture(state: &State, kit: &rune_kit::Kit, view: El) -> El {
@@ -1965,8 +1990,6 @@ fn gateway_toolbar_button(
         .h(28.0)
         .px(8.0)
         .radius(999.0)
-        .fill(tone.bg())
-        .border(1.0, tone.border())
 }
 
 fn toolbar_telemetry(state: &State, kit: &rune_kit::Kit, compact: bool) -> El {
@@ -2035,9 +2058,7 @@ fn toolbar_telemetry(state: &State, kit: &rune_kit::Kit, compact: bool) -> El {
         .px(8.0)
         .gap(9.0)
         .center_y()
-        .radius(999.0)
-        .fill(theme::hex(theme::SURFACE_RAISED))
-        .border(1.0, theme::hex(theme::BORDER_SUBTLE));
+        .radius(999.0);
     if compact {
         let busiest = samples
             .iter()
@@ -2060,7 +2081,7 @@ fn compact_icon_rail(
     kit: &rune_kit::Kit,
     selected_kit: &rune_kit::Kit,
     connection_tone: StatusTone,
-    preferences: crate::accessibility::ViewPreferences,
+    preferences: ViewPreferences,
 ) -> El {
     let nav_icon = |icon, label: &'static str, selected| {
         let palette = if selected { selected_kit } else { kit };
@@ -2090,8 +2111,6 @@ fn compact_icon_rail(
         .px(6.0)
         .gap(6.0)
         .items_center()
-        .fill(theme::hex(theme::SURFACE))
-        .border_sides([0.0, 1.0, 0.0, 0.0], theme::hex(theme::BORDER_SUBTLE))
         .child(crate::startup::rail_mark(state, 28.0, preferences))
         .child(
             rune::col()

@@ -19,6 +19,7 @@ use rune_kit::Kit;
 
 use crate::accessibility::ViewPreferences;
 use crate::icons;
+use crate::material;
 use crate::material::GlassSurface;
 use crate::theme;
 use crate::theme::StatusTone;
@@ -610,18 +611,18 @@ impl State {
     }
 }
 
-pub(crate) fn toolbar_item(state: &State, kit: &Kit) -> El {
-    tray(state, kit, "inbox-toggle")
+pub(crate) fn toolbar_item(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
+    tray(state, kit, "inbox-toggle", preferences)
 }
 
-fn tray(state: &State, kit: &Kit, key: &'static str) -> El {
+fn tray(state: &State, kit: &Kit, key: &'static str, preferences: ViewPreferences) -> El {
     let unread = state.inbox.unread();
     let label = if unread == 0 {
         "Inbox".to_owned()
     } else {
         format!("Inbox, {unread} unread")
     };
-    rune_kit::Button::new(label.clone())
+    let bell = rune_kit::Button::new(label.clone())
         .variant(rune_kit::ButtonVariant::Ghost)
         .icon(&BELL)
         .expanded(state.inbox.open)
@@ -656,7 +657,15 @@ fn tray(state: &State, kit: &Kit, key: &'static str) -> El {
         .label(label)
         .h(28.0)
         .px(8.0)
-        .radius(999.0)
+        .radius(999.0);
+    let bell = material::glass_control(bell, preferences);
+    if state.inbox.open {
+        bell.fill(
+            theme::hex(theme::SURFACE_ELEVATED).alpha(if preferences.matte() { 1.0 } else { 0.82 }),
+        )
+    } else {
+        bell
+    }
 }
 
 pub(crate) fn popover(
@@ -691,7 +700,7 @@ pub(crate) fn popover(
     for shadow in kit.shadow_layers(&kit.elevation.overlay) {
         panel = panel.box_shadow(shadow);
     }
-    let panel = crate::material::glass(panel, GlassSurface::Overlay, preferences);
+    let panel = material::glass(panel, GlassSurface::Overlay, preferences);
     let scrim = rune::el()
         .key("inbox-scrim")
         .absolute(0.0, 0.0)
@@ -732,10 +741,8 @@ pub(crate) fn popover(
                 .key("inbox-modal-tray-position")
                 .absolute(x, y)
                 .size(width, height)
-                .radius(999.0)
-                .fill(theme::hex(theme::SURFACE_RAISED))
                 .child(
-                    tray(state, kit, "inbox-toggle-close")
+                    tray(state, kit, "inbox-toggle-close", preferences)
                         .w_full()
                         .h_full()
                         .tab_index(-1),
@@ -834,8 +841,8 @@ fn body(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
                                 .grow(1.0)
                                 .wrap(),
                         )
-                        .child(mark)
-                        .child(close),
+                        .child(material::glass_control(mark, preferences))
+                        .child(material::glass_control(close, preferences)),
                 )
                 .child(
                     rune::text("Only changes observed by this workstation.")
@@ -844,7 +851,7 @@ fn body(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
                         .color(theme::hex(theme::TEXT_MUTED))
                         .wrap(),
                 )
-                .child(filter),
+                .child(material::glass_control(filter, preferences)),
         )
         .child(
             rune::col()
@@ -938,21 +945,10 @@ fn group_view(group: &Group<'_>, state: &State, kit: &Kit, preferences: ViewPref
     } else {
         theme::BORDER_SUBTLE
     });
-    let mut card = rune::col()
-        .key("card")
-        .w_full()
-        .radius(8.0)
-        .fill(theme::hex(theme::SURFACE_ELEVATED))
-        .border(1.0, border)
-        .child(trigger);
-    if !preferences.matte() {
-        card = card.box_shadow(rune::Shadow {
-            y: 1.0,
-            inset: true,
-            color: theme::hex(theme::LIGHT_SURFACE_GLOW).alpha(0.18),
-            ..rune::Shadow::default()
-        });
-    }
+    let card = rune::col().key("card").w_full().radius(8.0).child(trigger);
+    // The popover samples the backdrop once. Its stacked cards share the elevated tint
+    // and rim without repeatedly blurring the same scene.
+    let mut card = material::glass(card, GlassSurface::Overlay, preferences).backdrop_blur(0.0);
     if expanded {
         for item in &group.items {
             card = card.child(row(item, state, kit));
@@ -967,7 +963,13 @@ fn group_view(group: &Group<'_>, state: &State, kit: &Kit, preferences: ViewPref
                         .grow(1.0)
                         .h(3.0)
                         .radius(2.0)
-                        .fill(theme::hex(theme::SURFACE_RAISED))
+                        .fill(
+                            theme::hex(theme::SURFACE_RAISED).alpha(if preferences.matte() {
+                                1.0
+                            } else {
+                                0.82
+                            }),
+                        )
                         .border_sides([0.0, 1.0, 1.0, 1.0], border),
                 ),
             );
@@ -1566,6 +1568,48 @@ mod tests {
                 crate::assistant::Preference::Open
             );
             assert_eq!(runtime.state.page, crate::app::Page::Workstation);
+        }
+    }
+
+    #[test]
+    fn glass_and_opaque_chrome_and_inbox_keep_the_same_hit_bounds() {
+        use crate::accessibility::FixtureAccessibility;
+
+        for size in [(640.0, 480.0), (1280.0, 800.0)] {
+            let build = |opaque| {
+                let mut state = crate::tests::registered_fixture();
+                state.seed_inbox_drawer_fixture();
+                state.accessibility.fixture_override = Some(FixtureAccessibility {
+                    reduced_transparency: opaque,
+                    matte_fallback: opaque,
+                    ..FixtureAccessibility::default()
+                });
+                runtime(state, size)
+            };
+            let glass = build(false);
+            let opaque = build(true);
+            let rail = if size.0 < 820.0 {
+                "compact-icon-rail"
+            } else {
+                "sidebar"
+            };
+            for key in [
+                "toolbar-glass",
+                rail,
+                "command-open",
+                "connection-editor",
+                "inbox-toggle",
+                "inbox-body",
+                "inbox-filter",
+            ] {
+                let glass_bounds = glass.presented(key).unwrap_or_else(|| panic!("{key}"));
+                assert_eq!(
+                    Some(glass_bounds),
+                    opaque.presented(key),
+                    "{key} at {size:?}"
+                );
+            }
+            assert_eq!(glass.accessibility_json(), opaque.accessibility_json());
         }
     }
 

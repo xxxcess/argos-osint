@@ -9,7 +9,7 @@ import {
   ActivityIndicator,
 } from "react-native";
 
-// Matte Fleetworks paint. Existing geometry and semantic colors remain separate.
+// Glass Canvas tokens. Semantic colors and layout remain independent.
 export const colors = {
   bg: "#060709",
   panel: "#0B0F14",
@@ -32,7 +32,7 @@ export const colors = {
   success: "#23dfa0",
   warning: "#f1c84b",
   danger: "#f280a0",
-  // Compatibility names retain existing consumers with opaque matte fills.
+  // Opaque fills also supply the reduced-transparency and native baselines.
   glass: "#0B0F14",
   glassStrong: "#121820",
   glassBorder: "#647587",
@@ -46,10 +46,21 @@ export const fonts = {
 };
 // Web-only style props (RN Web supports them); typed loosely for RN.
 type WebStyle = Record<string, unknown>;
-export const matteCard: WebStyle = {
+// RN Web forwards dataSet to data-* attributes. The document stylesheet owns
+// media queries and backdrop filters, so server rendering needs no preferences listener.
+export const glassProps = {
+  panel: { dataSet: { glass: "panel" } },
+  frame: { dataSet: { glass: "frame" } },
+  card: { dataSet: { glass: "card" } },
+  chrome: { dataSet: { glass: "chrome" } },
+  control: { dataSet: { glass: "control" } },
+  overlay: { dataSet: { glass: "overlay" } },
+};
+
+export const glass: WebStyle = {
   backgroundColor: colors.panel,
   borderWidth: 1,
-  borderColor: colors.cardEdge,
+  borderColor: colors.border,
 };
 export const matteDarkControl: WebStyle = {
   backgroundColor: colors.raised,
@@ -60,37 +71,9 @@ export const mutedGoldPrimary: WebStyle = {
   backgroundColor: colors.accent,
   borderColor: colors.accent,
 };
-// Existing consumers retain their API while the visual treatment becomes matte.
-export const glass = matteCard;
 export const glow = (color: string): WebStyle => ({
   boxShadow: `inset 0 0 0 1px ${color}`,
 });
-/**
- * The diffuse perimeter of a group (theme.md section 2): a smoothstep alpha ramp of `ramp` px
- * inward from a `radius` boundary, content inset by `inset`. CSS has no alpha mask for a
- * background alone, so a canvas-colored inset shadow with `spread` and `blur = 2 sigma` draws a
- * Gaussian ramp fitted to the smoothstep (within 0.03 alpha, under one 8-bit level on these
- * colors). The same fit is used by the native `GroupEdge`. Children are never attenuated.
- */
-export const groupEdge = {
-  standard: { radius: 20, ramp: 16, inset: 24, spread: 8, blur: 7.5 },
-  compact: { radius: 16, ramp: 12, inset: 20, spread: 6, blur: 5.6 },
-};
-export type GroupEdge = (typeof groupEdge)[keyof typeof groupEdge];
-/** The group's coverage `depth` px inside its boundary: `t*t*(3-2t)`, `t = depth / ramp`. */
-export function groupAlpha(edge: GroupEdge, depth: number): number {
-  const t = Math.min(1, Math.max(0, depth / edge.ramp));
-  return t * t * (3 - 2 * t);
-}
-export function groupSurface(edge: GroupEdge): WebStyle {
-  return {
-    backgroundColor: colors.panel,
-    borderWidth: 0,
-    borderRadius: edge.radius,
-    padding: edge.inset,
-    boxShadow: `inset 0 0 ${edge.blur}px ${edge.spread}px ${colors.bg}`,
-  };
-}
 /**
  * Actions that submit, confirm, create or delete (Connect submits) carry the coarse matte rock
  * texture; every other control stays smooth. Fills and ink follow docs/design/matte-canvas/theme.md.
@@ -137,10 +120,13 @@ export const rockTextureStyle: WebStyle = {
   backgroundPosition: "0 0",
   backgroundRepeat: "repeat",
 };
-/** The texture layer of an action: fills the control, never takes input, hidden from readers. */
+const crescentTexture = { dataSet: { glassTexture: "crescent" } };
+
+/** The texture layer fills the control without taking input or announcing itself. */
 export function RockTexture({ opacity }: { opacity: number }) {
   return (
     <View
+      {...crescentTexture}
       aria-hidden
       pointerEvents="none"
       style={[StyleSheet.absoluteFill, rockTextureStyle as object, { opacity }]}
@@ -171,7 +157,7 @@ export function StatusTag({
     </Text>
   );
 }
-/** Matte container retaining the existing tone-tinted top rule. */
+/** Glass container retaining the existing tone-tinted top rule. */
 export function Frame({
   children,
   tone = "accent",
@@ -181,6 +167,7 @@ export function Frame({
 }) {
   return (
     <View
+      {...glassProps.frame}
       style={[
         s.frame,
         glass as object,
@@ -260,6 +247,7 @@ export function Button({
   return (
     <Pressable
       accessibilityRole="button"
+      {...(!tint && variant !== "primary" && !active && glassProps.control)}
       accessibilityLabel={label}
       accessibilityState={{ disabled }}
       aria-pressed={active}
@@ -338,7 +326,7 @@ export function Panel({
   title?: string;
 }) {
   return (
-    <View style={s.panel}>
+    <View {...glassProps.panel} style={s.panel}>
       {title ? (
         <Text accessibilityRole="header" style={s.panelTitle}>
           {title}
@@ -449,7 +437,9 @@ const s = StyleSheet.create({
   },
   disabledText: { color: colors.muted },
   panel: {
-    ...groupSurface(groupEdge.standard),
+    ...glass,
+    borderRadius: 20,
+    padding: 24,
     gap: 16,
     minWidth: 0,
   },

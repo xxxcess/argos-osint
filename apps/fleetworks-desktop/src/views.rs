@@ -187,7 +187,7 @@ fn backend_mode_card(
             .child(quiet(description, kit).selectable(false).a11y_hidden());
         if !busy {
             option = option
-                .hover(theme::hex(theme::SURFACE_ELEVATED))
+                .hover(kit.c.layer_03)
                 .on_press(move |state: &mut State| state.set_backend_kind(kind));
         }
         options = options.child(material::choice_tile(option, selected, preferences));
@@ -205,9 +205,8 @@ fn backend_mode_card(
                 kit,
             ))
             .child(options),
-        StatusTone::Neutral,
-        false,
         compact,
+        preferences,
     )
 }
 
@@ -568,14 +567,7 @@ fn local_backend_setup_card(
         }
     }
 
-    let tone = if state.connected() {
-        StatusTone::Ok
-    } else if matches!(state.connection.status, ConnectionStatus::Failed(_)) {
-        StatusTone::Err
-    } else {
-        StatusTone::Accent
-    };
-    material::responsive_card(body, tone, false, compact)
+    material::responsive_card(body, compact, preferences)
 }
 
 pub(crate) fn setup_gateway(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
@@ -831,13 +823,11 @@ fn pairing_status(
                     preferences,
                     kit,
                 ))
-                .child(
+                .child(material::glass_panel(
                     rune::col()
                         .padding(12.0)
                         .gap(6.0)
                         .radius(8.0)
-                        .fill(theme::hex(theme::SURFACE_RAISED))
-                        .border(1.0, theme::hex(theme::ACCENT_DEEP))
                         .child(quiet("Approval code", kit))
                         .child(
                             rune::text(challenge.approval_code.clone())
@@ -848,7 +838,8 @@ fn pairing_status(
                         )
                         .child(quiet("Pairing request", kit))
                         .child(quiet(challenge.pairing_id.clone(), kit).key("pairing-request-id")),
-                )
+                    preferences,
+                ))
                 .child(
                     rune::row().child(
                         ActionButton::new("Pair again")
@@ -1816,7 +1807,6 @@ fn actor_search_summary_card(
     summary: ActorSearchSummary,
 ) -> El {
     let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
-    let shadow_ref = (!preferences.matte()).then_some(&state.shadow_offset);
     let disabled_reason = state.maintenance_disabled_reason(MaintenanceOperation::ReindexActors);
     let refreshing =
         state.readiness_pending() || matches!(state.readiness, Load::Pending | Load::Loading);
@@ -1987,13 +1977,10 @@ fn actor_search_summary_card(
         }
     }
 
-    material::luminous_card(
-        card_body,
-        summary.tone,
-        false,
+    material::glass(
+        card_body.padding(24.0).radius(20.0),
+        material::GlassSurface::Panel,
         preferences,
-        pointer_ref,
-        shadow_ref,
     )
 }
 

@@ -240,6 +240,7 @@ pub(crate) fn toolbar_button(kit: &Kit, compact: bool, preferences: ViewPreferen
         .build(kit)
         .key("command-open")
         .w(width)
+        .shrink()
         .h(28.0)
         .px(11.0)
         .radius(999.0);

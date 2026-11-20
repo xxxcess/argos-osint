@@ -1929,6 +1929,9 @@ fn workstation_toolbar(
     use crate::command_panel::TOOLBAR_COMMAND_LABELED_WIDTH;
 
     const TRAILING_GAP: f32 = 6.0;
+    const TOOLBAR_EDGE_INSET: f32 = 12.0;
+    const TOOLBAR_FLOW_GAP: f32 = 8.0;
+    const TRAILING_CLEARANCE: f32 = TOOLBAR_EDGE_INSET + 2.0 * TOOLBAR_FLOW_GAP;
     const GATEWAY_ICON: f32 = 32.0;
     const GATEWAY_LABELED: f32 = 152.0;
     const TELEMETRY_COMPACT: f32 = 76.0;
@@ -1947,10 +1950,14 @@ fn workstation_toolbar(
             0.0
         };
     let leading_inset = if open_sidebar {
-        12.0
+        TOOLBAR_EDGE_INSET
     } else {
         let lights = cx.titlebar_inset();
-        let edge = if lights > 0.0 { lights + 8.0 } else { 12.0 };
+        let edge = if lights > 0.0 {
+            lights + 8.0
+        } else {
+            TOOLBAR_EDGE_INSET
+        };
         edge + if has_sidebar { 32.0 } else { 0.0 }
     };
     let show_assistant = state.assistant.enabled && state.connected() && !state.setup_gateway;
@@ -1974,20 +1981,26 @@ fn workstation_toolbar(
     };
     let fits = |command, gateway, telemetry| {
         let half_room = (width - command) / 2.0;
-        half_room >= leading_inset + 8.0
-            && half_room >= trailing_width(gateway, telemetry) + 12.0 + 16.0
+        half_room >= leading_inset + TOOLBAR_FLOW_GAP
+            && half_room >= trailing_width(gateway, telemetry) + TRAILING_CLEARANCE
     };
-    let telemetry_width = if state.connected() {
-        if fits(
-            TOOLBAR_COMMAND_COMPACT_WIDTH,
-            GATEWAY_ICON,
-            TELEMETRY_LABELED,
-        ) {
-            TELEMETRY_LABELED
-        } else {
-            TELEMETRY_COMPACT
-        }
+    let telemetry_width = if !state.connected() {
+        0.0
+    } else if fits(
+        TOOLBAR_COMMAND_COMPACT_WIDTH,
+        GATEWAY_ICON,
+        TELEMETRY_LABELED,
+    ) {
+        TELEMETRY_LABELED
+    } else if width
+        >= leading_inset
+            + TOOLBAR_COMMAND_COMPACT_WIDTH
+            + trailing_width(GATEWAY_ICON, TELEMETRY_COMPACT)
+            + TRAILING_CLEARANCE
+    {
+        TELEMETRY_COMPACT
     } else {
+        // Before the compact rail is measured, the full rail can consume this space.
         0.0
     };
     let wide_gateway = fits(

@@ -2597,13 +2597,9 @@ test.describe("revamp connection scene", () => {
       page.getByRole("status", { name: "Checking local API…" }),
     ).toBeVisible();
     await expect(page.locator("canvas")).toHaveCount(1);
-    await expect
-      .poll(() =>
-        page
-          .locator("#intel-landing-status")
-          .evaluate((node) => Number(getComputedStyle(node).opacity)),
-      )
-      .toBeGreaterThan(0.95);
+    const statusMessage = page.locator("#intel-landing-status");
+    await expect(statusMessage).toHaveCSS("opacity", "1");
+    await expect(statusMessage).toHaveCSS("animation-name", "none");
     const stage = (await page.locator("#intel-landing").boundingBox())!;
     const canvas = (await page.locator("canvas").boundingBox())!;
     const bar = (await page.locator("#intel-status-bar").boundingBox())!;
@@ -2622,7 +2618,7 @@ test.describe("revamp connection scene", () => {
     ).toBeLessThanOrEqual(1);
     expect(Math.abs(canvas.width - stage.width)).toBeLessThanOrEqual(1);
     expect(Math.abs(canvas.height - stage.height)).toBeLessThanOrEqual(1);
-    const status = (await page.locator("#intel-landing-status").boundingBox())!;
+    const status = (await statusMessage.boundingBox())!;
     const scale = await page
       .locator("html")
       .evaluate((element) => Number(getComputedStyle(element).zoom));

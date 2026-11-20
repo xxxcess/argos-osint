@@ -6,7 +6,7 @@
 
 ## Status and authority
 
-This is the approved visual target for Fleetworks native and Intel Web, recorded **2026-11-16 (America/New_York)**. It supersedes earlier gold/ivory interface palettes, satin or liquid-metal control finishes, persistent sheen and pointer lighting. The material emblem retains its own appearance. This change is **documentation only**: source integration, renderer measurements, accessibility checks and production-view verification remain pending.
+This is the approved visual target for Fleetworks native and Intel Web, revised **2026-11-20 (America/New_York)**. It uses dark frosted glass, static liquid-metal rims, and warm accents in selected chrome. Persistent sheen and pointer lighting remain excluded. Record source integration, accessibility measurements, and production-view verification separately.
 
 The audited source baseline is `nightly` at `00b700afd77ddac6cba2e2bd7ae91ab3802b7197` (tree `5051474185a8eb14b38e607480bb24c65352fff0`). Existing helper names below identify integration points, not already-implemented target behavior. The [native allowlist](../../wiki/code/native-design-system.md#complete-native-control-allowlist), connection contracts and web information architecture remain authoritative for controls and effects. This theme creates no new operation, authority, API call, chat surface or settings mode.
 
@@ -18,13 +18,13 @@ The audited source baseline is `nightly` at `00b700afd77ddac6cba2e2bd7ae91ab3802
 | Activity and localized loading | Compact overview |
 | [![Jobs and logs](mockups/03-jobs-logs.png)](mockups/03-jobs-logs.png) | [![Compact workstation](mockups/04-compact-workstation.png)](mockups/04-compact-workstation.png) |
 
-These generated mockups establish composition and material direction. Numbers, hosts, identities, timestamps and platform labels are illustrative. They are not Rune/browser captures or evidence of backend state. The rules below resolve incidental image artifacts: the canvas is uniform, text is crisp, ordinary surfaces have no reflection, and only genuinely pending regions receive loading motion. A displayed historical Ready result plus Stale describes an older observation, not current readiness.
+These generated mockups establish composition and material direction. Numbers, hosts, identities, timestamps and platform labels are illustrative. They are not Rune/browser captures or evidence of backend state. The rules below resolve incidental image artifacts: the canvas is uniform, text is crisp, ordinary surfaces stay matte, and only genuinely pending regions receive loading motion. A displayed historical Ready result plus Stale describes an older observation, not current readiness.
 
 ## 1. Canvas, color and branding
 
 Use an opaque **`#060709`** canvas for the window, web page, backend chooser and inset reading beds. Avoid stars, grain, vignettes or a wallpaper across working screens. The logo can contain its approved stars, molten core and reflective glass; its prepared asset edges must blend into this canvas or be transparent. Never stretch a poster to fill a logo slot.
 
-Brand with the **symbol only**. Do not place a visible “Fleetworks” wordmark beside the mark or repeat it in page headings, cards or toolbars. Retain the product name in application metadata, OS identity, accessible naming where needed and documentation. Keep existing slot/API responsibilities, including `FleetworksMark` and native `BRAND_MARK`; replacing their artwork is implementation work. At small sizes use the documented silhouette fallback, preserving one crescent, one sphere and five triangles. Large backend chooser art may retain material detail. Do not repeat reflective logo treatments on controls.
+Brand with the **symbol only**. Do not place a visible “Fleetworks” wordmark beside the mark or repeat it in page headings, cards or toolbars. Retain the product name in application metadata, OS identity, accessible naming where needed and documentation. Keep existing slot/API responsibilities, including `FleetworksMark` and native `BRAND_MARK`; replacing their artwork is implementation work. At small sizes use the documented silhouette fallback, preserving one crescent and one molten sphere. Large backend chooser art may retain material detail. Do not repeat reflective logo treatments on controls.
 
 ### Exact target tokens
 
@@ -47,7 +47,7 @@ The role names are the design contract. Native/shared-web mappings reuse existin
 | Focus | `#72E9FF` | `ACCENT_HIGHLIGHT`; dedicated web focus role |
 | Selection fill | `#10272D` | `SELECTION_SURFACE`; `colors.selectionSurface` |
 
-No ivory or gold primary UI accents remain. Warmth inside the emblem does not define the interface palette. Amber is permitted only for a meaningful warning or chart category, never as generic primary-action decoration.
+Use `#E5B869` molten-gold ink and `#241D12` warm tint on active navigation, unread counts, and selected links. Use cyan for general interactive affordances and keep the existing warning and chart colors recognizable.
 
 ### Flat semantic and chart palette
 

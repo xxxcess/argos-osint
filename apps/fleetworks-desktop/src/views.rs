@@ -135,67 +135,76 @@ fn connection_status(state: &State) -> String {
 
 fn backend_mode_card(
     state: &State,
-    narrow: bool,
     compact: bool,
     busy: bool,
     preferences: crate::accessibility::ViewPreferences,
     kit: &Kit,
-    pointer_ref: Option<&rune::Live<[f32; 2]>>,
 ) -> El {
-    let remote_btn = ActionButton::new("Distributed")
-        .key("backend-mode-remote")
-        .icon(&icons::SERVER)
-        .finish(if !state.is_local_backend() {
-            MetalFinish::GoldCta
-        } else {
-            MetalFinish::Gunmetal
-        })
-        .disabled(busy)
-        .on_press(|state: &mut State| state.set_backend_kind(BackendKind::Remote))
-        .build(kit, preferences, pointer_ref);
-    let local_btn = ActionButton::new("Embedded")
-        .key("backend-mode-local")
-        .icon(&icons::WORKSTATION)
-        .finish(if state.is_local_backend() {
-            MetalFinish::GoldCta
-        } else {
-            MetalFinish::Gunmetal
-        })
-        .disabled(busy)
-        .on_press(|state: &mut State| state.set_backend_kind(BackendKind::Local))
-        .build(kit, preferences, pointer_ref);
-    let buttons = if narrow {
-        rune::col()
-            .key("backend-mode")
-            .w_full()
-            .gap(8.0)
-            .child(local_btn)
-            .child(remote_btn)
-    } else {
-        rune::row()
-            .key("backend-mode")
-            .w_full()
-            .gap(8.0)
-            .child(local_btn)
-            .child(remote_btn)
-    };
+    let mut options = rune::row().key("backend-mode").w_full().gap(8.0);
+    for (kind, key, title, description, glyph) in [
+        (
+            BackendKind::Local,
+            "backend-mode-local",
+            "Embedded",
+            "Run the bundled companion on this workstation.",
+            &icons::WORKSTATION,
+        ),
+        (
+            BackendKind::Remote,
+            "backend-mode-remote",
+            "Distributed",
+            "Connect to a gateway over HTTPS or loopback HTTP.",
+            &icons::SERVER,
+        ),
+    ] {
+        let selected = (kind == BackendKind::Local) == state.is_local_backend();
+        let mut option = rune::col()
+            .key(key)
+            .role("button")
+            .label(title)
+            .description(if selected {
+                format!("Selected. {description}")
+            } else {
+                description.to_owned()
+            })
+            .focusable(!busy)
+            .disabled(busy)
+            .focus_ring(2.0, 2.0, kit.c.border_focus)
+            .grow(1.0)
+            .min_w(0.0)
+            .padding(if compact { 9.0 } else { 12.0 })
+            .gap(4.0)
+            .child(
+                rune::icon(glyph, 16.0)
+                    .color(if selected {
+                        kit.c.bg_accent
+                    } else {
+                        kit.c.icon_muted
+                    })
+                    .a11y_hidden(),
+            )
+            .child(heading(title, kit).a11y_hidden())
+            .child(quiet(description, kit).selectable(false).a11y_hidden());
+        if !busy {
+            option = option
+                .hover(theme::hex(theme::SURFACE_ELEVATED))
+                .on_press(move |state: &mut State| state.set_backend_kind(kind));
+        }
+        options = options.child(material::choice_tile(option, selected, preferences));
+    }
     material::responsive_card(
         rune::col()
-            .padding(16.0)
+            .padding(if compact { 8.0 } else { 16.0 })
             .gap(10.0)
             .child(ui_components::section_header(
                 &icons::SERVER,
                 "Backend type",
-                Some(if state.is_local_backend() {
-                    "Run the backend on this workstation through its bundled companion process."
-                } else {
-                    "Connect to a distributed deployment through its HTTPS or loopback HTTP gateway."
-                }),
+                None,
                 None,
                 None,
                 kit,
             ))
-            .child(buttons),
+            .child(options),
         StatusTone::Neutral,
         false,
         compact,
@@ -668,15 +677,7 @@ pub(crate) fn setup_gateway(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
         ));
     }
     if !state.startup.active() {
-        body = body.child(backend_mode_card(
-            state,
-            narrow,
-            compact,
-            busy,
-            preferences,
-            kit,
-            pointer_ref,
-        ));
+        body = body.child(backend_mode_card(state, compact, busy, preferences, kit));
     }
 
     if state.is_local_backend() {
@@ -1140,7 +1141,7 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
             .w_full()
             .gap(10.0)
             .child(workstation_host_resources(state, preferences, kit, layers).grow(1.0))
-            .child(workstation_job_counts(state, kit).grow(1.0));
+            .child(workstation_job_counts(state, preferences, kit).grow(1.0));
         body = body
             .child(metric_strip)
             .child(crate::readiness_cards::workstation_section(
@@ -1270,8 +1271,6 @@ fn workstation_host_resources(
             state.workstation_inspector == Some(inspector),
             preferences,
             kit,
-            (!preferences.matte()).then_some(&state.pointer_offset),
-            (!preferences.matte()).then_some(&state.shadow_offset),
         )
         .description(description)
         .min_w(0.0)
@@ -1370,7 +1369,11 @@ fn workstation_metric_inspector(
     );
 }
 
-fn workstation_job_counts(state: &State, kit: &Kit) -> El {
+fn workstation_job_counts(
+    state: &State,
+    preferences: crate::accessibility::ViewPreferences,
+    kit: &Kit,
+) -> El {
     let counts = state.registration.context.as_ref().and_then(|context| {
         state.scoped_jobs.page.as_ref().and_then(|page| {
             let scope = &page.activity_scope;
@@ -1409,7 +1412,7 @@ fn workstation_job_counts(state: &State, kit: &Kit) -> El {
         } else {
             "Workstation job count. Open Jobs & Logs."
         };
-        tiles = tiles.child(
+        tiles = tiles.child(material::canvas_tile(
             rune::col()
                 .key(key)
                 .role("button")
@@ -1421,10 +1424,6 @@ fn workstation_job_counts(state: &State, kit: &Kit) -> El {
                 .grow(1.0)
                 .padding(7.0)
                 .gap(1.0)
-                .radius(8.0)
-                .fill(kit.c.layer_01)
-                .hover(kit.c.layer_02)
-                .border(1.0, theme::hex(theme::BORDER_SUBTLE))
                 .child(quiet(name, kit).selectable(false).a11y_hidden())
                 .child(
                     rune::text(value.unwrap_or_else(|| "—".to_owned()))
@@ -1436,7 +1435,9 @@ fn workstation_job_counts(state: &State, kit: &Kit) -> El {
                     state.select_activity_tab(crate::logs::ActivityTab::Jobs);
                     state.navigate(Page::Jobs);
                 }),
-        );
+            false,
+            preferences,
+        ));
     }
     rune::col()
         .key("workstation-jobs-counts")
@@ -3439,6 +3440,55 @@ mod tests {
                 start.rect[1] + start.rect[3] <= strip.rect[1],
                 "the diagnostic must follow Start at {size:?}"
             );
+        }
+    }
+
+    #[test]
+    fn connected_embedded_capability_detail_fits_its_status_strip() {
+        use fleetworks_workstation::native::BackendKind;
+
+        for size in [(640.0, 480.0), (1280.0, 800.0)] {
+            let mut state = crate::tests::registered_fixture();
+            state.backend_kind = BackendKind::Local;
+            state.connection.origin = rune::TextEdit::new("local://embedded");
+            state.setup_gateway = true;
+            let mut runtime = Runtime::new(
+                state,
+                app::view,
+                size,
+                Env {
+                    system_dark: true,
+                    scale: 1.0,
+                },
+            );
+            runtime.frame(0.0);
+            runtime.frame(1.0 / 60.0);
+            let elements = runtime.elements();
+            let strip = elements
+                .iter()
+                .find(|el| el.key.as_deref() == Some("local-capability-warnings"))
+                .expect("optional capability warnings");
+            let detail = elements
+                .iter()
+                .find(|el| {
+                    el.key.as_deref() == Some("async-status-detail")
+                        && el.text.as_deref().is_some_and(|value| {
+                            value
+                                .starts_with("The embedded backend is not advertising NLP support.")
+                        })
+                })
+                .expect("capability warning detail");
+            assert!(
+                detail.rect[0] >= strip.rect[0]
+                    && detail.rect[0] + detail.rect[2] <= strip.rect[0] + strip.rect[2]
+                    && detail.rect[0] + detail.rect[2] <= size.0,
+                "detail must fit the strip at {size:?}: {:?} inside {:?}",
+                detail.rect,
+                strip.rect,
+            );
+            if size.0 == 640.0 {
+                assert!(detail.rect[3] > 20.0, "compact detail must wrap");
+            }
         }
     }
 

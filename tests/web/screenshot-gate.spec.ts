@@ -211,7 +211,19 @@ for (const vp of VIEWPORTS) {
     await page.setViewportSize({ width: vp.width, height: vp.height });
     await mockApi(page);
     await page.goto("/");
-    await page.getByRole("button", { name: "Open Intel", exact: true }).click();
+    const launcher = page.getByRole("button", {
+      name: "Open Intel",
+      exact: true,
+    });
+    await expect(launcher).toBeVisible();
+    await expect(
+      page.getByLabel("API connected", { exact: true }),
+    ).toBeVisible();
+    await page.screenshot({
+      path: `${CAPTURE}/${vp.name}-home-ready.png`,
+      fullPage: true,
+    });
+    await launcher.click();
     await expect(
       page.getByRole("button", { name: /^Open Focus Brief:/ }).first(),
     ).toBeVisible();
@@ -219,6 +231,62 @@ for (const vp of VIEWPORTS) {
       path: `${CAPTURE}/${vp.name}-bulletin-quiet-action.png`,
       fullPage: true,
     });
+
+    const session = await page.context().newCDPSession(page);
+    await session.send("Emulation.setEmulatedMedia", {
+      features: [
+        { name: "prefers-reduced-motion", value: "reduce" },
+        { name: "prefers-reduced-transparency", value: "no-preference" },
+      ],
+    });
+    await page.getByRole("button", { name: /^Retained day / }).click();
+    const menu = page.getByRole("menu");
+    await expect(menu).toHaveCSS("backdrop-filter", "blur(12px)");
+    await expect(menu).toHaveCSS("background-color", "rgba(18, 24, 32, 0.88)");
+    await expect(menu).toHaveCSS("box-shadow", /inset/);
+    const day = menu.getByRole("button", { name: "Day 2026-10-25" });
+    await expect(day).toHaveCSS("background-color", "rgb(36, 29, 18)");
+    const bounds = (await day.boundingBox())!;
+    expect(bounds.x).toBeGreaterThanOrEqual(0);
+    expect(bounds.x + bounds.width).toBeLessThanOrEqual(vp.width);
+    expect(
+      await day
+        .getByText("2026-10-25")
+        .evaluate((element) => element.scrollWidth <= element.clientWidth),
+    ).toBe(true);
+    await page.screenshot({
+      path: `${CAPTURE}/${vp.name}-bulletin-glass-day-menu.png`,
+      fullPage: true,
+    });
+
+    await session.send("Emulation.setEmulatedMedia", {
+      features: [
+        { name: "prefers-reduced-motion", value: "reduce" },
+        { name: "prefers-reduced-transparency", value: "reduce" },
+      ],
+    });
+    await expect(menu).toHaveCSS("backdrop-filter", "none");
+    await expect(menu).toHaveCSS("background-color", "rgb(25, 33, 43)");
+    await expect(menu).toHaveCSS("border-top-color", "rgb(100, 117, 135)");
+    expect(await day.boundingBox()).toEqual(bounds);
+    await page.screenshot({
+      path: `${CAPTURE}/${vp.name}-bulletin-opaque-day-menu.png`,
+      fullPage: true,
+    });
+    await day.click();
+    await expect(menu).toHaveCount(0);
+
+    await page
+      .getByRole("button", { name: "Background jobs", exact: true })
+      .click();
+    await expect(menu).toHaveCSS("backdrop-filter", "none");
+    await expect(menu).toHaveCSS("background-color", "rgb(25, 33, 43)");
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+    await session.detach();
   });
 
   test(`focus brief: primary ensure + related leads + default button vs panel @ ${vp.name}`, async ({
@@ -232,11 +300,29 @@ for (const vp of VIEWPORTS) {
       .getByRole("button", { name: /^Open Focus Brief:/ })
       .first()
       .click();
-    await expect(
-      page.getByRole("button", { name: "Ensure / resume brief" }),
-    ).toBeVisible();
+    const ensure = page.getByRole("button", { name: "Ensure / resume brief" });
+    const reload = page.getByRole("button", {
+      name: "Reload article / new generation",
+    });
+    for (const button of [ensure, reload]) {
+      await expect(button).toBeVisible();
+      await expect(button).toHaveCSS("box-shadow", /inset/);
+      await expect(button.locator('[aria-hidden="true"]')).toHaveCSS(
+        "background-image",
+        /^url\(/,
+      );
+    }
     await page.screenshot({
       path: `${CAPTURE}/${vp.name}-focus-brief-primary-related.png`,
+      fullPage: true,
+    });
+    await ensure.evaluate((button) =>
+      button.scrollIntoView({ block: "center" }),
+    );
+    await expect(ensure).toBeInViewport();
+    await expect(reload).toBeInViewport();
+    await page.screenshot({
+      path: `${CAPTURE}/${vp.name}-focus-brief-committing-actions.png`,
       fullPage: true,
     });
   });

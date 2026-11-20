@@ -152,7 +152,7 @@ The current change is documentation only; no new native/browser runtime pass is 
 
 ### Opaque materials preference
 
-The Assistant composer and the command panel keep a same-window blur (composer alpha 0.84 and 10 pt, overlay alpha 0.91 and 14 pt; `material::glass`), with a `BORDER_SUBTLE` top edge. Opaque drawing is chosen by macOS Reduce Transparency, or on any platform by setting `FLEETWORKS_OPAQUE_MATERIALS` to `1`, `true`, `yes` or `on` before launch; Linux no longer falls back to matte by default. Where Rune cannot copy the frame for a blur it draws the tint alone. The command panel draws its own panel with the same modal behavior as `rune_kit::Dialog` (focus trap, Escape and outside press close it); other dialogs, such as Settings, stay opaque. This is a platform capability and does not add texture or sheen to ordinary controls.
+The Assistant composer uses a 10 pt same-window blur at 0.84 tint alpha. The command panel, Inbox and shared dialogs such as Settings use a 14 pt blur at 0.88 tint alpha. Glass has a static upper reflection. macOS Reduce Transparency and `FLEETWORKS_OPAQUE_MATERIALS` set to `1`, `true`, `yes` or `on` select opaque surfaces with crisp borders and the same bounds. Where Rune cannot copy the frame for a blur, it draws the tint alone. The command panel traps focus and responds to Escape and outside presses.
 
 ### Assistant conversation parts (`chat_ui.rs`)
 

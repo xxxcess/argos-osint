@@ -11,7 +11,6 @@ use rune::Key;
 use rune::ScrollSpec;
 use rune::TextEdit;
 use rune_kit::Cell;
-use rune_kit::Dialog;
 use rune_kit::Kit;
 use rune_kit::Progress;
 use rune_kit::RollingText;
@@ -165,8 +164,8 @@ pub(crate) fn page(
     match state.page {
         Page::Seed => scroll(maintenance(state, preferences, kit, layers), "seed-body"),
         Page::Atlas => atlas(state, preferences, kit, layers),
-        Page::Tools => tools(state, preferences, kit, layers),
-        Page::Models => models(state, preferences, kit, layers),
+        Page::Tools => tools(state, cx, preferences, kit, layers),
+        Page::Models => models(state, cx, preferences, kit, layers),
         Page::Jobs => jobs(state, preferences, kit, layers, log_width),
         _ => rune::col(),
     }
@@ -823,9 +822,14 @@ fn open_tool_credential_editor(state: &mut State, provider: &str) {
     state.tool_key_dialog = true;
 }
 
-fn tools(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Vec<El>) -> El {
+fn tools(
+    state: &State,
+    cx: &Cx<State>,
+    preferences: ViewPreferences,
+    kit: &Kit,
+    layers: &mut Vec<El>,
+) -> El {
     let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
-    let shadow_ref = (!preferences.matte()).then_some(&state.shadow_offset);
     let mut body = rune::col().gap(12.0).child(ui_components::section_header(
         &icons::TOOLS,
         "OSINT Tools",
@@ -847,15 +851,27 @@ fn tools(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
         if catalog.tools.is_empty() {
             body = body.child(quiet("No services are advertised by this gateway.", kit));
         }
+        let wide = cx
+            .layout_size("page-content")
+            .is_some_and(|size| size[0] >= 780.0);
+        let mut grid = if wide {
+            rune::row().flex_wrap()
+        } else {
+            rune::col()
+        }
+        .w_full()
+        .gap(10.0);
         for tool in &catalog.tools {
-            body = body.child(material::luminous_card(
+            let tile = material::canvas_tile(
                 rune::col()
+                    .min_w(0.0)
                     .padding(10.0)
                     .gap(6.0)
                     .key(format!("tool-{}", tool.id))
                     .child(
                         rune::row()
                             .w_full()
+                            .flex_wrap()
                             .center_y()
                             .gap(8.0)
                             .child(
@@ -863,7 +879,7 @@ fn tools(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
                                     .color(theme::hex(theme::ENTITY_TECH))
                                     .a11y_hidden(),
                             )
-                            .child(heading(tool.name.clone(), kit))
+                            .child(heading(tool.name.clone(), kit).min_w(0.0).shrink())
                             .child(rune::spacer())
                             .child(ui_components::status_pill(
                                 tool.category.clone(),
@@ -874,12 +890,13 @@ fn tools(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
                     )
                     .child(line(tool.description.clone(), kit))
                     .child(quiet(tool.restrictions.clone(), kit)),
-                StatusTone::Cyan,
                 false,
                 preferences,
-                pointer_ref,
-                shadow_ref,
-            ));
+            );
+            grid = grid.child(if wide { tile.w_frac(0.48) } else { tile });
+        }
+        if !catalog.tools.is_empty() {
+            body = body.child(grid);
         }
     }
     if let Some(message) = list_load_or_skeleton(
@@ -900,7 +917,7 @@ fn tools(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
             } else {
                 StatusTone::Warn
             };
-            body = body.child(material::interactive_tile(
+            body = body.child(material::canvas_tile(
                 rune::row()
                     .padding(10.0)
                     .gap(10.0)
@@ -910,10 +927,12 @@ fn tools(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
                     .child(
                         rune::col()
                             .grow(1.0)
+                            .min_w(0.0)
                             .gap(4.0)
                             .child(heading(credential.provider.clone(), kit))
                             .child(
                                 rune::row()
+                                    .flex_wrap()
                                     .gap(6.0)
                                     .child(ui_components::status_pill(
                                         if credential.primary_present {
@@ -957,10 +976,7 @@ fn tools(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
                             .build(kit, preferences, pointer_ref),
                     ),
                 false,
-                tone,
                 preferences,
-                pointer_ref,
-                shadow_ref,
             ));
         }
     }
@@ -985,32 +1001,34 @@ fn tool_key_dialog(state: &State, preferences: ViewPreferences, kit: &Kit, layer
     } else {
         tool_key_editor(state, atlas, provider, preferences, kit)
     };
-    Dialog::new("tool-api-key", title)
-        .open(true)
-        .width(480.0)
-        .click_outside(false)
-        .on_close(|state: &mut State| {
+    layers.extend(ui_components::glass_dialog(
+        "tool-api-key",
+        &title,
+        480.0,
+        rune::col()
+            .key(if editing {
+                "provider-key-editor"
+            } else {
+                "atlas-key-sources"
+            })
+            .w_full()
+            .max_h(316.0)
+            .min_h(0.0)
+            .scroll(ScrollSpec {
+                stick_bottom: false,
+            })
+            .padding(16.0)
+            .gap(12.0)
+            .child(editor)
+            .child(configuration_status(state, preferences, kit)),
+        false,
+        |state: &mut State| {
             state.tool_key_dialog = false;
             reset_tool_key_editor(state);
-        })
-        .child(
-            rune::col()
-                .key(if editing {
-                    "provider-key-editor"
-                } else {
-                    "atlas-key-sources"
-                })
-                .grow(1.0)
-                .min_h(0.0)
-                .scroll(ScrollSpec {
-                    stick_bottom: false,
-                })
-                .padding(16.0)
-                .gap(12.0)
-                .child(editor)
-                .child(configuration_status(state, preferences, kit)),
-        )
-        .build(kit, layers);
+        },
+        preferences,
+        kit,
+    ));
 }
 
 fn atlas_key_sources(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
@@ -1182,9 +1200,14 @@ fn input(
         .child(field.build(kit).key(key.to_owned()))
 }
 
-fn models(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Vec<El>) -> El {
+fn models(
+    state: &State,
+    cx: &Cx<State>,
+    preferences: ViewPreferences,
+    kit: &Kit,
+    layers: &mut Vec<El>,
+) -> El {
     let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
-    let shadow_ref = (!preferences.matte()).then_some(&state.shadow_offset);
     let active_tab = if !state.configuration.account_id.text.is_empty() {
         ModelsTab::Providers
     } else {
@@ -1363,10 +1386,22 @@ fn models(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut V
                     StatusTone::Info,
                     kit,
                 ));
+                let wide = state.configuration.role.text.is_empty()
+                    && cx
+                        .layout_size("page-content")
+                        .is_some_and(|size| size[0] >= 780.0);
+                let mut grid = if wide {
+                    rune::row().flex_wrap()
+                } else {
+                    rune::col()
+                }
+                .w_full()
+                .gap(10.0);
                 for role in &defaults.roles {
                     let edited = role.clone();
                     let active = state.configuration.role.text == *role;
                     let mut row = rune::col()
+                        .min_w(0.0)
                         .gap(8.0)
                         .key(format!("model-role-{role}"))
                         .child(
@@ -1382,7 +1417,7 @@ fn models(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut V
                                     },
                                     preferences,
                                 ))
-                                .child(heading(role.clone(), kit))
+                                .child(heading(role.clone(), kit).min_w(0.0).shrink())
                                 .child(rune::spacer())
                                 .children(active.then(|| {
                                     ui_components::status_pill(
@@ -1422,18 +1457,11 @@ fn models(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut V
                                 .build(kit, preferences, pointer_ref),
                         );
                     }
-                    body = body.child(material::interactive_tile(
-                        row.padding(10.0),
-                        active,
-                        if active {
-                            StatusTone::Accent
-                        } else {
-                            StatusTone::Info
-                        },
-                        preferences,
-                        pointer_ref,
-                        shadow_ref,
-                    ));
+                    let tile = material::canvas_tile(row.padding(10.0), active, preferences);
+                    grid = grid.child(if wide { tile.w_frac(0.48) } else { tile });
+                }
+                if !defaults.roles.is_empty() {
+                    body = body.child(grid);
                 }
             }
         }

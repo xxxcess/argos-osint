@@ -226,6 +226,21 @@ jobs:
             --scene inbox-drawer \
             --scene command-panel \
             --scene catalog \
+            --scene workstation-status-checks-mixed-matte \
+            --scene workstation-status-checks-mixed-reduced-motion \
+            --scene setup-connected-embedded-matte \
+            --scene setup-connected-embedded-reduced-motion \
+            --scene setup-connected-distributed-matte \
+            --scene setup-connected-distributed-reduced-motion \
+            --scene atlas-provider-keys-matte \
+            --scene atlas-provider-keys-reduced-motion \
+            --scene inbox-drawer-matte \
+            --scene inbox-drawer-reduced-motion \
+            --scene command-panel-opaque \
+            --scene command-panel-reduced-motion \
+            --scene workstation-settings \
+            --scene workstation-settings-matte \
+            --scene workstation-settings-reduced-motion \
             --size 1280x800 --size 640x480 --scale 1
 
       - name: Capture startup motion and reduced-motion transitions (Lavapipe)

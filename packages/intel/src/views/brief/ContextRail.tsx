@@ -208,14 +208,14 @@ export function ContextRail({
         <EmptyState title="Brief status unavailable" />
       )}
       <Button
-        variant="primary"
+        intent="submit"
         disabled={ensure.isPending}
         onPress={() => ensure.mutate({ run: a.run_id, id: a.id })}
       >
         {ensure.isPending ? "Admitting…" : "Ensure / resume brief"}
       </Button>
       <Button
-        variant="quiet"
+        intent="submit"
         disabled={reload.isPending}
         onPress={() =>
           reload.mutate({

@@ -169,6 +169,23 @@ describe("Fleetworks palette compositing contracts (rendered verification remain
       expect(contrast(colors.onAccent, accent)).toBeGreaterThanOrEqual(4.5);
     expect(contrast(colors.text, colors.accent)).toBeLessThan(4.5);
   });
+  it("keeps glass menus and warm selection legible on both finishes", () => {
+    const frost = "rgba(18, 24, 32, 0.88)";
+    for (const background of [
+      colors.elevated,
+      css(composite(frost, colors.bg)),
+      css(composite(frost, colors.raised)),
+    ]) {
+      for (const ink of [colors.text, colors.dim, colors.muted]) {
+        expect(contrast(ink, background)).toBeGreaterThanOrEqual(4.5);
+      }
+      expect(contrast(colors.border, background)).toBeGreaterThanOrEqual(3);
+      expect(contrast("#72E9FF", background)).toBeGreaterThanOrEqual(3);
+    }
+    expect(
+      contrast(colors.molten, colors.moltenSurface),
+    ).toBeGreaterThanOrEqual(4.5);
+  });
   it("retains essential border/focus contrast after alpha blending", () => {
     for (const background of [
       colors.bg,

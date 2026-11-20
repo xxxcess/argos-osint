@@ -199,13 +199,35 @@ fn on_field_key(state: &mut State, event: &KeyEvent) -> bool {
 }
 
 /// The toolbar button.
-pub(crate) fn toolbar_button(kit: &Kit) -> El {
-    rune_kit::IconButton::new(&icons::COMMAND)
-        .variant(rune_kit::IconButtonVariant::Ghost)
-        .label("Command panel (Ctrl+K or ⌘K)")
+pub(crate) fn toolbar_button(kit: &Kit, compact: bool) -> El {
+    let shortcut = if cfg!(target_os = "macos") {
+        "⌘K"
+    } else {
+        "Ctrl+K"
+    };
+    rune_kit::Button::new("Run a command")
+        .variant(rune_kit::ButtonVariant::Ghost)
+        .icon(&icons::COMMAND)
+        .shortcut(shortcut)
+        .label_with(move |font, color| {
+            let mut label = rune::row().gap(8.0).center_y();
+            if !compact {
+                label = label.child(rune::text("Run a command").font(font).color(color));
+            }
+            label.child(
+                rune::text(shortcut)
+                    .font(font)
+                    .color(theme::hex(theme::TEXT_SECONDARY)),
+            )
+        })
         .on_press(|state: &mut State| state.open_command_panel())
         .build(kit)
         .key("command-open")
+        .h(28.0)
+        .px(11.0)
+        .radius(999.0)
+        .fill(theme::hex(theme::SURFACE_RAISED))
+        .border(1.0, theme::hex(theme::BORDER_SUBTLE))
 }
 
 /// The command overlay, pushed to `layers` while it is open. It keeps the modal contract of a
@@ -215,6 +237,7 @@ pub(crate) fn view(
     state: &State,
     kit: &Kit,
     preferences: crate::accessibility::ViewPreferences,
+    narrow: bool,
     layers: &mut Vec<El>,
 ) {
     if !state.commands.open || state.has_active_confirmation_dialog() {
@@ -325,6 +348,7 @@ pub(crate) fn view(
         panel = panel.box_shadow(shadow);
     }
     let panel = crate::material::glass(panel, crate::material::GlassSurface::Overlay, preferences)
+        .focus_return("command-open")
         .modal(true, |state: &mut State| state.commands.close())
         .modal_click_outside(true);
     layers.push(
@@ -333,7 +357,11 @@ pub(crate) fn view(
             .absolute(0.0, 0.0)
             .w_full()
             .h_full()
-            .fill(kit.c.scrim)
+            .fill(if narrow {
+                kit.c.scrim.alpha(kit.c.scrim.a.max(0.52))
+            } else {
+                kit.c.scrim
+            })
             .transition(if preferences.reduced_motion {
                 Transition::none()
             } else {

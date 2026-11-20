@@ -1,4 +1,4 @@
-//! Native Inbox: a grouped drawer over allowlisted transitions this app already observed.
+//! Native Inbox: a grouped popover over allowlisted transitions this app already observed.
 //!
 //! It is not a notification service. Nothing is pushed, nothing leaves this process, and it makes
 //! no claim about device-wide alerts. Items are built from fixed text plus a job title or a
@@ -12,11 +12,16 @@ use std::collections::VecDeque;
 use fleetworks_contracts::readiness::ReadinessState;
 use rune::Cx;
 use rune::El;
+use rune::Icon;
+use rune::TextEdit;
 use rune::Tx;
 use rune_kit::Kit;
 
+use crate::accessibility::ViewPreferences;
 use crate::icons;
+use crate::material::GlassSurface;
 use crate::theme;
+use crate::theme::StatusTone;
 use crate::State;
 
 /// Retained items. The oldest is dropped first.
@@ -25,6 +30,12 @@ pub(crate) const MAX_ITEMS: usize = 50;
 const MAX_SEEN_JOB_EVENTS: usize = 200;
 /// Bounded map of tracked job states across pagination and filtering.
 const MAX_TRACKED_JOBS: usize = 512;
+const DAY_SECONDS: f64 = 24.0 * 60.0 * 60.0;
+const BELL: Icon = Icon {
+    name: "fw-inbox-bell",
+    view: 16.0,
+    body: r#"<path d="M5.9 13.1a2.2 2.2 0 0 0 4.2 0M13 11.2H3l1.2-1.9V6a3.8 3.8 0 0 1 7.6 0v3.3L13 11.2Z" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" fill="none"/>"#,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum Topic {
@@ -58,6 +69,16 @@ struct Group<'a> {
     unread: usize,
 }
 
+impl Group<'_> {
+    fn oldest_priority_item(&self) -> &Item {
+        self.items
+            .iter()
+            .copied()
+            .find(|item| !item.read)
+            .unwrap_or(self.items[0])
+    }
+}
+
 fn item_order(left: &Item, right: &Item) -> std::cmp::Ordering {
     left.at.total_cmp(&right.at).then(left.id.cmp(&right.id))
 }
@@ -72,6 +93,7 @@ pub(crate) struct Item {
     /// UI clock reading when the transition was observed.
     pub at: f64,
     pub read: bool,
+    tone: StatusTone,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -118,6 +140,7 @@ pub struct Inbox {
     checks: Vec<(String, ReadinessState)>,
     seen_job_events: VecDeque<String>,
     pub(crate) open: bool,
+    query: TextEdit,
     expanded: BTreeSet<Topic>,
     selected: Option<u64>,
 }
@@ -154,10 +177,24 @@ impl Inbox {
             .collect();
         groups.sort_by(|left, right| {
             let priority = (left.unread == 0).cmp(&(right.unread == 0));
-            let oldest =
-                |group: &Group<'_>| group.items.iter().position(|item| !item.read).unwrap_or(0);
-            priority.then_with(|| item_order(left.items[oldest(left)], right.items[oldest(right)]))
+            priority
+                .then_with(|| item_order(left.oldest_priority_item(), right.oldest_priority_item()))
         });
+        groups
+    }
+
+    fn filtered_groups(&self) -> Vec<Group<'_>> {
+        let query = self.query.text.trim().to_lowercase();
+        let mut groups = self.groups();
+        if !query.is_empty() {
+            groups.retain(|group| {
+                group.title.to_lowercase().contains(&query)
+                    || group.items.iter().any(|item| {
+                        item.title.to_lowercase().contains(&query)
+                            || item.detail.to_lowercase().contains(&query)
+                    })
+            });
+        }
         groups
     }
 
@@ -188,6 +225,7 @@ impl Inbox {
 
     pub(crate) fn close(&mut self) {
         self.open = false;
+        self.query = TextEdit::new("");
         self.selected = None;
     }
 
@@ -199,6 +237,7 @@ impl Inbox {
 
     fn reset(&mut self) {
         self.items.clear();
+        self.query = TextEdit::new("");
         self.link = Link::Unknown;
         self.known_jobs.clear();
         self.known_job_order.clear();
@@ -259,12 +298,19 @@ impl Inbox {
                     self.seen_job_events.pop_front();
                 }
                 let state_label = describe_job_state(&state);
+                let tone = match state_label.as_str() {
+                    "completed" => StatusTone::Ok,
+                    "failed" => StatusTone::Err,
+                    "cancelled" => StatusTone::Warn,
+                    _ => StatusTone::Neutral,
+                };
                 self.push(
                     Topic::Job(id.clone()),
                     title.to_owned(),
                     format!("Job {state_label}"),
                     format!("{title} is now {state_label}. Open Jobs & Logs for details."),
                     now,
+                    tone,
                 );
                 changed = true;
             }
@@ -299,7 +345,15 @@ impl Inbox {
         changed
     }
 
-    fn push(&mut self, topic: Topic, group_title: String, title: String, detail: String, at: f64) {
+    fn push(
+        &mut self,
+        topic: Topic,
+        group_title: String,
+        title: String,
+        detail: String,
+        at: f64,
+        tone: StatusTone,
+    ) {
         self.next_id += 1;
         self.items.push_back(Item {
             id: self.next_id,
@@ -309,6 +363,7 @@ impl Inbox {
             detail,
             at,
             read: false,
+            tone,
         });
         while self.items.len() > MAX_ITEMS {
             if let Some(dropped) = self.items.pop_front() {
@@ -349,6 +404,7 @@ impl Inbox {
                         "Connected".into(),
                         "The connection to the backend is ready.".into(),
                         now,
+                        StatusTone::Ok,
                     );
                     changed = true;
                 }
@@ -360,6 +416,7 @@ impl Inbox {
                         "The last connection attempt did not succeed. Open Setup Gateway for details."
                             .into(),
                         now,
+                        StatusTone::Err,
                     );
                     changed = true;
                 }
@@ -401,6 +458,13 @@ impl Inbox {
                         readiness_word(*state)
                     ),
                     now,
+                    match state {
+                        ReadinessState::Ready => StatusTone::Ok,
+                        ReadinessState::Running => StatusTone::Info,
+                        ReadinessState::Degraded => StatusTone::Warn,
+                        ReadinessState::NotReady | ReadinessState::Unavailable => StatusTone::Err,
+                        _ => StatusTone::Neutral,
+                    },
                 );
                 changed = true;
             }
@@ -473,10 +537,19 @@ impl State {
         tx.focus("inbox-toggle", tx.focus_visible());
     }
 
-    /// Populate the production drawer with synthetic topics for native visual review.
+    /// Populate the production Inbox with synthetic topics for native visual review.
     pub fn seed_inbox_drawer_fixture(&mut self) {
         if self.fixture {
             seed_drawer(&mut self.inbox, self.clock);
+            self.inbox.push(
+                Topic::Connection,
+                "Connection".into(),
+                "Connecting".into(),
+                "The workstation started connecting to the backend.".into(),
+                self.clock - 25.0 * 3600.0 - 5.0,
+                StatusTone::Info,
+            );
+            self.inbox.mark_read(self.inbox.next_id);
         }
     }
 
@@ -550,7 +623,7 @@ fn tray(state: &State, kit: &Kit, key: &'static str) -> El {
     };
     rune_kit::Button::new(label.clone())
         .variant(rune_kit::ButtonVariant::Ghost)
-        .icon(&icons::INBOX)
+        .icon(&BELL)
         .expanded(state.inbox.open)
         .label_with(move |font, _| {
             if unread == 0 {
@@ -559,7 +632,7 @@ fn tray(state: &State, kit: &Kit, key: &'static str) -> El {
             rune::el()
                 .key("inbox-unread-badge")
                 .center()
-                .fill(theme::hex(theme::ACCENT_HOVER))
+                .fill(theme::hex(theme::MOLTEN_BRIGHT))
                 .radius(8.0)
                 .px(5.0)
                 .child(
@@ -581,9 +654,12 @@ fn tray(state: &State, kit: &Kit, key: &'static str) -> El {
         .build(kit)
         .key(key)
         .label(label)
+        .h(28.0)
+        .px(8.0)
+        .radius(999.0)
 }
 
-pub(crate) fn drawer(
+pub(crate) fn popover(
     state: &State,
     cx: &Cx<State>,
     kit: &Kit,
@@ -593,36 +669,36 @@ pub(crate) fn drawer(
         return None;
     }
     let trigger = cx.layout_with("inbox-toggle", |rect| rect);
+    let [_, window_y, window_width, shell_height] = cx
+        .layout_with("app-shell", |rect| rect)
+        .unwrap_or([0.0, 0.0, 640.0, 480.0]);
     let top = trigger.map_or(cx.titlebar_inset() + 50.0, |rect| rect[1] + rect[3] + 8.0);
-    let boundary = theme::hex(theme::BORDER_SUBTLE);
-    let panel = body(state, kit)
+    let right = trigger
+        .map_or(12.0, |rect| window_width - rect[0] - rect[2])
+        .max(12.0);
+    let height = (window_y + shell_height - top - 12.0).clamp(0.0, 416.0);
+    let mut panel = body(state, kit, preferences)
         .w(364.0)
         .max_w(364.0)
-        .h_full()
+        .h(height)
         .min_h(0.0)
-        .border_sides([1.0, 0.0, 0.0, 1.0], boundary)
-        .fill(theme::hex(theme::SURFACE))
+        .radius(12.0)
         .transition(crate::app::surface_transition(
             preferences.reduced_motion,
-            rune::Transition::offset(8.0, 0.0),
+            rune::Transition::offset(0.0, -4.0),
         ))
         .instant_changes();
-
+    for shadow in kit.shadow_layers(&kit.elevation.overlay) {
+        panel = panel.box_shadow(shadow);
+    }
+    let panel = crate::material::glass(panel, GlassSurface::Overlay, preferences);
     let scrim = rune::el()
         .key("inbox-scrim")
         .absolute(0.0, 0.0)
         .w_full()
         .h_full()
-        .fill(rune::Color {
-            a: 0.4,
-            ..theme::hex(theme::BACKGROUND)
-        })
+        .fill(theme::hex(theme::BACKGROUND).alpha(if window_width < 820.0 { 0.44 } else { 0.28 }))
         .a11y_hidden();
-    let scrim = if preferences.matte() {
-        scrim
-    } else {
-        scrim.backdrop_blur(3.0)
-    };
     let mut layer = rune::el()
         .key("inbox-layer")
         .absolute(0.0, 0.0)
@@ -642,11 +718,12 @@ pub(crate) fn drawer(
                     rune::row()
                         .key("inbox-panel-position")
                         .w_full()
-                        .grow(1.0)
-                        .min_h(0.0)
+                        .h(height)
                         .child(dismiss_area("inbox-backdrop-left").grow(1.0).h_full())
-                        .child(panel),
-                ),
+                        .child(panel)
+                        .child(dismiss_area("inbox-backdrop-right").w(right).h_full()),
+                )
+                .child(dismiss_area("inbox-backdrop-bottom").w_full().grow(1.0)),
         );
     if let Some([x, y, width, height]) = trigger {
         // The modal makes the workspace inert. Keep its only shared control operable in place.
@@ -655,8 +732,8 @@ pub(crate) fn drawer(
                 .key("inbox-modal-tray-position")
                 .absolute(x, y)
                 .size(width, height)
-                .radius(5.0)
-                .fill(theme::hex(theme::SURFACE))
+                .radius(999.0)
+                .fill(theme::hex(theme::SURFACE_RAISED))
                 .child(
                     tray(state, kit, "inbox-toggle-close")
                         .w_full()
@@ -676,7 +753,7 @@ fn dismiss_area(key: &'static str) -> El {
         .on_press_tx(State::close_inbox)
 }
 
-fn body(state: &State, kit: &Kit) -> El {
+fn body(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
     let inbox = &state.inbox;
     let close = rune_kit::Button::new("Close")
         .variant(rune_kit::ButtonVariant::Ghost)
@@ -693,18 +770,48 @@ fn body(state: &State, kit: &Kit) -> El {
         })
         .build(kit)
         .key("inbox-mark-all-read");
-    let mut rows = rune::col().key("inbox-list").gap(9.0);
-    let groups = inbox.groups();
+    let filter = rune_kit::TextInput::new(&inbox.query)
+        .label("Filter notifications")
+        .placeholder("Search Inbox")
+        .on_edit(|state: &mut State| &mut state.inbox.query)
+        .build(kit)
+        .key("inbox-filter")
+        .w_full();
+    let mut rows = rune::col().key("inbox-list").gap(8.0);
+    let groups = inbox.filtered_groups();
     if groups.is_empty() {
         rows = rows.child(
-            rune::text("Job, readiness and connection changes appear here.")
-                .font(kit.ty.small)
-                .color(theme::hex(theme::TEXT_MUTED))
-                .wrap(),
+            rune::text(if inbox.query.text.trim().is_empty() {
+                "Job, readiness and connection changes appear here."
+            } else {
+                "No notifications match this search."
+            })
+            .key("inbox-empty")
+            .font(kit.ty.small)
+            .color(theme::hex(theme::TEXT_MUTED))
+            .wrap(),
         );
     }
+    let mut last_section = "";
     for group in groups {
-        rows = rows.child(group_view(&group, state, kit));
+        // The observation clock is elapsed time. Keep unread-first ordering, then group
+        // adjacent cards by the age of the item that determines each group's place.
+        let section = if state.clock - group.oldest_priority_item().at < DAY_SECONDS {
+            "PAST 24 HOURS"
+        } else {
+            "EARLIER"
+        };
+        if section != last_section {
+            rows = rows.child(
+                rune::text(section)
+                    .key(format!("inbox-time-{}", group.topic.key()))
+                    .role("heading")
+                    .font(kit.ty.small_medium)
+                    .color(theme::hex(theme::TEXT_MUTED)),
+            );
+            last_section = section;
+        }
+        rows = rows.child(group_view(&group, state, kit, preferences));
     }
     rune::col()
         .key("inbox-body")
@@ -714,7 +821,7 @@ fn body(state: &State, kit: &Kit) -> El {
                 .w_full()
                 .px(14.0)
                 .py(8.0)
-                .gap(5.0)
+                .gap(6.0)
                 .border_sides([0.0, 0.0, 1.0, 0.0], theme::hex(theme::BORDER_SUBTLE))
                 .child(
                     rune::row()
@@ -736,7 +843,8 @@ fn body(state: &State, kit: &Kit) -> El {
                         .font(kit.ty.small)
                         .color(theme::hex(theme::TEXT_MUTED))
                         .wrap(),
-                ),
+                )
+                .child(filter),
         )
         .child(
             rune::col()
@@ -752,7 +860,7 @@ fn body(state: &State, kit: &Kit) -> El {
         )
 }
 
-fn group_view(group: &Group<'_>, state: &State, kit: &Kit) -> El {
+fn group_view(group: &Group<'_>, state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
     let key = group.topic.key();
     let expanded = state.inbox.expanded.contains(group.topic);
     let toggle_key = format!("{key}-toggle");
@@ -784,7 +892,7 @@ fn group_view(group: &Group<'_>, state: &State, kit: &Kit) -> El {
             state.inbox.toggle_group(&topic);
             tx.keep_on_screen(group_toggle_key.clone());
         })
-        .child(unread_dot(group.unread > 0))
+        .child(status_dot(latest.tone))
         .child(
             rune::text(group.title.to_owned())
                 .font(kit.ty.small_medium)
@@ -804,7 +912,7 @@ fn group_view(group: &Group<'_>, state: &State, kit: &Kit) -> El {
                         .color(theme::hex(if group.unread == 0 {
                             theme::TEXT_MUTED
                         } else {
-                            theme::ACCENT_HOVER
+                            theme::MOLTEN_ACCENT
                         })),
                 )
                 .child(
@@ -825,30 +933,54 @@ fn group_view(group: &Group<'_>, state: &State, kit: &Kit) -> El {
             .color(theme::hex(theme::TEXT_SECONDARY))
             .a11y_hidden(),
         );
-    let mut entry = rune::col()
-        .key(key)
+    let border = theme::hex(if preferences.matte() {
+        theme::BORDER_CONTROL
+    } else {
+        theme::BORDER_SUBTLE
+    });
+    let mut card = rune::col()
+        .key("card")
         .w_full()
-        .radius(6.0)
-        .fill(theme::hex(theme::SURFACE_RAISED))
-        .border(1.0, theme::hex(theme::BORDER_SUBTLE))
+        .radius(8.0)
+        .fill(theme::hex(theme::SURFACE_ELEVATED))
+        .border(1.0, border)
         .child(trigger);
+    if !preferences.matte() {
+        card = card.box_shadow(rune::Shadow {
+            y: 1.0,
+            inset: true,
+            color: theme::hex(theme::LIGHT_SURFACE_GLOW).alpha(0.18),
+            ..rune::Shadow::default()
+        });
+    }
     if expanded {
         for item in &group.items {
-            entry = entry.child(row(item, state, kit));
+            card = card.child(row(item, state, kit));
+        }
+    }
+    let mut entry = rune::col().key(key).w_full().child(card);
+    if !expanded && group.items.len() > 1 {
+        for (key, inset) in [("near-lip", 7.0), ("far-lip", 13.0)] {
+            entry = entry.child(
+                rune::row().key(key).w_full().px(inset).a11y_hidden().child(
+                    rune::el()
+                        .grow(1.0)
+                        .h(3.0)
+                        .radius(2.0)
+                        .fill(theme::hex(theme::SURFACE_RAISED))
+                        .border_sides([0.0, 1.0, 1.0, 1.0], border),
+                ),
+            );
         }
     }
     entry
 }
 
-fn unread_dot(unread: bool) -> El {
+fn status_dot(tone: StatusTone) -> El {
     rune::el()
         .size(6.0, 6.0)
         .radius(3.0)
-        .fill(if unread {
-            theme::hex(theme::ACCENT_HOVER)
-        } else {
-            rune::Color::TRANSPARENT
-        })
+        .fill(tone.fg())
         .a11y_hidden()
 }
 
@@ -887,7 +1019,7 @@ fn row(item: &Item, state: &State, kit: &Kit) -> El {
                     state.inbox.select(id);
                     tx.keep_on_screen(toggle_key.clone());
                 })
-                .child(unread_dot(!item.read))
+                .child(status_dot(item.tone))
                 .child(
                     rune::text(item.title.clone())
                         .font(if item.read {
@@ -920,7 +1052,7 @@ fn row(item: &Item, state: &State, kit: &Kit) -> El {
                 .on_press_tx(move |state: &mut State, tx| {
                     let position = |inbox: &Inbox| {
                         inbox
-                            .groups()
+                            .filtered_groups()
                             .iter()
                             .position(|group| group.topic == &topic)
                     };
@@ -946,6 +1078,11 @@ fn row(item: &Item, state: &State, kit: &Kit) -> El {
         actions = actions.child(
             rune_kit::Button::new(label)
                 .variant(rune_kit::ButtonVariant::Ghost)
+                .label_with(move |font, _| {
+                    rune::text(label)
+                        .font(font)
+                        .color(theme::hex(theme::MOLTEN_ACCENT))
+                })
                 .on_press_tx(move |state: &mut State, tx| {
                     state.close_inbox(tx);
                     match &topic {
@@ -1001,7 +1138,8 @@ fn seed_drawer(inbox: &mut Inbox, now: f64) {
         "Connection".into(),
         "Connected".into(),
         "The connection to the backend is ready.".into(),
-        now - 600.0,
+        now - 25.0 * 3600.0,
+        StatusTone::Ok,
     );
     inbox.mark_all_read();
     inbox.push(
@@ -1010,6 +1148,7 @@ fn seed_drawer(inbox: &mut Inbox, now: f64) {
         crate::readiness_cards::ACTOR_INDEX_CATCH_UP.into(),
         "The index is warming up after backend startup. You can keep using the other workstation tools.".into(),
         now - 120.0,
+        StatusTone::Info,
     );
     inbox.push(
         job.clone(),
@@ -1017,6 +1156,7 @@ fn seed_drawer(inbox: &mut Inbox, now: f64) {
         "Job completed".into(),
         format!("{job_title} is complete. Open Jobs & Logs for details."),
         now - 120.0,
+        StatusTone::Ok,
     );
     inbox.push(
         readiness.clone(),
@@ -1024,6 +1164,7 @@ fn seed_drawer(inbox: &mut Inbox, now: f64) {
         "Actor search is ready".into(),
         "Actor search changed from running to ready.".into(),
         now - 28.0,
+        StatusTone::Ok,
     );
     inbox.expanded.extend([readiness, job]);
     inbox.selected = inbox.items.get(1).map(|item| item.id);
@@ -1327,7 +1468,7 @@ mod tests {
     }
 
     #[test]
-    fn modal_drawer_has_four_close_paths_and_preserves_the_workspace_at_minimum_size() {
+    fn modal_popover_has_four_close_paths_and_preserves_the_workspace_at_minimum_size() {
         let mut state = crate::tests::registered_fixture();
         state.page = crate::app::Page::Workstation;
         state.assistant.enabled = true;
@@ -1335,6 +1476,13 @@ mod tests {
         state.inbox.observe(0.0, obs(1, Link::Connecting));
         state.inbox.observe(1.0, obs(1, Link::Connected));
         let mut runtime = runtime(state, (640.0, 480.0));
+        let (toolbar, _) = runtime.presented("toolbar").expect("toolbar geometry");
+        let (command, _) = runtime.presented("command-open").expect("command geometry");
+        let (telemetry, _) = runtime
+            .presented("toolbar-telemetry")
+            .expect("telemetry geometry");
+        assert!((command[0] + command[2] / 2.0 - toolbar[0] - toolbar[2] / 2.0).abs() < 0.5);
+        assert!(command[0] + command[2] <= telemetry[0]);
 
         for (step, close) in [
             "inbox-toggle-close",
@@ -1352,16 +1500,17 @@ mod tests {
             assert!(focused(&runtime, "inbox-close"));
             assert!(runtime.find("assistant-dock").is_some());
             assert!(runtime.find("screen-workstation").is_some());
-            assert!(runtime.find("inbox-filter").is_none());
-            let (panel, _) = runtime.presented("inbox-body").expect("drawer geometry");
+            let (panel, _) = runtime.presented("inbox-body").expect("popover geometry");
             let (tray, _) = runtime.presented("inbox-toggle").expect("tray geometry");
-            assert!(panel[0] >= 0.0 && (panel[0] + panel[2] - 640.0).abs() < 0.5);
+            assert!(panel[0] > 0.0 && panel[0] + panel[2] < 640.0);
+            assert!((panel[0] + panel[2] - tray[0] - tray[2]).abs() < 0.5);
             assert!(panel[1] >= tray[1] + tray[3]);
-            assert!((panel[1] + panel[3] - 480.0).abs() < 0.5);
+            assert!(panel[1] + panel[3] < 480.0);
             for key in [
                 "inbox-close",
                 "inbox-mark-all-read",
                 "inbox-helper",
+                "inbox-filter",
                 "inbox-scroll",
             ] {
                 let (rect, _) = runtime.presented(key).expect(key);
@@ -1418,6 +1567,32 @@ mod tests {
             );
             assert_eq!(runtime.state.page, crate::app::Page::Workstation);
         }
+    }
+
+    #[test]
+    fn inbox_filter_keeps_unread_totals_and_restores_all_groups_on_reopen() {
+        let mut state = crate::tests::registered_fixture();
+        state.seed_inbox_drawer_fixture();
+        let mut runtime = runtime(state, (1280.0, 800.0));
+        assert!(runtime.find("inbox-time-inbox-group-connection").is_some());
+        assert!(runtime.find("inbox-group-connection/near-lip").is_some());
+        assert!(runtime.find("inbox-group-job-fixture-index-job").is_some());
+
+        click(&mut runtime, "inbox-filter/value/input", 1.0);
+        runtime.key(rune::KeyEvent {
+            key: rune::Key::Text("WARMING UP".into()),
+            mods: rune::Mods::default(),
+        });
+        runtime.frame(1.25);
+        assert!(runtime.find("inbox-group-readiness-Actor search").is_some());
+        assert!(runtime.find("inbox-group-job-fixture-index-job").is_none());
+        assert!(runtime.find("inbox-group-connection").is_none());
+        assert_eq!(runtime.state.inbox.unread(), 3);
+
+        click(&mut runtime, "inbox-close", 1.5);
+        click(&mut runtime, "inbox-toggle", 1.75);
+        assert!(runtime.find("inbox-group-job-fixture-index-job").is_some());
+        assert_eq!(runtime.state.inbox.unread(), 3);
     }
 
     #[test]
@@ -1499,6 +1674,7 @@ mod tests {
                 "Connected".into(),
                 "The connection to the backend is ready.".into(),
                 901.0,
+                StatusTone::Ok,
             );
         });
         runtime.frame(1.5);

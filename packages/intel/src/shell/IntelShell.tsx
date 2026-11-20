@@ -13,7 +13,7 @@ import {
   intelStatus,
 } from "./intel-theme";
 import { intelFonts } from "./intel-fonts";
-import { FleetworksMark } from "@argos/ui";
+import { colors, FleetworksMark } from "@argos/ui";
 import type { JobState } from "./jobState";
 
 const subscribeHydration = () => () => {};
@@ -409,7 +409,7 @@ const s = StyleSheet.create({
     borderRadius: 8,
     borderWidth: 1,
     borderColor: c.borderStrong,
-    backgroundColor: c.panelRaised,
+    backgroundColor: colors.elevated,
   },
   jobHeading: {
     fontFamily: intelFonts.mono,

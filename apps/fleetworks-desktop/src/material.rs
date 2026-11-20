@@ -79,7 +79,7 @@ pub(crate) fn glass_recipe(
             blur: 10.0,
         },
         GlassSurface::Overlay => GlassRecipe {
-            alpha: 0.91,
+            alpha: 0.88,
             blur: 14.0,
         },
     })
@@ -93,10 +93,69 @@ pub(crate) fn glass(el: El, surface: GlassSurface, preferences: ViewPreferences)
         Some(recipe) => el
             .backdrop_blur(recipe.blur)
             .fill(raised.alpha(recipe.alpha))
-            .border_sides([1.0, 0.0, 0.0, 0.0], theme::hex(theme::BORDER_SUBTLE)),
+            .border_gradient(1.0, rim_color(), theme::hex(theme::BORDER_SUBTLE)),
         None => el
             .fill(raised)
-            .border_sides([1.0, 0.0, 0.0, 0.0], theme::hex(theme::BORDER_SUBTLE)),
+            .border(1.0, theme::hex(theme::BORDER_CONTROL)),
+    }
+}
+
+fn rim_color() -> Color {
+    theme::hex(theme::LIGHT_SURFACE_GLOW).alpha(0.18)
+}
+
+fn top_rim(el: El) -> El {
+    el.box_shadow(Shadow {
+        y: 1.0,
+        color: rim_color(),
+        inset: true,
+        ..Shadow::default()
+    })
+}
+
+/// Backend choice cards keep one functional outline and use a steady bevel for selection.
+pub(crate) fn choice_tile(el: El, selected: bool, preferences: ViewPreferences) -> El {
+    let tile = el
+        .radius(10.0)
+        .fill(theme::hex(if selected {
+            theme::SELECTION_SURFACE
+        } else {
+            theme::SURFACE
+        }))
+        .border(
+            1.0,
+            theme::hex(if selected || preferences.matte() {
+                theme::BORDER_CONTROL
+            } else {
+                theme::BORDER_SUBTLE
+            }),
+        );
+    if selected && !preferences.matte() {
+        top_rim(tile)
+    } else {
+        tile
+    }
+}
+
+/// Open content tiles stay on the canvas at rest and use a slate wash on hover.
+pub(crate) fn canvas_tile(el: El, selected: bool, preferences: ViewPreferences) -> El {
+    let tile = el
+        .radius(8.0)
+        .fill(theme::hex(if selected {
+            theme::SURFACE_RAISED
+        } else {
+            theme::BACKGROUND
+        }))
+        .hover(theme::hex(theme::SURFACE_ELEVATED));
+    if selected {
+        let tile = tile.border(1.0, theme::hex(theme::BORDER_CONTROL));
+        if preferences.matte() {
+            tile
+        } else {
+            top_rim(tile)
+        }
+    } else {
+        tile
     }
 }
 
@@ -344,6 +403,9 @@ pub(crate) fn apply_liquid_metal(
         fill = theme::hex(theme::SURFACE_RAISED);
     }
     let mut styled = button.fill(fill).border(1.0, border).radius(radius);
+    if finish.fractured() && !disabled && !preferences.matte() {
+        styled = top_rim(styled);
+    }
     if finish.fractured() {
         let (rest, hover) = if disabled && !shimmer {
             (TEXTURE_OPACITY_DISABLED, TEXTURE_OPACITY_DISABLED)
@@ -469,12 +531,6 @@ pub(crate) fn skeleton_block(
     )
 }
 
-/// Toolbar controls share the Kit's matte recipe without a reflection overlay.
-/// Do not wrap the control or change accessibility keys, layout or focus rings.
-pub(crate) fn compact_toolbar(control: El, _preferences: ViewPreferences) -> El {
-    control
-}
-
 #[cfg(test)]
 mod glass_tests {
     use super::*;
@@ -493,7 +549,7 @@ mod glass_tests {
         assert!((0.80..=0.88).contains(&composer.alpha));
         assert!((8.0..=12.0).contains(&composer.blur));
         let overlay = glass_recipe(GlassSurface::Overlay, prefs(false, false)).expect("glass");
-        assert!((0.88..=0.94).contains(&overlay.alpha));
+        assert!((0.82..=0.90).contains(&overlay.alpha));
         assert!((12.0..=16.0).contains(&overlay.blur));
     }
 

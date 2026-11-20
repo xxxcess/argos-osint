@@ -37,7 +37,6 @@ use rune_kit::shell::Toolbar;
 use rune_kit::Button;
 use rune_kit::ButtonVariant;
 use rune_kit::ControlSize;
-use rune_kit::Dialog;
 use rune_kit::IconButton;
 use rune_kit::IconButtonVariant;
 
@@ -67,7 +66,6 @@ use crate::logs::ActivityTab;
 use crate::logs::LogAction;
 use crate::logs::LogState;
 use crate::maintenance::Maintenance;
-use crate::material::MetalFinish;
 use crate::rebind::Rebind;
 use crate::registration::Registration;
 use crate::submission::SubmissionKind;
@@ -77,7 +75,6 @@ use crate::theme::StatusTone;
 use crate::transfer::Transfer;
 use crate::transfer::TransferAction;
 use crate::ui_components;
-use crate::ui_components::ActionButton;
 use crate::views;
 use crate::workspaces::WorkspaceCommand;
 use crate::workspaces::Workspaces;
@@ -404,7 +401,7 @@ impl Default for State {
             host_metrics_request: None,
             host_metrics_observed_at: None,
             host_metrics_error: None,
-            sidebar: PaneState::new(220.0).range(180.0, 340.0),
+            sidebar: PaneState::new(188.0).range(176.0, 340.0),
             connection: Connection::default(),
             pairing: crate::pairing::Pairing::default(),
             connection_profiles: ConnectionProfiles::initial(),
@@ -610,7 +607,9 @@ impl State {
                 self.connection.token_file = rune::TextEdit::new("");
                 self.connection_profiles.credential = None;
                 self.connection_profiles.operator_token_override = false;
-                self.local_backend.refresh_binary_status();
+                if !self.fixture {
+                    self.local_backend.refresh_binary_status();
+                }
             }
             BackendKind::Remote => {
                 if canonical_local_origin(&self.connection.origin.text).is_ok() {
@@ -734,7 +733,9 @@ impl State {
         if canonical_local_origin(&self.connection.origin.text).is_err() {
             self.connection.origin = rune::TextEdit::new(DEFAULT_LOCAL_ORIGIN);
         }
-        self.local_backend.refresh_binary_status();
+        if !self.fixture {
+            self.local_backend.refresh_binary_status();
+        }
         self.connection.status = ConnectionStatus::Connecting;
         self.record(Intent::Connect);
         if let Some(services) = &self.services {
@@ -1520,9 +1521,14 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
         let startup = crate::startup::view(state, cx, preferences, &kit);
         return mark_fixture(state, &kit, startup).on_window_focus(State::log_window_focus);
     }
-    let compact_rail = cx
-        .layout_size("app-shell")
-        .is_some_and(|size| size[0] < 820.0);
+    let shell_width = cx.layout_size("app-shell").map(|size| size[0]);
+    let compact_rail = shell_width.is_some_and(|width| width < 820.0);
+    let compact_toolbar = shell_width.is_none_or(|width| width < 1000.0);
+    let mut selected_rail_kit = kit.clone();
+    selected_rail_kit.c.pressed = theme::hex(theme::MOLTEN_SELECTION);
+    selected_rail_kit.c.text_base = theme::hex(theme::MOLTEN_ACCENT);
+    selected_rail_kit.c.icon_base = theme::hex(theme::MOLTEN_ACCENT);
+    selected_rail_kit.radius.md = 999.0;
 
     let connection_tone = match &state.connection.status {
         ConnectionStatus::Connected => StatusTone::Ok,
@@ -1530,9 +1536,9 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
         ConnectionStatus::Failed(_) => StatusTone::Err,
         ConnectionStatus::Disconnected => StatusTone::Neutral,
     };
-    let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
-
     let sidebar_el = (!compact_rail).then(|| {
+        let row_kit = |selected| if selected { &selected_rail_kit } else { &kit };
+        let workstation_selected = !state.setup_gateway && state.page == Page::Workstation;
         let mut sidebar = Sidebar::new()
             .label("Fleetworks pages")
             .header_gap(6.0)
@@ -1568,22 +1574,31 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
                 .build(&kit)
                 .key("gateway-status-header"),
             )
-            .child(SidebarHeader::new("Workstation").build(&kit))
+            .child(
+                SidebarHeader::new("Workstation")
+                    .build(&kit)
+                    .key("sidebar-workstation-heading"),
+            )
             .child(
                 SidebarRow::new(Page::Workstation.title())
                     .icon(Page::Workstation.icon())
-                    .selected(!state.setup_gateway && state.page == Page::Workstation)
+                    .selected(workstation_selected)
                     .on_select(|state: &mut State, _| state.navigate(Page::Workstation))
-                    .build(&kit)
+                    .build(row_kit(workstation_selected))
                     .key("nav-workstation"),
             );
 
         if state.connected() {
-            sidebar = sidebar.child(SidebarHeader::new("Operations").build(&kit));
+            sidebar = sidebar.child(
+                SidebarHeader::new("Operations")
+                    .build(&kit)
+                    .key("sidebar-operations-heading"),
+            );
             for page in Page::ALL.into_iter().filter(|page| *page != Page::Seed) {
+                let selected = !state.setup_gateway && state.page == page;
                 let mut row_builder = SidebarRow::new(page.title())
                     .icon(page.icon())
-                    .selected(!state.setup_gateway && state.page == page)
+                    .selected(selected)
                     .on_select(move |state: &mut State, _| state.navigate(page));
                 if let Some(status) = sidebar_row_status(state, page) {
                     row_builder = row_builder.status(status);
@@ -1591,7 +1606,11 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
                 if let Some(badge) = sidebar_row_badge(state, page) {
                     row_builder = row_builder.badge(badge);
                 }
-                sidebar = sidebar.child(row_builder.build(&kit).key(format!("nav-{}", page.key())));
+                sidebar = sidebar.child(
+                    row_builder
+                        .build(row_kit(selected))
+                        .key(format!("nav-{}", page.key())),
+                );
             }
         } else {
             sidebar = sidebar.child(
@@ -1599,7 +1618,7 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
                     .icon(&icons::KEY)
                     .selected(state.setup_gateway)
                     .on_select(|state: &mut State, _| state.setup_gateway = true)
-                    .build(&kit)
+                    .build(row_kit(state.setup_gateway))
                     .key("nav-setup"),
             );
         }
@@ -1624,40 +1643,18 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     } else {
         "Workstation activity: registration required".to_owned()
     };
-    let compact_header = cx
-        .layout_size("page-content")
-        .is_some_and(|size| size[0] < 520.0);
     let title_page = if state.connected() {
         state.page
     } else {
         Page::Workstation
     };
-    let toolbar_title = if state.setup_gateway {
-        if compact_header {
-            "Setup"
-        } else {
-            "Setup Gateway"
-        }
-    } else if compact_header && title_page != Page::Workstation {
-        title_page.compact_title()
-    } else {
-        title_page.title()
+    let toolbar_title = match (state.setup_gateway, compact_toolbar) {
+        (true, true) => "Setup",
+        (true, false) => "Setup Gateway",
+        (false, true) => title_page.compact_title(),
+        (false, false) => title_page.title(),
     };
-    let setup_button = crate::material::compact_toolbar(
-        ActionButton::new("Setup Gateway")
-            .key("connection-editor")
-            .icon(&icons::KEY)
-            .finish(if state.setup_gateway {
-                MetalFinish::GoldCta
-            } else {
-                MetalFinish::Gunmetal
-            })
-            .on_press(|state: &mut State| {
-                state.setup_gateway = true;
-            })
-            .build(&kit, preferences, pointer_ref),
-        preferences,
-    );
+    let gateway = gateway_toolbar_button(state, &kit, compact_toolbar, connection_tone);
     // The chat aux panel stays off until the typed chat contract lands. The original context
     // rail keeps its place meanwhile.
     let assistant_room = if state.assistant.enabled && state.connected() && !state.setup_gateway {
@@ -1668,20 +1665,29 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     let assistant_placement = assistant_room.map_or(crate::assistant::Placement::Hidden, |room| {
         state.assistant.preference.placement(room)
     });
-    let mut trailing = rune::row()
-        .gap(8.0)
-        .center_y()
-        .child(crate::command_panel::toolbar_button(&kit))
-        .child(crate::inbox::toolbar_item(state, &kit));
+    let mut trailing = rune::row().gap(6.0).center_y();
     if state.assistant.enabled && state.connected() && !state.setup_gateway {
         trailing = trailing.child(crate::assistant::toggle(
             assistant_placement != crate::assistant::Placement::Hidden,
             &kit,
         ));
     }
+    if state.connected() {
+        trailing = trailing.child(toolbar_telemetry(state, &kit, compact_toolbar));
+    }
     let toolbar = Toolbar::new()
-        .title(toolbar_title)
-        .trailing(trailing.child(setup_button));
+        .leading(
+            rune::text(toolbar_title)
+                .font(kit.ty.ui_medium)
+                .color(kit.c.text_base)
+                .truncate(),
+        )
+        .center(crate::command_panel::toolbar_button(&kit, compact_toolbar))
+        .trailing(
+            trailing
+                .child(gateway)
+                .child(crate::inbox::toolbar_item(state, &kit)),
+        );
 
     let any_busy = state.connection.status == ConnectionStatus::Connecting
         || state.pairing.busy()
@@ -1791,7 +1797,13 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     let content = content.child(screen);
     let mut main = rune::row().key("main-area").w_full().h_full().min_h(0.0);
     if compact_rail {
-        main = main.child(compact_icon_rail(state, &kit, connection_tone, preferences));
+        main = main.child(compact_icon_rail(
+            state,
+            &kit,
+            &selected_rail_kit,
+            connection_tone,
+            preferences,
+        ));
     }
     main = main.child(content);
     if !state.assistant.enabled
@@ -1848,22 +1860,24 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
             .layout_size("main-area")
             .map(|size| (size[0] - 24.0).clamp(420.0, 940.0))
             .unwrap_or(760.0);
-        Dialog::new("workstation-settings", "Settings")
-            .open(true)
-            .width(width)
-            .fit()
-            .click_outside(true)
-            .on_close(|state: &mut State| state.settings_open = false)
-            .child(crate::workstation_settings::page(state, cx, &kit))
-            .build(&kit, &mut layers);
+        layers.extend(crate::ui_components::glass_dialog(
+            "workstation-settings",
+            "Settings",
+            width,
+            crate::workstation_settings::page(state, cx, &kit),
+            true,
+            |state: &mut State| state.settings_open = false,
+            preferences,
+            &kit,
+        ));
     }
 
     if !state.has_active_confirmation() {
-        crate::command_panel::view(state, &kit, preferences, &mut layers);
+        crate::command_panel::view(state, &kit, preferences, compact_rail, &mut layers);
     }
 
-    if let Some(drawer) = crate::inbox::drawer(state, cx, &kit, preferences) {
-        layers.push(drawer);
+    if let Some(popover) = crate::inbox::popover(state, cx, &kit, preferences) {
+        layers.push(popover);
     }
 
     let mut split = SplitView::new(main)
@@ -1914,12 +1928,160 @@ fn mark_fixture(state: &State, kit: &rune_kit::Kit, view: El) -> El {
         .child(view.grow(1.0).min_h(0.0))
 }
 
+fn gateway_toolbar_button(
+    state: &State,
+    kit: &rune_kit::Kit,
+    compact: bool,
+    tone: StatusTone,
+) -> El {
+    let status = match state.connection.status {
+        ConnectionStatus::Connected => "Gateway connected",
+        ConnectionStatus::Connecting => "Gateway connecting",
+        ConnectionStatus::Failed(_) => "Gateway fault",
+        ConnectionStatus::Disconnected => "Gateway disconnected",
+    };
+    let label = if state.connection.status == ConnectionStatus::Disconnected {
+        "Setup Gateway"
+    } else {
+        status
+    };
+    Button::new(format!("{status}. Open gateway setup"))
+        .variant(ButtonVariant::Ghost)
+        .help("Setup Gateway")
+        .label_with(move |font, _| {
+            let mut content = rune::row().gap(5.0).center_y().child(
+                rune::icon(&icons::SERVER, 14.0)
+                    .color(tone.fg())
+                    .a11y_hidden(),
+            );
+            if !compact {
+                content = content.child(rune::text(label).font(font).color(tone.fg()));
+            }
+            content
+        })
+        .on_press(|state: &mut State| state.setup_gateway = true)
+        .build(kit)
+        .key("connection-editor")
+        .h(28.0)
+        .px(8.0)
+        .radius(999.0)
+        .fill(tone.bg())
+        .border(1.0, tone.border())
+}
+
+fn toolbar_telemetry(state: &State, kit: &rune_kit::Kit, compact: bool) -> El {
+    let metrics = match &state.host_metrics {
+        Load::Ready(metrics) => Some(metrics),
+        _ => None,
+    };
+    let samples = [
+        (
+            "CPU",
+            &icons::CPU,
+            metrics.and_then(|value| value.cpu_percent),
+        ),
+        (
+            "MEM",
+            &icons::MEMORY,
+            metrics.and_then(|value| value.memory_percent),
+        ),
+        (
+            "DSK",
+            &icons::DISK,
+            metrics.and_then(|value| value.disk_percent),
+        ),
+    ]
+    .map(|(name, icon, sample)| {
+        (
+            name,
+            icon,
+            sample.filter(|value| (0.0..=100.0).contains(value)),
+        )
+    });
+    let stale = state.host_metrics_error.is_some();
+    let percent =
+        |sample: Option<f64>| sample.map_or_else(|| "—".into(), |value| format!("{value:.0}%"));
+    let [cpu, memory, disk] = samples.map(|(_, _, sample)| percent(sample));
+    let freshness = if stale { ", stale" } else { "" };
+    let description =
+        format!("Gateway telemetry, CPU {cpu}, memory {memory}, disk {disk}{freshness}");
+    let ink = |sample| {
+        theme::hex(match sample {
+            Some(_) if stale => theme::TEXT_MUTED,
+            Some(value) if value >= 95.0 => theme::STATUS_ERR,
+            Some(value) if value >= 85.0 => theme::STATUS_WARN,
+            Some(_) => theme::TEXT_PRIMARY,
+            None => theme::TEXT_MUTED,
+        })
+    };
+    let badge = |icon, label: String, sample| {
+        rune::row()
+            .gap(4.0)
+            .center_y()
+            .a11y_hidden()
+            .child(rune::icon(icon, 12.0).color(ink(sample)))
+            .child(
+                rune::text(label)
+                    .font(kit.ty.small_medium)
+                    .color(ink(sample)),
+            )
+    };
+    let mut strip = rune::row()
+        .key("toolbar-telemetry")
+        .label(description.clone())
+        .help(description)
+        .role("group")
+        .h(28.0)
+        .px(8.0)
+        .gap(9.0)
+        .center_y()
+        .radius(999.0)
+        .fill(theme::hex(theme::SURFACE_RAISED))
+        .border(1.0, theme::hex(theme::BORDER_SUBTLE));
+    if compact {
+        let busiest = samples
+            .iter()
+            .filter_map(|(_, icon, sample)| sample.map(|value| (*icon, value)))
+            .max_by(|(_, left), (_, right)| left.total_cmp(right));
+        let (icon, sample) = busiest.map_or((&icons::WORKSTATION, None), |(icon, value)| {
+            (icon, Some(value))
+        });
+        strip.child(badge(icon, percent(sample), sample))
+    } else {
+        for (name, icon, sample) in samples {
+            strip = strip.child(badge(icon, format!("{name} {}", percent(sample)), sample));
+        }
+        strip
+    }
+}
+
 fn compact_icon_rail(
     state: &State,
     kit: &rune_kit::Kit,
+    selected_kit: &rune_kit::Kit,
     connection_tone: StatusTone,
     preferences: crate::accessibility::ViewPreferences,
 ) -> El {
+    let nav_icon = |icon, label: &'static str, selected| {
+        let palette = if selected { selected_kit } else { kit };
+        let fill = if selected {
+            palette.c.pressed
+        } else {
+            rune::Color::TRANSPARENT
+        };
+        IconButton::new(icon)
+            .variant(if selected {
+                IconButtonVariant::Ghost
+            } else {
+                IconButtonVariant::GhostMuted
+            })
+            .control_size(ControlSize::Large)
+            .label(label)
+            .help(label)
+            .build(palette)
+            .fill(fill)
+            .focus_selected(selected)
+    };
     let mut rail = rune::col()
         .key("compact-icon-rail")
         .w(52.0)
@@ -1938,64 +2100,36 @@ fn compact_icon_rail(
                 .child(ui_components::status_dot(connection_tone, preferences)),
         )
         .child(
-            IconButton::new(Page::Workstation.icon())
-                .variant(if !state.setup_gateway && state.page == Page::Workstation {
-                    IconButtonVariant::Contrast
-                } else {
-                    IconButtonVariant::GhostMuted
-                })
-                .control_size(ControlSize::Large)
-                .label(Page::Workstation.title())
-                .help(Page::Workstation.title())
-                .on_press(|state: &mut State| state.navigate(Page::Workstation))
-                .build(kit)
-                .key("nav-workstation"),
+            nav_icon(
+                Page::Workstation.icon(),
+                Page::Workstation.title(),
+                !state.setup_gateway && state.page == Page::Workstation,
+            )
+            .on_press(|state: &mut State| state.navigate(Page::Workstation))
+            .key("nav-workstation"),
         );
     if state.connected() {
         for page in Page::ALL.into_iter().filter(|page| *page != Page::Seed) {
             rail = rail.child(
-                IconButton::new(page.icon())
-                    .variant(if !state.setup_gateway && state.page == page {
-                        IconButtonVariant::Contrast
-                    } else {
-                        IconButtonVariant::GhostMuted
-                    })
-                    .control_size(ControlSize::Large)
-                    .label(page.title())
-                    .help(page.title())
-                    .on_press(move |state: &mut State| state.navigate(page))
-                    .build(kit)
-                    .key(format!("nav-{}", page.key())),
+                nav_icon(
+                    page.icon(),
+                    page.title(),
+                    !state.setup_gateway && state.page == page,
+                )
+                .on_press(move |state: &mut State| state.navigate(page))
+                .key(format!("nav-{}", page.key())),
             );
         }
     } else {
         rail = rail.child(
-            IconButton::new(&icons::KEY)
-                .variant(if state.setup_gateway {
-                    IconButtonVariant::Contrast
-                } else {
-                    IconButtonVariant::GhostMuted
-                })
-                .control_size(ControlSize::Large)
-                .label("Setup Gateway")
-                .help("Setup Gateway")
+            nav_icon(&icons::KEY, "Setup Gateway", state.setup_gateway)
                 .on_press(|state: &mut State| state.setup_gateway = true)
-                .build(kit)
                 .key("nav-setup"),
         );
     }
     rail.child(rune::spacer()).child(
-        IconButton::new(&icons::WORKSTATION)
-            .variant(if state.settings_open {
-                IconButtonVariant::Contrast
-            } else {
-                IconButtonVariant::GhostMuted
-            })
-            .control_size(ControlSize::Large)
-            .label("Settings")
-            .help("Settings")
+        nav_icon(&icons::WORKSTATION, "Settings", state.settings_open)
             .on_press(|state: &mut State| state.settings_open = true)
-            .build(kit)
             .key("open-workstation-settings"),
     )
 }

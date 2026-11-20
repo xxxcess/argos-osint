@@ -14,6 +14,7 @@ export const colors = {
   bg: "#060709",
   panel: "#0B0F14",
   raised: "#121820",
+  elevated: "#19212B",
   inset: "#060709",
   border: "#647587",
   borderSubtle: "#2B343F",
@@ -25,6 +26,8 @@ export const colors = {
   accentHover: "#68E7EB",
   onAccent: "#060709",
   selectionSurface: "#10272D",
+  molten: "#E5B869",
+  moltenSurface: "#241D12",
   accent2: "#c678dd",
   success: "#23dfa0",
   warning: "#f1c84b",
@@ -399,6 +402,8 @@ const s = StyleSheet.create({
     paddingHorizontal: 16,
     borderRadius: 10,
     borderColor: colors.border,
+    boxShadow:
+      "inset 0 1px 0 var(--fleetworks-specular-rim, rgba(213, 220, 229, 0.2))",
     overflow: "hidden",
   },
   buttonText: {

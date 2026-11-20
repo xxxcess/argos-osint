@@ -1,7 +1,7 @@
 //! Matte deep-space colors shared by the actual views and their fixtures.
 //!
 //! One uninterrupted `#060709` canvas, charcoal tonal steps, cool gray text and seven status
-//! hues that always travel with a label or icon. Sheen belongs to the main logo only.
+//! hues that always travel with a label or icon. Warm accents identify current selections.
 
 use rune::color;
 use rune::Color;
@@ -29,6 +29,9 @@ pub const ACCENT_HIGHLIGHT: &str = "#72E9FF";
 pub const ACCENT_DEEP: &str = "#0F6F75";
 pub const ON_ACCENT: &str = "#060709";
 pub const SELECTION_SURFACE: &str = "#10272D";
+pub const MOLTEN_SELECTION: &str = "#241D12";
+pub const MOLTEN_ACCENT: &str = "#E5B869";
+pub const MOLTEN_BRIGHT: &str = "#F1C84B";
 
 /// Cool dark-metal stops kept for the fractured-obsidian submit texture and the logo mark.
 pub const METAL_DARK_TOP: &str = "#222631";

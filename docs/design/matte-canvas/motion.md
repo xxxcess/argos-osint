@@ -54,7 +54,7 @@ The [verifier notes](../../../assets/brand/reference/quiet-orbit/source/clearanc
 
 ## In-app transitions
 
-The connected shell keeps its navigation and canvas fixed during a keyed 160 ms content fade. Brain details open from the selected result with a four-point shift. The Inbox drawer slides in at the right edge over a dimmed workspace. Assistant and Commands enter with short four- to six-point slides and fades. Refreshes keep the same view identity, scroll and selection. With reduced motion the views swap directly and keep focus and status cues.
+The connected shell keeps its navigation and canvas fixed during a keyed 160 ms content fade. Brain details open from the selected result with a four-point shift. The Inbox popover shifts four points down from the toolbar bell over a dimmed workspace. Assistant and Commands enter with short four- to six-point slides and fades. Refreshes keep the same view identity, scroll and selection. With reduced motion the views swap directly and keep focus and status cues.
 
 ## Acceptance
 

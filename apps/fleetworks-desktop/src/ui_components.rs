@@ -13,8 +13,11 @@ use rune::Icon;
 use rune::Live;
 use rune::Shadow;
 use rune::TextStyle;
+use rune::Transition;
 use rune::Tx;
 use rune_kit::Dialog;
+use rune_kit::IconButton;
+use rune_kit::IconButtonVariant;
 use rune_kit::Kit;
 use rune_kit::Progress;
 use rune_kit::ProgressCircle;
@@ -270,33 +273,124 @@ pub(crate) fn async_status_strip(
     let title = title.into();
     let detail = detail.into();
     let key = key.into();
-    let mut header = row().gap(8.0).center_y();
+    let mut header = row().w_full().min_w(0.0).gap(8.0).center_y();
     if busy {
         header = header.child(Spinner::new().size(15.0).color(tone.fg()).build(kit));
     } else {
         header = header.child(status_dot(tone, preferences));
     }
-    header = header
-        .child(text(title.clone()).font(kit.ty.ui_medium).color(tone.fg()))
-        .child(text(detail).font(kit.ty.small).color(kit.c.text_muted));
+    header = header.child(
+        text(title)
+            .grow(1.0)
+            .min_w(0.0)
+            .font(kit.ty.ui_medium)
+            .color(tone.fg())
+            .wrap(),
+    );
 
     let mut strip = col()
         .key(key)
         .w_full()
+        .min_w(0.0)
         .gap(6.0)
         .padding(10.0)
         .radius(8.0)
         .fill(tone.bg())
         .border(1.0, tone.border())
         .child(header);
+    if !detail.is_empty() {
+        strip = strip.child(
+            text(detail)
+                .key("async-status-detail")
+                .w_full()
+                .min_w(0.0)
+                .font(kit.ty.small)
+                .color(kit.c.text_muted)
+                .wrap_anywhere(),
+        );
+    }
     if busy {
         strip = strip.child(Progress::new(None).build(kit));
     }
     strip
 }
 
-/// Compact, interactive 0–100% telemetry dial.
+/// Floating dialog with a dimmed backdrop and Rune-managed focus and dismissal.
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn glass_dialog<S: 'static>(
+    key: &str,
+    title: &str,
+    width: f32,
+    body: El,
+    dismiss_outside: bool,
+    close: impl Fn(&mut S) + Clone + 'static,
+    preferences: ViewPreferences,
+    kit: &Kit,
+) -> [El; 2] {
+    let scrim = el()
+        .key(format!("{key}-scrim"))
+        .absolute(0.0, 0.0)
+        .w_full()
+        .h_full()
+        .fill(theme::hex(theme::BACKGROUND).alpha(0.86))
+        .a11y_hidden();
+    let dismiss = IconButton::new(kit.glyph.close)
+        .variant(IconButtonVariant::Ghost)
+        .label("Close")
+        .on_press(close.clone())
+        .build(kit)
+        .key("close");
+    let panel = col()
+        .key(format!("{key}-dialog"))
+        .role("dialog")
+        .label(title)
+        .w_full()
+        .max_w(width)
+        .radius(10.0)
+        .child(
+            row()
+                .key("header")
+                .w_full()
+                .px(16.0)
+                .py(10.0)
+                .gap(12.0)
+                .center_y()
+                .border_sides([0.0, 0.0, 1.0, 0.0], theme::hex(theme::BORDER_SUBTLE))
+                .child(
+                    text(title)
+                        .grow(1.0)
+                        .min_w(0.0)
+                        .font(kit.ty.ui_medium)
+                        .color(kit.c.text_base)
+                        .wrap(),
+                )
+                .child(dismiss),
+        )
+        .child(col().key("body").w_full().child(body))
+        .modal(true, close)
+        .modal_click_outside(dismiss_outside);
+    let panel = material::glass(panel, material::GlassSurface::Overlay, preferences);
+    let (scrim, panel) = if preferences.reduced_motion {
+        (scrim, panel)
+    } else {
+        (
+            scrim.transition(Transition::opacity()),
+            panel.transition(Transition::opacity()),
+        )
+    };
+    [
+        scrim,
+        el().key(format!("{key}-layer"))
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h_full()
+            .padding(16.0)
+            .center()
+            .child(panel),
+    ]
+}
+
+/// Compact, interactive 0–100% telemetry dial.
 pub(crate) fn metric_ring_tile(
     key: &str,
     label: &str,
@@ -306,8 +400,6 @@ pub(crate) fn metric_ring_tile(
     active: bool,
     preferences: ViewPreferences,
     kit: &Kit,
-    pointer_offset: Option<&Live<[f32; 2]>>,
-    shadow_offset: Option<&Live<[f32; 2]>>,
 ) -> El {
     let value = reading.map(|value| format!("{value:.1}%"));
     let accessible_label = format!("{label}: {}", value.as_deref().unwrap_or("Unavailable"));
@@ -349,19 +441,12 @@ pub(crate) fn metric_ring_tile(
                 .a11y_hidden(),
         );
 
-    material::interactive_tile(
-        body,
-        active,
-        tone,
-        preferences,
-        pointer_offset,
-        shadow_offset,
-    )
-    .key(key)
-    .role("button")
-    .label(accessible_label)
-    .focusable(true)
-    .focus_ring(2.0, 2.0, theme::hex(theme::ACCENT_HIGHLIGHT))
+    material::canvas_tile(body, active, preferences)
+        .key(key)
+        .role("button")
+        .label(accessible_label)
+        .focusable(true)
+        .focus_ring(2.0, 2.0, theme::hex(theme::ACCENT_HIGHLIGHT))
 }
 
 /// Inline configuration toggle row backed by `rune_kit::Switch`.

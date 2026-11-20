@@ -8,6 +8,7 @@ nextjs-portal {
    keeps the two equal. Everything below derives from the variable. */
 :root {
   --intel-ui-scale: 0.75;
+  --fleetworks-specular-rim: rgba(213, 220, 229, 0.2);
 }
 html {
   zoom: var(--intel-ui-scale);
@@ -196,7 +197,8 @@ select {
 }
 #intel-home-launcher:is(:hover, :focus-visible)
   [data-testid="intel-launcher-tile"] {
-  box-shadow: none;
+  background-color: #19212b;
+  box-shadow: inset 0 1px 0 var(--fleetworks-specular-rim);
   border-color: #24dce3;
 }
 [data-testid^="article-card-"] {
@@ -272,6 +274,25 @@ select {
   top: 0;
   z-index: 2;
   padding-bottom: 12px;
+}
+:is(#intel-day-overlay, #intel-job-menu) {
+  box-shadow: inset 0 1px 0 var(--fleetworks-specular-rim);
+}
+#intel-day-overlay {
+  min-width: 144px;
+  max-height: min(320px, 50dvh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+@media (prefers-reduced-transparency: no-preference) and (forced-colors: none) {
+  @supports (backdrop-filter: blur(12px)) or
+    (-webkit-backdrop-filter: blur(12px)) {
+    :is(#intel-day-overlay, #intel-job-menu) {
+      background-color: rgba(18, 24, 32, 0.88);
+      -webkit-backdrop-filter: blur(12px);
+      backdrop-filter: blur(12px);
+    }
+  }
 }
 @media (max-width: 599px) {
   #intel-content-frame[data-testid="intel-bulletin-frame"] {
@@ -358,26 +379,4 @@ select {
   /* The WebGL crescent reaches about 8.2% of scene height below center. */
   top: max(calc(50% + 40px), calc(59% + 12px));
   padding-top: 0;
-}
-
-@keyframes intel-landing-status-cycle {
-  0% {
-    opacity: 0;
-  }
-  20%,
-  80% {
-    opacity: 1;
-  }
-  100% {
-    opacity: 0;
-  }
-}
-#intel-landing-status {
-  animation: intel-landing-status-cycle 3s linear infinite;
-}
-@media (prefers-reduced-motion: reduce) {
-  #intel-landing-status {
-    animation: none;
-    opacity: 1;
-  }
 }

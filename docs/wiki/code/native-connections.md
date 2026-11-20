@@ -31,9 +31,9 @@ The [HTTP/IPC parity test](../../../services/api-host/tests/http_ipc_parity.rs) 
 
 ## Inbox and Assistant dock
 
-The toolbar **Inbox** tray shows the unread count and toggles a right-edge drawer over the current page. The page, its scroll position, and the Assistant stay in place. The backdrop dims the workspace and adds a subtle blur when supported. Reduced Transparency uses dimming alone. Use the tray, **Close**, Escape, or the backdrop to dismiss it. Focus stays in the open drawer and returns to the tray on dismissal. Reduced Motion shows the drawer in place immediately.
+The toolbar **Inbox** bell shows the unread count and opens a glass popover below it. The current page, scroll position, and Assistant stay in place behind a dimmed backdrop. Reduced Transparency uses an opaque panel with the same bounds. The bell, **Close**, Escape, and the backdrop dismiss the popover. Focus stays in the popover while it is open and returns to the bell on dismissal. Reduced Motion opens it immediately.
 
-The drawer groups this workstation’s observed notifications by job, service, or connection. Unread groups lead, ordered by their oldest unread item. Expand a group to read items in chronological order. Opening the drawer leaves items unread. Mark an individual item or all items read. **Open job** goes to a tracked job and **View status** opens the matching readiness details on Workstation Status. Background actor indexing is a readiness update and leaves the Jobs & Logs count unchanged.
+Filter this workstation’s observed notifications by text. Groups collect related job, service, or connection changes and show time headings. Unread groups lead, ordered by their oldest unread item. Expand a group to read items in chronological order. Opening the popover leaves items unread. Mark an individual item or all items read. **Open job** goes to a tracked job and **View status** opens the matching readiness details on Workstation Status. Background actor indexing is a readiness update and leaves the Jobs & Logs count unchanged.
 
 The app keeps at most 50 items and clears them when the connection authority changes. Notifications cover visible job completion, readiness transitions, and connection success or failure. Item text uses fixed wording and bounded titles without exposing error text, URLs, or credentials.
 
@@ -41,7 +41,7 @@ The contextual **Assistant** dock is built and tested but **disabled** (`Assista
 
 ## Command panel
 
-Cmd/Ctrl+K or the toolbar magnifier opens a grouped list of known actions: go to a page, Setup Gateway, Settings, Open Inbox, and Show or hide Assistant when it is enabled. Typing only filters that fixed list, and there is no arbitrary command runner. Arrow keys move, Enter runs, and Escape closes and returns focus to the toolbar button. Actions that could accept work, such as seed or index, only open their page, where the existing review step still applies. While the panel is open it is the only overlay.
+Cmd/Ctrl+K or the centered command pill opens a grouped list of known actions: go to a page, Setup Gateway, Settings, Open Inbox, and Show or hide Assistant when it is enabled. Typing only filters that fixed list, and there is no arbitrary command runner. Arrow keys move, Enter runs, and Escape closes and returns focus to the toolbar button. Actions that could accept work, such as seed or index, only open their page, where the existing review step still applies. While the panel is open it is the only overlay.
 
 <a id="pairing-and-keychain-agreed-target"></a>
 

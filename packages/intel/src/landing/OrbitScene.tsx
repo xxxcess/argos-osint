@@ -117,14 +117,12 @@ export function OrbitScene({
       </View>
       <View nativeID="intel-landing-controls" style={s.controls}>
         <StatusMessage
-          key={message}
           message={message}
           color={
             sequence.phase === "healthy" || sequence.phase === "ready"
               ? coreColor
               : intelColors.dim
           }
-          reduced={reduced}
         />
         <View
           role="list"

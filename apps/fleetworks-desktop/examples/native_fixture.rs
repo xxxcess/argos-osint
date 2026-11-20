@@ -35,6 +35,7 @@ mod native {
     use fleetworks_contracts::search::ActorSearchResponse;
     use fleetworks_contracts::search::IndexState;
     use fleetworks_contracts::search::IndexStatus;
+    use fleetworks_desktop::accessibility::FixtureAccessibility;
     use fleetworks_desktop::app;
     use fleetworks_desktop::app::Intent;
     use fleetworks_desktop::app::Load;
@@ -53,6 +54,7 @@ mod native {
     use fleetworks_desktop::brain::ActorDossier;
     use fleetworks_desktop::configuration::ConfigurationSaved;
     use fleetworks_desktop::connection::ConnectionStatus;
+    use fleetworks_desktop::local_backend::BinaryDiscoveryStatus;
     use fleetworks_desktop::registration::InterfaceSnapshot;
     use fleetworks_desktop::registration::NativeInterface;
     use fleetworks_desktop::transfer::TransferConfirmation;
@@ -61,12 +63,16 @@ mod native {
     use fleetworks_desktop::workspaces::WorkspaceSnapshot;
     use fleetworks_desktop::Page;
     use fleetworks_desktop::State;
+    use fleetworks_workstation::native::BackendKind;
     use fleetworks_workstation::native::WorkspaceState;
     use rune::AppSpec;
     use rune::TextEdit;
 
     fn init() -> State {
-        State::fixture()
+        let mut state = State::fixture();
+        state.local_backend.binary_status =
+            BinaryDiscoveryStatus::Ready("/fixture/bundle/argos-api-host".into());
+        state
     }
 
     fn connected(state: &mut State) {
@@ -571,6 +577,56 @@ mod native {
         }
     }
 
+    fn setup_connected_embedded(state: &mut State) {
+        setup_connected_distributed(state);
+        state.backend_kind = BackendKind::Local;
+        state.connection.origin = TextEdit::new("local://embedded");
+    }
+
+    fn setup_connected_distributed(state: &mut State) {
+        readiness_scenes::mixed_status_checks(state);
+        state.setup_gateway = true;
+        state.setup_advanced_open = true;
+    }
+
+    fn inbox(state: &mut State) {
+        registered(state);
+        state.seed_inbox_drawer_fixture();
+    }
+
+    fn workstation_status(state: &mut State) {
+        readiness_scenes::mixed_status_checks(state);
+        state.backend_kind = BackendKind::Local;
+        state.connection.origin = TextEdit::new("local://embedded");
+        state.host_metrics = Load::Ready(fleetworks_desktop::workstation_dashboard::HostMetrics {
+            cpu_percent: Some(18.0),
+            memory_percent: Some(0.0),
+            disk_percent: None,
+            ..Default::default()
+        });
+        jobs_scenes::install(state, Vec::new());
+        state.workstation_status_checks_open = true;
+    }
+
+    fn workstation_settings(state: &mut State) {
+        registered(state);
+        state.fixture_show_workstation_settings();
+    }
+
+    enum ReviewAppearance {
+        Matte,
+        ReducedMotion,
+    }
+
+    fn review_appearance(state: &mut State, setup: fn(&mut State), appearance: ReviewAppearance) {
+        setup(state);
+        state.accessibility.fixture_override = Some(FixtureAccessibility {
+            reduced_motion: matches!(appearance, ReviewAppearance::ReducedMotion),
+            reduced_transparency: matches!(appearance, ReviewAppearance::Matte),
+            ..FixtureAccessibility::default()
+        });
+    }
+
     pub fn run() {
         rune::run(AppSpec {
             init,
@@ -695,39 +751,69 @@ mod native {
                     appearance_scenes::reduced_motion,
                 ),
                 ("appearance-material-fallback", appearance_scenes::fallback),
-                ("setup-connected-embedded", |state| {
-                    readiness_scenes::mixed_status_checks(state);
-                    state.backend_kind = fleetworks_workstation::native::BackendKind::Local;
-                    state.connection.origin = TextEdit::new("local://embedded");
-                    state.local_backend.binary_status =
-                        fleetworks_desktop::local_backend::BinaryDiscoveryStatus::Ready(
-                            "/fixture/bundle/argos-api-host".into(),
-                        );
-                    state.setup_gateway = true;
-                    state.setup_advanced_open = true;
+                ("setup-connected-embedded", setup_connected_embedded),
+                ("setup-connected-distributed", setup_connected_distributed),
+                ("inbox-drawer", inbox),
+                ("workstation-status-checks-mixed", workstation_status),
+                ("workstation-settings", workstation_settings),
+                ("workstation-status-checks-mixed-matte", |state| {
+                    review_appearance(state, workstation_status, ReviewAppearance::Matte);
                 }),
-                ("setup-connected-distributed", |state| {
-                    readiness_scenes::mixed_status_checks(state);
-                    state.setup_gateway = true;
-                    state.setup_advanced_open = true;
+                ("workstation-status-checks-mixed-reduced-motion", |state| {
+                    review_appearance(state, workstation_status, ReviewAppearance::ReducedMotion);
                 }),
-                ("inbox-drawer", |state| {
-                    registered(state);
-                    state.seed_inbox_drawer_fixture();
+                ("inbox-drawer-matte", |state| {
+                    review_appearance(state, inbox, ReviewAppearance::Matte);
                 }),
-                ("workstation-status-checks-mixed", |state| {
-                    readiness_scenes::mixed_status_checks(state);
-                    state.backend_kind = fleetworks_workstation::native::BackendKind::Local;
-                    state.connection.origin = TextEdit::new("local://embedded");
-                    state.host_metrics =
-                        Load::Ready(fleetworks_desktop::workstation_dashboard::HostMetrics {
-                            cpu_percent: Some(18.0),
-                            memory_percent: Some(0.0),
-                            disk_percent: None,
-                            ..Default::default()
-                        });
-                    jobs_scenes::install(state, Vec::new());
-                    state.workstation_status_checks_open = true;
+                ("inbox-drawer-reduced-motion", |state| {
+                    review_appearance(state, inbox, ReviewAppearance::ReducedMotion);
+                }),
+                ("command-panel-reduced-motion", |state| {
+                    review_appearance(
+                        state,
+                        overhaul_scenes::command_panel,
+                        ReviewAppearance::ReducedMotion,
+                    );
+                }),
+                ("setup-connected-embedded-matte", |state| {
+                    review_appearance(state, setup_connected_embedded, ReviewAppearance::Matte);
+                }),
+                ("setup-connected-embedded-reduced-motion", |state| {
+                    review_appearance(
+                        state,
+                        setup_connected_embedded,
+                        ReviewAppearance::ReducedMotion,
+                    );
+                }),
+                ("setup-connected-distributed-matte", |state| {
+                    review_appearance(state, setup_connected_distributed, ReviewAppearance::Matte);
+                }),
+                ("setup-connected-distributed-reduced-motion", |state| {
+                    review_appearance(
+                        state,
+                        setup_connected_distributed,
+                        ReviewAppearance::ReducedMotion,
+                    );
+                }),
+                ("atlas-provider-keys-matte", |state| {
+                    review_appearance(
+                        state,
+                        submission_scenes::atlas_provider_keys,
+                        ReviewAppearance::Matte,
+                    );
+                }),
+                ("atlas-provider-keys-reduced-motion", |state| {
+                    review_appearance(
+                        state,
+                        submission_scenes::atlas_provider_keys,
+                        ReviewAppearance::ReducedMotion,
+                    );
+                }),
+                ("workstation-settings-matte", |state| {
+                    review_appearance(state, workstation_settings, ReviewAppearance::Matte);
+                }),
+                ("workstation-settings-reduced-motion", |state| {
+                    review_appearance(state, workstation_settings, ReviewAppearance::ReducedMotion);
                 }),
                 ("workstation-observed", readiness_scenes::observed),
                 ("workstation-connecting", readiness_scenes::connecting),

@@ -635,6 +635,22 @@ mod tests {
     }
 
     #[test]
+    fn embedded_fixture_preserves_synthetic_companion_discovery() {
+        use crate::local_backend::BinaryDiscoveryStatus;
+
+        let mut runtime = runtime((640.0, 480.0), false);
+        let synthetic = BinaryDiscoveryStatus::Ready("/fixture/bundle/argos-api-host".into());
+        runtime.state.local_backend.binary_status = synthetic.clone();
+        runtime.frame(0.0);
+        click(&mut runtime, "startup-local");
+        runtime.frame(0.2);
+        assert_eq!(runtime.state.local_backend.binary_status, synthetic);
+
+        runtime.state.connect_local();
+        assert_eq!(runtime.state.local_backend.binary_status, synthetic);
+    }
+
+    #[test]
     fn both_paths_are_keyboard_usable_on_the_first_frame_and_back_does_not_replay() {
         for (size, reduced) in [
             ((640.0, 480.0), false),

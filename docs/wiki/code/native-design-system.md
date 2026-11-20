@@ -4,7 +4,7 @@
 
 Rune macOS and Linux x86_64 client (`apps/fleetworks-desktop`). One selected destination; backend boundaries remain governed by the connection/runtime contracts. Intel Web shares paint/branding (`@tag:look-and-feel`) and workstation Connect while keeping its navigation and topology/list behavior.
 
-**Approved target · 2026-11-17:** [Matte canvas theme](../../design/matte-canvas/theme.md) and [interaction/state contract](../../design/matte-canvas/interaction-state.md). Cool neutral text, symbol-only branding, diffuse grouped surfaces, flat semantic colors and narrowly eligible matte-rock actions supersede the earlier reflective/gold interface. Source implementation, fixture evidence, and live review are tracked separately.
+**Approved target · 2026-11-20:** [Deep-space & Matte Canvas theme](../../design/matte-canvas/theme.md) and [interaction/state contract](../../design/matte-canvas/interaction-state.md). Deep-space `#060709` canvas, symbol-only crescent + molten-core branding, frosted-glass floating overlays with crisp liquid-metal rim highlights (and opaque reduced-transparency fallbacks), warm molten-amber/cool-cyan accents, fractured crescent-moon textures on committing/brand surfaces, and the calm reference desktop layout (slim rail, centered command trigger, compact top-right telemetry/bell strip, hairline-grouped settings, floating inbox card stack). Source implementation, fixture evidence, and live review are tracked separately.
 
 [![Native shell and selected destination](../../diagrams/native-workstation-layout.svg)](../../diagrams/native-workstation-layout.html)
 
@@ -97,18 +97,18 @@ Setup shows one actionable state: pairing approval, Keychain access or network p
 
 ## Approved matte canvas target
 
-The complete reproducible palette, edge-mask formula, texture recipe, action eligibility and loading timing live in [theme.md](../../design/matte-canvas/theme.md). Use its exact values in native and web rather than deriving UI colors from the logo.
+The complete reproducible palette, glass/rim recipes, crescent texture, action eligibility and loading timing live in [theme.md](../../design/matte-canvas/theme.md). Harmonize both native and web with the Quiet Orbit crescent-and-molten-core brand style.
 
 | Concern | Required target |
 | --- | --- |
-| Canvas and branding | Uniform opaque `#060709`; material emblem with transparent/canvas-matched edges and preserved aspect. Symbol only in the interface: no visible Fleetworks wordmark. Keep OS metadata and necessary accessible naming. |
-| Neutral hierarchy | Cool primary `#D5DCE5`, supporting `#A8B6C5`, muted `#8192A4`; group `#0B0F14`, raised `#121820`, elevated `#19212B`. No ivory/gold primary UI accents. |
-| Group surfaces | Flat group background masked inward over 16 logical pixels with a smoothstep falloff and 20px outer radius; compact recipe 12px/16px. Content is drawn above the mask at full opacity. No bright card strokes, reflection, backdrop blur or ambient halo. |
-| Essential controls | Preserve functional `#647587` borders; 2px `#72E9FF` focus plus 2px canvas gap, independent of diffuse decoration and selection. |
-| Actions | Static coarse crescent-rock texture only on semantic submit/confirm/create/delete controls, including Connect. Context tints remain local. Cancel, Settings, navigation, filters, pop-out/inspect, read retry, metric and readiness surfaces stay flat. |
-| Motion | Zero persistent sheen or pointer lighting; the emblem is the reflective-art exception. Only genuinely pending unresolved regions use the guide's low-alpha translated band over a steady base. Text/live values never blink, pulse or roll on refresh. |
-| Color | Flat, diverse semantic and chart hues with labels/icons. Preserve severity, evidence and category meanings; unknown is never fabricated zero. |
-| Layout | Responsive grouped grids for overview/options/status; retain tables for comparisons, existing reading order, keyboard traversal and supported compact layouts. |
+| Canvas and branding | Deep-space `#060709`; symbol-only Quiet Orbit mark (fractured obsidian crescent + warm molten core, no orbit triangles, no visible Fleetworks wordmark). Keep OS metadata and necessary accessible naming. |
+| Neutral & brand highlights | Cool primary `#D5DCE5`, supporting `#A8B6C5`, muted `#8192A4`; group `#0B0F14`, raised `#121820`, elevated `#19212B`. Pair static liquid-metal hairline top-rims (`#D5DCE5` low alpha / `#4A5262`) and warm molten-core active accents (`#E5B869` / `#F1C84B`) with cool cyan (`#24DCE3`) interactive states. |
+| Surfaces & frosted glass | Quiet `#0B0F14` grouped sections (clean hairline borders/dividers for Settings or soft `GroupEdge` perimeter fade) with unboxed calm grids at rest. Floating overlays (Inbox/Notifications popover stack, Command palette, Context menus, Modals) use dark frosted glass (`backdrop_blur` + crisp liquid-metal rim highlight), falling back to opaque `#121820`/`#19212B` under reduced transparency (`ViewPreferences::matte()`). |
+| Essential controls | Preserve functional `#647587` borders; 2px `#72E9FF` focus plus 2px canvas gap, independent of decorative highlights or glass blur. |
+| Crescent textures & actions | Fractured crescent-moon obsidian texture (`fleetworks-rock-tile`) with subtle liquid-metal top bevel on semantic submit/confirm/create/delete/Connect actions and restrained brand/hero accents. Routine navigation, filters, search, dropdowns and read retries stay clean slate or frosted glass. |
+| Motion | Static liquid-metal edges at rest (no resting animation wake loop or fixed-pixel pointer-lighting loop); Quiet Orbit owns startup/emblem motion. Pending unresolved regions use the low-alpha translated band over a steady base. Text/live values never blink, pulse or roll on refresh. |
+| Color | Crisp semantic and chart hues paired with labels/icons. Preserve severity, evidence and category meanings; unknown is never fabricated zero. |
+| Layout | Calm desktop shell rhythm: slim left rail with soft rounded active pill, centered command-bar trigger, compact top-right host-telemetry & bell-badge strip, hairline-grouped Settings/content panes, floating glass Inbox card stack, and responsive grids/tables down to `640×480`. |
 
 ### Existing implementation to adapt
 

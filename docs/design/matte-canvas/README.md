@@ -14,14 +14,15 @@ Approved visual target for the native client and shared web paint. The four gene
 
 | Surface | Required treatment |
 | --- | --- |
-| Brand display | One symbol, no visible wordmark; the logo retains its molten/glass finish |
-| Submit, Confirm, Create, Delete | Matte coarse obsidian texture from the crescent interior, with semantic action tint |
-| Navigation, Settings, Cancel, filters, refresh, pop-out and read retry | Smooth matte; no crescent texture or metallic sheen |
-| Metrics, readiness, cards, tables and selectable rows | Smooth matte tonal groups; spacing and alignment establish hierarchy |
+| Brand display | Symbol only (fractured obsidian crescent + warm molten core, no orbit triangles, no visible wordmark) |
+| Floating overlays (Inbox/Notifications popover, Command palette, Context menus, Modals) | Frosted dark glass (same-window backdrop blur + crisp 1px liquid-metal specular top rim; opaque fallback under reduced transparency) |
+| Submit, Confirm, Create, Delete, Connect & brand hero accents | Fractured crescent-moon obsidian texture from the logo with semantic tint and restrained liquid-metal top bevel |
+| Navigation, Settings, Cancel, filters, refresh, pop-out and read retry | Clean deep-space obsidian/slate with subtle warm molten-gold or cool-metallic active pills; hairline dividers inside grouped containers |
+| Metrics, readiness, cards, tables and selectable rows | Quiet deep-space tonal groups (unboxed grids at rest, soft glass/elevated lift on hover/selection); spacing and alignment establish hierarchy |
 | Initial unresolved content or pending list tail | Steady skeleton base with a restrained translated cool sheen |
 | Long record lists | Continuous scrolling over bounded, opaque cursor requests; no routine page-number or Previous/Next chrome |
 
-The canvas is `#060709`. Cool gray replaces ivory text. Cyan/blue/violet/mint/amber/rose communicate context; gold and ivory remain inside the logo artwork. Remove pointer-driven lighting, reflective rims, ornamental panel strokes and hard grid divisions. Preserve accessible focus and essential input boundaries.
+The canvas is `#060709`. Pair deep-space obsidian surfaces with frosted-glass floating overlays, static liquid-metal hairline rim highlights, warm molten-core active accents, and fractured crescent-moon textures derived from the logo. Keep desktop chrome calm and structured (slim left rail, centered command trigger pill, compact top-right telemetry & bell-badge strip, hairline-grouped settings rows, floating notification card stack). Preserve accessible ≥ 4.5:1 text contrast, crisp keyboard focus and essential input boundaries, and avoid resting animation wake loops or pointer-lighting loops.
 
 ## Approved screens
 
@@ -35,7 +36,7 @@ One resources group, a compact client/gateway band and a readiness grid. The las
 
 ![Approved setup with symbol-only brand and textured Connect action](mockups/02-setup-gateway.png)
 
-The logo remains the main reflective object. Connect receives rock texture because it submits the form. Navigation and Settings do not. The stepper is informational; operator approval and credential boundaries are unchanged.
+The logo anchors the crescent-and-molten-core palette. Connect receives crescent rock texture and a subtle liquid-metal top bevel because it submits the form. Navigation and routine utility controls stay clean and uncluttered. The stepper is informational; operator approval and credential boundaries are unchanged.
 
 ### Jobs & Logs
 
@@ -51,6 +52,6 @@ The same groups reflow into measured columns, with a compact navigation rail. Th
 
 ## Precedence and scope
 
-This approved direction supersedes earlier gold/ivory primary accents, satin/reflective control recipes, persistent pointer-lighting, blanket rock-textured buttons/cards, hard panel rims and pager-style presentation in prior mockups or design plans. The [native control contract](../../wiki/code/native-design-system.md), [connection authority](../../wiki/code/native-connections.md) and [web product semantics](../../wiki/code/intel-web.md) still govern capabilities and data access. The new scroll/state contract changes presentation without broadening authorization or server page bounds.
+The **2026-11-20** deep-space + frosted-glass + liquid-metal + crescent-texture direction and reference desktop layout refine the 2026-11-16 matte baseline and supersede earlier pager chrome, noisy pointer-lighting loops, and flat-only restrictions on floating overlays and brand highlights. The [native control contract](../../wiki/code/native-design-system.md), [connection authority](../../wiki/code/native-connections.md) and [web product semantics](../../wiki/code/intel-web.md) still govern capabilities and data access. The scroll/state contract changes presentation without broadening authorization or server page bounds.
 
 Earlier supplied references and dated implementation evidence remain historical. Do not reinterpret their screenshots or PASS records as evidence that this target has shipped. Future implementation must compare actual production-view captures with these references and report interaction, accessibility, performance and platform evidence separately.

@@ -23,7 +23,7 @@ The parent owns shared plans, assigns disjoint paths and appoints one build owne
 
 ## Quick reference
 
-- **Visual authority:** use the [approved matte canvas reproduction guide](../docs/design/matte-canvas/README.md), current native control allowlist and shared React guidance. Earlier gold/ivory accents, reflective ordinary controls and pager chrome are superseded; retain workflow and authority rules.
+- **Visual authority:** use the [approved deep-space / matte canvas guide](../docs/design/matte-canvas/README.md), current native control allowlist and shared React guidance (deep-space canvas, frosted-glass floating overlays with liquid-metal rim highlights, crescent-moon textures on committing/brand surfaces, opaque reduced-transparency fallbacks, no pager chrome or resting animation wake loops).
 
 
 - **Build and CI:** Follow [contributor commands](../docs/wiki/code/contributing.md) and [cache hygiene](../docs/wiki/code/contributing.md#build-cache-hygiene). Use affected [Fleetworks scopes](../docs/wiki/code/ci.md#fleetworksyml--scoped-branch-checks) and the embedded gate for affected compatibility paths. Local Rust uses the host and embedded storage. Dispatch `embedded.yml` for hosted platform compatibility and `mutation.yml` for mutation evidence; do not run mutation locally.

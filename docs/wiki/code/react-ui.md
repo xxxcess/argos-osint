@@ -49,31 +49,32 @@ Compiler optimization is not a correctness proof. Typecheck, Hooks/compiler diag
 
 | Authority | Responsibility |
 | --- | --- |
-| [Approved theme](../../design/matte-canvas/theme.md) | Canonical materials, semantic palette, symbol-only branding and approved visual references |
+| [Approved theme](../../design/matte-canvas/theme.md) | Canonical deep-space materials, frosted glass, liquid-metal rims, crescent texture, semantic palette, symbol-only branding and visual references |
 | [Interaction-state contract](../../design/matte-canvas/interaction-state.md) | Stable loading/refresh presentation, reduced motion and continuous-list behavior |
-| [Shared UI](../../../packages/ui/src/index.tsx) | Implementation owner for shared palette, fonts, recipes and primitives |
+| [Shared UI](../../../packages/ui/src/index.tsx) | Implementation owner for shared palette, fonts, frosted glass/rim recipes, crescent `RockTexture` and primitives |
 | [Intel theme](../../../packages/intel/src/shell/intel-theme.ts) | Evidence, metric and execution-state hues |
-| [Browser CSS](../../../apps/web-desktop/app/style.css) | Opaque canvas, functional focus ring and scrollbars |
+| [Browser CSS](../../../apps/web-desktop/app/style.css) | Deep-space canvas, frosted overlay glass with reduced-transparency fallback, functional focus ring and scrollbars |
 
-Use the single `#060709` canvas and the canonical theme's token values. Existing source tokens/assets are implementation inputs, not permission to retain superseded ivory/gold primary accents. Brand display areas show the approved symbol without a visible Fleetworks wordmark. The logo alone retains permanent metallic sheen; preserve its molten core, rocky crescent, five prisms and triangle/crescent clearance.
+Use the deep-space `#060709` canvas and the canonical theme's tokens. Brand display areas show the simplified symbol (fractured obsidian crescent + warm molten core, no orbit triangles) without a visible Fleetworks wordmark. Pair calm deep-space reading surfaces with frosted-glass popovers/menus, restrained static liquid-metal rim highlights, warm molten-core active highlights alongside cool cyan interactive cues, and crescent-rock textures on committing/brand actions.
 
-Approved native visual references: [Workstation Status](../../design/matte-canvas/mockups/01-workstation-status.png), [Setup Gateway](../../design/matte-canvas/mockups/02-setup-gateway.png), [Jobs & Logs](../../design/matte-canvas/mockups/03-jobs-logs.png) and [compact Workstation Status](../../design/matte-canvas/mockups/04-compact-workstation.png). These guide shared paint and generic states, not web navigation or native-workflow adoption.
+Approved native visual references: [Workstation Status](../../design/matte-canvas/mockups/01-workstation-status.png), [Setup Gateway](../../design/matte-canvas/mockups/02-setup-gateway.png), [Jobs & Logs](../../design/matte-canvas/mockups/03-jobs-logs.png) and [compact Workstation Status](../../design/matte-canvas/mockups/04-compact-workstation.png), refined by the 2026-11-20 desktop reference layout. These guide shared paint, glass/rim depth and generic states without altering Intel Web routes or native-workflow boundaries.
 
-### Intel matte desk
+### Intel deep-space glass & obsidian desk
 
 @tag:look-and-feel @tag:react-ui @tag:intel-brief
 
 | Surface/state | Recipe |
 | --- | --- |
-| Reading, metrics and readiness | Smooth matte charcoal, diffuse edges blending into the canvas; group by spacing/type without card strokes or grid dividers |
-| Navigation and utility controls | Smooth matte; Settings, Cancel, filter, refresh, pop-out and read Retry never use rock texture; use a flat contextual selection marker |
-| Submit / Confirm / Create / Delete | Coarse matte fractured crescent-rock on the button face only; Connect qualifies as form submission; contextual color without metallic reflection. Use `<Button intent="submit" | "confirm" | "delete">` (`packages/ui/src/index.tsx`); the committed crescent tile is embedded by `rockTile.ts` |
-| Selected | Stable semantic treatment plus the appropriate accessible state; distinct from keyboard focus |
+| Reading, metrics and readiness | Quiet `#0B0F14` deep-space tonal groups (clean hairline borders/dividers or soft edge blend); keep grids uncluttered at rest with subtle elevated hover lift |
+| Floating overlays & menus | Dark frosted glass (`backdrop-filter: blur(12–16px)`, translucent `#121820` fill, crisp 1px liquid-metal specular top rim); opaque `#121820`/`#19212B` fallback under `prefers-reduced-transparency: reduce` |
+| Navigation and utility controls | Clean deep-space controls with subtle warm molten-gold or metallic active pill highlights; Settings, Cancel, filter, refresh, pop-out and read Retry stay smooth rather than heavily textured |
+| Submit / Confirm / Create / Delete | Fractured crescent-moon obsidian texture (`<Button intent="submit" \| "confirm" \| "delete">` via `rockTile.ts`) with semantic tint and subtle liquid-metal upper edge highlight; Connect qualifies |
+| Selected | Stable semantic treatment plus crisp metallic/accent border and accessible state; distinct from keyboard focus |
 | Disabled | Readable muted label and semantic disabled state; material eligibility still follows the action's intent |
-| Pending placeholder | Constant matte skeleton base with restrained cool translated sheen; localized to unresolved content and static for reduced motion |
-| Compatibility exports | Retain shared APIs such as `glass`/`glow()` while implementing the approved paint; names do not authorize glossy surfaces |
+| Pending placeholder | Constant skeleton base with restrained cool translated sheen; localized to unresolved content and static for reduced motion |
+| Shared exports | `glass`, `glow()`, `Panel`, `Button` and `RockTexture` in `packages/ui/src/index.tsx` implement the deep-space glass, rim highlight and crescent texture recipes |
 
-Outside the approved logo and localized pending shimmer, use no metallic sheen, broad reflections, backdrop blur or decorative card-entry animation. Functional focus/selection cues remain visible even though decorative panel outlines are removed. Opaque preferences retain readable states. Existing view/camera motion stays preference-aware; this target introduces no renderer or animation-library requirement.
+Keep liquid-metal rim highlights static at rest (no resting animation wake loop, full-screen glare or pointer-lighting loop). Functional focus/selection cues remain crisp and independent of glass blur. Reduced-transparency and opaque preferences retain readable states with identical geometry. Existing view/camera motion stays preference-aware; this target introduces no new renderer or animation-library requirement.
 
 ## UI/UX guidance
 

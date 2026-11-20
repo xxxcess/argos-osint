@@ -391,6 +391,7 @@ pub(crate) fn glass_dialog<S: 'static>(
 }
 
 /// Compact, interactive 0–100% telemetry dial.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn metric_ring_tile(
     key: &str,
     label: &str,

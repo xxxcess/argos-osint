@@ -363,7 +363,7 @@ pub(crate) fn page(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
         .for_view(state.fixture, cx.is_reduced_motion());
     let pointer = (!preferences.matte()).then_some(&state.pointer_offset);
     let page_size = cx.layout_size("page-content");
-    let compact = page_size.map_or(true, |size| size[0] < 580.0);
+    let compact = page_size.is_none_or(|size| size[0] < 580.0);
     let height = page_size
         .map(|size| (size[1] - 62.0).clamp(290.0, 580.0))
         .unwrap_or(370.0);

@@ -1,6 +1,6 @@
 # Fleetworks native client
 
-Read the root instructions, the repository Rust style skill and the [Rune skill](../../.opencode/skills/fleetworks-rune-verify/SKILL.md). The [native design guide](../../docs/wiki/code/native-design-system.md) is the control allowlist and links the current Matte Canvas theme, motion and state contracts.
+Read the root instructions, the repository Rust style skill and the [Rune skill](../../.opencode/skills/fleetworks-rune-verify/SKILL.md). The [native design guide](../../docs/wiki/code/native-design-system.md) is the control allowlist and links the current Glass Canvas theme, motion and state contracts.
 
 - **Scope.** This Rune client runs on Linux x86-64 and macOS. Brain owns search, results and the authoritative dossier. Jobs & Logs uses server-enforced workstation scope. Intel Web owns topology and its accessible list. Keep retired entry points, backend engines, Docker APIs and embedded HTTP servers outside the app.
 - **Backend setup.** Start the Embedded companion only on explicit user action. Distributed setup pairs an installation to the gateway and stores credentials in the platform secret store, with an explicit session-only option as applicable. Preserve equivalent behavior for shared capabilities. Follow the [connection and parity contracts](../../docs/wiki/code/native-connections.md#backend-types-and-parity).

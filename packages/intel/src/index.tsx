@@ -387,7 +387,14 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
                       : "Return to Bulletin"}
                 </Button>
                 <View
-                  style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}
+                  style={{
+                    flexDirection: "row",
+                    flexWrap: "wrap",
+                    flexShrink: 1,
+                    minWidth: 0,
+                    maxWidth: "100%",
+                    gap: 8,
+                  }}
                 >
                   {(
                     [

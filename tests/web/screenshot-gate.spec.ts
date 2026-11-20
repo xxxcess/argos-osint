@@ -418,9 +418,51 @@ for (const vp of VIEWPORTS) {
     await expect(
       page.getByRole("button", { name: "Return to Brief" }),
     ).toBeVisible();
+    if (vp.width <= 390) {
+      const workspace = page.locator("#intel-topology-workspace");
+      const bounds = (await workspace.boundingBox())!;
+      const toolbar = await Promise.all(
+        ["Neighbors", "Nodes", "Connections"].map(async (name) => {
+          const button = workspace.getByRole("button", { name, exact: true });
+          await expect(button).toBeInViewport({ ratio: 1 });
+          const box = (await button.boundingBox())!;
+          expect(box.x).toBeGreaterThanOrEqual(bounds.x);
+          expect(box.x + box.width).toBeLessThanOrEqual(
+            bounds.x + bounds.width,
+          );
+          return box;
+        }),
+      );
+      if (vp.width === 320) expect(toolbar[2].y).toBeGreaterThan(toolbar[0].y);
+
+      const graph = page.locator("#intel-topology-viewport");
+      const focusedTile = '[data-role="focus"] [data-tile="node"]';
+      // The route and its toolbar mount before the lazy graph is rendered.
+      await expect
+        .poll(
+          () =>
+            graph.evaluate((element, selector) => {
+              const tile = element.querySelector(selector);
+              if (!tile) return false;
+              const frame = element.getBoundingClientRect();
+              const focus = tile.getBoundingClientRect();
+              return (
+                Math.abs(
+                  focus.x + focus.width / 2 - frame.x - frame.width / 2,
+                ) <= 8 &&
+                Math.abs(
+                  focus.y + focus.height / 2 - frame.y - frame.height / 2,
+                ) <= 8
+              );
+            }, focusedTile),
+          { timeout: 15_000 },
+        )
+        .toBe(true);
+      await expect(graph.locator(focusedTile)).toBeInViewport({ ratio: 1 });
+    }
     await page.screenshot({
       path: `${CAPTURE}/${vp.name}-topology-node-list.png`,
-      fullPage: true,
+      fullPage: vp.width > 390,
     });
   });
 

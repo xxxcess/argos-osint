@@ -1,44 +1,47 @@
 ---
 name: gsd
 description: >-
-  Monitor open Argos PRs, address CI and Cursor review findings, and delegate
-  spec implementation PRs through GSD Nightly Core and UI. Verify selected
-  checks on the exact PR head and report performance, scalability, and security evidence.
+  Monitor open Argos PRs targeting nightly. Core responds to unresolved
+  review threads and implements verified fixes. UI reviews rendered views
+  and posts feedback. Report exact-head performance, scalability, and security evidence.
 ---
 
 # GSD — PR Babysitter, Security Responder & Spec Implementer
 
-Run a bounded (~1 hour) autonomous monitoring and delivery loop in the active conversation thread:
-1. **Babysit open PRs** in `xxxcess/argos-osint` — track hosted CI runs, inspect failed logs, dispatch subagents to implement and push targeted fixes for genuine regressions (or rerun transient runner failures), address **Cursor bot (`cursor[bot]`) security review findings**, and leave merging to the user.
-2. **Implement spec PRs via dedicated per-PR subagents** — watch for open PRs titled `spec implementation: <feature name>` (case-insensitive), spawn a subagent per PR (which may break independent modules/docs into disjoint child workers) inside an isolated worktree, extract the spec from the PR body/comments and changed spec files, build performant, secure, and scalable implementations on that PR's branch, update affected docs/diagrams per [conventions](../../../docs/wiki/code/conventions.md), run scoped checks, and commit + push back to the PR branch.
-3. **Continue on a timer** for ~60 minutes until the time window expires and all triggered implementations, security fixes, and CI checks settle.
+Run a bounded (~1 hour) loop for open PRs targeting `nightly` in `xxxcess/argos-osint`. Select Core or UI for each invocation. Keep eligible PRs open for the owner to merge.
 
 ---
 
 ## Nightly workflow (canonical)
 
-Select Core, UI, or both from the [CI path plan](../../../docs/wiki/code/ci.md#nightly-gsd-order) for the exact PR head. A change that affects behavior across a shared contract selects the affected work in both workflows. Keep one PR lead and one verification record for a mixed change.
+Use the CI path plan to identify affected checks for the exact PR head. Mixed changes can select both CI tracks. Core owns implementation and CI follow-up. UI reviews the affected rendered views and gives Core feedback. [CI path plan](../../../docs/wiki/code/ci.md#nightly-gsd-order)
+
+Before a comment or push, read the PR with `gh api repos/xxxcess/argos-osint/pulls/<n>` and check that its state is open, its base is `nightly`, and its head still matches the reviewed revision. Refresh evidence if the head moves. Use the newly verified head for replies posted after a push.
 
 ### GSD Nightly: Core
 
-Improve functional application logic through incremental Cargo workspace changes. Cover the affected domain, storage, jobs, API, transport, worker, and workstation logic. Run the selected AMD64 backend, Embedded compatibility, image, and integration checks in the first pass, including Linux companion and HTTP/IPC parity for affected backend-only changes. Verify affected ARM64 backend and image lanes in the second pass. Exercise the affected transports under equivalent authorization when a change crosses [Embedded and Distributed](../../../docs/wiki/code/native-connections.md#backend-types-and-parity).
+Respond to every unresolved review thread from any author and address unaddressed, actionable PR discussion, including UI feedback. Own code fixes, tests, commits and pushes on the exact PR head. Improve functional logic across the affected Cargo workspace and other affected implementation paths.
+
+Run the selected AMD64 backend, Embedded compatibility, image, and integration checks in the first pass, including Linux companion and HTTP/IPC parity for affected backend-only changes. Verify affected ARM64 backend and image lanes in the second pass. Exercise affected transports under equivalent authorization when a change crosses backend modes. [Embedded and Distributed parity](../../../docs/wiki/code/native-connections.md#backend-types-and-parity)
 
 ### GSD Nightly: UI
 
-Review, polish, and refine the Rune and Rune Kit desktop app and React Native Web. Start with the affected production views and [UI scope guidance](../../../AGENTS.md#ui-changes). Review theme and layout, keyboard and pointer interaction, focus and accessibility, and behavior at small native window sizes or responsive web widths. Make targeted UI fixes and verify the changed states. Route functional findings to Core and use both workflows when the fix crosses the UI and application logic boundary.
+Review the affected Rune and Rune Kit desktop and React Native Web production views for polish and refinement. Check theme and layout, keyboard and pointer interaction, focus and accessibility, and behavior at small native window sizes or responsive web widths. Give Core actionable feedback with the affected view or file, reproduction steps, expected and observed behavior, and rendered evidence. [UI scope guidance](../../../AGENTS.md#ui-changes)
+
+UI reads repository files, PR discussion, and CI evidence. Posting or updating one consolidated feedback comment per eligible PR is UI's only repository or PR mutation. Core owns code edits, commits, pushes, CI dispatch and review-thread follow-up.
 
 Use generated images of the affected production UI states for every selected client review.
 
-- **Native.** Use `fleetworks_verify.py native-ui` to capture Rune Runtime fixture PNGs and accessibility trees. Inspect both from the first-pass Linux x86-64 artifacts and affected second-pass Mac artifacts. [Native capture guide](../../../docs/wiki/code/native-verification.md)
-- **Web.** Use Playwright to capture the affected React Native Web views in the compiled browser build during the second pass. Open the screenshots and record the exercised interactions and states. [Web capture guide](../../../docs/wiki/code/react-ui-testing.md)
+- **Native.** Use Rune Runtime fixture PNGs and accessibility trees generated by `fleetworks_verify.py native-ui`. Inspect both from the first-pass Linux x86-64 artifacts and affected second-pass Mac artifacts. [Native capture guide](../../../docs/wiki/code/native-verification.md)
+- **Web.** Use Playwright screenshots of the affected React Native Web views in the compiled browser build from the second pass. Open the screenshots and record the exercised interactions and states. [Web capture guide](../../../docs/wiki/code/react-ui-testing.md)
 
-For each capture, record the exact head SHA, platform and window or viewport size, Rune scene or Playwright test, UI state, artifact link, and inspection result. Use scoped visual review when the regular CI artifacts lack an affected state. Keep visual review pending when an expected capture is unavailable or still needs inspection. Record live app or browser review as additional evidence. [Scoped visual review](../../../docs/wiki/code/native-verification.md#dispatchable-ui-visual-review)
+For each capture, record the exact head SHA, platform and window or viewport size, Rune scene or Playwright test, UI state, artifact link, and inspection result. When the regular CI artifacts lack an affected state, identify the missing capture in the comment for Core and keep visual review pending. Core can request a scoped capture on the same SHA. Record live app or browser review as additional evidence. [Scoped visual review](../../../docs/wiki/code/native-verification.md#dispatchable-ui-visual-review)
 
-After **Fleetworks required** is green, dispatch any selected second-pass checks for the same PR and SHA. Every new head starts a new first pass. Trusted integration pushes retain release verification.
+After **Fleetworks required** is green, Core dispatches any selected second-pass checks for the same PR and SHA. UI reads and inspects the resulting visual evidence. Every new head starts a new first pass. Trusted integration pushes retain release verification.
 
 ### KPI evidence
 
-For each selected workflow, track performance, scalability, and security evidence alongside implementation and verification. Choose evidence that reflects the changed behavior.
+For each selected workflow, track performance, scalability, and security evidence from the work being implemented or reviewed. Choose evidence that reflects the changed behavior.
 
 | Axis | Core examples | UI examples |
 | --- | --- | --- |
@@ -48,16 +51,16 @@ For each selected workflow, track performance, scalability, and security evidenc
 
 For a measured KPI, record the baseline and candidate SHAs, workload and input size, platform or runner, build and cache state when relevant, samples, values and units, change, and evidence link. Use comparable runs for before and after claims. For a security or boundedness improvement, identify the invariant and link the focused test or inspection that verifies it. Label a plausible gain as **unmeasured** until comparable evidence exists. Report regressions and trade-offs alongside improvements.
 
-### Shared delivery loop
+### Core delivery loop
 
-Run these steps in order. The loop sections below keep their detail.
+Run these steps in order. UI uses the visual review routine below.
 
-1. **Poll.** Run `gsd_poll.py` ([Routine Loop](#routine-loop-per-poll-cycle) step 1). Skip release-bot and fork (`isCrossRepository`) PRs. Never merge.
-2. **Work in the PR worktree.** For each actionable PR use `.agent-scratch/worktrees/pr-<n>`, checked out to the PR head. Do not touch the main checkout, `main` or `nightly`.
-3. **Read owner comments as requirements.** New owner comments on the PR (and in the session) are new requirements. Track each one in `.agent-scratch/gsd-state.json` under `prs.<n>.requirements` with its comment id and `open | done`; mark one done only with the pushed sha that satisfies it.
+1. **Poll.** Run `gsd_poll.py --track core` ([Routine Loop](#routine-loop-per-poll-cycle) step 1). Inspect unresolved review threads and actionable discussion for every eligible PR. Check push access separately for fork branches.
+2. **Work in the PR worktree.** For each PR requiring code changes, use `.agent-scratch/worktrees/pr-<n>` at the verified head. The PR head branch is the only push target.
+3. **Track requirements and review feedback.** Record actionable items under `prs.<n>.requirements` with their comment or thread IDs and status. Review outdated threads against the original diff and current code. Record a fixing SHA, evidence that the current head already addresses the finding, or the reason follow-up is blocked.
 4. **Iterate on the first pass.** Fix affected Core and UI regressions. Record which checks were selected, which were skipped by scope, and any pending Linux review.
 5. **Cheap local checks only.** CI is the test runner. Run locally only: `rustfmt --check --edition 2021 apps/fleetworks-desktop/src/lib.rs` (it follows the module tree) or `cargo fmt --check`, `prettier --check` on changed web and Markdown files, `python3 scripts/fleetworks_doc_links.py` (0 broken), and `node scripts/release_check.mjs message --file <msg>` with `node scripts/release_check.mjs versions`. No full builds, no full test suites and no mutation runs ([root rules](../../../AGENTS.md)).
-6. **Commit and push.** Stage exact paths, use Conventional Commits and one small commit per slice. Before the first push of a run, check `git merge-tree --write-tree origin/<base> HEAD`. Push with the full branch name and a literal sha: `git push origin <sha>:refs/heads/<headRefName>`, with no shell variables, substitutions or brace expansion. Never force-push.
+6. **Commit and push.** Stage exact paths, use Conventional Commits and one small commit per slice. Before the first push of a run, check `git merge-tree --write-tree origin/<base> HEAD`. Recheck the open PR, `nightly` base, expected remote head, and write access. Use a fast-forward push with the full branch name and a literal SHA. For a same-repository PR, use `git push origin <sha>:refs/heads/<headRefName>`. For writable forks, use the remote matching the verified head repository. Report blocked pushes on forks without write access and respond to the review feedback.
 7. **Read failed CI once.** After a push, read each failed job log once (`gh api --allow-escape-sequences repos/xxxcess/argos-osint/actions/jobs/<id>/logs`) instead of waiting in a loop; the owner or the next scheduled wake reports CI events. Plain `gh pr view` can fail, so read PRs through `gh api repos/xxxcess/argos-osint/pulls/<n>`.
 8. **Fix in priority order.**
 
@@ -69,10 +72,10 @@ Run these steps in order. The loop sections below keep their detail.
 
    A runner-capacity or toolchain failure (lost runner, no capacity, GitHub 5xx, a C build such as `blake3`) is not our code: rerun the failed jobs at most twice per commit with `gh api -X POST repos/xxxcess/argos-osint/actions/runs/<id>/rerun-failed-jobs` once the run has completed, then report it without changing code. Fix real failures at the root cause. Refresh visual-regression baselines only from CI capture artifacts, never from local renders.
 9. **Keep docs and design in sync.** Update affected docs, tags and diagrams in the same change ([conventions](../../../docs/wiki/code/conventions.md)). Keep [docs/design/matte-canvas](../../../docs/design/matte-canvas/README.md) consistent with the code and add reproduction steps for anything generated or derived. Do not touch work the owner put on hold.
-10. **Update state.** After each push and each CI read, write `head_sha`, `status`, `backend_gate` and `linux_gate` (each `pending | failing | green`), the Linux review verdict and second-pass run/result, `requirements`, `addressed_cursor_comments`, `worktree` and `notes` to `.agent-scratch/gsd-state.json`.
+10. **Update state.** After each push and each CI read, write `head_sha`, `status`, `backend_gate` and `linux_gate` (each `pending | failing | green`), the Linux review verdict and second-pass run/result, `requirements`, `worktree` and `notes` to `.agent-scratch/gsd-state.json`.
     The poll output reports aggregate `verification_passes` and separate Core and UI `verification_tracks`.
     Under `prs.<n>.nightly`, record `core` and `ui` with `head_sha`, scope reason, check status by pass, links, and a `kpis` list for [KPI evidence](#kpi-evidence). The poll reports those KPIs under `nightly_kpis` when their recorded SHA matches the PR head. Use `skipped` when the plan confirms the workflow has no selected checks. Start selected checks at `pending` on each new head and retain earlier results as history.
-11. **One status report.** Report the head SHA, first- and second-pass gates, Core and UI evidence and KPIs, Linux review, and open requirements together. When the owner has authorized PR comments, post or update a single comment that starts with `<!-- gsd-status -->`. Create it with `gh api repos/xxxcess/argos-osint/issues/<n>/comments -f body='...'` and update it with `gh api -X PATCH repos/xxxcess/argos-osint/issues/comments/<id> -f body='...'`. Always pass the body inline, never read from a file.
+11. **Report status.** Report the head SHA, first- and second-pass gates, evidence and KPIs, review outcomes and open requirements. Keep GitHub replies with their original threads. When a separate Core status comment is authorized, maintain one comment marked `<!-- gsd-status -->`. Before any comment, repeat the PR eligibility and head check.
 12. **Track both passes.** Record the [second-pass run and results](../../../docs/wiki/code/ci.md#nightly-gsd-order) separately from Linux package, fixture and live evidence. Refresh visual baselines from CI captures.
 
 ---
@@ -108,9 +111,9 @@ Every implementation and fix produced by GSD or its subagents must satisfy all t
 Keep the root GSD loop thin so it can monitor multiple PRs concurrently without losing responsiveness or colliding on files:
 
 1. **One PR Lead Subagent per actionable PR** (`invoke_subagent` with `TypeName: "self"` and an explicit isolated worktree `.agent-scratch/worktrees/pr-<number>`):
-   - Spawn one PR lead subagent whenever a `spec implementation: <feature name>` PR needs implementation, or an open PR needs CI-failure / `cursor[bot]` security fixes.
-   - Assign **disjoint ownership**: each PR lead operates strictly inside `.agent-scratch/worktrees/pr-<number>` (checked out to `origin/<headRefName>`), keeping the main checkout's dirty files and `dist/` untouched.
-   - Store `{ "conversation_id": "...", "head_sha": "...", "status": "..." }` in `.agent-scratch/gsd-state.json` under `prs.<num>.subagent`. If follow-up failures or Cursor comments arrive on that PR while its lead subagent is still alive, wake it with `send_message` instead of spawning a second conflicting worker on the same branch.
+   - Core spawns a PR lead for eligible spec implementation, actionable review fixes, or CI failure investigation. UI review helpers report findings to the UI lead, who posts the consolidated comment.
+   - Assign **disjoint ownership** for Core code changes inside `.agent-scratch/worktrees/pr-<number>` at the verified PR head.
+   - Store `{ "conversation_id": "...", "head_sha": "...", "status": "..." }` in `.agent-scratch/gsd-state.json` under `prs.<num>.subagent`. When follow-up failures or review comments arrive, wake the live PR lead with `send_message`.
 2. **Work decomposition inside a PR**:
    - For multi-part specs or cross-stack changes (e.g., Rust core/API + React web + docs/diagrams), the PR lead breaks the spec into concrete units and spawns targeted subagents with **disjoint file lists**:
      - Use `TypeName: "research"` subagents in parallel to inspect impacted symbols, existing helpers, and security/performance constraints.
@@ -123,8 +126,7 @@ Keep the root GSD loop thin so it can monitor multiple PRs concurrently without 
 
 ## State & Paths
 
-- **State file** (unstaged scratch): `.agent-scratch/gsd-state.json`
-  Tracks `started_at`, `end_at` (`started_at + 3600s`), `last_poll_at`, and per-PR state (`head_sha`, `kind`: `babysit | spec_impl`, `status`: `queued | implementing | verifying | pushed | ci_pending | complete | blocked`, `addressed_cursor_comments`, `subagent`, `worktree`, `notes`).
+- **State files** (unstaged scratch). Core uses `.agent-scratch/gsd-state.json` and UI uses `.agent-scratch/gsd-ui-state.json`. Each tracks its timer, PR head, check and evidence status, and notes. Core also tracks requirements, reviewed thread or comment IDs, subagents, and worktrees.
 - **Isolated worktrees**: `.agent-scratch/worktrees/pr-<number>`
   One worktree per PR branch so concurrent PR subagents never clash with each other or with unrelated local edits.
 - **Tool PATH**: Always prepend `/opt/homebrew/bin:/usr/local/bin` before invoking `gh`, `node`, or `git`:
@@ -136,27 +138,28 @@ Keep the root GSD loop thin so it can monitor multiple PRs concurrently without 
 
 ## Routine Loop (Per Poll Cycle)
 
-### 1. Poll open PRs, CI status, and Cursor security findings
+### 1. Poll eligible PRs and exact-head CI
 
-Run the helper script:
+Run one poll command for the selected track. Core is the default.
 
 ```sh
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-python3 .agents/skills/gsd/scripts/gsd_poll.py --repo xxxcess/argos-osint --state .agent-scratch/gsd-state.json
+python3 .agents/skills/gsd/scripts/gsd_poll.py --track core --repo xxxcess/argos-osint --state .agent-scratch/gsd-state.json
+python3 .agents/skills/gsd/scripts/gsd_poll.py --track ui --repo xxxcess/argos-osint --state .agent-scratch/gsd-ui-state.json
 ```
 
-Pass `--reset` only when starting a fresh ~1-hour GSD session. Skip external fork PRs (`isCrossRepository: true`) for direct branch pushes and skip automated dependency/release-bot PRs (e.g. `release-please--branches--main*`) unless explicitly requested.
+Pass `--reset` when starting a fresh session. The poller selects open PRs targeting `nightly`. A fork can still receive feedback. Core verifies write access before a push.
 
-### 2. Dispatch per-PR subagents for `spec implementation: <feature name>` PRs
+### 2. Core spec implementation for `spec implementation: <feature name>` PRs
 
-Match any open PR whose title starts with `spec implementation:` (case-insensitive) and whose latest `headRefOid` has not already been implemented and pushed by GSD (check `.agent-scratch/gsd-state.json` + recent commits on the PR branch).
+Match an eligible PR whose title starts with `spec implementation:` (case-insensitive) and whose latest `headRefOid` has not already been implemented and pushed by GSD (check `.agent-scratch/gsd-state.json` + recent commits on the PR branch).
 
 For each new or updated `spec implementation: <feature name>` PR, spawn a dedicated PR Lead subagent (`invoke_subagent`, `TypeName: "self"`) instructed to:
 1. **Read the full spec**:
-   - Read the PR with `gh api repos/xxxcess/argos-osint/pulls/<num>` plus its issue comments and reviews (plain `gh pr view` can fail).
+   - Read the PR body, issue comments and reviews. Verify the open state, `nightly` base and head SHA.
    - Read any spec/plan/design markdown files added or modified in the PR.
 2. **Create/sync the PR's isolated worktree**:
-   - `git fetch origin <headRefName>` and ensure `.agent-scratch/worktrees/pr-<num>` points to `origin/<headRefName>`.
+   - Fetch the head from the PR's verified repository and branch. Ensure `.agent-scratch/worktrees/pr-<num>` points to the verified head SHA.
    - Respect repository rules (`AGENTS.md`, `argos-rust-style`, `argos-react-ui`, `argos-react-patterns`, `fleetworks-rune-verify` as applicable) and enforce the **Performance, Security & Scalability Bar**.
 3. **Decompose, implement & document**:
    - Break multi-component specs into parallel research/implementation subagents with disjoint `OWNED_FILES` inside `.agent-scratch/worktrees/pr-<num>`, then integrate cleanly.
@@ -170,23 +173,19 @@ For each new or updated `spec implementation: <feature name>` PR, spawn a dedica
      ```
 5. **Commit, push & report back**:
    - Stage only the exact changed files (`git add <paths...>`, never `git add .`).
-   - Commit and push with the full branch name and a literal sha (`git push origin <sha>:refs/heads/<headRefName>`), never force-push.
+   - Commit and follow the exact-head push and fork handling in the Core delivery loop.
    - Return the new `headRefOid` (`pushed_sha`), changed files, selected workflows, exact test results, and KPI evidence so the parent records `status: "ci_pending"` in `.agent-scratch/gsd-state.json` and monitors the resulting CI run.
 
-### 3. Dispatch fixes for Cursor bot (`cursor[bot]`) security findings
+### 3. Core review responses and fixes
 
-On every cycle, inspect `cursor_security_findings` reported by `gsd_poll.py` (which scans active, non-stale inline review comments, PR reviews, and issue comments from `cursor[bot]`):
+1. Read `unresolved_review_threads` from the Core poll. For each thread, use GitHub to read the full discussion, including all replies. Review every unresolved thread regardless of author, including outdated threads. Read PR conversation comments and review summaries for unaddressed actionable requests, including the consolidated UI feedback.
+2. Verify each finding against the current head and the original diff when relevant. Apply and test actionable fixes, then commit and push to the verified PR head. If a finding is already addressed, superseded or blocked, record the evidence or blocker.
+3. Reply in each unresolved thread and respond to actionable conversation items with the verified outcome, relevant test evidence and fixing SHA when available. Recheck eligibility and the current head immediately before commenting or pushing. On a fork without push access, respond with the blocker and any relevant fix or verification details.
+4. Track thread or comment IDs, reviewed SHA and response to avoid duplicate replies. Revisit a thread when its findings or applicable code change.
 
-1. For each PR with unaddressed findings (`unaddressed: true`), dispatch or resume that PR's subagent (`invoke_subagent` or `send_message`) in `.agent-scratch/worktrees/pr-<num>`:
-   - Inspect every cited `path`, `line`, and security explanation in detail.
-   - Verify the exploit/vulnerability path in the actual codebase — never blindly suppress warnings or weaken validation.
-   - Implement a root-cause security fix preserving performance and scalability, and add a focused regression test proving the fix where feasible.
-2. Validate affected tests + commit/version policy, commit only exact changed files, and push with the full branch name and a literal sha (`git push origin <sha>:refs/heads/<headRefName>`).
-3. Record each resolved finding's `uid` (e.g., `review_comment:4573016625`) in `addressed_cursor_comments` in `.agent-scratch/gsd-state.json` (and reply concisely on the PR/comment referencing the fix commit SHA if helpful). Wait for Cursor's next review pass on the new commit to verify no new findings remain.
+### 4. Core CI follow-up and backend container logs
 
-### 4. Babysit open PR CI checks & backend container logs
-
-For each tracked open PR (both regular open PRs and pushed `spec implementation:` PRs):
+For each eligible tracked PR:
 1. Check `statusCheckRollup` and latest workflow runs for `headRefOid`.
 2. **Pending / queued / in-progress**: leave alone and check on the next cycle.
 3. **Failed check or container error/semantic warning**:
@@ -194,15 +193,21 @@ For each tracked open PR (both regular open PRs and pushed `spec implementation:
    - Distinguish **transient runner/infra issues** (e.g. runner lost communication, macOS capacity timeout, GitHub API 502/rate limit) from **real code/lint/test/service-log failures**.
    - For transient failures: rerun failed jobs with `gh api -X POST repos/xxxcess/argos-osint/actions/runs/<run_id>/rerun-failed-jobs` after the run completes (at most twice per commit SHA before flagging as blocked; do not change code for a runner or toolchain problem).
    - For real failures or backend container errors / actionable semantic warnings: dispatch or wake that PR's subagent in `.agent-scratch/worktrees/pr-<num>` to fix the root cause cleanly, verify with the affected local test, validate commit message & versions, and push back by full branch name and literal sha. Fix in the [priority order](#nightly-workflow-canonical).
-4. **Selected checks in both passes green, applicable Linux review recorded, and no unresolved findings**:
+4. **Selected checks green, applicable Linux review recorded, responses posted, and actionable findings verified**:
    - Mark the PR's current `headRefOid` as `"complete"` in `.agent-scratch/gsd-state.json`.
    - **Do NOT merge the PR.** Leave merging to the user and note that the PR is green and ready for review/merge.
 
-### 5. Schedule next wakeup & exit rule
+### 5. UI visual review and feedback
+
+1. Poll with `--track ui`. Select PRs with affected UI. Review their changed views and exact-head CI artifacts for affected native and Web states. Read the PR discussion to identify feedback already reported.
+2. Inspect the generated images and associated evidence. Store the reviewed SHA and KPI evidence under `prs.<n>.nightly.ui` in the UI state file. Separate pending capture or live evidence from verified observations.
+3. Recheck that the PR is open, targets `nightly`, and matches the reviewed SHA. Post or update one PR comment marked `<!-- gsd-ui-review -->` with the reviewed SHA, affected views, capture links, actionable findings for Core, and any pending evidence. Update the comment when new evidence or a new head changes the findings.
+
+### 6. Schedule next wakeup and exit
 
 - **Wake on events, not in-turn loops.** Wake on the `schedule` timer or when the owner reports a CI event; after a push, report and end the turn instead of waiting on CI.
 - **Stop condition**: End the scheduled loop once **both**:
   1. Current time >= `end_at` (~1 hour after `started_at`), **and**
-  2. All triggered `spec implementation:` implementations, active `cursor[bot]` security findings, active PR subagents, and their latest CI checks have finished (or are explicitly reported as blocked/failing after retry).
-- If `end_at` is reached while a triggered PR subagent, security fix, or its final CI verification is still in flight, finish that item before stopping.
+  2. Selected implementation, review feedback, and CI follow-up have settled or have a recorded blocker.
+- If `end_at` is reached while a triggered PR subagent, review fix, or its final CI verification is still in flight, finish that item before stopping.
 - Provide a concise status table with separate Core and UI rows on exit and whenever new specs complete, security fixes land, or checks turn green or become blocked. Link the PR, exact-head check runs, and KPI evidence.

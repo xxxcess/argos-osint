@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Poll open PRs, CI status, and Cursor security findings for the GSD workflow."""
+"""Poll open nightly PRs for GSD Core or UI review."""
 
 from __future__ import annotations
 
@@ -14,8 +14,35 @@ from pathlib import Path
 SPEC_TITLE_RE = re.compile(r"^spec\s+implementation:\s*(.+)$", re.IGNORECASE)
 SEVERITY_RE = re.compile(r"Severity:\s*([A-Z]+)", re.IGNORECASE)
 STALE_MARKER = "<summary>Stale comment</summary>"
-SKIP_BRANCH_PREFIXES = ("release-please--",)
+NIGHTLY = "nightly"
 CURSOR_LOGINS = {"cursor[bot]", "cursor-bot", "cursor"}
+
+
+REVIEW_THREADS = """
+query($owner: String!, $repo: String!, $number: Int!, $endCursor: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      state
+      baseRefName
+      headRefOid
+      reviewThreads(first: 50, after: $endCursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          isResolved
+          isOutdated
+          path
+          line
+          originalLine
+          comments(first: 1) {
+            nodes { databaseId body url author { login } }
+          }
+        }
+      }
+    }
+  }
+}
+"""
 
 
 def run_gh(args: list[str]) -> str:
@@ -80,6 +107,36 @@ def fetch_cursor_security_findings(repo: str, pr_number: int, addressed_ids: set
                 "body": body,
             })
     return findings
+
+
+def fetch_unresolved_review_threads(repo: str, pr_number: int, head_sha: str) -> list[dict] | None:
+    """Collect open threads from every reviewer on the exact nightly PR head."""
+    owner, name = repo.split("/", 1)
+    pages = json.loads(run_gh([
+        "api", "graphql", "--paginate", "--slurp",
+        "-f", f"owner={owner}", "-f", f"repo={name}", "-F", f"number={pr_number}",
+        "-f", f"query={REVIEW_THREADS}",
+    ]))
+    threads = []
+    for page in pages:
+        pr = page["data"]["repository"]["pullRequest"]
+        if not pr or pr["state"] != "OPEN" or pr["baseRefName"] != NIGHTLY or pr["headRefOid"] != head_sha:
+            return None
+        for thread in pr["reviewThreads"]["nodes"]:
+            if thread["isResolved"]:
+                continue
+            root, *_ = thread["comments"]["nodes"] or [{}]
+            threads.append({
+                "id": thread["id"],
+                "path": thread["path"],
+                "line": thread["line"] or thread["originalLine"],
+                "outdated": thread["isOutdated"],
+                "comment_id": root.get("databaseId"),
+                "author": (root.get("author") or {}).get("login"),
+                "url": root.get("url"),
+                "body": root.get("body"),
+            })
+    return threads
 
 
 def summarize_checks(rollup: list[dict] | None) -> dict:
@@ -176,18 +233,25 @@ def load_state(path: Path, hours: float, reset: bool) -> dict:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Poll open PRs for GSD")
+    parser = argparse.ArgumentParser(description="Poll open PRs targeting nightly for GSD")
     parser.add_argument("--repo", required=True, help="owner/repo")
-    parser.add_argument("--state", required=True, type=Path, help="Path to gsd-state.json")
+    parser.add_argument("--track", choices=("core", "ui"), default="core")
+    parser.add_argument("--state", type=Path, help="Override the track’s local state file")
     parser.add_argument("--hours", type=float, default=1.0, help="Window duration in hours")
     parser.add_argument("--reset", action="store_true", help="Reset state timer")
     args = parser.parse_args()
+    if args.state is None:
+        filename = "gsd-state.json" if args.track == "core" else "gsd-ui-state.json"
+        args.state = Path(".agent-scratch") / filename
 
     fields = (
         "number,title,headRefName,headRefOid,baseRefName,"
-        "isDraft,isCrossRepository,url,statusCheckRollup,updatedAt"
+        "isDraft,isCrossRepository,state,url,statusCheckRollup,updatedAt"
     )
-    prs = json.loads(run_gh(["pr", "list", "-R", args.repo, "--state", "open", "--json", fields]))
+    prs = json.loads(run_gh([
+        "pr", "list", "-R", args.repo, "--base", NIGHTLY, "--state", "open",
+        "--limit", "1000", "--json", fields,
+    ]))
 
     state = load_state(args.state, args.hours, args.reset)
     now = datetime.now(timezone.utc)
@@ -195,6 +259,7 @@ def main() -> int:
     remaining_seconds = max(0, int((end_at - now).total_seconds()))
 
     report = {
+        "track": args.track,
         "now": now.isoformat(),
         "started_at": state["started_at"],
         "end_at": state["end_at"],
@@ -224,17 +289,25 @@ def main() -> int:
         }
         addressed_ids = set(prev.get("addressed_cursor_comments", []))
 
-        if pr.get("isCrossRepository") or branch.startswith(SKIP_BRANCH_PREFIXES):
+        if pr["baseRefName"] != NIGHTLY or pr["state"] != "OPEN":
             report["skipped_prs"].append({
-                "number": pr["number"],
-                "title": title,
-                "branch": branch,
-                "reason": "fork" if pr.get("isCrossRepository") else "automated-release-branch",
+                "number": pr["number"], "title": title, "branch": branch, "reason": "outside-nightly",
             })
             continue
 
-        cursor_findings = fetch_cursor_security_findings(args.repo, pr["number"], addressed_ids)
-        unaddressed_cursor = [f for f in cursor_findings if f["unaddressed"]]
+        cursor_findings = []
+        unresolved = None
+        if args.track == "core":
+            unresolved = fetch_unresolved_review_threads(args.repo, pr["number"], head_sha)
+            if unresolved is None:
+                report["skipped_prs"].append({
+                    "number": pr["number"], "title": title, "branch": branch, "reason": "changed-during-poll",
+                })
+                continue
+            cursor_findings = fetch_cursor_security_findings(args.repo, pr["number"], addressed_ids)
+        unaddressed_cursor_count = (
+            sum(f["unaddressed"] for f in cursor_findings) if args.track == "core" else None
+        )
 
         entry = {
             "number": pr["number"],
@@ -244,6 +317,7 @@ def main() -> int:
             "base": pr["baseRefName"],
             "head_sha": head_sha,
             "draft": bool(pr.get("isDraft")),
+            "is_cross_repository": bool(pr.get("isCrossRepository")),
             "url": pr["url"],
             "checks": checks["counts"],
             "verification_passes": passes,
@@ -251,12 +325,14 @@ def main() -> int:
             "nightly_kpis": kpis,
             "failed_checks": checks["failed"],
             "pending_checks": len(checks["pending"]),
+            "unresolved_review_threads": unresolved,
             "cursor_security_findings": cursor_findings,
-            "unaddressed_cursor_count": len(unaddressed_cursor),
+            "unaddressed_cursor_count": unaddressed_cursor_count,
             "tracked_status": prev.get("status", "new"),
             "tracked_sha": prev.get("head_sha"),
             "needs_implementation": bool(
-                spec_match and prev.get("implemented_sha") != head_sha and prev.get("pushed_sha") != head_sha
+                args.track == "core" and spec_match
+                and prev.get("implemented_sha") != head_sha and prev.get("pushed_sha") != head_sha
             ),
         }
 
@@ -269,7 +345,7 @@ def main() -> int:
             "last_checks": checks["counts"],
             "verification_passes": passes,
             "verification_tracks": tracks,
-            "last_unaddressed_cursor_count": len(unaddressed_cursor),
+            "last_unaddressed_cursor_count": unaddressed_cursor_count,
         }
 
         if spec_match:

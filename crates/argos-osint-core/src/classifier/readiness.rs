@@ -546,6 +546,20 @@ impl ClassifierHome {
         &self.inner.home
     }
 
+    /// Checks that the configured Atlas worker and checkpoint files are present.
+    /// This observation starts no worker and does not certify inference or a model pin.
+    pub async fn check_local_atlas_assets(&self) -> Result<(), ClassifierError> {
+        #[cfg(feature = "classifier")]
+        {
+            let home = self.inner.home.clone();
+            blocking(move || super::bert::check_configured_assets(&home).map_err(HomeError::from))
+                .await
+                .map_err(classifier_error)
+        }
+        #[cfg(not(feature = "classifier"))]
+        Err(ClassifierError::Unavailable)
+    }
+
     /// Constructs a lazy home adapter; runtime paths should already be absolute.
     #[must_use]
     pub fn new(home: PathBuf) -> Self {

@@ -496,11 +496,6 @@ fn local_backend_setup_card(
             .disabled(state.local_backend.stopping)
             .on_press(|state: &mut State| state.stop_local_backend())
             .build(kit, preferences, pointer_ref);
-        let switch_btn = ActionButton::new("Switch to Distributed")
-            .key("switch-remote-gateway")
-            .finish(MetalFinish::Gunmetal)
-            .on_press(|state: &mut State| state.set_backend_kind(BackendKind::Remote))
-            .build(kit, preferences, pointer_ref);
         let mut actions = if narrow {
             rune::col().w_full().gap(8.0)
         } else {
@@ -516,10 +511,13 @@ fn local_backend_setup_card(
                     .build(kit, preferences, pointer_ref),
             );
         }
-        actions = actions.child(stop_btn);
-        if !state.startup.active() {
-            actions = actions.child(switch_btn);
-        }
+        actions = actions
+            .child(stop_btn)
+            .child(crate::backend_views::switch_to_distributed(
+                state,
+                preferences,
+                kit,
+            ));
         body = body.child(actions);
     } else {
         let connecting = state.connection.status == ConnectionStatus::Connecting;
@@ -531,21 +529,17 @@ fn local_backend_setup_card(
             .disabled(connecting)
             .on_press(|state: &mut State| state.connect_local())
             .build(kit, preferences, pointer_ref);
-        let switch_btn = ActionButton::new("Switch to Distributed")
-            .key("switch-remote-gateway")
-            .finish(MetalFinish::Gunmetal)
-            .disabled(connecting)
-            .on_press(|state: &mut State| state.set_backend_kind(BackendKind::Remote))
-            .build(kit, preferences, pointer_ref);
-        let mut actions = if narrow {
+        let actions = if narrow {
             rune::col().w_full().gap(8.0)
         } else {
             rune::row().w_full().gap(8.0)
         }
-        .child(start_btn);
-        if !state.startup.active() {
-            actions = actions.child(switch_btn);
-        }
+        .child(start_btn)
+        .child(crate::backend_views::switch_to_distributed(
+            state,
+            preferences,
+            kit,
+        ));
         body = body
             .child(actions)
             .child(binary_strip)
@@ -609,7 +603,7 @@ pub(crate) fn setup_gateway(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
         &icons::KEY,
         "Setup Gateway",
         Some(if state.is_local_backend() {
-            "Start the embedded backend on this workstation."
+            crate::submission::ATLAS_DISTRIBUTED_REQUIREMENT
         } else if cfg!(target_os = "macos") {
             "Pair once via macOS Keychain. Accepted jobs persist independently."
         } else {

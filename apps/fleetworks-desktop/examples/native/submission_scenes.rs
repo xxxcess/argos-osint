@@ -3,7 +3,12 @@
 use fleetworks_contracts::context::JobOrigin;
 use fleetworks_contracts::context::JobRequestAssociation;
 use fleetworks_contracts::context::OriginSource;
+use fleetworks_contracts::readiness::AtlasCyclePreflight;
+use fleetworks_contracts::readiness::AtlasKeyPresence;
+use fleetworks_contracts::readiness::ReadinessState;
+use fleetworks_contracts::readiness::WorkstationReadiness;
 use fleetworks_desktop::app::Intent;
+use fleetworks_desktop::app::Load;
 use fleetworks_desktop::backend::ActivityJob;
 use fleetworks_desktop::backend::JobDetail;
 use fleetworks_desktop::submission::AcceptedReceipt;
@@ -31,12 +36,44 @@ fn setup(state: &mut State, kind: SubmissionKind) {
         SubmissionKind::Atlas => Page::Atlas,
         SubmissionKind::Tool => Page::Tools,
     };
+    if kind == SubmissionKind::Atlas {
+        let mut readiness = WorkstationReadiness::new(
+            "synthetic-deployment".into(),
+            "2026-01-01T00:00:00Z".into(),
+            Vec::new(),
+        );
+        if let Load::Ready(receipt) = &state.registration.receipt {
+            readiness.registration = Some(receipt.clone());
+        }
+        let mut preflight = AtlasCyclePreflight::new(
+            ReadinessState::Ready,
+            ReadinessState::Ready,
+            AtlasKeyPresence::Saved,
+            AtlasKeyPresence::Saved,
+            AtlasKeyPresence::Saved,
+            AtlasKeyPresence::Saved,
+        );
+        preflight.configuration_revision = state.configuration_revision();
+        readiness.atlas_preflight = Some(preflight);
+        state.readiness = Load::Ready(readiness);
+        state.readiness_received_at = Some(0.0);
+    }
     state.backend.tool_inputs = rune::TextEdit::new("{\"email\":\"fixture@example.test\"}");
 }
 
 pub fn atlas_preview(state: &mut State) {
     setup(state, SubmissionKind::Atlas);
     state.preview_atlas_cycle();
+}
+pub fn atlas_prerequisites(state: &mut State) {
+    setup(state, SubmissionKind::Atlas);
+    if let Load::Ready(readiness) = &mut state.readiness {
+        if let Some(preflight) = &mut readiness.atlas_preflight {
+            preflight.rust_bert = ReadinessState::NotReady;
+            preflight.newsapi = AtlasKeyPresence::Unchecked;
+            preflight.currents = AtlasKeyPresence::Missing;
+        }
+    }
 }
 pub fn atlas_accepted(state: &mut State) {
     atlas_preview(state);

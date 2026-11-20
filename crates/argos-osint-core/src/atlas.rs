@@ -1727,22 +1727,95 @@ fn article_from_row(row: &AtlasArticleRow) -> FeedArticle {
     }
 }
 
-fn require_key(value: &str, name: &str) -> Result<()> {
-    if value.trim().is_empty() {
-        Err(anyhow!(
-            "Enter the {name} on its OSINT tool, or set its environment variable"
-        ))
-    } else {
-        Ok(())
+/// Provider slots required by Atlas acquisition stages.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum AtlasProvider {
+    GNews,
+    NewsData,
+    NewsApi,
+    Currents,
+}
+
+impl AtlasProvider {
+    const DISCOVERY: [Self; 2] = [Self::GNews, Self::NewsData];
+    const COLLECTION: [Self; 2] = [Self::NewsApi, Self::Currents];
+
+    /// Canonical provider settings ID.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::GNews => "gnews",
+            Self::NewsData => "newsdata",
+            Self::NewsApi => "newsapi",
+            Self::Currents => "currents",
+        }
+    }
+
+    /// Safe user-facing indication of the missing slot.
+    #[must_use]
+    pub const fn missing_message(self) -> &'static str {
+        match self {
+            Self::GNews => "Save a GNews key in OSINT Tools before running an Atlas cycle",
+            Self::NewsData => "Save a NewsData.io key in OSINT Tools before running an Atlas cycle",
+            Self::NewsApi => "Save a NewsAPI key in OSINT Tools before running an Atlas cycle",
+            Self::Currents => "Save a Currents key in OSINT Tools before running an Atlas cycle",
+        }
+    }
+
+    /// Stable bounded Jobs failure code. It contains no stored credential bytes.
+    #[must_use]
+    pub const fn missing_code(self) -> &'static str {
+        match self {
+            Self::GNews => "atlas_gnews_key_missing",
+            Self::NewsData => "atlas_newsdata_key_missing",
+            Self::NewsApi => "atlas_newsapi_key_missing",
+            Self::Currents => "atlas_currents_key_missing",
+        }
+    }
+
+    fn present(self, keys: &ProviderKeys) -> bool {
+        let (primary, fallback) = keys.pair(self.id());
+        !primary.trim().is_empty() || !fallback.trim().is_empty()
     }
 }
 
-fn require_either(primary: &str, fallback: &str, name: &str) -> Result<()> {
-    if primary.trim().is_empty() && fallback.trim().is_empty() {
-        require_key("", name)
-    } else {
-        Ok(())
+/// Acquisition stopped before making a provider call for the missing slot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct MissingAtlasProvider {
+    pub provider: AtlasProvider,
+}
+
+impl std::fmt::Display for MissingAtlasProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.provider.missing_message())
     }
+}
+
+impl std::error::Error for MissingAtlasProvider {}
+
+fn require_providers(
+    keys: &ProviderKeys,
+    providers: impl IntoIterator<Item = AtlasProvider>,
+) -> std::result::Result<(), MissingAtlasProvider> {
+    for provider in providers {
+        if !provider.present(keys) {
+            return Err(MissingAtlasProvider { provider });
+        }
+    }
+    Ok(())
+}
+
+fn require_fresh_provider_keys(
+    keys: &ProviderKeys,
+) -> std::result::Result<(), MissingAtlasProvider> {
+    require_providers(
+        keys,
+        AtlasProvider::DISCOVERY
+            .into_iter()
+            .chain(AtlasProvider::COLLECTION),
+    )
 }
 
 /// Run or resume Atlas. `resume` continues the newest paused run. Dedup seeds from
@@ -2422,6 +2495,9 @@ where
         };
         (new_run_id(), cursor, RunStats::default(), false)
     };
+    if !resume {
+        require_fresh_provider_keys(keys)?;
+    }
     let home_path = std::path::absolute(db_path)?
         .parent()
         .ok_or_else(|| CyclePreflightError::InvalidRunState {
@@ -2583,8 +2659,7 @@ where
     let cycle_mode = if resume { "resumed" } else { "fresh" };
     let mut tel = CycleTelemetry::open(&store,db_path, &run_id, cycle_mode, cycle_started_at).await;
     if cursor.phase <= 1 {
-        require_either(&keys.gnews, &keys.gnews_fallback, "GNews API key")?;
-        require_either(&keys.newsdata, &keys.newsdata_fallback, "NewsData API key")?;
+        require_providers(keys, AtlasProvider::DISCOVERY)?;
     }
     let mut seen: Vec<Seen> = feed.iter().map(seen_of).collect();
     // Seed thin history keys newest-first. Full descriptions, metadata and
@@ -2800,8 +2875,7 @@ where
     if cursor.phase == 2 {
         track(2);
         tel.enter_stage("collection", "article", &stats);
-        require_either(&keys.newsapi, &keys.newsapi_fallback, "NewsAPI key")?;
-        require_either(&keys.currents, &keys.currents_fallback, "Currents API key")?;
+        require_providers(keys, AtlasProvider::COLLECTION)?;
         if stats.origins.is_empty() && stats.coverage.acquisition_failures == 0 {
             store
                 .set_state(
@@ -4391,6 +4465,197 @@ mod acquisition_tests {
 mod classifier_preflight_tests {
     use super::*;
 
+    #[cfg(feature = "embedded")]
+    #[derive(Debug, PartialEq, surrealdb::types::SurrealValue)]
+    struct QuotaState {
+        key: String,
+        used: i64,
+    }
+
+    #[cfg(feature = "embedded")]
+    async fn quota_snapshot(repo: &crate::storage::repo::Repository) -> Vec<QuotaState> {
+        let mut response = repo
+            .db()
+            .query("SELECT record::id(id) AS key,used FROM atlas_quota")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let mut rows: Vec<QuotaState> = response.take(0).unwrap();
+        rows.sort_by(|left, right| left.key.cmp(&right.key));
+        rows
+    }
+
+    #[cfg(feature = "embedded")]
+    fn saved_fallbacks() -> ProviderKeys {
+        ProviderKeys {
+            gnews_fallback: "fixture-gnews-fallback".into(),
+            newsdata_fallback: "fixture-newsdata-fallback".into(),
+            newsapi_fallback: "fixture-newsapi-fallback".into(),
+            currents_fallback: "fixture-currents-fallback".into(),
+            ..ProviderKeys::default()
+        }
+    }
+
+    #[cfg(feature = "embedded")]
+    async fn fixture_fresh_cycle(
+        repo: &crate::storage::repo::Repository,
+        db_path: &Path,
+        keys: &ProviderKeys,
+        fetch: impl FnMut(HttpCall) -> FetchFut + Send,
+    ) -> Result<Stop> {
+        let pause = AtomicBool::new(false);
+        let tracker = std::sync::Mutex::new(AtlasJob::new(db_path));
+        Box::pin(run_atlas_on_store(
+            RunInput {
+                db_path,
+                pause: &pause,
+                keys,
+                user_agent: "Atlas offline preflight fixture",
+                pace: false,
+                resume: false,
+                feed: &[],
+                classifier: None,
+                synthesizer: None,
+                synthesizer_fallbacks: &[],
+                run_id: None,
+            },
+            |_| {},
+            fetch,
+            &tracker,
+            AtlasStore::from_repository(repo.clone()),
+            Some("fleet-atlas-run-fresh-fixture"),
+        ))
+        .await
+    }
+
+    #[cfg(feature = "embedded")]
+    #[tokio::test]
+    async fn missing_collection_key_blocks_fresh_cycle_before_discovery_or_quota() {
+        use crate::storage::open::Target;
+        use crate::storage::repo::Repository;
+
+        let root = tempfile::tempdir().unwrap();
+        let repo = Repository::connect(
+            &Target::Embedded {
+                path: root.path().join("storage"),
+            },
+            "argos",
+            "fresh_provider_preflight",
+        )
+        .await
+        .unwrap();
+        crate::storage::atlas::quota_bump(repo.db(), "gnews", &utc_day())
+            .await
+            .unwrap();
+        let quota = quota_snapshot(&repo).await;
+        let db_path = root.path().join("argos.db");
+        for missing in [AtlasProvider::NewsApi, AtlasProvider::Currents] {
+            let mut keys = saved_fallbacks();
+            match missing {
+                AtlasProvider::NewsApi => keys.newsapi_fallback.clear(),
+                AtlasProvider::Currents => keys.currents_fallback.clear(),
+                _ => unreachable!("collection-only fixture"),
+            }
+            let mut fetched = 0;
+            let error = fixture_fresh_cycle(&repo, &db_path, &keys, |_| {
+                fetched += 1;
+                Box::pin(async { Err(anyhow!("missing collection key must prevent acquisition")) })
+            })
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error
+                    .downcast_ref::<MissingAtlasProvider>()
+                    .map(|e| e.provider),
+                Some(missing),
+                "the specific missing collection provider must be named: {error}"
+            );
+            assert_eq!(
+                fetched, 0,
+                "no discovery or collection calls for {missing:?}"
+            );
+            assert_eq!(quota_snapshot(&repo).await, quota);
+            assert!(crate::storage::atlas::list_runs(repo.db())
+                .await
+                .unwrap()
+                .is_empty());
+        }
+    }
+
+    #[cfg(all(feature = "embedded", feature = "classifier", unix))]
+    #[tokio::test]
+    async fn fresh_cycle_accepts_fallback_only_slots_with_offline_discovery() {
+        use crate::storage::open::Target;
+        use crate::storage::repo::Repository;
+
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().canonicalize().unwrap();
+        let model = home.join("model");
+        std::fs::create_dir(&model).unwrap();
+        for (name, bytes) in [
+            ("config.json", "{}"),
+            ("vocab.txt", "fixture-vocabulary"),
+            ("rust_model.ot", "fixture-checkpoint"),
+        ] {
+            std::fs::write(model.join(name), bytes).unwrap();
+        }
+        let classifier = home.join("classifier");
+        std::fs::create_dir(&classifier).unwrap();
+        let worker = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/fixtures/atlas_bert")
+            .canonicalize()
+            .unwrap();
+        std::fs::write(
+            classifier.join("zero-shot.json"),
+            serde_json::to_vec(&serde_json::json!({"worker_path": worker, "model_dir": model}))
+                .unwrap(),
+        )
+        .unwrap();
+        let repo = Repository::connect(
+            &Target::Embedded {
+                path: home.join("storage"),
+            },
+            "argos",
+            "fresh_fallback_slots",
+        )
+        .await
+        .unwrap();
+        let keys = saved_fallbacks();
+        let mut fetched = Vec::new();
+        let result = fixture_fresh_cycle(&repo, &home.join("argos.db"), &keys, |call| {
+            let (body, fallback) = match call.provider.as_str() {
+                "gnews" => (r#"{"articles":[]}"#, &keys.gnews_fallback),
+                "newsdata" => (
+                    r#"{"status":"success","results":[]}"#,
+                    &keys.newsdata_fallback,
+                ),
+                other => panic!("empty discovery must not fetch {other}"),
+            };
+            assert!(
+                call.url.contains(fallback.as_str()),
+                "fallback slot must supply the request"
+            );
+            fetched.push(call.provider);
+            Box::pin(async move {
+                Ok(HttpReply {
+                    status: 200,
+                    body: body.into(),
+                    location: None,
+                })
+            })
+        })
+        .await
+        .unwrap();
+        assert!(matches!(result, Stop::Finished));
+        assert_eq!(fetched, ["gnews", "newsdata"]);
+        let quota = quota_snapshot(&repo).await;
+        assert_eq!(quota.len(), 2);
+        assert!(quota
+            .iter()
+            .all(|entry| entry.key.contains(":fallback") && entry.used == 1));
+    }
+
     #[test]
     fn phase_alone_does_not_authorize_post_admission_resume() {
         let mut cursor = Cursor {
@@ -4548,24 +4813,6 @@ mod classifier_preflight_tests {
     async fn denied_preflight_spends_no_quota_or_fetches_and_preserves_resume_state() {
         use crate::storage::open::Target;
         use crate::storage::repo::Repository;
-        use surrealdb::types::SurrealValue;
-        #[derive(Debug, PartialEq, SurrealValue)]
-        struct QuotaState {
-            key: String,
-            used: i64,
-        }
-        async fn quota_snapshot(repo: &Repository) -> Vec<QuotaState> {
-            let mut response = repo
-                .db()
-                .query("SELECT record::id(id) AS key,used FROM atlas_quota")
-                .await
-                .unwrap()
-                .check()
-                .unwrap();
-            let mut rows: Vec<QuotaState> = response.take(0).unwrap();
-            rows.sort_by(|left, right| left.key.cmp(&right.key));
-            rows
-        }
         let temp = tempfile::tempdir().unwrap();
         let db_path = temp.path().join("argos.db");
         let repo = Repository::connect(
@@ -4586,7 +4833,7 @@ mod classifier_preflight_tests {
             .unwrap();
         assert_eq!(quota_snapshot(&repo).await[0].used, 1);
         let pause = AtomicBool::new(false);
-        let keys = ProviderKeys::default();
+        let keys = saved_fallbacks();
         for resume in [false, true] {
             if resume {
                 crate::storage::atlas::insert_run(

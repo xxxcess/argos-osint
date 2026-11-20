@@ -1,8 +1,10 @@
 //! Allowlisted backend operation cards and workstation-scoped activity.
 
 use fleetworks_contracts::context::Permission;
+use fleetworks_contracts::readiness::AtlasKeyPresence;
 use fleetworks_contracts::readiness::DatasetKind;
 use fleetworks_contracts::readiness::MaintenanceOperation;
+use fleetworks_contracts::readiness::ReadinessState;
 use rune::Cx;
 use rune::El;
 use rune::ScrollSpec;
@@ -129,6 +131,25 @@ fn job_worker_sync_summary(job: &crate::backend::ActivityJob) -> String {
     summary
 }
 
+fn job_error_summary(job: &crate::backend::ActivityJob) -> &str {
+    if job.operation != fleetworks_contracts::ATLAS_CYCLE_OPERATION {
+        return &job.error_summary;
+    }
+    match job.error_summary.as_str() {
+        "atlas_gnews_key_missing" => "GNews API key missing. Save a key in OSINT Tools.",
+        "atlas_newsdata_key_missing" => "NewsData.io API key missing. Save a key in OSINT Tools.",
+        "atlas_newsapi_key_missing" => "NewsAPI API key missing. Save a key in OSINT Tools.",
+        "atlas_currents_key_missing" => "Currents API key missing. Save a key in OSINT Tools.",
+        "atlas_classifier_unavailable" | "atlas_classifier_service_unavailable" => {
+            "Rust-BERT worker unavailable. Check the Distributed gateway."
+        }
+        "atlas_classifier_model_not_configured" => "Rust-BERT checkpoint is not configured.",
+        "atlas_classifier_timeout" => "Rust-BERT worker timed out.",
+        "atlas_classifier_busy" => "Rust-BERT worker is busy.",
+        _ => &job.error_summary,
+    }
+}
+
 pub(crate) fn page(
     state: &State,
     cx: &Cx<State>,
@@ -203,18 +224,34 @@ fn atlas(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
     })
     .build(kit, preferences, pointer_ref);
 
-    let mut action = rune::col().child(ui_components::section_header(
+    let mut action = rune::col().gap(8.0).child(ui_components::section_header(
         &icons::ATLAS,
         "News Cycles",
-        Some("Queue incremental news collection or inspect prior runs"),
+        None,
         count_badge,
-        Some(trigger),
+        None,
         kit,
     ));
 
-    if let Some(reason) = reason {
-        action = action.child(quiet(reason, kit));
+    if state.atlas_advertised() {
+        action = action.child(atlas_prerequisites(state, preferences, kit));
     }
+    if let Some(reason) = &reason {
+        action = action.child(quiet(reason.as_str(), kit));
+    }
+    if state.is_local_backend() {
+        action = action.child(
+            ActionButton::new("Set up Distributed")
+                .key("atlas-open-distributed-setup")
+                .on_press_tx(|state: &mut State, tx| {
+                    state.setup_gateway = true;
+                    tx.scroll_into_view("switch-remote-gateway");
+                    tx.focus("switch-remote-gateway", tx.by_keys());
+                })
+                .build(kit, preferences, None),
+        );
+    }
+    action = action.child(rune::row().child(trigger));
     if !lane.busy() {
         if let Some(snapshot) = &lane.confirmation {
             action = action.child(
@@ -242,6 +279,7 @@ fn atlas(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
                                     .key("atlas-submit-confirm")
                                     .icon(&icons::ATLAS)
                                     .finish(MetalFinish::FracturedConfirm)
+                                    .disabled(reason.is_some())
                                     .on_press(|state: &mut State| {
                                         state.confirm_submission(SubmissionKind::Atlas)
                                     })
@@ -587,6 +625,137 @@ fn atlas(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
     )
 }
 
+pub(crate) fn switch_to_distributed(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
+    ActionButton::new("Switch to Distributed")
+        .key("switch-remote-gateway")
+        .disabled(
+            state.connection.status == crate::connection::ConnectionStatus::Connecting
+                || state.local_backend.stopping,
+        )
+        .on_press_tx(State::open_atlas_distributed_setup)
+        .build(kit, preferences, None)
+}
+
+fn atlas_prerequisites(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
+    let preflight = state.atlas_preflight();
+    let mut checks = rune::col()
+        .key("atlas-prerequisites")
+        .gap(4.0)
+        .w_full()
+        .child(ui_components::section_header(
+            &icons::SHIELD_CHECK,
+            "Cycle prerequisites",
+            None,
+            None,
+            Some(
+                ActionButton::new("Refresh checks")
+                    .key("atlas-preflight-refresh")
+                    .icon(&icons::REFRESH)
+                    .finish(MetalFinish::ObsidianPill)
+                    .disabled(
+                        !state.permission(Permission::ReadBackend) || state.readiness_pending(),
+                    )
+                    .on_press(|state: &mut State| state.refresh_readiness())
+                    .build(kit, preferences, None),
+            ),
+            kit,
+        ));
+
+    for (id, label, observed, ready_label) in [
+        (
+            "atlas-worker",
+            "Atlas worker",
+            preflight.map(|report| report.atlas_worker),
+            "Available",
+        ),
+        (
+            "rust-bert",
+            "Rust-BERT worker and checkpoint",
+            preflight.map(|report| report.rust_bert),
+            if preflight.is_some_and(|report| report.rust_bert_verified) {
+                "Verified"
+            } else {
+                "Checkpoint available"
+            },
+        ),
+    ] {
+        let (status, tone) = match observed {
+            Some(ReadinessState::Ready) => (ready_label, StatusTone::Ok),
+            Some(ReadinessState::Running) => ("Checking", StatusTone::Info),
+            Some(ReadinessState::NotReady | ReadinessState::Degraded) => {
+                ("Not ready", StatusTone::Warn)
+            }
+            Some(ReadinessState::Unavailable | ReadinessState::NotApplicable) => {
+                ("Unavailable", StatusTone::Neutral)
+            }
+            _ => ("Unchecked", StatusTone::Neutral),
+        };
+        checks = checks.child(atlas_check_row(id, label, status, tone, None, kit));
+    }
+
+    let keys = state.atlas_key_states();
+    let mut have_saved_key = false;
+    for (provider, label, presence) in keys {
+        let (status, tone) = match presence {
+            AtlasKeyPresence::Missing => ("Missing key", StatusTone::Warn),
+            AtlasKeyPresence::Saved => {
+                have_saved_key = true;
+                ("Key saved", StatusTone::Neutral)
+            }
+            _ => ("Unchecked", StatusTone::Neutral),
+        };
+        let action = (presence == AtlasKeyPresence::Missing).then(|| {
+            ActionButton::new("OSINT Tools")
+                .key(format!("atlas-key-open-{provider}"))
+                .finish(MetalFinish::ObsidianPill)
+                .on_press(move |state: &mut State| {
+                    state.navigate(Page::Tools);
+                    open_tool_credential_editor(state, provider);
+                })
+                .build(kit, preferences, None)
+                .label(format!("Configure the {label} API key in OSINT Tools"))
+        });
+        checks = checks.child(atlas_check_row(provider, label, status, tone, action, kit));
+    }
+    if have_saved_key {
+        checks = checks.child(quiet("Saved keys still need provider authentication.", kit));
+    }
+    checks
+}
+
+fn atlas_check_row(
+    id: &str,
+    name: &str,
+    status: &str,
+    tone: StatusTone,
+    action: Option<El>,
+    kit: &Kit,
+) -> El {
+    rune::row()
+        .key(format!("atlas-check-{id}"))
+        .w_full()
+        .min_w(0.0)
+        .flex_wrap()
+        .center_y()
+        .gap(6.0)
+        .child(line(name, kit).grow(1.0).min_w(0.0))
+        .child(ui_components::status_pill(status, None, tone, kit))
+        .children(action)
+}
+
+fn open_tool_credential_editor(state: &mut State, provider: &str) {
+    if state.page != Page::Tools || !state.permission(Permission::ManageConfiguration) {
+        return;
+    }
+    state.configuration.tool_provider = TextEdit::new(provider);
+    state.configuration.tool_primary.replace_text("");
+    state.configuration.tool_fallback.replace_text("");
+    state.configuration.clear_tool_primary = false;
+    state.configuration.clear_tool_fallback = false;
+    state.configuration_edited();
+    state.tool_key_dialog = true;
+}
+
 fn tools(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Vec<El>) -> El {
     let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
     let shadow_ref = (!preferences.matte()).then_some(&state.shadow_offset);
@@ -716,13 +885,7 @@ fn tools(state: &State, preferences: ViewPreferences, kit: &Kit, layers: &mut Ve
                             .finish(MetalFinish::Gunmetal)
                             .disabled(!state.permission(Permission::ManageConfiguration))
                             .on_press(move |state: &mut State| {
-                                state.configuration.tool_provider = TextEdit::new(&provider);
-                                state.configuration.tool_primary.replace_text("");
-                                state.configuration.tool_fallback.replace_text("");
-                                state.configuration.clear_tool_primary = false;
-                                state.configuration.clear_tool_fallback = false;
-                                state.configuration_edited();
-                                state.tool_key_dialog = true;
+                                open_tool_credential_editor(state, &provider);
                             })
                             .build(kit, preferences, pointer_ref),
                     ),
@@ -1390,6 +1553,7 @@ fn jobs(
             };
             let detail_id = detail.job.id.clone();
             let tone = state_tone(&detail.job.state);
+            let error_summary = job_error_summary(&detail.job);
             let mut details = rune::col().gap(10.0).child(ui_components::section_header(
                 &icons::JOBS,
                 detail_title.clone(),
@@ -1457,9 +1621,8 @@ fn jobs(
                     kit,
                 ));
             } else {
-                if !detail.job.error_summary.is_empty() {
-                    details =
-                        details.child(line(detail.job.error_summary.clone(), kit).role("alert"));
+                if !error_summary.is_empty() {
+                    details = details.child(line(error_summary, kit).role("alert"));
                 }
                 if detail.job.state == "failed" || detail.job.can_retry {
                     let retry_reason = state.job_action_disabled_reason(JobAction::Retry);
@@ -1753,8 +1916,7 @@ fn jobs(
                     .child(line(format!("State: {}", detail.job.state), kit))
                     .child(line(format!("Phase: {}", detail.job.phase), kit))
                     .children(
-                        (!detail.job.error_summary.is_empty())
-                            .then(|| line(detail.job.error_summary.clone(), kit).role("alert")),
+                        (!error_summary.is_empty()).then(|| line(error_summary, kit).role("alert")),
                     );
                 ui_components::modal_prompt(
                     "job-operational-summary",

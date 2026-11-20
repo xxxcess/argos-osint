@@ -1365,6 +1365,10 @@ fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
         && state.scoped_logs.window_focused
         && state.registration.context.is_some()
     {
+        if !state.setup_gateway && state.atlas_preflight_due() {
+            state.refresh_readiness();
+            changed = true;
+        }
         // Active work is read quickly. Otherwise a slower, bounded read still discovers cycles
         // admitted after this page loaded, including from an empty or finished-only page.
         let interval = if state.atlas_poll_active() { 3.0 } else { 10.0 };

@@ -757,6 +757,10 @@ mod native {
                 }),
                 ("atlas-offline", |state| state.page = Page::Atlas),
                 ("atlas-articles-ready", atlas_ready),
+                (
+                    "atlas-prerequisites",
+                    submission_scenes::atlas_prerequisites,
+                ),
                 ("atlas-submit-preview", submission_scenes::atlas_preview),
                 ("atlas-submit-accepted", submission_scenes::atlas_accepted),
                 ("atlas-submit-uncertain", submission_scenes::atlas_uncertain),

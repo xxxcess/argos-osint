@@ -45,6 +45,8 @@ THEN {
 
 /// Broker pool for collecting Atlas cycles.
 pub const ATLAS_POOL: &str = "atlas_cycle";
+/// Prefix reserved for Atlas queue consumer presence in the process registry.
+pub const ATLAS_WORKER_OWNER_PREFIX: &str = "atlas-worker-";
 const VERSION: u16 = 1;
 const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 const RELAY_LEASE_SECS: i64 = 30;
@@ -109,6 +111,42 @@ fn valid_pool(value: &str) -> bool {
 
 fn invalid(code: &str) -> TxError {
     TxError::Abort(code.to_owned())
+}
+
+/// Whether fresh Atlas work has both an enabled pool and a recently observed consumer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum AtlasWorkerAvailability {
+    Disabled,
+    AwaitingWorker,
+    Ready,
+}
+
+/// Read Atlas dispatch and recent consumer presence without claiming work.
+pub async fn atlas_worker_availability(
+    db: &Surreal<Any>,
+    now: DateTime<Utc>,
+) -> Result<AtlasWorkerAvailability, TxError> {
+    let cutoff = now - Duration::seconds(super::processes::PROCESS_STALE_SECS);
+    let mut reply = db
+        .query(
+            "SELECT VALUE enabled FROM ONLY job_dispatch_pool:atlas_cycle;
+             SELECT VALUE true FROM process WHERE heartbeat_at >= <datetime>$cutoff
+                AND string::starts_with(record::id(id), $prefix) LIMIT 1;",
+        )
+        .bind(("cutoff", jobs::ts(cutoff)))
+        .bind(("prefix", ATLAS_WORKER_OWNER_PREFIX))
+        .await?
+        .check()?;
+    let enabled: Option<bool> = jobs::take(&mut reply, 0)?;
+    let workers: Vec<bool> = jobs::take(&mut reply, 1)?;
+    Ok(if enabled != Some(true) {
+        AtlasWorkerAvailability::Disabled
+    } else if workers.is_empty() {
+        AtlasWorkerAvailability::AwaitingWorker
+    } else {
+        AtlasWorkerAvailability::Ready
+    })
 }
 
 /// Opt a pool into transactional dispatch after bootstrap establishes the
@@ -973,15 +1011,58 @@ mod relinquish_tests {
     use chrono::{Duration, Utc};
 
     use super::{
-        claim_delivery, claim_ready, enable_pool, finish_delivery, recover_expired, submit,
-        DeliveryClaim, DeliveryFinish, DeliveryOutcome, ATLAS_POOL,
+        atlas_worker_availability, claim_delivery, claim_ready, enable_pool, finish_delivery,
+        recover_expired, submit, AtlasWorkerAvailability, DeliveryClaim, DeliveryFinish,
+        DeliveryOutcome, ATLAS_POOL,
     };
     use crate::storage::bootstrap;
     use crate::storage::jobs::{self, NewJob, NewTask};
     use crate::storage::jobs_view;
     use crate::storage::open::Target;
+    use crate::storage::processes;
     use crate::storage::repo::Repository;
     use crate::storage::tx::TxError;
+
+    #[tokio::test]
+    async fn atlas_availability_requires_enabled_dispatch_and_a_recent_consumer() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::connect(
+            &Target::Embedded {
+                path: dir.path().join("db"),
+            },
+            "fixture",
+            "atlas_worker_readiness",
+        )
+        .await
+        .unwrap();
+        let db = repo.db();
+        bootstrap::ensure_network_identity(db).await.unwrap();
+        let now = Utc::now();
+        processes::beat(db, "process-unrelated-fixture", 1, now)
+            .await
+            .unwrap();
+        assert_eq!(
+            atlas_worker_availability(db, now).await.unwrap(),
+            AtlasWorkerAvailability::Disabled
+        );
+        enable_pool(db, ATLAS_POOL).await.unwrap();
+        assert_eq!(
+            atlas_worker_availability(db, now).await.unwrap(),
+            AtlasWorkerAvailability::AwaitingWorker
+        );
+        processes::beat(db, "atlas-worker-fixture", 1, now)
+            .await
+            .unwrap();
+        assert_eq!(
+            atlas_worker_availability(db, now).await.unwrap(),
+            AtlasWorkerAvailability::Ready
+        );
+        let stale = now + Duration::seconds(processes::PROCESS_STALE_SECS + 1);
+        assert_eq!(
+            atlas_worker_availability(db, stale).await.unwrap(),
+            AtlasWorkerAvailability::AwaitingWorker
+        );
+    }
 
     #[tokio::test]
     async fn relinquish_resumes_across_restarts_without_exhausting_max_attempts_or_duplicating_jobs(

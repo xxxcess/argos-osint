@@ -22,11 +22,13 @@ The deployment starts with new Jobs stores and no queue migration prerequisite. 
 
 Switching back to the base stack disables new Atlas dispatch at bootstrap and preserves queued work. Stop the overlay first; reapply it to resume dispatch.
 
-Once the real worker and required provider/model configuration are ready, submit a collection cycle from native Atlas. Its durable job/request receipt is the acceptance authority. After an uncertain response, reconcile the same request before attempting new work; use Jobs to inspect authorized progress. Neither a healthy HTTP listener nor a returned receipt proves successful inference.
+News cycles require a Distributed gateway with Atlas enabled. In Fleetworks, connect to that gateway and open **News Cycles**. The setup checks show the reported Atlas worker and Rust-BERT readiness alongside the saved key slots. Follow a missing slot to **OSINT Tools**. The durable job receipt confirms queue acceptance. Use **Jobs & Logs** to see progress and any blocking prerequisite. After an uncertain response, reconcile the same request before attempting new work.
 
 Atlas sends metadata cache misses to the warm NLP service in bounded batches. Its classifier sends exact model pins and batches to the private Rust-BERT service. The services bind only to the Compose network. The overlay also configures the Distributed API to probe them with its private internal credential. Workstation Status can then report the selected backend’s observed NLP and classifier readiness. The API receives the private origins and token file paths through Compose. The native app receives the typed readiness observations. Embedded probes its own bundled engines through IPC.
 
-A live cycle needs GNews and NewsData.io keys plus a compatible Rust-BERT worker and pinned model. The standard image hosts the service and loads operator-supplied assets. Put a worker built for the container's Linux architecture and the MNLI checkpoint under the workspace's `models/atlas-bert/`. If the worker uses shared LibTorch libraries, make them available under `models/atlas-bert/lib/`. Set the worker executable and model directory in `classifier/zero-shot.json` using absolute container paths. For example
+A fresh cycle needs a saved primary or fallback key for each provider. GNews and NewsData.io supply discovery. NewsAPI and Currents supply collection. The worker checks all four slots before its first provider fetch. A saved key indicates presence only. Provider authentication is established when the provider accepts a request. Resumed cycles keep the requirements of their current phase. A cycle already in collection can resume with its collection keys.
+
+Atlas also needs a compatible Rust-BERT worker and pinned model. The standard image hosts the service and loads operator-supplied assets. Put a worker built for the container's Linux architecture and the MNLI checkpoint under the workspace's `models/atlas-bert/`. If the worker uses shared LibTorch libraries, make them available under `models/atlas-bert/lib/`. Set the worker executable and model directory in `classifier/zero-shot.json` using absolute container paths.
 
 ```json
 {
@@ -35,4 +37,4 @@ A live cycle needs GNews and NewsData.io keys plus a compatible Rust-BERT worker
 }
 ```
 
-The classifier readiness endpoint reports transport availability and a separate Rust-BERT model state. Natural candidate training still depends on its own advertised durable worker and explicit confirmation. The first successful Atlas pin verifies the model assets. If a pin fails, the Atlas job reports the failure reason in Jobs.
+The classifier readiness endpoint reports service availability, checkpoint presence, and model verification. Checkpoint presence lets the first cycle proceed to its Atlas pin, which verifies the assets for the selected worker. If a pin fails, the Atlas job reports the failure reason in **Jobs & Logs**. Actor catalog setup, actor search and Natural candidate training are separate workflows.

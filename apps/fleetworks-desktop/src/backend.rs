@@ -452,6 +452,12 @@ impl State {
             Page::Atlas => {
                 self.backend_read(ReadRequest::Models);
                 self.refresh_cycles();
+                if self.atlas_advertised()
+                    && self.permission(Permission::ReadBackend)
+                    && !self.readiness_pending()
+                {
+                    self.refresh_readiness();
+                }
             }
             Page::Seed => {
                 self.refresh_readiness();

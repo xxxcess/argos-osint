@@ -5,6 +5,11 @@ use fleetworks_contracts::context::JobRequestAssociation;
 use fleetworks_contracts::context::OriginSource;
 use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::context::RegisteredContext;
+use fleetworks_contracts::readiness::AtlasCyclePreflight;
+use fleetworks_contracts::readiness::AtlasKeyPresence;
+use fleetworks_contracts::readiness::ReadinessState;
+use fleetworks_contracts::readiness::WorkstationReadiness;
+use fleetworks_workstation::native::BackendKind;
 use rune::Env;
 use rune::Runtime;
 use rune::TextEdit;
@@ -54,7 +59,7 @@ fn fixture() -> State {
     );
     state.registration.context = Some(
         RegisteredContext::new(
-            receipt,
+            receipt.clone(),
             1,
             1,
             "synthetic-config".into(),
@@ -62,6 +67,23 @@ fn fixture() -> State {
         )
         .expect("synthetic registered context"),
     );
+    let mut readiness = WorkstationReadiness::new(
+        "synthetic-deployment".into(),
+        "2026-01-01T00:00:00Z".into(),
+        Vec::new(),
+    );
+    readiness.registration = Some(receipt);
+    let mut preflight = AtlasCyclePreflight::new(
+        ReadinessState::Ready,
+        ReadinessState::Ready,
+        AtlasKeyPresence::Saved,
+        AtlasKeyPresence::Saved,
+        AtlasKeyPresence::Saved,
+        AtlasKeyPresence::Saved,
+    );
+    preflight.configuration_revision = Some(0);
+    readiness.atlas_preflight = Some(preflight);
+    state.complete_readiness(Ok(readiness));
     state.backend.profile = Load::Ready(ProfileSnapshot {
         configuration_revision: 0,
         configuration_format: 1,
@@ -395,6 +417,97 @@ fn production_cycle_confirmation_uses_shared_handlers_and_navigation_never_resub
         posts, 1,
         "revisiting the destination never resubmits accepted work"
     );
+}
+
+#[test]
+fn distributed_atlas_prerequisites_gate_creation_and_open_the_missing_key_editor() {
+    let mut state = fixture();
+    state.page = Page::Atlas;
+    state
+        .connection
+        .capabilities
+        .as_mut()
+        .unwrap()
+        .permissions
+        .push(Permission::ManageConfiguration);
+    let Load::Ready(readiness) = &mut state.readiness else {
+        panic!("registered readiness fixture");
+    };
+    let preflight = readiness.atlas_preflight.as_mut().unwrap();
+    preflight.rust_bert = ReadinessState::NotReady;
+    preflight.currents = AtlasKeyPresence::Missing;
+    let mut runtime = Runtime::new(state, app::view, (640.0, 480.0), Env::default());
+    runtime.reduced_motion = true;
+    runtime.frame(0.0);
+    let tree = runtime.accessibility_json().to_string();
+    assert!(tree.contains("Ask the gateway operator to check the Rust-BERT worker and checkpoint"));
+    assert!(tree.contains("Configure the Currents API key in OSINT Tools"));
+    assert!(tree.contains("Saved keys still need provider authentication"));
+
+    runtime.update(|state, _| {
+        let Load::Ready(readiness) = &mut state.readiness else {
+            panic!("registered readiness fixture");
+        };
+        let preflight = readiness.atlas_preflight.as_mut().unwrap();
+        preflight.rust_bert = ReadinessState::Ready;
+    });
+    runtime.frame(0.021);
+    assert!(runtime
+        .accessibility_json()
+        .to_string()
+        .contains("Add a Currents API key in OSINT Tools"));
+    runtime.update(|state, tx| {
+        state.preview_atlas_cycle();
+        tx.scroll_into_view("atlas-key-open-currents");
+    });
+    runtime.frame(0.042);
+    assert!(runtime.state.submissions.atlas.confirmation.is_none());
+    assert!(!runtime.state.intents.iter().any(|intent| matches!(
+        intent,
+        Intent::SubmitInteractive { .. } | Intent::PostInteractive { .. }
+    )));
+
+    let (x, y) = runtime
+        .find("atlas-key-open-currents")
+        .expect("missing key link");
+    assert!((0.0..640.0).contains(&x) && (0.0..480.0).contains(&y));
+    runtime.pointer_down(x, y);
+    runtime.pointer_up(x, y);
+    runtime.frame(0.063);
+    assert_eq!(runtime.state.page, Page::Tools);
+    assert!(runtime.state.tool_key_dialog);
+    assert_eq!(runtime.state.configuration.tool_provider.text, "currents");
+}
+
+#[test]
+fn embedded_atlas_links_to_setup_without_stopping_the_companion() {
+    let mut state = fixture();
+    state.page = Page::Atlas;
+    state.backend_kind = BackendKind::Local;
+    state.connection.origin = TextEdit::new("local://embedded");
+    let mut runtime = Runtime::new(state, app::view, (640.0, 480.0), Env::default());
+    runtime.reduced_motion = true;
+    runtime.frame(0.0);
+    assert!(runtime
+        .accessibility_json()
+        .to_string()
+        .contains(super::ATLAS_DISTRIBUTED_REQUIREMENT));
+    assert!(runtime.find("atlas-prerequisites").is_none());
+    let (x, y) = runtime
+        .find("atlas-open-distributed-setup")
+        .expect("Distributed setup link");
+    assert!((0.0..640.0).contains(&x) && (0.0..480.0).contains(&y));
+    runtime.pointer_down(x, y);
+    runtime.pointer_up(x, y);
+    runtime.frame(0.021);
+    assert!(runtime.state.setup_gateway);
+    assert_eq!(runtime.state.backend_kind, BackendKind::Local);
+    assert!(runtime.state.connected());
+    assert!(runtime.find("switch-remote-gateway").is_some());
+    assert!(runtime
+        .accessibility_json()
+        .to_string()
+        .contains(super::ATLAS_DISTRIBUTED_REQUIREMENT));
 }
 
 #[test]

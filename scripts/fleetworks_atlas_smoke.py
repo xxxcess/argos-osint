@@ -159,7 +159,7 @@ def exercise(tmp, binary, surreal):
                     assert state(job_id)["state"] == "queued"
                 with process([binary, "--role", "atlas-worker"], worker_env, tmp / f"worker-{attempt}.log") as worker:
                     failed = wait_for_state(worker, job_id, "failed")
-                    assert failed["error_summary"] == "atlas_classifier_unavailable", failed
+                    assert failed["error_summary"] == "atlas_gnews_key_missing", failed
                     assert failed["attempts_used"] == attempt, failed
                     completed = wait_for_state(worker, replay_job, "completed")
                     assert completed["result_ref"] == replay_run and completed["attempts_used"] == 1, completed
@@ -168,8 +168,8 @@ def exercise(tmp, binary, surreal):
             assert state(cancel_id)["attempts_used"] == 0
             assert post(atlas_path, fixture_request, proof_headers) == (202, receipt)
             # Exact attempt identity and durable publish count stay stable across a
-            # worker restart and explicit retry. The fixture has no classifier,
-            # so no news provider is contacted and no article is persisted.
+            # worker restart and explicit retry. The fixture has no provider keys,
+            # so it stops before contacting any provider or persisting an article.
             assert sql(f"SELECT VALUE number FROM attempt WHERE task=type::record('task','{job_id}-collect') ORDER BY number;") == [1, 2]
             assert sql(f"SELECT VALUE revision FROM job_dispatch_outbox WHERE job=type::record('job','{job_id}') AND published_at!=NONE ORDER BY revision;") == [0, 3]
     print("Atlas: authenticated replay, queued cancellation, durable embedded enqueue, completion replay and monotonic retry across restart passed", flush=True)

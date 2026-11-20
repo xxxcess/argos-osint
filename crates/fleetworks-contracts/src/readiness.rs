@@ -246,6 +246,64 @@ pub struct WorkstationReadiness {
     /// The operator-chosen backend label, present only when one was configured at bootstrap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform_identity: Option<PlatformIdentity>,
+    /// Fresh Atlas admission observations, scoped to authorized registered workstations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub atlas_preflight: Option<AtlasCyclePreflight>,
+}
+
+/// Presence of at least one saved primary or fallback provider slot. No provider call is made.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AtlasKeyPresence {
+    #[default]
+    Unchecked,
+    Missing,
+    Saved,
+}
+
+/// The backend's bounded fresh-cycle prerequisites, without credential or model paths.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct AtlasCyclePreflight {
+    pub atlas_worker: ReadinessState,
+    pub rust_bert: ReadinessState,
+    /// True only when the owner reports a verified pinned model.
+    #[serde(default)]
+    pub rust_bert_verified: bool,
+    pub gnews: AtlasKeyPresence,
+    pub newsdata: AtlasKeyPresence,
+    pub newsapi: AtlasKeyPresence,
+    pub currents: AtlasKeyPresence,
+    pub fresh_for_ms: u64,
+    /// Backend configuration revision observed when checking key presence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration_revision: Option<u64>,
+}
+
+impl AtlasCyclePreflight {
+    /// Construct the named observations for a single snapshot.
+    #[must_use]
+    pub fn new(
+        atlas_worker: ReadinessState,
+        rust_bert: ReadinessState,
+        gnews: AtlasKeyPresence,
+        newsdata: AtlasKeyPresence,
+        newsapi: AtlasKeyPresence,
+        currents: AtlasKeyPresence,
+    ) -> Self {
+        Self {
+            atlas_worker,
+            rust_bert,
+            rust_bert_verified: false,
+            gnews,
+            newsdata,
+            newsapi,
+            currents,
+            fresh_for_ms: 10_000,
+            configuration_revision: None,
+        }
+    }
 }
 
 /// An operator-chosen backend label with the deployment it names. It is never derived from the
@@ -268,6 +326,7 @@ impl WorkstationReadiness {
             registration: None,
             configured_inputs: Vec::new(),
             platform_identity: None,
+            atlas_preflight: None,
         }
     }
 

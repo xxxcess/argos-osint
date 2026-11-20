@@ -141,6 +141,7 @@ jobs:
             --scene workstation-partial-seed \
             --scene workstation-status-checks-mixed \
             --scene workstation-offline \
+            --scene atlas-prerequisites \
             --scene pairing-waiting \
             --scene pairing-keychain-denied \
             --scene assistant-open \

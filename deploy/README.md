@@ -89,6 +89,8 @@ The native-review helper adds [`compose.actor-bootstrap.yml`](compose.actor-boot
 
 This stack starts no web frontend. WebRelay remains separately configured; remote access requires independently configured HTTPS ingress and allowed-host policy. Explicit operator/headless clients retain token-file mode. [Verification status](../.planning/2026-11-12-native-pairing-implementation/acceptance.md) separates source/test evidence from actual backend and live Keychain journeys.
 
+The optional [Inbox QA deployment](inbox-qa.md) uses a shared offline model pack contract for Embedded and Distributed. Apply its isolation overlay after provisioning a dedicated model and executor pair.
+
 Search process health authenticates `/internal/v1/actors/status`; an empty generation can be healthy while discovery remains `not_built`/`indexing`. Seed completion and reader-visible index completion are separate. Search failure does not gate gateway or seed admission startup. Source/generation mismatch, corruption and writer conflicts stay visible and preserve data; there is no automatic delete/rebuild. Explicit maintenance reports rebuild/pressure state; retain the old serving generation and diagnose before changing any directory or source epoch.
 
 First-party services emit one structured `Fleetworks startup summary` after their listener, worker pools, or storage bootstrap is ready. The summary identifies the role and safe availability fields without credentials, token files, or dataset paths. Use the selected Compose project's logs to compare startup milestones before investigating a failed health check.

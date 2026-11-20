@@ -491,6 +491,26 @@ fn panel(kit: &Kit, title: &str) -> El {
 }
 
 pub(crate) fn checks_view(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
+    if crate::inbox_qa::setup_choice(state) {
+        let panel = panel(kit, "Backend inference")
+            .child(views::quiet(
+                "Optional answers about workstation health in the Inbox.",
+                kit,
+            ))
+            .child(crate::inbox_qa::settings_content(state, kit, preferences))
+            .child(
+                ActionButton::new("Continue to Workstation checks")
+                    .key("startup-inbox-qa-continue")
+                    .finish(MetalFinish::GoldCta)
+                    .on_press_tx(crate::inbox_qa::continue_setup)
+                    .build(kit, preferences, None),
+            );
+        return layout(
+            panel,
+            setup_sequence(state, None, preferences, kit),
+            step_dots(None, kit),
+        );
+    }
     let panel = panel(kit, "Workstation checks")
         .py(8.0)
         .gap(6.0)

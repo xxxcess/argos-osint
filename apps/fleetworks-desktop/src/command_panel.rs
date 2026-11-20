@@ -169,7 +169,7 @@ impl State {
                 self.setup_gateway = true;
             }
             Command::OpenSettings => self.settings_open = true,
-            Command::OpenInbox => self.inbox.open = true,
+            Command::OpenInbox => self.open_inbox(),
             Command::ToggleAssistant => {
                 use crate::assistant::Preference;
                 self.assistant.preference = if self.assistant.preference == Preference::Closed {

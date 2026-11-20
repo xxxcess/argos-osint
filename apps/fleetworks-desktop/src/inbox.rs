@@ -1,9 +1,7 @@
-//! Native Inbox: a grouped popover over allowlisted transitions this app already observed.
+//! Native Inbox: a drawer for backend answers and allowlisted workstation notifications.
 //!
-//! It is not a notification service. Nothing is pushed, nothing leaves this process, and it makes
-//! no claim about device-wide alerts. Items are built from fixed text plus a job title or a
-//! readiness check name, never from error text, URLs or credentials. The whole list resets when
-//! the connection authority changes.
+//! Notification items come from fixed text, job titles and readiness check names. The list
+//! resets when the connection authority changes.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -32,6 +30,7 @@ const MAX_SEEN_JOB_EVENTS: usize = 200;
 /// Bounded map of tracked job states across pagination and filtering.
 const MAX_TRACKED_JOBS: usize = 512;
 const DAY_SECONDS: f64 = 24.0 * 60.0 * 60.0;
+const DRAWER_WIDTH: f32 = 440.0;
 const BELL: Icon = Icon {
     name: "fw-inbox-bell",
     view: 16.0,
@@ -533,9 +532,30 @@ pub(crate) fn age_label(now: f64, at: f64) -> String {
 }
 
 impl State {
+    pub(crate) fn open_inbox(&mut self) {
+        self.inbox.open = true;
+        self.inbox_qa.request_resume();
+    }
+
     pub(crate) fn close_inbox(&mut self, tx: &mut Tx) {
         self.inbox.close();
         tx.focus("inbox-toggle", tx.focus_visible());
+    }
+
+    /// Populate the Inbox with a compact synthetic notification and room for a QA exchange.
+    #[doc(hidden)]
+    pub fn seed_inbox_qa_drawer_fixture(&mut self) {
+        if self.fixture {
+            self.inbox.push(
+                Topic::Connection,
+                "Connection".into(),
+                "Connected".into(),
+                "The connection to the backend is ready.".into(),
+                self.clock,
+                StatusTone::Ok,
+            );
+            self.inbox.open = true;
+        }
     }
 
     /// Populate the production Inbox with synthetic topics for native visual review.
@@ -649,7 +669,7 @@ fn tray(state: &State, kit: &Kit, key: &'static str, preferences: ViewPreference
                 && !state.settings_open
                 && !state.commands.open
             {
-                state.inbox.open = true;
+                state.open_inbox();
             }
         })
         .build(kit)
@@ -668,7 +688,7 @@ fn tray(state: &State, kit: &Kit, key: &'static str, preferences: ViewPreference
     }
 }
 
-pub(crate) fn popover(
+pub(crate) fn drawer(
     state: &State,
     cx: &Cx<State>,
     kit: &Kit,
@@ -677,24 +697,15 @@ pub(crate) fn popover(
     if !state.inbox.open || state.has_active_confirmation() {
         return None;
     }
-    let trigger = cx.layout_with("inbox-toggle", |rect| rect);
-    let [_, window_y, window_width, shell_height] = cx
-        .layout_with("app-shell", |rect| rect)
-        .unwrap_or([0.0, 0.0, 640.0, 480.0]);
-    let top = trigger.map_or(cx.titlebar_inset() + 50.0, |rect| rect[1] + rect[3] + 8.0);
-    let right = trigger
-        .map_or(12.0, |rect| window_width - rect[0] - rect[2])
-        .max(12.0);
-    let height = (window_y + shell_height - top - 12.0).clamp(0.0, 416.0);
+    let window_width = cx.layout_size("app-shell").map_or(640.0, |size| size[0]);
     let mut panel = body(state, kit, preferences)
-        .w(364.0)
-        .max_w(364.0)
-        .h(height)
+        .w(DRAWER_WIDTH)
+        .max_w(DRAWER_WIDTH)
+        .h_full()
         .min_h(0.0)
-        .radius(12.0)
         .transition(crate::app::surface_transition(
             preferences.reduced_motion,
-            rune::Transition::offset(0.0, -4.0),
+            rune::Transition::offset(DRAWER_WIDTH, 0.0),
         ))
         .instant_changes();
     for shadow in kit.shadow_layers(&kit.elevation.overlay) {
@@ -708,48 +719,26 @@ pub(crate) fn popover(
         .h_full()
         .fill(theme::hex(theme::BACKGROUND).alpha(if window_width < 820.0 { 0.44 } else { 0.28 }))
         .a11y_hidden();
-    let mut layer = rune::el()
-        .key("inbox-layer")
-        .absolute(0.0, 0.0)
-        .w_full()
-        .h_full()
-        .role("dialog")
-        .label("Inbox")
-        .focus_return("inbox-toggle")
-        .modal_tx(false, State::close_inbox)
-        .child(scrim)
-        .child(
-            rune::col()
-                .w_full()
-                .h_full()
-                .child(dismiss_area("inbox-backdrop-top").w_full().h(top))
-                .child(
-                    rune::row()
-                        .key("inbox-panel-position")
-                        .w_full()
-                        .h(height)
-                        .child(dismiss_area("inbox-backdrop-left").grow(1.0).h_full())
-                        .child(panel)
-                        .child(dismiss_area("inbox-backdrop-right").w(right).h_full()),
-                )
-                .child(dismiss_area("inbox-backdrop-bottom").w_full().grow(1.0)),
-        );
-    if let Some([x, y, width, height]) = trigger {
-        // The modal makes the workspace inert. Keep its only shared control operable in place.
-        layer = layer.child(
-            rune::el()
-                .key("inbox-modal-tray-position")
-                .absolute(x, y)
-                .size(width, height)
-                .child(
-                    tray(state, kit, "inbox-toggle-close", preferences)
-                        .w_full()
-                        .h_full()
-                        .tab_index(-1),
-                ),
-        );
-    }
-    Some(layer)
+    Some(
+        rune::el()
+            .key("inbox-layer")
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h_full()
+            .role("dialog")
+            .label("Inbox")
+            .focus_return("inbox-toggle")
+            .modal_tx(false, State::close_inbox)
+            .child(scrim)
+            .child(
+                rune::row()
+                    .key("inbox-panel-position")
+                    .w_full()
+                    .h_full()
+                    .child(dismiss_area("inbox-backdrop-left").grow(1.0).h_full())
+                    .child(panel),
+            ),
+    )
 }
 
 fn dismiss_area(key: &'static str) -> El {
@@ -842,7 +831,8 @@ fn body(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
                                 .wrap(),
                         )
                         .child(material::glass_control(mark, preferences))
-                        .child(material::glass_control(close, preferences)),
+                        .child(material::glass_control(close, preferences))
+                        .child(tray(state, kit, "inbox-toggle-close", preferences).tab_index(-1)),
                 )
                 .child(
                     rune::text("Only changes observed by this workstation.")
@@ -863,8 +853,13 @@ fn body(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
                     stick_bottom: false,
                 })
                 .scroll_anchor()
-                .child(rows.w_full().padding(12.0)),
+                .child(
+                    rows.children(crate::inbox_qa::exchange(state, kit))
+                        .w_full()
+                        .padding(12.0),
+                ),
         )
+        .child(crate::inbox_qa::footer(state, kit, preferences))
 }
 
 fn group_view(group: &Group<'_>, state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
@@ -1470,7 +1465,7 @@ mod tests {
     }
 
     #[test]
-    fn modal_popover_has_four_close_paths_and_preserves_the_workspace_at_minimum_size() {
+    fn modal_drawer_has_four_close_paths_and_preserves_the_workspace_at_minimum_size() {
         let mut state = crate::tests::registered_fixture();
         state.page = crate::app::Page::Workstation;
         state.assistant.enabled = true;
@@ -1502,14 +1497,17 @@ mod tests {
             assert!(focused(&runtime, "inbox-close"));
             assert!(runtime.find("assistant-dock").is_some());
             assert!(runtime.find("screen-workstation").is_some());
-            let (panel, _) = runtime.presented("inbox-body").expect("popover geometry");
-            let (tray, _) = runtime.presented("inbox-toggle").expect("tray geometry");
-            assert!(panel[0] > 0.0 && panel[0] + panel[2] < 640.0);
-            assert!((panel[0] + panel[2] - tray[0] - tray[2]).abs() < 0.5);
-            assert!(panel[1] >= tray[1] + tray[3]);
-            assert!(panel[1] + panel[3] < 480.0);
+            let (panel, _) = runtime.presented("inbox-body").expect("drawer geometry");
+            for (coordinate, expected) in
+                panel
+                    .into_iter()
+                    .zip([640.0 - DRAWER_WIDTH, 0.0, DRAWER_WIDTH, 480.0])
+            {
+                assert!((coordinate - expected).abs() < 0.5, "{panel:?}");
+            }
             for key in [
                 "inbox-close",
+                "inbox-toggle-close",
                 "inbox-mark-all-read",
                 "inbox-helper",
                 "inbox-filter",

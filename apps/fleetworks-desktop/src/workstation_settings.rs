@@ -313,12 +313,16 @@ fn section_content(state: &State, preferences: ViewPreferences, kit: &Kit) -> El
                 ),
                 kit,
             ));
-            rune::col().w_full().gap(22.0).child(setting_group(
-                "Connection",
-                rows,
-                preferences,
-                kit,
-            ))
+            rune::col()
+                .w_full()
+                .gap(22.0)
+                .child(setting_group(
+                    "Backend inference",
+                    crate::inbox_qa::settings_content(state, kit, preferences).padding(12.0),
+                    preferences,
+                    kit,
+                ))
+                .child(setting_group("Connection", rows, preferences, kit))
         }
         SettingsSection::Models => rune::col().w_full().gap(22.0).child(setting_group(
             "Routing",
@@ -450,6 +454,10 @@ pub(crate) fn page(state: &State, cx: &Cx<State>, kit: &Kit) -> El {
                 .border_sides([0.0, 0.0, 1.0, 0.0], theme::hex(theme::BORDER_SUBTLE))
                 .child(
                     rune::text(state.settings_section.title())
+                        .key("settings-section-title")
+                        .role("heading")
+                        .focusable(true)
+                        .tab_index(-1)
                         .font(kit.ty.body_medium)
                         .color(theme::hex(theme::TEXT_PRIMARY)),
                 )

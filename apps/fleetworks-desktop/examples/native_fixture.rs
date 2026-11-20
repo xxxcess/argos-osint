@@ -16,6 +16,13 @@ mod native {
     mod submission_scenes;
 
     use fleetworks_contracts::capabilities::Capabilities;
+    use fleetworks_contracts::chat::ChatSourceKind;
+    use fleetworks_contracts::chat::ChatSourceReference;
+    use fleetworks_contracts::chat::QaFinding;
+    use fleetworks_contracts::chat::QaPhase;
+    use fleetworks_contracts::chat::QaSettings;
+    use fleetworks_contracts::chat::QaTurn;
+    use fleetworks_contracts::chat::QaTurnState;
     use fleetworks_contracts::connect::RegistrationReceipt;
     use fleetworks_contracts::context::JobOrigin;
     use fleetworks_contracts::context::OriginSource;
@@ -594,6 +601,46 @@ mod native {
         state.seed_inbox_drawer_fixture();
     }
 
+    fn inbox_qa_off(state: &mut State, kind: BackendKind) {
+        registered(state);
+        state.seed_inbox_qa_drawer_fixture();
+        state.backend_kind = kind;
+        let can_manage = kind == BackendKind::Local;
+        if can_manage {
+            state.connection.origin = TextEdit::new("local://embedded");
+        }
+        state.seed_inbox_qa_fixture(QaSettings::new(false, QaPhase::Off, 1, 1, can_manage), None);
+    }
+
+    fn inbox_qa_turn(state: &mut State, stage: QaTurnState) {
+        registered(state);
+        state.seed_inbox_qa_drawer_fixture();
+        let mut turn = QaTurn::queued(
+            "fixture-turn-1".into(),
+            "fixture-request-1".into(),
+            "Is actor search ready?".into(),
+        );
+        turn.state = stage;
+        turn.cursor = 1;
+        if matches!(stage, QaTurnState::Answered | QaTurnState::Canceled) {
+            let answer = "Actor search is ready.";
+            turn.findings.push(QaFinding::new(
+                ChatSourceReference::new(ChatSourceKind::Readiness, "actor-search".into())
+                    .expect("fixture search readiness source"),
+                "Actor search".into(),
+                answer.into(),
+                0,
+                answer.len() as u32,
+                "2026-01-01T00:00:00Z".into(),
+            ));
+            turn.cursor = 3;
+        }
+        state.seed_inbox_qa_fixture(
+            QaSettings::new(true, QaPhase::Ready, 2, 1, true),
+            Some(turn),
+        );
+    }
+
     fn workstation_status(state: &mut State) {
         readiness_scenes::mixed_status_checks(state);
         state.backend_kind = BackendKind::Local;
@@ -771,6 +818,21 @@ mod native {
                 ("setup-connected-embedded", setup_connected_embedded),
                 ("setup-connected-distributed", setup_connected_distributed),
                 ("inbox-drawer", inbox),
+                ("inbox-qa-off-embedded", |state| {
+                    inbox_qa_off(state, BackendKind::Local);
+                }),
+                ("inbox-qa-off-distributed", |state| {
+                    inbox_qa_off(state, BackendKind::Remote);
+                }),
+                ("inbox-qa-pending", |state| {
+                    inbox_qa_turn(state, QaTurnState::Running);
+                }),
+                ("inbox-qa-answered", |state| {
+                    inbox_qa_turn(state, QaTurnState::Answered);
+                }),
+                ("inbox-qa-stopped", |state| {
+                    inbox_qa_turn(state, QaTurnState::Canceled);
+                }),
                 ("workstation-status-checks-mixed", workstation_status),
                 ("workstation-settings", workstation_settings),
                 ("toolbar-telemetry-populated", toolbar_telemetry_populated),

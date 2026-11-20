@@ -109,6 +109,11 @@ async fn ensure_schema_defines_everything_once_and_refuses_newer_databases() {
         "actor_search_event",
         "actor_search_cause",
         "actor_search_rebuild",
+        "inbox_qa_settings",
+        "inbox_qa_replica",
+        "inbox_qa_exchange",
+        "inbox_qa_latest",
+        "inbox_qa_health",
     ] {
         assert!(info.contains(&format!("\"{table}\"")), "missing {table}");
     }
@@ -116,8 +121,8 @@ async fn ensure_schema_defines_everything_once_and_refuses_newer_databases() {
     let again = ensure_schema(&db).await.unwrap();
     assert_eq!(again.previous, SCHEMA_VERSION);
     // The 48 v6 modules plus pairing, registry, cycle history, reset, origin,
-    // actions, setup, classifier activation, actor search and upload tickets.
-    assert_eq!(bootstrap::schemas().len(), 58);
+    // actions, setup, classifier activation, actor search, uploads and Inbox QA.
+    assert_eq!(bootstrap::schemas().len(), 59);
     for (table, index) in [
         ("native_pairing", "native_pairing_token"),
         ("native_pairing", "native_pairing_credential"),
@@ -159,6 +164,9 @@ async fn ensure_schema_defines_everything_once_and_refuses_newer_databases() {
         ("actor_search_event", "actor_search_event_cause"),
         ("brain_actor_alias", "actor_search_alias_owner"),
         ("actor_search_cause", "actor_search_cause_finish"),
+        ("inbox_qa_replica", "inbox_qa_replica_ready"),
+        ("inbox_qa_exchange", "inbox_qa_owner"),
+        ("inbox_qa_exchange", "inbox_qa_workstation"),
     ] {
         let mut result = db
             .query(format!("INFO FOR TABLE {table}"))

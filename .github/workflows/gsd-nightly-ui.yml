@@ -26,6 +26,9 @@ on:
       web-dev:
         type: boolean
         required: true
+      inbox-qa:
+        type: boolean
+        default: false
     secrets:
       depot-ci-token:
         required: false
@@ -60,6 +63,7 @@ jobs:
       target: ${{ matrix.target }}
       runner: ${{ matrix.runner }}
       release-version: ${{ inputs.release-version }}
+      inbox-qa: ${{ inputs.inbox-qa }}
 
   desktop_linux:
     name: Linux app / x86_64-unknown-linux-gnu

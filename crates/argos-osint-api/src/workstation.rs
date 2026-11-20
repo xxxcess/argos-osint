@@ -851,6 +851,106 @@ pub(crate) async fn read(
     }
 }
 
+/// Shared backend health facts safe to disclose to a credential-free model process.
+pub(crate) async fn qa_snapshot(
+    state: &ApiState,
+    owners: &ReadinessOwners,
+    search: Option<&SearchClient>,
+    observed_after_ms: i64,
+    embedded: bool,
+) -> Option<(chrono::DateTime<Utc>, Vec<QaReadinessFact>)> {
+    let mut cache = owners.cache.lock().await;
+    if cache.as_ref().is_none_or(|cached| {
+        cached.captured.elapsed() >= CACHE_AGE
+            || sample_time(cached).is_none_or(|at| at.timestamp_millis() <= observed_after_ms)
+    }) {
+        *cache = Some(collect(state, owners, search).await);
+    }
+    let observations = cache.as_ref()?;
+    let at = sample_time(observations).filter(|at| at.timestamp_millis() > observed_after_ms)?;
+    if observations.captured.elapsed() >= CACHE_AGE {
+        return None;
+    }
+    let mut checks = observations.checks.clone();
+    drop(cache);
+    if embedded
+        && checks.iter().any(|check| {
+            check.id == ReadinessCheckId::ClassifierTraining
+                && check.reason_code == "natural_resource_idle"
+        })
+    {
+        let repo = state.repo.clone();
+        if let Some(Ok(setup)) = crate::run_shielded_timeout(DEADLINE, async move {
+            setup_jobs::embedded_setup_observation(&repo).await
+        })
+        .await
+        {
+            if setup.training_completed {
+                for check in &mut checks {
+                    if check.id == ReadinessCheckId::ClassifierTraining {
+                        check.state = ReadinessState::Ready;
+                    }
+                }
+            }
+        }
+    }
+    Some((at, checks.iter().filter_map(qa_fact).collect()))
+}
+
+fn sample_time(observations: &Observations) -> Option<chrono::DateTime<Utc>> {
+    chrono::DateTime::parse_from_rfc3339(&observations.at)
+        .ok()
+        .map(|at| at.with_timezone(&Utc))
+}
+
+pub(crate) type QaReadinessFact = (&'static str, &'static str, &'static str, &'static str);
+
+fn qa_fact(check: &ReadinessCheck) -> Option<QaReadinessFact> {
+    // Include fixed terminology only. Explanations from private probes may contain
+    // endpoint details. Never copy capability, artifact, action or identifier fields.
+    let (label, explanation) = match check.id {
+        ReadinessCheckId::Gateway => ("Gateway", "The gateway accepts authenticated requests."),
+        ReadinessCheckId::Datastore => ("Datastore", "The datastore holds backend records."),
+        ReadinessCheckId::Jobs => (
+            "Jobs service",
+            "The Jobs service coordinates background work.",
+        ),
+        ReadinessCheckId::Brain => (
+            "Brain service",
+            "The Brain service exposes Intel operations.",
+        ),
+        ReadinessCheckId::Control => (
+            "Control service",
+            "The Control service manages backend configuration.",
+        ),
+        ReadinessCheckId::Nlp => ("Natural language processing", "This engine analyzes text."),
+        ReadinessCheckId::Classifier => ("Classifier", "This engine classifies supported text."),
+        ReadinessCheckId::ActorCatalog => (
+            "Actor catalog",
+            "The catalog stores the backend actor records.",
+        ),
+        ReadinessCheckId::ActorSearch => (
+            "Actor search",
+            "Actor search uses the current backend index.",
+        ),
+        ReadinessCheckId::ClassifierInference => (
+            "Classifier inference",
+            "Inference uses the active classifier.",
+        ),
+        ReadinessCheckId::ClassifierTraining => (
+            "Classifier training",
+            "Training prepares a classifier for activation.",
+        ),
+        _ => return None,
+    };
+    let status = match check.state {
+        ReadinessState::NotReady => "not ready",
+        ReadinessState::NotApplicable => "not applicable",
+        state => state.as_str(),
+    };
+    Some((check.id.as_str(), label, status, explanation))
+}
+
 pub(crate) async fn read_value(
     state: &ApiState,
     principal: &AuthenticatedPrincipal,

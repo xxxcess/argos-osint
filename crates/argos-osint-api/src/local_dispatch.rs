@@ -164,6 +164,7 @@ struct UploadSessionEntry {
 pub struct LocalGateway {
     state: ApiState,
     services: PrivateServices,
+    qa: crate::inbox_qa::QaTarget,
     capability_config: LocalCapabilityConfig,
     job_cursors: Arc<activity_paging::JobsCursors>,
     log_cursors: Arc<operational_logs::LogCursors>,
@@ -179,8 +180,14 @@ impl LocalGateway {
         services: PrivateServices,
         capability_config: LocalCapabilityConfig,
     ) -> anyhow::Result<Self> {
+        let qa = crate::inbox_qa::QaTarget::new(
+            services.readiness.clone(),
+            services.search.clone(),
+            true,
+        );
         Ok(Self {
             state,
+            qa,
             services,
             capability_config,
             job_cursors: Arc::new(activity_paging::JobsCursors::new()),
@@ -189,6 +196,11 @@ impl LocalGateway {
             tools: Arc::new(Tools::default()),
             upload_sessions: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    /// Refresh QA health observations for this companion while inference is enabled.
+    pub async fn run_qa_health_refresh(&self, stop: &crate::inbox_qa::CancellationToken) {
+        self.qa.refresh(&self.state, stop).await;
     }
 
     /// Return runtime-backed local capability metadata governed by `LocalCapabilityConfig`.
@@ -274,6 +286,14 @@ impl LocalGateway {
         self.enforce_reset_fence(principal).await?;
 
         match op {
+            op @ (IpcOperation::QaSettings
+            | IpcOperation::QaSettingsUpdate(_)
+            | IpcOperation::QaTurnSubmit(_)
+            | IpcOperation::QaLatest
+            | IpcOperation::QaEvents(_)
+            | IpcOperation::QaCancel(_)) => {
+                Box::pin(self.dispatch_qa_op(principal, registration, op)).await
+            }
             op @ (IpcOperation::Ready
             | IpcOperation::Capabilities
             | IpcOperation::WorkstationReadiness
@@ -300,6 +320,59 @@ impl LocalGateway {
                 Box::pin(self.dispatch_read_op(principal, registration, op)).await
             }
             op => Box::pin(self.dispatch_write_op(principal, registration, op)).await,
+        }
+    }
+
+    async fn dispatch_qa_op(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        registration: Option<&RegisteredContext>,
+        op: IpcOperation,
+    ) -> Result<IpcPayload, DispatchError> {
+        use crate::inbox_qa;
+
+        if principal.purpose() != CredentialPurpose::Native {
+            return Err(ContextFailure::forbidden().into());
+        }
+        let permission = match &op {
+            IpcOperation::QaSettings => Permission::ReadBackend,
+            IpcOperation::QaSettingsUpdate(_) => Permission::ManageInboxQa,
+            IpcOperation::QaLatest | IpcOperation::QaEvents(_) => {
+                Permission::ReadWorkstationActivity
+            }
+            IpcOperation::QaTurnSubmit(_) | IpcOperation::QaCancel(_) => {
+                Permission::SubmitInteractive
+            }
+            _ => return Err(DispatchError::bad_request("Invalid Inbox operation")),
+        };
+        let context = self
+            .resolve(
+                principal,
+                registration,
+                permission,
+                ContextRequirement::Registered,
+            )
+            .await?;
+        match op {
+            IpcOperation::QaSettings => {
+                json_payload(inbox_qa::settings_request(&self.state, &context).await?)
+            }
+            IpcOperation::QaSettingsUpdate(request) => {
+                json_payload(inbox_qa::update_request(&self.state, &context, request).await?)
+            }
+            IpcOperation::QaTurnSubmit(request) => json_payload(
+                inbox_qa::submit_request(&self.state, &context, &self.qa, request).await?,
+            ),
+            IpcOperation::QaLatest => {
+                json_payload(inbox_qa::latest_request(&self.state, &context).await?)
+            }
+            IpcOperation::QaEvents(query) => json_payload(
+                inbox_qa::events_request(&self.state, &context, &self.qa, query).await?,
+            ),
+            IpcOperation::QaCancel(request) => {
+                json_payload(inbox_qa::cancel_request(&self.state, &context, request).await?)
+            }
+            _ => Err(DispatchError::bad_request("Invalid Inbox operation")),
         }
     }
 
@@ -1173,6 +1246,7 @@ impl LocalGateway {
             "profile-management",
             "actor-discovery",
             "workstation-cycle-history-v1",
+            crate::inbox_qa::FEATURE,
         ]
         .into_iter()
         .map(str::to_owned)

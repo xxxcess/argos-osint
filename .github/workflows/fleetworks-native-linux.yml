@@ -237,6 +237,11 @@ jobs:
             --scene atlas-provider-keys-reduced-motion \
             --scene inbox-drawer-matte \
             --scene inbox-drawer-reduced-motion \
+            --scene inbox-qa-off-embedded \
+            --scene inbox-qa-off-distributed \
+            --scene inbox-qa-pending \
+            --scene inbox-qa-answered \
+            --scene inbox-qa-stopped \
             --scene command-panel-opaque \
             --scene command-panel-reduced-motion \
             --scene workstation-settings \

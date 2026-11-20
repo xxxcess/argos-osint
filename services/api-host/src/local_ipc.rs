@@ -160,6 +160,7 @@ mod embedded {
         repo: Repository,
         state_root: PathBuf,
         worker_config: Option<LocalWorkerConfig>,
+        qa_broker: Client,
         helpers: Option<HelperChildren>,
         _jobs_store: Store,
         _search_service: Arc<SearchService>,
@@ -285,6 +286,10 @@ mod embedded {
                 Arc::clone(&search_service),
                 format!("actor-index-{}", argos_osint_core::store::new_id()),
             )?;
+            let qa_broker = Client::local(
+                jobs_queue.clone(),
+                crate::inbox_qa_service::QUEUE.to_owned(),
+            );
             let worker_config = LocalWorkerConfig {
                 broker: Client::local(jobs_queue, NATIVE_QUEUE_NAME.to_owned()),
                 store: dataset_store,
@@ -308,6 +313,7 @@ mod embedded {
                 repo,
                 state_root: layout.root,
                 worker_config: Some(worker_config),
+                qa_broker,
                 helpers: Some(helpers),
                 _jobs_store: jobs_store,
                 _search_service: search_service,
@@ -330,6 +336,23 @@ mod embedded {
                 .worker_config
                 .take()
                 .ok_or_else(|| anyhow!("local worker configuration already consumed"))?;
+            let model =
+                crate::qa_worker::QaWorkerSupervisor::embedded_for_state(self.state_root.clone());
+            let health_stop = argos_osint_api::inbox_qa::CancellationToken::new();
+            let health_refresh = tokio::spawn({
+                let gateway = self.gateway.clone();
+                let stop = health_stop.clone();
+                async move { gateway.run_qa_health_refresh(&stop).await }
+            });
+            let (qa_stop, qa_signal) = oneshot::channel::<()>();
+            let qa_task = tokio::spawn(crate::inbox_qa_service::run(
+                self.repo.clone(),
+                self.qa_broker.clone(),
+                model,
+                async move {
+                    let _ = qa_signal.await;
+                },
+            ));
             let result = serve_streams(
                 reader,
                 writer,
@@ -341,6 +364,12 @@ mod embedded {
                 signal,
             )
             .await;
+            health_stop.cancel();
+            let _ = health_refresh.await;
+            let _ = qa_stop.send(());
+            if !matches!(qa_task.await, Ok(Ok(()))) {
+                tracing::warn!("Embedded Inbox QA executor shut down unexpectedly");
+            }
             if let Some(helpers) = self.helpers.take() {
                 helpers.shutdown().await;
             }
@@ -412,6 +441,7 @@ mod embedded {
             Permission::RegisterWorkstation,
             Permission::RebindWorkstation,
             Permission::ManageConfiguration,
+            Permission::ManageInboxQa,
             Permission::MaintainBackend,
             Permission::SubmitInteractive,
             Permission::ReadWorkstationActivity,

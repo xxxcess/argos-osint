@@ -230,7 +230,8 @@ impl ScopedCredential {
                 || (!permissions.contains(&Permission::RegisterWorkstation)
                     && !permissions.contains(&Permission::RebindWorkstation)
                     && !permissions.contains(&Permission::MaintainBackend)
-                    && !permissions.contains(&Permission::ManageConfiguration)),
+                    && !permissions.contains(&Permission::ManageConfiguration)
+                    && !permissions.contains(&Permission::ManageInboxQa)),
             "web relay cannot receive native registration or maintenance authority"
         );
         Ok(Self {

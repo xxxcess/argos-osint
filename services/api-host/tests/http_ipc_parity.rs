@@ -53,6 +53,11 @@ use argos_osint_core::storage::setup_jobs as core_setup_jobs;
 use fleetworks_contracts::actor_index::ActorIndexLimits;
 use fleetworks_contracts::capabilities::Capabilities;
 use fleetworks_contracts::chat::ChatTurnAck;
+use fleetworks_contracts::chat::QaCancelRequest;
+use fleetworks_contracts::chat::QaEventQuery;
+use fleetworks_contracts::chat::QaPhase;
+use fleetworks_contracts::chat::QaSettingsUpdate;
+use fleetworks_contracts::chat::QaTurnRequest;
 use fleetworks_contracts::chat::CHAT_TURNS_PATH;
 use fleetworks_contracts::classifier_activation::ActivationRequest;
 use fleetworks_contracts::classifier_activation::ActiveModelRevision;
@@ -411,6 +416,7 @@ impl HttpHarness {
             Permission::RegisterWorkstation,
             Permission::RebindWorkstation,
             Permission::ManageConfiguration,
+            Permission::ManageInboxQa,
             Permission::MaintainBackend,
             Permission::SubmitInteractive,
             Permission::ReadWorkstationActivity,
@@ -548,6 +554,7 @@ async fn run_shared_flow(
         .expect("capabilities satisfy native contract");
     assert!(caps.features.iter().any(|f| f == "actor-discovery"));
     assert!(caps.features.iter().any(|f| f == "workstation-readiness"));
+    assert!(caps.features.iter().any(|f| f == "inbox-qa-v2"));
     assert!(caps.features.iter().any(|f| f == "jobs"));
     assert!(caps.features.iter().any(|f| f == "logs"));
     let local = transport == "ipc";
@@ -1325,6 +1332,73 @@ async fn run_shared_flow(
         "live_parity",
         "chat turn ok acknowledgement and empty-input 400 parity",
     );
+
+    let qa_settings = client.qa_settings().await.expect("registered QA settings");
+    assert!(
+        !qa_settings.enabled,
+        "{transport}: Inbox QA defaults to Off"
+    );
+    assert_eq!(qa_settings.phase, QaPhase::Off);
+    assert!(qa_settings.can_manage);
+    assert!(
+        client
+            .latest_qa_turn()
+            .await
+            .expect("latest Inbox exchange")
+            .is_none(),
+        "{transport}: a fresh registration has no accepted QA exchange",
+    );
+    let qa_context = MutationContext::new(&registered_context);
+    assert_eq!(
+        client
+            .update_qa_settings(&QaSettingsUpdate::new(
+                qa_context.clone(),
+                qa_settings.revision + 1,
+                true,
+            ))
+            .await
+            .unwrap_err(),
+        ClientError::Status(409),
+    );
+    let qa_turn = QaTurnRequest::new(
+        format!("parity-inbox-qa-{transport}"),
+        qa_context.clone(),
+        "What is the state of the gateway?".to_owned(),
+        None,
+    )
+    .expect("valid QA turn");
+    assert_eq!(
+        client.submit_qa_turn(&qa_turn).await.unwrap_err(),
+        ClientError::Status(503),
+    );
+    let missing_turn_id = "missing-parity-turn";
+    assert_eq!(
+        client
+            .qa_events(&QaEventQuery::new(missing_turn_id.to_owned(), 0, 0))
+            .await
+            .unwrap_err(),
+        ClientError::Status(404),
+    );
+    assert_eq!(
+        client
+            .cancel_qa_turn(&QaCancelRequest::new(
+                qa_context,
+                missing_turn_id.to_owned()
+            ))
+            .await
+            .unwrap_err(),
+        ClientError::Status(404),
+    );
+    for (operation, summary) in [
+        ("qa_settings", "registered backend defaults to Off"),
+        ("qa_settings_update", "stale setting revision conflict"),
+        ("qa_turn_submit", "disabled inference rejects turn"),
+        ("qa_latest", "fresh registration has no latest exchange"),
+        ("qa_events", "unknown turn rejects event read"),
+        ("qa_cancel", "unknown turn rejects Stop"),
+    ] {
+        record(report, operation, "live_parity", summary);
+    }
 
     assert_eq!(
         client

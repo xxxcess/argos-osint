@@ -331,6 +331,7 @@ pub(crate) fn internal_access_with_token(
             Permission::RebindWorkstation,
             Permission::ResolveWebSession,
             Permission::ManageConfiguration,
+            Permission::ManageInboxQa,
             Permission::MaintainBackend,
             Permission::SubmitInteractive,
             Permission::ReadWorkstationActivity,

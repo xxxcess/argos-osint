@@ -35,6 +35,7 @@ impl Service {
     }
 
     fn allows(self, method: &Method, path: &str) -> bool {
+        use fleetworks_contracts::chat::QA_SETTINGS_PATH;
         use fleetworks_contracts::{
             JOBS_PATH, JOB_CANCEL_PATH, JOB_DETAIL_PATH, JOB_RETRY_PATH, TOOL_RESULT_PATH,
             TOOL_RUN_PATH,
@@ -53,7 +54,8 @@ impl Service {
                     "/api/v1/profile" | "/api/v1/models/defaults"
                 ) | (
                     &Method::POST,
-                    "/api/v1/profile/export"
+                    QA_SETTINGS_PATH
+                        | "/api/v1/profile/export"
                         | "/api/v1/profile/import"
                         | "/api/v1/models/defaults/set"
                         | "/api/v1/profile/accounts/upsert"

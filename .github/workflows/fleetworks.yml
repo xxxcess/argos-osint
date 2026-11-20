@@ -101,6 +101,11 @@ jobs:
       queue: ${{ steps.verification.outputs.queue }}
       storage: ${{ steps.verification.outputs.storage }}
       bert: ${{ steps.verification.outputs.bert }}
+      inbox_qa: ${{ steps.verification.outputs.inbox_qa }}
+      inbox_qa_packs: ${{ steps.verification.outputs.inbox_qa_packs }}
+      inbox_qa_images: ${{ steps.verification.outputs.inbox_qa_images }}
+      inbox_qa_embedded: ${{ steps.verification.outputs.inbox_qa_embedded }}
+      inbox_qa_depot: ${{ steps.verification.outputs.inbox_qa == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
       web: ${{ steps.verification.outputs.web }}
       web_dev: ${{ steps.verification.outputs.web_dev }}
       images: ${{ steps.verification.outputs.images }}
@@ -359,6 +364,12 @@ jobs:
 
       - name: Select jobs for the current pass
         id: verification
+        env:
+          INBOX_QA_ELIGIBLE: >-
+            ${{ (github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'nightly') ||
+                (github.event_name == 'workflow_dispatch' && inputs.stage == 'second' && steps.promotion.outputs.base_ref == 'nightly') ||
+                github.ref == 'refs/heads/nightly' ||
+                (github.event_name == 'workflow_dispatch' && inputs.image_builder == 'depot') }}
         run: |
           python3 .github/scripts/fleetworks_ci.py select --stage "$FLEETWORKS_STAGE" \
             --plan "$RUNNER_TEMP/release.json" --output "$GITHUB_OUTPUT"
@@ -450,8 +461,64 @@ jobs:
       macos: ${{ needs.scope.outputs.desktop_macos == 'true' }}
       web: ${{ needs.scope.outputs.web == 'true' }}
       web-dev: ${{ needs.scope.outputs.web_dev == 'true' }}
+      inbox-qa: ${{ needs.scope.outputs.inbox_qa == 'true' }}
     secrets:
       depot-ci-token: ${{ github.event_name == 'push' && github.ref == 'refs/heads/nightly' && needs.scope.outputs.desktop_linux == 'true' && needs.scope.outputs.core_native_linux != 'true' && needs.scope.outputs.publish == 'true' && vars.DEPOT_NIGHTLY_NATIVE_ENABLED == 'true' && secrets.DEPOT_LINUX_NATIVE_PILOT_TOKEN || '' }}
+
+  inbox_qa_packs:
+    name: Inbox QA worker pack / ${{ matrix.target }}
+    needs: scope
+    if: needs.scope.outputs.inbox_qa == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.scope.outputs.inbox_qa_packs) }}
+    uses: ./.github/workflows/fleetworks-inbox-qa-pack.yml
+    with:
+      head: ${{ needs.scope.outputs.head }}
+      target: ${{ matrix.target }}
+      runner: ${{ matrix.runner }}
+
+  inbox_qa_embedded:
+    name: Inbox QA Embedded / ${{ matrix.target }}
+    needs: [scope, inbox_qa_packs, gsd_ui]
+    if: ${{ !cancelled() && needs.scope.outputs.inbox_qa == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.scope.outputs.inbox_qa_embedded) }}
+    uses: ./.github/workflows/fleetworks-inbox-qa-smoke.yml
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    with:
+      head: ${{ needs.scope.outputs.head }}
+      target: ${{ matrix.target }}
+      runner: ${{ matrix.runner }}
+      arch: ${{ matrix.arch }}
+      runtime: embedded
+      release-version: ${{ needs.scope.outputs.publish == 'true' && needs.scope.outputs.release_version || '' }}
+
+  inbox_qa_distributed:
+    name: Inbox QA Distributed via Depot / Linux ${{ matrix.arch }}
+    needs: [scope, inbox_qa_packs]
+    if: ${{ !cancelled() && needs.scope.outputs.inbox_qa_depot == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.scope.outputs.inbox_qa_images) }}
+    uses: ./.github/workflows/fleetworks-inbox-qa-smoke.yml
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    with:
+      head: ${{ needs.scope.outputs.head }}
+      target: ${{ matrix.target }}
+      runner: ${{ matrix.runner }}
+      arch: ${{ matrix.arch }}
+      runtime: distributed
 
   images_buildx_benchmark:
     name: Docker image benchmark (Buildx) / Linux ${{ matrix.arch }}
@@ -632,7 +699,7 @@ jobs:
 
   source_checks:
     name: ${{ inputs.stage == 'second' && 'Fleetworks second pass source checks' || github.event_name == 'workflow_dispatch' && 'Fleetworks manual source checks' || 'Fleetworks source checks' }}
-    needs: [scope, gsd_core, gsd_ui, images_buildx_benchmark, images_depot, native_embedded_image]
+    needs: [scope, gsd_core, gsd_ui, images_buildx_benchmark, images_depot, native_embedded_image, inbox_qa_packs, inbox_qa_embedded, inbox_qa_distributed]
     if: always() && !(github.event_name == 'workflow_dispatch' && inputs.depot_linux_native_pilot)
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -666,6 +733,11 @@ jobs:
           BUILDX_BENCHMARK_RESULT: ${{ needs.images_buildx_benchmark.result }}
           DEPOT_IMAGES_RESULT: ${{ needs.images_depot.result }}
           NATIVE_EMBEDDED_IMAGE_RESULT: ${{ needs.native_embedded_image.result }}
+          INBOX_QA_SELECTED: ${{ needs.scope.outputs.inbox_qa }}
+          INBOX_QA_DEPOT_SELECTED: ${{ needs.scope.outputs.inbox_qa_depot }}
+          INBOX_QA_PACKS_RESULT: ${{ needs.inbox_qa_packs.result }}
+          INBOX_QA_EMBEDDED_RESULT: ${{ needs.inbox_qa_embedded.result }}
+          INBOX_QA_DISTRIBUTED_RESULT: ${{ needs.inbox_qa_distributed.result }}
         shell: bash
         run: |
           set -euo pipefail
@@ -717,6 +789,12 @@ jobs:
           verify images_buildx_benchmark "$BUILDX_BENCHMARK_SELECTED" "$BUILDX_BENCHMARK_RESULT" || failed=1
           verify images_depot "$DEPOT_IMAGES_SELECTED" "$DEPOT_IMAGES_RESULT" || failed=1
           verify native_embedded_image "$NATIVE_EMBEDDED_IMAGE_SELECTED" "$NATIVE_EMBEDDED_IMAGE_RESULT" || failed=1
+          verify "Inbox QA packs" "$INBOX_QA_SELECTED" "$INBOX_QA_PACKS_RESULT" || failed=1
+          verify "Inbox QA Embedded" "$INBOX_QA_SELECTED" "$INBOX_QA_EMBEDDED_RESULT" || failed=1
+          verify "Inbox QA Distributed (Depot)" "$INBOX_QA_DEPOT_SELECTED" "$INBOX_QA_DISTRIBUTED_RESULT" || failed=1
+          if [[ "$INBOX_QA_SELECTED:$INBOX_QA_DEPOT_SELECTED" == true:false ]]; then
+            printf 'Inbox QA Distributed was skipped because the fork cannot authenticate to Depot.\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
           case "$REVIEW_IMAGE_SKIP_REASON" in
             fork) reason='fork pull requests cannot use the Depot review project' ;;
             outside_nightly) reason='outside the nightly rollout; use an exact-head manual Depot dispatch to verify' ;;

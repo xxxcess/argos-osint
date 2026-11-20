@@ -19,6 +19,27 @@ class VerificationPassTests(unittest.TestCase):
         with patch.object(planner, "git_paths", return_value=[*paths, ""]):
             return {"scope": ci.compare(planner, "a" * 40, "b" * 40)}
 
+    def test_inbox_qa_uses_native_packages_and_stages_architectures(self):
+        path = "tools/assistant-bert/src/main.rs"
+        plan = self.scopes(path)
+        self.assertTrue(ci.inbox_qa_path(path))
+        self.assertEqual(plan["scope"]["scopes"], [])
+        self.assertFalse(ci.inbox_qa_path("docs/wiki/code/assistant-chat-contract.md"))
+
+        first = ci.verification("first", plan, inbox_qa=True)
+        self.assertTrue(first["desktop_linux"])
+        self.assertEqual([entry["arch"] for entry in first["inbox_qa_images"]], ["amd64"])
+        self.assertEqual([entry["target"] for entry in first["inbox_qa_embedded"]],
+                         ["x86_64-unknown-linux-gnu"])
+
+        second = ci.verification("second", plan, inbox_qa=True)
+        self.assertTrue(second["desktop_macos"])
+        self.assertFalse(second["desktop_linux"])
+        self.assertEqual([entry["arch"] for entry in second["inbox_qa_images"]], ["arm64"])
+        self.assertEqual([entry["target"] for entry in second["inbox_qa_embedded"]],
+                         ["x86_64-apple-darwin", "aarch64-apple-darwin"])
+        self.assertFalse(second["web"])
+
     def test_native_implementation_and_artwork_use_only_native_linux_first(self):
         plan = self.scopes(
             "apps/fleetworks-desktop/src/startup.rs",

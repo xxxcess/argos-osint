@@ -287,6 +287,7 @@ pub struct State {
     pub(crate) fixture_catalog: bool,
     /// Observed job, readiness and connection transitions for this authority.
     pub inbox: crate::inbox::Inbox,
+    pub(crate) inbox_qa: crate::inbox_qa::InboxQa,
     /// Cmd/Ctrl+K command panel over a fixed list of known actions.
     pub commands: crate::command_panel::CommandPanel,
     pub page: Page,
@@ -375,6 +376,7 @@ impl Default for State {
             assistant: crate::assistant::Assistant::default(),
             fixture_catalog: false,
             inbox: crate::inbox::Inbox::default(),
+            inbox_qa: crate::inbox_qa::InboxQa::default(),
             commands: crate::command_panel::CommandPanel::default(),
             page: Page::Workstation,
             setup_gateway: false,
@@ -513,6 +515,7 @@ impl State {
 
     /// Drop ephemeral reads only. Accepted backend work has an independent lifetime.
     pub fn cancel_requests(&mut self) {
+        self.inbox_qa.detach();
         self.pairing.cancel();
         self.connection_request = None;
         self.host_metrics_request = None;
@@ -1332,6 +1335,7 @@ fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
     }
     changed |= state.startup.poll_flight(now, tx);
     changed |= state.observe_inbox();
+    changed |= state.poll_inbox_qa(now, tx);
     changed |= state.sync_assistant();
     changed |= state.poll_scoped_logs();
     changed |= state.sync_jobs_binding();
@@ -1860,8 +1864,8 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
         crate::command_panel::view(state, &kit, preferences, compact_rail, &mut layers);
     }
 
-    if let Some(popover) = crate::inbox::popover(state, cx, &kit, preferences) {
-        layers.push(popover);
+    if let Some(drawer) = crate::inbox::drawer(state, cx, &kit, preferences) {
+        layers.push(drawer);
     }
 
     let mut split = SplitView::new(main)

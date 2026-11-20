@@ -36,12 +36,78 @@ SCOPES = {
 }
 BACKEND_IMAGES = {"runtime", "search-index", "surrealdb"}
 
+INBOX_QA_PATHS = {
+    ".github/scripts/inbox_qa_artifact.py",
+    ".github/workflows/fleetworks-inbox-qa-pack.yml",
+    ".github/workflows/fleetworks-inbox-qa-smoke.yml",
+    "apps/fleetworks-desktop/examples/native_fixture.rs",
+    "apps/fleetworks-desktop/src/inbox.rs",
+    "Cargo.lock",
+    "Cargo.toml",
+    "crates/argos-osint-api/src/inbox_qa.rs",
+    "crates/argos-osint-core/src/storage/inbox_qa.rs",
+    "crates/fleetworks-contracts/src/chat.rs",
+    "crates/fleetworks-contracts/src/ipc.rs",
+    "crates/fleetworks-contracts/src/qa_worker.rs",
+    "deploy/Dockerfile.inbox-qa",
+    "deploy/compose.inbox-qa.yml",
+    "deploy/compose.native-review.yml",
+    "rust-toolchain.toml",
+    "scripts/agent_cargo.py",
+    "services/api-host/src/local_ipc.rs",
+    "services/api-host/src/qa_worker.rs",
+    "services/api-host/tests/http_ipc_parity.rs",
+}
+INBOX_QA_PREFIXES = (
+    "apps/fleetworks-desktop/src/inbox_qa",
+    "crates/argos-osint-api/src/inbox_qa/",
+    "crates/argos-osint-core/src/storage/inbox_qa/",
+    "crates/fleetworks-contracts/src/chat/qa",
+    "crates/fleetworks-contracts/src/client/inbox_qa",
+    "scripts/fleetworks_qa_",
+    "scripts/test_fleetworks_qa_",
+    "services/api-host/src/inbox_qa",
+    "tools/assistant-bert/",
+)
+
+
+def inbox_qa_path(path):
+    return not path.endswith(".md") and (path in INBOX_QA_PATHS or path.startswith(INBOX_QA_PREFIXES))
+
+
+def inbox_qa_affected(scope):
+    if not Path("tools/assistant-bert/Cargo.toml").is_file():
+        return False
+    if scope["full"]:
+        return scope.get("components") in ("auto", "all")
+    if not all(exact_revision(scope.get(key)) for key in ("base", "head")):
+        return True
+    separator = ".." if scope["event"] == "push" else "..."
+    try:
+        paths = subprocess.check_output(
+            ["git", "diff", "--name-only", "--no-renames", "-z",
+             f"{scope['base']}{separator}{scope['head']}", "--"],
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return True
+    return any(inbox_qa_path(os.fsdecode(path)) for path in paths.split(b"\0"))
+
 
 def path_selection(planner, path):
     if not path or path.startswith("docs/design/"):
         return set(), set()
     if path in POLICY_SCOPES:
         return POLICY_SCOPES[path], set()
+    # The standalone model, pack, and QA workflow have their own lane.
+    if path.startswith(("tools/assistant-bert/", "scripts/fleetworks_qa_", "scripts/test_fleetworks_qa_")):
+        return set(), set()
+    if path in {
+        ".github/workflows/fleetworks-inbox-qa-pack.yml",
+        ".github/workflows/fleetworks-inbox-qa-smoke.yml",
+        ".github/scripts/inbox_qa_artifact.py",
+    }:
+        return set(), set()
     # Older trusted nightly planners do not yet classify the broker crate.
     if path.startswith("crates/fleetworks-broker/") and not path.endswith(".md"):
         return {"server", "queue", "images"}, {"runtime"}
@@ -135,7 +201,7 @@ def review_image_matrix(stage, images, scopes, *, publish, full):
     return entries
 
 
-def verification(stage, plan):
+def verification(stage, plan, *, inbox_qa=False):
     """Apply the pass to checks while leaving release publication inputs intact."""
     scope = plan["scope"]
     scopes = set(scope["scopes"])
@@ -156,9 +222,20 @@ def verification(stage, plan):
     review_images = review_image_matrix(stage, images, scopes, publish=plan.get("publish", False), full=full)
     if not images:
         scopes.discard("images")
-    desktop = "desktop" in scopes
-    companion = "local_backend" in scopes
+    desktop = "desktop" in scopes or inbox_qa
+    companion = "local_backend" in scopes or inbox_qa
     desktop_linux = (desktop or companion) and stage != "second"
+    qa_packs = [{
+        "runner": ARCHITECTURES[arch][0],
+        "target": f"{ARCHITECTURES[arch][1]}-unknown-linux-gnu",
+        "arch": arch,
+    } for arch in arches] if inbox_qa else []
+    qa_images = list(qa_packs)
+    if inbox_qa and stage != "first":
+        qa_packs.extend((
+            {"runner": "macos-15-intel", "target": "x86_64-apple-darwin", "arch": "amd64"},
+            {"runner": "macos-15", "target": "aarch64-apple-darwin", "arch": "arm64"},
+        ))
     return {
         **{name: name in scopes for name in sorted(SCOPES)},
         "desktop_linux": desktop_linux,
@@ -166,6 +243,11 @@ def verification(stage, plan):
         # client changes, so a companion-only change needs the Linux package.
         "core_native_linux": desktop_linux and companion and not desktop,
         "desktop_macos": desktop and stage != "first",
+        "inbox_qa": inbox_qa,
+        "inbox_qa_packs": qa_packs,
+        "inbox_qa_images": qa_images,
+        "inbox_qa_embedded": [entry for entry in qa_packs
+                              if entry["target"] != "aarch64-unknown-linux-gnu"],
         "backend_matrix": backend_matrix(arches),
         "backend_arch": arches[0] if len(arches) == 1 else "both",
         "image_matrix": images,
@@ -259,7 +341,9 @@ def main():
         with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
             print(f"Second pass follows successful first-pass run {first_run}.", file=summary)
     else:
-        selected = verification(args.stage, json.loads(args.plan.read_text(encoding="utf-8")))
+        plan = json.loads(args.plan.read_text(encoding="utf-8"))
+        inbox_qa = os.environ.get("INBOX_QA_ELIGIBLE") == "true" and inbox_qa_affected(plan["scope"])
+        selected = verification(args.stage, plan, inbox_qa=inbox_qa)
         with args.output.open("a", encoding="utf-8") as output:
             for key, value in selected.items():
                 encoded = value if isinstance(value, str) else json.dumps(value, separators=(",", ":"))

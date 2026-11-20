@@ -4627,18 +4627,28 @@ mod classifier_preflight_tests {
         let keys = saved_fallbacks();
         let mut fetched = Vec::new();
         let result = fixture_fresh_cycle(&repo, &home.join("argos.db"), &keys, |call| {
-            let (body, fallback) = match call.provider.as_str() {
-                "gnews" => (r#"{"articles":[]}"#, &keys.gnews_fallback),
-                "newsdata" => (
-                    r#"{"status":"success","results":[]}"#,
-                    &keys.newsdata_fallback,
-                ),
+            let body = match call.provider.as_str() {
+                "gnews" => {
+                    assert!(
+                        call.headers.iter().any(|(name, value)| {
+                            name.eq_ignore_ascii_case("X-Api-Key") && value == &keys.gnews_fallback
+                        }),
+                        "GNews must authenticate with its saved fallback header"
+                    );
+                    r#"{"articles":[]}"#
+                }
+                "newsdata" => {
+                    let url = url::Url::parse(&call.url).expect("valid NewsData.io request URL");
+                    assert!(
+                        url.query_pairs().any(|(name, value)| {
+                            name == "apikey" && value == keys.newsdata_fallback.as_str()
+                        }),
+                        "NewsData.io must authenticate with its saved fallback query parameter"
+                    );
+                    r#"{"status":"success","results":[]}"#
+                }
                 other => panic!("empty discovery must not fetch {other}"),
             };
-            assert!(
-                call.url.contains(fallback.as_str()),
-                "fallback slot must supply the request"
-            );
             fetched.push(call.provider);
             Box::pin(async move {
                 Ok(HttpReply {

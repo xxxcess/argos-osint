@@ -68,12 +68,10 @@ env:
 jobs:
   linux_native_depot_pilot:
     name: Linux native Depot pilot
-    if: >-
-      (github.event_name == 'workflow_dispatch' && inputs.depot_linux_native_pilot) ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/nightly' && vars.DEPOT_LINUX_NATIVE_PILOT_ENABLED == 'true')
+    if: github.event_name == 'workflow_dispatch' && inputs.depot_linux_native_pilot
     uses: ./.github/workflows/fleetworks-native-linux-depot-pilot.yml
     with:
-      expected-head: ${{ github.event_name == 'workflow_dispatch' && inputs.head || github.event_name == 'push' && github.sha || '' }}
+      expected-head: ${{ inputs.head }}
     secrets:
       depot-ci-token: ${{ secrets.DEPOT_LINUX_NATIVE_PILOT_TOKEN }}
 
@@ -95,7 +93,7 @@ jobs:
       review_image_matrix: ${{ steps.verification.outputs.review_image_matrix }}
       review_image_builder: ${{ steps.image_execution.outputs.builder }}
       review_image_skip_reason: ${{ steps.image_execution.outputs.skip_reason }}
-      depot_release: ${{ github.event_name == 'push' && github.ref == 'refs/heads/nightly' && vars.DEPOT_RELEASE_PROJECT_ID != '' }}
+      depot_release: ${{ github.event_name == 'push' && github.ref == 'refs/heads/nightly' }}
       local_backend: ${{ steps.verification.outputs.local_backend }}
       server: ${{ steps.verification.outputs.server }}
       compose: ${{ steps.verification.outputs.compose }}
@@ -364,6 +362,18 @@ jobs:
           python3 .github/scripts/fleetworks_ci.py select --stage "$FLEETWORKS_STAGE" \
             --plan "$RUNNER_TEMP/release.json" --output "$GITHUB_OUTPUT"
 
+      - name: Require a separate Depot project for nightly release images
+        if: github.event_name == 'push' && github.ref == 'refs/heads/nightly' && steps.release.outputs.publish == 'true' && steps.verification.outputs.images == 'true'
+        env:
+          DEPOT_RELEASE_PROJECT_ID: ${{ vars.DEPOT_RELEASE_PROJECT_ID }}
+          DEPOT_REVIEW_PROJECT_ID: ${{ vars.DEPOT_REVIEW_PROJECT_ID }}
+        shell: bash
+        run: |
+          if [[ -z "$DEPOT_RELEASE_PROJECT_ID" || "$DEPOT_RELEASE_PROJECT_ID" == "$DEPOT_REVIEW_PROJECT_ID" ]]; then
+            echo '::error::Set DEPOT_RELEASE_PROJECT_ID to a Depot project separate from DEPOT_REVIEW_PROJECT_ID for nightly release images'
+            exit 1
+          fi
+
       - name: Route selected review image builds
         id: image_execution
         if: steps.verification.outputs.review_images == 'true'
@@ -424,12 +434,14 @@ jobs:
     name: Linux app / x86_64-unknown-linux-gnu
     needs: scope
     if: needs.scope.outputs.desktop_linux == 'true'
-    uses: ./.github/workflows/fleetworks-native-linux.yml
+    uses: ./.github/workflows/fleetworks-native-linux-route.yml
     with:
       expected-head: ${{ needs.scope.outputs.head }}
       mode: ${{ needs.scope.outputs.full == 'true' && 'full' || 'pr' }}
       profile: ${{ needs.scope.outputs.publish == 'true' && 'release' || 'debug' }}
       release-version: ${{ needs.scope.outputs.publish == 'true' && needs.scope.outputs.release_version || '' }}
+    secrets:
+      depot-ci-token: ${{ github.event_name == 'push' && github.ref == 'refs/heads/nightly' && needs.scope.outputs.publish == 'true' && vars.DEPOT_NIGHTLY_NATIVE_ENABLED == 'true' && secrets.DEPOT_LINUX_NATIVE_PILOT_TOKEN || '' }}
 
   embedded:
     name: Affected embedded storage
@@ -893,7 +905,7 @@ jobs:
   release_images:
     name: Verified release image staging / Linux ${{ matrix.arch }}
     needs: [scope, source_checks]
-    if: always() && needs.scope.result == 'success' && needs.source_checks.result == 'success' && needs.scope.outputs.publish == 'true' && needs.scope.outputs.images == 'true' && needs.scope.outputs.depot_release != 'true' && github.event_name == 'push' && contains(fromJson('["refs/heads/dev","refs/heads/nightly","refs/heads/main"]'), github.ref)
+    if: always() && needs.scope.result == 'success' && needs.source_checks.result == 'success' && needs.scope.outputs.publish == 'true' && needs.scope.outputs.images == 'true' && github.event_name == 'push' && contains(fromJson('["refs/heads/dev","refs/heads/main"]'), github.ref)
     permissions:
       contents: read
       packages: write

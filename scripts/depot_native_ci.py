@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replay the canonical Linux native job on Depot with an isolated Cargo cache."""
+"""Run the canonical Linux native verification job on Depot and collect its evidence."""
 import argparse
 from datetime import datetime
 import json
@@ -10,6 +10,7 @@ import re
 import shutil
 import signal
 import sys
+from tempfile import TemporaryDirectory
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -34,7 +35,7 @@ TIMED_PHASES = (
 FAILED = {"failed", "cancelled"}
 
 
-def render_workflow(source, sha, pair, phase):
+def render_workflow(source, sha, pair, phase, release_version=""):
     # Keep the canonical job, workspace, and environment. GitHub-only triggers,
     # inputs, and concurrency groups are resolved by the caller.
     env = re.search(r"(?ms)^env:\n((?:^[ \t]+[^\n]*\n)+)", source)
@@ -45,8 +46,8 @@ def render_workflow(source, sha, pair, phase):
     inputs = {
         "expected-head": sha,
         "mode": "nightly",
-        "profile": "debug",
-        "release-version": "",
+        "profile": "release" if release_version else "debug",
+        "release-version": release_version,
         "pilot-cache-key": pair,
         "pilot-cache-phase": phase,
     }
@@ -60,8 +61,9 @@ def render_workflow(source, sha, pair, phase):
 
     body = re.sub(r"\binputs\.([a-z0-9-]+)\b", resolve, "env:\n" + env[1] + "\njobs:\n" + jobs)
     body = body.replace(runner_line, f"    runs-on: {RUNNER}\n")
+    purpose = f"pilot ({phase})" if phase else f"release ({release_version})"
     return (
-        f"name: Fleetworks Linux native pilot ({phase})\n"
+        f"name: Fleetworks Linux native {purpose}\n"
         "on: workflow_dispatch\n"
         "permissions:\n  contents: read\n\n" + body
     )
@@ -131,23 +133,26 @@ def download_artifact(token, artifact, destination):
         raise ValueError(f"Incomplete Depot artifact {artifact['name']}")
 
 
-def fetch_evidence(token, run_id, job, directory, sha, phase):
+def fetch_artifacts(token, run_id, job, directory, sha, profile, phase=""):
     response = depot_request("ListArtifacts", token, runId=run_id, jobId=job["jobId"])
     artifacts = {}
     for kind, prefix in ARTIFACTS.items():
         matches = [
             item for item in response["artifacts"]
-            if item["name"].startswith(f"{prefix}x86_64-debug-{sha}-")
-            and item["name"].endswith(f"-{phase}")
+            if item["name"].startswith(f"{prefix}x86_64-{profile}-{sha}-")
+            and (not phase or item["name"].endswith(f"-{phase}"))
         ]
         if len(matches) != 1:
-            raise ValueError(f"Expected exactly one {phase} {kind} artifact from Depot run {run_id}")
+            raise ValueError(f"Expected exactly one {kind} artifact from Depot run {run_id}")
         artifact = matches[0]
         destination = directory / f"{kind}.zip"
         download_artifact(token, artifact, destination)
         artifacts[kind] = destination
+    return artifacts
 
-    with ZipFile(artifacts["verification"]) as evidence:
+
+def pilot_timings(archive, sha, phase):
+    with ZipFile(archive) as evidence:
         cache_state = evidence.read("pilot-cache-state.txt").decode().strip()
         expected = f"{phase}: Cargo cache {'miss' if phase == 'cold' else 'hit'}"
         if cache_state != expected:
@@ -166,14 +171,13 @@ def fetch_evidence(token, run_id, job, directory, sha, phase):
     return cache_state, timings
 
 
-def benchmark(args, token, source, phase):
-    workflow = render_workflow(source, args.sha, args.pair, phase)
+def run_native_job(args, token, workflow):
     created = depot_request(
         "Run", token, repo=args.repo, sha=args.sha, ref=args.ref, workflowContent=[workflow],
     )
     run_id = created["runId"]
     url = f"https://depot.dev/orgs/{created['orgId']}/workflows/{run_id}"
-    print(f"Depot {phase}: {url}", flush=True)
+    print(f"Depot Linux native run: {url}", flush=True)
     try:
         run = wait_for_run(token, run_id)
     except (KeyboardInterrupt, RuntimeError):
@@ -187,13 +191,21 @@ def benchmark(args, token, source, phase):
     status = depot_request("GetRunStatus", token, runId=run_id)
     jobs = [job for workflow in status["workflows"] for job in workflow["jobs"]]
     if run["status"] != "finished" or len(jobs) != 1:
-        raise RuntimeError(f"Depot {phase} verification failed or produced unexpected jobs: {url}")
+        raise RuntimeError(f"Depot verification failed or produced unexpected jobs: {url}")
     job = depot_request("GetJob", token, jobId=jobs[0]["jobId"])
     if job["jobConclusion"] != "success" or job["currentAttempt"] != 1:
-        raise RuntimeError(f"Depot {phase} did not pass on the first attempt: {url}")
+        raise RuntimeError(f"Depot verification did not pass on the first attempt: {url}")
+    return run, job, url
+
+
+def benchmark(args, token, source, phase):
+    workflow = render_workflow(source, args.sha, args.pair, phase)
+    run, job, url = run_native_job(args, token, workflow)
+    run_id = run["runId"]
     directory = args.output / phase
     directory.mkdir(parents=True, exist_ok=False)
-    cache_state, timings = fetch_evidence(token, run_id, job, directory, args.sha, phase)
+    artifacts = fetch_artifacts(token, run_id, job, directory, args.sha, "debug", phase)
+    cache_state, timings = pilot_timings(artifacts["verification"], args.sha, phase)
     return {
         "run_id": run_id,
         "url": url,
@@ -223,24 +235,25 @@ def markdown(comparison):
     return "\n".join(lines)
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repo", required=True)
-    parser.add_argument("--sha", required=True)
-    parser.add_argument("--ref", required=True)
-    parser.add_argument("--pair", required=True)
-    parser.add_argument("--output", type=Path, required=True)
-    args = parser.parse_args()
-    if not re.fullmatch(r"[0-9a-f]{40}", args.sha):
-        parser.error("--sha must be a full lower-case Git SHA")
-    expected_pair = r"linux-native-pilot-v1-[0-9]+-[0-9]+-" + args.sha
-    if not re.fullmatch(expected_pair, args.pair):
-        parser.error("--pair must identify the GitHub run, attempt and exact SHA")
+def nightly_release(args, token, source):
+    if args.ref != "refs/heads/nightly":
+        raise ValueError("Depot release dispatch requires the nightly branch")
+    workflow = render_workflow(source, args.sha, "", "", args.release_version)
+    run, job, url = run_native_job(args, token, workflow)
+    args.output.mkdir(parents=True, exist_ok=False)
+    with TemporaryDirectory(dir=args.output) as temporary:
+        artifacts = fetch_artifacts(token, run["runId"], job, Path(temporary), args.sha, "release")
+        for kind, archive in artifacts.items():
+            with ZipFile(archive) as package:
+                package.extractall(args.output / kind)
+    return (
+        f"### Linux native release built on Depot at `{args.sha}`\n\n"
+        f"[Verified release build]({url}) · "
+        f"{elapsed(job['jobStartedAt'], job['jobFinishedAt']):.1f} s job wall time\n"
+    )
 
-    token = os.environ.get("DEPOT_CI_TOKEN")
-    if not token:
-        parser.error("Configure the DEPOT_LINUX_NATIVE_PILOT_TOKEN Actions secret with a Depot CI token")
-    source = WORKFLOW.read_text(encoding="utf-8")
+
+def run_pilot(args, token, source):
     phases = {}
     for phase in ("cold", "warm"):
         result = benchmark(args, token, source, phase)
@@ -248,7 +261,32 @@ def main():
         phases[phase] = result
     comparison = {"repository": args.repo, "sha": args.sha, "runner": RUNNER, "phases": phases}
     (args.output / "comparison.json").write_text(json.dumps(comparison, indent=2) + "\n", encoding="utf-8")
-    report = markdown(comparison)
+    return markdown(comparison)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repo", required=True)
+    parser.add_argument("--sha", required=True)
+    parser.add_argument("--ref", required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--pair")
+    mode.add_argument("--release-version")
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+    if not re.fullmatch(r"[0-9a-f]{40}", args.sha):
+        parser.error("--sha must be a full lower-case Git SHA")
+    expected_pair = r"linux-native-pilot-v1-[0-9]+-[0-9]+-" + args.sha
+    if args.pair is not None and not re.fullmatch(expected_pair, args.pair):
+        parser.error("--pair must identify the GitHub run, attempt and exact SHA")
+    if args.release_version is not None and not re.fullmatch(r"[0-9][A-Za-z0-9.+-]*", args.release_version):
+        parser.error("--release-version must be a version starting with a digit")
+
+    token = os.environ.get("DEPOT_CI_TOKEN")
+    if not token:
+        parser.error("Configure the DEPOT_LINUX_NATIVE_PILOT_TOKEN Actions secret with a Depot CI token")
+    source = WORKFLOW.read_text(encoding="utf-8")
+    report = run_pilot(args, token, source) if args.pair else nightly_release(args, token, source)
     print(report)
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
         with Path(summary).open("a", encoding="utf-8") as file:

@@ -63,7 +63,7 @@ jobs:
             exit 1
           fi
           test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
-          python3 scripts/depot_native_pilot.py \
+          python3 scripts/depot_native_ci.py \
             --repo "$GITHUB_REPOSITORY" --sha "$EXPECTED_HEAD" --ref "$GITHUB_REF" \
             --pair "$PILOT_PAIR" --output "$RUNNER_TEMP/depot-linux-native-pilot"
 

@@ -57,7 +57,7 @@ Use `--builder depot --depot-project <id>` to run the build remotely. The runner
 
 - **Review.** Configure GitHub OIDC trust for this repository in a dedicated review project and keep public fork PR access disabled. Set `DEPOT_REVIEW_PROJECT_ID` for same-repository reviews targeting `nightly`, their validated second passes, and standard nightly dispatches. Those selected image checks require Depot. An exact-head manual dispatch can select Depot on another branch. Fork PRs skip image builds and retain their other checks. Use `image_builder=buildx` only for an explicit manual comparison. [Depot GitHub OIDC](https://depot.dev/docs/container-builds/integrations/github-actions#authentication)
 - **Release.** Create a separate Depot project with a project-scoped token. Keep the repository-wide GitHub OIDC relationship confined to the review project. In GitHub, create the `fleetworks-release-images` environment, restrict deployments to the `nightly` branch with a branch rule and store the release project token as the environment secret `DEPOT_RELEASE_TOKEN`. Keep this token out of repository secrets and Depot CI imports. The current Depot GitHub trust configuration is scoped to a repository, so the protected environment keeps release credentials separate from same-repository review jobs. [Depot project tokens](https://depot.dev/docs/cli/authentication#project-tokens) · [GitHub deployment branch rules](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments#deployment-branches-and-tags)
-- **Cutover.** After successful review builds on both architectures, set the repository variable `DEPOT_RELEASE_PROJECT_ID` to the release project ID. A trusted `nightly` push then stages selected images through that project. Other release branches keep Buildx. Verify immutable retry reuse, the smoked image ID against the registry config digest, and the exported archive checksum. Clear the release variable to roll back. Registry authentication stays on GitHub's trusted release job, and GHCR publication starts after smoke succeeds.
+- **Cutover.** Set `DEPOT_RELEASE_PROJECT_ID` to the release project ID before enabling nightly publication. A trusted `nightly` push requires Depot for every selected release Docker image. Missing credentials or a missing or shared project fail the selected release check. Dev and main release builds use Buildx. GitHub Actions stages the exact smoked image digest and publishes the verified archive and checksum.
 
 ### Compare build times
 
@@ -83,7 +83,9 @@ gh workflow run fleetworks.yml --ref "$review_branch" \
   -f head="$review_head" -f depot_linux_native_pilot=true
 ```
 
-Set the repository variable `DEPOT_LINUX_NATIVE_PILOT_ENABLED=true` to run the pilot on pushes to `nightly`. The existing review and publication checks continue to run through their normal gates.
+Set `DEPOT_NIGHTLY_NATIVE_ENABLED=true` after verifying the Depot CI token and the release build. Selected `nightly` Linux x86_64 release builds then execute the canonical verification job on Depot. GitHub Actions checks the result for the same commit and republishes the package, UI captures and verification files in the current Actions run. The manual pilot runs the cold and warm debug comparison on demand.
+
+Depot CI supports Linux on x86_64 and Arm64. GitHub’s macOS jobs provide real Intel and Apple Silicon package verification for a personally owned repository. [Depot CI sandbox types](https://depot.dev/docs/ci/overview#depot-ci-sandboxes) · [Depot GitHub Actions runner requirements](https://depot.dev/docs/github-actions/overview)
 
 ## Embedded desktop Docker image
 

@@ -1,0 +1,97 @@
+name: Fleetworks Linux native build and verification
+
+on:
+  workflow_call:
+    inputs:
+      expected-head:
+        required: true
+        type: string
+      mode:
+        required: true
+        type: string
+      profile:
+        required: true
+        type: string
+      release-version:
+        required: false
+        type: string
+        default: ""
+    secrets:
+      depot-ci-token:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  depot:
+    name: Depot Linux native release build and verification
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/nightly' &&
+      inputs.profile == 'release' && vars.DEPOT_NIGHTLY_NATIVE_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 85
+    env:
+      EXPECTED_HEAD: ${{ inputs.expected-head }}
+      RELEASE_VERSION: ${{ inputs.release-version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.expected-head }}
+          persist-credentials: false
+          lfs: false
+
+      - name: Run the exact Linux native release verification on Depot
+        id: remote
+        env:
+          DEPOT_CI_TOKEN: ${{ secrets.depot-ci-token }}
+        shell: bash
+        run: |
+          if [[ -z "$DEPOT_CI_TOKEN" ]]; then
+            echo '::error::The DEPOT_LINUX_NATIVE_PILOT_TOKEN GitHub Actions secret must hold a Depot CI API token'
+            exit 1
+          fi
+          if [[ "$EXPECTED_HEAD" != "$GITHUB_SHA" || "$(git rev-parse HEAD)" != "$EXPECTED_HEAD" || -z "$RELEASE_VERSION" ]]; then
+            echo '::error::Depot release verification requires the current workflow SHA and a release version'
+            exit 1
+          fi
+          python3 scripts/depot_native_ci.py \
+            --repo "$GITHUB_REPOSITORY" --sha "$EXPECTED_HEAD" --ref "$GITHUB_REF" \
+            --release-version "$RELEASE_VERSION" --output "$RUNNER_TEMP/depot-linux-native-release"
+
+      - name: Upload Linux UI captures
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: Fleetworks-Linux-Desktop-UI-Captures-x86_64-release-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}
+          path: ${{ runner.temp }}/depot-linux-native-release/ui/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload the verified Linux native archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: Fleetworks-Linux-Desktop-App-x86_64-release-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}
+          path: ${{ runner.temp }}/depot-linux-native-release/app/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload Linux native verification evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: Fleetworks-Linux-Desktop-Verification-x86_64-release-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}
+          path: ${{ runner.temp }}/depot-linux-native-release/verification/
+          if-no-files-found: ${{ steps.remote.outcome == 'success' && 'error' || 'ignore' }}
+          retention-days: 7
+
+  github:
+    name: GitHub Linux native build and verification
+    needs: depot
+    if: ${{ !cancelled() && needs.depot.result == 'skipped' }}
+    uses: ./.github/workflows/fleetworks-native-linux.yml
+    with:
+      expected-head: ${{ inputs.expected-head }}
+      mode: ${{ inputs.mode }}
+      profile: ${{ inputs.profile }}
+      release-version: ${{ inputs.release-version }}

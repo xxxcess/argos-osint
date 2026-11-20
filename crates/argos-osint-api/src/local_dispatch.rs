@@ -832,6 +832,7 @@ impl LocalGateway {
                     &context,
                     request,
                     MaintenanceOperation::SeedActors,
+                    maintenance::SetupIngress::Embedded(None),
                 )
                 .await?;
                 json_payload(receipt)
@@ -852,6 +853,7 @@ impl LocalGateway {
                     &context,
                     request,
                     MaintenanceOperation::TrainClassifier,
+                    maintenance::SetupIngress::Embedded(None),
                 )
                 .await?;
                 json_payload(receipt)
@@ -867,11 +869,22 @@ impl LocalGateway {
                         ContextRequirement::Registered,
                     )
                     .await?;
+                // A failed status read never proves the current generation is reusable.
+                let index_status = if let Some(search) = self.services.search.clone() {
+                    crate::run_shielded_timeout(std::time::Duration::from_secs(2), async move {
+                        search.status().await
+                    })
+                    .await
+                    .and_then(Result::ok)
+                } else {
+                    None
+                };
                 let receipt = maintenance::admit_request(
                     &self.state,
                     &context,
                     request,
                     MaintenanceOperation::ReindexActors,
+                    maintenance::SetupIngress::Embedded(index_status.as_ref()),
                 )
                 .await?;
                 json_payload(receipt)
@@ -1204,6 +1217,7 @@ impl LocalGateway {
             owners,
             search,
             context.context().cloned(),
+            true,
         )
         .await?;
         Ok(IpcPayload::Json(value))

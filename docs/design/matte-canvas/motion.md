@@ -16,7 +16,8 @@ All materials are visible in the first frame. The [static SVG](../../../assets/b
 | --- | --- |
 | Native chooser | The complete scene and both backend tiles are usable in the first frame. Play the core motion for 3 seconds, then hold the final pose. |
 | Setup | The selected form opens immediately. Move the current orbit pose into the setup header over about 220 ms and keep the mark there through start, registration, failure and retry. Start Embedded Backend and Connect remain explicit. Back restores focus to the selected tile and returns the settled mark without replay. |
-| Done | Mount Workstation Status immediately. Move the mark into the wide or compact sidebar rail over about 200 ms and settle into the static crescent and core. |
+| Data setup | Center the active stage and controls below the settled mark. Four dots indicate actor catalog, actor index, classifier, and workstation checks. Keep the same content envelope through confirmation, progress, and outcome. |
+| Enter workstation | Mount Workstation Status after setup. Move the mark into the wide or compact sidebar rail over about 200 ms and settle into the static crescent and core. |
 | Scope | One startup presentation; no replay on navigation, dialog close, refresh or in-app reconnect |
 | Reduced motion / asset failure | Show the complete static mark directly at each destination. Chooser, form and workstation input follow the same timing. |
 | After startup | Ordinary pages are static apart from useful local activity; no full-canvas decorative motion loop |

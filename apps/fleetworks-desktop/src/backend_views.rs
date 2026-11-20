@@ -2438,7 +2438,7 @@ pub(crate) fn maintenance(
     body
 }
 
-fn csv_path_prompt(
+pub(crate) fn csv_path_prompt(
     prompt: &crate::maintenance::CsvPathPrompt,
     preferences: ViewPreferences,
     kit: &Kit,
@@ -2695,7 +2695,7 @@ pub(crate) fn actor_index_receipt_banner(
         );
     }
     if let Load::Ready(receipt) = &state.maintenance.receipt {
-        if receipt.operation != MaintenanceOperation::ReindexActors {
+        if receipt.operation != MaintenanceOperation::ReindexActors || receipt.already_completed {
             return None;
         }
         let title = if receipt.reused {

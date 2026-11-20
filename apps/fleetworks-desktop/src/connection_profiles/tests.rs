@@ -310,3 +310,25 @@ fn cleared_or_changed_profile_catalog_drops_cached_credential_reference_and_auth
         "a cleared profile requires an explicit fresh selection"
     );
 }
+
+#[test]
+fn late_saved_distributed_url_prefill_respects_the_connection_draft() {
+    let mut state = State::fixture();
+    state.startup = crate::startup::Startup::cold_launch();
+    state.choose_startup_destination(BackendKind::Remote);
+    let mut saved = catalog();
+    saved.selected_profile_id = Some(saved.profiles[1].id.clone());
+    let revision = state.connection_profiles.revision();
+    state.complete_profile_catalog(revision, Ok(saved.clone()));
+    assert_eq!(state.connection.origin.text, saved.profiles[1].origin);
+    assert!(state.connection_profiles.credential.is_none());
+    assert_eq!(state.connection.status, ConnectionStatus::Disconnected);
+
+    state.connection.origin = TextEdit::new(fleetworks_contracts::DEFAULT_API_ORIGIN);
+    state.profile_editor_changed(true);
+    state.complete_profile_catalog(revision, Ok(saved));
+    assert_eq!(
+        state.connection.origin.text,
+        fleetworks_contracts::DEFAULT_API_ORIGIN
+    );
+}

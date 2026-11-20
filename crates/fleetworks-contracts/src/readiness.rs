@@ -467,7 +467,7 @@ impl MaintenanceRequest {
     }
 }
 
-/// An accepted job, not a completed seed/train/index or model promotion.
+/// A durable maintenance admission or a confirmed no-op for completed work.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct MaintenanceReceipt {
@@ -477,6 +477,10 @@ pub struct MaintenanceReceipt {
     pub origin: JobOrigin,
     pub dataset: Option<DatasetRef>,
     pub reused: bool,
+    /// Already-completed work accepted without scheduling another job. The job ID
+    /// is empty when no existing job is attached to the request.
+    #[serde(default)]
+    pub already_completed: bool,
 }
 
 impl MaintenanceReceipt {
@@ -496,6 +500,20 @@ impl MaintenanceReceipt {
             origin,
             dataset,
             reused,
+            already_completed: false,
+        }
+    }
+
+    /// Construct a successful no-op without claiming a new job or changing its origin.
+    #[must_use]
+    pub fn completed(
+        operation: MaintenanceOperation,
+        origin: JobOrigin,
+        dataset: Option<DatasetRef>,
+    ) -> Self {
+        Self {
+            already_completed: true,
+            ..Self::new(String::new(), operation, origin, dataset, true)
         }
     }
 }

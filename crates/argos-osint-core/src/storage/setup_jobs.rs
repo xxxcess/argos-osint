@@ -8,7 +8,12 @@
 use std::time::Duration;
 
 use chrono::Utc;
+use fleetworks_contracts::actor_index::ActorIndexStatus;
+use fleetworks_contracts::actor_index::ACTOR_INDEX_ANALYZER;
+use fleetworks_contracts::actor_index::ACTOR_INDEX_PROTOCOL;
+use fleetworks_contracts::actor_index::ACTOR_INDEX_SCHEMA;
 use fleetworks_contracts::context::JobOrigin;
+use fleetworks_contracts::context::OriginSource;
 use fleetworks_contracts::context::RegisteredContext;
 use fleetworks_contracts::readiness::DatasetKind;
 use fleetworks_contracts::readiness::DatasetRef;
@@ -469,6 +474,356 @@ async fn save_receipt_in(
     Ok(())
 }
 
+#[derive(SurrealValue)]
+struct StoredResult {
+    payload_json: String,
+    result_json: String,
+}
+
+fn completed_input_key(operation: &str, sha256: &str) -> surrealdb::types::RecordId {
+    jobs::rid(
+        "setup_completed_input",
+        &digest(&[operation, &sha256.to_ascii_lowercase()]),
+    )
+}
+
+fn successful_dataset(operation: &str, stored: &StoredResult) -> Option<DatasetRef> {
+    let payload: SetupPayload = serde_json::from_str(&stored.payload_json).ok()?;
+    if operation_name(payload.operation) != operation {
+        return None;
+    }
+    let dataset = payload.dataset?;
+    dataset.validate().ok()?;
+    let result: serde_json::Value = serde_json::from_str(&stored.result_json).ok()?;
+    if result["operation"].as_str() != Some(operation)
+        || result["dataset_sha256"].as_str() != Some(dataset.sha256.as_str())
+    {
+        return None;
+    }
+    let complete = match operation {
+        SEED_POOL => {
+            let total = result["total"].as_u64();
+            result["database_seeded"].as_bool() == Some(true)
+                && total.is_some_and(|total| total > 0)
+                && result["processed"].as_u64() == total
+        }
+        TRAIN_POOL => {
+            result["engine"].as_str() == Some("natural")
+                && result["candidate_model_id"]
+                    .as_str()
+                    .is_some_and(|id| !id.is_empty())
+                && result["activation_requested"].as_bool() == Some(false)
+        }
+        _ => false,
+    };
+    complete.then_some(dataset)
+}
+
+async fn remember_completed_input(
+    tx: &Tx,
+    operation: &str,
+    dataset: &DatasetRef,
+) -> Result<(), TxError> {
+    jobs::run(
+        tx,
+        tx.query("UPSERT $record SET completed=true, operation=$operation RETURN NONE")
+            .bind(("record", completed_input_key(operation, &dataset.sha256)))
+            .bind(("operation", operation.to_owned())),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Record completed setup input as part of the terminal job transaction. The
+/// worker result must describe the exact admitted dataset and successful domain work.
+pub(super) async fn record_completed_input_in(
+    tx: &Tx,
+    task: &jobs::ClaimedTask,
+) -> Result<(), TxError> {
+    if !matches!(task.pool.as_str(), SEED_POOL | TRAIN_POOL) {
+        return Ok(());
+    }
+    let mut response = jobs::run(
+        tx,
+        tx.query(
+            "SELECT payload_json, result_json FROM ONLY $operation
+             WHERE content_reuse=true AND payload_hash=$hash
+                AND (SELECT VALUE state FROM ONLY $job)='completed'",
+        )
+        .bind(("operation", jobs::rid("setup_operation", &task.job_id)))
+        .bind(("hash", task.input_hash.clone()))
+        .bind(("job", jobs::rid("job", &task.job_id))),
+    )
+    .await?;
+    if let Some(stored) = jobs::take::<Option<StoredResult>>(&mut response, 0)? {
+        if let Some(dataset) = successful_dataset(&task.pool, &stored) {
+            remember_completed_input(tx, &task.pool, &dataset).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Minimal setup facts suitable for a registered Embedded maintenance operator.
+pub struct EmbeddedSetupObservation {
+    pub catalog_sha256: Option<String>,
+    pub training_completed: bool,
+}
+
+pub async fn embedded_setup_observation(
+    repo: &Repository,
+) -> Result<EmbeddedSetupObservation, TxError> {
+    let mut response = repo
+        .db()
+        .query(
+            "SELECT VALUE fingerprint FROM ONLY brain_actor_seed:catalog
+             WHERE status='complete' AND total>0 AND processed=total
+                AND array::len((SELECT VALUE id FROM brain_actor WHERE scope_key=$scope LIMIT 1))>0;
+             RETURN array::len((SELECT VALUE id FROM setup_completed_input
+                WHERE operation=$training AND completed=true LIMIT 1))>0;",
+        )
+        .bind(("scope", crate::actor_catalog::SCOPE))
+        .bind(("training", TRAIN_POOL))
+        .await?
+        .check()?;
+    let catalog_sha256 = response
+        .take::<Option<String>>(0)?
+        .filter(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .map(|hash| hash.to_ascii_lowercase());
+    let mut training_completed = response.take::<Option<bool>>(1)? == Some(true);
+    if !training_completed {
+        // Legacy successful Jobs records are authoritative while still retained.
+        let mut legacy = repo.db().query(
+            "SELECT payload_json, result_json FROM setup_operation WHERE operation=$training
+             AND result_json!='' AND type::record('job', record::id(id)).state='completed' LIMIT 16"
+        )
+        .bind(("training", TRAIN_POOL))
+        .await?
+        .check()?;
+        let stored: Vec<StoredResult> = legacy.take(0)?;
+        training_completed = stored
+            .iter()
+            .any(|result| successful_dataset(TRAIN_POOL, result).is_some());
+    }
+    Ok(EmbeddedSetupObservation {
+        catalog_sha256,
+        training_completed,
+    })
+}
+
+async fn completed_dataset_in(
+    tx: &Tx,
+    operation: &str,
+    dataset: &DatasetRef,
+) -> Result<bool, TxError> {
+    if operation == SEED_POOL {
+        // A prior import does not replace an incomplete or empty current catalog.
+        if !catalog_complete_in(tx).await? {
+            return Ok(false);
+        }
+        let mut response = jobs::run(
+            tx,
+            tx.query("SELECT VALUE fingerprint FROM ONLY brain_actor_seed:catalog"),
+        )
+        .await?;
+        if jobs::take::<Option<String>>(&mut response, 0)?
+            .is_some_and(|fingerprint| fingerprint.eq_ignore_ascii_case(&dataset.sha256))
+        {
+            remember_completed_input(tx, operation, dataset).await?;
+            return Ok(true);
+        }
+    }
+    let mut response = jobs::run(
+        tx,
+        tx.query("RETURN record::exists($record)")
+            .bind(("record", completed_input_key(operation, &dataset.sha256))),
+    )
+    .await?;
+    if jobs::take::<Option<bool>>(&mut response, 0)? == Some(true) {
+        return Ok(true);
+    }
+
+    // Legacy setup operations have durable results and pins but no content receipt.
+    // Read only results bound to the same validated SHA and successful job state.
+    let mut response = jobs::run(
+        tx,
+        tx.query(
+            "LET $datasets=SELECT VALUE dataset_id FROM setup_dataset
+                WHERE kind=$kind AND sha256=$sha AND size_bytes=$size AND validated=true;
+             LET $jobs=SELECT VALUE type::record('setup_operation', job_id) FROM setup_dataset_pin
+                WHERE dataset_id IN $datasets AND type::record('job',job_id).state='completed';
+             SELECT payload_json, result_json FROM $jobs WHERE operation=$operation AND result_json!='';",
+        )
+        .bind(("kind", dataset_kind(dataset.kind)))
+        .bind(("sha", dataset.sha256.to_ascii_lowercase()))
+        .bind(("size", dataset.size_bytes as i64))
+        .bind(("operation", operation.to_owned())),
+    )
+    .await?;
+    let results: Vec<StoredResult> = jobs::take(&mut response, 2)?;
+    if results.iter().any(|stored| {
+        successful_dataset(operation, stored)
+            .is_some_and(|previous| same_content(&previous, dataset))
+    }) {
+        remember_completed_input(tx, operation, dataset).await?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn same_content(left: &DatasetRef, right: &DatasetRef) -> bool {
+    left.kind == right.kind
+        && left.size_bytes == right.size_bytes
+        && left.sha256.eq_ignore_ascii_case(&right.sha256)
+}
+
+async fn resource_has_same_content(
+    tx: &Tx,
+    existing: &ResourceRow,
+    expected: &DatasetRef,
+    operation: MaintenanceOperation,
+) -> Result<bool, TxError> {
+    let mut response = jobs::run(
+        tx,
+        tx.query("SELECT VALUE payload_json FROM ONLY $row WHERE payload_hash=$hash")
+            .bind(("row", jobs::rid("setup_operation", &existing.job_id)))
+            .bind(("hash", existing.payload_hash.clone())),
+    )
+    .await?;
+    let json: Option<String> = jobs::take(&mut response, 0)?;
+    let payload: Option<SetupPayload> = json
+        .map(|json| serde_json::from_str(&json).map_err(|_| invalid("payload_invalid")))
+        .transpose()?;
+    Ok(payload.is_some_and(|payload| {
+        payload.operation == operation
+            && payload
+                .dataset
+                .is_some_and(|dataset| same_content(&dataset, expected))
+    }))
+}
+
+/// Fence catalog replacement and deletion in the same transaction as index admission.
+pub async fn require_seeded_actors_in(transaction: &Tx) -> Result<(), TxError> {
+    let mut seed = transaction.query("UPSERT setup_resource:actor_catalog SET revision=(revision ?? 0)+1 RETURN NONE; SELECT VALUE IF job_id != '' { ((type::record('job',job_id).state ?? '') IN ['queued','running','waiting','reconciling'] OR array::len((SELECT VALUE id FROM task WHERE job=type::record('job',$parent.job_id) AND state NOT IN ['completed','failed','cancelled','superseded','stopped','skipped'] LIMIT 1))>0) } ELSE { false } FROM ONLY setup_resource:actor_catalog;")
+        .await?.check()?;
+    let active: Option<bool> = seed.take(1)?;
+    if active != Some(false) || !catalog_complete_in(transaction).await? {
+        return Err(TxError::Abort("maintenance:actors_not_seeded".into()));
+    }
+    Ok(())
+}
+
+async fn catalog_complete_in(tx: &Tx) -> Result<bool, TxError> {
+    let mut result = jobs::run(
+        tx,
+        tx.query(
+            "RETURN count(UPDATE brain_actor_seed:catalog SET status='complete'
+                            WHERE status='complete' AND total>0 AND processed=total RETURN VALUE id)=1;
+             RETURN count(UPDATE (SELECT VALUE id FROM brain_actor WHERE scope_key=$scope LIMIT 1)
+                           SET scope_key=$scope RETURN VALUE id)=1;",
+        )
+        .bind(("scope", crate::actor_catalog::SCOPE)),
+    )
+    .await?;
+    let seed_ready: Option<bool> = jobs::take(&mut result, 0)?;
+    let actors_present: Option<bool> = jobs::take(&mut result, 1)?;
+    Ok(seed_ready == Some(true) && actors_present == Some(true))
+}
+
+#[derive(SurrealValue)]
+struct IndexSource {
+    deployment_id: String,
+    source_epoch: String,
+    index_generation: String,
+    next_sequence: i64,
+    acknowledged_sequence: i64,
+    backfill_complete: bool,
+    pending_json: String,
+    blocked: bool,
+    pressure_paused: bool,
+    backlog_paused: bool,
+    rebuild_reason: String,
+}
+
+async fn index_already_serving_in(
+    tx: &Tx,
+    context: &RegisteredContext,
+    status: Option<&ActorIndexStatus>,
+) -> Result<bool, TxError> {
+    let pending = || invalid("actor_index_observation_pending");
+    let status = status.ok_or_else(pending)?;
+    if status.protocol != ACTOR_INDEX_PROTOCOL
+        || status.schema_version != ACTOR_INDEX_SCHEMA
+        || status.analyzer_version != ACTOR_INDEX_ANALYZER
+        || status.deployment_id != context.deployment_id
+        || status.source_epoch.is_empty()
+    {
+        return Err(pending());
+    }
+
+    // This also serializes against a canonical source write or acknowledgement.
+    super::actor_search_outbox::guard(tx).await?;
+    let mut result = jobs::run(
+        tx,
+        tx.query(
+            "SELECT deployment_id, source_epoch, index_generation, next_sequence,
+                acknowledged_sequence, backfill_complete, pending_json, blocked,
+                pressure_paused, backlog_paused,
+                ((SELECT VALUE reason_code FROM ONLY actor_search_rebuild:catalog) ?? '') AS rebuild_reason
+             FROM ONLY actor_search_control:catalog",
+        ),
+    )
+    .await?;
+    let source = jobs::take::<Option<IndexSource>>(&mut result, 0)?.ok_or_else(pending)?;
+    if !source.deployment_id.is_empty()
+        && (source.deployment_id != status.deployment_id
+            || source.source_epoch != status.source_epoch)
+    {
+        return Err(pending());
+    }
+    if status.recovery_available
+        || source.blocked
+        || !source.rebuild_reason.is_empty()
+        || (status.state == "degraded" && status.reason_code.is_some())
+    {
+        return Ok(false);
+    }
+    if status.rebuilding.is_some()
+        || source.pressure_paused
+        || source.backlog_paused
+        || status
+            .pressure
+            .as_ref()
+            .is_some_and(|pressure| pressure.paused)
+    {
+        return Err(pending());
+    }
+    if status.state == "not_built" {
+        return Ok(false);
+    }
+    let active = status.active.as_ref().ok_or_else(pending)?;
+    if !source.index_generation.is_empty()
+        && active.generation != source.index_generation
+        && status.state == "ready"
+    {
+        // A genuinely different generation may require a new full build.
+        return Ok(false);
+    }
+    let caught_up = status.state == "ready"
+        && active.source_complete
+        && active.generation == source.index_generation
+        && active.visible_checkpoint == active.committed_checkpoint
+        && i64::try_from(active.visible_checkpoint).ok() == Some(source.next_sequence)
+        && source.acknowledged_sequence == source.next_sequence
+        && source.backfill_complete
+        && source.pending_json.is_empty();
+    if caught_up {
+        Ok(true)
+    } else {
+        // A matching generation continues to catch up through the existing feed.
+        Err(pending())
+    }
+}
+
 /// Join setup admission to the caller's existing durable acceptance transaction.
 /// The caller constructs origin from validated context/effective configuration.
 pub async fn admit_in(
@@ -479,6 +834,55 @@ pub async fn admit_in(
     operation: MaintenanceOperation,
     request: &MaintenanceRequest,
 ) -> Result<MaintenanceReceipt, TxError> {
+    admit_with_mode(
+        tx,
+        authority,
+        context,
+        origin,
+        operation,
+        request,
+        AdmissionMode::Standard,
+    )
+    .await
+}
+
+enum AdmissionMode<'a> {
+    Standard,
+    Embedded(Option<&'a ActorIndexStatus>),
+}
+
+/// Admit local backend work with durable input reuse and fresh serving-index evidence.
+pub async fn admit_embedded_in(
+    tx: &Tx,
+    authority: &RegistryAuthority,
+    context: &RegisteredContext,
+    origin: &JobOrigin,
+    operation: MaintenanceOperation,
+    request: &MaintenanceRequest,
+    index_status: Option<&ActorIndexStatus>,
+) -> Result<MaintenanceReceipt, TxError> {
+    admit_with_mode(
+        tx,
+        authority,
+        context,
+        origin,
+        operation,
+        request,
+        AdmissionMode::Embedded(index_status),
+    )
+    .await
+}
+
+async fn admit_with_mode(
+    tx: &Tx,
+    authority: &RegistryAuthority,
+    context: &RegisteredContext,
+    origin: &JobOrigin,
+    operation: MaintenanceOperation,
+    request: &MaintenanceRequest,
+    mode: AdmissionMode<'_>,
+) -> Result<MaintenanceReceipt, TxError> {
+    let embedded = matches!(mode, AdmissionMode::Embedded(_));
     request
         .validate(operation)
         .map_err(|_| invalid("invalid_request"))?;
@@ -519,6 +923,10 @@ pub async fn admit_in(
         }
         let receipt: MaintenanceReceipt =
             serde_json::from_str(&replay.receipt_json).map_err(|_| invalid("receipt_invalid"))?;
+        if receipt.already_completed {
+            validate_noop_in(tx, authority, context, origin).await?;
+            return Ok(receipt);
+        }
         job_context::record_admission_in(
             tx,
             authority,
@@ -539,6 +947,9 @@ pub async fn admit_in(
         .is_some_and(|revision| revision != origin.configuration_revision)
     {
         return Err(invalid("configuration_revision_changed"));
+    }
+    if embedded && operation == MaintenanceOperation::ReindexActors {
+        require_seeded_actors_in(tx).await?;
     }
     let mut enabled = jobs::run(
         tx,
@@ -576,8 +987,19 @@ pub async fn admit_in(
     let mut resource_row = jobs::run(tx, tx.query("SELECT job_id, payload_hash, scope_id, IF job_id != '' { ((type::record('job', job_id).state ?? '') IN ['queued','running','waiting','reconciling'] OR array::len((SELECT VALUE id FROM task WHERE job=type::record('job',$parent.job_id) AND state NOT IN ['completed','failed','cancelled','superseded','stopped','skipped'] LIMIT 1))>0) } ELSE { false } AS active FROM ONLY $resource").bind(("resource", resource.clone()))).await?;
     let existing: Option<ResourceRow> = jobs::take(&mut resource_row, 0)?;
     if let Some(existing) = existing.filter(|row| row.active) {
-        if existing.payload_hash != payload_hash || existing.scope_id != authority.scope_id() {
+        if existing.scope_id != authority.scope_id() {
             return Err(invalid("resource_busy"));
+        }
+        if existing.payload_hash != payload_hash {
+            let same_content = match &request.dataset {
+                Some(dataset) if embedded => {
+                    resource_has_same_content(tx, &existing, dataset, operation).await?
+                }
+                _ => false,
+            };
+            if !same_content {
+                return Err(invalid("resource_busy"));
+            }
         }
         job_context::record_admission_in(
             tx,
@@ -596,6 +1018,24 @@ pub async fn admit_in(
             request.dataset.clone(),
             true,
         );
+        save_receipt_in(tx, &id, &payload_hash, &receipt).await?;
+        return Ok(receipt);
+    }
+    let complete = match (mode, request.dataset.as_ref()) {
+        (AdmissionMode::Embedded(_), Some(dataset)) => {
+            completed_dataset_in(tx, pool, dataset).await?
+        }
+        (AdmissionMode::Embedded(status), None)
+            if operation == MaintenanceOperation::ReindexActors =>
+        {
+            index_already_serving_in(tx, context, status).await?
+        }
+        _ => false,
+    };
+    if complete {
+        validate_noop_in(tx, authority, context, origin).await?;
+        let receipt =
+            MaintenanceReceipt::completed(operation, origin.clone(), request.dataset.clone());
         save_receipt_in(tx, &id, &payload_hash, &receipt).await?;
         return Ok(receipt);
     }
@@ -625,6 +1065,14 @@ pub async fn admit_in(
     if created {
         jobs::run(tx, tx.query("CREATE $row SET operation=$operation, payload_json=$payload, payload_hash=$hash, scope_id=$scope, updated_at=time::now() RETURN NONE")
             .bind(("row", jobs::rid("setup_operation", &id))).bind(("operation", pool)).bind(("payload", payload_json)).bind(("hash", payload_hash.clone())).bind(("scope", authority.scope_id().to_owned()))).await?;
+        if embedded && request.dataset.is_some() {
+            jobs::run(
+                tx,
+                tx.query("UPDATE $row SET content_reuse=true RETURN NONE")
+                    .bind(("row", jobs::rid("setup_operation", &id))),
+            )
+            .await?;
+        }
         if let Some(dataset) = &request.dataset {
             jobs::run(
                 tx,
@@ -666,6 +1114,18 @@ pub async fn admit_in(
     );
     save_receipt_in(tx, &id, &payload_hash, &receipt).await?;
     Ok(receipt)
+}
+
+async fn validate_noop_in(
+    tx: &Tx,
+    authority: &RegistryAuthority,
+    context: &RegisteredContext,
+    origin: &JobOrigin,
+) -> Result<(), TxError> {
+    if origin.source != OriginSource::Native {
+        return Err(invalid("invalid_source"));
+    }
+    job_context::validate_admission_context_in(tx, authority, context, origin).await
 }
 
 /// Read one durable immutable payload for an actually claimed task.

@@ -184,8 +184,34 @@ jobs:
             --scene startup-embedded-registered --scene startup-embedded-registered-reduced-motion \
             --script "startup-embedded-registered=$scripts/startup-done.json" \
             --script "startup-embedded-registered-reduced-motion=$scripts/startup-done.json" \
+            --script-expect-key startup-embedded-registered=startup-data-reset-seed \
+            --script-expect-key startup-embedded-registered-reduced-motion=startup-data-reset-seed
+
+          "${capture[@]}" --output "$evidence/startup-finish" --script-at 0.45 \
+            --scene startup-embedded-registered --scene startup-embedded-registered-reduced-motion \
+            --script "startup-embedded-registered=$scripts/startup-data-finish.json" \
+            --script "startup-embedded-registered-reduced-motion=$scripts/startup-data-finish.json" \
             --script-expect-key startup-embedded-registered=screen-workstation \
             --script-expect-key startup-embedded-registered-reduced-motion=screen-workstation
+
+          "${capture[@]}" --scene startup-embedded-registered --output "$evidence/startup-data-reset" --script-at 0.45 \
+            --script "startup-embedded-registered=$scripts/startup-data-reset-seed.json" \
+            --script-expect-key startup-embedded-registered=startup-data-primary
+
+          wizard=()
+          for scene in startup-data-seed startup-data-index startup-data-index-queued startup-data-train startup-data-checks-unavailable; do
+            wizard+=(--scene "$scene" --script "$scene=$scripts/startup-done.json"
+              --script-expect-key "$scene=startup-data-setup")
+          done
+          "${capture[@]}" "${wizard[@]}" --output "$evidence/startup-data" --script-at 0.25
+
+          "${capture[@]}" --scene startup-data-train --output "$evidence/startup-data-skip" --script-at 0.45 \
+            --script "startup-data-train=$scripts/startup-data-skip-training.json" \
+            --script-expect-key startup-data-train=startup-data-checklist
+
+          "${capture[@]}" --scene startup-health-checks-mixed --output "$evidence/startup-health-checks" --script-at 0.25 \
+            --script "startup-health-checks-mixed=$scripts/startup-done.json" \
+            --script-expect-key startup-health-checks-mixed=startup-data-checklist
 
       - name: Publish Linux UI captures for early review
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

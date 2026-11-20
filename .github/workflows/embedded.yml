@@ -136,6 +136,7 @@ jobs:
             --test storage_contracts --test storage_jobs --test storage_brief --test storage_brief_publish \
             --test storage_provider_pacer --test storage_provider_account --test storage_credits \
             --test storage_actor_catalog --test storage_atlas_delete --test storage_setup_jobs \
+            --test storage_actor_seed_execution --test storage_actor_search_rebuild \
             --test storage_classifier_activation --test storage_operational_logs
       - name: Local matrix leg (embedded)
         if: '!inputs.scoped'

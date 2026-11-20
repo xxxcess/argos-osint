@@ -15,7 +15,6 @@ use argos_osint_core::storage::actor_search_outbox as index;
 use argos_osint_core::storage::connect_registry;
 use argos_osint_core::storage::connect_registry::RegistryAuthority;
 use argos_osint_core::storage::job_dispatch;
-use argos_osint_core::storage::jobs::ClaimedTask;
 use argos_osint_core::storage::memory;
 use argos_osint_core::storage::repo::Repository;
 use argos_osint_core::storage::setup_jobs;
@@ -31,25 +30,12 @@ use fleetworks_contracts::connect::RegistrationEnsureRequest;
 use fleetworks_contracts::context::JobOrigin;
 use fleetworks_contracts::context::MutationContext;
 use fleetworks_contracts::context::OriginSource;
+use fleetworks_contracts::context::RegisteredContext;
 use fleetworks_contracts::readiness::MaintenanceOperation;
+use fleetworks_contracts::readiness::MaintenanceReceipt;
 use fleetworks_contracts::readiness::MaintenanceRequest;
 
-async fn fixture(repo: &Repository) -> (ClaimedTask, ActorIndexStatus) {
-    argos_osint_core::storage::bootstrap::ensure_network_identity(repo.db())
-        .await
-        .expect("actual deployment bootstrap");
-    connect_registry::initialize_control(repo.db())
-        .await
-        .expect("registry bootstrap");
-    job_dispatch::ensure_queue_transport(repo.db(), setup_jobs::REINDEX_POOL)
-        .await
-        .expect("real transport policy");
-    job_dispatch::enable_pool(repo.db(), setup_jobs::REINDEX_POOL)
-        .await
-        .expect("configured fixture consumer");
-    setup_jobs::enable_operation(repo.db(), MaintenanceOperation::ReindexActors, true)
-        .await
-        .expect("explicit operation");
+async fn rebuild_context(repo: &Repository) -> (RegistryAuthority, RegisteredContext) {
     let authority =
         RegistryAuthority::new("synthetic-scope", "synthetic-native", "synthetic-epoch")
             .expect("bounded authority");
@@ -73,6 +59,61 @@ async fn fixture(repo: &Repository) -> (ClaimedTask, ActorIndexStatus) {
     )
     .await
     .expect("current proof");
+    (authority, context)
+}
+
+async fn embedded_rebuild(
+    repo: &Repository,
+    status: Option<&ActorIndexStatus>,
+    key: &str,
+) -> Result<MaintenanceReceipt, tx::TxError> {
+    let (authority, context) = rebuild_context(repo).await;
+    let request = MaintenanceRequest::for_reindex(key.into(), MutationContext::new(&context))
+        .expect("bounded new request");
+    let origin = JobOrigin::new(
+        &context,
+        OriginSource::Native,
+        key.into(),
+        Utc::now().to_rfc3339(),
+        1,
+        Vec::new(),
+    );
+    tx::run_tx(repo.db(), tx::RetryPolicy::default(), |transaction| {
+        let (authority, context, origin, request) = (&authority, &context, &origin, &request);
+        async move {
+            setup_jobs::admit_embedded_in(
+                &transaction,
+                authority,
+                context,
+                origin,
+                MaintenanceOperation::ReindexActors,
+                request,
+                status,
+            )
+            .await
+        }
+    })
+    .await
+    .map(|committed| committed.value)
+}
+
+async fn fixture(repo: &Repository) -> (job_dispatch::DeliveryLease, ActorIndexStatus) {
+    argos_osint_core::storage::bootstrap::ensure_network_identity(repo.db())
+        .await
+        .expect("actual deployment bootstrap");
+    connect_registry::initialize_control(repo.db())
+        .await
+        .expect("registry bootstrap");
+    job_dispatch::ensure_queue_transport(repo.db(), setup_jobs::REINDEX_POOL)
+        .await
+        .expect("real transport policy");
+    job_dispatch::enable_pool(repo.db(), setup_jobs::REINDEX_POOL)
+        .await
+        .expect("configured fixture consumer");
+    setup_jobs::enable_operation(repo.db(), MaintenanceOperation::ReindexActors, true)
+        .await
+        .expect("explicit operation");
+    let (authority, context) = rebuild_context(repo).await;
     let request =
         MaintenanceRequest::for_reindex("rebuild-fixture".into(), MutationContext::new(&context))
             .expect("canonical DB rebuild request");
@@ -123,7 +164,7 @@ async fn fixture(repo: &Repository) -> (ClaimedTask, ActorIndexStatus) {
     .await
     .expect("real task lease")
     {
-        job_dispatch::DeliveryClaim::Claimed(lease) => lease.task,
+        job_dispatch::DeliveryClaim::Claimed(lease) => *lease,
         other => panic!("expected actual claim, got {other:?}"),
     };
     let mut response = repo
@@ -212,8 +253,9 @@ async fn canonical_shadow_restarts_exact_pending_then_promotes_only_verified_vis
     )
     .await
     .expect("canonical seed");
-    let (claimed, mut status) = fixture(&repo).await;
-    index::request_rebuild(&repo, &claimed)
+    let (delivery, mut status) = fixture(&repo).await;
+    let claimed = &delivery.task;
+    index::request_rebuild(&repo, claimed)
         .await
         .expect("real consumer submits durable rebuild");
     let mut at = Utc::now();
@@ -340,6 +382,9 @@ async fn canonical_shadow_restarts_exact_pending_then_promotes_only_verified_vis
                 index::rebuild_promoted(&repo, &lease, &accepted, at)
                     .await
                     .expect("reader switch receipt");
+                status.active = Some(accepted);
+                status.rebuilding = None;
+                status.state = "ready".into();
                 promoted = true;
                 break;
             }
@@ -362,6 +407,26 @@ async fn canonical_shadow_restarts_exact_pending_then_promotes_only_verified_vis
             .phase,
         "completed"
     );
+    job_dispatch::finish_delivery(
+        repo.db(),
+        &delivery,
+        job_dispatch::DeliveryOutcome::Complete {
+            result_ref: "actor-index:g2",
+        },
+        Utc::now(),
+    )
+    .await
+    .expect("terminal durable rebuild after verified promotion");
+    let no_work = embedded_rebuild(&repo, Some(&status), "repeat-with-current-index")
+        .await
+        .expect("current index is an accepted no-op");
+    assert!(no_work.already_completed && no_work.reused && no_work.job_id.is_empty());
+    assert_eq!(
+        embedded_rebuild(&repo, Some(&status), "repeat-with-current-index")
+            .await
+            .expect("same no-op receipt replays"),
+        no_work
+    );
     let mut origin=repo.db().query("SELECT VALUE workstation_id FROM job_origin;SELECT VALUE workstation_id FROM job_request").await.expect("provenance").check().expect("provenance statements");
     assert_eq!(origin.take::<Vec<String>>(0).expect("origin").len(), 1);
     assert_eq!(
@@ -371,6 +436,31 @@ async fn canonical_shadow_restarts_exact_pending_then_promotes_only_verified_vis
             .len(),
         1
     );
+    tx::run_tx(
+        repo.db(),
+        tx::RetryPolicy::default(),
+        |transaction| async move {
+            memory::set_lifecycle_in(&transaction, &["shadow-actor-0001".into()], "retired")
+                .await?;
+            Ok(())
+        },
+    )
+    .await
+    .expect("change the canonical source after verified visibility");
+    for observed in [None, Some(&status)] {
+        let error = embedded_rebuild(&repo, observed, "rebuild-during-catch-up")
+            .await
+            .expect_err("temporary index ambiguity must not queue a full rebuild");
+        assert!(matches!(
+            error, tx::TxError::Abort(ref code) if code == "setup:actor_index_observation_pending"
+        ));
+    }
+    status.state = "degraded".into();
+    status.reason_code = Some("fixture_recoverable_index_failure".into());
+    let recovery = embedded_rebuild(&repo, Some(&status), "recover-degraded-index")
+        .await
+        .expect("genuine failure still admits recovery");
+    assert!(!recovery.already_completed && !recovery.reused && !recovery.job_id.is_empty());
 }
 
 #[tokio::test]
@@ -582,8 +672,9 @@ async fn oversized_aliases_and_expansion_keep_canonical_actor_in_rebuild() {
         2,
         "canonical source intent remains durable"
     );
-    let (claimed, mut status) = fixture(&repo).await;
-    index::request_rebuild(&repo, &claimed)
+    let (delivery, mut status) = fixture(&repo).await;
+    let claimed = &delivery.task;
+    index::request_rebuild(&repo, claimed)
         .await
         .expect("rebuild request");
     let now = Utc::now();

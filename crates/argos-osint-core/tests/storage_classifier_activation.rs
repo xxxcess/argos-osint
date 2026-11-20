@@ -30,6 +30,7 @@ use fleetworks_contracts::context::JobOrigin;
 use fleetworks_contracts::context::MutationContext;
 use fleetworks_contracts::context::OriginSource;
 use fleetworks_contracts::context::RegisteredContext;
+use fleetworks_contracts::readiness::DatasetRef;
 use fleetworks_contracts::readiness::MaintenanceOperation;
 use fleetworks_contracts::readiness::MaintenanceRequest;
 use serde_json::json;
@@ -155,13 +156,14 @@ async fn actual_training_candidate_requires_scoped_private_source_and_explicit_g
         let request = &request;
         async move {
             let capture = admission(creator, "train-once");
-            setup_jobs::admit_in(
+            setup_jobs::admit_embedded_in(
                 &transaction,
                 capture.authority(),
                 creator,
                 capture.origin(),
                 MaintenanceOperation::TrainClassifier,
                 request,
+                None,
             )
             .await
         }
@@ -186,6 +188,63 @@ async fn actual_training_candidate_requires_scoped_private_source_and_explicit_g
     )
     .await
     .expect("actual training completion");
+    let observed = setup_jobs::embedded_setup_observation(&repo)
+        .await
+        .expect("durable training observation");
+    assert!(observed.training_completed);
+    assert!(observed.catalog_sha256.is_none());
+    let repeated_upload = DatasetRef::new(
+        "new-upload-same-training-bytes".into(),
+        dataset.kind,
+        dataset.sha256.clone(),
+        dataset.size_bytes,
+    )
+    .expect("new upload ID for the previously validated CSV");
+    setup_jobs::register_dataset(
+        &repo,
+        &authority(),
+        &repeated_upload,
+        setup_jobs::DATASET_TTL,
+    )
+    .await
+    .expect("validate repeat upload");
+    let repeat = MaintenanceRequest::for_training(
+        "repeat-training-csv".into(),
+        MutationContext::new(&other_installation).with_configuration_revision(1),
+        repeated_upload,
+    )
+    .expect("repeat CSV request");
+    let repeated_receipt = tx::run_tx(repo.db(), tx::RetryPolicy::default(), |transaction| {
+        let (registered, request) = (&other_installation, &repeat);
+        async move {
+            let capture = admission(registered, "repeat-training-csv");
+            setup_jobs::admit_embedded_in(
+                &transaction,
+                capture.authority(),
+                registered,
+                capture.origin(),
+                MaintenanceOperation::TrainClassifier,
+                request,
+                None,
+            )
+            .await
+        }
+    })
+    .await
+    .expect("durable same-content confirmation")
+    .value;
+    assert!(repeated_receipt.already_completed && repeated_receipt.reused);
+    assert!(repeated_receipt.job_id.is_empty());
+    assert_eq!(repeated_receipt.dataset, repeat.dataset);
+    assert!(job_dispatch::claim_ready(
+        repo.db(),
+        setup_jobs::TRAIN_POOL,
+        "repeat-check",
+        Utc::now()
+    )
+    .await
+    .expect("check training dispatch")
+    .is_none());
     assert!(classifier_activation::training_source(
         &repo,
         "activation-scope",

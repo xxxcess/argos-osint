@@ -655,6 +655,9 @@ impl State {
     fn reset_connection_state(&mut self) {
         self.cancel_requests();
         self.activity_tab = ActivityTab::Jobs;
+        self.startup.data_step = None;
+        self.startup.data_checks = false;
+        self.startup.data_reset = [false; 3];
         self.workstation_diagnostics_open = false;
         self.workstation_status_checks_open = false;
         self.setup_advanced_open = false;
@@ -989,14 +992,17 @@ impl State {
     }
 
     pub(crate) fn maintenance_checks_due(&self, now: f64) -> bool {
-        if !matches!(self.page, Page::Seed | Page::Workstation)
-            || self.setup_gateway
+        if !(matches!(self.page, Page::Seed | Page::Workstation) && !self.setup_gateway
+            || self.startup.data_setup_active())
             || !self.connected()
             || !self.scoped_logs.window_focused
             || self.readiness_request.is_some()
             || now < self.readiness_refresh_at
         {
             return false;
+        }
+        if self.startup_data_needs_observation() {
+            return true;
         }
         match &self.readiness {
             Load::Ready(readiness) => readiness.checks.iter().any(|check| {
@@ -1319,9 +1325,9 @@ fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
     changed |= state.sync_assistant();
     changed |= state.poll_scoped_logs();
     changed |= state.sync_jobs_binding();
-    if matches!(state.page, Page::Seed | Page::Workstation)
+    if (matches!(state.page, Page::Seed | Page::Workstation) && !state.setup_gateway
+        || state.startup.data_setup_active())
         && !state.fixture
-        && !state.setup_gateway
         && state.connected()
         && state.scoped_logs.window_focused
     {
@@ -1393,7 +1399,17 @@ fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
 fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
     if state.startup.active() {
         if event.key == Key::Escape && state.setup_gateway {
-            state.return_to_startup_choice(tx);
+            if state.startup.data_setup_active() {
+                if state.maintenance.confirmation.is_some() {
+                    state.dismiss_maintenance_confirmation(tx);
+                } else if state.maintenance.csv_path_prompt.is_some() {
+                    state.cancel_csv_path_prompt(tx);
+                } else {
+                    return false;
+                }
+            } else {
+                state.return_to_startup_choice(tx);
+            }
             return true;
         }
         return false;
@@ -1555,7 +1571,7 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
 
         if state.connected() {
             sidebar = sidebar.child(SidebarHeader::new("Operations").build(&kit));
-            for page in Page::ALL {
+            for page in Page::ALL.into_iter().filter(|page| *page != Page::Seed) {
                 let mut row_builder = SidebarRow::new(page.title())
                     .icon(page.icon())
                     .selected(!state.setup_gateway && state.page == page)
@@ -1927,7 +1943,7 @@ fn compact_icon_rail(
                 .key("nav-workstation"),
         );
     if state.connected() {
-        for page in Page::ALL {
+        for page in Page::ALL.into_iter().filter(|page| *page != Page::Seed) {
             rail = rail.child(
                 IconButton::new(page.icon())
                     .variant(if !state.setup_gateway && state.page == page {

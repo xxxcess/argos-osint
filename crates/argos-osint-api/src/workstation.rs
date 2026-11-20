@@ -760,6 +760,7 @@ pub(crate) async fn read(
         &owners,
         search.as_ref().map(|Extension(client)| client),
         context.map(|Extension(context)| context),
+        false,
     )
     .await
     {
@@ -774,6 +775,7 @@ pub(crate) async fn read_value(
     owners: &ReadinessOwners,
     search: Option<&SearchClient>,
     context: Option<RegisteredContext>,
+    embedded_setup: bool,
 ) -> Result<serde_json::Value, (StatusCode, &'static str)> {
     if !principal.permits(Permission::ReadBackend) {
         return Err((
@@ -804,6 +806,41 @@ pub(crate) async fn read_value(
             && context.access_epoch == principal.access_epoch()
     });
     let registered = context.is_some();
+    if embedded_setup
+        && registered
+        && permitted
+        && principal.purpose() == fleetworks_contracts::context::CredentialPurpose::Native
+    {
+        let repo = state.repo.clone();
+        if let Some(Ok(setup)) = crate::run_shielded_timeout(DEADLINE, async move {
+            setup_jobs::embedded_setup_observation(&repo).await
+        })
+        .await
+        {
+            if let Some(hash) = setup.catalog_sha256 {
+                if let Some(catalog) = checks.iter_mut().find(|check| {
+                    check.id == ReadinessCheckId::ActorCatalog
+                        && check.state == ReadinessState::Ready
+                }) {
+                    catalog
+                        .artifact_ids
+                        .push(format!("actor-catalog-sha256:{hash}"));
+                }
+            }
+            if setup.training_completed {
+                if let Some(training) = checks.iter_mut().find(|check| {
+                    check.id == ReadinessCheckId::ClassifierTraining
+                        && check.reason_code == "natural_resource_idle"
+                }) {
+                    training.state = ReadinessState::Ready;
+                    training.reason_code = "embedded_training_completed".into();
+                    training.explanation =
+                        "Classifier training completed on this Embedded backend.".into();
+                }
+            }
+        }
+    }
+
     let state_for_read = state.clone();
     let revision = tokio::task::spawn_blocking(move || {
         let root = crate::configuration::workspace_for(&state_for_read)?;

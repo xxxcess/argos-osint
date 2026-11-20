@@ -1018,7 +1018,6 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
         .accessibility
         .for_view(state.fixture, cx.is_reduced_motion());
     let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
-    let shadow_ref = (!preferences.matte()).then_some(&state.shadow_offset);
 
     let transport = match &state.connection.status {
         ConnectionStatus::Connected => ("Connected", StatusTone::Ok),
@@ -1785,7 +1784,7 @@ pub(crate) fn queued_actor_reindex_id(state: &State) -> Option<&str> {
         }
         record.job_id.as_str()
     } else if let Load::Ready(receipt) = &state.maintenance.receipt {
-        if receipt.operation != MaintenanceOperation::ReindexActors {
+        if receipt.operation != MaintenanceOperation::ReindexActors || receipt.already_completed {
             return None;
         }
         receipt.job_id.as_str()
@@ -1794,7 +1793,7 @@ pub(crate) fn queued_actor_reindex_id(state: &State) -> Option<&str> {
     };
     let observed = matches!(&state.backend.jobs, Load::Ready(jobs) if jobs.rows.iter().any(|job| job.id == id))
         || matches!(&state.backend.detail, Load::Ready(detail) if detail.job.id == id);
-    (!observed).then_some(id)
+    (!observed && !id.trim().is_empty()).then_some(id)
 }
 
 fn open_workstation_seed(state: &mut State) {
@@ -1922,7 +1921,19 @@ fn actor_search_summary_card(
                 .child(primary),
         );
 
-    {
+    let has_index_details = !summary.can_search
+        || relevant_job.is_some()
+        || state.maintenance.pending_reindex.is_some()
+        || state
+            .maintenance
+            .operation_job(MaintenanceOperation::ReindexActors)
+            .is_some()
+        || matches!(
+            &state.maintenance.receipt,
+            Load::Ready(receipt)
+                if receipt.operation == MaintenanceOperation::ReindexActors && !receipt.already_completed
+        );
+    if has_index_details || state.maintenance.reindex_details_open {
         let mut details_col = rune::col().gap(4.0).child(quiet(summary.next_action, kit));
         if summary.building {
             let stage = summary.stage.as_deref().unwrap_or(summary.status_label);
@@ -1952,8 +1963,11 @@ fn actor_search_summary_card(
             })
             .key("workstation-index-details-toggle")
             .finish(MetalFinish::ObsidianPill)
-            .on_press(|state: &mut State| {
+            .on_press_tx(move |state: &mut State, tx| {
                 state.maintenance.reindex_details_open = !state.maintenance.reindex_details_open;
+                if !state.maintenance.reindex_details_open && !has_index_details {
+                    tx.focus("workstation-search-actors", tx.focus_visible());
+                }
             })
             .build(kit, preferences, pointer_ref),
         );
@@ -3237,6 +3251,17 @@ mod tests {
         });
         clock += 1.0 / 60.0;
         rt.frame(clock);
+        assert!(rt.find("workstation-index-details-toggle").is_some());
+        click_within(
+            &mut rt,
+            "workstation-index-details-toggle",
+            (1280.0, 800.0),
+            &mut clock,
+        );
+        assert!(rt.find("workstation-index-details-toggle").is_none());
+        assert!(rt.elements().iter().any(|element| {
+            element.key.as_deref() == Some("workstation-search-actors") && element.focused
+        }));
         click_within(
             &mut rt,
             "workstation-search-actors",

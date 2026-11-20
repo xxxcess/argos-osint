@@ -135,7 +135,8 @@ fn real_shell_navigation_works_offline_without_boundary_effects() {
     assert!(!connected_tree.contains(&hidden_connect_id));
     assert!(connected.find("nav-workstation").is_some());
     assert!(connected.find("nav-setup").is_none());
-    for page in Page::ALL {
+    assert!(connected.find("nav-seed").is_none());
+    for page in Page::ALL.into_iter().filter(|page| *page != Page::Seed) {
         let key = format!("nav-{}", page.key());
         let (x, y) = connected
             .find(&key)

@@ -19,6 +19,7 @@ use crate::app::Intent;
 use crate::app::Load;
 use crate::app::State;
 use crate::connection::ConnectionCredential;
+use crate::connection::ConnectionStatus;
 use crate::connection::ConnectionTestFailure;
 use crate::connection::ConnectionTestSummary;
 use crate::connection::GatewayEffects;
@@ -57,6 +58,7 @@ pub struct ConnectionProfiles {
     test_request: Option<RequestTask>,
     credential_request: Option<RequestTask>,
     pending_install: bool,
+    startup_distributed_draft: Option<u64>,
 }
 
 impl ConnectionProfiles {
@@ -94,6 +96,47 @@ impl State {
         self.connection_profiles.revision = self.connection_profiles.revision.wrapping_add(1);
         self.connection_profiles.request =
             services.profile_catalog(container.clone(), None, self.connection_profiles.revision);
+    }
+
+    pub(crate) fn prefill_startup_distributed_url(&mut self) {
+        if self.backend_kind != BackendKind::Remote || self.connection_profiles.launch_override {
+            return;
+        }
+        self.connection_profiles.startup_distributed_draft =
+            Some(self.connection_profiles.draft_revision);
+        self.prefill_startup_pairing_origin();
+        self.apply_startup_distributed_profile();
+    }
+
+    fn apply_startup_distributed_profile(&mut self) {
+        if !self.startup.active()
+            || !self.setup_gateway
+            || self.backend_kind != BackendKind::Remote
+            || self.connection.status != ConnectionStatus::Disconnected
+            || self.connection.origin.text != fleetworks_contracts::DEFAULT_API_ORIGIN
+            || self.connection_profiles.startup_distributed_draft
+                != Some(self.connection_profiles.draft_revision)
+        {
+            return;
+        }
+        let Load::Ready(catalog) = &self.connection_profiles.catalog else {
+            return;
+        };
+        let mut distributed = catalog
+            .profiles
+            .iter()
+            .filter(|profile| profile.kind == BackendKind::Remote);
+        let saved = catalog
+            .selected_profile_id
+            .as_ref()
+            .and_then(|selected| distributed.clone().find(|profile| &profile.id == selected))
+            .or_else(|| {
+                let first = distributed.next()?;
+                distributed.next().is_none().then_some(first)
+            });
+        if let Some(profile) = saved {
+            self.connection.origin = TextEdit::new(&profile.origin);
+        }
     }
 
     fn has_backend_edits(&self) -> bool {
@@ -451,6 +494,7 @@ impl State {
                         self.install_profile(&profile);
                     }
                 }
+                self.apply_startup_distributed_profile();
                 self.connection_profiles.message = Some(if source_changed {
                     "The selected saved connection changed or was cleared. The previous connection was disconnected; select a current record or credential reference.".into()
                 } else {

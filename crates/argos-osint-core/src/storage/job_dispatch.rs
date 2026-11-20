@@ -662,6 +662,7 @@ pub async fn finish_delivery(
             DeliveryOutcome::Complete { result_ref } => {
                 jobs::complete_in(&tx, task, result_ref, &at).await?;
                 jobs::settle_finished_job_in(&tx, &task.job_id).await?;
+                super::setup_jobs::record_completed_input_in(&tx, task).await?;
                 jobs::run(
                     &tx,
                     tx.query(

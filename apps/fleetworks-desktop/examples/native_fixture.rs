@@ -12,6 +12,7 @@ mod native {
     mod overhaul_scenes;
     mod readiness_scenes;
     mod redesign_scenes;
+    mod startup_data_scenes;
     mod submission_scenes;
 
     use fleetworks_contracts::capabilities::Capabilities;
@@ -570,16 +571,6 @@ mod native {
         }
     }
 
-    fn startup_registered(state: &mut State, reduced_motion: bool) {
-        state.fixture_show_startup_setup(fleetworks_workstation::native::BackendKind::Local);
-        registered(state);
-        state.accessibility.fixture_override =
-            Some(fleetworks_desktop::accessibility::FixtureAccessibility {
-                reduced_motion,
-                ..Default::default()
-            });
-    }
-
     pub fn run() {
         rune::run(AppSpec {
             init,
@@ -597,11 +588,26 @@ mod native {
                         });
                 }),
                 ("startup-embedded-registered", |state| {
-                    startup_registered(state, false);
+                    startup_data_scenes::ready(state, false);
                 }),
                 ("startup-embedded-registered-reduced-motion", |state| {
-                    startup_registered(state, true);
+                    startup_data_scenes::ready(state, true);
                 }),
+                ("startup-data-seed", startup_data_scenes::seed),
+                ("startup-data-index", startup_data_scenes::index),
+                (
+                    "startup-data-index-queued",
+                    startup_data_scenes::index_queued,
+                ),
+                ("startup-data-train", startup_data_scenes::train),
+                (
+                    "startup-health-checks-mixed",
+                    startup_data_scenes::mixed_checks,
+                ),
+                (
+                    "startup-data-checks-unavailable",
+                    startup_data_scenes::checks_unavailable,
+                ),
                 ("redesign-status", redesign_scenes::status),
                 ("redesign-seed", redesign_scenes::seed),
                 ("redesign-seed-ready", redesign_scenes::seed_ready),

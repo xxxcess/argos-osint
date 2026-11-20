@@ -1195,6 +1195,55 @@ mod embedded {
         }
 
         #[cfg(feature = "embedded")]
+        async fn upload_actor_fixture(
+            client: &LocalIpcClient,
+            registered: &RegisteredContext,
+            csv: &[u8],
+        ) -> DatasetUpload {
+            let sha256 = format!("{:x}", sha2::Sha256::digest(csv));
+            let upload_ticket: DatasetUploadTicket = client
+                .request_json(
+                    Some(registered.clone()),
+                    IpcOperation::DatasetUploadStart(
+                        DatasetUploadRequest::new(
+                            DatasetKind::ActorCatalog,
+                            sha256,
+                            csv.len() as u64,
+                        )
+                        .expect("upload req"),
+                    ),
+                )
+                .await
+                .expect("start upload");
+            let upload_id = upload_ticket
+                .upload_path
+                .strip_prefix(DATASET_UPLOADS_PATH)
+                .and_then(|rest| rest.strip_prefix('/'))
+                .expect("upload id")
+                .to_owned();
+
+            let _chunk_empty = client
+                .request_payload(
+                    Some(registered.clone()),
+                    IpcOperation::DatasetUploadChunk {
+                        upload_id: upload_id.clone(),
+                        offset: 0,
+                        data_b64: test_base64_encode(csv),
+                    },
+                )
+                .await
+                .expect("upload chunk");
+            let uploaded: DatasetUpload = client
+                .request_json(
+                    Some(registered.clone()),
+                    IpcOperation::DatasetUploadFinish { upload_id },
+                )
+                .await
+                .expect("finish upload");
+            uploaded
+        }
+
+        #[cfg(feature = "embedded")]
         #[tokio::test]
         async fn ipc_lifecycle_registration_seed_and_restart_resume_preserves_job_without_duplicates(
         ) {
@@ -1261,47 +1310,8 @@ mod embedded {
             assert_eq!(readiness.deployment_id, registered.deployment_id);
 
             let csv = b"actor_id,actor_name,actor_type,aliases,name_normalized\nactor-beacon-1,Harbor Beacon Collective,organization,[],harbor beacon collective\n";
-            let sha256 = format!("{:x}", sha2::Sha256::digest(csv));
-            let upload_ticket: DatasetUploadTicket = client1
-                .request_json(
-                    Some(registered.clone()),
-                    IpcOperation::DatasetUploadStart(
-                        DatasetUploadRequest::new(
-                            DatasetKind::ActorCatalog,
-                            sha256,
-                            csv.len() as u64,
-                        )
-                        .expect("upload req"),
-                    ),
-                )
-                .await
-                .expect("start upload");
-            let upload_id = upload_ticket
-                .upload_path
-                .strip_prefix(DATASET_UPLOADS_PATH)
-                .and_then(|rest| rest.strip_prefix('/'))
-                .expect("upload id")
-                .to_owned();
-
-            let _chunk_empty = client1
-                .request_payload(
-                    Some(registered.clone()),
-                    IpcOperation::DatasetUploadChunk {
-                        upload_id: upload_id.clone(),
-                        offset: 0,
-                        data_b64: test_base64_encode(csv),
-                    },
-                )
-                .await
-                .expect("upload chunk");
-            let uploaded: DatasetUpload = client1
-                .request_json(
-                    Some(registered.clone()),
-                    IpcOperation::DatasetUploadFinish { upload_id },
-                )
-                .await
-                .expect("finish upload");
-
+            let uploaded = upload_actor_fixture(&client1, &registered, csv).await;
+            let original_dataset = uploaded.dataset.clone();
             let seed_receipt: MaintenanceReceipt = client1
                 .request_json(
                     Some(registered.clone()),
@@ -1374,42 +1384,74 @@ mod embedded {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
 
-            let reindex_receipt: MaintenanceReceipt = client2
+            let uploaded_again = upload_actor_fixture(&client2, &registered, csv).await;
+            assert_ne!(uploaded_again.dataset.id, original_dataset.id);
+            assert_eq!(uploaded_again.dataset.sha256, original_dataset.sha256);
+            let repeated_seed: MaintenanceReceipt = client2
                 .request_json(
                     Some(registered.clone()),
-                    IpcOperation::ReindexActors(
-                        MaintenanceRequest::for_reindex(
-                            "reindex-ipc-1".into(),
+                    IpcOperation::SeedActors(
+                        MaintenanceRequest::for_seed(
+                            "seed-ipc-same-bytes".into(),
                             MutationContext::new(&registered).with_configuration_revision(0),
+                            uploaded_again.dataset,
                         )
-                        .expect("reindex req"),
+                        .expect("new request for the same bytes"),
                     ),
                 )
                 .await
-                .expect("reindex actors submitted after seed");
+                .expect("repeat seed is a successful no-op after restart");
+            assert!(repeated_seed.already_completed && repeated_seed.reused);
+            assert!(repeated_seed.job_id.is_empty());
 
-            let search_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-            loop {
-                let jobs: Jobs = client2
-                    .request_json(
-                        Some(registered.clone()),
-                        IpcOperation::JobsList(Default::default()),
+            let client = &client2;
+            let context = &registered;
+            let admit_reindex = |key: &'static str| async move {
+                let search_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+                loop {
+                    let request = MaintenanceRequest::for_reindex(
+                        key.into(),
+                        MutationContext::new(context).with_configuration_revision(0),
                     )
-                    .await
-                    .expect("jobs list");
-                assert_eq!(
-                    jobs.rows
-                        .iter()
-                        .filter(|row| row.id == reindex_receipt.job_id)
-                        .count(),
-                    1,
-                    "reindex job must exist without duplicates"
-                );
-                let reindex_done = jobs
-                    .rows
-                    .iter()
-                    .find(|row| row.id == reindex_receipt.job_id)
-                    .is_some_and(|row| row.state == "completed");
+                    .expect("reindex request");
+                    match client
+                        .request_json(Some(context.clone()), IpcOperation::ReindexActors(request))
+                        .await
+                    {
+                        Ok(receipt) => return receipt,
+                        Err(fleetworks_contracts::ClientError::Status(422)) => {
+                            assert!(
+                                tokio::time::Instant::now() < search_deadline,
+                                "index owner never settled during normal catch-up"
+                            );
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                        Err(error) => panic!("reindex admission failed: {error}"),
+                    }
+                }
+            };
+            let reindex: MaintenanceReceipt = admit_reindex("reindex-ipc-1").await;
+            let search_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+            if reindex.already_completed {
+                assert!(reindex.job_id.is_empty());
+            } else {
+                assert!(!reindex.job_id.is_empty());
+            }
+            loop {
+                let reindex_done = if reindex.already_completed {
+                    true
+                } else {
+                    let jobs: Jobs = client2
+                        .request_json(
+                            Some(registered.clone()),
+                            IpcOperation::JobsList(Default::default()),
+                        )
+                        .await
+                        .expect("jobs list");
+                    let mut matching = jobs.rows.iter().filter(|row| row.id == reindex.job_id);
+                    assert_eq!(matching.clone().count(), 1, "single admitted reindex job");
+                    matching.any(|row| row.state == "completed")
+                };
                 if reindex_done {
                     let search: ActorSearchResponse = client2
                         .request_json(
@@ -1435,6 +1477,19 @@ mod embedded {
                 );
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
+            let same_index: MaintenanceReceipt = admit_reindex("reindex-ipc-repeat").await;
+            assert!(
+                same_index.already_completed && same_index.reused && same_index.job_id.is_empty()
+            );
+            let readiness: WorkstationReadiness = client2
+                .request_json(Some(registered.clone()), IpcOperation::WorkstationReadiness)
+                .await
+                .expect("readiness for the same registered Embedded backend");
+            let expected_hash = format!("actor-catalog-sha256:{}", original_dataset.sha256);
+            assert!(readiness
+                .checks
+                .iter()
+                .any(|check| check.artifact_ids.contains(&expected_hash)));
 
             let ack2 = client2.shutdown("finished").await.expect("shutdown 2");
             assert!(ack2.checkpointed);

@@ -10,6 +10,11 @@ x-qa-socket: &qa-socket
 x-qa-owner: &qa-owner "${FLEETWORKS_UID:?Set the isolated workspace owner UID}:${FLEETWORKS_GID:?Set the isolated workspace owner GID}"
 
 services:
+  jobs:
+    environment:
+      FLEETWORKS_QA_JOBS_TOKEN_FILE: /run/secrets/qa_jobs_token
+    secrets: [qa_jobs_token]
+
   assistant-qa-executor:
     image: ${FLEETWORKS_RUNTIME_IMAGE:?Set the verified gateway runtime image}
     platform: ${PLATFORM:?Select the native Linux architecture}
@@ -26,10 +31,11 @@ services:
       FLEETWORKS_STORAGE_USERNAME: fleetworks_review
       FLEETWORKS_STORAGE_PASSWORD_FILE: /run/secrets/storage_password
       FLEETWORKS_JOBS_ORIGIN: http://jobs:8080
-      FLEETWORKS_JOBS_TOKEN_FILE: /run/secrets/jobs_token
+      FLEETWORKS_QA_JOBS_TOKEN_FILE: /run/secrets/qa_jobs_token
       FLEETWORKS_ACCESS_SCOPE_ID: ${FLEETWORKS_ACCESS_SCOPE_ID:?Retain the provisioned review scope}
       FLEETWORKS_ACCESS_EPOCH: ${FLEETWORKS_ACCESS_EPOCH:?Retain the provisioned review epoch}
       FLEETWORKS_QA_SOCKET: /run/fleetworks-qa/model.sock
+      FLEETWORKS_QA_REPLICA_ID: ${FLEETWORKS_QA_REPLICA_ID:-review-qa}
     volumes:
       - *qa-socket
       - type: bind
@@ -38,7 +44,7 @@ services:
         read_only: true
         bind:
           create_host_path: false
-    secrets: [storage_password, jobs_token]
+    secrets: [storage_password, qa_jobs_token]
     depends_on:
       jobs:
         condition: service_healthy
@@ -73,3 +79,7 @@ services:
     cpus: 1.0
     mem_limit: 1g
     pids_limit: 32
+
+secrets:
+  qa_jobs_token:
+    file: ${FLEETWORKS_QA_JOBS_TOKEN_HOST_FILE:?Provide a private distinct QA Jobs token file}

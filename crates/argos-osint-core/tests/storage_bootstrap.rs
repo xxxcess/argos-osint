@@ -165,6 +165,7 @@ async fn ensure_schema_defines_everything_once_and_refuses_newer_databases() {
         ("brain_actor_alias", "actor_search_alias_owner"),
         ("actor_search_cause", "actor_search_cause_finish"),
         ("inbox_qa_replica", "inbox_qa_replica_ready"),
+        ("inbox_qa_replica", "inbox_qa_replica_owner"),
         ("inbox_qa_exchange", "inbox_qa_owner"),
         ("inbox_qa_exchange", "inbox_qa_workstation"),
     ] {

@@ -229,8 +229,11 @@ def run_distributed(args):
     # Docker daemon and Compose use the same path without a published model port.
     socket_directory = workspace / "qa"
     socket_directory.mkdir(mode=0o700)
+    queue_token = workspace / "secrets/qa-jobs-token"
+    native_review.private_file(queue_token, secrets.token_urlsafe(48) + "\n")
     env = {**verify.isolated_environment(os.environ), **prepared["environment"],
-           "FLEETWORKS_QA_IMAGE": args.image, "FLEETWORKS_QA_SOCKET_DIR": str(socket_directory)}
+           "FLEETWORKS_QA_IMAGE": args.image, "FLEETWORKS_QA_SOCKET_DIR": str(socket_directory),
+           "FLEETWORKS_QA_JOBS_TOKEN_HOST_FILE": str(queue_token)}
     verify.require_unused_project(env, args.platform)
     command = [*verify.compose_command(workspace), "-f", str(ROOT / "deploy/compose.inbox-qa.yml")]
 

@@ -8,9 +8,12 @@ import os
 from pathlib import Path
 import platform
 import re
+import select
 import shutil
+import struct
 import subprocess
 import sys
+import time
 
 import fleetworks_qa_pack as pack
 
@@ -133,6 +136,63 @@ def mac_libraries(binary, directory, torch_root):
     return list(libraries.values())
 
 
+def verify_inference(root, loader_key):
+    # The extracted pack must find all runtime libraries and use the exact
+    # checkpoint without inheriting Torch or model-cache environment variables.
+    model_env = {loader_key: str(root / "lib"), "OMP_NUM_THREADS": "1"}
+    started = time.monotonic()
+    process = subprocess.Popen([str(root / pack.WORKER), "--model-dir", str(root / "model")],
+                               env=model_env, cwd=root, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL)
+    deadline = started + 60
+
+    def send(message):
+        encoded = json.dumps(message, separators=(",", ":")).encode()
+        process.stdin.write(struct.pack(">I", len(encoded)) + encoded)
+        process.stdin.flush()
+
+    def receive():
+        fd = process.stdout.fileno()
+
+        def read(size):
+            output = bytearray()
+            while len(output) < size:
+                remaining = max(deadline - time.monotonic(), 0)
+                pack.check(select.select([fd], [], [], remaining)[0], "QA checkpoint smoke timed out")
+                chunk = os.read(fd, size - len(output))
+                pack.check(chunk, "QA checkpoint worker stopped unexpectedly")
+                output.extend(chunk)
+            return output
+
+        size, = struct.unpack(">I", read(4))
+        pack.check(0 < size <= 512 * 1024, "QA checkpoint reply exceeds its limit")
+        return json.loads(read(size))
+
+    try:
+        pack.check(receive() == {"reply": "ready", "protocol": 1, "model_revision": pack.MODEL_REVISION},
+                   "QA checkpoint did not become ready")
+        warm = time.monotonic()
+        send({"command": "ask", "request": {"turn_id": "pack-probe", "snapshot_id": "pack-probe",
+              "question": "What is the state of actor search?",
+              "passages": [{"source_id": "readiness", "text": "Actor search is ready."}]}})
+        finding = {"reply": "event", "event": {"kind": "finding", "turn_id": "pack-probe",
+                   "sequence": 1, "source_id": "readiness", "start": 16, "end": 21, "text": "ready"}}
+        pack.check(receive() == finding, "pinned checkpoint did not extract the expected exact answer")
+        pack.check(receive() == {"reply": "event", "event": {"kind": "complete", "turn_id": "pack-probe",
+                   "sequence": 2, "outcome": "answered"}}, "QA checkpoint did not complete the turn")
+        complete = time.monotonic()
+        send({"command": "shutdown"})
+        pack.check(process.wait(timeout=10) == 0, "QA checkpoint worker did not shut down")
+        return {"model_warm_ms": round((warm - started) * 1000, 1),
+                "single_passage_ms": round((complete - warm) * 1000, 1)}
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=10)
+        process.stdin.close()
+        process.stdout.close()
+
+
 def build(target, directory):
     readonly_toolchain(target)
     directory = directory.resolve()
@@ -157,7 +217,7 @@ def build(target, directory):
               else linux_libraries(binary, libraries, env))
     notices = []
     for info in sorted(torch_root.parent.glob("torch-*.dist-info")):
-        for source in sorted([*info.glob("LICENSE*"), *info.glob("NOTICE*")]):
+        for source in sorted([*info.glob("LICENSE"), *info.glob("NOTICE*")]):
             target_path = staging / ("torch-" + source.name)
             shutil.copyfile(source, target_path)
             notices.append(target_path)
@@ -173,6 +233,7 @@ def build(target, directory):
     if target not in DARWIN_WHEELS:
         linux_libraries(installed / pack.WORKER, installed / "lib",
                         {**env, loader_key: str(installed / "lib")}, installed=True)
+    digests["checkpoint_smoke"] = verify_inference(installed, loader_key)
     (directory / "digests.json").write_text(json.dumps(digests, sort_keys=True) + "\n")
     print(json.dumps(digests, sort_keys=True))
 

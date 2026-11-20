@@ -3,7 +3,7 @@
 use std::future::Future;
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, ensure, Context, Result};
 use argos_osint_api::inbox_qa::{CancellationToken, QaInference};
 use argos_osint_core::storage::inbox_qa::{self as store, FrozenEvidence, POOL};
 use argos_osint_core::storage::job_dispatch::{
@@ -20,7 +20,6 @@ use tokio::time::{sleep, timeout, Instant};
 use crate::qa_worker::QaWorkerSupervisor;
 use crate::queue_client::{Client, Disposition, Received};
 
-pub(crate) const QUEUE: &str = "fleetworks.qa";
 const DELIVERY_SECS: i64 = 12;
 const POLL: Duration = Duration::from_millis(250);
 const CHECK: Duration = Duration::from_secs(2);
@@ -39,14 +38,22 @@ pub(crate) async fn run_distributed(
         return Ok(());
     };
     let broker = tokio::task::spawn_blocking(|| {
-        Client::new(
+        Client::for_qa(
             &std::env::var("FLEETWORKS_JOBS_ORIGIN")?,
-            &crate::fleetworks::read_secret("FLEETWORKS_JOBS_TOKEN")?,
-            QUEUE.to_owned(),
+            &crate::fleetworks::read_secret("FLEETWORKS_QA_JOBS_TOKEN")?,
         )
     })
     .await??;
-    run(repo, broker, model, signal).await
+    let placement = std::env::var("FLEETWORKS_QA_REPLICA_ID")
+        .context("FLEETWORKS_QA_REPLICA_ID is required for a Distributed executor")?;
+    ensure!(
+        (1..=64).contains(&placement.len())
+            && placement
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')),
+        "FLEETWORKS_QA_REPLICA_ID is invalid"
+    );
+    run(repo, broker, model, placement, signal).await
 }
 
 struct Executor {
@@ -54,28 +61,35 @@ struct Executor {
     broker: Client,
     model: QaWorkerSupervisor,
     owner: String,
+    placement: String,
+    lease_held: bool,
 }
 
 pub(crate) async fn run(
     repo: Repository,
     broker: Client,
     model: QaWorkerSupervisor,
+    placement: String,
     signal: impl Future<Output = ()>,
 ) -> Result<()> {
-    let executor = Executor {
+    let mut executor = Executor {
         repo,
         broker,
         model,
         owner: format!("assistant-qa-{}", argos_osint_core::store::new_id()),
+        placement,
+        lease_held: false,
     };
     let stop = CancellationToken::new();
-    let session = executor.serve(&stop);
-    tokio::pin!(session, signal);
-    let result = tokio::select! {
-        result = &mut session => result,
-        () = &mut signal => {
-            stop.cancel();
-            session.await
+    let result = {
+        let session = executor.serve(&stop);
+        tokio::pin!(session, signal);
+        tokio::select! {
+            result = &mut session => result,
+            () = &mut signal => {
+                stop.cancel();
+                session.await
+            }
         }
     };
     executor.unload().await;
@@ -83,8 +97,9 @@ pub(crate) async fn run(
 }
 
 impl Executor {
-    async fn serve(&self, stop: &CancellationToken) -> Result<()> {
+    async fn serve(&mut self, stop: &CancellationToken) -> Result<()> {
         let mut loaded = None;
+        let mut observed_generation = None;
         let mut next_warm = Instant::now();
         let mut next_check = Instant::now();
         let mut next_dispatch = Instant::now();
@@ -101,6 +116,10 @@ impl Executor {
                     continue;
                 }
             };
+            if observed_generation != Some(setting.generation) {
+                observed_generation = Some(setting.generation);
+                next_warm = Instant::now();
+            }
             if loaded.is_some_and(|generation| !setting.enabled || setting.generation != generation)
             {
                 self.unload().await;
@@ -111,11 +130,7 @@ impl Executor {
                 next_cleanup = Instant::now() + Duration::from_secs(15);
                 let _ = timeout(AUTH_TIMEOUT, store::cleanup(&self.repo)).await;
             }
-            if !setting.enabled {
-                self.pause(stop).await;
-                continue;
-            }
-            if !initialized {
+            if setting.enabled && !initialized {
                 let initialize = async {
                     job_dispatch::ensure_queue_transport(self.repo.db(), POOL).await?;
                     job_dispatch::enable_pool(self.repo.db(), POOL).await
@@ -127,11 +142,31 @@ impl Executor {
                 initialized = true;
             }
             if loaded.is_none() && Instant::now() >= next_warm {
-                if self.warm(setting.generation, stop).await {
-                    loaded = Some(setting.generation);
-                } else {
-                    self.unload().await;
-                    next_warm = Instant::now() + WARM_RETRY;
+                next_warm = Instant::now() + WARM_RETRY;
+                let claim = timeout(
+                    AUTH_TIMEOUT,
+                    store::claim_replica(
+                        &self.repo,
+                        &self.placement,
+                        &self.owner,
+                        setting.generation,
+                    ),
+                )
+                .await;
+                match claim {
+                    Ok(Ok(store::ReplicaClaim::Warm)) => {
+                        self.lease_held = true;
+                        if self.warm(setting.generation, stop).await {
+                            loaded = Some(setting.generation);
+                        } else {
+                            self.unload().await;
+                        }
+                    }
+                    Ok(Ok(store::ReplicaClaim::ConfirmReap)) => {
+                        self.lease_held = true;
+                        self.unload().await;
+                    }
+                    _ => {}
                 }
             }
             let Some(generation) = loaded else {
@@ -186,7 +221,7 @@ impl Executor {
         let lease = || {
             timeout(
                 AUTH_TIMEOUT,
-                store::beat(&self.repo, &self.owner, generation, false),
+                store::beat(&self.repo, &self.placement, &self.owner, generation, false),
             )
         };
         if !matches!(lease().await, Ok(Ok(true))) {
@@ -200,7 +235,7 @@ impl Executor {
                 () = stop.cancelled() => return false,
                 result = &mut warm => {
                     return matches!(result, Ok(Ok(())))
-                        && matches!(timeout(AUTH_TIMEOUT, store::beat(&self.repo, &self.owner, generation, true)).await, Ok(Ok(true)));
+                        && matches!(timeout(AUTH_TIMEOUT, store::beat(&self.repo, &self.placement, &self.owner, generation, true)).await, Ok(Ok(true)));
                 }
                 () = tokio::time::sleep_until(next) => {
                     if !matches!(lease().await, Ok(Ok(true))) {
@@ -217,19 +252,26 @@ impl Executor {
         matches!(
             timeout(
                 AUTH_TIMEOUT,
-                store::beat(&self.repo, &self.owner, generation, true)
+                store::beat(&self.repo, &self.placement, &self.owner, generation, true)
             )
             .await,
             Ok(Ok(true))
         ) && matches!(timeout(AUTH_TIMEOUT, self.model.warm()).await, Ok(Ok(())))
     }
 
-    async fn unload(&self) {
+    async fn unload(&mut self) {
+        if !std::mem::take(&mut self.lease_held) {
+            return;
+        }
         if matches!(
             timeout(STOP_TIMEOUT, self.model.shutdown()).await,
             Ok(Ok(()))
         ) {
-            let _ = timeout(AUTH_TIMEOUT, store::forget_replica(&self.repo, &self.owner)).await;
+            let _ = timeout(
+                AUTH_TIMEOUT,
+                store::forget_replica(&self.repo, &self.placement, &self.owner),
+            )
+            .await;
         }
     }
 
@@ -425,7 +467,7 @@ impl Executor {
         generation: i64,
     ) -> Result<bool> {
         let (permitted, live, dispatch, queue) = tokio::join!(
-            store::beat(&self.repo, &self.owner, generation, true),
+            store::beat(&self.repo, &self.placement, &self.owner, generation, true),
             store::is_live(&self.repo, lease),
             job_dispatch::renew_delivery(self.repo.db(), lease, DELIVERY_SECS, Utc::now()),
             delivery.renew(),

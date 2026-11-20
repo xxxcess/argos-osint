@@ -286,10 +286,8 @@ mod embedded {
                 Arc::clone(&search_service),
                 format!("actor-index-{}", argos_osint_core::store::new_id()),
             )?;
-            let qa_broker = Client::local(
-                jobs_queue.clone(),
-                crate::inbox_qa_service::QUEUE.to_owned(),
-            );
+            let qa_broker =
+                Client::local(jobs_queue.clone(), crate::queue_client::QA_QUEUE.to_owned());
             let worker_config = LocalWorkerConfig {
                 broker: Client::local(jobs_queue, NATIVE_QUEUE_NAME.to_owned()),
                 store: dataset_store,
@@ -349,6 +347,7 @@ mod embedded {
                 self.repo.clone(),
                 self.qa_broker.clone(),
                 model,
+                "embedded".to_owned(),
                 async move {
                     let _ = qa_signal.await;
                 },

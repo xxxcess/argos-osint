@@ -58,7 +58,7 @@ def is_digest(value: object) -> bool:
 def allowed_file(path: str, target: str) -> bool:
     if path in MODEL or path in EXECUTABLES:
         return True
-    if re.fullmatch(r"licenses/torch-(?:LICENSE|NOTICE)[a-zA-Z0-9_.-]*", path):
+    if path == "licenses/torch-LICENSE" or re.fullmatch(r"licenses/torch-NOTICE[a-zA-Z0-9_.-]*", path):
         return True
     suffix = TARGETS[target][2]
     if suffix == ".so":

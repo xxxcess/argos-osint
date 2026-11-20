@@ -451,13 +451,27 @@ async fn run_non_ipc(args: Args) -> Result<()> {
                 Role::Control => argos_osint_api::control_router(state, policy),
                 Role::Jobs => {
                     let (store, queue) = jobs_store.expect("Jobs owns the operational datastores");
+                    let qa_queue = if let Some(qa_policy) =
+                        tokio::task::spawn_blocking(fleetworks::qa_jobs_access).await??
+                    {
+                        argos_osint_api::guard_network(
+                            jobs_service::qa_router(queue.clone()),
+                            qa_policy,
+                            Arc::new(Vec::new()),
+                            port,
+                        )
+                    } else {
+                        axum::Router::new()
+                    };
                     let internal = argos_osint_api::guard_network(
                         jobs_service::router(store, queue),
                         policy.clone(),
                         Arc::new(Vec::new()),
                         port,
                     );
-                    argos_osint_api::jobs_router(state, policy).merge(internal)
+                    argos_osint_api::jobs_router(state, policy)
+                        .merge(internal)
+                        .merge(qa_queue)
                 }
                 _ => argos_osint_api::network_router_with_private_services(state, policy, services),
             };

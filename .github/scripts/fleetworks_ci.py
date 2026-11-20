@@ -222,16 +222,19 @@ def verification(stage, plan, *, inbox_qa=False):
     review_images = review_image_matrix(stage, images, scopes, publish=plan.get("publish", False), full=full)
     if not images:
         scopes.discard("images")
-    desktop = "desktop" in scopes or inbox_qa
-    companion = "local_backend" in scopes or inbox_qa
+    inbox_qa_release = stage == "standard" and plan.get("inbox_qa", False)
+    need_qa_packs = inbox_qa or inbox_qa_release
+    desktop = "desktop" in scopes or need_qa_packs
+    companion = "local_backend" in scopes or need_qa_packs
     desktop_linux = (desktop or companion) and stage != "second"
+    qa_arches = arches if inbox_qa else ["amd64"] if inbox_qa_release else []
     qa_packs = [{
         "runner": ARCHITECTURES[arch][0],
         "target": f"{ARCHITECTURES[arch][1]}-unknown-linux-gnu",
         "arch": arch,
-    } for arch in arches] if inbox_qa else []
-    qa_images = list(qa_packs)
-    if inbox_qa and stage != "first":
+    } for arch in qa_arches]
+    qa_images = list(qa_packs) if inbox_qa else []
+    if need_qa_packs and stage != "first":
         qa_packs.extend((
             {"runner": "macos-15-intel", "target": "x86_64-apple-darwin", "arch": "amd64"},
             {"runner": "macos-15", "target": "aarch64-apple-darwin", "arch": "arm64"},
@@ -243,7 +246,8 @@ def verification(stage, plan, *, inbox_qa=False):
         # client changes, so a companion-only change needs the Linux package.
         "core_native_linux": desktop_linux and companion and not desktop,
         "desktop_macos": desktop and stage != "first",
-        "inbox_qa": inbox_qa,
+        "inbox_qa": need_qa_packs,
+        "inbox_qa_distributed": inbox_qa,
         "inbox_qa_packs": qa_packs,
         "inbox_qa_images": qa_images,
         "inbox_qa_embedded": [entry for entry in qa_packs

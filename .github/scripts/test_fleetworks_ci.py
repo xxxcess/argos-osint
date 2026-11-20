@@ -40,6 +40,18 @@ class VerificationPassTests(unittest.TestCase):
                          ["x86_64-apple-darwin", "aarch64-apple-darwin"])
         self.assertFalse(second["web"])
 
+    def test_nightly_native_release_requires_only_its_embedded_packs_without_a_qa_diff(self):
+        plan = self.scopes("apps/fleetworks-desktop/src/startup.rs")
+        plan["inbox_qa"] = True
+        selected = ci.verification("standard", plan)
+        self.assertTrue(selected["inbox_qa"])
+        self.assertFalse(selected["inbox_qa_distributed"])
+        self.assertEqual([entry["target"] for entry in selected["inbox_qa_packs"]], [
+            "x86_64-unknown-linux-gnu", "x86_64-apple-darwin", "aarch64-apple-darwin",
+        ])
+        self.assertEqual(selected["inbox_qa_packs"], selected["inbox_qa_embedded"])
+        self.assertEqual(selected["inbox_qa_images"], [])
+
     def test_native_implementation_and_artwork_use_only_native_linux_first(self):
         plan = self.scopes(
             "apps/fleetworks-desktop/src/startup.rs",

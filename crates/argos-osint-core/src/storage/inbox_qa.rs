@@ -29,9 +29,7 @@ use super::tx::TxError;
 
 /// Shared Jobs dispatch pool, dedicated to QA.
 pub const POOL: &str = "assistant_qa";
-pub const REPLICA_LEASE_MS: i64 = 12_000;
-// Executor cancellation plus listener-side idle shutdown provides an independent reap bound.
-const REPLICA_REAP_MS: i64 = 45_000;
+const REPLICA_LEASE_MS: i64 = 12_000;
 const EXCHANGE_TTL_MS: i64 = 15 * 60_000;
 const MAX_ACTIVE_AGE_MS: i64 = 90_000;
 const MAX_ACTIVE: i64 = 16;
@@ -49,9 +47,11 @@ DEFINE FIELD IF NOT EXISTS admission ON inbox_qa_settings TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS changed_at ON inbox_qa_settings TYPE int DEFAULT 0;
 DEFINE TABLE IF NOT EXISTS inbox_qa_replica SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS generation ON inbox_qa_replica TYPE int;
+DEFINE FIELD IF NOT EXISTS owner ON inbox_qa_replica TYPE string DEFAULT '';
 DEFINE FIELD IF NOT EXISTS lease_until ON inbox_qa_replica TYPE int;
 DEFINE FIELD IF NOT EXISTS ready ON inbox_qa_replica TYPE bool DEFAULT false;
 DEFINE INDEX IF NOT EXISTS inbox_qa_replica_ready ON inbox_qa_replica FIELDS generation, lease_until;
+DEFINE INDEX IF NOT EXISTS inbox_qa_replica_owner ON inbox_qa_replica FIELDS owner;
 DEFINE TABLE IF NOT EXISTS inbox_qa_exchange SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS generation ON inbox_qa_exchange TYPE int;
 DEFINE FIELD IF NOT EXISTS owner ON inbox_qa_exchange TYPE string;
@@ -276,9 +276,65 @@ pub async fn set(
     }).await?.value)
 }
 
-/// Mark a warmed worker available for a short lease, fenced by enablement generation.
+#[derive(SurrealValue)]
+struct ReplicaRow {
+    owner: String,
+    generation: i64,
+    lease_until: i64,
+}
+
+/// Permission to open a model session, or to confirm an earlier session was reaped.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReplicaClaim {
+    Wait,
+    ConfirmReap,
+    Warm,
+}
+
+async fn replica_in(tx: &Tx, placement: &str) -> Result<Option<ReplicaRow>, TxError> {
+    let mut reply = jobs::run(
+        tx,
+        tx.query("SELECT owner,generation,lease_until FROM ONLY $worker")
+            .bind(("worker", jobs::rid("inbox_qa_replica", placement))),
+    )
+    .await?;
+    jobs::take(&mut reply, 0)
+}
+
+/// Reserve this placement. A previous session must be positively reaped before reusing it.
+pub async fn claim_replica(
+    repo: &Repository,
+    placement: &str,
+    owner: &str,
+    generation: i64,
+) -> Result<ReplicaClaim, TxError> {
+    Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| async move {
+        let state = settings_in(&tx).await?;
+        if state.generation != generation {
+            return Ok(ReplicaClaim::Wait);
+        }
+        let now = now_ms();
+        let current = replica_in(&tx, placement).await?;
+        let claim = match current {
+            Some(row) if row.lease_until > now && row.owner != owner => return Ok(ReplicaClaim::Wait),
+            Some(_) => ReplicaClaim::ConfirmReap,
+            None if state.enabled => ReplicaClaim::Warm,
+            None => return Ok(ReplicaClaim::Wait),
+        };
+        // This row shares the same write fence as a concurrent enablement transition.
+        jobs::run(&tx, tx.query(
+            "UPDATE inbox_qa_settings:current SET admission += 1 RETURN NONE;
+             UPSERT $worker SET generation=$generation, owner=$owner, ready=false, lease_until=$until RETURN NONE;",
+        ).bind(("worker", jobs::rid("inbox_qa_replica", placement))).bind(("owner", owner.to_owned()))
+          .bind(("generation", generation)).bind(("until", now + REPLICA_LEASE_MS))).await?;
+        Ok(claim)
+    }).await?.value)
+}
+
+/// Renew the exact open permit. An expired holder must confirm reap before warming again.
 pub async fn beat(
     repo: &Repository,
+    placement: &str,
     owner: &str,
     generation: i64,
     ready: bool,
@@ -288,19 +344,21 @@ pub async fn beat(
         if !state.enabled || state.generation != generation {
             return Ok(false);
         }
-        // Touch the same authority record used to serialize Off and admission.
+        let now = now_ms();
+        if !replica_in(&tx, placement).await?.is_some_and(|row| {
+            row.owner == owner && row.generation == generation && row.lease_until > now
+        }) {
+            return Ok(false);
+        }
         jobs::run(
             &tx,
             tx.query(
                 "UPDATE inbox_qa_settings:current SET admission += 1 RETURN NONE;
-             DELETE inbox_qa_replica WHERE lease_until <= $cutoff RETURN NONE;
-             UPSERT $worker SET generation=$generation, lease_until=$until, ready=$ready RETURN NONE;",
+             UPDATE $worker SET ready=$ready, lease_until=$until RETURN NONE;",
             )
-            .bind(("worker", jobs::rid("inbox_qa_replica", owner)))
-            .bind(("generation", generation))
+            .bind(("worker", jobs::rid("inbox_qa_replica", placement)))
             .bind(("ready", ready))
-            .bind(("cutoff", now_ms() - REPLICA_REAP_MS))
-            .bind(("until", now_ms() + REPLICA_LEASE_MS)),
+            .bind(("until", now + REPLICA_LEASE_MS)),
         )
         .await?;
         Ok(true)
@@ -309,35 +367,34 @@ pub async fn beat(
     .value)
 }
 
-/// Drop a presence record only after the corresponding model has been reaped.
-pub async fn forget_replica(repo: &Repository, owner: &str) -> Result<(), TxError> {
+/// Drop this holder's record only after the corresponding model is confirmed reaped.
+pub async fn forget_replica(
+    repo: &Repository,
+    placement: &str,
+    owner: &str,
+) -> Result<(), TxError> {
     repo.db()
-        .query("DELETE $worker RETURN NONE")
-        .bind(("worker", jobs::rid("inbox_qa_replica", owner)))
+        .query("DELETE $worker WHERE owner=$owner RETURN NONE")
+        .bind(("worker", jobs::rid("inbox_qa_replica", placement)))
+        .bind(("owner", owner.to_owned()))
         .await?
         .check()?;
     Ok(())
 }
 
-/// Whether a leased worker has loaded the current generation or still owes unload confirmation.
-pub async fn replica_present(
-    repo: &Repository,
-    generation: i64,
-    current_generation: bool,
-) -> Result<bool, TxError> {
+/// Whether any replica has a loaded model and currently holds an enablement lease.
+pub async fn replica_present(repo: &Repository, generation: i64) -> Result<bool, TxError> {
     let mut reply = repo.db().query(
-        "SELECT VALUE true FROM inbox_qa_replica WHERE (generation=$gen)=$current AND lease_until > $now AND ready=true LIMIT 1",
-    ).bind(("gen", generation)).bind(("current", current_generation)).bind(("now", now_ms()))
-     .await?.check()?;
+        "SELECT VALUE true FROM inbox_qa_replica WHERE generation=$gen AND lease_until>$now AND ready=true LIMIT 1",
+    ).bind(("gen", generation)).bind(("now", now_ms())).await?.check()?;
     Ok(!reply.take::<Vec<bool>>(0)?.is_empty())
 }
 
-/// Whether an enabled replica has yet to confirm unload within the reap bound.
+/// Report Stopping until the model supervisor confirms reap, including during a partition.
 pub async fn replica_stopping(repo: &Repository) -> Result<bool, TxError> {
     let mut reply = repo
         .db()
-        .query("SELECT VALUE true FROM inbox_qa_replica WHERE lease_until>$cutoff LIMIT 1")
-        .bind(("cutoff", now_ms() - REPLICA_REAP_MS))
+        .query("SELECT VALUE true FROM inbox_qa_replica LIMIT 1")
         .await?
         .check()?;
     Ok(!reply.take::<Vec<bool>>(0)?.is_empty())
@@ -495,9 +552,12 @@ pub async fn admit(
             if !jobs::take::<Vec<bool>>(&mut reply, 2)?.is_empty() {
                 return Err(abort("active"));
             }
-            if jobs::take::<i64>(&mut reply, 3)? >= MAX_ACTIVE.min(ready * 2)
-                || jobs::take::<i64>(&mut reply, 4)? >= MAX_PER_REGISTRATION
-                || jobs::take::<i64>(&mut reply, 5)? >= MAX_RETAINED
+            let active = jobs::take::<Option<i64>>(&mut reply, 3)?.ok_or_else(|| abort("invalid_store"))?;
+            let owner_retained = jobs::take::<Option<i64>>(&mut reply, 4)?.ok_or_else(|| abort("invalid_store"))?;
+            let total_retained = jobs::take::<Option<i64>>(&mut reply, 5)?.ok_or_else(|| abort("invalid_store"))?;
+            if active >= MAX_ACTIVE.min(ready * 2)
+                || owner_retained >= MAX_PER_REGISTRATION
+                || total_retained >= MAX_RETAINED
             {
                 return Err(abort("busy"));
             }
@@ -584,6 +644,12 @@ async fn append_in(
         }
         exchange.turn.findings.push(part.clone());
     }
+    // Serialize a publication with a generation transition or a placement handover.
+    jobs::run(
+        tx,
+        tx.query("UPDATE inbox_qa_settings:current SET admission += 1 RETURN NONE"),
+    )
+    .await?;
     let terminal = state.is_terminal();
     exchange.turn.cursor += 1;
     exchange.turn.state = state;
@@ -663,10 +729,13 @@ async fn live_exchange_in(
         return Ok(None);
     };
     let mut live = jobs::run(tx, tx.query(
-        "SELECT VALUE true FROM ONLY $task WHERE lease_owner=$owner AND lease_epoch=$lease AND lease_until>time::now() AND state='running' AND !job.cancel_requested;",
+        "SELECT VALUE true FROM ONLY $task WHERE lease_owner=$owner AND lease_epoch=$lease AND lease_until>time::now() AND state='running' AND !job.cancel_requested;
+         SELECT VALUE true FROM inbox_qa_replica WHERE owner=$owner AND generation=$generation AND lease_until>$now AND ready=true LIMIT 1;",
     ).bind(("task", jobs::rid("task", &task.id))).bind(("owner", task.lease_owner.clone()))
-     .bind(("lease", task.lease_epoch))).await?;
-    if jobs::take::<Option<bool>>(&mut live, 0)? != Some(true) {
+     .bind(("lease", task.lease_epoch)).bind(("generation", state.generation)).bind(("now", now_ms()))).await?;
+    if jobs::take::<Option<bool>>(&mut live, 0)? != Some(true)
+        || jobs::take::<Vec<bool>>(&mut live, 1)?.is_empty()
+    {
         return Ok(None);
     }
     let exchange = decode(&row.payload)?;

@@ -21,6 +21,9 @@ on:
       release-version:
         type: string
         default: ""
+      release-asset:
+        type: boolean
+        default: false
 
 permissions:
   actions: read
@@ -62,6 +65,16 @@ jobs:
           artifact-ids: ${{ steps.pack.outputs.id }}
           path: ${{ runner.temp }}/inbox-qa-pack
           digest-mismatch: error
+      - &pack_layout
+        name: Require the downloaded archive and digest receipt at the artifact root
+        shell: bash
+        run: |
+          set -euo pipefail
+          pack="$RUNNER_TEMP/inbox-qa-pack"
+          if [[ ! -f "$pack/Fleetworks-Inbox-QA-Pack-$QA_TARGET.tar.gz" || ! -f "$pack/digests.json" ]]; then
+            echo '::error::The verified Inbox QA artifact must contain its archive and digest receipt at the root'
+            exit 1
+          fi
       - name: Select the exact Native app package
         id: app
         env:
@@ -91,6 +104,7 @@ jobs:
           APP_ATTEMPT: ${{ steps.app.outputs.attempt }}
           PROFILE: ${{ steps.app.outputs.profile }}
           DEPOT_NATIVE_RELEASE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/nightly' && vars.DEPOT_NIGHTLY_NATIVE_ENABLED == 'true' }}
+          QA_NIGHTLY_RELEASE: ${{ inputs.release-asset && github.event_name == 'push' && github.ref == 'refs/heads/nightly' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -137,6 +151,31 @@ jobs:
             --archive "$pack/Fleetworks-Inbox-QA-Pack-$QA_TARGET.tar.gz" --digests "$pack/digests.json" \
             | tee "$evidence/embedded-$QA_TARGET.json"
           cp "$pack/digests.json" "$evidence/pack-digests-$QA_TARGET.json"
+          if [[ "$QA_NIGHTLY_RELEASE" == true ]]; then
+            test "$PROFILE" = release
+            test -n "$RELEASE_VERSION"
+            archive="Fleetworks-Inbox-QA-Pack-$QA_TARGET.tar.gz"
+            release="$RUNNER_TEMP/inbox-qa-release"
+            mkdir -p "$release"
+            jq -e --arg target "$QA_TARGET" \
+              '.runtime == "embedded-stdio" and .target == $target and .model_pid_count == 1 and .terminal_events == 1' \
+              "$evidence/embedded-$QA_TARGET.json" >/dev/null
+            jq --arg archive "$archive" --arg version "$RELEASE_VERSION" --arg native "$digest" '
+              {target, source_sha, model_revision, manifest_sha256, archive_sha256,
+               archive: $archive, version: $version, native_archive_sha256: $native,
+               runtime: "embedded-stdio", status: "passed"}
+            ' "$pack/digests.json" > "$release/$archive.digests.json"
+            ln "$pack/$archive" "$release/$archive"
+          fi
+      - name: Stage the smoke-verified pack for the immutable nightly release
+        if: inputs.release-asset && github.event_name == 'push' && github.ref == 'refs/heads/nightly'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: Fleetworks-Inbox-QA-Embedded-Release-${{ inputs.target }}-${{ inputs.head }}-${{ github.run_id }}.${{ github.run_attempt }}
+          path: ${{ runner.temp }}/inbox-qa-release/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
       - name: Retain Embedded runtime evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -162,6 +201,7 @@ jobs:
       - *checkout
       - *pack_id
       - *download_pack
+      - *pack_layout
       - name: Install pinned Depot CLI
         uses: depot/setup-action@91bc8495a33ebfc504ffc89e5674379ccf23c29c # v1
         with:

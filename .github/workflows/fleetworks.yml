@@ -105,7 +105,8 @@ jobs:
       inbox_qa_packs: ${{ steps.verification.outputs.inbox_qa_packs }}
       inbox_qa_images: ${{ steps.verification.outputs.inbox_qa_images }}
       inbox_qa_embedded: ${{ steps.verification.outputs.inbox_qa_embedded }}
-      inbox_qa_depot: ${{ steps.verification.outputs.inbox_qa == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+      inbox_qa_distributed: ${{ steps.verification.outputs.inbox_qa_distributed }}
+      inbox_qa_depot: ${{ steps.verification.outputs.inbox_qa_distributed == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
       web: ${{ steps.verification.outputs.web }}
       web_dev: ${{ steps.verification.outputs.web_dev }}
       images: ${{ steps.verification.outputs.images }}
@@ -499,6 +500,7 @@ jobs:
       arch: ${{ matrix.arch }}
       runtime: embedded
       release-version: ${{ needs.scope.outputs.publish == 'true' && needs.scope.outputs.release_version || '' }}
+      release-asset: ${{ fromJson(needs.scope.outputs.release_plan).inbox_qa == true }}
 
   inbox_qa_distributed:
     name: Inbox QA Distributed via Depot / Linux ${{ matrix.arch }}
@@ -734,6 +736,7 @@ jobs:
           DEPOT_IMAGES_RESULT: ${{ needs.images_depot.result }}
           NATIVE_EMBEDDED_IMAGE_RESULT: ${{ needs.native_embedded_image.result }}
           INBOX_QA_SELECTED: ${{ needs.scope.outputs.inbox_qa }}
+          INBOX_QA_DISTRIBUTED_AFFECTED: ${{ needs.scope.outputs.inbox_qa_distributed }}
           INBOX_QA_DEPOT_SELECTED: ${{ needs.scope.outputs.inbox_qa_depot }}
           INBOX_QA_PACKS_RESULT: ${{ needs.inbox_qa_packs.result }}
           INBOX_QA_EMBEDDED_RESULT: ${{ needs.inbox_qa_embedded.result }}
@@ -792,7 +795,7 @@ jobs:
           verify "Inbox QA packs" "$INBOX_QA_SELECTED" "$INBOX_QA_PACKS_RESULT" || failed=1
           verify "Inbox QA Embedded" "$INBOX_QA_SELECTED" "$INBOX_QA_EMBEDDED_RESULT" || failed=1
           verify "Inbox QA Distributed (Depot)" "$INBOX_QA_DEPOT_SELECTED" "$INBOX_QA_DISTRIBUTED_RESULT" || failed=1
-          if [[ "$INBOX_QA_SELECTED:$INBOX_QA_DEPOT_SELECTED" == true:false ]]; then
+          if [[ "$INBOX_QA_DISTRIBUTED_AFFECTED:$INBOX_QA_DEPOT_SELECTED" == true:false ]]; then
             printf 'Inbox QA Distributed was skipped because the fork cannot authenticate to Depot.\n' >> "$GITHUB_STEP_SUMMARY"
           fi
           case "$REVIEW_IMAGE_SKIP_REASON" in
@@ -972,6 +975,25 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: Fleetworks-Atlas-BERT-Worker-Bundle-Linux-*-${{ needs.scope.outputs.head }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release
+          digest-mismatch: error
+      - name: Select the three smoke-verified nightly Inbox QA pack pairs
+        if: fromJson(needs.scope.outputs.release_plan).inbox_qa == true
+        id: inbox_qa_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B .github/scripts/inbox_qa_artifact.py \
+            --family Fleetworks-Inbox-QA-Embedded-Release-x86_64-unknown-linux-gnu \
+            --family Fleetworks-Inbox-QA-Embedded-Release-x86_64-apple-darwin \
+            --family Fleetworks-Inbox-QA-Embedded-Release-aarch64-apple-darwin
+      - name: Download the exact smoke-verified Inbox QA pack pairs by ID
+        if: fromJson(needs.scope.outputs.release_plan).inbox_qa == true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ steps.inbox_qa_release.outputs.ids }}
           path: ${{ runner.temp }}/release
           digest-mismatch: error
       - name: Promote only the verified source plan

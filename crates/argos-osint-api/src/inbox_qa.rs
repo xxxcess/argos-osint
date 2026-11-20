@@ -260,7 +260,7 @@ async fn settings_value(
     setting: store::Setting,
 ) -> Result<QaSettings, ApiError> {
     let phase = if setting.enabled {
-        if store::replica_present(&state.repo, setting.generation, true)
+        if store::replica_present(&state.repo, setting.generation)
             .await
             .map_err(storage_error)?
         {
@@ -341,7 +341,7 @@ pub(crate) async fn submit_request(
             "Backend inference is off",
         ));
     }
-    if !store::replica_present(&state.repo, setting.generation, true)
+    if !store::replica_present(&state.repo, setting.generation)
         .await
         .map_err(storage_error)?
     {

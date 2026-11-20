@@ -45,7 +45,6 @@ use crate::State;
 const SETTINGS_REFRESH: f64 = 5.0;
 const MIN_EVENT_INTERVAL: f64 = 0.2;
 const COMPOSER: &str = "inbox-qa-composer";
-const COMPOSER_INPUT: &str = "inbox-qa-composer/scroll/input";
 const SETTINGS_CONTROL: &str = "inbox-qa-toggle";
 const REPLY: &str = "chat-message-inbox-qa-answer";
 
@@ -501,7 +500,7 @@ impl State {
                     qa.retry_count = 0;
                     if self.inbox.open {
                         show_reply(tx);
-                        tx.focus(COMPOSER_INPUT, tx.focus_visible());
+                        tx.focus(COMPOSER, tx.focus_visible());
                     }
                 } else {
                     qa.resume = true;
@@ -517,7 +516,7 @@ impl State {
                     qa.settings_loaded = false;
                 } else if self.inbox.open {
                     show_reply(tx);
-                    tx.focus(COMPOSER_INPUT, tx.focus_visible());
+                    tx.focus(COMPOSER, tx.focus_visible());
                 }
             }
             Reply::Submit(Err(_)) => {
@@ -535,7 +534,7 @@ impl State {
                 if self.inbox.open && qa.latest.is_some() {
                     show_reply(tx);
                     if accepted_pending {
-                        tx.focus(COMPOSER_INPUT, tx.focus_visible());
+                        tx.focus(COMPOSER, tx.focus_visible());
                     }
                 }
             }
@@ -564,7 +563,7 @@ impl State {
                 qa.adopt(Some(turn));
                 qa.status = None;
                 if self.inbox.open {
-                    tx.focus(COMPOSER_INPUT, true);
+                    tx.focus(COMPOSER, true);
                 }
             }
             Reply::Latest(Err(error)) | Reply::Events(Err(error)) | Reply::Cancel(Err(error)) => {
@@ -891,7 +890,7 @@ pub(crate) fn exchange(state: &State, kit: &Kit) -> Option<El> {
             .child(chat_ui::bubble(&question, kit))
             .child(
                 chat_ui::bubble(&answer, kit)
-                    .role("status")
+                    .key("inbox-qa-live-answer")
                     .live_region(LiveRegion::Polite),
             ),
     )
@@ -1117,6 +1116,16 @@ mod tests {
         runtime
     }
 
+    fn accessibility_nodes_with_key(node: &serde_json::Value, key: &str) -> usize {
+        usize::from(node["key"] == key)
+            + node["children"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|child| accessibility_nodes_with_key(child, key))
+                .sum::<usize>()
+    }
+
     #[test]
     fn qa_drawer_pins_composer_and_updates_one_answer_at_both_window_sizes() {
         for size in [(640.0, 480.0), (1280.0, 800.0)] {
@@ -1145,9 +1154,12 @@ mod tests {
             });
             runtime.frame(1.25);
             assert!(runtime.find("inbox-qa-stop").is_none());
-            let tree = runtime.accessibility_json().to_string();
-            assert_eq!(tree.matches("Assistant message").count(), 1);
-            assert!(tree.contains(FINDING) && tree.contains("Stopped"));
+            let tree = runtime.accessibility_json();
+            assert_eq!(accessibility_nodes_with_key(&tree, REPLY), 1);
+            let rendered = tree.to_string();
+            assert_eq!(rendered.matches("Assistant message").count(), 1);
+            assert!(rendered.contains("live-polite"));
+            assert!(rendered.contains(FINDING) && rendered.contains("Stopped"));
             assert_eq!(runtime.state.inbox.unread(), unread);
 
             runtime.update(|state, _| {
@@ -1169,12 +1181,15 @@ mod tests {
     #[test]
     fn qa_composer_preserves_shift_enter_and_ime_commit() {
         let mut runtime = active_drawer((640.0, 480.0));
-        runtime.update(|_, tx| tx.focus(COMPOSER_INPUT, true));
+        runtime.update(|_, tx| tx.focus(COMPOSER, true));
         runtime.frame(0.75);
+        assert!(runtime.state.inbox_qa.draft.focused);
         runtime.key(KeyEvent {
             key: Key::Text("Health".into()),
             mods: Mods::default(),
         });
+        runtime.frame(0.875);
+        assert_eq!(runtime.state.inbox_qa.draft.text, "Health");
         runtime.key(KeyEvent {
             key: Key::Enter,
             mods: Mods {
@@ -1244,6 +1259,7 @@ mod tests {
         });
         runtime.frame(1.5);
         assert_eq!(runtime.state.inbox_qa.draft.text, draft);
+        assert!(runtime.state.inbox_qa.draft.focused);
         assert!(runtime.state.inbox_qa.pending.is_none());
         assert!(runtime.accessibility_json().to_string().contains(FINDING));
         assert!(runtime.find("inbox-qa-send").is_some());

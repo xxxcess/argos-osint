@@ -29,26 +29,28 @@ def find_artifact(artifacts, family, revision, run_id, max_attempt):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--family", required=True)
+    parser.add_argument("--family", required=True, action="append")
     options = parser.parse_args()
     revision = os.environ["FLEETWORKS_HEAD"]
     run_id = os.environ["GITHUB_RUN_ID"]
     attempt = int(os.environ["GITHUB_RUN_ATTEMPT"])
     if not re.fullmatch(r"(?!0{40})[a-f0-9]{40}", revision):
         raise ValueError("Artifact selection needs an exact source SHA")
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+", options.family) or not run_id.isdecimal():
+    if not all(re.fullmatch(r"[A-Za-z0-9_.-]+", family) for family in options.family) or not run_id.isdecimal():
         raise ValueError("Invalid Actions run or artifact family")
     pages = json.loads(subprocess.check_output([
         "gh", "api", "--paginate", "--slurp",
         f"repos/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{run_id}/artifacts?per_page=100",
     ], timeout=60, text=True))
-    identity, selected_attempt = find_artifact(
-        (artifact for page in pages for artifact in page["artifacts"]),
-        options.family, revision, run_id, attempt,
-    )
+    artifacts = [artifact for page in pages for artifact in page["artifacts"]]
+    selected = [find_artifact(artifacts, family, revision, run_id, attempt) for family in options.family]
     with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
-        print(f"id={identity}", file=output)
-        print(f"attempt={selected_attempt}", file=output)
+        if len(selected) == 1:
+            identity, selected_attempt = selected[0]
+            print(f"id={identity}", file=output)
+            print(f"attempt={selected_attempt}", file=output)
+        else:
+            print("ids=" + ",".join(str(identity) for identity, _ in selected), file=output)
 
 
 if __name__ == "__main__":

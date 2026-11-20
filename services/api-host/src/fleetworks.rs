@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::env;
 use std::fs::File;
 use std::io::Read;
@@ -307,25 +308,12 @@ pub(crate) fn internal_access_with_token(
     service: &str,
     token_key: &str,
 ) -> Result<(IpAddr, NetworkPolicy)> {
-    let bind_key = format!("FLEETWORKS_{service}_BIND");
-    let host_key = format!("FLEETWORKS_{service}_ALLOWED_HOSTS");
-    let bind = value(&bind_key, "127.0.0.1")?
-        .parse()
-        .with_context(|| format!("invalid {bind_key}"))?;
-    let hosts = split_csv(&env::var(&host_key).with_context(|| format!("{host_key} is required"))?);
-    let token = read_secret(token_key)?;
-    let scope = env::var("FLEETWORKS_ACCESS_SCOPE_ID")
-        .context("FLEETWORKS_ACCESS_SCOPE_ID is required for private service authority")?;
-    let epoch = env::var("FLEETWORKS_ACCESS_EPOCH")
-        .context("FLEETWORKS_ACCESS_EPOCH is required for private service authority")?;
-    use fleetworks_contracts::context::CredentialPurpose;
     use fleetworks_contracts::context::Permission;
-    let credential = argos_osint_api::ScopedCredential::new(
+    internal_access_with_identity(
+        service,
+        &read_secret(token_key)?,
         format!("internal-{}", service.to_ascii_lowercase()),
-        scope,
-        epoch,
-        CredentialPurpose::InternalService,
-        [
+        BTreeSet::from([
             Permission::ReadBackend,
             Permission::RegisterWorkstation,
             Permission::RebindWorkstation,
@@ -337,10 +325,56 @@ pub(crate) fn internal_access_with_token(
             Permission::ReadWorkstationActivity,
             Permission::RetryJob,
             Permission::CancelJob,
-        ]
-        .into_iter()
-        .collect(),
-        &token,
+        ]),
+    )
+}
+
+/// The optional QA executor credential reaches only the QA wake-up route.
+pub(crate) fn qa_jobs_access() -> Result<Option<NetworkPolicy>> {
+    use fleetworks_contracts::context::Permission;
+
+    if env::var_os("FLEETWORKS_QA_JOBS_TOKEN").is_none()
+        && env::var_os("FLEETWORKS_QA_JOBS_TOKEN_FILE").is_none()
+    {
+        return Ok(None);
+    }
+    let qa_token = read_secret("FLEETWORKS_QA_JOBS_TOKEN")?;
+    ensure!(
+        qa_token != read_secret("FLEETWORKS_JOBS_TOKEN")?,
+        "Inbox QA requires a distinct Jobs credential"
+    );
+    let (_, policy) = internal_access_with_identity(
+        "JOBS",
+        &qa_token,
+        "internal-jobs-qa".to_owned(),
+        BTreeSet::from([Permission::SubmitInteractive]),
+    )?;
+    Ok(Some(policy))
+}
+
+fn internal_access_with_identity(
+    service: &str,
+    token: &str,
+    identity: String,
+    permissions: BTreeSet<fleetworks_contracts::context::Permission>,
+) -> Result<(IpAddr, NetworkPolicy)> {
+    let bind_key = format!("FLEETWORKS_{service}_BIND");
+    let host_key = format!("FLEETWORKS_{service}_ALLOWED_HOSTS");
+    let bind = value(&bind_key, "127.0.0.1")?
+        .parse()
+        .with_context(|| format!("invalid {bind_key}"))?;
+    let hosts = split_csv(&env::var(&host_key).with_context(|| format!("{host_key} is required"))?);
+    let scope = env::var("FLEETWORKS_ACCESS_SCOPE_ID")
+        .context("FLEETWORKS_ACCESS_SCOPE_ID is required for private service authority")?;
+    let epoch = env::var("FLEETWORKS_ACCESS_EPOCH")
+        .context("FLEETWORKS_ACCESS_EPOCH is required for private service authority")?;
+    let credential = argos_osint_api::ScopedCredential::new(
+        identity,
+        scope,
+        epoch,
+        fleetworks_contracts::context::CredentialPurpose::InternalService,
+        permissions,
+        token,
     )?;
     Ok((
         bind,

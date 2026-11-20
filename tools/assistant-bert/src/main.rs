@@ -228,11 +228,20 @@ fn receive_commands(stopping: Arc<AtomicBool>) -> io::Result<mpsc::Receiver<QaWo
         .name("qa-input".into())
         .spawn(move || {
             let mut input = BufReader::new(io::stdin().lock());
-            while let Ok(Some(command)) =
-                frame::read::<QaWorkerCommand>(&mut input, QA_MAX_FRAME_BYTES)
-            {
-                if matches!(command, QaWorkerCommand::Shutdown) || sender.send(command).is_err() {
-                    break;
+            loop {
+                match frame::read::<QaWorkerCommand>(&mut input, QA_MAX_FRAME_BYTES) {
+                    Ok(Some(QaWorkerCommand::Shutdown)) => break,
+                    Ok(Some(command)) => {
+                        if sender.try_send(command).is_err() {
+                            break;
+                        }
+                    }
+                    // A disconnected supervisor cannot reap a wedged native
+                    // prediction. Exit the process independently of that thread.
+                    _ => {
+                        // SAFETY: This private worker has no durable writes to flush.
+                        unsafe { libc::_exit(1) }
+                    }
                 }
             }
             stopping.store(true, Ordering::Release);
@@ -262,9 +271,9 @@ fn run() -> Result<()> {
         .ok_or_else(|| anyhow!("missing QA model directory"))?;
     ensure!(args.next().is_none(), "unexpected QA worker arguments");
 
-    let model = load_model(&dir)?;
     let stopping = Arc::new(AtomicBool::new(false));
     let commands = receive_commands(stopping.clone())?;
+    let model = load_model(&dir)?;
     let mut output = BufWriter::new(io::stdout().lock());
     ready(&mut output)?;
     for command in commands {

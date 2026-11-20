@@ -85,7 +85,7 @@ jobs:
           set -euo pipefail
           wheel="$(python3 -B scripts/fleetworks_qa_ci.py wheel --target "$QA_TARGET")"
           python3 -m pip install --only-binary=:all: "$wheel" 'numpy==1.26.4'
-          output="$RUNNER_TEMP/inbox-qa-pack"
+          output="$RUNNER_TEMP/inbox-qa-pack-build"
           python3 -B scripts/fleetworks_qa_ci.py build --target "$QA_TARGET" --output "$output"
           RECEIPT="$output/digests.json" python3 - <<'PY'
           from pathlib import Path
@@ -101,14 +101,17 @@ jobs:
               print(f"\nArchive SHA-256 `{value['archive_sha256']}`", file=summary)
               print(f"\nManifest SHA-256 `{value['manifest_sha256']}`", file=summary)
           PY
+          # A single directory input is translated consistently into the
+          # Debian job container. Stage only the two public files.
+          stage="$RUNNER_TEMP/inbox-qa-pack"
+          mkdir "$stage"
+          mv "$output/Fleetworks-Inbox-QA-Pack-$QA_TARGET.tar.gz" "$output/digests.json" "$stage/"
       - &upload
         name: Retain the verified offline pack and digest receipt
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: Fleetworks-Inbox-QA-Pack-${{ inputs.target }}-${{ inputs.head }}-${{ github.run_id }}.${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/inbox-qa-pack/Fleetworks-Inbox-QA-Pack-*.tar.gz
-            ${{ runner.temp }}/inbox-qa-pack/digests.json
+          path: ${{ runner.temp }}/inbox-qa-pack/
           if-no-files-found: error
           compression-level: 0
           retention-days: 14

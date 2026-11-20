@@ -1,5 +1,6 @@
 //! Private Unix socket listener. LibTorch is linked only by the child executable.
 
+#[allow(dead_code)]
 #[path = "../frame.rs"]
 mod frame;
 #[allow(dead_code)]
@@ -11,6 +12,8 @@ use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io;
+use std::io::Read;
+use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::FileTypeExt;
@@ -29,17 +32,26 @@ use std::process::Stdio;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::anyhow;
 use anyhow::ensure;
 use anyhow::Result;
+use serde::de::DeserializeOwned;
 
+use protocol::qa_frame_len;
 use protocol::QaWorkerCommand;
+use protocol::QaWorkerEvent;
 use protocol::QaWorkerReply;
+use protocol::QA_MAX_FRAME_BYTES;
+use protocol::QA_MODEL_REVISION;
+use protocol::QA_WORKER_PROTOCOL;
 
 const INITIAL_FRAME_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_HANDSHAKE_BYTES: usize = 128;
-const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const EXECUTOR_LEASE: Duration = Duration::from_secs(30);
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
+const HEADER_BYTES: usize = 4;
 const POLL_MILLIS: libc::c_int = 100;
 
 static STOP: AtomicBool = AtomicBool::new(false);
@@ -117,56 +129,303 @@ fn claim_socket(path: &Path) -> Result<UnixListener> {
     Ok(listener)
 }
 
-fn poll_fd(fd: libc::c_int, events: libc::c_short) -> io::Result<libc::c_short> {
-    let mut descriptor = libc::pollfd {
-        fd,
+fn interests(stream: &impl AsRawFd, events: libc::c_short) -> libc::pollfd {
+    libc::pollfd {
+        fd: stream.as_raw_fd(),
         events,
         revents: 0,
-    };
-    // SAFETY: poll sees one initialized writable pollfd for the duration of the call.
-    if unsafe { libc::poll(&mut descriptor, 1, POLL_MILLIS) } < 0 {
+    }
+}
+
+fn poll(descriptors: &mut [libc::pollfd]) -> io::Result<()> {
+    // SAFETY: poll sees every initialized writable pollfd for the duration of the call.
+    if unsafe {
+        libc::poll(
+            descriptors.as_mut_ptr(),
+            descriptors.len() as libc::nfds_t,
+            POLL_MILLIS,
+        )
+    } < 0
+    {
         let error = io::Error::last_os_error();
         if error.kind() != io::ErrorKind::Interrupted {
             return Err(error);
         }
     }
-    Ok(descriptor.revents)
+    Ok(())
 }
 
 struct ModelChild(Child);
 
-impl Drop for ModelChild {
-    fn drop(&mut self) {
-        if !matches!(self.0.try_wait(), Ok(Some(_))) {
+impl ModelChild {
+    fn reap(&mut self) -> io::Result<()> {
+        if self.0.try_wait()?.is_none() {
             if let Ok(pid) = i32::try_from(self.0.id()) {
                 // SAFETY: An unreaped child owns its PID and was spawned as process group leader.
                 unsafe { libc::kill(-pid, libc::SIGKILL) };
             }
             let _ = self.0.kill();
         }
-        let _ = self.0.wait();
+        self.0.wait()?;
+        Ok(())
     }
 }
 
-fn serve(mut stream: UnixStream, worker: &Path, model: &Path, libraries: &Path) -> Result<()> {
-    stream.set_nonblocking(false)?;
-    stream.set_read_timeout(Some(INITIAL_FRAME_TIMEOUT))?;
-    stream.set_write_timeout(Some(INITIAL_FRAME_TIMEOUT))?;
-    match frame::read::<QaWorkerCommand>(&mut stream, MAX_HANDSHAKE_BYTES)? {
-        Some(QaWorkerCommand::Shutdown) => {
-            // An idle socket proves the previous child was already reaped.
-            frame::write(&mut stream, &QaWorkerReply::Stopped)?;
+impl Drop for ModelChild {
+    fn drop(&mut self) {
+        let _ = self.reap();
+    }
+}
+
+/// Assemble at most one bounded frame from a nonblocking socket.
+struct Incoming {
+    bytes: Vec<u8>,
+    received: usize,
+}
+
+impl Default for Incoming {
+    fn default() -> Self {
+        Self {
+            bytes: vec![0; HEADER_BYTES],
+            received: 0,
+        }
+    }
+}
+
+impl Incoming {
+    fn read<T: DeserializeOwned>(
+        &mut self,
+        mut stream: &UnixStream,
+        limit: usize,
+    ) -> Result<Option<(T, Outgoing)>> {
+        loop {
+            match stream.read(&mut self.bytes[self.received..]) {
+                Ok(0) => return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into()),
+                Ok(count) => self.received += count,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error.into()),
+            }
+            if self.received != self.bytes.len() {
+                continue;
+            }
+            if self.received == HEADER_BYTES {
+                let size = qa_frame_len(self.bytes[..HEADER_BYTES].try_into()?)?;
+                ensure!(size <= limit, "QA listener frame exceeds its limit");
+                self.bytes.resize(HEADER_BYTES + size, 0);
+                continue;
+            }
+            let bytes = std::mem::take(self).bytes;
+            let value = serde_json::from_slice(&bytes[HEADER_BYTES..])
+                .map_err(|_| anyhow!("invalid QA listener frame"))?;
+            return Ok(Some((value, Outgoing { bytes, sent: 0 })));
+        }
+    }
+}
+
+struct Outgoing {
+    bytes: Vec<u8>,
+    sent: usize,
+}
+
+impl Outgoing {
+    fn write(&mut self, mut stream: &UnixStream) -> io::Result<bool> {
+        while self.sent < self.bytes.len() {
+            match stream.write(&self.bytes[self.sent..]) {
+                Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero)),
+                Ok(count) => self.sent += count,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(true)
+    }
+}
+
+fn flush(pending: &mut Option<Outgoing>, stream: &UnixStream) -> io::Result<()> {
+    if let Some(packet) = pending {
+        if packet.write(stream)? {
+            *pending = None;
+        }
+    }
+    Ok(())
+}
+
+fn opening_command(stream: &UnixStream) -> Result<QaWorkerCommand> {
+    let until = Instant::now() + INITIAL_FRAME_TIMEOUT;
+    let mut incoming = Incoming::default();
+    while !STOP.load(Ordering::Relaxed) && Instant::now() < until {
+        if let Some((command, _)) = incoming.read(stream, MAX_HANDSHAKE_BYTES)? {
+            return Ok(command);
+        }
+        poll(&mut [interests(stream, libc::POLLIN)])?;
+    }
+    Err(anyhow!("QA executor handshake expired"))
+}
+
+fn confirm_stopped(stream: &UnixStream) -> Result<()> {
+    let mut bytes = Vec::new();
+    frame::write(&mut bytes, &QaWorkerReply::Stopped)?;
+    let mut stopped = Outgoing { bytes, sent: 0 };
+    let until = Instant::now() + INITIAL_FRAME_TIMEOUT;
+    while Instant::now() < until {
+        if stopped.write(stream)? {
             return Ok(());
         }
-        Some(QaWorkerCommand::Open) => {}
+        poll(&mut [interests(stream, libc::POLLOUT)])?;
+    }
+    Err(anyhow!("QA unload confirmation expired"))
+}
+
+#[derive(Eq, PartialEq)]
+enum Phase {
+    Starting,
+    Idle,
+    Pinging,
+    Answering,
+    Stopping,
+}
+
+fn relay(
+    executor: &UnixStream,
+    model: &UnixStream,
+    child: &mut ModelChild,
+    lease: Duration,
+    reply: &mut Option<Outgoing>,
+) -> Result<()> {
+    let mut commands = Incoming::default();
+    let mut replies = Incoming::default();
+    let mut outbound = None;
+    let mut phase = Phase::Starting;
+    let mut expires = Instant::now() + lease;
+    while !STOP.load(Ordering::Relaxed) && Instant::now() < expires {
+        if child.0.try_wait()?.is_some() {
+            break;
+        }
+        if phase != Phase::Stopping {
+            if let Some((command, packet)) = commands.read(executor, QA_MAX_FRAME_BYTES)? {
+                let now = Instant::now();
+                if now >= expires {
+                    break;
+                }
+                match command {
+                    QaWorkerCommand::Ping if phase == Phase::Idle => {
+                        phase = Phase::Pinging;
+                        expires = now + lease;
+                    }
+                    QaWorkerCommand::Ask { request } if phase == Phase::Idle => {
+                        request.validate()?;
+                        phase = Phase::Answering;
+                        expires = now + lease;
+                    }
+                    QaWorkerCommand::Shutdown => {
+                        phase = Phase::Stopping;
+                        expires = expires.min(now + SHUTDOWN_GRACE);
+                        if outbound.is_some() {
+                            // A partly written request cannot be replaced with a Shutdown frame.
+                            break;
+                        }
+                    }
+                    _ => return Err(anyhow!("unexpected QA executor command")),
+                }
+                outbound = Some(packet);
+            }
+        }
+        flush(&mut outbound, model)?;
+        flush(reply, executor)?;
+        if reply.is_none() {
+            if let Some((value, packet)) =
+                replies.read::<QaWorkerReply>(model, QA_MAX_FRAME_BYTES)?
+            {
+                match (value, &phase) {
+                    (_, Phase::Stopping) => {}
+                    (
+                        QaWorkerReply::Ready {
+                            protocol,
+                            model_revision,
+                        },
+                        Phase::Starting | Phase::Pinging,
+                    ) if protocol == QA_WORKER_PROTOCOL && model_revision == QA_MODEL_REVISION => {
+                        phase = Phase::Idle;
+                        *reply = Some(packet);
+                    }
+                    (
+                        QaWorkerReply::Event {
+                            event: QaWorkerEvent::Complete { .. },
+                        },
+                        Phase::Answering,
+                    ) => {
+                        phase = Phase::Idle;
+                        *reply = Some(packet);
+                    }
+                    (
+                        QaWorkerReply::Event {
+                            event: QaWorkerEvent::Finding { .. },
+                        },
+                        Phase::Answering,
+                    ) => {
+                        *reply = Some(packet);
+                    }
+                    _ => return Err(anyhow!("unexpected QA model reply")),
+                }
+            }
+        }
+        let mut executor_events = if phase == Phase::Stopping {
+            0
+        } else {
+            libc::POLLIN
+        };
+        if reply.is_some() {
+            executor_events |= libc::POLLOUT;
+        }
+        let mut model_events = if reply.is_none() { libc::POLLIN } else { 0 };
+        if outbound.is_some() {
+            model_events |= libc::POLLOUT;
+        }
+        let mut descriptors = [
+            interests(executor, executor_events),
+            interests(model, model_events),
+        ];
+        poll(&mut descriptors)?;
+        if descriptors[0].revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn supervise(
+    stream: &UnixStream,
+    model: &UnixStream,
+    child: &mut ModelChild,
+    lease: Duration,
+) -> Result<()> {
+    let mut reply = None;
+    let relayed = relay(stream, model, child, lease, &mut reply);
+    child.reap()?;
+    if reply.is_none_or(|packet| packet.sent == 0) {
+        // A partially written frame makes this connection unusable. A fresh executor may query
+        // Shutdown on the idle listener and will still get confirmation after reaping.
+        confirm_stopped(stream)?;
+    }
+    relayed
+}
+
+fn serve(stream: UnixStream, worker: &Path, model: &Path, libraries: &Path) -> Result<()> {
+    stream.set_nonblocking(true)?;
+    match opening_command(&stream)? {
+        QaWorkerCommand::Shutdown => return confirm_stopped(&stream),
+        QaWorkerCommand::Open => {}
         _ => return Err(anyhow!("invalid QA executor handshake")),
     }
 
-    // Inactivity ends the child session. A valid executor renews it with bounded Ping frames
-    // while its own enablement lease is current, even when there is no question to answer.
-    stream.set_read_timeout(Some(IDLE_TIMEOUT))?;
-    let input = OwnedFd::from(stream.try_clone()?);
-    let output = OwnedFd::from(stream.try_clone()?);
+    // Relay rather than passing the executor FD to the worker so a stuck worker cannot hold
+    // its own lease open. Each direction holds at most one bounded frame awaiting delivery.
+    let (model_io, child_io) = UnixStream::pair()?;
+    model_io.set_nonblocking(true)?;
+    let input = OwnedFd::from(child_io.try_clone()?);
+    let output = OwnedFd::from(child_io);
     let library_variable = if cfg!(target_os = "macos") {
         "DYLD_LIBRARY_PATH"
     } else {
@@ -187,19 +446,7 @@ fn serve(mut stream: UnixStream, worker: &Path, model: &Path, libraries: &Path) 
             .process_group(0)
             .spawn()?,
     );
-    while !STOP.load(Ordering::Relaxed) {
-        if child.0.try_wait()?.is_some() {
-            // Only the listener confirms after it has collected the child's status.
-            frame::write(&mut stream, &QaWorkerReply::Stopped)?;
-            return Ok(());
-        }
-        let observed = poll_fd(stream.as_raw_fd(), 0)?;
-        if observed & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
-            break;
-        }
-    }
-    // Off/disconnect may happen during CPU work. Reap before admitting another executor.
-    Ok(())
+    supervise(&stream, &model_io, &mut child, EXECUTOR_LEASE)
 }
 
 fn option(args: &mut impl Iterator<Item = std::ffi::OsString>, key: &str) -> Result<PathBuf> {
@@ -242,7 +489,9 @@ fn run() -> Result<()> {
     let _socket_path = SocketPath(&socket);
     listener.set_nonblocking(true)?;
     while !STOP.load(Ordering::Relaxed) {
-        if poll_fd(listener.as_raw_fd(), libc::POLLIN)? & libc::POLLIN == 0 {
+        let mut descriptors = [interests(&listener, libc::POLLIN)];
+        poll(&mut descriptors)?;
+        if descriptors[0].revents & libc::POLLIN == 0 {
             continue;
         }
         match listener.accept() {
@@ -262,5 +511,77 @@ fn main() -> ExitCode {
     } else {
         eprintln!("QA model socket unavailable");
         ExitCode::FAILURE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::process::ExitStatusExt;
+    use std::thread;
+
+    use protocol::QaPassage;
+    use protocol::QaWorkerRequest;
+
+    use super::*;
+
+    #[test]
+    fn reaps_stuck_prediction_even_when_both_socket_peers_remain_open() {
+        let (mut executor, exec_io) = UnixStream::pair().unwrap();
+        let (mut model, model_io) = UnixStream::pair().unwrap();
+        let timeout = Duration::from_secs(5);
+        executor.set_read_timeout(Some(timeout)).unwrap();
+        model.set_read_timeout(Some(timeout)).unwrap();
+        exec_io.set_nonblocking(true).unwrap();
+        model_io.set_nonblocking(true).unwrap();
+        let mut child = ModelChild(
+            Command::new("/bin/sleep")
+                .arg("60")
+                .process_group(0)
+                .spawn()
+                .unwrap(),
+        );
+        let monitor = thread::spawn(move || {
+            supervise(&exec_io, &model_io, &mut child, Duration::from_secs(1)).unwrap();
+            child.0.try_wait().unwrap().unwrap()
+        });
+
+        frame::write(
+            &mut model,
+            &QaWorkerReply::Ready {
+                protocol: QA_WORKER_PROTOCOL,
+                model_revision: QA_MODEL_REVISION.into(),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            frame::read::<QaWorkerReply>(&mut executor, QA_MAX_FRAME_BYTES).unwrap(),
+            Some(QaWorkerReply::Ready { .. })
+        ));
+        frame::write(
+            &mut executor,
+            &QaWorkerCommand::Ask {
+                request: QaWorkerRequest::new(
+                    "turn-a".into(),
+                    "snapshot-a".into(),
+                    "Is search ready?".into(),
+                    vec![QaPassage::new(
+                        "search".into(),
+                        "Actor search is ready.".into(),
+                    )],
+                ),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            frame::read::<QaWorkerCommand>(&mut model, QA_MAX_FRAME_BYTES).unwrap(),
+            Some(QaWorkerCommand::Ask { .. })
+        ));
+
+        // There is no Shutdown and neither peer is closed when the on-time reap is confirmed.
+        assert!(matches!(
+            frame::read::<QaWorkerReply>(&mut executor, QA_MAX_FRAME_BYTES).unwrap(),
+            Some(QaWorkerReply::Stopped)
+        ));
+        assert_eq!(monitor.join().unwrap().signal(), Some(libc::SIGKILL));
     }
 }

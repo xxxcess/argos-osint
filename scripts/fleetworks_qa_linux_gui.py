@@ -95,11 +95,13 @@ def read_journal(journal):
     return [json.loads(line) for line in journal.read_text().splitlines(keepends=True) if line.endswith("\n")]
 
 
-def on_screen(node, atspi):
+def screen_bounds(node, atspi):
     if node is None or not node.getState().contains(atspi.STATE_SHOWING):
-        return False
+        return None
     x, y, width, height = node.queryComponent().getExtents(atspi.DESKTOP_COORDS)
-    return width > 0 and height > 0 and x >= 0 and y >= 0
+    if width <= 0 or height <= 0 or x < 0 or y < 0:
+        return None
+    return x, y, width, height
 
 
 def release_gate(companion, worker):
@@ -199,15 +201,20 @@ def test_window(app, registry, atspi, home, worker, pointer, journal, output):
     button("startup-data-continue", "Open Workstation")
     button("inbox-toggle")
 
-    def enter_question():
-        composer = find("inbox-qa-composer")
-        if composer is None:
-            return None
-        if not composer.queryEditableText().setTextContents(QUESTION):
-            raise RuntimeError("Fleetworks could not enter a QA question")
-        return True
-
-    wait_for(enter_question, app, "available QA composer", timeout=110)
+    x, y, width, height = wait_for(
+        lambda: screen_bounds(find("inbox-qa-composer"), atspi), app, "available QA composer", timeout=110,
+    )
+    # A bare Xvfb display has no window manager to grant keyboard focus.
+    windows = subprocess.check_output(
+        ["xdotool", "search", "--onlyvisible", "--name", "^Fleetworks$"], text=True, timeout=5,
+    ).split()
+    require(len(windows) == 1, "expected one visible Fleetworks window on the fixture display")
+    subprocess.run(
+        ["xdotool", "windowfocus", "--sync", windows[0],
+         "mousemove", str(x + width // 2), str(y + height // 2), "click", "1"],
+        check=True, timeout=5,
+    )
+    subprocess.run(["xdotool", "type", "--clearmodifiers", QUESTION], check=True, timeout=5)
     started = time.monotonic()
     button("inbox-qa-send")
 
@@ -224,7 +231,7 @@ def test_window(app, registry, atspi, home, worker, pointer, journal, output):
             return None
         citation = find("chat-citation-0")
         stop = find("inbox-qa-stop", button=True)
-        if not on_screen(citation, atspi) or not on_screen(stop, atspi):
+        if screen_bounds(citation, atspi) is None or screen_bounds(stop, atspi) is None:
             return None
         require(find("chat-citation-1") is None, "the drawer showed another citation before release")
         companions = [row["companion_pid"] for row in records if "companion_pid" in row]
@@ -247,7 +254,7 @@ def test_window(app, registry, atspi, home, worker, pointer, journal, output):
         final = settled_turn(pages, early)
         if find("inbox-qa-stop") is not None:
             return None
-        if not on_screen(find("chat-citation-0", label=citation_name), atspi):
+        if screen_bounds(find("chat-citation-0", label=citation_name), atspi) is None:
             return None
         count = len(final["findings"])
         require(all(find(f"chat-citation-{i}") is not None for i in range(count))

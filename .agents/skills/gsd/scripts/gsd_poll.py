@@ -12,7 +12,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SPEC_TITLE_RE = re.compile(r"^spec\s+implementation:\s*(.+)$", re.IGNORECASE)
-SEVERITY_RE = re.compile(r"Severity:\s*([A-Z]+)", re.IGNORECASE)
+SEVERITY_RE = re.compile(r"Severity:\s*(CRITICAL|HIGH|MEDIUM|LOW|INFO)\b", re.IGNORECASE)
+LOGIN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}")
 STALE_MARKER = "<summary>Stale comment</summary>"
 NIGHTLY = "nightly"
 CURSOR_LOGINS = {"cursor[bot]", "cursor-bot", "cursor"}
@@ -25,6 +26,7 @@ query($owner: String!, $repo: String!, $number: Int!, $endCursor: String) {
       state
       baseRefName
       headRefOid
+      author { __typename login ... on User { databaseId } }
       reviewThreads(first: 50, after: $endCursor) {
         pageInfo { hasNextPage endCursor }
         nodes {
@@ -35,7 +37,7 @@ query($owner: String!, $repo: String!, $number: Int!, $endCursor: String) {
           line
           originalLine
           comments(first: 1) {
-            nodes { databaseId body url author { login } }
+            nodes { databaseId url author { __typename login ... on User { databaseId } } }
           }
         }
       }
@@ -45,12 +47,13 @@ query($owner: String!, $repo: String!, $number: Int!, $endCursor: String) {
 """
 
 
-def run_gh(args: list[str]) -> str:
+def run_gh(args: list[str], *, timeout: float | None = None) -> str:
     proc = subprocess.run(
         ["gh", *args],
         text=True,
         capture_output=True,
         check=False,
+        timeout=timeout,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"gh {' '.join(args)} failed ({proc.returncode}): {proc.stderr.strip()}")
@@ -72,13 +75,58 @@ def gh_json_paginated(endpoint: str) -> list[dict]:
     return items
 
 
-def is_cursor_author(item: dict) -> bool:
-    login = ((item.get("user") or {}).get("login") or "").lower()
-    return login in CURSOR_LOGINS or login.startswith("cursor[bot]")
+def can_direct_work(repo: str, actor: dict | None, permission_cache: dict) -> bool:
+    """Check a human principal's current base-repo permission using GitHub metadata."""
+    actor = actor if isinstance(actor, dict) else {}
+    login = actor.get("login")
+    account_id = actor.get("id", actor.get("databaseId"))
+    if (
+        actor.get("type", actor.get("__typename")) != "User"
+        or not isinstance(login, str)
+        or not LOGIN_RE.fullmatch(login)
+        or type(account_id) is not int
+        or account_id <= 0
+    ):
+        return False
+
+    key = (repo.casefold(), login.casefold(), account_id)
+    if key in permission_cache:
+        return permission_cache[key]
+    try:
+        endpoint = f"repos/{repo}/collaborators/{login}/permission"
+        result = json.loads(run_gh(["api", "--method", "GET", endpoint], timeout=15))
+    except (RuntimeError, OSError, subprocess.TimeoutExpired, ValueError):
+        result = {}
+    user = result.get("user") if isinstance(result, dict) else None
+    # The REST permission field maps maintain to write and triage to read.
+    verified = (
+        isinstance(user, dict)
+        and user.get("type") == "User"
+        and type(user.get("id")) is int
+        and user["id"] == account_id
+        and isinstance(user.get("login"), str)
+        and user["login"].casefold() == login.casefold()
+        and result.get("permission") in ("admin", "write")
+    )
+    permission_cache[key] = verified
+    return verified
 
 
-def fetch_cursor_security_findings(repo: str, pr_number: int, addressed_ids: set[str]) -> list[dict]:
-    """Collect active (non-stale) Cursor bot review/security comments for a PR."""
+def review_author(repo: str, actor: dict | None, permission_cache: dict) -> dict:
+    actor = actor if isinstance(actor, dict) else {}
+    return {
+        "author": actor.get("login"),
+        "author_id": actor.get("id", actor.get("databaseId")),
+        "author_type": actor.get("type", actor.get("__typename")),
+        "author_has_repository_write_access": can_direct_work(repo, actor, permission_cache),
+    }
+
+
+def fetch_review_discussion(
+    repo: str, pr_number: int, addressed_ids: set[str], permission_cache: dict,
+) -> tuple[list[dict], list[dict]]:
+    """Keep metadata for every reviewer, with separate diagnostic Cursor evidence."""
+    discussion: list[dict] = []
     findings: list[dict] = []
     endpoints = (
         ("review_comment", f"repos/{repo}/pulls/{pr_number}/comments"),
@@ -87,30 +135,40 @@ def fetch_cursor_security_findings(repo: str, pr_number: int, addressed_ids: set
     )
     for source, endpoint in endpoints:
         for item in gh_json_paginated(endpoint):
-            if not is_cursor_author(item):
-                continue
             body = (item.get("body") or "").strip()
-            if not body or STALE_MARKER in body:
+            if not body:
                 continue
+            actor = item.get("user")
+            actor = actor if isinstance(actor, dict) else {}
             cid = f"{source}:{item.get('id')}"
-            severity_match = SEVERITY_RE.search(body)
-            findings.append({
+            entry = {
                 "uid": cid,
                 "id": item.get("id"),
                 "source": source,
                 "path": item.get("path"),
                 "line": item.get("line") or item.get("original_line"),
                 "commit_id": item.get("commit_id"),
-                "severity": severity_match.group(1).upper() if severity_match else "INFO",
                 "url": item.get("html_url") or "",
+                **review_author(repo, actor, permission_cache),
+            }
+            discussion.append(entry)
+            login = actor.get("login")
+            login = login.casefold() if isinstance(login, str) else ""
+            if actor.get("type") != "Bot" or login not in CURSOR_LOGINS or STALE_MARKER in body:
+                continue
+            severity_match = SEVERITY_RE.search(body)
+            findings.append({
+                **entry,
+                "severity": severity_match.group(1).upper() if severity_match else "INFO",
                 "unaddressed": cid not in addressed_ids,
-                "body": body,
             })
-    return findings
+    return discussion, findings
 
 
-def fetch_unresolved_review_threads(repo: str, pr_number: int, head_sha: str) -> list[dict] | None:
-    """Collect open threads from every reviewer on the exact nightly PR head."""
+def fetch_unresolved_review_threads(
+    repo: str, pr_number: int, head_sha: str, permission_cache: dict,
+) -> tuple[list[dict], dict | None] | None:
+    """Collect open threads and the PR author on the exact nightly PR head."""
     owner, name = repo.split("/", 1)
     pages = json.loads(run_gh([
         "api", "graphql", "--paginate", "--slurp",
@@ -118,10 +176,12 @@ def fetch_unresolved_review_threads(repo: str, pr_number: int, head_sha: str) ->
         "-f", f"query={REVIEW_THREADS}",
     ]))
     threads = []
+    author = None
     for page in pages:
         pr = page["data"]["repository"]["pullRequest"]
         if not pr or pr["state"] != "OPEN" or pr["baseRefName"] != NIGHTLY or pr["headRefOid"] != head_sha:
             return None
+        author = pr.get("author")
         for thread in pr["reviewThreads"]["nodes"]:
             if thread["isResolved"]:
                 continue
@@ -132,11 +192,20 @@ def fetch_unresolved_review_threads(repo: str, pr_number: int, head_sha: str) ->
                 "line": thread["line"] or thread["originalLine"],
                 "outdated": thread["isOutdated"],
                 "comment_id": root.get("databaseId"),
-                "author": (root.get("author") or {}).get("login"),
                 "url": root.get("url"),
-                "body": root.get("body"),
+                **review_author(repo, root.get("author"), permission_cache),
             })
-    return threads
+    return threads, author
+
+
+def spec_implementation_pending(
+    track: str, spec_match: re.Match | None, cross_repository: bool,
+    author_can_direct: bool, head_sha: str, previous: dict,
+) -> bool:
+    return bool(
+        track == "core" and spec_match and not cross_repository and author_can_direct
+        and previous.get("implemented_sha") != head_sha and previous.get("pushed_sha") != head_sha
+    )
 
 
 def summarize_checks(rollup: list[dict] | None) -> dict:
@@ -271,6 +340,7 @@ def main() -> int:
         "skipped_prs": [],
     }
 
+    permission_cache = {}
     for pr in prs:
         num = str(pr["number"])
         title = pr["title"]
@@ -296,15 +366,23 @@ def main() -> int:
             continue
 
         cursor_findings = []
+        discussion = []
         unresolved = None
+        author_can_direct = False
+        cross_repository = pr.get("isCrossRepository") is not False
         if args.track == "core":
-            unresolved = fetch_unresolved_review_threads(args.repo, pr["number"], head_sha)
-            if unresolved is None:
+            review = fetch_unresolved_review_threads(args.repo, pr["number"], head_sha, permission_cache)
+            if review is None:
                 report["skipped_prs"].append({
                     "number": pr["number"], "title": title, "branch": branch, "reason": "changed-during-poll",
                 })
                 continue
-            cursor_findings = fetch_cursor_security_findings(args.repo, pr["number"], addressed_ids)
+            unresolved, author = review
+            if spec_match and not cross_repository:
+                author_can_direct = can_direct_work(args.repo, author, permission_cache)
+            discussion, cursor_findings = fetch_review_discussion(
+                args.repo, pr["number"], addressed_ids, permission_cache,
+            )
         unaddressed_cursor_count = (
             sum(f["unaddressed"] for f in cursor_findings) if args.track == "core" else None
         )
@@ -312,12 +390,13 @@ def main() -> int:
         entry = {
             "number": pr["number"],
             "title": title,
-            "feature": spec_match.group(1).strip() if spec_match else None,
+            "feature": spec_match.group(1).strip() if spec_match and author_can_direct else None,
             "branch": branch,
             "base": pr["baseRefName"],
             "head_sha": head_sha,
             "draft": bool(pr.get("isDraft")),
-            "is_cross_repository": bool(pr.get("isCrossRepository")),
+            "is_cross_repository": cross_repository,
+            "push_scope": "operator_authorization_required" if cross_repository else "same_repository",
             "url": pr["url"],
             "checks": checks["counts"],
             "verification_passes": passes,
@@ -326,13 +405,13 @@ def main() -> int:
             "failed_checks": checks["failed"],
             "pending_checks": len(checks["pending"]),
             "unresolved_review_threads": unresolved,
+            "review_discussion": discussion,
             "cursor_security_findings": cursor_findings,
             "unaddressed_cursor_count": unaddressed_cursor_count,
             "tracked_status": prev.get("status", "new"),
             "tracked_sha": prev.get("head_sha"),
-            "needs_implementation": bool(
-                args.track == "core" and spec_match
-                and prev.get("implemented_sha") != head_sha and prev.get("pushed_sha") != head_sha
+            "needs_implementation": spec_implementation_pending(
+                args.track, spec_match, cross_repository, author_can_direct, head_sha, prev,
             ),
         }
 
@@ -341,14 +420,14 @@ def main() -> int:
             "title": title,
             "branch": branch,
             "head_sha": head_sha,
-            "kind": "spec_impl" if spec_match else "babysit",
+            "kind": "spec_impl" if spec_match and author_can_direct else "babysit",
             "last_checks": checks["counts"],
             "verification_passes": passes,
             "verification_tracks": tracks,
             "last_unaddressed_cursor_count": unaddressed_cursor_count,
         }
 
-        if spec_match:
+        if spec_match and author_can_direct:
             report["spec_prs"].append(entry)
         else:
             report["babysit_prs"].append(entry)

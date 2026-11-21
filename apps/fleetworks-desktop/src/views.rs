@@ -3,6 +3,7 @@
 use fleetworks_contracts::capabilities::Capabilities;
 use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::readiness::MaintenanceOperation;
+use fleetworks_contracts::readiness::ReadinessCheck;
 use fleetworks_contracts::readiness::ReadinessCheckId;
 use fleetworks_contracts::readiness::ReadinessState;
 use fleetworks_contracts::search::IndexState;
@@ -1563,22 +1564,11 @@ fn summarize_actor_search(state: &State) -> ActorSearchSummary {
         && (!search_fresh || state.readiness_error.is_some()))
     .then_some("Actor search observation unsynced. Open Status checks for details.");
 
-    let paused = search_check.is_some_and(|check| {
-        let reason = check.reason_code.to_ascii_lowercase();
-        reason.contains("pause")
-            || reason.contains("paced")
-            || check.explanation.to_ascii_lowercase().contains("paused")
-    });
-    let catalog_needs_data = catalog_check.filter(|catalog| {
-        catalog.state == ReadinessState::NotReady && state.readiness_check_fresh(catalog)
-    });
-    let background_indexing = search_fresh
-        && search_check.is_some_and(|check| check.state == ReadinessState::Running)
-        && reindex_job.is_none()
-        && receipt_job.is_none()
-        && catalog_needs_data.is_none()
-        && state.maintenance.pending_reindex.is_none()
-        && !paused;
+    let paused = search_check.is_some_and(actor_search_is_paused);
+    let catalog_needs_data =
+        catalog_check.is_some_and(|check| actor_catalog_needs_data(state, check));
+    let background_indexing =
+        search_check.is_some_and(|check| actor_search_is_background_indexing(state, check));
     let can_query_current_index = capability_ready
         && search_fresh
         && search_check.is_some_and(|check| check.state == ReadinessState::Ready);
@@ -1629,7 +1619,7 @@ fn summarize_actor_search(state: &State) -> ActorSearchSummary {
             false,
             false,
         )
-    } else if catalog_needs_data.is_some() {
+    } else if catalog_needs_data {
         (
             "Needs data",
             StatusTone::Warn,
@@ -1727,6 +1717,33 @@ fn summarize_actor_search(state: &State) -> ActorSearchSummary {
         total,
         needs_seed,
     }
+}
+
+pub(crate) fn actor_search_is_background_indexing(state: &State, check: &ReadinessCheck) -> bool {
+    check.id == ReadinessCheckId::ActorSearch
+        && check.state == ReadinessState::Running
+        && state.readiness_check_fresh(check)
+        && state.maintenance.pending_reindex.is_none()
+        && active_actor_reindex(state).is_none()
+        && queued_actor_reindex_id(state).is_none()
+        && !matches!(&state.readiness, Load::Ready(readiness) if readiness
+            .checks
+            .iter()
+            .any(|check| actor_catalog_needs_data(state, check)))
+        && !actor_search_is_paused(check)
+}
+
+fn actor_search_is_paused(check: &ReadinessCheck) -> bool {
+    let reason = check.reason_code.to_ascii_lowercase();
+    reason.contains("pause")
+        || reason.contains("paced")
+        || check.explanation.to_ascii_lowercase().contains("paused")
+}
+
+fn actor_catalog_needs_data(state: &State, check: &ReadinessCheck) -> bool {
+    check.id == ReadinessCheckId::ActorCatalog
+        && check.state == ReadinessState::NotReady
+        && state.readiness_check_fresh(check)
 }
 
 pub(crate) fn active_actor_reindex(state: &State) -> Option<&crate::backend::ActivityJob> {

@@ -203,11 +203,16 @@ fn checks(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
         .iter()
         .map(|check| {
             let fresh = state.readiness_check_fresh(check);
+            let status = if crate::views::actor_search_is_background_indexing(state, check) {
+                CheckStatus::BackgroundIndexing
+            } else {
+                CheckStatus::of(check, fresh)
+            };
             StatusCheckRow {
                 check,
                 fresh,
-                status: CheckStatus::of(check, fresh),
-                primary: if fresh {
+                status,
+                primary: if fresh && status.is_blocker() {
                     admitted_action(state, check)
                 } else {
                     None
@@ -215,7 +220,14 @@ fn checks(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
             }
         })
         .collect();
-    rows.sort_by_key(|row| (row.primary.is_none(), row.status.rank(), row.check.id));
+    rows.sort_by_key(|row| {
+        (
+            row.status != CheckStatus::Failed,
+            row.primary.is_none(),
+            row.status.rank(),
+            row.check.id,
+        )
+    });
     let heading = |title: &'static str| {
         rune::text(title)
             .role("columnheader")
@@ -520,7 +532,7 @@ pub(crate) fn primary_issue(
                 return None;
             }
             let status = CheckStatus::of(check, true);
-            (status == CheckStatus::Failed || include_other_blockers && status.rank() <= 2)
+            (status == CheckStatus::Failed || include_other_blockers && status.is_blocker())
                 .then_some((check, status))
         })
         .min_by_key(|(check, status)| (status.rank(), check.id))?;
@@ -615,6 +627,7 @@ enum CheckStatus {
     Degraded,
     Unavailable,
     Checking,
+    BackgroundIndexing,
     Unknown,
     RememberedReady,
     Ready,
@@ -639,6 +652,13 @@ impl CheckStatus {
         }
     }
 
+    fn is_blocker(self) -> bool {
+        matches!(
+            self,
+            Self::Failed | Self::NeedsData | Self::NotReady | Self::Degraded | Self::Unavailable
+        )
+    }
+
     fn label(self) -> &'static str {
         match self {
             Self::Failed => "Failed",
@@ -647,6 +667,7 @@ impl CheckStatus {
             Self::Degraded => "Degraded",
             Self::Unavailable => "Unavailable",
             Self::Checking => "Checking",
+            Self::BackgroundIndexing => "Background indexing",
             Self::Unknown => "Unknown",
             Self::RememberedReady => "Last ready",
             Self::Ready => "Ready",
@@ -659,7 +680,7 @@ impl CheckStatus {
             Self::Failed => 0,
             Self::NeedsData | Self::NotReady | Self::Degraded => 1,
             Self::Unavailable => 2,
-            Self::Checking => 3,
+            Self::Checking | Self::BackgroundIndexing => 3,
             Self::Unknown | Self::RememberedReady => 4,
             Self::Ready => 5,
             Self::NotApplicable => 6,
@@ -670,7 +691,7 @@ impl CheckStatus {
         match self {
             Self::Failed => StatusTone::Err,
             Self::NeedsData | Self::NotReady | Self::Degraded => StatusTone::Warn,
-            Self::Checking => StatusTone::Neutral,
+            Self::Checking | Self::BackgroundIndexing => StatusTone::Neutral,
             Self::Ready => StatusTone::Ok,
             Self::Unavailable | Self::Unknown | Self::RememberedReady | Self::NotApplicable => {
                 StatusTone::Neutral
@@ -681,7 +702,7 @@ impl CheckStatus {
         match self {
             Self::Failed => &glyphs::CLOSE,
             Self::NeedsData | Self::NotReady | Self::Degraded => &icons::ALERT,
-            Self::Checking => &icons::JOBS,
+            Self::Checking | Self::BackgroundIndexing => &icons::JOBS,
             Self::Ready => &glyphs::CHECK,
             Self::Unavailable | Self::Unknown | Self::RememberedReady | Self::NotApplicable => {
                 &glyphs::DASH

@@ -686,6 +686,10 @@ fn compact_connected_distributed_setup_keeps_readiness_switch_usable() {
 
 #[test]
 fn status_checks_share_the_compact_keyboard_disclosures_and_keep_the_blocker_visible() {
+    use fleetworks_contracts::context::JobOrigin;
+    use fleetworks_contracts::context::OriginSource;
+    use fleetworks_contracts::readiness::MaintenanceOperation;
+    use fleetworks_contracts::readiness::MaintenanceReceipt;
     use fleetworks_contracts::readiness::ReadinessCheck;
     use fleetworks_contracts::readiness::ReadinessCheckId;
     use fleetworks_contracts::readiness::ReadinessState;
@@ -698,7 +702,7 @@ fn status_checks_share_the_compact_keyboard_disclosures_and_keep_the_blocker_vis
     const SETUP_SWITCH: &str = "setup-advanced-toggle/switch";
     const FAILED_ROW: &str = "readiness-trigger-jobs";
     const FAILED_DETAIL: &str = "readiness-details-jobs";
-    const CHECKING_ROW: &str = "readiness-trigger-actor_search";
+    const ACTOR_ROW: &str = "readiness-trigger-actor_search";
     const PASSED_ROW: &str = "readiness-trigger-gateway";
 
     let check = |id, state, reason: &str, explanation: &str| {
@@ -800,13 +804,16 @@ fn status_checks_share_the_compact_keyboard_disclosures_and_keep_the_blocker_vis
         assert!(runtime.find(FAILED_DETAIL).is_none());
 
         let failed = status_check_element(&runtime, FAILED_ROW);
-        let checking = status_check_element(&runtime, CHECKING_ROW);
+        let actor = status_check_element(&runtime, ACTOR_ROW);
         let passed = status_check_element(&runtime, PASSED_ROW);
         assert_eq!(failed.label.as_deref(), Some("Jobs: Failed"));
-        assert_eq!(checking.label.as_deref(), Some("Actor search: Checking"));
+        assert_eq!(
+            actor.label.as_deref(),
+            Some("Actor search: Background indexing")
+        );
         assert_eq!(passed.label.as_deref(), Some("Gateway: Ready"));
-        assert!(failed.target[1] < checking.target[1], "{kind:?}");
-        assert!(checking.target[1] < passed.target[1], "{kind:?}");
+        assert!(failed.target[1] < actor.target[1], "{kind:?}");
+        assert!(actor.target[1] < passed.target[1], "{kind:?}");
         for key in ["readiness-icon-jobs", "readiness-icon-gateway"] {
             assert!(status_check_element(&runtime, key).rect[2] > 0.0);
         }
@@ -858,6 +865,30 @@ fn status_checks_share_the_compact_keyboard_disclosures_and_keep_the_blocker_vis
         runtime.update(|_, tx| tx.scroll_into_view(FAILED_DETAIL));
         tick_status_checks(&mut runtime, &mut frame);
         assert_status_check_fully_visible(&runtime, FAILED_DETAIL);
+
+        runtime.update(|state, _| {
+            let origin = JobOrigin::new(
+                state.registration.context.as_ref().unwrap(),
+                OriginSource::Native,
+                "synthetic-reindex-request".into(),
+                OBSERVED.into(),
+                0,
+                Vec::new(),
+            );
+            state.maintenance.receipt = Load::Ready(MaintenanceReceipt::new(
+                "synthetic-reindex".into(),
+                MaintenanceOperation::ReindexActors,
+                origin,
+                None,
+                false,
+            ));
+        });
+        tick_status_checks(&mut runtime, &mut frame);
+        assert_eq!(
+            status_check_element(&runtime, ACTOR_ROW).label.as_deref(),
+            Some("Actor search: Checking")
+        );
+
         focus_status_check(&mut runtime, disclosure, &mut frame);
         press_status_check(&mut runtime, &mut frame);
         assert!(runtime.find(FAILED_ROW).is_none());
@@ -909,10 +940,18 @@ fn desktop_status_table_aligns_columns_and_exposes_the_granted_row_action() {
         Permission::MaintainBackend,
         true,
     ));
+    let mut jobs = ReadinessCheck::new(
+        ReadinessCheckId::Jobs,
+        ReadinessState::NotReady,
+        "process_not_ready".into(),
+        "The dispatcher is unavailable.".into(),
+        OBSERVED.into(),
+    );
+    jobs.fresh_for_ms = 60_000;
     let mut readiness = WorkstationReadiness::new(
         "synthetic-deployment".into(),
         OBSERVED.into(),
-        vec![gateway, catalog],
+        vec![gateway, catalog, jobs],
     );
     readiness.registration = Some(RegistrationReceipt::new(
         "synthetic-deployment".into(),
@@ -949,6 +988,8 @@ fn desktop_status_table_aligns_columns_and_exposes_the_granted_row_action() {
     assert_eq!(column_labels, ["Service", "Status", "Action"]);
     let catalog_status = status_check_element(&runtime, "readiness-status-actor_catalog");
     let gateway_status = status_check_element(&runtime, "readiness-status-gateway");
+    let jobs_status = status_check_element(&runtime, "readiness-status-jobs");
+    assert!(jobs_status.target[1] < catalog_status.target[1]);
     assert_eq!(catalog_status.target[0], gateway_status.target[0]);
     assert!(catalog_status.target[1] < gateway_status.target[1]);
     assert!(runtime.find("readiness-details-actor_catalog").is_none());
@@ -967,6 +1008,31 @@ fn desktop_status_table_aligns_columns_and_exposes_the_granted_row_action() {
         kind: DatasetKind::ActorCatalog,
     }));
     assert!(runtime.find("readiness-details-actor_catalog").is_none());
+
+    runtime.update(|state, _| {
+        let Load::Ready(readiness) = &state.readiness else {
+            panic!("expected the previous observation");
+        };
+        let mut next = readiness.clone();
+        let catalog = next
+            .checks
+            .iter_mut()
+            .find(|check| check.id == ReadinessCheckId::ActorCatalog)
+            .unwrap();
+        catalog.state = ReadinessState::Ready;
+        catalog.reason_code = "database_catalog_ready".into();
+        catalog.explanation = "The catalog is ready at the current checkpoint.".into();
+        state.complete_readiness(Ok(next));
+    });
+    tick_status_checks(&mut runtime, &mut frame);
+    let jobs_status = status_check_element(&runtime, "readiness-status-jobs");
+    let catalog_status = status_check_element(&runtime, "readiness-status-actor_catalog");
+    assert!(jobs_status.target[1] < catalog_status.target[1]);
+    assert!(runtime.find(SEED).is_none());
+    focus_status_check(&mut runtime, "readiness-trigger-actor_catalog", &mut frame);
+    press_status_check(&mut runtime, &mut frame);
+    assert!(runtime.find("readiness-details-actor_catalog").is_some());
+    assert!(status_check_element(&runtime, SEED).focusable);
 }
 
 fn tick_status_checks(runtime: &mut Runtime<State>, frame: &mut u32) {

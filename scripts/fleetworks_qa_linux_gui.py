@@ -27,14 +27,29 @@ def require(condition, description):
 
 
 def wait_for(probe, app, description, timeout=90):
+    from gi.repository import GLib
+
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if app.poll() is not None:
             raise RuntimeError(f"Fleetworks exited at {description} with status {app.returncode}")
-        value = probe()
+        try:
+            value = probe()
+        except GLib.Error as error:
+            # Transitions can unregister a subtree between enumerating a node and
+            # looking at its children. The next probe reacquires the live tree.
+            if (error.domain, error.code, error.message) != (
+                "atspi_error", 0, "The application no longer exists"
+            ):
+                raise
+            if app.poll() is not None:
+                raise RuntimeError(f"Fleetworks exited at {description} with status {app.returncode}") from error
+            value = None
         if value is not None:
             return value
         time.sleep(0.1)
+    if app.poll() is not None:
+        raise RuntimeError(f"Fleetworks exited at {description} with status {app.returncode}")
     raise TimeoutError(f"Fleetworks window did not reach {description}")
 
 
@@ -152,16 +167,24 @@ def test_window(app, registry, atspi, home, worker, pointer, journal, output):
             for node in descendants(window):
                 if node.get_accessible_id() != key or (label is not None and node.name != label):
                     continue
-                if button and (node.getRole() != atspi.ROLE_PUSH_BUTTON
-                               or not node.getState().contains(atspi.STATE_ENABLED)):
+                state = node.getState()
+                if state.contains(atspi.STATE_DEFUNCT):
+                    continue
+                if button and (node.getRole() != atspi.ROLE_PUSH_BUTTON or not state.contains(atspi.STATE_ENABLED)):
                     continue
                 return node
         return None
 
     def button(key, label=None):
-        node = wait_for(lambda: find(key, label=label, button=True), app, key)
-        if not node.queryAction().doAction(0):
-            raise RuntimeError(f"Fleetworks could not activate {key}")
+        def activate():
+            node = find(key, label=label, button=True)
+            if node is None:
+                return None
+            if not node.queryAction().doAction(0):
+                raise RuntimeError(f"Fleetworks could not activate {key}")
+            return True
+
+        wait_for(activate, app, key)
 
     button("startup-local")
     button("connect-local")
@@ -176,9 +199,15 @@ def test_window(app, registry, atspi, home, worker, pointer, journal, output):
     button("startup-data-continue", "Open Workstation")
     button("inbox-toggle")
 
-    composer = wait_for(lambda: find("inbox-qa-composer"), app, "available QA composer", timeout=110)
-    if not composer.queryEditableText().setTextContents(QUESTION):
-        raise RuntimeError("Fleetworks could not enter a QA question")
+    def enter_question():
+        composer = find("inbox-qa-composer")
+        if composer is None:
+            return None
+        if not composer.queryEditableText().setTextContents(QUESTION):
+            raise RuntimeError("Fleetworks could not enter a QA question")
+        return True
+
+    wait_for(enter_question, app, "available QA composer", timeout=110)
     started = time.monotonic()
     button("inbox-qa-send")
 
@@ -205,7 +234,7 @@ def test_window(app, registry, atspi, home, worker, pointer, journal, output):
     early, companion, citation_name = wait_for(first_frame, app, "an early citation and enabled Stop", timeout=16)
     first_ms = round((time.monotonic() - started) * 1000, 1)
     subprocess.run(["scrot", "--overwrite", str(output / "first-finding.png")], check=True, timeout=5)
-    require(first_frame() is not None, "the early citation or enabled Stop disappeared while completion was held")
+    wait_for(first_frame, app, "the early citation and enabled Stop while completion is held", timeout=2)
     release_gate(companion, worker)
 
     def completed_frame():
@@ -275,6 +304,13 @@ def main():
                                "--local-backend-bin", str(proxy)], env=environment) as app:
             try:
                 test_window(app, pyatspi.Registry, pyatspi, home, worker, pointer, journal, output)
+            except Exception:
+                if app.poll() is None:
+                    try:
+                        subprocess.run(["scrot", "--overwrite", str(output / "failed-stage.png")], timeout=3)
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
+                raise
             finally:
                 if app.poll() is None:
                     app.terminate()

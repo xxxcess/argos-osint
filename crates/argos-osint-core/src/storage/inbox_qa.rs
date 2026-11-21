@@ -250,6 +250,22 @@ async fn settings_in(tx: &Tx) -> Result<Setting, TxError> {
     Ok(observed)
 }
 
+/// Classify a database failure without exposing its data or diagnostic text.
+pub fn storage_error_kind(error: &TxError) -> &'static str {
+    use surrealdb::types::QueryError;
+
+    let TxError::Db(error) = error else {
+        return "storage";
+    };
+    match error.query_details() {
+        Some(QueryError::TransactionConflict) => "transaction_conflict",
+        Some(QueryError::TimedOut { .. }) => "query_timeout",
+        Some(QueryError::Cancelled) => "query_cancelled",
+        Some(QueryError::NotExecuted) => "query_not_executed",
+        _ => error.kind_str(),
+    }
+}
+
 /// Read the authoritative generation. An absent or reset setting is Off.
 pub async fn setting(repo: &Repository) -> Result<Setting, TxError> {
     Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| async move {

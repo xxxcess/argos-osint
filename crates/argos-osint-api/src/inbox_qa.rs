@@ -400,16 +400,8 @@ fn storage_error(error: TxError) -> ApiError {
 }
 
 fn settings_storage_error(stage: &'static str, error: TxError) -> ApiError {
-    use surrealdb::types::QueryError;
-
     let class = match &error {
-        TxError::Db(error) => match error.query_details() {
-            Some(QueryError::TransactionConflict) => "transaction_conflict",
-            Some(QueryError::TimedOut { .. }) => "query_timeout",
-            Some(QueryError::Cancelled) => "query_cancelled",
-            Some(QueryError::NotExecuted) => "query_not_executed",
-            _ => error.kind_str(),
-        },
+        TxError::Db(_) => store::storage_error_kind(&error),
         TxError::Contention { .. } => "contention",
         TxError::Abort(reason)
             if matches!(reason.as_str(), "inbox_qa:forbidden" | "inbox_qa:revision") =>

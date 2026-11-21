@@ -22,13 +22,13 @@ QA = "/api/v2/workstation/chat/"
 TERMINAL = {"answered", "insufficient_context", "canceled", "failed"}
 SUMMARY_QUESTION = "What is the current workstation readiness?"
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
-DIAGNOSTIC = re.compile(r'\b(qa_(?:warm|replica|queue|turn)_stage)="?([a-z0-9_]{1,40})\b')
+DIAGNOSTIC = re.compile(r'\b(qa_(?:warm|replica|queue|turn|settings)_stage)="?([a-z0-9_]{1,40})\b')
 DIAGNOSTIC_DETAIL = re.compile(
     r'\b(qa_warm_reason|qa_warm_elapsed_ms|landlock_abi|sanitized_os_error|worker_exit_code|worker_signal)'
     r'="?(Some\(-?\d{1,9}\)|-?\d{1,9}|abandoned|landlock_abi)(?=["\s,|]|$)'
 )
-PANIC_DETAIL = re.compile(
-    r'\b(worker_panic_source|worker_panic_line|worker_panic_cause)="?([a-z0-9_]{1,40})(?=["\s,|]|$)'
+FIXED_DIAGNOSTIC_DETAIL = re.compile(
+    r'\b(worker_panic_source|worker_panic_line|worker_panic_cause|qa_settings_error)="?([a-z0-9_]{1,40})(?=["\s,|]|$)'
 )
 SAFE_REJECTION = {
     "Backend inference is off": "inference_off",
@@ -67,7 +67,7 @@ def report_diagnostics(logs):
     lines = ANSI.sub("", logs).splitlines()
     for line in lines:
         for stage, code in DIAGNOSTIC.findall(line):
-            details = DIAGNOSTIC_DETAIL.findall(line) + PANIC_DETAIL.findall(line)
+            details = DIAGNOSTIC_DETAIL.findall(line) + FIXED_DIAGNOSTIC_DETAIL.findall(line)
             stages.add((stage, code, tuple(sorted(details))))
     print(json.dumps({
         "qa_failure_stages": [
@@ -186,10 +186,12 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
     def ask(case, question):
         accepted = request("turns", {**turn, "request_id": f"inbox-qa-smoke-{case}", "question": question},
                            expected=(200, 201, 202))
-        return until(
-            lambda: request("events", query={"turn_id": accepted["turn_id"], "after": 0, "wait_seconds": 0})["turn"],
-            lambda value: value["state"] in TERMINAL, f"{case} question did not finish",
-        )
+        require(accepted["state"] in TERMINAL, f"{case} did not finish within admission")
+        page = request("events", query={"turn_id": accepted["turn_id"], "after": 0, "wait_seconds": 0})
+        require(page["turn"] == accepted and not page["gap"]
+                and len([event for event in page["events"] if event["state"] in TERMINAL]) == 1,
+                f"{case} admission differed from its terminal event")
+        return accepted
 
     gateway = ask("gateway", "What is the state of the gateway?")
     require(cited_finding(gateway, "readiness", "gateway") == "Gateway is ready.",

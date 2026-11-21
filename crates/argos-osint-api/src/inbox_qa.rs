@@ -399,6 +399,35 @@ fn storage_error(error: TxError) -> ApiError {
     )
 }
 
+fn settings_storage_error(stage: &'static str, error: TxError) -> ApiError {
+    use surrealdb::types::QueryError;
+
+    let class = match &error {
+        TxError::Db(error) => match error.query_details() {
+            Some(QueryError::TransactionConflict) => "transaction_conflict",
+            Some(QueryError::TimedOut { .. }) => "query_timeout",
+            Some(QueryError::Cancelled) => "query_cancelled",
+            Some(QueryError::NotExecuted) => "query_not_executed",
+            _ => error.kind_str(),
+        },
+        TxError::Contention { .. } => "contention",
+        TxError::Abort(reason)
+            if matches!(reason.as_str(), "inbox_qa:forbidden" | "inbox_qa:revision") =>
+        {
+            return storage_error(error);
+        }
+        TxError::Abort(_) => "transaction_abort",
+        TxError::PublisherStopped => "publisher_stopped",
+        TxError::PublisherDropped => "publisher_dropped",
+    };
+    tracing::warn!(
+        qa_settings_stage = stage,
+        qa_settings_error = class,
+        "Inbox settings storage error"
+    );
+    storage_error(error)
+}
+
 fn current_health_unavailable() -> ApiError {
     ApiError(
         StatusCode::SERVICE_UNAVAILABLE,
@@ -455,7 +484,7 @@ async fn settings_value(
         }
     } else if store::replica_stopping(&state.repo)
         .await
-        .map_err(storage_error)?
+        .map_err(|error| settings_storage_error("observe_stopping", error))?
     {
         QaPhase::Stopping
     } else {
@@ -496,7 +525,7 @@ pub(crate) async fn update_request(
     context.revalidate(&state.repo).await?;
     let setting = store::set(&state.repo, &actor, revision, request.enabled)
         .await
-        .map_err(storage_error)?;
+        .map_err(|error| settings_storage_error("write_setting", error))?;
     settings_value(state, context, setting, availability).await
 }
 

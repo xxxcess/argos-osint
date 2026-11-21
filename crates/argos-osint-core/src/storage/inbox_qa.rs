@@ -557,7 +557,33 @@ async fn boundary_in(tx: &Tx, key: &str, generation: i64) -> Result<i64, TxError
     Ok(own.max(jobs::take::<Option<i64>>(&mut global, 0)?.unwrap_or_default()))
 }
 
-/// Atomically accept evidence, latest exchange, Jobs task and dispatch outbox.
+fn grounded_finding(evidence: &FrozenEvidence) -> Result<Option<QaFinding>, TxError> {
+    evidence
+        .request
+        .validate()
+        .map_err(|_| abort("invalid_part"))?;
+    match (
+        evidence.request.passages.as_slice(),
+        evidence.sources.as_slice(),
+    ) {
+        ([], []) => Ok(None),
+        ([passage], [source]) if passage.source_id == source.opaque_id => {
+            let end =
+                u32::try_from(passage.text.chars().count()).map_err(|_| abort("invalid_part"))?;
+            Ok(Some(QaFinding::new(
+                source.reference.clone(),
+                source.label.clone(),
+                passage.text.clone(),
+                0,
+                end,
+                source.observed_at.clone(),
+            )))
+        }
+        _ => Err(abort("invalid_part")),
+    }
+}
+
+/// Atomically accept evidence, latest exchange and the work needed to answer it.
 pub async fn admit(
     repo: &Repository,
     actor: &Actor,
@@ -621,7 +647,7 @@ pub async fn admit(
             {
                 return Err(abort("busy"));
             }
-            let exchange = Exchange {
+            let mut exchange = Exchange {
                 actor: actor.clone(),
                 source: request.source.clone(),
                 turn: QaTurn::queued(id.clone(), request.request_id.clone(), request.question.clone()),
@@ -635,6 +661,20 @@ pub async fn admit(
             ).bind(("turn", jobs::rid("inbox_qa_exchange", id))).bind(("gen", state.generation))
               .bind(("owner", key.clone())).bind(("workstation", actor.workstation())).bind(("at", timestamp)).bind(("payload", payload))
               .bind(("latest", jobs::rid("inbox_qa_latest", key))).bind(("boundary", boundary))).await?;
+            if matches!(evidence.answer_mode, AnswerMode::Grounded) {
+                // Exact facts need no worker lease. Publish the canonical turn and its
+                // events in the admission transaction so Off need not race settlement.
+                let finding = grounded_finding(evidence)?;
+                let terminal = if finding.is_some() {
+                    append_in(&tx, key, state.generation, &mut exchange, QaTurnState::Running, finding)
+                        .await?;
+                    QaTurnState::Answered
+                } else {
+                    QaTurnState::InsufficientContext
+                };
+                append_in(&tx, key, state.generation, &mut exchange, terminal, None).await?;
+                return Ok(exchange.turn);
+            }
             job_dispatch::submit_in(&tx, &jobs::NewJob {
                 id, kind: POOL, operation: POOL, parent: None, created_at: now,
             }, &jobs::NewTask {
@@ -685,7 +725,8 @@ pub async fn latest(
 
 async fn append_in(
     tx: &Tx,
-    row: &ExchangeRow,
+    owner: &str,
+    generation: i64,
     exchange: &mut Exchange,
     state: QaTurnState,
     finding: Option<QaFinding>,
@@ -738,8 +779,8 @@ async fn append_in(
     .await?;
     if terminal {
         jobs::run(tx, tx.query("UPSERT inbox_qa_health:current SET required_after=math::max([required_after ?? 0,$at]) RETURN NONE; UPDATE $latest SET required_after=$at WHERE generation=$gen AND turn=$turn RETURN NONE;")
-            .bind(("latest", jobs::rid("inbox_qa_latest", &row.owner))).bind(("at", at))
-            .bind(("gen", row.generation)).bind(("turn", jobs::rid("inbox_qa_exchange", &exchange.turn.turn_id)))).await?;
+            .bind(("latest", jobs::rid("inbox_qa_latest", owner))).bind(("at", at))
+            .bind(("gen", generation)).bind(("turn", jobs::rid("inbox_qa_exchange", &exchange.turn.turn_id)))).await?;
     }
     bump_event_revision(tx).await?;
     Ok(())
@@ -768,7 +809,15 @@ pub async fn cancel(repo: &Repository, actor: &Actor, id: &str) -> Result<QaTurn
                 .ok_or_else(|| abort("missing"))?;
             let mut exchange = decode(&row.payload)?;
             if row.active {
-                append_in(&tx, &row, &mut exchange, QaTurnState::Canceled, None).await?;
+                append_in(
+                    &tx,
+                    &row.owner,
+                    row.generation,
+                    &mut exchange,
+                    QaTurnState::Canceled,
+                    None,
+                )
+                .await?;
                 retire_in(&tx, vec![id.to_owned()]).await?;
             }
             Ok(exchange.turn)
@@ -816,11 +865,27 @@ pub async fn start(
         };
         if !exchange.turn.findings.is_empty() {
             // A replacement process must not publish duplicates from an interrupted prefix.
-            append_in(&tx, &row, &mut exchange, QaTurnState::Failed, None).await?;
+            append_in(
+                &tx,
+                &row.owner,
+                row.generation,
+                &mut exchange,
+                QaTurnState::Failed,
+                None,
+            )
+            .await?;
             return Ok(None);
         }
         if exchange.turn.state == QaTurnState::Queued {
-            append_in(&tx, &row, &mut exchange, QaTurnState::Running, None).await?;
+            append_in(
+                &tx,
+                &row.owner,
+                row.generation,
+                &mut exchange,
+                QaTurnState::Running,
+                None,
+            )
+            .await?;
         }
         Ok(exchange.evidence)
     })
@@ -856,7 +921,15 @@ pub async fn publish(
             if state == QaTurnState::Answered && exchange.turn.findings.is_empty() {
                 return Err(abort("invalid_part"));
             }
-            append_in(&tx, &row, &mut exchange, state, finding).await?;
+            append_in(
+                &tx,
+                &row.owner,
+                row.generation,
+                &mut exchange,
+                state,
+                finding,
+            )
+            .await?;
             Ok(true)
         }
     })
@@ -1006,7 +1079,7 @@ pub async fn cleanup(repo: &Repository) -> Result<(), TxError> {
         for id in jobs::take::<Vec<String>>(&mut expired, 0)? {
             if let Some(row) = exchange_in(&tx, &id).await?.filter(|row| row.active) {
                 let mut exchange = decode(&row.payload)?;
-                append_in(&tx, &row, &mut exchange, QaTurnState::Failed, None).await?;
+                append_in(&tx, &row.owner, row.generation, &mut exchange, QaTurnState::Failed, None).await?;
                 retire.push(id);
             }
         }

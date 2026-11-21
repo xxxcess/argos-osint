@@ -296,7 +296,7 @@ def run_embedded(args):
                 return bool(value.get("deployment_id"))
 
             def running_jobs():
-                value, _ = session.request_json({"op": "jobs_list", "args": {}}, registration=registration)
+                value, _ = session.request_json({"op": "jobs_list", "args": {"sort": "newest"}}, registration=registration)
                 require(value["dashboard_counts_scope"] == "unfiltered_top_level_workstation_activity",
                         "IPC jobs dashboard counts used the wrong scope")
                 return value["counts"]["active"]
@@ -435,7 +435,7 @@ def run_distributed(args):
 
         def running_jobs():
             value = verify.expect_status(
-                verify.request(port, "/api/v1/jobs", token, headers=verify.native_headers(registration)),
+                verify.request(port, "/api/v1/jobs?sort=newest", token, headers=verify.native_headers(registration)),
                 200, "registered workstation jobs",
             )
             require(value["dashboard_counts_scope"] == "unfiltered_top_level_workstation_activity",

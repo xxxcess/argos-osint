@@ -43,6 +43,8 @@ use crate::app::Page;
 use crate::app::State;
 use crate::backend;
 use crate::backend::JobDetail;
+use crate::bundled_datasets;
+use crate::bundled_datasets::DatasetPin;
 use crate::connection::GatewayEffects;
 use crate::connection::RequestTask;
 use crate::platform;
@@ -518,6 +520,38 @@ impl State {
         self.maintenance.message = None;
     }
 
+    pub(crate) fn bundled_dataset_path(&self, kind: DatasetKind) -> Option<PathBuf> {
+        if self.fixture {
+            let pin = bundled_datasets::pin(kind)?;
+            return self
+                .fixture_bundled_csv
+                .then(|| PathBuf::from("/fixture/datasets").join(&pin.filename));
+        }
+        bundled_datasets::installed_path(kind)
+    }
+
+    pub(crate) fn stage_bundled_dataset(&mut self, kind: DatasetKind, path: PathBuf) -> bool {
+        if self
+            .startup
+            .data_step
+            .and_then(crate::startup_data::Step::dataset_kind)
+            != Some(kind)
+        {
+            return false;
+        }
+        let Some(pin) = bundled_datasets::pin(kind) else {
+            return false;
+        };
+        let Some(operation) = dataset_operation(kind) else {
+            return false;
+        };
+        if self.maintenance_disabled_reason(operation).is_some() {
+            return false;
+        }
+        self.select_local_dataset(path, kind);
+        self.request_dataset_upload(Some(pin))
+    }
+
     pub(crate) fn download_github_dataset(&mut self, kind: DatasetKind, url: String) {
         let operation = match kind {
             DatasetKind::ActorCatalog => MaintenanceOperation::SeedActors,
@@ -576,35 +610,46 @@ impl State {
     }
 
     pub fn upload_selected_dataset(&mut self) {
+        self.request_dataset_upload(None);
+    }
+
+    fn request_dataset_upload(&mut self, pin: Option<&'static DatasetPin>) -> bool {
         if !self.permission(Permission::MaintainBackend)
             || matches!(self.maintenance.upload, Load::Loading)
         {
-            return;
+            return false;
         }
         let Some(selection) = self.maintenance.local_dataset.clone() else {
-            return;
+            return false;
         };
-        self.record(Intent::UploadDataset {
+        let intent = Intent::UploadDataset {
             kind: selection.kind,
-        });
+        };
         if self.fixture {
-            return;
+            if pin.is_some() {
+                self.maintenance.upload = Load::Loading;
+                self.maintenance.upload_revision = self.maintenance.upload_revision.wrapping_add(1);
+            }
+            self.record(intent);
+            return true;
         }
         let Some(client) = self.registered_dataset_client() else {
-            return;
+            return false;
         };
         let Some(services) = self.services.as_ref() else {
-            return;
+            return false;
         };
         self.maintenance.upload = Load::Loading;
         self.maintenance.upload_revision = self.maintenance.upload_revision.wrapping_add(1);
         self.maintenance.upload_request = services.upload_dataset(
             client,
             selection,
+            pin,
             self.connection.epoch,
             self.maintenance.upload_revision,
             self.origin_revision,
         );
+        true
     }
 
     pub fn refresh_datasets(&mut self) {
@@ -1332,7 +1377,7 @@ impl GatewayEffects {
                         path: file.path().to_owned(),
                         kind,
                     };
-                    let result = upload(&client, selection).await;
+                    let result = upload(&client, selection, None).await;
                     drop(file);
                     result
                 }
@@ -1349,6 +1394,7 @@ impl GatewayEffects {
         &self,
         client: Client,
         selection: LocalDataset,
+        pin: Option<&'static DatasetPin>,
         epoch: u64,
         revision: u64,
         origin_revision: u64,
@@ -1356,7 +1402,7 @@ impl GatewayEffects {
         let ui = self.ui.get()?.clone();
         let task = self.runtime.spawn(async move {
             let kind = selection.kind;
-            let result = upload(&client, selection).await;
+            let result = upload(&client, selection, pin).await;
             ui.update(move |state, _| {
                 state.complete_dataset_upload(epoch, revision, origin_revision, kind, result);
             });
@@ -2041,7 +2087,11 @@ async fn reconcile_uncertain_reindex(
     ))
 }
 
-async fn upload(client: &Client, selection: LocalDataset) -> Result<DatasetUpload, String> {
+async fn upload(
+    client: &Client,
+    selection: LocalDataset,
+    pin: Option<&DatasetPin>,
+) -> Result<DatasetUpload, String> {
     let kind = selection.kind;
     let cancel = Arc::new(AtomicBool::new(false));
     let _cancel = CancelPreparation(Arc::clone(&cancel));
@@ -2056,6 +2106,12 @@ async fn upload(client: &Client, selection: LocalDataset) -> Result<DatasetUploa
     })
     .await
     .map_err(|_| "Dataset verification worker stopped".to_owned())??;
+    if pin.is_some_and(|expected| expected.sha256 != sha256 || expected.size_bytes != size) {
+        return Err(
+            "The bundled CSV failed its integrity check. Choose Local CSV or reinstall Fleetworks."
+                .into(),
+        );
+    }
     client
         .upload_dataset(kind, &sha256, tokio::fs::File::from_std(file), size)
         .await
@@ -2222,6 +2278,14 @@ fn dataset_kind(operation: MaintenanceOperation) -> Option<DatasetKind> {
     match operation {
         MaintenanceOperation::SeedActors => Some(DatasetKind::ActorCatalog),
         MaintenanceOperation::TrainClassifier => Some(DatasetKind::ClassifierTraining),
+        _ => None,
+    }
+}
+
+fn dataset_operation(kind: DatasetKind) -> Option<MaintenanceOperation> {
+    match kind {
+        DatasetKind::ActorCatalog => Some(MaintenanceOperation::SeedActors),
+        DatasetKind::ClassifierTraining => Some(MaintenanceOperation::TrainClassifier),
         _ => None,
     }
 }

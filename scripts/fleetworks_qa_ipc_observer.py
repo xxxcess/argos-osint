@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Forward the packaged GUI's real companion IPC and record only QA sequence evidence."""
+"""Forward packaged GUI IPC and record bounded QA and seed acceptance evidence."""
 
 import hashlib
 import json
@@ -11,7 +11,7 @@ import threading
 
 from fleetworks_local_backend_smoke import MAX_IPC_FRAME_BYTES
 
-OBSERVED = {"qa_turn_submit", "qa_events"}
+OBSERVED = {"seed_actors", "qa_turn_submit", "qa_events"}
 MAX_RECORDS = 128
 
 
@@ -88,6 +88,10 @@ def observe(companion, journal, args):
                     continue
                 if recorded >= MAX_RECORDS:
                     raise ValueError("Fixture IPC journal exceeded its record bound")
+                recorded += 1
+                if operation == "seed_actors":
+                    output.write(json.dumps({"op": operation}) + "\n")
+                    continue
                 value = outcome["data"]["value"]
                 turn = value["turn"] if operation == "qa_events" else value
                 events = value["events"] if operation == "qa_events" else []
@@ -105,7 +109,6 @@ def observe(companion, journal, args):
                         for event in events
                     ],
                 }) + "\n")
-                recorded += 1
         except BrokenPipeError:
             actual.terminate()
         return actual.wait(timeout=10)

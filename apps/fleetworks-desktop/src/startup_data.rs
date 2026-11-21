@@ -1,5 +1,7 @@
 //! The cold-start workflow uses the same registered maintenance operations as Workstation Status.
 
+use std::path::PathBuf;
+
 use fleetworks_contracts::readiness::DatasetKind;
 use fleetworks_contracts::readiness::DatasetRef;
 use fleetworks_contracts::readiness::MaintenanceOperation;
@@ -31,6 +33,7 @@ pub(crate) const PRIMARY: &str = "startup-data-primary";
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum CsvSource {
     Local,
+    Bundled,
     Github,
 }
 
@@ -38,20 +41,29 @@ impl CsvSource {
     fn label(self) -> &'static str {
         match self {
             Self::Local => "Local CSV",
+            Self::Bundled => "Bundled CSV",
             Self::Github => "GitHub CSV URL",
         }
     }
 }
 
+enum Bundle {
+    Unchecked,
+    Missing,
+    Available { path: PathBuf, attempted: bool },
+}
+
 struct CsvInput {
     source: CsvSource,
+    bundle: Bundle,
     url: TextEdit,
 }
 
 impl CsvInput {
     fn new(kind: DatasetKind) -> Self {
         Self {
-            source: CsvSource::Github,
+            source: CsvSource::Local,
+            bundle: Bundle::Unchecked,
             url: TextEdit::new(crate::github_dataset::default_url(kind).unwrap_or_default()),
         }
     }
@@ -170,7 +182,7 @@ impl Step {
             Self::Seed => "Validate an actor CSV before seeding the connected backend.",
             Self::Index => "Build the index that makes actors searchable.",
             Self::Classifier => {
-                "Choose a training CSV to create a classifier candidate. Training is optional."
+                "Validate a training CSV before creating an optional classifier candidate."
             }
         }
     }
@@ -241,11 +253,16 @@ impl Step {
             self.preview(state, tx);
         } else if let Some(kind) = self.dataset_kind() {
             match self.csv_input(&state.startup.csv_inputs) {
-                Some(input) if input.source == CsvSource::Github => {
-                    state.download_github_dataset(kind, input.url.text.clone());
-                }
-                Some(_) if cfg!(target_os = "linux") => state.enter_csv_path(kind, tx),
-                Some(_) => state.choose_dataset(kind, tx),
+                Some(input) => match input.source {
+                    CsvSource::Bundled => {
+                        state.validate_bundled_startup_csv(self, kind);
+                    }
+                    CsvSource::Github => {
+                        state.download_github_dataset(kind, input.url.text.clone());
+                    }
+                    CsvSource::Local if cfg!(target_os = "linux") => state.enter_csv_path(kind, tx),
+                    CsvSource::Local => state.choose_dataset(kind, tx),
+                },
                 None => {}
             }
         }
@@ -451,6 +468,81 @@ fn focus_stage(tx: &mut Tx) {
 }
 
 impl State {
+    pub(crate) fn drive_startup_dataset(&mut self) -> bool {
+        let Some(step) = self.startup.data_step else {
+            return false;
+        };
+        let Some(kind) = step.dataset_kind() else {
+            return false;
+        };
+        if !self.connected() || self.registration.context.is_none() {
+            return false;
+        }
+        let mut changed = false;
+        if step
+            .csv_input(&self.startup.csv_inputs)
+            .is_some_and(|input| matches!(input.bundle, Bundle::Unchecked))
+        {
+            let path = self.bundled_dataset_path(kind);
+            let input = step
+                .csv_input_mut(&mut self.startup.csv_inputs)
+                .expect("dataset step has a CSV input");
+            input.bundle = if let Some(path) = path {
+                input.source = CsvSource::Bundled;
+                Bundle::Available {
+                    path,
+                    attempted: false,
+                }
+            } else {
+                Bundle::Missing
+            };
+            changed = true;
+        }
+        let first_attempt = step
+            .csv_input(&self.startup.csv_inputs)
+            .is_some_and(|input| {
+                input.source == CsvSource::Bundled
+                    && matches!(
+                        input.bundle,
+                        Bundle::Available {
+                            attempted: false,
+                            ..
+                        }
+                    )
+            });
+        if first_attempt {
+            changed |= self.validate_bundled_startup_csv(step, kind);
+        }
+        changed
+    }
+
+    fn can_validate_bundled_startup_csv(&self, step: Step) -> bool {
+        matches!(stage(self, step), Stage::Action | Stage::Failed(_))
+            && !self.maintenance.busy()
+            && self.maintenance.csv_path_prompt.is_none()
+            && self.maintenance.confirmation.is_none()
+            && validated_csv(self, step).is_none()
+            && self.maintenance_disabled_reason(step.operation()).is_none()
+    }
+
+    fn validate_bundled_startup_csv(&mut self, step: Step, kind: DatasetKind) -> bool {
+        if !self.can_validate_bundled_startup_csv(step) {
+            return false;
+        }
+        let Some(CsvInput {
+            source: CsvSource::Bundled,
+            bundle: Bundle::Available { path, attempted },
+            ..
+        }) = step.csv_input_mut(&mut self.startup.csv_inputs)
+        else {
+            return false;
+        };
+        *attempted = true;
+        let path = path.clone();
+        self.stage_bundled_dataset(kind, path);
+        true
+    }
+
     fn startup_csv_source(&mut self, step: Step, source: CsvSource) {
         if self.startup.data_step != Some(step) {
             return;
@@ -463,6 +555,7 @@ impl State {
         }
         input.source = source;
         self.clear_startup_csv(step);
+        self.drive_startup_dataset();
     }
 
     fn clear_startup_csv(&mut self, step: Step) {
@@ -518,6 +611,7 @@ impl State {
         self.maintenance.message = None;
         self.startup.data_step = first_unfinished(self);
         self.startup.data_checks = self.startup.data_step.is_none();
+        self.drive_startup_dataset();
         focus_stage(tx);
     }
 
@@ -528,6 +622,7 @@ impl State {
             }
             self.startup.data_checks = false;
             self.startup.data_step = Some(step);
+            self.drive_startup_dataset();
             focus_stage(tx);
         }
     }
@@ -551,6 +646,7 @@ impl State {
         self.startup.data_reset[step.number() - 1] = true;
         self.startup.data_checks = false;
         self.startup.data_step = Some(step);
+        self.drive_startup_dataset();
         focus_stage(tx);
     }
 
@@ -793,11 +889,17 @@ pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit:
     };
     panel = panel.children(progress);
     if let Some(input) = csv_input {
-        panel = panel.child(csv_source_controls(step, input, kit));
+        panel = panel.children(csv_source_controls(step, input, kit));
         if let Some(upload) = upload {
             let detail = upload.row_count.map_or_else(
                 || format!("{} · CSV validated", input.source.label()),
-                |rows| format!("{} · {rows} rows validated", input.source.label()),
+                |rows| {
+                    format!(
+                        "{} · {} rows validated",
+                        input.source.label(),
+                        format_row_count(rows)
+                    )
+                },
             );
             panel = panel.child(
                 status(
@@ -839,6 +941,11 @@ pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit:
     if csv_input.is_some() && (downloading || validating) {
         let (title, detail) = if downloading {
             ("Downloading", "Fetching the CSV from GitHub.")
+        } else if csv_input.is_some_and(|input| input.source == CsvSource::Bundled) {
+            (
+                "Validating",
+                "Checking the bundled CSV with the connected backend.",
+            )
         } else {
             ("Validating", "Waiting for the backend to validate the CSV.")
         };
@@ -873,6 +980,12 @@ pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit:
                 "Use current catalog"
             } else if upload.is_some() {
                 step.validated_action()
+            } else if csv_input.is_some_and(|input| input.source == CsvSource::Bundled) {
+                if matches!(state.maintenance.upload, Load::Failed(_)) {
+                    "Retry validation"
+                } else {
+                    "Validate bundled CSV"
+                }
             } else if csv_input.is_some_and(|input| input.source == CsvSource::Github) {
                 "Download & validate"
             } else {
@@ -921,7 +1034,7 @@ pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit:
                         .build(kit, preferences, None),
                 );
             }
-            if let Some(reason) = blocked {
+            if let Some(reason) = blocked.filter(|_| !downloading && !validating) {
                 panel = panel.child(views::quiet(reason, kit));
                 actions = actions.child(refresh(state, preferences, kit));
             }
@@ -945,20 +1058,39 @@ pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit:
     layout(panel.child(actions), sequence, dots)
 }
 
-fn csv_source_controls(step: Step, input: &CsvInput, kit: &Kit) -> El {
+fn format_row_count(rows: u64) -> String {
+    let mut count = rows.to_string();
+    let mut separator = count.len();
+    while separator > 3 {
+        separator -= 3;
+        count.insert(separator, ',');
+    }
+    count
+}
+
+fn csv_source_controls(step: Step, input: &CsvInput, kit: &Kit) -> Option<El> {
+    let sources: Vec<_> = [CsvSource::Local, CsvSource::Bundled, CsvSource::Github]
+        .into_iter()
+        .filter(|source| match source {
+            CsvSource::Local => true,
+            CsvSource::Bundled => matches!(input.bundle, Bundle::Available { .. }),
+            CsvSource::Github => cfg!(any(test, feature = "native-github-dataset")),
+        })
+        .collect();
+    if sources.len() <= 1 {
+        return None;
+    }
+    let labels: Vec<_> = sources.iter().map(|source| source.label()).collect();
     let options = SegmentedControl::new(
-        &[CsvSource::Local.label(), CsvSource::Github.label()],
-        Some(usize::from(input.source == CsvSource::Github)),
+        &labels,
+        sources.iter().position(|&source| source == input.source),
     )
     .label("CSV source")
     .fit()
     .on_pick(move |state: &mut State, index, _| {
-        let source = if index == 0 {
-            CsvSource::Local
-        } else {
-            CsvSource::Github
-        };
-        state.startup_csv_source(step, source);
+        if let Some(&source) = sources.get(index) {
+            state.startup_csv_source(step, source);
+        }
     })
     .build(kit)
     .key("startup-csv-source");
@@ -981,12 +1113,14 @@ fn csv_source_controls(step: Step, input: &CsvInput, kit: &Kit) -> El {
             .build(kit)
             .key("startup-csv-github-url")
     });
-    rune::col()
-        .w_full()
-        .min_w(0.0)
-        .gap(6.0)
-        .child(options)
-        .children(url)
+    Some(
+        rune::col()
+            .w_full()
+            .min_w(0.0)
+            .gap(6.0)
+            .child(options)
+            .children(url),
+    )
 }
 
 fn layout(panel: El, sequence: El, dots: El) -> El {

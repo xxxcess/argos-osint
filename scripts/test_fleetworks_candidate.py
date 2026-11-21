@@ -19,10 +19,30 @@ from unittest import mock
 
 from fleetworks_candidate import (
     COMPANION_BINARY, COMPANION_PACKAGE, MAX_NATIVE_ARCHIVE_BYTES, MAX_NATIVE_UNPACKED_BYTES,
-    NATIVE_APP, NATIVE_BINARY, NATIVE_MANIFEST,
+    DATASET_LIMITS, DATASET_PINS, LEGACY_NATIVE_FORMAT, NATIVE_APP, NATIVE_BINARY, NATIVE_FORMAT,
+    NATIVE_MANIFEST,
 )
 from fleetworks_candidate import main, native_main, open_native, _run_cargo, apple_versions, cargo_companion_command, cargo_executable, cargo_native_command
 from fleetworks_candidate import artifact_version, checksum_line, elf_architecture, extract_native, linux_runtime_preflight, native_output, package_native, sha256, verify_engine_free
+
+
+def fixture_datasets(test):
+    root = test.root / "datasets"
+    root.mkdir()
+    revision = "d" * 40
+    pins = {"schema": 1, "revision": revision, "datasets": {}}
+    for kind, (filename, origin, _) in DATASET_LIMITS.items():
+        source = root / filename
+        source.write_text(f"id,kind\nfixture,{kind}\n", encoding="utf-8")
+        pins["datasets"][kind] = {
+            "filename": filename, "size_bytes": source.stat().st_size, "sha256": sha256(source),
+            "download_url": f"{origin}/{revision}/datasets/{filename}",
+        }
+    (root / DATASET_PINS).write_text(json.dumps(pins), encoding="utf-8")
+    configured = mock.patch("fleetworks_candidate.DATASET_ROOT", root)
+    configured.start()
+    test.addCleanup(configured.stop)
+    return root, pins
 
 
 class NativeAppTests(unittest.TestCase):
@@ -32,6 +52,7 @@ class NativeAppTests(unittest.TestCase):
         # macOS temporary paths may use /var -> /private/var. Match the
         # packager's canonical destination so fault injection hits replacement.
         self.root = Path(scratch.name).resolve()
+        self.datasets, self.dataset_pins = fixture_datasets(self)
         self.binary = self.root / "cargo output with spaces" / NATIVE_BINARY
         self.binary.parent.mkdir()
         self.binary.write_bytes(struct.pack("<8I", 0xFEEDFACF, 0x01000007, 3, 2, 0, 0, 0, 0) + b"native fixture")
@@ -78,6 +99,12 @@ class NativeAppTests(unittest.TestCase):
         self.assertEqual(plist["LSMinimumSystemVersion"], "13.0")
         self.assertEqual(plist["CFBundleExecutable"], NATIVE_BINARY)
         manifest = json.loads(Path(result["manifest"]).read_text())
+        self.assertEqual(manifest["format"], NATIVE_FORMAT)
+        self.assertEqual(manifest["default_datasets"], self.dataset_pins)
+        for pin in self.dataset_pins["datasets"].values():
+            relative = "Contents/Resources/datasets/" + pin["filename"]
+            self.assertEqual((app / relative).read_bytes(), (self.datasets / pin["filename"]).read_bytes())
+            self.assertEqual(manifest["files"][relative], pin["sha256"])
         self.assertTrue(manifest["dirty"])
         self.assertEqual(manifest["revision"], "1" * 40)
         self.assertEqual(manifest["rune_revision"], "2" * 40)
@@ -290,6 +317,42 @@ class NativeAppTests(unittest.TestCase):
             self.verify(result)
         self.assertFalse((self.root / "download check").exists())
 
+    def test_new_zip_requires_pinned_files_and_old_format_still_verifies(self):
+        path_prefix = "Contents/Resources/datasets/"
+        actor = path_prefix + self.dataset_pins["datasets"]["actor_catalog"]["filename"]
+        manifest_path = NATIVE_APP + "/Contents/Resources/fleetworks-manifest.json"
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                result = self.pack(archive=True, attempt="3" if legacy else "2")
+                archive = Path(result["archive"])
+                with zipfile.ZipFile(archive) as original:
+                    entries = [(entry, original.read(entry)) for entry in original.infolist()]
+                with zipfile.ZipFile(archive, "w") as changed:
+                    for entry, payload in entries:
+                        relative = entry.filename.partition("/")[2]
+                        if relative == actor or legacy and relative.startswith(path_prefix):
+                            continue
+                        if entry.filename == manifest_path:
+                            manifest = json.loads(payload)
+                            del manifest["files"][actor]
+                            if legacy:
+                                manifest["format"] = LEGACY_NATIVE_FORMAT
+                                del manifest["default_datasets"]
+                                manifest["files"] = {name: digest for name, digest in manifest["files"].items()
+                                                     if not name.startswith(path_prefix)}
+                            payload = json.dumps(manifest).encode("utf-8")
+                        changed.writestr(entry, payload)
+                result["sha256"] = sha256(archive)
+                archive.with_suffix(".zip.sha256").write_text(checksum_line(archive, result["sha256"]))
+                if legacy:
+                    app, manifest = self.verify(result)
+                    self.assertEqual(manifest["format"], LEGACY_NATIVE_FORMAT)
+                    self.assertFalse((app / path_prefix).exists())
+                else:
+                    with self.assertRaisesRegex(ValueError, "missing a matching default dataset"):
+                        self.verify(result)
+                    self.assertFalse((self.root / "download check").exists())
+
 
 class NativeBuildProgressTests(unittest.TestCase):
     def setUp(self):
@@ -474,6 +537,7 @@ class LinuxNativeCandidateTests(unittest.TestCase):
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)
         self.root = Path(scratch.name).resolve()
+        self.datasets, self.dataset_pins = fixture_datasets(self)
         self.binary = self.root / "target output" / NATIVE_BINARY
         self.binary.parent.mkdir()
         elf_header = (
@@ -546,6 +610,52 @@ class LinuxNativeCandidateTests(unittest.TestCase):
         )
         self.assertEqual(verified["revision"], "1" * 40)
         self.assertEqual((app / "bin" / NATIVE_BINARY).read_bytes(), self.binary.read_bytes())
+        installed = app / "share/fleetworks/resources/datasets"
+        self.assertEqual(json.loads((installed / DATASET_PINS).read_bytes()), self.dataset_pins)
+        for pin in self.dataset_pins["datasets"].values():
+            self.assertEqual((installed / pin["filename"]).stat().st_size, pin["size_bytes"])
+            self.assertEqual(sha256(installed / pin["filename"]), pin["sha256"])
+
+    def test_lfs_pointer_resolves_matching_media_and_partial_download_never_replaces_bundle(self):
+        actor = self.dataset_pins["datasets"]["actor_catalog"]
+        source = self.datasets / actor["filename"]
+        content = source.read_bytes()
+        source.write_text(
+            f"version https://git-lfs.github.com/spec/v1\noid sha256:{actor['sha256']}\nsize {actor['size_bytes']}\n",
+            encoding="ascii",
+        )
+        relative = "share/fleetworks/resources/datasets/" + actor["filename"]
+
+        def opener(content):
+            response = mock.MagicMock()
+            response.__enter__.return_value = response
+            response.status = 200
+            response.geturl.return_value = actor["download_url"]
+            response.headers = {"Content-Length": str(actor["size_bytes"])}
+            response.read1.side_effect = io.BytesIO(content).read
+            result = mock.Mock()
+            result.open.return_value = response
+            return result
+
+        complete = opener(content)
+        with mock.patch("fleetworks_candidate.urllib.request.build_opener", return_value=complete) as factory:
+            result = self.pack()
+        [handler] = factory.call_args.args
+        self.assertIsNone(handler.redirect_request(None, None, 302, "", {}, "https://unexpected.test/data"))
+        request = complete.open.call_args.args[0]
+        self.assertEqual(request.full_url, actor["download_url"])
+        self.assertIsNone(request.get_header("Authorization"))
+        self.assertEqual((Path(result["app"]) / relative).read_bytes(), content)
+        last_manifest = Path(result["manifest"]).read_bytes()
+
+        for incorrect in (content[:-1], b"!" + content[1:]):
+            with self.subTest(length=len(incorrect)), mock.patch(
+                "fleetworks_candidate.urllib.request.build_opener", return_value=opener(incorrect),
+            ), self.assertRaisesRegex(ValueError, "length or SHA-256 does not match"):
+                self.pack()
+            self.assertEqual((Path(result["app"]) / relative).read_bytes(), content)
+            self.assertEqual(Path(result["manifest"]).read_bytes(), last_manifest)
+            self.assertFalse(list(self.destination.glob(".fleetworks-stage-*")))
 
     def test_rejects_disallowed_linux_shared_libraries_and_unsafe_tar_members(self):
         def bad_lib(command, **_kwargs):

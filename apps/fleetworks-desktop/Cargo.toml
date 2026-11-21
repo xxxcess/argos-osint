@@ -7,6 +7,9 @@ license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 
+[features]
+native-github-dataset = []
+
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true

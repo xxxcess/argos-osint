@@ -19,6 +19,7 @@ fn embedded_setup(state: &mut State, readiness_scene: fn(&mut State)) {
     readiness_scene(state);
     state.page = Page::Workstation;
     state.setup_gateway = true;
+    state.seed_startup_bundled_dataset_fixture();
     state.connection.origin = TextEdit::new("local://embedded");
     state.local_backend.binary_status =
         BinaryDiscoveryStatus::Ready("/fixture/bundle/argos-api-host".into());

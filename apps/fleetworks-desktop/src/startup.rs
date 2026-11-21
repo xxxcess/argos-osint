@@ -556,6 +556,7 @@ impl State {
         if !self.readiness_pending() {
             self.refresh_readiness();
         }
+        self.drive_startup_dataset();
         tx.instant();
         tx.focus("startup-data-stage", tx.by_keys());
     }
@@ -965,7 +966,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_prefills_github_csv_choices_and_only_downloads_after_press() {
+    fn startup_github_csv_is_opt_in_and_only_downloads_after_press() {
         use ReadinessState::{NotReady, Ready};
         for (checks, kind) in [
             ([NotReady; 3], DatasetKind::ActorCatalog),
@@ -975,6 +976,9 @@ mod tests {
             runtime.frame(0.0);
             click(&mut runtime, "gateway-setup-done");
             runtime.frame(0.02);
+            assert!(runtime.find("startup-csv-github-url").is_none());
+            click(&mut runtime, "startup-csv-source/segment1");
+            runtime.frame(0.01);
             let default = crate::github_dataset::default_url(kind).expect("default CSV URL");
             let tree = runtime.accessibility_json().to_string();
             assert!(tree.contains(default));
@@ -996,6 +1000,111 @@ mod tests {
     }
 
     #[test]
+    fn startup_validates_each_bundled_csv_once_then_waits_for_confirmation() {
+        use ReadinessState::{NotReady, Ready};
+        for (checks, kind, operation, ready_label, action_label) in [
+            (
+                [NotReady; 3],
+                DatasetKind::ActorCatalog,
+                MaintenanceOperation::SeedActors,
+                "Ready to seed",
+                "Seed actors",
+            ),
+            (
+                [Ready, Ready, NotReady],
+                DatasetKind::ClassifierTraining,
+                MaintenanceOperation::TrainClassifier,
+                "Ready to train",
+                "Train classifier",
+            ),
+        ] {
+            let (mut runtime, _) = data_setup_runtime(checks);
+            runtime.state.fixture_bundled_csv = true;
+            runtime.state.intents.clear();
+            let profile = std::mem::replace(&mut runtime.state.backend.profile, app::Load::Idle);
+            runtime.frame(0.0);
+            click(&mut runtime, "gateway-setup-done");
+            runtime.frame(0.02);
+            assert!(!runtime
+                .state
+                .intents
+                .contains(&Intent::UploadDataset { kind }));
+            runtime.update(|state, _| {
+                state.backend.profile = profile;
+                assert!(state.drive_startup_dataset());
+            });
+            runtime.frame(0.02);
+            assert!(runtime
+                .state
+                .intents
+                .contains(&Intent::UploadDataset { kind }));
+            let tree = runtime.accessibility_json().to_string();
+            assert!(tree.contains("Bundled CSV"));
+            assert!(tree.contains("Validating"));
+            assert!(!tree.contains(action_label));
+            let complete = move |state: &mut State, result| {
+                state.complete_dataset_upload(
+                    state.connection.epoch,
+                    state.maintenance.upload_revision,
+                    state.origin_revision(),
+                    kind,
+                    result,
+                );
+            };
+            runtime.update(|state, _| {
+                assert!(!state.drive_startup_dataset());
+                complete(state, Err("Could not validate the bundled CSV".into()));
+                assert!(!state.drive_startup_dataset());
+            });
+            runtime.frame(0.02);
+            assert!(!runtime
+                .accessibility_json()
+                .to_string()
+                .contains(action_label));
+            assert_eq!(
+                runtime
+                    .state
+                    .intents
+                    .iter()
+                    .filter(|intent| matches!(intent, Intent::UploadDataset { .. }))
+                    .count(),
+                1
+            );
+            runtime.update(|_, tx| tx.scroll_into_view(startup_data::PRIMARY));
+            runtime.frame(0.02);
+            click(&mut runtime, startup_data::PRIMARY);
+            runtime.frame(0.02);
+            let dataset = DatasetRef::new("fixture-bundle".into(), kind, "b".repeat(64), 120)
+                .expect("validated dataset");
+            let mut upload = DatasetUpload::new(dataset.clone(), 60);
+            upload.row_count = Some(94_987);
+            runtime.update(|state, _| complete(state, Ok(upload)));
+            runtime.frame(0.02);
+            let tree = runtime.accessibility_json().to_string();
+            assert!(tree.contains(ready_label));
+            assert!(tree.contains("Bundled CSV · 94,987 rows validated"));
+            assert!(runtime.state.maintenance.confirmation.is_none());
+            runtime.update(|_, tx| tx.scroll_into_view(startup_data::PRIMARY));
+            runtime.frame(0.02);
+            click(&mut runtime, startup_data::PRIMARY);
+            runtime.frame(0.02);
+            assert_eq!(
+                runtime
+                    .state
+                    .maintenance
+                    .confirmation
+                    .as_ref()
+                    .and_then(|confirmation| confirmation.dataset.as_ref()),
+                Some(&dataset)
+            );
+            assert!(!runtime
+                .state
+                .intents
+                .contains(&Intent::Maintenance { operation }));
+        }
+    }
+
+    #[test]
     fn startup_github_csv_requires_validation_and_discards_stale_edits_and_uploads() {
         const URL_EDITOR: &str = "startup-csv-github-url/value/input";
         const LOCAL_SOURCE: &str = "startup-csv-source/segment0";
@@ -1005,6 +1114,8 @@ mod tests {
         runtime.frame(0.0);
         click(&mut runtime, "gateway-setup-done");
         runtime.frame(0.02);
+        click(&mut runtime, "startup-csv-source/segment1");
+        runtime.frame(0.01);
         click(&mut runtime, startup_data::PRIMARY);
         runtime.update(|state, _| {
             state.maintenance.github_downloading = true;

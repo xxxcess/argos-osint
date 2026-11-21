@@ -286,6 +286,7 @@ pub struct State {
     pub assistant: crate::assistant::Assistant,
     /// Fixture only: draw the component catalog in place of the page.
     pub(crate) fixture_catalog: bool,
+    pub(crate) fixture_bundled_csv: bool,
     /// Observed job, readiness and connection transitions for this authority.
     pub inbox: crate::inbox::Inbox,
     pub(crate) inbox_qa: crate::inbox_qa::InboxQa,
@@ -434,6 +435,7 @@ impl Default for State {
             rebind: Rebind::default(),
             origin_revision: 0,
             fixture: false,
+            fixture_bundled_csv: false,
             intents: Vec::new(),
             fixture_effect: None,
             services: None,
@@ -470,6 +472,13 @@ impl State {
             fixture: true,
             setup_gateway: false,
             ..Self::default()
+        }
+    }
+
+    /// Use synthetic packaged resource paths for the startup fixture.
+    pub fn seed_startup_bundled_dataset_fixture(&mut self) {
+        if self.fixture {
+            self.fixture_bundled_csv = true;
         }
     }
 
@@ -1335,6 +1344,7 @@ fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
         return true;
     }
     changed |= state.startup.poll_flight(now, tx);
+    changed |= state.drive_startup_dataset();
     changed |= state.observe_inbox();
     changed |= state.poll_inbox_qa(now, tx);
     changed |= state.sync_assistant();

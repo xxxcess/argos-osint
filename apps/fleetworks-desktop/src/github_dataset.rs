@@ -15,16 +15,8 @@ use tempfile::NamedTempFile;
 use tokio::io::AsyncWriteExt;
 use url::Url;
 
-const ACTORS: &str = concat!(
-    "https://media.githubusercontent.com/media/xxxcess/argos-osint/",
-    "cd371e39772a157bb791dc0d0dc6ac76c84e0ea5/datasets/argos_actors.csv",
-);
-const ACTORS_SIZE: u64 = 139_885_998;
-const ACTORS_SHA256: &str = "c1866dd7b295ef1e62bd0b818d30c6eafd5c3a59f7b2c1417d22653295dbfedd";
-const TRAINING: &str = concat!(
-    "https://raw.githubusercontent.com/xxxcess/argos-osint/",
-    "cd371e39772a157bb791dc0d0dc6ac76c84e0ea5/datasets/argos_atlas_strategic_domains_v2.csv",
-);
+use crate::bundled_datasets;
+
 const MAX_URL_BYTES: usize = 2_048;
 const MAX_REDIRECTS: usize = 4;
 const MAX_POINTER_BYTES: u64 = 1_024;
@@ -41,11 +33,7 @@ const STAGING_ERROR: &str = "Could not save the downloaded CSV. Check available 
 const POINTER_HEADER: &str = "version https://git-lfs.github.com/spec/v1";
 
 pub(crate) fn default_url(kind: DatasetKind) -> Option<&'static str> {
-    match kind {
-        DatasetKind::ActorCatalog => Some(ACTORS),
-        DatasetKind::ClassifierTraining => Some(TRAINING),
-        _ => None,
-    }
+    bundled_datasets::pin(kind).map(|pin| pin.download_url.as_str())
 }
 
 /// Stage one complete download. The caller owns this file through its usual
@@ -244,10 +232,12 @@ enum Staged {
 }
 
 async fn fetch_csv(client: &Client, url: Url, limit: u64) -> Result<NamedTempFile, String> {
-    let expected = (url.as_str() == ACTORS).then(|| LfsPointer {
-        sha256: ACTORS_SHA256.to_owned(),
-        size: ACTORS_SIZE,
-    });
+    let expected = bundled_datasets::pin(DatasetKind::ActorCatalog)
+        .filter(|pin| url.as_str() == pin.download_url)
+        .map(|pin| LfsPointer {
+            sha256: pin.sha256.clone(),
+            size: pin.size_bytes,
+        });
     let (resolved, response) = get(client, url).await?;
     match stage(response, limit, expected.as_ref()).await? {
         Staged::Csv(csv) => Ok(csv),
@@ -343,8 +333,8 @@ mod tests {
     #[test]
     fn accepts_public_raw_branch_commit_and_lfs_urls() {
         for source in [
-            ACTORS,
-            TRAINING,
+            default_url(DatasetKind::ActorCatalog).unwrap(),
+            default_url(DatasetKind::ClassifierTraining).unwrap(),
             "https://raw.githubusercontent.com/example/repo/main/Actor.CSV",
             "https://raw.githubusercontent.com/example/repo/refs/heads/feature/data/datasets/actors.csv",
             "https://github.com/example/repo/raw/main/datasets/data%20set.csv",
@@ -461,7 +451,7 @@ mod tests {
                 .resolve(HOST, address)
                 .build()
                 .unwrap();
-            let official = parse_source(ACTORS).unwrap();
+            let official = parse_source(default_url(DatasetKind::ActorCatalog).unwrap()).unwrap();
             assert_eq!(
                 get(&github, official).await.err().as_deref(),
                 Some(DOWNLOAD_ERROR)

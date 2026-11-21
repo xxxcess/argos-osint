@@ -9,6 +9,7 @@ import argparse
 import codecs
 import gzip
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -24,7 +25,9 @@ import tarfile
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
 import zipfile
 from pathlib import Path, PurePosixPath
 
@@ -38,7 +41,17 @@ NATIVE_APP = "Fleetworks.app"
 NATIVE_MANIFEST = "Fleetworks.app.manifest.json"
 LINUX_APP = "Fleetworks-linux-x86_64"
 LINUX_MANIFEST = "Fleetworks-linux-x86_64.manifest.json"
-NATIVE_FORMAT = "fleetworks-native-1"
+NATIVE_FORMAT = "fleetworks-native-2"
+LEGACY_NATIVE_FORMAT = "fleetworks-native-1"
+SUPPORTED_NATIVE_FORMATS = (LEGACY_NATIVE_FORMAT, NATIVE_FORMAT)
+DATASET_ROOT = ROOT / "datasets"
+DATASET_PINS = "native-defaults.json"
+DATASET_DOWNLOAD_TIMEOUT = 180
+DATASET_DOWNLOAD_IDLE_TIMEOUT = 20
+DATASET_LIMITS = {
+    "actor_catalog": ("argos_actors.csv", "https://media.githubusercontent.com/media/xxxcess/argos-osint", 256 * 1024 * 1024),
+    "classifier_training": ("argos_atlas_strategic_domains_v2.csv", "https://raw.githubusercontent.com/xxxcess/argos-osint", 128 * 1024 * 1024),
+}
 NATIVE_CPU_TYPES = {"x86_64-apple-darwin": 0x01000007, "aarch64-apple-darwin": 0x0100000C}
 LINUX_ELF_MACHINES = {"x86_64-unknown-linux-gnu": 62}
 DISALLOWED_LINUX_LIBRARIES = ("libssl", "libcrypto", "librocksdb", "libsurreal", "libtorch", "libonnxruntime")
@@ -458,7 +471,129 @@ def linux_runtime_preflight(environment=None, *, vulkan_icd_dirs=None, runner=No
 
 
 def _write_json(path, value):
-    path.write_text(json.dumps(value, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    path.write_bytes(_json_bytes(value))
+
+
+def _json_bytes(value):
+    return (json.dumps(value, sort_keys=True, indent=2) + "\n").encode("utf-8")
+
+
+def _validated_dataset_pins(pins):
+    if not isinstance(pins, dict) or set(pins) != {"schema", "revision", "datasets"} \
+            or type(pins["schema"]) is not int or pins["schema"] != 1 \
+            or not isinstance(pins["revision"], str) \
+            or not re.fullmatch(r"[0-9a-f]{40}", pins["revision"]) \
+            or not isinstance(pins["datasets"], dict) \
+            or set(pins["datasets"]) != set(DATASET_LIMITS):
+        raise ValueError("Native dataset pins must describe both CSVs at an exact revision")
+    for kind, (filename, origin, limit) in DATASET_LIMITS.items():
+        dataset = pins["datasets"][kind]
+        if not isinstance(dataset, dict) or set(dataset) != {"filename", "sha256", "size_bytes", "download_url"} \
+                or dataset["filename"] != filename or not isinstance(dataset["sha256"], str) \
+                or not re.fullmatch(r"[0-9a-f]{64}", dataset["sha256"]) \
+                or type(dataset["size_bytes"]) is not int or not 0 < dataset["size_bytes"] <= limit \
+                or dataset["download_url"] != f"{origin}/{pins['revision']}/datasets/{filename}":
+            raise ValueError(f"Invalid Native default dataset pin: {kind}")
+    return pins
+
+
+def _read_dataset_pins():
+    path = DATASET_ROOT / DATASET_PINS
+    if DATASET_ROOT.is_symlink() or path.is_symlink() or not path.is_file() or path.stat().st_size > 8192:
+        raise ValueError("Native default dataset pins must be a small tracked regular file")
+    return _validated_dataset_pins(json.loads(path.read_bytes()))
+
+
+def _stage_dataset(read_block, destination, pin, *, deadline=None):
+    count = 0
+    digest = hashlib.sha256()
+    with tempfile.NamedTemporaryFile(prefix=".dataset-", dir=destination.parent, delete=False) as output:
+        staged = Path(output.name)
+        try:
+            while True:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError("Native actor dataset download timed out")
+                block = read_block(min(1024 * 1024, pin["size_bytes"] - count + 1))
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError("Native actor dataset download timed out")
+                if not block:
+                    break
+                count += len(block)
+                if count > pin["size_bytes"]:
+                    raise ValueError(f"Native dataset exceeds its pinned length: {pin['filename']}")
+                digest.update(block)
+                output.write(block)
+            if count != pin["size_bytes"] or digest.hexdigest() != pin["sha256"]:
+                raise ValueError(f"Native dataset length or SHA-256 does not match its pin: {pin['filename']}")
+            output.close()
+            staged.chmod(0o644)
+            os.replace(staged, destination)
+        finally:
+            staged.unlink(missing_ok=True)
+
+
+class _RejectDatasetRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _download_pinned_actor(pin, destination):
+    _progress("Downloading the pinned Native actor catalog from GitHub media")
+    deadline = time.monotonic() + DATASET_DOWNLOAD_TIMEOUT
+    opener = urllib.request.build_opener(_RejectDatasetRedirects())
+    request = urllib.request.Request(pin["download_url"], headers={"Accept-Encoding": "identity"})
+    try:
+        with opener.open(request, timeout=DATASET_DOWNLOAD_IDLE_TIMEOUT) as response:
+            if response.status != 200 or response.geturl() != pin["download_url"]:
+                raise ValueError("Pinned Native actor dataset did not return the complete GitHub media object")
+            length = response.headers.get("Content-Length")
+            if length is not None and length != str(pin["size_bytes"]):
+                raise ValueError("GitHub media length does not match the pinned Native actor dataset")
+            _stage_dataset(response.read1, destination, pin, deadline=deadline)
+    except urllib.error.HTTPError as error:
+        raise ValueError(f"Pinned Native actor dataset download failed (HTTP {error.code})") from None
+    except (urllib.error.URLError, ConnectionError, TimeoutError, http.client.HTTPException):
+        raise ValueError("Could not download the pinned Native actor dataset. Check GitHub access or hydrate it with Git LFS.") from None
+
+
+def _bundle_default_datasets(resources, pins):
+    directory = resources / "datasets"
+    directory.mkdir()
+    for kind, pin in pins["datasets"].items():
+        source = DATASET_ROOT / pin["filename"]
+        destination = directory / pin["filename"]
+        if source.is_symlink() or (source.exists() and not source.is_file()):
+            raise ValueError(f"Native dataset source must be a regular file: {pin['filename']}")
+        if kind == "actor_catalog" and not source.exists():
+            _download_pinned_actor(pin, destination)
+            continue
+        if not source.is_file():
+            raise ValueError(f"Native dataset source is missing: {pin['filename']}")
+        with source.open("rb") as handle:
+            if kind == "actor_catalog" and source.stat().st_size <= 1024:
+                lfs_pointer = f"version https://git-lfs.github.com/spec/v1\noid sha256:{pin['sha256']}\nsize {pin['size_bytes']}\n"
+                if handle.read(1025) == lfs_pointer.encode("ascii"):
+                    _download_pinned_actor(pin, destination)
+                    continue
+                handle.seek(0)
+            _stage_dataset(handle.read, destination, pin)
+    _write_json(directory / DATASET_PINS, pins)
+
+
+def _verify_bundled_datasets(manifest, resources, sizes):
+    if manifest["format"] == LEGACY_NATIVE_FORMAT:
+        if "default_datasets" in manifest:
+            raise ValueError("Legacy Native archive unexpectedly declares default datasets")
+        return
+    pins = _validated_dataset_pins(manifest.get("default_datasets"))
+    relative_dir = f"{resources}/datasets"
+    expectations = {f"{relative_dir}/{pin['filename']}": (pin["size_bytes"], pin["sha256"])
+                    for pin in pins["datasets"].values()}
+    receipt = _json_bytes(pins)
+    expectations[f"{relative_dir}/{DATASET_PINS}"] = (len(receipt), hashlib.sha256(receipt).hexdigest())
+    for name, (size, digest) in expectations.items():
+        if sizes.get(name) != size or manifest["files"].get(name) != digest:
+            raise ValueError(f"Native archive is missing a matching default dataset resource: {name}")
 
 
 def _resource_files(resources):
@@ -690,8 +825,11 @@ def package_native(destination, binary, resources, *, version, target, revision,
         if old_app.is_symlink() or old_manifest.is_symlink() or not old_app.is_dir() or not old_manifest.is_file():
             raise ValueError("Existing native output is not an owned app/manifest pair")
         previous = json.loads(old_manifest.read_text(encoding="utf-8"))
-        if not isinstance(previous, dict) or previous.get("format") != NATIVE_FORMAT or previous.get("bundle_identifier") != manifest["bundle_identifier"]:
+        if not isinstance(previous, dict) or previous.get("format") not in SUPPORTED_NATIVE_FORMATS \
+                or previous.get("bundle_identifier") != manifest["bundle_identifier"]:
             raise ValueError("Refusing to replace an unrelated native app")
+    dataset_pins = _read_dataset_pins()
+    manifest["default_datasets"] = dataset_pins
     destination.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".fleetworks-stage-", dir=destination) as temporary:
         stage = Path(temporary)
@@ -724,9 +862,8 @@ def package_native(destination, binary, resources, *, version, target, revision,
                 target_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(path, target_path)
                 target_path.chmod(0o644)
-            manifest["files"] = {path.relative_to(app).as_posix(): sha256(path)
-                                 for path in sorted(app.rglob("*")) if path.is_file()}
-            _write_json(app / "share/fleetworks/fleetworks-manifest.json", manifest)
+            bundle_resources = share_res
+            embedded_manifest = app / "share/fleetworks/fleetworks-manifest.json"
         else:
             contents = app / "Contents"
             executable = contents / "MacOS" / NATIVE_BINARY
@@ -750,9 +887,18 @@ def package_native(destination, binary, resources, *, version, target, revision,
                          LSMinimumSystemVersion=minimum_os)
             with (contents / "Info.plist").open("wb") as output:
                 plistlib.dump(plist, output, sort_keys=True)
-            manifest["files"] = {path.relative_to(app).as_posix(): sha256(path)
-                                 for path in sorted(app.rglob("*")) if path.is_file()}
-            _write_json(bundled_resources / "fleetworks-manifest.json", manifest)
+            bundle_resources = bundled_resources
+            embedded_manifest = bundled_resources / "fleetworks-manifest.json"
+        _bundle_default_datasets(bundle_resources, dataset_pins)
+        dataset_dir = bundle_resources.relative_to(app).as_posix() + "/datasets"
+        verified_digests = {f"{dataset_dir}/{pin['filename']}": pin["sha256"]
+                            for pin in dataset_pins["datasets"].values()}
+        manifest["files"] = {}
+        for path in sorted(app.rglob("*")):
+            if path.is_file():
+                name = path.relative_to(app).as_posix()
+                manifest["files"][name] = verified_digests.get(name) or sha256(path)
+        _write_json(embedded_manifest, manifest)
         unpacked_bytes = sum(path.stat().st_size for path in app.rglob("*") if path.is_file())
         if unpacked_bytes > MAX_NATIVE_UNPACKED_BYTES:
             raise ValueError(f"Native bundle exceeds 1 GiB unpacked limit ({unpacked_bytes} bytes)")
@@ -1067,7 +1213,7 @@ def _extract_linux_archive(archive, destination, *, expected_digest, version, ta
             raise ValueError("Native archive has no bounded embedded manifest")
         with tar.extractfile(tar.getmember(embedded_name)) as manifest_stream:
             manifest = json.loads(manifest_stream.read())
-        if not isinstance(manifest, dict) or manifest.get("format") != NATIVE_FORMAT \
+        if not isinstance(manifest, dict) or manifest.get("format") not in SUPPORTED_NATIVE_FORMATS \
                 or manifest.get("platform") != "linux" \
                 or manifest.get("version") != version or manifest.get("revision") != revision \
                 or manifest.get("target") != target or manifest.get("rune_revision") != rune_revision \
@@ -1084,6 +1230,9 @@ def _extract_linux_archive(archive, destination, *, expected_digest, version, ta
         file_names = {f"{LINUX_APP}/{name}" for name in hashes} | {embedded_name}
         if file_names != {member.name for member in members if member.isfile()}:
             raise ValueError("Native archive files do not match the manifest")
+        _verify_bundled_datasets(manifest, "share/fleetworks/resources", {
+            member.name.partition("/")[2]: member.size for member in members if member.isfile()
+        })
         for name, expected in hashes.items():
             if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
                 raise ValueError("Native manifest contains an invalid file digest")
@@ -1168,7 +1317,7 @@ def extract_native(archive, destination, *, expected_digest, version, target, re
         if embedded_name not in names or zipped.getinfo(embedded_name).file_size > 1024 * 1024:
             raise ValueError("Native archive has no bounded embedded manifest")
         manifest = json.loads(zipped.read(embedded_name))
-        if not isinstance(manifest, dict) or manifest.get("format") != NATIVE_FORMAT \
+        if not isinstance(manifest, dict) or manifest.get("format") not in SUPPORTED_NATIVE_FORMATS \
                 or manifest.get("version") != version or manifest.get("revision") != revision \
                 or manifest.get("target") != target or manifest.get("rune_revision") != rune_revision \
                 or manifest.get("architecture") != NATIVE_TARGETS[target] \
@@ -1184,6 +1333,9 @@ def extract_native(archive, destination, *, expected_digest, version, target, re
         file_names = {f"{NATIVE_APP}/{name}" for name in hashes} | {embedded_name}
         if file_names != {entry.filename for entry in entries if not entry.is_dir()}:
             raise ValueError("Native archive files do not match the manifest")
+        _verify_bundled_datasets(manifest, "Contents/Resources", {
+            entry.filename.partition("/")[2]: entry.file_size for entry in entries if not entry.is_dir()
+        })
         directories = {str(parent) + "/" for name in file_names
                        for parent in PurePosixPath(name).parents if str(parent) != "."}
         if any(entry.filename not in directories for entry in entries if entry.is_dir()):

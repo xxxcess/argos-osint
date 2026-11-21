@@ -10,6 +10,7 @@ pub mod assistant;
 pub mod backend;
 mod backend_views;
 pub mod brain;
+mod bundled_datasets;
 mod catalog;
 mod chat_ui;
 pub mod classifier_activation;

@@ -701,7 +701,7 @@ async fn invalid_csv_columns_fail_locally_before_any_upload_link_or_stream_reque
         let client = Client::new(&format!("http://{}", listener.local_addr().unwrap()), None).unwrap();
         let path = directory.path().join("selected.csv");
         std::fs::write(&path, content).unwrap();
-        let result = tokio::time::timeout(std::time::Duration::from_secs(5), upload(&client, LocalDataset { path, kind }))
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), upload(&client, LocalDataset { path, kind }, None))
             .await.expect("invalid columns must fail locally without waiting for HTTP");
         assert!(result.as_ref().is_err_and(|error| error.to_ascii_lowercase().contains("column")), "a file for the other purpose must report a local column error");
         assert!(matches!(listener.accept(), Err(error) if error.kind() == ErrorKind::WouldBlock),

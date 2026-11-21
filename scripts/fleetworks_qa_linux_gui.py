@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify streaming in the packaged Inbox window on an isolated X11 display."""
+"""Verify offline startup and Inbox streaming in the packaged Linux window."""
 
 import argparse
 import json
@@ -19,6 +19,7 @@ from fleetworks_qa_pack import MANIFEST, WORKER, install, sha256, verify_directo
 
 SUMMARY_QUESTION = "What is the current workstation readiness?"
 TERMINAL = {"answered", "insufficient_context", "failed", "canceled"}
+BUNDLED_ACTOR_ROWS = 94_987
 
 
 def require(condition, description):
@@ -197,18 +198,24 @@ def test_window(app, registry, atspi, home, worker, pointer, journal, output):
     with os.fdopen(fd, "w") as file:
         json.dump(pointer, file)
 
-    def actor_default_available():
-        field = find(None, label="GitHub CSV URL")
-        download = find("startup-data-primary", label="Download & validate", button=True)
-        if screen_bounds(field, atspi) is None or screen_bounds(download, atspi) is None:
+    def bundled_actor_ready():
+        ready = find(None, label="Ready to seed")
+        rows = find(None, label=f"Bundled CSV · {BUNDLED_ACTOR_ROWS:,} rows validated")
+        local = find(None, label="Local CSV")
+        seed = find("startup-data-primary", label="Seed actors", button=True)
+        if any(screen_bounds(node, atspi) is None for node in (ready, rows, local, seed)):
             return None
-        # The X11 accessibility bridge exposes the control and action but no
-        # Text interface. The Runtime test asserts the exact prefilled value.
+        require(local.getState().contains(atspi.STATE_ENABLED), "Local CSV is unavailable after validation")
         return True
 
-    wait_for(actor_default_available, app, "GitHub actor CSV and Download & validate action")
+    def require_no_seed():
+        require(not any(row.get("op") == "seed_actors" for row in read_journal(journal)),
+                "startup accepted an actor seed without operator confirmation")
+
+    wait_for(bundled_actor_ready, app, "automatic validation of the bundled actor CSV", timeout=180)
+    require_no_seed()
     subprocess.run(["scrot", "--overwrite", str(output / "startup-actor-default.png")], check=True, timeout=5)
-    button("startup-data-skip")
+    button("startup-data-skip", "Finish later")
     button("inbox-qa-toggle", "Turn On")
     button("startup-inbox-qa-continue")
     button("startup-data-continue", "Open Workstation")
@@ -314,13 +321,14 @@ def test_window(app, registry, atspi, home, worker, pointer, journal, output):
 
     memory = wait_for(grounded_memory, app, "grounded memory reading and its original timestamp", timeout=16)
     subprocess.run(["scrot", "--overwrite", str(output / "grounded-memory.png")], check=True, timeout=5)
+    require_no_seed()
     result = {
         "runtime": "embedded-stdio", "graphical": "x11", "first_citation_while_running": True,
         "stop_enabled_before_release": True, "same_turn": True, "terminal_events": 1,
         "finding_count": len(final["findings"]), "duplicate_findings": 0,
         "first_finding_ms": first_ms, "completion_ms": completion_ms,
         "grounded_memory": memory,
-        "startup_actor_default_controls": True,
+        "startup_actor_validated_rows": BUNDLED_ACTOR_ROWS, "startup_actor_seed_accepted": False,
     }
     (output / "streaming.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result))

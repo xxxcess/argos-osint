@@ -38,6 +38,21 @@ pub enum QaPhase {
     Unavailable,
 }
 
+/// Redacted recovery category for an unavailable Embedded inference worker.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum QaAvailabilityReason {
+    /// A verified model pack has not been installed for this companion.
+    PackMissing,
+    /// The configured model pack or its installation cannot be verified.
+    PackInvalid,
+    /// The host cannot enforce the required model-worker sandbox.
+    SandboxUnsupported,
+    /// The companion could not start or warm an isolated model worker.
+    WorkerStartFailed,
+}
+
 /// Inference settings and caller-specific management authority.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[non_exhaustive]
@@ -47,6 +62,9 @@ pub struct QaSettings {
     pub revision: u64,
     pub generation: u64,
     pub can_manage: bool,
+    /// Present only when the selected Embedded companion diagnoses unavailability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub availability_reason: Option<QaAvailabilityReason>,
 }
 
 impl QaSettings {
@@ -65,6 +83,7 @@ impl QaSettings {
             revision,
             generation,
             can_manage,
+            availability_reason: None,
         }
     }
 }
@@ -345,5 +364,41 @@ impl QaEventPage {
     #[must_use]
     pub fn new(turn: QaTurn, events: Vec<QaEvent>, gap: bool) -> Self {
         Self { turn, events, gap }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_availability_reason_is_optional_and_typed() {
+        let mut settings = QaSettings::new(true, QaPhase::Unavailable, 1, 1, false);
+        let legacy = serde_json::to_value(settings).unwrap();
+        assert!(legacy.get("availability_reason").is_none());
+        assert_eq!(
+            serde_json::from_value::<QaSettings>(legacy).unwrap(),
+            settings
+        );
+        for (reason, code) in [
+            (QaAvailabilityReason::PackMissing, "pack_missing"),
+            (QaAvailabilityReason::PackInvalid, "pack_invalid"),
+            (
+                QaAvailabilityReason::SandboxUnsupported,
+                "sandbox_unsupported",
+            ),
+            (
+                QaAvailabilityReason::WorkerStartFailed,
+                "worker_start_failed",
+            ),
+        ] {
+            settings.availability_reason = Some(reason);
+            let value = serde_json::to_value(settings).unwrap();
+            assert_eq!(value["availability_reason"], code);
+            assert_eq!(
+                serde_json::from_value::<QaSettings>(value).unwrap(),
+                settings
+            );
+        }
     }
 }

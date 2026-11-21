@@ -165,6 +165,7 @@ pub struct LocalGateway {
     state: ApiState,
     services: PrivateServices,
     qa: crate::inbox_qa::QaTarget,
+    qa_availability: crate::inbox_qa::QaRuntimeAvailability,
     capability_config: LocalCapabilityConfig,
     job_cursors: Arc<activity_paging::JobsCursors>,
     log_cursors: Arc<operational_logs::LogCursors>,
@@ -188,6 +189,7 @@ impl LocalGateway {
         Ok(Self {
             state,
             qa,
+            qa_availability: crate::inbox_qa::QaRuntimeAvailability::default(),
             services,
             capability_config,
             job_cursors: Arc::new(activity_paging::JobsCursors::new()),
@@ -196,6 +198,12 @@ impl LocalGateway {
             tools: Arc::new(Tools::default()),
             upload_sessions: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    /// Share the diagnosis reported by this companion's supervised model worker.
+    #[must_use]
+    pub fn qa_runtime_availability(&self) -> crate::inbox_qa::QaRuntimeAvailability {
+        self.qa_availability.clone()
     }
 
     /// Refresh QA health observations for this companion while inference is enabled.
@@ -354,12 +362,19 @@ impl LocalGateway {
             )
             .await?;
         match op {
-            IpcOperation::QaSettings => {
-                json_payload(inbox_qa::settings_request(&self.state, &context).await?)
-            }
-            IpcOperation::QaSettingsUpdate(request) => {
-                json_payload(inbox_qa::update_request(&self.state, &context, request).await?)
-            }
+            IpcOperation::QaSettings => json_payload(
+                inbox_qa::settings_request(&self.state, &context, Some(&self.qa_availability))
+                    .await?,
+            ),
+            IpcOperation::QaSettingsUpdate(request) => json_payload(
+                inbox_qa::update_request(
+                    &self.state,
+                    &context,
+                    request,
+                    Some(&self.qa_availability),
+                )
+                .await?,
+            ),
             IpcOperation::QaTurnSubmit(request) => json_payload(
                 inbox_qa::submit_request(&self.state, &context, &self.qa, request).await?,
             ),

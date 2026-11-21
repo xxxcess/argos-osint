@@ -18,6 +18,7 @@ mod native {
     use fleetworks_contracts::capabilities::Capabilities;
     use fleetworks_contracts::chat::ChatSourceKind;
     use fleetworks_contracts::chat::ChatSourceReference;
+    use fleetworks_contracts::chat::QaAvailabilityReason;
     use fleetworks_contracts::chat::QaFinding;
     use fleetworks_contracts::chat::QaPhase;
     use fleetworks_contracts::chat::QaSettings;
@@ -612,6 +613,16 @@ mod native {
         state.seed_inbox_qa_fixture(QaSettings::new(false, QaPhase::Off, 1, 1, can_manage), None);
     }
 
+    fn inbox_qa_unavailable(state: &mut State, reason: QaAvailabilityReason) {
+        registered(state);
+        state.seed_inbox_qa_drawer_fixture();
+        state.backend_kind = BackendKind::Local;
+        state.connection.origin = TextEdit::new("local://embedded");
+        let mut settings = QaSettings::new(true, QaPhase::Unavailable, 2, 1, true);
+        settings.availability_reason = Some(reason);
+        state.seed_inbox_qa_fixture(settings, None);
+    }
+
     fn inbox_qa_turn(state: &mut State, stage: QaTurnState) {
         registered(state);
         state.seed_inbox_qa_drawer_fixture();
@@ -832,6 +843,22 @@ mod native {
                 }),
                 ("inbox-qa-stopped", |state| {
                     inbox_qa_turn(state, QaTurnState::Canceled);
+                }),
+                ("inbox-qa-pack-missing", |state| {
+                    inbox_qa_unavailable(state, QaAvailabilityReason::PackMissing);
+                }),
+                ("inbox-qa-pack-invalid", |state| {
+                    inbox_qa_unavailable(state, QaAvailabilityReason::PackInvalid);
+                }),
+                ("inbox-qa-sandbox-unsupported", |state| {
+                    inbox_qa_unavailable(state, QaAvailabilityReason::SandboxUnsupported);
+                }),
+                ("inbox-qa-worker-start-failed", |state| {
+                    inbox_qa_unavailable(state, QaAvailabilityReason::WorkerStartFailed);
+                }),
+                ("gateway-qa-sandbox-unsupported", |state| {
+                    inbox_qa_unavailable(state, QaAvailabilityReason::SandboxUnsupported);
+                    state.fixture_show_gateway_qa_details();
                 }),
                 ("workstation-status-checks-mixed", workstation_status),
                 ("workstation-settings", workstation_settings),

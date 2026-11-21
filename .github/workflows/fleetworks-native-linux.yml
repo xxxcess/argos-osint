@@ -242,6 +242,11 @@ jobs:
             --scene inbox-qa-pending \
             --scene inbox-qa-answered \
             --scene inbox-qa-stopped \
+            --scene inbox-qa-pack-missing \
+            --scene inbox-qa-pack-invalid \
+            --scene inbox-qa-sandbox-unsupported \
+            --scene inbox-qa-worker-start-failed \
+            --scene gateway-qa-sandbox-unsupported \
             --scene command-panel-opaque \
             --scene command-panel-reduced-motion \
             --scene workstation-settings \

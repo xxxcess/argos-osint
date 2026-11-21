@@ -5,6 +5,7 @@ mod sandbox;
 
 use std::collections::BTreeMap;
 use std::env;
+use std::fmt;
 use std::fs;
 use std::future;
 use std::io;
@@ -26,6 +27,7 @@ use anyhow::Result;
 use argos_osint_api::inbox_qa::CancellationToken;
 use argos_osint_api::inbox_qa::QaInference;
 use argos_osint_api::inbox_qa::QaInferenceFuture;
+use fleetworks_contracts::chat::QaAvailabilityReason;
 use fleetworks_contracts::qa_worker::qa_frame_len;
 use fleetworks_contracts::qa_worker::QaWorkerCommand;
 use fleetworks_contracts::qa_worker::QaWorkerEvent;
@@ -65,6 +67,35 @@ const TURN_LIMIT: Duration = Duration::from_secs(25);
 const PING_LIMIT: Duration = Duration::from_secs(2);
 const UNLOAD_LIMIT: Duration = Duration::from_secs(3);
 const MAX_RESIDENT_BYTES: u64 = 1536 * 1024 * 1024;
+
+#[derive(Debug)]
+struct WarmFailure(QaAvailabilityReason);
+
+impl fmt::Display for WarmFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("Embedded Inbox QA worker unavailable")
+    }
+}
+
+impl std::error::Error for WarmFailure {}
+
+pub(crate) fn availability_reason(error: &anyhow::Error) -> QaAvailabilityReason {
+    error
+        .downcast_ref::<WarmFailure>()
+        .map_or(QaAvailabilityReason::WorkerStartFailed, |failure| failure.0)
+}
+
+fn pack_pointer_error(error: anyhow::Error) -> anyhow::Error {
+    let reason = if error
+        .downcast_ref::<io::Error>()
+        .is_some_and(|error| error.kind() == io::ErrorKind::NotFound)
+    {
+        QaAvailabilityReason::PackMissing
+    } else {
+        QaAvailabilityReason::PackInvalid
+    };
+    warm_error("pack_pointer", error.context(WarmFailure(reason)))
+}
 
 fn warm_error(stage: &'static str, error: anyhow::Error) -> anyhow::Error {
     tracing::warn!(
@@ -178,16 +209,17 @@ impl QaWorkerSupervisor {
                 let state_dir = state_dir.clone();
                 let mut stage = WarmStage::new("pack_verification");
                 let verified = tokio::task::spawn_blocking(move || {
-                    let pointer =
-                        match override_pack().map_err(|error| warm_error("pack_pointer", error))? {
-                            Some(pointer) => pointer,
-                            None => load_installed_pointer(&state_dir)
-                                .map_err(|error| warm_error("pack_pointer", error))?,
-                        };
-                    let pack = verify_pack(&pointer)
-                        .map_err(|error| warm_error("pack_verification", error))?;
-                    sandbox::protect_state(&state_dir, &pack)
-                        .map_err(|error| warm_error("sandbox_state_boundary", error))?;
+                    let pointer = match override_pack().map_err(pack_pointer_error)? {
+                        Some(pointer) => pointer,
+                        None => load_installed_pointer(&state_dir).map_err(pack_pointer_error)?,
+                    };
+                    let invalid_pack = || WarmFailure(QaAvailabilityReason::PackInvalid);
+                    let pack = verify_pack(&pointer).map_err(|error| {
+                        warm_error("pack_verification", error.context(invalid_pack()))
+                    })?;
+                    sandbox::protect_state(&state_dir, &pack).map_err(|error| {
+                        warm_error("sandbox_state_boundary", error.context(invalid_pack()))
+                    })?;
                     Ok::<_, anyhow::Error>(pack)
                 })
                 .await;
@@ -853,6 +885,25 @@ mod tests {
         let header = u32::try_from(bytes.len()).unwrap().to_be_bytes();
         peer.write_all(&header).await.unwrap();
         peer.write_all(&bytes).await.unwrap();
+    }
+
+    #[test]
+    fn classifies_missing_and_invalid_local_pack_and_startup_failure() {
+        let state = tempfile::tempdir().unwrap();
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let reason = || match load_installed_pointer(state.path()).map_err(pack_pointer_error) {
+            Ok(_) => panic!("fixture must not load a pack"),
+            Err(error) => availability_reason(&error),
+        };
+        assert_eq!(reason(), QaAvailabilityReason::PackMissing);
+        let pointer = state.path().join("qa-pack.json");
+        fs::write(&pointer, b"malformed pointer").unwrap();
+        fs::set_permissions(&pointer, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(reason(), QaAvailabilityReason::PackInvalid);
+        assert_eq!(
+            availability_reason(&anyhow!("private synthetic worker failure")),
+            QaAvailabilityReason::WorkerStartFailed
+        );
     }
 
     #[tokio::test]

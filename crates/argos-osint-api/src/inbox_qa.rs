@@ -14,9 +14,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use fleetworks_contracts::chat::{
-    ChatSourceKind, ChatSourceReference, QaCancelRequest, QaEventPage, QaEventQuery, QaPhase,
-    QaSettings, QaSettingsUpdate, QaTurn, QaTurnRequest, QA_CANCEL_PATH, QA_EVENTS_PATH,
-    QA_LATEST_PATH, QA_SETTINGS_PATH, QA_TURNS_PATH,
+    ChatSourceKind, ChatSourceReference, QaAvailabilityReason, QaCancelRequest, QaEventPage,
+    QaEventQuery, QaPhase, QaSettings, QaSettingsUpdate, QaTurn, QaTurnRequest, QA_CANCEL_PATH,
+    QA_EVENTS_PATH, QA_LATEST_PATH, QA_SETTINGS_PATH, QA_TURNS_PATH,
 };
 use fleetworks_contracts::context::{CredentialPurpose, MutationContext, Permission};
 use fleetworks_contracts::qa_worker::{QaPassage, QaWorkerEvent, QaWorkerRequest};
@@ -58,6 +58,40 @@ impl CancellationToken {
 impl Default for CancellationToken {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The selected Embedded companion's redacted startup diagnosis.
+#[derive(Clone)]
+pub struct QaRuntimeAvailability(watch::Sender<Option<AvailabilityFailure>>);
+
+#[derive(Clone, Copy)]
+struct AvailabilityFailure {
+    generation: i64,
+    reason: Option<QaAvailabilityReason>,
+}
+
+impl Default for QaRuntimeAvailability {
+    fn default() -> Self {
+        Self(watch::channel(None).0)
+    }
+}
+
+impl QaRuntimeAvailability {
+    /// Report a failure or clear it after successful startup for an enablement generation.
+    pub fn record(&self, generation: i64, reason: Option<QaAvailabilityReason>) {
+        self.0.send_modify(|failure| {
+            if failure.is_none_or(|previous| previous.generation <= generation) {
+                *failure = Some(AvailabilityFailure { generation, reason });
+            }
+        });
+    }
+
+    fn reason(&self, generation: i64) -> Option<QaAvailabilityReason> {
+        self.0
+            .borrow()
+            .filter(|failure| failure.generation == generation)
+            .and_then(|failure| failure.reason)
     }
 }
 
@@ -392,14 +426,18 @@ async fn settings_value(
     state: &ApiState,
     context: &ResolvedRequest,
     setting: store::Setting,
+    availability: Option<&QaRuntimeAvailability>,
 ) -> Result<QaSettings, ApiError> {
+    let reason = availability.and_then(|availability| availability.reason(setting.generation));
     let phase = if setting.enabled {
         if store::replica_present(&state.repo, setting.generation)
             .await
             .map_err(storage_error)?
         {
             QaPhase::Ready
-        } else if chrono::Utc::now().timestamp_millis() - setting.changed_at_ms < 15_000 {
+        } else if reason.is_none()
+            && chrono::Utc::now().timestamp_millis() - setting.changed_at_ms < 15_000
+        {
             QaPhase::Starting
         } else {
             QaPhase::Unavailable
@@ -413,28 +451,34 @@ async fn settings_value(
         QaPhase::Off
     };
     context.revalidate(&state.repo).await?;
-    Ok(QaSettings::new(
+    let mut settings = QaSettings::new(
         setting.enabled,
         phase,
         u64::try_from(setting.revision).unwrap_or_default(),
         u64::try_from(setting.generation).unwrap_or_default(),
         context.permits(Permission::ManageInboxQa),
-    ))
+    );
+    if phase == QaPhase::Unavailable {
+        settings.availability_reason = reason;
+    }
+    Ok(settings)
 }
 
 pub(crate) async fn settings_request(
     state: &ApiState,
     context: &ResolvedRequest,
+    availability: Option<&QaRuntimeAvailability>,
 ) -> Result<QaSettings, ApiError> {
     require(context, Permission::ReadBackend, None)?;
     let settings = store::setting(&state.repo).await.map_err(storage_error)?;
-    settings_value(state, context, settings).await
+    settings_value(state, context, settings, availability).await
 }
 
 pub(crate) async fn update_request(
     state: &ApiState,
     context: &ResolvedRequest,
     request: QaSettingsUpdate,
+    availability: Option<&QaRuntimeAvailability>,
 ) -> Result<QaSettings, ApiError> {
     let actor = require(context, Permission::ManageInboxQa, Some(&request.context))?;
     let revision = i64::try_from(request.expected_revision).map_err(|_| crate::bad())?;
@@ -442,7 +486,7 @@ pub(crate) async fn update_request(
     let setting = store::set(&state.repo, &actor, revision, request.enabled)
         .await
         .map_err(storage_error)?;
-    settings_value(state, context, setting).await
+    settings_value(state, context, setting, availability).await
 }
 
 pub(crate) async fn submit_request(
@@ -722,7 +766,7 @@ async fn read_settings(
     State(state): State<ApiState>,
     Extension(context): Extension<ResolvedRequest>,
 ) -> HttpResult<QaSettings> {
-    response(settings_request(&state, &context).await?)
+    response(settings_request(&state, &context, None).await?)
 }
 
 async fn update(
@@ -730,7 +774,7 @@ async fn update(
     Extension(context): Extension<ResolvedRequest>,
     Json(request): Json<QaSettingsUpdate>,
 ) -> HttpResult<QaSettings> {
-    response(update_request(&state, &context, request).await?)
+    response(update_request(&state, &context, request, None).await?)
 }
 
 async fn submit(
@@ -764,4 +808,34 @@ async fn cancel(
     Json(request): Json<QaCancelRequest>,
 ) -> HttpResult<QaTurn> {
     response(cancel_request(&state, &context, request).await?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reports_only_the_current_embedded_enablement_generation() {
+        let availability = QaRuntimeAvailability::default();
+        assert_eq!(availability.reason(1), None);
+
+        let supervisor = availability.clone();
+        supervisor.record(1, Some(QaAvailabilityReason::PackMissing));
+        assert_eq!(
+            availability.reason(1),
+            Some(QaAvailabilityReason::PackMissing)
+        );
+        assert_eq!(availability.reason(2), None);
+
+        supervisor.record(2, Some(QaAvailabilityReason::SandboxUnsupported));
+        supervisor.record(1, Some(QaAvailabilityReason::WorkerStartFailed));
+        assert_eq!(
+            availability.reason(2),
+            Some(QaAvailabilityReason::SandboxUnsupported)
+        );
+        assert_eq!(availability.reason(1), None);
+
+        supervisor.record(2, None);
+        assert_eq!(availability.reason(2), None);
+    }
 }

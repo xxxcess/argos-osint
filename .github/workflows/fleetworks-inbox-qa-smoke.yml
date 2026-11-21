@@ -167,6 +167,43 @@ jobs:
             ' "$pack/digests.json" > "$release/$archive.digests.json"
             ln "$pack/$archive" "$release/$archive"
           fi
+      - name: Select the exact Linux streaming fixture worker
+        if: inputs.target == 'x86_64-unknown-linux-gnu' && inputs.release-version == ''
+        id: stream_gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACK_ATTEMPT: ${{ steps.pack.outputs.attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B .github/scripts/inbox_qa_artifact.py --family "Fleetworks-Inbox-QA-Stream-Gate-$QA_TARGET"
+          grep -Fx "attempt=$PACK_ATTEMPT" "$GITHUB_OUTPUT"
+      - name: Download the fixture worker with a verified Actions digest
+        if: inputs.target == 'x86_64-unknown-linux-gnu' && inputs.release-version == ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ steps.stream_gate.outputs.id }}
+          path: ${{ runner.temp }}/inbox-qa-stream-gate
+          digest-mismatch: error
+      - name: Verify visible Embedded streaming in the packaged Linux window
+        if: inputs.target == 'x86_64-unknown-linux-gnu' && inputs.release-version == ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            at-spi2-core python3-pyatspi libglib2.0-bin dbus-daemon xvfb xauth scrot \
+            libvulkan1 mesa-vulkan-drivers libxkbcommon-x11-0
+          pack="$RUNNER_TEMP/inbox-qa-pack"
+          gate="$RUNNER_TEMP/inbox-qa-stream-gate/qa_stream_gate"
+          chmod 0755 "$gate"
+          sudo -- unshare --net --setgid "$(id -g)" --setuid "$(id -u)" -- /usr/bin/env \
+            HOME="$RUNNER_TEMP/inbox-qa-empty-home" PYTHONDONTWRITEBYTECODE=1 \
+            dbus-run-session -- xvfb-run --auto-servernum --server-args='-screen 0 1440x900x24 -nolisten tcp' \
+            /usr/bin/python3 -B scripts/fleetworks_qa_linux_gui.py \
+            --app "$RUNNER_TEMP/inbox-qa-extracted/Fleetworks-linux-x86_64" \
+            --archive "$pack/Fleetworks-Inbox-QA-Pack-$QA_TARGET.tar.gz" --digests "$pack/digests.json" \
+            --gated-worker "$gate" --output "$RUNNER_TEMP/inbox-qa-evidence/linux-graphical-streaming"
       - name: Stage the smoke-verified pack for the immutable nightly release
         if: inputs.release-asset && github.event_name == 'push' && github.ref == 'refs/heads/nightly'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

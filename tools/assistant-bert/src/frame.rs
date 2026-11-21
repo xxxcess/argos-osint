@@ -5,7 +5,7 @@ use std::io::Write;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use crate::protocol::qa_frame_len;
+use super::protocol::qa_frame_len;
 
 pub fn read<T: DeserializeOwned>(reader: &mut impl Read, max: usize) -> io::Result<Option<T>> {
     let mut header = [0; 4];

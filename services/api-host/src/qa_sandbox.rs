@@ -124,6 +124,25 @@ mod linux {
         Ok(())
     }
 
+    fn require_landlock_abi(abi: libc::c_long, os_error: Option<io::Error>) -> Result<()> {
+        if abi >= MIN_LANDLOCK_ABI {
+            return Ok(());
+        }
+        tracing::warn!(
+            qa_warm_stage = "sandbox_setup",
+            qa_warm_reason = "landlock_abi",
+            landlock_abi = abi,
+            sanitized_os_error = ?os_error.as_ref().and_then(io::Error::raw_os_error),
+            "Inbox QA requires Linux Landlock ABI 3 or newer"
+        );
+        let failure =
+            super::super::WarmFailure(super::super::QaAvailabilityReason::SandboxUnsupported);
+        Err(match os_error {
+            Some(error) => anyhow::Error::new(error).context(failure),
+            None => anyhow::Error::new(failure),
+        })
+    }
+
     fn rules_for(pack: &Path) -> Result<OwnedFd> {
         // SAFETY: The null descriptor data and zero size request the supported ABI version.
         let abi = unsafe {
@@ -134,19 +153,7 @@ mod linux {
                 LANDLOCK_VERSION,
             )
         };
-        if abi < MIN_LANDLOCK_ABI {
-            let os_error = (abi < 0).then(io::Error::last_os_error);
-            tracing::warn!(
-                qa_warm_stage = "sandbox_setup",
-                qa_warm_reason = "landlock_abi",
-                landlock_abi = abi,
-                sanitized_os_error = ?os_error.as_ref().and_then(io::Error::raw_os_error),
-                "Inbox QA requires Linux Landlock ABI 3 or newer"
-            );
-            return Err(anyhow::anyhow!(
-                "Inbox QA requires Linux Landlock ABI 3 or newer"
-            ));
-        }
+        require_landlock_abi(abi, (abi < 0).then(io::Error::last_os_error))?;
         let handled_access_fs = FS_ABI_3 | if abi >= 5 { FS_IOCTL_DEV } else { 0 };
         // SAFETY: The first field of landlock_ruleset_attr is the initialized u64 filesystem mask.
         let raw = unsafe {
@@ -274,5 +281,24 @@ mod linux {
             });
         }
         Ok(command)
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn types_missing_or_old_landlock_without_weakening_the_sandbox() {
+        use super::super::availability_reason;
+        use super::super::QaAvailabilityReason;
+
+        for (abi, os_error) in [
+            (-1, Some(io::Error::from_raw_os_error(libc::ENOSYS))),
+            (2, None),
+        ] {
+            let error = require_landlock_abi(abi, os_error).unwrap_err();
+            assert_eq!(
+                availability_reason(&error),
+                QaAvailabilityReason::SandboxUnsupported
+            );
+        }
+        assert!(require_landlock_abi(3, None).is_ok());
     }
 }

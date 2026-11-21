@@ -12,6 +12,9 @@ on:
       runner:
         type: string
         required: true
+      streaming-test:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -115,6 +118,37 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
+      - name: Build the Linux fixture worker that holds after its first real finding
+        if: inputs.streaming-test && inputs.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B - <<'PY'
+          import os
+          from pathlib import Path
+          import shutil
+          import sys
+          sys.path.insert(0, "scripts")
+          from fleetworks_qa_ci import linux_libraries, run, torch_environment
+
+          _, loader_key, env = torch_environment()
+          run(sys.executable, "scripts/agent_cargo.py", "build", "--locked", "--release",
+              "--manifest-path", "tools/assistant-bert/Cargo.toml", "--example", "qa_stream_gate", env=env)
+          stage = Path(os.environ["RUNNER_TEMP"]) / "inbox-qa-stream-gate"
+          stage.mkdir()
+          fixture = stage / "qa_stream_gate"
+          shutil.copy2("target/agents/release/examples/qa_stream_gate", fixture)
+          libraries = stage.parent / "inbox-qa-pack-build" / "installed" / "lib"
+          linux_libraries(fixture, libraries, {**env, loader_key: str(libraries)}, installed=True)
+          PY
+      - name: Retain the separate Inbox QA streaming fixture worker
+        if: inputs.streaming-test && inputs.target == 'x86_64-unknown-linux-gnu'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: Fleetworks-Inbox-QA-Stream-Gate-${{ inputs.target }}-${{ inputs.head }}-${{ github.run_id }}.${{ github.run_attempt }}
+          path: ${{ runner.temp }}/inbox-qa-stream-gate/
+          if-no-files-found: error
+          retention-days: 7
 
   macos:
     name: Native macOS CPU worker

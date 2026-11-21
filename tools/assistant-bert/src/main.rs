@@ -1,9 +1,9 @@
-mod frame;
+pub(crate) mod frame;
 
 // Share the private frame contract without pulling the application into the model process.
 #[allow(dead_code)]
 #[path = "../../../crates/fleetworks-contracts/src/qa_worker.rs"]
-mod protocol;
+pub(crate) mod protocol;
 
 use std::collections::BTreeSet;
 use std::env;
@@ -12,7 +12,6 @@ use std::io;
 use std::io::BufReader;
 use std::io::BufWriter;
 use std::io::Read;
-use std::io::Write;
 use std::panic;
 use std::path::Path;
 use std::path::PathBuf;
@@ -206,7 +205,7 @@ fn best_span<'a>(passage: &QaPassage, candidates: &'a [Answer]) -> Option<&'a An
 fn answer(
     model: &QuestionAnsweringModel,
     request: QaWorkerRequest,
-    writer: &mut impl Write,
+    output: &mut impl FnMut(QaWorkerReply) -> io::Result<()>,
     stopping: &AtomicBool,
 ) -> Result<()> {
     request.validate()?;
@@ -264,7 +263,7 @@ fn answer(
                     text: best.answer.clone(),
                 };
                 sequence.accept(&request, &event)?;
-                frame::write(writer, &QaWorkerReply::Event { event })?;
+                output(QaWorkerReply::Event { event })?;
                 words = total_words;
                 found += 1;
                 if found as usize == QA_MAX_FINDINGS {
@@ -286,7 +285,7 @@ fn answer(
         },
     };
     sequence.accept(&request, &event)?;
-    frame::write(writer, &QaWorkerReply::Event { event })?;
+    output(QaWorkerReply::Event { event })?;
     Ok(())
 }
 
@@ -317,17 +316,16 @@ fn receive_commands(stopping: Arc<AtomicBool>) -> io::Result<mpsc::Receiver<QaWo
     Ok(receiver)
 }
 
-fn ready(writer: &mut impl Write) -> io::Result<()> {
-    frame::write(
-        writer,
-        &QaWorkerReply::Ready {
-            protocol: QA_WORKER_PROTOCOL,
-            model_revision: QA_MODEL_REVISION.into(),
-        },
-    )
+fn ready() -> QaWorkerReply {
+    QaWorkerReply::Ready {
+        protocol: QA_WORKER_PROTOCOL,
+        model_revision: QA_MODEL_REVISION.into(),
+    }
 }
 
-fn run() -> Result<()> {
+pub(crate) fn run(mut output: impl FnMut(QaWorkerReply) -> io::Result<()>) -> Result<()> {
+    // Even an unexpected parser or model failure must not write request data to stderr.
+    panic::set_hook(Box::new(startup_panic));
     let mut args = env::args_os().skip(1);
     ensure!(
         args.next().as_deref() == Some("--model-dir".as_ref()),
@@ -341,7 +339,6 @@ fn run() -> Result<()> {
 
     let stopping = Arc::new(AtomicBool::new(false));
     let commands = receive_commands(stopping.clone())?;
-    let mut output = BufWriter::new(io::stdout().lock());
     let model = match panic::catch_unwind(|| load_model(&dir)) {
         Ok(model) => model?,
         Err(_) => {
@@ -350,24 +347,21 @@ fn run() -> Result<()> {
                 0,
                 QaWorkerPanicCause::Other,
             ));
-            frame::write(
-                &mut output,
-                &QaWorkerReply::StartupFailed {
-                    source,
-                    line,
-                    cause,
-                },
-            )?;
+            output(QaWorkerReply::StartupFailed {
+                source,
+                line,
+                cause,
+            })?;
             return Err(anyhow!("QA model process panicked during startup"));
         }
     };
-    ready(&mut output)?;
+    output(ready())?;
     for command in commands {
         if stopping.load(Ordering::Acquire) {
             break;
         }
         match command {
-            QaWorkerCommand::Ping => ready(&mut output)?,
+            QaWorkerCommand::Ping => output(ready())?,
             QaWorkerCommand::Ask { request } => answer(&model, request, &mut output, &stopping)?,
             QaWorkerCommand::Shutdown => return Ok(()),
             QaWorkerCommand::Open => return Err(anyhow!("unexpected QA worker handshake")),
@@ -377,9 +371,8 @@ fn run() -> Result<()> {
 }
 
 fn main() -> ExitCode {
-    // Even an unexpected parser or model failure must not write request data to stderr.
-    panic::set_hook(Box::new(startup_panic));
-    if run().is_ok() {
+    let mut output = BufWriter::new(io::stdout().lock());
+    if run(|reply| frame::write(&mut output, &reply)).is_ok() {
         ExitCode::SUCCESS
     } else {
         eprintln!("QA model process unavailable");

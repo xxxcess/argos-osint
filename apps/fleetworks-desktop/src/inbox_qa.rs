@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use fleetworks_contracts::chat::ChatSourceKind;
 use fleetworks_contracts::chat::ChatSourceReference;
+use fleetworks_contracts::chat::QaAvailabilityReason;
 use fleetworks_contracts::chat::QaCancelRequest;
 use fleetworks_contracts::chat::QaEventPage;
 use fleetworks_contracts::chat::QaEventQuery;
@@ -47,6 +48,8 @@ const MIN_EVENT_INTERVAL: f64 = 0.2;
 const COMPOSER: &str = "inbox-qa-composer";
 const SETTINGS_CONTROL: &str = "inbox-qa-toggle";
 const REPLY: &str = "chat-message-inbox-qa-answer";
+const DETAILS_TOGGLE: &str = "inbox-qa-availability-toggle";
+const DETAILS: &str = "inbox-qa-availability-details";
 
 struct Binding {
     kind: BackendKind,
@@ -141,6 +144,7 @@ pub(crate) struct InboxQa {
     source: Option<assistant::Context>,
     status: Option<&'static str>,
     settings_loaded: bool,
+    details_open: bool,
     startup_seen: bool,
     change_to: Option<bool>,
     request: Option<InFlight>,
@@ -162,6 +166,7 @@ impl Default for InboxQa {
             source: None,
             status: None,
             settings_loaded: false,
+            details_open: false,
             startup_seen: false,
             change_to: None,
             request: None,
@@ -224,6 +229,9 @@ impl InboxQa {
         if !settings.enabled || generation_changed {
             self.retire();
             self.resume = true;
+        }
+        if self.settings.and_then(|old| old.availability_reason) != settings.availability_reason {
+            self.details_open = false;
         }
         self.settings = Some(settings);
         self.settings_loaded = true;
@@ -301,6 +309,17 @@ impl State {
         self.inbox_qa.apply_settings(settings, self.clock);
         self.inbox_qa.adopt(turn);
         self.inbox_qa.resume = false;
+    }
+
+    /// Open the synthetic Gateway scene with QA availability details expanded.
+    #[doc(hidden)]
+    pub fn fixture_show_gateway_qa_details(&mut self) {
+        if self.fixture {
+            self.inbox.close();
+            self.settings_open = true;
+            self.settings_section = SettingsSection::Gateway;
+            self.inbox_qa.details_open = true;
+        }
     }
 
     pub(crate) fn supports_inbox_qa(&self) -> bool {
@@ -725,8 +744,70 @@ fn hint(text: &str, kit: &Kit) -> El {
         .wrap_anywhere()
 }
 
+struct EmbeddedProblem {
+    status: &'static str,
+    details: &'static str,
+}
+
+fn embedded_problem(state: &State) -> Option<EmbeddedProblem> {
+    if !state.is_local_backend() || state.inbox_qa.change_to.is_some() {
+        return None;
+    }
+    let settings = state.inbox_qa_settings()?;
+    if settings.phase != QaPhase::Unavailable {
+        return None;
+    }
+    let problem = match settings.availability_reason? {
+        QaAvailabilityReason::PackMissing => EmbeddedProblem {
+            status: "Embedded QA pack is missing",
+            details: "Install the optional Inbox QA pack for this Fleetworks release and platform.",
+        },
+        QaAvailabilityReason::PackInvalid => EmbeddedProblem {
+            status: "Embedded QA pack could not be verified",
+            details: "Reinstall the Inbox QA pack for this Fleetworks release and platform.",
+        },
+        QaAvailabilityReason::SandboxUnsupported => EmbeddedProblem {
+            status: "Embedded inference isn’t supported on this host",
+            details: "Embedded inference on Linux requires Landlock ABI 3 or newer.",
+        },
+        QaAvailabilityReason::WorkerStartFailed => EmbeddedProblem {
+            status: "Embedded inference worker could not start",
+            details: "Check the Embedded companion logs for the worker startup error.",
+        },
+        _ => return None,
+    };
+    Some(problem)
+}
+
+fn problem_content(state: &State, problem: EmbeddedProblem, kit: &Kit) -> El {
+    let expanded = state.inbox_qa.details_open;
+    let toggle = rune_kit::Button::new("Details")
+        .variant(rune_kit::ButtonVariant::Ghost)
+        .on_press_tx(|state: &mut State, tx| {
+            state.inbox_qa.details_open = !state.inbox_qa.details_open;
+            tx.keep_on_screen(DETAILS_TOGGLE);
+        })
+        .build(kit)
+        .key(DETAILS_TOGGLE)
+        .label("Inference availability details")
+        .expanded(expanded);
+    rune::col()
+        .w_full()
+        .min_w(0.0)
+        .gap(4.0)
+        .child(
+            hint(problem.status, kit)
+                .color(StatusTone::Warn.fg())
+                .font(kit.ty.small_medium)
+                .role("status"),
+        )
+        .child(rune::row().child(toggle))
+        .children(expanded.then(|| hint(problem.details, kit).key(DETAILS)))
+}
+
 pub(crate) fn settings_content(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
     let (phase, tone) = phase_label(state);
+    let problem = embedded_problem(state);
     let mut content = rune::col()
         .w_full()
         .min_w(0.0)
@@ -737,7 +818,11 @@ pub(crate) fn settings_content(state: &State, kit: &Kit, preferences: ViewPrefer
         .flex_wrap()
         .center_y()
         .gap(8.0)
-        .child(crate::ui_components::status_pill(phase, None, tone, kit));
+        .children(
+            problem
+                .is_none()
+                .then(|| crate::ui_components::status_pill(phase, None, tone, kit)),
+        );
     if let Some(settings) = state.inbox_qa_settings() {
         if state.can_manage_inbox_qa() {
             let enable = !settings.enabled;
@@ -751,7 +836,7 @@ pub(crate) fn settings_content(state: &State, kit: &Kit, preferences: ViewPrefer
                     .on_press(move |state: &mut State| state.set_inbox_inference(enable))
                     .build(kit, preferences, None),
             );
-        } else if !settings.enabled {
+        } else if !settings.enabled && problem.is_none() {
             content = content.child(hint(operator_nudge(state), kit));
         }
     } else if !state.supports_inbox_qa() {
@@ -760,7 +845,9 @@ pub(crate) fn settings_content(state: &State, kit: &Kit, preferences: ViewPrefer
             kit,
         ));
     }
-    if let Some(status) = state.inbox_qa.status {
+    if let Some(problem) = problem {
+        content = content.child(problem_content(state, problem, kit));
+    } else if let Some(status) = state.inbox_qa.status {
         content = content.child(hint(status, kit).role("status"));
     } else if phase == "Unavailable" && state.supports_inbox_qa() {
         content = content.child(hint(unavailable_nudge(state), kit));
@@ -778,7 +865,7 @@ fn operator_nudge(state: &State) -> &'static str {
 
 fn unavailable_nudge(state: &State) -> &'static str {
     if state.is_local_backend() {
-        "Verify the installed Embedded QA pack and check the backend in Gateway settings."
+        "Embedded inference is unavailable. Check Gateway settings for backend status."
     } else {
         "Ask your gateway operator to check the inference worker and model pack."
     }
@@ -897,6 +984,9 @@ pub(crate) fn exchange(state: &State, kit: &Kit) -> Option<El> {
 }
 
 pub(crate) fn footer(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
+    if let Some(problem) = embedded_problem(state) {
+        return footer_layer(problem_content(state, problem, kit), preferences);
+    }
     if !state.inbox_qa_visible() {
         return nudge(state, kit, preferences);
     }
@@ -1175,6 +1265,103 @@ mod tests {
                 .to_string()
                 .contains(operator_nudge(&runtime.state)));
             assert_eq!(runtime.state.inbox.unread(), unread);
+        }
+    }
+
+    fn press_details(runtime: &mut Runtime<State>, now: f64) {
+        runtime.update(|_, tx| tx.focus(DETAILS_TOGGLE, true));
+        runtime.frame(now);
+        assert!(runtime
+            .elements()
+            .iter()
+            .any(|element| { element.key.as_deref() == Some(DETAILS_TOGGLE) && element.focused }));
+        runtime.key(KeyEvent {
+            key: Key::Text(" ".into()),
+            mods: Mods::default(),
+        });
+        runtime.frame(now + 0.25);
+    }
+
+    #[test]
+    fn embedded_inference_failures_keep_notifications_available_and_distinguish_recovery() {
+        let cases = [
+            (
+                QaAvailabilityReason::PackMissing,
+                "Embedded QA pack is missing",
+                "Install the optional Inbox QA pack",
+            ),
+            (
+                QaAvailabilityReason::PackInvalid,
+                "Embedded QA pack could not be verified",
+                "Reinstall the Inbox QA pack",
+            ),
+            (
+                QaAvailabilityReason::SandboxUnsupported,
+                "Embedded inference isn’t supported on this host",
+                "requires Landlock ABI 3 or newer",
+            ),
+            (
+                QaAvailabilityReason::WorkerStartFailed,
+                "Embedded inference worker could not start",
+                "Check the Embedded companion logs",
+            ),
+        ];
+        for size in [(640.0, 480.0), (1280.0, 800.0)] {
+            let mut runtime = active_drawer(size);
+            let unread = runtime.state.inbox.unread();
+            for (index, (reason, status, details)) in cases.into_iter().enumerate() {
+                let now = 1.0 + index as f64;
+                runtime.update(|state, _| {
+                    state.backend_kind = BackendKind::Local;
+                    let mut settings = QaSettings::new(true, QaPhase::Unavailable, 2, 2, true);
+                    settings.availability_reason = Some(reason);
+                    state.inbox_qa.apply_settings(settings, now);
+                });
+                runtime.frame(now);
+                let tree = runtime.accessibility_json().to_string();
+                assert!(tree.contains(status), "{size:?} {reason:?}");
+                assert!(!tree.contains(details));
+                assert!(runtime.find(COMPOSER).is_none());
+                assert!(runtime.find("inbox-filter").is_some());
+                assert!(runtime.find("inbox-group-connection-toggle").is_some());
+                assert_eq!(runtime.state.inbox.unread(), unread);
+
+                press_details(&mut runtime, now + 0.25);
+                assert!(runtime.accessibility_json().to_string().contains(details));
+                let (footer, _) = runtime.presented("inbox-qa-footer").unwrap();
+                let (scroll, _) = runtime.presented("inbox-scroll").unwrap();
+                assert!(scroll[1] + scroll[3] <= footer[1] + 0.5);
+                assert!((footer[1] + footer[3] - size.1).abs() < 1.5);
+            }
+        }
+    }
+
+    #[test]
+    fn gateway_settings_discloses_the_embedded_host_prerequisite() {
+        for size in [(640.0, 480.0), (1280.0, 800.0)] {
+            let mut runtime = active_drawer(size);
+            runtime.update(|state, _| {
+                state.backend_kind = BackendKind::Local;
+                let mut settings = QaSettings::new(true, QaPhase::Unavailable, 2, 2, true);
+                settings.availability_reason = Some(QaAvailabilityReason::SandboxUnsupported);
+                state.inbox_qa.apply_settings(settings, 1.0);
+                state.inbox.close();
+                state.settings_open = true;
+                state.settings_section = SettingsSection::Gateway;
+            });
+            runtime.frame(1.0);
+            runtime.frame(1.25);
+            let tree = runtime.accessibility_json().to_string();
+            assert!(tree.contains("Embedded inference isn’t supported on this host"));
+            assert!(tree.contains("Turn Off"));
+            assert!(!tree.contains("Landlock"));
+
+            press_details(&mut runtime, 1.5);
+            let tree = runtime.accessibility_json();
+            assert_eq!(accessibility_nodes_with_key(&tree, DETAILS), 1);
+            assert!(tree
+                .to_string()
+                .contains("requires Landlock ABI 3 or newer"));
         }
     }
 

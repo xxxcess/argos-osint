@@ -4,14 +4,14 @@ use std::future::Future;
 use std::time::Duration;
 
 use anyhow::{anyhow, ensure, Context, Result};
-use argos_osint_api::inbox_qa::{CancellationToken, QaInference};
+use argos_osint_api::inbox_qa::{CancellationToken, QaInference, QaRuntimeAvailability};
 use argos_osint_core::storage::inbox_qa::{self as store, FrozenEvidence, POOL};
 use argos_osint_core::storage::job_dispatch::{
     self, DeliveryClaim, DeliveryFinish, DeliveryLease, DeliveryOutcome, Envelope,
 };
 use argos_osint_core::storage::repo::Repository;
 use chrono::Utc;
-use fleetworks_contracts::chat::{QaFinding, QaTurnState};
+use fleetworks_contracts::chat::{QaAvailabilityReason, QaFinding, QaTurnState};
 use fleetworks_contracts::qa_worker::{QaWorkerEvent, QaWorkerOutcome, QaWorkerSequence};
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
@@ -54,7 +54,7 @@ pub(crate) async fn run_distributed(
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')),
         "FLEETWORKS_QA_REPLICA_ID is invalid"
     );
-    run(repo, broker, model, placement, signal).await
+    run(repo, broker, model, placement, None, signal).await
 }
 
 struct Executor {
@@ -63,6 +63,7 @@ struct Executor {
     model: QaWorkerSupervisor,
     owner: String,
     placement: String,
+    availability: Option<QaRuntimeAvailability>,
     lease_held: bool,
 }
 
@@ -71,6 +72,7 @@ pub(crate) async fn run(
     broker: Client,
     model: QaWorkerSupervisor,
     placement: String,
+    availability: Option<QaRuntimeAvailability>,
     signal: impl Future<Output = ()>,
 ) -> Result<()> {
     let mut executor = Executor {
@@ -79,6 +81,7 @@ pub(crate) async fn run(
         model,
         owner: format!("assistant-qa-{}", argos_osint_core::store::new_id()),
         placement,
+        availability,
         lease_held: false,
     };
     let stop = CancellationToken::new();
@@ -184,6 +187,7 @@ impl Executor {
                         self.lease_held = true;
                         if self.warm(setting.generation, stop).await {
                             loaded = Some(setting.generation);
+                            self.record_availability(setting.generation, None);
                             tracing::info!(qa_replica_stage = "ready", "Inbox QA replica ready");
                         } else {
                             self.unload().await;
@@ -270,8 +274,14 @@ impl Executor {
                 result = &mut warm => {
                     match result {
                         Ok(Ok(())) => return self.renew_replica(generation, true, "ready_lease").await,
-                        Ok(Err(_)) => tracing::warn!(qa_replica_stage = "warm_model", "Inbox QA model did not warm"),
-                        Err(_) => tracing::warn!(qa_replica_stage = "warm_timeout", "Inbox QA model did not warm within its budget"),
+                        Ok(Err(error)) => {
+                            self.record_availability(generation, Some(crate::qa_worker::availability_reason(&error)));
+                            tracing::warn!(qa_replica_stage = "warm_model", "Inbox QA model did not warm");
+                        }
+                        Err(_) => {
+                            self.record_availability(generation, Some(QaAvailabilityReason::WorkerStartFailed));
+                            tracing::warn!(qa_replica_stage = "warm_timeout", "Inbox QA model did not warm within its budget");
+                        }
                     }
                     return false;
                 }
@@ -282,6 +292,12 @@ impl Executor {
                     next = Instant::now() + CHECK;
                 }
             }
+        }
+    }
+
+    fn record_availability(&self, generation: i64, reason: Option<QaAvailabilityReason>) {
+        if let Some(availability) = &self.availability {
+            availability.record(generation, reason);
         }
     }
 
@@ -315,14 +331,17 @@ impl Executor {
         {
             return false;
         }
-        if !matches!(timeout(AUTH_TIMEOUT, self.model.warm()).await, Ok(Ok(()))) {
-            tracing::warn!(
-                qa_replica_stage = "heartbeat_model",
-                "Inbox QA model heartbeat failed"
-            );
-            return false;
-        }
-        true
+        let reason = match timeout(AUTH_TIMEOUT, self.model.warm()).await {
+            Ok(Ok(())) => return true,
+            Ok(Err(error)) => crate::qa_worker::availability_reason(&error),
+            Err(_) => QaAvailabilityReason::WorkerStartFailed,
+        };
+        self.record_availability(generation, Some(reason));
+        tracing::warn!(
+            qa_replica_stage = "heartbeat_model",
+            "Inbox QA model heartbeat failed"
+        );
+        false
     }
 
     async fn unload(&mut self) {

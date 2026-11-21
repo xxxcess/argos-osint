@@ -169,6 +169,11 @@ jobs:
             --revision "$FLEETWORKS_HEAD" --output "$RUNNER_TEMP/fleetworks-native-evidence/inbox-qa" \
             --scene inbox-qa-off-embedded --scene inbox-qa-off-distributed --scene inbox-qa-pending \
             --scene inbox-qa-answered --scene inbox-qa-stopped \
+            --scene inbox-qa-pack-missing \
+            --scene inbox-qa-pack-invalid \
+            --scene inbox-qa-sandbox-unsupported \
+            --scene inbox-qa-worker-start-failed \
+            --scene gateway-qa-sandbox-unsupported \
             --size 1280x800 --size 640x480 --scale 1
       - name: Build, archive, extract-verify and smoke-test the debug app for pull-request review
         if: inputs.release-version == ''

@@ -52,4 +52,6 @@ The native Inbox uses the separate [V2 types](../../../crates/fleetworks-contrac
 | GET | `/api/v2/workstation/chat/events` | Registered Native workstation activity read |
 | POST | `/api/v2/workstation/chat/cancel` | Registered Native interactive submit |
 
+When Embedded inference is unavailable, settings may include an `availability_reason`. The reason is a fixed code such as `pack_missing`, `pack_invalid`, `sandbox_unsupported`, or `worker_start_failed`. It contains no paths or process output. An unavailable reason leaves notifications usable and hides the QA composer. Distributed availability comes from the selected gateway.
+
 Each accepted turn freezes its authorized backend evidence. Published findings are checked against the source and its exact half-open Unicode scalar offsets. The latest answer holds at most three cited findings and 60 words. Events use a per-turn cursor with a bounded wait and include the canonical turn for gap recovery. Stop preserves committed findings and seals the turn. A request ID replay returns the existing turn when the original input matches. Off fences further QA and retires the displayed exchange. See [deployment and pack installation](../../../deploy/inbox-qa.md).

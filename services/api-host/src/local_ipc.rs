@@ -348,6 +348,7 @@ mod embedded {
                 self.qa_broker.clone(),
                 model,
                 "embedded".to_owned(),
+                Some(self.gateway.qa_runtime_availability()),
                 async move {
                     let _ = qa_signal.await;
                 },

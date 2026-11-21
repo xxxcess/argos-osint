@@ -20,7 +20,7 @@ import fleetworks_qa_pack as pack
 ROOT = Path(__file__).resolve().parents[1]
 QA = "/api/v2/workstation/chat/"
 TERMINAL = {"answered", "insufficient_context", "canceled", "failed"}
-QUESTION = "What is the state of the gateway?"
+SUMMARY_QUESTION = "What is the current workstation readiness?"
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 DIAGNOSTIC = re.compile(r'\b(qa_(?:warm|replica|queue|turn)_stage)="?([a-z0-9_]{1,40})\b')
 DIAGNOSTIC_DETAIL = re.compile(
@@ -77,13 +77,26 @@ def report_diagnostics(logs):
     }), file=sys.stderr)
 
 
-def exercise(request, manage, registration, manager, model, readiness):
+def cited_finding(turn, kind, source_id):
+    require(turn["state"] == "answered" and len(turn["findings"]) == 1,
+            f"{source_id} did not produce exactly one answer")
+    finding, = turn["findings"]
+    require(finding["source"] == {"kind": kind, "id": source_id},
+            f"{source_id} answer cited a different source")
+    require(0 <= finding["start"] < finding["end"]
+            and finding["end"] - finding["start"] == len(finding["text"])
+            and datetime.fromisoformat(finding["observed_at"]).tzinfo is not None,
+            f"{source_id} answer lacks valid offsets or an observation time")
+    return finding["text"]
+
+
+def exercise(request, manage, registration, manager, model, readiness, running_jobs, *, embedded_mode=False):
     """Run the same real QA lifecycle over the supplied transport."""
     before = request("settings")
     require(not before["enabled"] and before["phase"] == "off", "QA did not default to Off")
     require(not model(), "Off retained a live model process")
     require(request("latest") is None, "Off exposes an exchange")
-    turn = {"request_id": "inbox-qa-smoke-1", "context": authorize(registration), "question": QUESTION}
+    turn = {"request_id": "inbox-qa-smoke-1", "context": authorize(registration), "question": SUMMARY_QUESTION}
     request("turns", turn, expected=503)
 
     revision = before["revision"]
@@ -145,7 +158,8 @@ def exercise(request, manage, registration, manager, model, readiness):
     for finding in snapshot["findings"]:
         require(0 <= finding["start"] < finding["end"]
                 and finding["end"] - finding["start"] == len(finding["text"])
-                and finding["observed_at"] and finding["source"]["id"], "invalid cited span")
+                and finding["observed_at"] and finding["source"]["id"]
+                and finding["source"]["kind"] == "readiness", "invalid readiness citation")
     require(request("latest") == snapshot, "latest exchange differs from event snapshot")
     resumed = request("events", query={"turn_id": turn_id, "after": cursor, "wait_seconds": 0})
     require(not resumed["events"] and resumed["turn"] == snapshot, "terminal replay duplicated an event")
@@ -169,6 +183,35 @@ def exercise(request, manage, registration, manager, model, readiness):
     require(min(map(observed, next_turn["findings"])) > max(map(observed, snapshot["findings"])),
             "the follow-up reused an observation from before the previous terminal turn")
 
+    def ask(case, question):
+        accepted = request("turns", {**turn, "request_id": f"inbox-qa-smoke-{case}", "question": question},
+                           expected=(200, 201, 202))
+        return until(
+            lambda: request("events", query={"turn_id": accepted["turn_id"], "after": 0, "wait_seconds": 0})["turn"],
+            lambda value: value["state"] in TERMINAL, f"{case} question did not finish",
+        )
+
+    gateway = ask("gateway", "What is the state of the gateway?")
+    require(cited_finding(gateway, "readiness", "gateway") == "Gateway is ready.",
+            "gateway answer did not report the observed ready state")
+    if embedded_mode:
+        catalog = ask("catalog", "Is the actor catalog ready?")
+        require(cited_finding(catalog, "readiness", "actor_catalog") == "Actor catalog is not ready.",
+                "an empty Embedded catalog did not answer with its negative readiness state")
+
+    active_jobs = running_jobs()
+    jobs = ask("jobs", "How many jobs are running?")
+    job_noun = "job" if active_jobs == 1 else "jobs"
+    require(cited_finding(jobs, "job_count", "running") == f"This workstation has {active_jobs} running {job_noun}.",
+            "Inbox running-job count differs from the registered workstation dashboard")
+    memory = ask("memory", "What is the current memory usage?")
+    require(re.fullmatch(r"The API host memory usage is (?:[0-9]{1,2}\.[0-9]|100\.0)%\.",
+                         cited_finding(memory, "host_metric", "memory")),
+            "memory answer did not report a current utilization percentage")
+    unsupported = ask("unsupported", "What is the current GPU temperature?")
+    require(unsupported["state"] == "insufficient_context" and not unsupported["findings"],
+            "unsupported measurement received an answer")
+
     started = time.monotonic()
     manage("settings", {"context": authorize(manager), "expected_revision": current["revision"], "enabled": False})
     until(lambda: request("settings"), lambda value: value["phase"] == "off",
@@ -178,7 +221,8 @@ def exercise(request, manage, registration, manager, model, readiness):
     return {"model_warm_ms": ready_ms, "admission_ms": admission_ms, "first_cited_finding_ms": first_finding_ms,
             "completion_ms": completed_ms, "unload_ms": round((time.monotonic() - started) * 1000, 1),
             "model_pid_count": len(active), "warm_model_rss_bytes": worker_rss_bytes,
-            "fresh_observation": True, "terminal_events": terminal_events}
+            "fresh_observation": True, "terminal_events": terminal_events,
+            "grounded_readiness": True, "live_metrics": True, "unsupported_context": True}
 
 
 def embedded_tree(parent):
@@ -251,7 +295,14 @@ def run_embedded(args):
                 value, _ = session.request_json({"op": "workstation_readiness"}, registration=registration)
                 return bool(value.get("deployment_id"))
 
-            result = exercise(request, request, registration, registration, model, readiness)
+            def running_jobs():
+                value, _ = session.request_json({"op": "jobs_list", "args": {}}, registration=registration)
+                require(value["dashboard_counts_scope"] == "unfiltered_top_level_workstation_activity",
+                        "IPC jobs dashboard counts used the wrong scope")
+                return value["counts"]["active"]
+
+            result = exercise(request, request, registration, registration, model, readiness, running_jobs,
+                              embedded_mode=True)
             _, exit_code = session.shutdown()
             require(exit_code == 0, "companion shutdown failed after unloading QA")
             return {"runtime": "embedded-stdio", "target": digests["target"], **result}
@@ -382,7 +433,16 @@ def run_distributed(args):
                                       headers=verify.native_headers(registration))
             return response[0] == 200
 
-        result = exercise(request, manage, registration, manager, model, readiness)
+        def running_jobs():
+            value = verify.expect_status(
+                verify.request(port, "/api/v1/jobs", token, headers=verify.native_headers(registration)),
+                200, "registered workstation jobs",
+            )
+            require(value["dashboard_counts_scope"] == "unfiltered_top_level_workstation_activity",
+                    "paired jobs dashboard counts used the wrong scope")
+            return value["counts"]["active"]
+
+        result = exercise(request, manage, registration, manager, model, readiness, running_jobs)
         failed = False
         return {"runtime": "distributed-paired-http", "platform": args.platform, "model_image_id": info["Image"], **result}
     except Exception:

@@ -143,9 +143,23 @@ impl Actor {
     }
 }
 
+/// Maximum age of evidence admitted to an Inbox turn.
+pub const MAX_EVIDENCE_AGE_MS: i64 = 5_000;
+
+/// Decide whether a frozen request is answered from an exact fact or sent to the model.
+#[derive(Clone, Copy, Default, Deserialize, Serialize)]
+pub enum AnswerMode {
+    #[default]
+    Model,
+    /// Zero passages means insufficient context. One passage is a complete answer.
+    Grounded,
+}
+
 /// Frozen evidence and metadata retained inside the coordinator during execution.
 #[derive(Clone, Deserialize, Serialize)]
 pub struct FrozenEvidence {
+    #[serde(default)]
+    pub answer_mode: AnswerMode,
     pub request: QaWorkerRequest,
     pub sources: Vec<Source>,
     pub sampled_at_ms: i64,
@@ -576,7 +590,7 @@ pub async fn admit(
             }
             let boundary = boundary_in(&tx, key, state.generation).await?;
             if evidence.sampled_at_ms <= boundary
-                || evidence.sampled_at_ms < now.timestamp_millis() - 5_000
+                || evidence.sampled_at_ms < now.timestamp_millis() - MAX_EVIDENCE_AGE_MS
             {
                 return Err(abort("freshness"));
             }

@@ -1,6 +1,6 @@
 //! Host telemetry sampled outside Tokio workers. @tag:host-metrics
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -10,7 +10,10 @@ use std::time::Instant;
 
 use axum::extract::Extension;
 use axum::Json;
+use chrono::DateTime;
+use chrono::Utc;
 use serde::Serialize;
+use sysinfo::DiskRefreshKind;
 use sysinfo::Disks;
 use sysinfo::Networks;
 use sysinfo::System;
@@ -37,12 +40,26 @@ pub(crate) struct HostSampler {
     disks: Disks,
     networks: Networks,
     sampled_at: Option<Instant>,
+    observed_at: Option<DateTime<Utc>>,
     disk_sampled_at: Option<Instant>,
+    disk_observed_at: Option<DateTime<Utc>>,
     snapshot: HostMetrics,
     platform: Option<String>,
 }
 
 pub(crate) type SharedSampler = Arc<Mutex<HostSampler>>;
+
+const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+const DISK_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
+
+pub(crate) struct TimedHostMetrics {
+    pub(crate) cpu_percent: Option<f64>,
+    pub(crate) memory_percent: Option<f64>,
+    pub(crate) disk_percent: Option<f64>,
+    pub(crate) observed_at: DateTime<Utc>,
+    pub(crate) disk_observed_at: Option<DateTime<Utc>>,
+    pub(crate) next_sample_at: Instant,
+}
 
 #[derive(Clone, Default)]
 pub(crate) struct HostReading {
@@ -89,7 +106,7 @@ impl HostFeed {
         {
             let feed = self.clone();
             tokio::spawn(async move {
-                let mut tick = tokio::time::interval(Duration::from_secs(1));
+                let mut tick = tokio::time::interval(SAMPLE_INTERVAL);
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
                     tick.tick().await;
@@ -147,33 +164,27 @@ fn bounded_platform(name: &str) -> Option<String> {
 }
 
 impl HostSampler {
-    fn sample(&mut self, now: Instant, home: PathBuf) -> HostMetrics {
+    fn sample(&mut self, now: Instant, home: &Path) -> &HostMetrics {
         if self.platform.is_none() {
             self.platform = platform_name();
         }
         let elapsed = self.sampled_at.map(|previous| now.duration_since(previous));
         // Multiple clients cannot shorten the delta window or cause expensive resampling.
-        if elapsed.is_some_and(|elapsed| elapsed < Duration::from_secs(1)) {
-            return self.snapshot.clone();
+        if elapsed.is_some_and(|elapsed| elapsed < SAMPLE_INTERVAL) {
+            return &self.snapshot;
         }
+        let observed_at = Utc::now();
         self.system.refresh_cpu_usage();
         self.system.refresh_memory();
         // Disk capacity changes slowly; enumerating mounts can be expensive.
         if self
             .disk_sampled_at
-            .is_none_or(|previous| now.duration_since(previous) >= Duration::from_secs(30))
+            .is_none_or(|previous| now.duration_since(previous) >= DISK_SAMPLE_INTERVAL)
         {
-            self.disks.refresh(true);
-            self.disk_sampled_at = Some(now);
+            self.refresh_disk(now);
         }
         self.networks.refresh(true);
         let cpu = f64::from(self.system.global_cpu_usage());
-        let disk = self
-            .disks
-            .list()
-            .iter()
-            .filter(|disk| home.starts_with(disk.mount_point()))
-            .max_by_key(|disk| disk.mount_point().components().count());
         let (interface_count, network_bytes) = self
             .networks
             .iter()
@@ -191,12 +202,7 @@ impl HostSampler {
                 .filter(|_| !self.system.cpus().is_empty() && cpu.is_finite())
                 .map(|_| cpu.clamp(0.0, 100.0)),
             memory_percent: percent(self.system.used_memory(), self.system.total_memory()),
-            disk_percent: disk.and_then(|disk| {
-                percent(
-                    disk.total_space().saturating_sub(disk.available_space()),
-                    disk.total_space(),
-                )
-            }),
+            disk_percent: self.disk_percent(home),
             network_kbps: elapsed
                 .filter(|_| interface_count > 0)
                 .and_then(|elapsed| network_rate(network_bytes, elapsed)),
@@ -207,7 +213,65 @@ impl HostSampler {
             )),
         };
         self.sampled_at = Some(now);
-        self.snapshot.clone()
+        self.observed_at = Some(observed_at);
+        &self.snapshot
+    }
+
+    fn refresh_disk(&mut self, now: Instant) {
+        let observed_at = Utc::now();
+        // On Linux, refreshing a retained disk preserves its old capacity if
+        // statvfs fails. Start from an empty list so an unreadable volume stays unknown.
+        self.disks =
+            Disks::new_with_refreshed_list_specifics(DiskRefreshKind::nothing().with_storage());
+        self.disk_sampled_at = Some(now);
+        self.disk_observed_at = Some(observed_at);
+    }
+
+    fn disk_percent(&self, home: &Path) -> Option<f64> {
+        let disk = self
+            .disks
+            .list()
+            .iter()
+            .filter(|disk| home.starts_with(disk.mount_point()))
+            .max_by_key(|disk| disk.mount_point().components().count())?;
+        percent(
+            disk.total_space().saturating_sub(disk.available_space()),
+            disk.total_space(),
+        )
+    }
+
+    fn timed_sample(
+        &mut self,
+        now: Instant,
+        home: &Path,
+        disk_required_after_ms: Option<i64>,
+    ) -> Option<TimedHostMetrics> {
+        self.sample(now, home);
+        // The dashboard can reuse a disk reading for 30 seconds. An Inbox turn
+        // can request a newer reading, still at a shared one-second cadence.
+        if disk_required_after_ms.is_some_and(|boundary| {
+            self.disk_observed_at
+                .is_none_or(|observed| observed.timestamp_millis() <= boundary)
+        }) && self
+            .disk_sampled_at
+            .is_none_or(|previous| now.duration_since(previous) >= SAMPLE_INTERVAL)
+        {
+            self.refresh_disk(now);
+            self.snapshot.disk_percent = self.disk_percent(home);
+        }
+        let sampled_at = if disk_required_after_ms.is_some() {
+            self.disk_sampled_at?
+        } else {
+            self.sampled_at?
+        };
+        Some(TimedHostMetrics {
+            cpu_percent: self.snapshot.cpu_percent,
+            memory_percent: self.snapshot.memory_percent,
+            disk_percent: self.snapshot.disk_percent,
+            observed_at: self.observed_at?,
+            disk_observed_at: self.disk_observed_at,
+            next_sample_at: sampled_at + SAMPLE_INTERVAL,
+        })
     }
 }
 
@@ -221,10 +285,29 @@ pub(crate) async fn sample_current(sampler: SharedSampler) -> Result<HostMetrics
             .lock()
             .map_err(|_| crate::internal("Host metrics lock poisoned"))?;
         let home = argos_osint_core::paths::home_dir();
-        Ok::<_, ApiError>(sampler.sample(Instant::now(), home))
+        Ok::<_, ApiError>(sampler.sample(Instant::now(), &home).clone())
     })
     .await
     .map_err(crate::internal)?
+}
+
+pub(crate) async fn sample_timed(
+    sampler: SharedSampler,
+    disk_required_after_ms: Option<i64>,
+    deadline: tokio::time::Instant,
+) -> Option<TimedHostMetrics> {
+    let mut sample = tokio::task::spawn_blocking(move || {
+        let mut sampler = sampler.try_lock().ok()?;
+        let home = argos_osint_core::paths::home_dir();
+        sampler.timed_sample(Instant::now(), &home, disk_required_after_ms)
+    });
+    match tokio::time::timeout_at(deadline, &mut sample).await {
+        Ok(result) => result.ok().flatten(),
+        Err(_) => {
+            sample.abort();
+            None
+        }
+    }
 }
 
 pub(crate) async fn read(
@@ -281,6 +364,8 @@ mod tests {
     #[test]
     fn rapid_reads_preserve_the_prior_sample_without_refreshing_host_counters() {
         let now = std::time::Instant::now();
+        let observed_at = chrono::Utc::now();
+        let disk_observed_at = observed_at - chrono::Duration::seconds(4);
         let expected = super::HostMetrics {
             cpu_percent: Some(11.0),
             memory_percent: Some(22.0),
@@ -291,13 +376,26 @@ mod tests {
         };
         let mut sampler = super::HostSampler {
             sampled_at: Some(now),
+            observed_at: Some(observed_at),
+            disk_sampled_at: Some(now),
+            disk_observed_at: Some(disk_observed_at),
             snapshot: expected.clone(),
             ..super::HostSampler::default()
         };
         assert_eq!(
-            sampler.sample(now + Duration::from_millis(500), std::path::PathBuf::new()),
-            expected
+            sampler.sample(now + Duration::from_millis(500), std::path::Path::new("")),
+            &expected
         );
+        let sample = sampler
+            .timed_sample(
+                now + Duration::from_millis(500),
+                std::path::Path::new(""),
+                Some(observed_at.timestamp_millis()),
+            )
+            .unwrap();
+        assert_eq!(sample.observed_at, observed_at);
+        assert_eq!(sample.disk_observed_at, Some(disk_observed_at));
+        assert_eq!(sample.next_sample_at, now + super::SAMPLE_INTERVAL);
     }
 
     #[test]

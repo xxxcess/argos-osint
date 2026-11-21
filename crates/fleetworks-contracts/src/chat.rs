@@ -155,6 +155,10 @@ pub enum ChatSourceKind {
     Job,
     Cycle,
     Readiness,
+    /// A sample from the selected backend's host metrics feed.
+    HostMetric,
+    /// A count from the registered workstation's activity scope.
+    JobCount,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

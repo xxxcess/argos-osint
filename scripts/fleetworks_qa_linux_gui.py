@@ -17,7 +17,7 @@ import time
 from fleetworks_local_backend_smoke import check_zero_bound_sockets, resolve_companion_binary
 from fleetworks_qa_pack import MANIFEST, WORKER, install, sha256, verify_directory
 
-QUESTION = "What is the state of the gateway?"
+SUMMARY_QUESTION = "What is the current workstation readiness?"
 TERMINAL = {"answered", "insufficient_context", "failed", "canceled"}
 
 
@@ -214,7 +214,7 @@ def test_window(app, registry, atspi, home, worker, pointer, journal, output):
          "mousemove", str(x + width // 2), str(y + height // 2), "click", "1"],
         check=True, timeout=5,
     )
-    subprocess.run(["xdotool", "type", "--clearmodifiers", QUESTION], check=True, timeout=5)
+    subprocess.run(["xdotool", "type", "--clearmodifiers", SUMMARY_QUESTION], check=True, timeout=5)
     wait_for(lambda: find("inbox-qa-send", button=True), app, "enabled QA Send")
     started = time.monotonic()
     # Submit via the already-focused composer, using the same keyboard path as an operator.

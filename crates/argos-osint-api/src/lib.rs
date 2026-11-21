@@ -363,7 +363,8 @@ fn router_with_access(
         .merge(brain_routes);
     let router = if mode == AccessMode::Bearer {
         let target =
-            inbox_qa::QaTarget::new(services.readiness.clone(), services.search.clone(), false);
+            inbox_qa::QaTarget::new(services.readiness.clone(), services.search.clone(), false)
+                .with_metrics(sampler.clone());
         let tools_routes = tools::routes();
         let tools_routes = if let Some(tools) = services.tools {
             tools_routes.route_layer(middleware::from_fn_with_state(tools, tools::forward))

@@ -1,5 +1,8 @@
 //! Authenticated V2 Inbox QA admission and reads shared by HTTP and private IPC.
 
+mod metrics;
+mod question;
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
@@ -25,6 +28,7 @@ use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::time::Instant;
 
 use crate::actor_search::SearchClient;
+use crate::host_metrics::SharedSampler;
 use crate::request_context::{ContextFailure, ResolvedRequest};
 use crate::workstation::{self, ReadinessOwners};
 use crate::{ApiError, ApiState};
@@ -208,6 +212,7 @@ pub(crate) struct QaTarget {
     readiness: Option<ReadinessOwners>,
     search: Option<SearchClient>,
     embedded: bool,
+    sampler: Option<SharedSampler>,
     subscribers: Arc<Semaphore>,
     events: Arc<EventWake>,
     probes: Arc<Semaphore>,
@@ -223,10 +228,16 @@ impl QaTarget {
             readiness,
             search,
             embedded,
+            sampler: None,
             subscribers: Arc::new(Semaphore::new(8)),
             events: Arc::new(EventWake::new()),
             probes: Arc::new(Semaphore::new(4)),
         }
+    }
+
+    pub(crate) fn with_metrics(mut self, sampler: SharedSampler) -> Self {
+        self.sampler = Some(sampler);
+        self
     }
 
     async fn observe(
@@ -571,87 +582,203 @@ async fn snapshot(
     let boundary = store::freshness_boundary(&state.repo, actor)
         .await
         .map_err(storage_error)?;
-    let sample = tokio::time::timeout_at(deadline, async {
-        loop {
-            if let Some(sample) = target.observe(state, generation, boundary, true).await? {
-                return Ok::<_, ApiError>(sample);
+    let intent = question::classify(&request.question);
+    let source = request.source.as_ref();
+    let mut selected_activity = None;
+    if let Some(source) = source {
+        match source.kind {
+            ChatSourceKind::Job | ChatSourceKind::Cycle => {
+                let observed_at = chrono::Utc::now();
+                let (label, status) = activity_fact(state, context, source).await?;
+                selected_activity = Some((label, status, observed_at));
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            ChatSourceKind::Readiness => {}
+            _ => return Err(crate::missing()),
         }
-    })
-    .await
-    .map_err(|_| current_health_unavailable())??;
-    let observed_at = chrono::DateTime::from_timestamp_millis(sample.sampled_at_ms)
-        .ok_or_else(current_health_unavailable)?;
-    let mut sources = Vec::new();
+    }
+
+    let needs_health = matches!(
+        intent,
+        question::Question::Readiness(_) | question::Question::Summary
+    ) || source.is_some_and(|source| source.kind == ChatSourceKind::Readiness);
+    let health = if needs_health {
+        let observed = tokio::time::timeout_at(deadline, async {
+            loop {
+                if let Some(sample) = target.observe(state, generation, boundary, true).await? {
+                    return Ok::<_, ApiError>(sample);
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .map_err(|_| current_health_unavailable())
+        .and_then(|result| result);
+        if matches!(intent, question::Question::Summary)
+            || source.is_some_and(|source| source.kind == ChatSourceKind::Readiness)
+        {
+            Some(observed?)
+        } else {
+            observed.ok()
+        }
+    } else {
+        None
+    };
+    if let Some(source) = source.filter(|source| source.kind == ChatSourceKind::Readiness) {
+        if !health
+            .as_ref()
+            .is_some_and(|sample| sample.facts.iter().any(|fact| fact.id == source.id))
+        {
+            return Err(crate::missing());
+        }
+    }
+
     let mut passages = Vec::new();
-    for store::HealthFact {
-        id,
-        label,
-        status,
-        explanation,
-    } in sample.facts
-    {
-        let reference =
-            ChatSourceReference::new(ChatSourceKind::Readiness, id).map_err(|_| crate::bad())?;
+    let mut sources = Vec::new();
+    let mut push = |reference, label, text, observed_at| {
         let opaque_id = format!("passage-{}", passages.len());
-        passages.push(QaPassage::new(
-            opaque_id.clone(),
-            format!("{label} is {status}. {explanation} Observed at {observed_at}."),
-        ));
+        passages.push(QaPassage::new(opaque_id.clone(), text));
         sources.push(store::Source {
             opaque_id,
             reference,
             label,
-            observed_at: observed_at.to_rfc3339(),
+            observed_at,
         });
-    }
-    if let Some(source) = request.source.as_ref() {
-        match source.kind {
-            ChatSourceKind::Job | ChatSourceKind::Cycle => {
-                let scope = crate::activity::scope_for_request(&state.repo, context, None).await?;
-                let row = crate::activity::authorized_job(&state.repo, context, &scope, &source.id)
-                    .await?;
-                if source.kind == ChatSourceKind::Cycle
-                    && fleetworks_contracts::AtlasCycleReceipt::from_job_id(&row.job.id).is_none()
-                {
-                    return Err(crate::missing());
-                }
-                let status = match row.job.state.as_str() {
-                    "queued" => "queued",
-                    "running" => "running",
-                    "reconciling" => "reconciling",
-                    "succeeded" | "completed" => "completed",
-                    "failed" => "failed",
-                    "cancelled" => "canceled",
-                    "partial" => "partially completed",
-                    "paused" => "paused",
-                    _ => "unknown",
-                };
-                let label = if source.kind == ChatSourceKind::Cycle {
-                    "Selected cycle"
-                } else {
-                    "Selected job"
-                };
-                let opaque_id = format!("passage-{}", passages.len());
-                sources.push(store::Source {
-                    opaque_id: opaque_id.clone(),
-                    reference: source.clone(),
-                    label: label.to_owned(),
-                    observed_at: chrono::Utc::now().to_rfc3339(),
-                });
-                passages.push(QaPassage::new(opaque_id, format!("{label} is {status}.")));
+    };
+    let mut sampled_at_ms = chrono::Utc::now().timestamp_millis();
+    let mut answer_mode = store::AnswerMode::Grounded;
+    match intent {
+        question::Question::Readiness(check) => {
+            if let Some((sample, fact)) = health.as_ref().and_then(|sample| {
+                readiness_fact(sample, check.as_str()).map(|fact| (sample, fact))
+            }) {
+                let reference =
+                    ChatSourceReference::new(ChatSourceKind::Readiness, fact.id.clone())
+                        .map_err(|_| crate::bad())?;
+                let at = chrono::DateTime::from_timestamp_millis(sample.sampled_at_ms)
+                    .ok_or_else(current_health_unavailable)?;
+                push(
+                    reference,
+                    fact.label.clone(),
+                    readiness_answer(fact),
+                    at.to_rfc3339(),
+                );
+                sampled_at_ms = sample.sampled_at_ms;
             }
-            ChatSourceKind::Readiness if sources.iter().any(|item| item.reference == *source) => {}
-            _ => return Err(crate::missing()),
         }
+        question::Question::Metric(metric) => {
+            if let Some(sampler) = &target.sampler {
+                let fact =
+                    metrics::collect(state, context, sampler, metric, boundary, deadline).await;
+                sampled_at_ms = chrono::Utc::now().timestamp_millis();
+                if let Some(fact) = fact {
+                    let reference = ChatSourceReference::new(fact.kind, fact.id.into())
+                        .map_err(|_| crate::bad())?;
+                    push(
+                        reference,
+                        fact.label.into(),
+                        fact.text,
+                        fact.observed_at.to_rfc3339(),
+                    );
+                    sampled_at_ms = fact.observed_at.timestamp_millis();
+                }
+            }
+        }
+        question::Question::ContextStatus(kind) => {
+            if let (Some(source), Some((label, status, at))) = (source, selected_activity) {
+                if source.kind == kind && status != "unknown" && at.timestamp_millis() > boundary {
+                    push(
+                        source.clone(),
+                        label.into(),
+                        format!("{label} is {status}."),
+                        at.to_rfc3339(),
+                    );
+                    sampled_at_ms = at.timestamp_millis();
+                }
+            }
+        }
+        question::Question::Summary => {
+            if let Some(sample) = health {
+                answer_mode = store::AnswerMode::Model;
+                sampled_at_ms = sample.sampled_at_ms;
+                let at = chrono::DateTime::from_timestamp_millis(sampled_at_ms)
+                    .ok_or_else(current_health_unavailable)?;
+                for fact in &sample.facts {
+                    let reference =
+                        ChatSourceReference::new(ChatSourceKind::Readiness, fact.id.clone())
+                            .map_err(|_| crate::bad())?;
+                    push(
+                        reference,
+                        fact.label.clone(),
+                        format!(
+                            "{} {} Observed at {at}.",
+                            readiness_answer(fact),
+                            fact.explanation
+                        ),
+                        at.to_rfc3339(),
+                    );
+                }
+                if let (Some(source), Some((label, status, observed_at))) =
+                    (source, selected_activity)
+                {
+                    push(
+                        source.clone(),
+                        label.into(),
+                        format!("{label} is {status}."),
+                        observed_at.to_rfc3339(),
+                    );
+                    sampled_at_ms = sampled_at_ms.min(observed_at.timestamp_millis());
+                }
+            }
+        }
+        question::Question::Unsupported => {}
     }
     let turn_id = store::accepted_turn_id(actor, request, generation).map_err(storage_error)?;
     Ok(store::FrozenEvidence {
+        answer_mode,
         request: QaWorkerRequest::new(turn_id.clone(), turn_id, request.question.clone(), passages),
         sources,
-        sampled_at_ms: sample.sampled_at_ms,
+        sampled_at_ms,
     })
+}
+
+fn readiness_fact<'a>(sample: &'a store::HealthSample, id: &str) -> Option<&'a store::HealthFact> {
+    sample
+        .facts
+        .iter()
+        .find(|fact| fact.id == id && fact.status != "unknown")
+}
+
+fn readiness_answer(fact: &store::HealthFact) -> String {
+    format!("{} is {}.", fact.label, fact.status)
+}
+
+async fn activity_fact(
+    state: &ApiState,
+    context: &ResolvedRequest,
+    source: &ChatSourceReference,
+) -> Result<(&'static str, &'static str), ApiError> {
+    let scope = crate::activity::scope_for_request(&state.repo, context, None).await?;
+    let row = crate::activity::authorized_job(&state.repo, context, &scope, &source.id).await?;
+    let label = if source.kind == ChatSourceKind::Cycle {
+        if fleetworks_contracts::AtlasCycleReceipt::from_job_id(&row.job.id).is_none() {
+            return Err(crate::missing());
+        }
+        "Selected cycle"
+    } else {
+        "Selected job"
+    };
+    let status = match row.job.state.as_str() {
+        "queued" => "queued",
+        "running" => "running",
+        "reconciling" => "reconciling",
+        "succeeded" | "completed" => "completed",
+        "failed" => "failed",
+        "cancelled" | "canceled" => "canceled",
+        "partial" => "partially completed",
+        "paused" => "paused",
+        _ => "unknown",
+    };
+    Ok((label, status))
 }
 
 pub(crate) async fn latest_request(

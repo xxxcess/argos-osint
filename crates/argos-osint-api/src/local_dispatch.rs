@@ -181,11 +181,13 @@ impl LocalGateway {
         services: PrivateServices,
         capability_config: LocalCapabilityConfig,
     ) -> anyhow::Result<Self> {
+        let host_sampler = host_metrics::new_sampler();
         let qa = crate::inbox_qa::QaTarget::new(
             services.readiness.clone(),
             services.search.clone(),
             true,
-        );
+        )
+        .with_metrics(host_sampler.clone());
         Ok(Self {
             state,
             qa,
@@ -194,7 +196,7 @@ impl LocalGateway {
             capability_config,
             job_cursors: Arc::new(activity_paging::JobsCursors::new()),
             log_cursors: Arc::new(operational_logs::LogCursors::new()),
-            host_sampler: host_metrics::new_sampler(),
+            host_sampler,
             tools: Arc::new(Tools::default()),
             upload_sessions: Arc::new(Mutex::new(HashMap::new())),
         })

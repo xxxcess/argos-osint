@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, ensure, Context, Result};
 use argos_osint_api::inbox_qa::{CancellationToken, QaInference, QaRuntimeAvailability};
-use argos_osint_core::storage::inbox_qa::{self as store, FrozenEvidence, POOL};
+use argos_osint_core::storage::inbox_qa::{self as store, AnswerMode, FrozenEvidence, POOL};
 use argos_osint_core::storage::job_dispatch::{
     self, DeliveryClaim, DeliveryFinish, DeliveryLease, DeliveryOutcome, Envelope,
 };
@@ -547,9 +547,17 @@ impl Executor {
     ) -> RunResult {
         let (sender, mut receiver) = mpsc::channel(4);
         let cancel = CancellationToken::new();
-        let inference = self
-            .model
-            .ask(evidence.request.clone(), sender, cancel.clone());
+        let inference: argos_osint_api::inbox_qa::QaInferenceFuture<'_> = match evidence.answer_mode
+        {
+            AnswerMode::Model => self
+                .model
+                .ask(evidence.request.clone(), sender, cancel.clone()),
+            AnswerMode::Grounded => Box::pin(grounded_events(
+                evidence,
+                sender,
+                Utc::now().timestamp_millis(),
+            )),
+        };
         tokio::pin!(inference);
         let mut next_check = Instant::now() + CHECK;
         let deadline = Instant::now() + TURN_TIMEOUT;
@@ -637,6 +645,41 @@ impl Executor {
     }
 }
 
+/// Publish the exact same validated event protocol used by the inference worker.
+async fn grounded_events(
+    evidence: &FrozenEvidence,
+    sender: mpsc::Sender<QaWorkerEvent>,
+    now_ms: i64,
+) -> Result<()> {
+    let age = now_ms.saturating_sub(evidence.sampled_at_ms);
+    let turn_id = &evidence.request.turn_id;
+    let (sequence, outcome) = match evidence.request.passages.as_slice() {
+        [passage] if (0..=store::MAX_EVIDENCE_AGE_MS).contains(&age) => {
+            sender
+                .send(QaWorkerEvent::Finding {
+                    turn_id: turn_id.clone(),
+                    sequence: 1,
+                    source_id: passage.source_id.clone(),
+                    start: 0,
+                    end: u32::try_from(passage.text.chars().count())?,
+                    text: passage.text.clone(),
+                })
+                .await?;
+            (2, QaWorkerOutcome::Answered)
+        }
+        [] | [_] => (1, QaWorkerOutcome::InsufficientContext),
+        _ => return Err(anyhow!("grounded Inbox QA turn has multiple passages")),
+    };
+    sender
+        .send(QaWorkerEvent::Complete {
+            turn_id: turn_id.clone(),
+            sequence,
+            outcome,
+        })
+        .await?;
+    Ok(())
+}
+
 enum RunResult {
     More,
     Completed,
@@ -696,4 +739,62 @@ async fn publish(
     } else {
         RunResult::More
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use fleetworks_contracts::qa_worker::QaPassage;
+    use fleetworks_contracts::qa_worker::QaWorkerRequest;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn grounded_turn_publishes_fresh_facts_and_withholds_stale_ones() {
+        let evidence = FrozenEvidence {
+            answer_mode: AnswerMode::Grounded,
+            request: QaWorkerRequest::new(
+                "turn".into(),
+                "snapshot".into(),
+                "Is the actor catalog ready?".into(),
+                vec![QaPassage::new(
+                    "catalog".into(),
+                    "Actor catalog is not ready.".into(),
+                )],
+            ),
+            sources: Vec::new(),
+            sampled_at_ms: 10_000,
+        };
+        let (sender, mut receiver) = mpsc::channel(2);
+        grounded_events(&evidence, sender, 10_001).await.unwrap();
+        let mut sequence = QaWorkerSequence::default();
+        let finding = receiver.recv().await.unwrap();
+        assert!(
+            matches!(&finding, QaWorkerEvent::Finding { text, .. } if text == "Actor catalog is not ready.")
+        );
+        assert!(!sequence.accept(&evidence.request, &finding).unwrap());
+        let terminal = receiver.recv().await.unwrap();
+        assert!(sequence.accept(&evidence.request, &terminal).unwrap());
+        assert!(matches!(
+            terminal,
+            QaWorkerEvent::Complete {
+                outcome: QaWorkerOutcome::Answered,
+                ..
+            }
+        ));
+
+        let (sender, mut receiver) = mpsc::channel(2);
+        grounded_events(&evidence, sender, 15_001).await.unwrap();
+        let terminal = receiver.recv().await.unwrap();
+        assert!(QaWorkerSequence::default()
+            .accept(&evidence.request, &terminal)
+            .unwrap());
+        assert!(matches!(
+            terminal,
+            QaWorkerEvent::Complete {
+                outcome: QaWorkerOutcome::InsufficientContext,
+                ..
+            }
+        ));
+        assert!(receiver.recv().await.is_none());
+    }
 }

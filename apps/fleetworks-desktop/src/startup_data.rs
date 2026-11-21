@@ -251,19 +251,19 @@ impl Step {
             self.preview(state, tx);
         } else if validated_csv(state, self).is_some() {
             self.preview(state, tx);
-        } else if let Some(kind) = self.dataset_kind() {
-            match self.csv_input(&state.startup.csv_inputs) {
-                Some(input) => match input.source {
-                    CsvSource::Bundled => {
-                        state.validate_bundled_startup_csv(self, kind);
-                    }
-                    CsvSource::Github => {
-                        state.download_github_dataset(kind, input.url.text.clone());
-                    }
-                    CsvSource::Local if cfg!(target_os = "linux") => state.enter_csv_path(kind, tx),
-                    CsvSource::Local => state.choose_dataset(kind, tx),
-                },
-                None => {}
+        } else if let Some((kind, input)) = self
+            .dataset_kind()
+            .zip(self.csv_input(&state.startup.csv_inputs))
+        {
+            match input.source {
+                CsvSource::Bundled => {
+                    state.validate_bundled_startup_csv(self, kind);
+                }
+                CsvSource::Github => {
+                    state.download_github_dataset(kind, input.url.text.clone());
+                }
+                CsvSource::Local if cfg!(target_os = "linux") => state.enter_csv_path(kind, tx),
+                CsvSource::Local => state.choose_dataset(kind, tx),
             }
         }
     }

@@ -718,7 +718,8 @@ pub(crate) async fn protect(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
     );
-    headers.insert(header::VARY, HeaderValue::from_static("Origin"));
+    // Preserve response-specific negotiation while varying gateway responses by origin.
+    headers.append(header::VARY, HeaderValue::from_static("Origin"));
     if let Some(value) = origin {
         headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, value);
         headers.insert(

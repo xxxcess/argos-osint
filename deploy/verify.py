@@ -65,7 +65,10 @@ def exchange(port, path, token=None, payload=None, *, headers=None, method=None)
             value = json.loads(data)
         except ValueError:
             value = None  # Public HTML pages are inspected by status only.
-        return response.status, value, dict(response.getheaders())
+        # Multiple Vary fields represent one comma-separated list.
+        headers = {name: response.getheader(name) if name.lower() == "vary" else content
+                   for name, content in response.getheaders()}
+        return response.status, value, headers
     finally:
         connection.close()
 

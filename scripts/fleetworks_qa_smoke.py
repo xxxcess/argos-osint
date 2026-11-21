@@ -500,7 +500,8 @@ def run_distributed(args):
                 require(status in statuses, f"{path} received HTTP {status} ({reason})")
                 if path != "settings" and 200 <= status < 300:
                     normalized = {name.lower(): content.lower() for name, content in response_headers.items()}
-                    require(EVIDENCE_HEADER.lower() in {name.strip() for name in normalized.get("vary", "").split(",")}
+                    require({"origin", EVIDENCE_HEADER.lower()} <= {
+                                name.strip() for name in normalized.get("vary", "").split(",")}
                             and {"private", "no-store"} <= {part.strip() for part in
                                                             normalized.get("cache-control", "").split(",")},
                             f"{path} response did not isolate the evidence view from HTTP caches")

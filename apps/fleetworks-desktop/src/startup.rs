@@ -1036,19 +1036,28 @@ mod tests {
         assert!(runtime.find("startup-csv-ready").is_none());
         assert!(runtime.find("maintenance-confirm").is_none());
 
+        runtime.state.intents.clear();
         runtime.update(|_, tx| tx.scroll_into_view(startup_data::PRIMARY));
         runtime.frame(0.09);
         click(&mut runtime, startup_data::PRIMARY);
+        runtime.frame(0.01);
+        assert!(runtime
+            .state
+            .intents
+            .contains(&Intent::DownloadGithubDataset { kind }));
         let dataset = DatasetRef::new("fixture-actors".into(), kind, "a".repeat(64), 120)
             .expect("validated dataset");
         let mut receipt = DatasetUpload::new(dataset.clone(), 60);
         receipt.row_count = Some(12);
         runtime.update(|state, _| complete(state, Ok(receipt.clone())));
         runtime.frame(0.10);
+        assert!(runtime.find("maintenance-confirm").is_none());
+        assert!(runtime.find("startup-csv-ready").is_some());
+        runtime.update(|_, tx| tx.scroll_into_view("startup-csv-ready"));
+        runtime.frame(0.01);
         let tree = runtime.accessibility_json().to_string();
         assert!(tree.contains("Ready to seed"));
         assert!(tree.contains("GitHub CSV URL · 12 rows validated"));
-        assert!(runtime.find("maintenance-confirm").is_none());
 
         runtime.update(|_, tx| tx.scroll_into_view(startup_data::PRIMARY));
         runtime.frame(0.12);

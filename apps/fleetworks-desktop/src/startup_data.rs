@@ -879,12 +879,23 @@ pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit:
                 step.action()
             };
             let busy = blocked.is_some() || downloading || validating || state.maintenance.busy();
+            let validated = upload.is_some();
+            let source = csv_input.map(|input| input.source);
             actions = actions.child(
                 ActionButton::new(primary)
                     .key(PRIMARY)
                     .finish(MetalFinish::GoldCta)
                     .disabled(busy)
-                    .on_press_tx(move |state: &mut State, tx| step.start(state, tx))
+                    .on_press_tx(move |state: &mut State, tx| {
+                        let current_source = step
+                            .csv_input(&state.startup.csv_inputs)
+                            .map(|input| input.source);
+                        if source == current_source
+                            && validated == validated_csv(state, step).is_some()
+                        {
+                            step.start(state, tx);
+                        }
+                    })
                     .build(kit, preferences, None),
             );
             if csv_input.is_some() && upload.is_none() && saved_dataset(state, step).is_some() {

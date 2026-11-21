@@ -1,0 +1,17 @@
+(version 1)
+(deny default)
+(allow process-exec (literal (param "worker")))
+(allow file-read* (subpath (param "pack")))
+(allow file-read-data (literal "/"))
+(allow file-read*
+    (subpath "/usr/lib")
+    (subpath "/System/Library")
+    (subpath "/System/Cryptexes/OS/usr/lib")
+    (subpath "/System/Volumes/Preboot/Cryptexes/OS/usr/lib")
+    (literal "/dev/null") (literal "/dev/random") (literal "/dev/urandom"))
+(allow sysctl-read)
+
+; Intel libiomp5 owns this one registration object. The ARM launcher leaves it unset.
+(let ((omp-name (param "omp_name")))
+    (if (not (equal? omp-name ""))
+        (allow ipc-posix-shm (ipc-posix-name omp-name))))

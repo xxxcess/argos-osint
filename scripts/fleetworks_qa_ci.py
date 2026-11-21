@@ -13,6 +13,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 
 import fleetworks_qa_pack as pack
@@ -136,15 +137,24 @@ def mac_libraries(binary, directory, torch_root):
     return list(libraries.values())
 
 
-def verify_inference(root, loader_key):
+def verify_inference(root, loader_key, target):
     # The extracted pack must find all runtime libraries and use the exact
     # checkpoint without inheriting Torch or model-cache environment variables.
     model_env = {loader_key: str(root / "lib"), "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
                  "RAYON_NUM_THREADS": "1"}
     started = time.monotonic()
-    process = subprocess.Popen([str(root / pack.WORKER), "--model-dir", str(root / "model")],
-                               env=model_env, cwd=root, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                               stderr=subprocess.DEVNULL)
+    worker = root / pack.WORKER
+    model = root / "model"
+    command = [str(worker), "--model-dir", str(model)]
+    if target in DARWIN_WHEELS:
+        launcher = ROOT / "services/api-host/src/qa_embedded_macos.sh"
+        profile = launcher.with_suffix(".sb")
+        command = ["/bin/sh", "-c", launcher.read_text(encoding="utf-8"), "fleetworks-inbox-qa",
+                   target.split("-", 1)[0], "-f", str(profile), "-D", f"pack={root}",
+                   "-D", f"worker={worker}", *command]
+    error_log = tempfile.TemporaryFile()
+    process = subprocess.Popen(command, env=model_env, cwd=model, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               stderr=error_log)
     deadline = started + 60
 
     def send(message):
@@ -186,12 +196,22 @@ def verify_inference(root, loader_key):
         pack.check(process.wait(timeout=10) == 0, "QA checkpoint worker did not shut down")
         return {"model_warm_ms": round((warm - started) * 1000, 1),
                 "single_passage_ms": round((complete - warm) * 1000, 1)}
+    except Exception:
+        error_log.seek(0)
+        diagnostic = error_log.read(16 * 1024)
+        numbers = re.findall(rb"^OMP: (?:System error|Error) #(\d{1,3}):", diagnostic, re.M)
+        result = {"worker_exit": process.poll(), "openmp_error_numbers": sorted({int(n) for n in numbers}),
+                  "openmp_shared_memory_error": b"Can't open SHM" in diagnostic,
+                  "openmp_temporary_file_error": b"Can't open TEMP" in diagnostic}
+        print(json.dumps(result, sort_keys=True), file=sys.stderr)
+        raise
     finally:
         if process.poll() is None:
             process.kill()
             process.wait(timeout=10)
         process.stdin.close()
         process.stdout.close()
+        error_log.close()
 
 
 def build(target, directory):
@@ -234,7 +254,7 @@ def build(target, directory):
     if target not in DARWIN_WHEELS:
         linux_libraries(installed / pack.WORKER, installed / "lib",
                         {**env, loader_key: str(installed / "lib")}, installed=True)
-    digests["checkpoint_smoke"] = verify_inference(installed, loader_key)
+    digests["checkpoint_smoke"] = verify_inference(installed, loader_key, target)
     (directory / "digests.json").write_text(json.dumps(digests, sort_keys=True) + "\n")
     print(json.dumps(digests, sort_keys=True))
 

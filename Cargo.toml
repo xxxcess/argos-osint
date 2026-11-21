@@ -68,6 +68,10 @@ winit = { git = "https://github.com/anomalyco/rune", rev = "205b8d4f7e60fa6248b8
 [profile.dev.package.rquickjs-sys]
 opt-level = 3
 
+# The Embedded companion hashes the complete offline QA pack before loading it.
+[profile.dev.package.sha2]
+opt-level = 3
+
 # Rune's full debug information can exceed the native development host's
 # memory budget. Preserve backtrace line tables without rebuilding unrelated
 # backend dependencies with a different global profile.

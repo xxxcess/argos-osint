@@ -41,29 +41,21 @@ const LOADER_DIRS: &[&str] = &[
 pub(super) fn command(pack: &Path, worker: &Path) -> Result<Command> {
     use std::ffi::OsString;
 
-    const PROFILE: &str = r#"
-        (version 1)
-        (deny default)
-        (allow process-exec (literal (param "worker")))
-        (allow file-read* (subpath (param "pack")))
-        (allow file-read-data (literal "/"))
-        (allow file-read*
-            (subpath "/usr/lib")
-            (subpath "/System/Library")
-            (subpath "/System/Cryptexes/OS/usr/lib")
-            (subpath "/System/Volumes/Preboot/Cryptexes/OS/usr/lib")
-            (literal "/dev/null") (literal "/dev/random") (literal "/dev/urandom"))
-        (allow sysctl-read)
-    "#;
+    const PROFILE: &str = include_str!("qa_embedded_macos.sb");
+    const LAUNCHER: &str = include_str!("qa_embedded_macos.sh");
     let parameter = |key: &str, path: &Path| {
         let mut value = OsString::from(key);
         value.push(path.as_os_str());
         value
     };
     // The Darwin pack uses @loader_path from signed load commands. No DYLD override is needed.
-    let mut command = Command::new("/usr/bin/sandbox-exec");
+    let mut command = Command::new("/bin/sh");
     command
         .env_clear()
+        .arg("-c")
+        .arg(LAUNCHER)
+        .arg("fleetworks-inbox-qa")
+        .arg(std::env::consts::ARCH)
         .arg("-p")
         .arg(PROFILE)
         .arg("-D")

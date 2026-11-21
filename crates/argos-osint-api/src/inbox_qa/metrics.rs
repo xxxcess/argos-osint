@@ -308,7 +308,9 @@ mod tests {
         .await
         .unwrap();
         bootstrap::ensure_network_identity(repo.db()).await.unwrap();
-        connect_registry::initialize_control(&repo).await.unwrap();
+        connect_registry::initialize_control(repo.db())
+            .await
+            .unwrap();
         let state = ApiState::new(repo, "fixture-instance".into(), 0, Arc::new(Vec::new()));
         let principal = AuthenticatedPrincipal::for_local_ipc(
             "metric-native",

@@ -232,10 +232,10 @@ impl InboxQa {
     }
 
     fn accept_pending(&mut self, turn: &QaTurn) -> bool {
-        if !self
+        if self
             .pending
             .as_ref()
-            .is_some_and(|pending| pending.request.request_id == turn.request_id)
+            .is_none_or(|pending| pending.request.request_id != turn.request_id)
         {
             return false;
         }

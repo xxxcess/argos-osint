@@ -8,7 +8,13 @@ import {
   StyleSheet,
   useWindowDimensions,
 } from "react-native";
-import { Notice, LoadingState, EmptyState, FleetworksMark } from "@argos/ui";
+import {
+  Notice,
+  LoadingState,
+  EmptyState,
+  FleetworksMark,
+  glassProps,
+} from "@argos/ui";
 import {
   articleSearchProblem,
   keyFor,
@@ -62,6 +68,7 @@ type Props = {
 export function BulletinView(p: Props) {
   const { width } = useWindowDimensions();
   const wide = width >= 900;
+  const compact = width < 600;
   const searchProblem = p.search.trim() ? articleSearchProblem(p.search) : null;
   const loading =
     !p.list.data &&
@@ -69,7 +76,11 @@ export function BulletinView(p: Props) {
     (p.daysPending || (p.list.isLoading && !!p.selectedDay));
   return (
     <View nativeID="intel-bulletin" style={s.shell}>
-      <View style={[s.header, !wide && { paddingHorizontal: 24 }]}>
+      <View
+        {...glassProps.chrome}
+        nativeID="intel-bulletin-header"
+        style={[s.header, !wide && { paddingHorizontal: 24 }]}
+      >
         <View style={s.headingRow}>
           <FleetworksMark size={30} />
           {/* The logo is the visible header. The heading stays for assistive tech and tests. */}
@@ -100,7 +111,13 @@ export function BulletinView(p: Props) {
         </View>
       </View>
       <View style={[s.body, wide && { flexDirection: "row" }]}>
-        <View style={[s.rail, wide && { width: 220, borderRightWidth: 1 }]}>
+        <View
+          {...glassProps.chrome}
+          nativeID="intel-category-rail"
+          role="group"
+          aria-label="Categories"
+          style={[s.rail, wide && { width: 220, borderRightWidth: 1 }]}
+        >
           <Text style={s.micro}>Categories</Text>
           <CategoryRail
             categories={p.categories}
@@ -130,6 +147,7 @@ export function BulletinView(p: Props) {
           ) : (
             <>
               <FeedHeader
+                compact={compact}
                 sort={p.sort}
                 onSort={p.onSort}
                 days={p.days}

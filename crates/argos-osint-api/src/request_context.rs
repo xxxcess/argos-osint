@@ -34,12 +34,13 @@ pub(crate) const REGISTRATION_HEADER: &str = "x-fleetworks-registration";
 pub(crate) const REGISTRATION_REVISION_HEADER: &str = "x-fleetworks-registration-revision";
 pub(crate) const DELEGATION_HEADER: &str = "x-fleetworks-delegation";
 const MAX_DELEGATION_BYTES: usize = 8192;
-const PERMISSIONS: [Permission; 10] = [
+const PERMISSIONS: [Permission; 11] = [
     Permission::ReadBackend,
     Permission::RegisterWorkstation,
     Permission::RebindWorkstation,
     Permission::ResolveWebSession,
     Permission::ManageConfiguration,
+    Permission::ManageInboxQa,
     Permission::MaintainBackend,
     Permission::SubmitInteractive,
     Permission::ReadWorkstationActivity,

@@ -217,7 +217,7 @@ The existing [native verifier](../../../scripts/fleetworks_verify.py) selects an
 
 ## Assistant chat turn endpoint
 
-`POST /api/v1/workstation/chat/turns` (and IPC `chat_turn_submit`) accepts one typed turn from a native registered caller with `SubmitInteractive`. It checks the turn and the caller's registration and answers `{"status":"ok"}`. It stores nothing, starts no job and never writes an assistant reply. The browser relay does not carry it. The backend advertises `chat` as supported so the native composer can clear its draft on send. The wider typed contract, with threads, messages and events, is described in [assistant-chat-contract.md](assistant-chat-contract.md) and is not served yet.
+`POST /api/v1/workstation/chat/turns` (and IPC `chat_turn_submit`) accepts one typed turn from a native registered caller with `SubmitInteractive`. It checks the turn and the caller's registration and answers `{"status":"ok"}`. It stores nothing, starts no job and never writes an assistant reply. The browser relay does not carry it. The backend advertises `chat` for the V1 composer. The separate [Inbox QA V2 contract](assistant-chat-contract.md#inbox-qa-v2) provides the latest exchange, cited findings, and resumable events through the selected backend. A dedicated executor isolates QA work from other Jobs pools. A private model process carries out inference for each Embedded companion or provisioned Distributed replica.
 
 ## Async runtime safety
 

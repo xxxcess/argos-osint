@@ -3,26 +3,30 @@ import { Image } from "react-native";
 
 // Canonical assets/brand/fleetworks-mark.svg geometry. Embedding the vector keeps
 // shared RN consumers independent of the web host's base path and asset loader.
-const MARK = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Fleetworks">
-  <g fill="none" stroke="#C6A56E" stroke-width="2.4" stroke-linejoin="round">
-    <polygon points="128,28 140,50 116,50"/>
-    <polygon points="78,52 90,74 66,74"/>
-    <polygon points="178,52 190,74 166,74"/>
-    <polygon points="46,92 58,114 34,114"/>
-    <polygon points="210,92 222,114 198,114"/>
-  </g>
+const MARK = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 144 176" role="img" aria-label="Fleetworks">
   <defs>
-    <mask id="crescent" maskUnits="userSpaceOnUse" x="0" y="0" width="256" height="256">
-      <rect width="256" height="256" fill="white"/>
-      <circle cx="128" cy="132" r="50" fill="black"/>
+    <radialGradient id="core" cx=".36" cy=".66" r=".69">
+      <stop stop-color="#F3DBAA"/>
+      <stop offset=".46" stop-color="#A87D57"/>
+      <stop offset=".77" stop-color="#453B39"/>
+      <stop offset="1" stop-color="#15151B"/>
+    </radialGradient>
+    <linearGradient id="obsidian" x2=".74" y2="1">
+      <stop stop-color="#66717F"/>
+      <stop offset=".47" stop-color="#252D38"/>
+      <stop offset="1" stop-color="#101319"/>
+    </linearGradient>
+    <mask id="crescent" maskUnits="userSpaceOnUse" x="0" y="0" width="144" height="176">
+      <rect width="144" height="176" fill="white"/>
+      <circle cx="72" cy="69" r="50" fill="black"/>
     </mask>
   </defs>
-  <circle cx="128" cy="168" r="62" fill="#C4A265" mask="url(#crescent)"/>
-  <circle cx="128" cy="124" r="40" fill="#F3EEE4"/>
+  <circle cx="72" cy="105" r="62" fill="url(#obsidian)" stroke="#566170" stroke-width="2" mask="url(#crescent)"/>
+  <circle cx="72" cy="61" r="40" fill="url(#core)" stroke="#8F8372" stroke-width="2"/>
 </svg>`;
 const SOURCE = { uri: `data:image/svg+xml,${encodeURIComponent(MARK)}` };
 
-/** Decorative five outlined rays, ivory disc and transparent gold crescent. */
+/** Decorative glass core and obsidian crescent. */
 export function FleetworksMark({ size = 18 }: { size?: number }) {
   return (
     <Image

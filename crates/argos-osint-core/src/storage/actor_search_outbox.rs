@@ -117,7 +117,7 @@ async fn root_guard_in(tx: &Tx, job: &str) -> Result<(), TxError> {
     jobs::bump(tx, "job_guard", &root).await
 }
 
-async fn guard(tx: &Tx) -> Result<(), TxError> {
+pub(super) async fn guard(tx: &Tx) -> Result<(), TxError> {
     jobs::bump(tx, "job_guard", "actor-search-coordinator").await?;
     jobs::run(
         tx,

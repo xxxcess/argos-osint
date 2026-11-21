@@ -36,7 +36,8 @@ use super::tx::{run_tx, RetryPolicy, TxError};
 /// preserving immutable origins and fencing incompatible writers.
 /// v10 adds durable native pairing, scoped installation credentials and revocation.
 /// v11 adds authenticated dataset upload tickets shared across gateway replicas.
-pub const SCHEMA_VERSION: i64 = 11;
+/// v12 adds isolated Inbox QA turn, replica and settings state.
+pub const SCHEMA_VERSION: i64 = 12;
 
 /// Module schemas in apply order: counters before the outbox; the graph
 /// before lifecycle (which indexes `brain_graph_node`); Atlas before its
@@ -44,7 +45,7 @@ pub const SCHEMA_VERSION: i64 = 11;
 /// before refresh. The event logs (`argos_event`, `investigation_event`)
 /// stand alone; telemetry writes use `profile_view`'s tables, with
 /// `telemetry_meta` after them.
-pub fn schemas() -> [(&'static str, &'static str); 58] {
+pub fn schemas() -> [(&'static str, &'static str); 59] {
     [
         ("counters", super::counters::SCHEMA),
         ("native_pairing", super::native_pairing::SCHEMA),
@@ -112,6 +113,7 @@ pub fn schemas() -> [(&'static str, &'static str); 58] {
         ("job_context", super::job_context::SCHEMA),
         ("job_actions", super::job_actions::SCHEMA),
         ("job_dispatch", super::job_dispatch::SCHEMA),
+        ("inbox_qa", super::inbox_qa::SCHEMA),
         ("setup_jobs", super::setup_jobs::SCHEMA),
         ("upload_ticket", super::upload_ticket::SCHEMA),
         (

@@ -1,9 +1,7 @@
-//! The matte deep-space material set.
+//! The Glass Canvas material set.
 //!
-//! Panels, fields, navigation and utility controls are flat tonal steps over one canvas. Only a
-//! real Submit, Confirm, Create or Delete action carries the fractured-obsidian texture, and a
-//! busy control may show a cool shimmer while it loads. Decorative edges never stand in for
-//! functional boundaries or keyboard focus.
+//! Smoked glass is painted behind opaque content. Committing actions carry the fractured-obsidian
+//! texture. Decorative edges are independent of functional boundaries and keyboard focus.
 
 use std::f32::consts::PI;
 
@@ -22,22 +20,21 @@ use crate::rock;
 use crate::theme;
 use crate::theme::StatusTone;
 
-/// Control finishes. `GoldCta`, `Gunmetal`, `CrimsonDanger` and `ObsidianPill` are smooth matte
-/// fills (the first keeps its name from the old theme and is now a cool primary). Only the two
-/// fractured variants carry texture, and only real submit actions use them.
+/// Control finishes. Routine controls use smooth smoked glass. Fractured finishes add texture
+/// for committing actions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MetalFinish {
-    /// Primary matte action that is not a submission.
+    /// Primary utility action.
     GoldCta,
     Gunmetal,
-    /// Matte destructive entry point, such as an action that opens a confirmation.
+    /// Destructive entry point, such as an action that opens a confirmation.
     CrimsonDanger,
     ObsidianPill,
-    /// Submit, Create or Connect: matte rock texture, cyan tint.
+    /// Submit, Create or Connect with a cyan tint.
     Fractured,
-    /// Confirm: matte rock texture, mint tint.
+    /// Confirm with a mint tint.
     FracturedConfirm,
-    /// The destructive confirmation itself, such as Delete: matte rock texture, rose tint.
+    /// The destructive confirmation itself, such as Delete, with a rose tint.
     FracturedDanger,
 }
 
@@ -51,9 +48,12 @@ impl MetalFinish {
     }
 }
 
-/// Surfaces that may blur the window's own content. Buttons and tiles never do.
+/// Shared tint, edge and same-window blur tiers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum GlassSurface {
+    Chrome,
+    Panel,
+    Control,
     Composer,
     Overlay,
 }
@@ -63,6 +63,21 @@ pub(crate) enum GlassSurface {
 pub(crate) struct GlassRecipe {
     pub alpha: f32,
     pub blur: f32,
+    rim_alpha: f32,
+}
+
+impl GlassSurface {
+    fn base(self) -> Color {
+        theme::hex(match self {
+            Self::Chrome | Self::Panel => theme::SURFACE,
+            Self::Control | Self::Composer | Self::Overlay => theme::SURFACE_RAISED,
+        })
+    }
+
+    fn tint(self, preferences: ViewPreferences) -> Color {
+        glass_recipe(self, preferences)
+            .map_or(self.base(), |recipe| self.base().alpha(recipe.alpha))
+    }
 }
 
 /// `None` means opaque: reduced transparency, or the opaque preference, never blurs.
@@ -74,140 +89,190 @@ pub(crate) fn glass_recipe(
         return None;
     }
     Some(match surface {
+        GlassSurface::Chrome => GlassRecipe {
+            alpha: 0.82,
+            blur: 10.0,
+            rim_alpha: 0.12,
+        },
+        GlassSurface::Panel => GlassRecipe {
+            alpha: 0.80,
+            blur: 12.0,
+            rim_alpha: 0.16,
+        },
+        GlassSurface::Control => GlassRecipe {
+            alpha: 0.82,
+            blur: 0.0,
+            rim_alpha: 0.14,
+        },
         GlassSurface::Composer => GlassRecipe {
             alpha: 0.84,
             blur: 10.0,
+            rim_alpha: 0.16,
         },
         GlassSurface::Overlay => GlassRecipe {
-            alpha: 0.91,
-            blur: 14.0,
+            alpha: 0.88,
+            blur: 16.0,
+            rim_alpha: 0.20,
         },
     })
 }
 
-/// Dim obsidian glass: tint on the paint rather than subtree opacity, a narrow upper
-/// reflection, and the window itself stays opaque. The opaque form keeps the same bounds.
+/// Paint one glass tier without affecting content opacity or bounds.
 pub(crate) fn glass(el: El, surface: GlassSurface, preferences: ViewPreferences) -> El {
-    let raised = theme::hex(theme::SURFACE_RAISED);
+    let el = el.fill(surface.tint(preferences));
     match glass_recipe(surface, preferences) {
+        Some(recipe) if surface == GlassSurface::Overlay => el
+            .border_gradient(
+                1.0,
+                rim_color(recipe.rim_alpha),
+                theme::hex(theme::BORDER_SUBTLE),
+            )
+            .backdrop_blur(recipe.blur),
         Some(recipe) => el
-            .backdrop_blur(recipe.blur)
-            .fill(raised.alpha(recipe.alpha))
-            .border_sides([1.0, 0.0, 0.0, 0.0], theme::hex(theme::BORDER_SUBTLE)),
-        None => el
-            .fill(raised)
-            .border_sides([1.0, 0.0, 0.0, 0.0], theme::hex(theme::BORDER_SUBTLE)),
+            .border(1.0, theme::hex(theme::BORDER_SUBTLE))
+            .box_shadow(top_rim(recipe.rim_alpha))
+            .backdrop_blur(recipe.blur),
+        None => el.border(1.0, theme::hex(theme::BORDER_CONTROL)),
     }
 }
 
-/// Configure `rune_kit` semantic depth tokens. Every control and card is matte: a thin
-/// functional edge and no drop shadow, gloss or glow.
-pub(crate) fn configure_kit(kit: &mut Kit, _preferences: ViewPreferences) {
+/// Repeated and nested panels share the glass tint over a backdrop that is already flat or blurred.
+pub(crate) fn glass_panel(el: El, preferences: ViewPreferences) -> El {
+    glass(el, GlassSurface::Panel, preferences).backdrop_blur(0.0)
+}
+
+/// A routine control keeps a crisp functional outline in both appearances.
+pub(crate) fn glass_control(el: El, preferences: ViewPreferences) -> El {
+    glass(el, GlassSurface::Control, preferences).border(1.0, theme::hex(theme::BORDER_CONTROL))
+}
+
+fn rim_color(alpha: f32) -> Color {
+    theme::hex(theme::LIGHT_SURFACE_GLOW).alpha(alpha)
+}
+
+fn top_rim(alpha: f32) -> Shadow {
+    Shadow {
+        y: 1.0,
+        color: rim_color(alpha),
+        inset: true,
+        ..Shadow::default()
+    }
+}
+
+fn control_tint(base: Color, preferences: ViewPreferences) -> Color {
+    glass_recipe(GlassSurface::Control, preferences).map_or(base, |recipe| base.alpha(recipe.alpha))
+}
+
+/// Backend choice cards keep one functional outline and use a steady bevel for selection.
+pub(crate) fn choice_tile(el: El, selected: bool, preferences: ViewPreferences) -> El {
+    let tile = glass_control(el.radius(10.0), preferences);
+    if selected {
+        tile.fill(if preferences.matte() {
+            theme::hex(theme::SURFACE_ELEVATED)
+        } else {
+            control_tint(theme::hex(theme::SELECTION_SURFACE), preferences)
+        })
+    } else {
+        tile
+    }
+}
+
+/// Open content tiles stay on the canvas at rest and use a slate wash on hover.
+pub(crate) fn canvas_tile(el: El, selected: bool, preferences: ViewPreferences) -> El {
+    let tile = el.radius(8.0).hover(control_tint(
+        theme::hex(theme::SURFACE_ELEVATED),
+        preferences,
+    ));
+    if selected {
+        glass_control(tile, preferences)
+    } else {
+        let rim = rune::el()
+            .key("tile-rim")
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h_full()
+            .radius(8.0)
+            .group_opacity(0.0, 1.0)
+            .a11y_hidden();
+        let rim = if preferences.matte() {
+            rim.border(1.0, theme::hex(theme::BORDER_CONTROL))
+        } else {
+            rim.border_gradient(1.0, rim_color(0.18), theme::hex(theme::BORDER_SUBTLE))
+        };
+        tile.hover_group_focus().child(rim)
+    }
+}
+
+/// Map kit fields, selects, segments and short utility buttons onto the same material tiers.
+pub(crate) fn configure_kit(kit: &mut Kit, preferences: ViewPreferences) {
     let functional_edge = Shadow {
         spread: 1.0,
         color: theme::hex(theme::BORDER_CONTROL),
         inset: true,
         ..Shadow::default()
     };
-    let satin_edge = Shadow {
-        spread: 1.0,
-        color: theme::hex(theme::TEXT_PRIMARY).alpha(theme::CARD_EDGE_ALPHA),
-        inset: true,
-        ..Shadow::default()
-    };
-    let mut elevation = Elevation::default();
-    elevation.button_neutral = vec![functional_edge];
-    elevation.button_contrast = vec![satin_edge];
-    elevation.elements = vec![functional_edge];
+    let mut control_depth = vec![functional_edge];
+    let mut floating_depth = vec![functional_edge];
+    if let Some(recipe) = glass_recipe(GlassSurface::Control, preferences) {
+        control_depth.push(top_rim(recipe.rim_alpha));
+        floating_depth = vec![
+            Shadow {
+                color: theme::hex(theme::BORDER_SUBTLE),
+                ..functional_edge
+            },
+            top_rim(0.20),
+        ];
+    }
+    let mut elevation = Elevation::default().with_input(control_depth.clone());
+    elevation.button_neutral = control_depth.clone();
+    elevation.button_contrast = control_depth.clone();
+    elevation.elements = control_depth;
+    elevation.floating = floating_depth.clone();
+    elevation.overlay = floating_depth;
+    let control = GlassSurface::Control.tint(preferences);
+    kit.c.bg_base = control;
+    kit.c.bg_button_neutral = control;
+    kit.c.layer_01 = GlassSurface::Overlay.tint(preferences);
+    kit.c.layer_02 = control;
+    kit.c.layer_03 = control_tint(theme::hex(theme::SURFACE_ELEVATED), preferences);
+    kit.c.surface_base = GlassSurface::Panel.tint(preferences);
+    kit.c.surface_weak = control;
+    kit.c.surface_raised = control;
+    kit.c.surface_raised_base = control;
+    kit.c.surface_raised_hover = kit.c.layer_03;
     kit.c.submit_highlight = Color::TRANSPARENT;
     kit.c.depth_top = Color::TRANSPARENT;
     kit.c.depth_bottom = Color::TRANSPARENT;
     kit.elevation = elevation;
 }
 
-/// The diffuse perimeter of one group, in logical pixels (theme.md section 2).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct GroupEdge {
-    /// Corner radius of the group boundary.
-    pub(crate) radius: f32,
-    /// Width of the alpha ramp inward from the boundary.
-    pub(crate) ramp: f32,
-    /// Content inset from the boundary, past the ramp.
-    pub(crate) inset: f32,
-    /// Spread and blur of the canvas-colored inset shadow that draws the ramp.
-    spread: f32,
-    blur: f32,
-}
-
-impl GroupEdge {
-    /// Standard groups: 20 px radius, 16 px ramp, 24 px inset.
-    pub(crate) const STANDARD: GroupEdge = GroupEdge {
-        radius: 20.0,
-        ramp: 16.0,
-        inset: 24.0,
-        spread: 8.0,
-        blur: 7.5,
-    };
-    /// Compact groups under 160 px high: 16 px radius, 12 px ramp, 20 px inset.
-    pub(crate) const COMPACT: GroupEdge = GroupEdge {
-        radius: 16.0,
-        ramp: 12.0,
-        inset: 20.0,
-        spread: 6.0,
-        blur: 5.6,
-    };
-
-    /// The group's coverage `depth` px inside its boundary: `t*t*(3-2t)` for `t = depth / ramp`.
-    #[cfg(test)]
-    fn alpha(self, depth: f32) -> f32 {
-        let t = (depth / self.ramp).clamp(0.0, 1.0);
-        t * t * (3.0 - 2.0 * t)
-    }
-}
-
-/// A flat group whose perimeter dissolves into the canvas, with no stroke. The ramp belongs to
-/// the group's own background, so children are never attenuated. A selected item keeps a crisp
-/// functional boundary instead.
-/// shortcut: the renderer has no alpha-mask primitive, so a Gaussian inset shadow fitted to the
-/// smoothstep ramp draws it (within 0.03 alpha everywhere, under one 8-bit level on these
-/// colors). Replace it with a nine-slice alpha asset if a mask primitive lands.
+/// Glass for grouped content in scroll views. Repeated cards do not spend separate blur slots.
 pub(crate) fn luminous_card(
     content: El,
-    tone: StatusTone,
+    _tone: StatusTone,
     selected: bool,
-    _preferences: ViewPreferences,
+    preferences: ViewPreferences,
     _pointer_offset: Option<&Live<[f32; 2]>>,
     _shadow_offset: Option<&Live<[f32; 2]>>,
 ) -> El {
-    group_surface(content, tone, selected, GroupEdge::STANDARD)
-}
-
-/// A group that takes the compact perimeter in a compact window, so every control of a setup
-/// card stays reachable at the 640 x 480 floor.
-pub(crate) fn responsive_card(content: El, tone: StatusTone, selected: bool, compact: bool) -> El {
-    let edge = if compact {
-        GroupEdge::COMPACT
-    } else {
-        GroupEdge::STANDARD
-    };
-    group_surface(content, tone, selected, edge)
-}
-
-/// Draw `content` as a group with the perimeter `edge`, inset to clear the ramp.
-fn group_surface(content: El, tone: StatusTone, selected: bool, edge: GroupEdge) -> El {
-    let content = content.padding(edge.inset).radius(edge.radius);
+    let card = glass_panel(group_shape(content, false), preferences);
     if selected {
-        content
-            .fill(theme::hex(theme::SURFACE_RAISED))
-            .border(1.0, tone.border())
+        card.border(1.0, theme::hex(theme::BORDER_CONTROL))
     } else {
-        content.fill(theme::hex(theme::SURFACE)).box_shadow(Shadow {
-            blur: edge.blur,
-            spread: edge.spread,
-            color: theme::hex(theme::BACKGROUND),
-            inset: true,
-            ..Shadow::default()
-        })
+        card
+    }
+}
+
+/// Adjust the setup card inset without changing the glass geometry in the opaque appearance.
+pub(crate) fn responsive_card(content: El, compact: bool, preferences: ViewPreferences) -> El {
+    glass_panel(group_shape(content, compact), preferences)
+}
+
+fn group_shape(content: El, compact: bool) -> El {
+    if compact {
+        content.padding(20.0).radius(16.0)
+    } else {
+        content.padding(24.0).radius(20.0)
     }
 }
 
@@ -215,13 +280,20 @@ fn group_surface(content: El, tone: StatusTone, selected: bool, edge: GroupEdge)
 pub(crate) fn interactive_tile(
     content: El,
     selected: bool,
-    tone: StatusTone,
-    _preferences: ViewPreferences,
+    _tone: StatusTone,
+    preferences: ViewPreferences,
     _pointer_offset: Option<&Live<[f32; 2]>>,
     _shadow_offset: Option<&Live<[f32; 2]>>,
 ) -> El {
-    group_surface(content, tone, selected, GroupEdge::COMPACT)
-        .hover(theme::hex(theme::SURFACE_ELEVATED))
+    let tile = group_shape(content, true);
+    if selected {
+        canvas_tile(tile, true, preferences)
+    } else {
+        glass(tile, GlassSurface::Control, preferences).hover(control_tint(
+            theme::hex(theme::SURFACE_ELEVATED),
+            preferences,
+        ))
+    }
 }
 
 /// Texture opacity at rest, hover-free; disabled controls use [`TEXTURE_OPACITY_DISABLED`].
@@ -231,8 +303,7 @@ pub(crate) const TEXTURE_OPACITY_DISABLED: f32 = 0.04;
 /// has no pressed-state style for descendants; pressed darkens the fill by 2 levels instead.
 pub(crate) const TEXTURE_OPACITY_HOVER: f32 = 0.14;
 
-/// Fill, border and hover fill for one finish. Hover adds 2 to each base channel. Every finish is
-/// a flat fill; the textured ones sit on the theme's action bases.
+/// Base fill, functional border and hover fill. The textured finishes use semantic tints.
 fn finish_colors(finish: MetalFinish) -> (Color, Color, Color) {
     let control = theme::hex(theme::BORDER_CONTROL);
     match finish {
@@ -248,7 +319,7 @@ fn finish_colors(finish: MetalFinish) -> (Color, Color, Color) {
         ),
         MetalFinish::CrimsonDanger => (
             theme::hex(theme::STATUS_ERR_BG),
-            theme::hex(theme::STATUS_ERR_BORDER),
+            control,
             theme::hex("#241C24"),
         ),
         MetalFinish::Fractured => (theme::hex("#10262C"), control, theme::hex("#12282E")),
@@ -322,8 +393,7 @@ fn shade(color: Color, levels: i16) -> Color {
     .alpha(color.a)
 }
 
-/// Apply a finish to a button. Everything is a flat matte fill; the fractured finishes add the
-/// obsidian texture; a busy control gets a cool shimmer band unless motion is reduced.
+/// Apply a glass control and its finish. Pending controls keep the same material and geometry.
 pub(crate) fn apply_liquid_metal(
     button: El,
     finish: MetalFinish,
@@ -338,12 +408,24 @@ pub(crate) fn apply_liquid_metal(
         finish if finish.fractured() => 10.0,
         _ => 7.0,
     };
-    let (mut fill, border, hover_fill) = finish_colors(finish);
-    if disabled && !shimmer && finish.fractured() {
-        // A disabled textured action returns to the raised-control base with a faint texture.
+    let (mut fill, border, mut hover_fill) = finish_colors(finish);
+    if preferences.matte() || (disabled && !shimmer && finish.fractured()) {
         fill = theme::hex(theme::SURFACE_RAISED);
     }
+    if preferences.matte() {
+        hover_fill = theme::hex(theme::SURFACE_ELEVATED);
+    }
+    let fill = control_tint(fill, preferences);
+    let hover_fill = control_tint(hover_fill, preferences);
     let mut styled = button.fill(fill).border(1.0, border).radius(radius);
+    if let Some(recipe) = glass_recipe(GlassSurface::Control, preferences) {
+        let rim = if finish.fractured() {
+            0.18
+        } else {
+            recipe.rim_alpha
+        };
+        styled = styled.box_shadow(top_rim(rim));
+    }
     if finish.fractured() {
         let (rest, hover) = if disabled && !shimmer {
             (TEXTURE_OPACITY_DISABLED, TEXTURE_OPACITY_DISABLED)
@@ -383,7 +465,7 @@ pub(crate) fn apply_liquid_metal(
         );
     }
     if disabled {
-        return styled.dim(0.55);
+        return styled;
     }
     let styled = styled.hover(hover_fill);
     if finish.fractured() {
@@ -469,12 +551,6 @@ pub(crate) fn skeleton_block(
     )
 }
 
-/// Toolbar controls share the Kit's matte recipe without a reflection overlay.
-/// Do not wrap the control or change accessibility keys, layout or focus rings.
-pub(crate) fn compact_toolbar(control: El, _preferences: ViewPreferences) -> El {
-    control
-}
-
 #[cfg(test)]
 mod glass_tests {
     use super::*;
@@ -489,19 +565,35 @@ mod glass_tests {
 
     #[test]
     fn recipes_stay_inside_the_spec_ranges() {
-        let composer = glass_recipe(GlassSurface::Composer, prefs(false, false)).expect("glass");
-        assert!((0.80..=0.88).contains(&composer.alpha));
-        assert!((8.0..=12.0).contains(&composer.blur));
-        let overlay = glass_recipe(GlassSurface::Overlay, prefs(false, false)).expect("glass");
-        assert!((0.88..=0.94).contains(&overlay.alpha));
-        assert!((12.0..=16.0).contains(&overlay.blur));
+        for (surface, alpha, blur, rim) in [
+            (GlassSurface::Chrome, 0.78..=0.86, 8.0..=12.0, 0.10..=0.18),
+            (GlassSurface::Panel, 0.74..=0.84, 10.0..=14.0, 0.10..=0.18),
+            (GlassSurface::Control, 0.76..=0.86, 0.0..=0.0, 0.10..=0.18),
+            (GlassSurface::Composer, 0.80..=0.88, 8.0..=12.0, 0.10..=0.18),
+            (GlassSurface::Overlay, 0.80..=0.88, 14.0..=18.0, 0.16..=0.24),
+        ] {
+            let recipe = glass_recipe(surface, prefs(false, false)).expect("glass");
+            assert!(alpha.contains(&recipe.alpha), "{surface:?}");
+            assert!(blur.contains(&recipe.blur), "{surface:?}");
+            assert!(rim.contains(&recipe.rim_alpha), "{surface:?}");
+        }
     }
 
     #[test]
     fn reduced_transparency_and_the_opaque_preference_never_blur() {
         for (reduced, matte) in [(true, false), (false, true), (true, true)] {
-            assert!(glass_recipe(GlassSurface::Composer, prefs(reduced, matte)).is_none());
-            assert!(glass_recipe(GlassSurface::Overlay, prefs(reduced, matte)).is_none());
+            let preferences = prefs(reduced, matte);
+            for surface in [
+                GlassSurface::Chrome,
+                GlassSurface::Panel,
+                GlassSurface::Control,
+                GlassSurface::Composer,
+                GlassSurface::Overlay,
+            ] {
+                assert!(glass_recipe(surface, preferences).is_none());
+                assert_eq!(surface.tint(preferences), surface.base());
+                assert_eq!(surface.tint(preferences).a, 1.0);
+            }
         }
     }
 }
@@ -519,52 +611,6 @@ mod finish_tests {
         MetalFinish::FracturedConfirm,
         MetalFinish::FracturedDanger,
     ];
-
-    /// Abramowitz and Stegun 7.1.26, absolute error under 1.5e-7.
-    fn erf(x: f32) -> f32 {
-        let t = 1.0 / (1.0 + 0.327_591_1 * x.abs());
-        let poly = t
-            * (0.254_829_6
-                + t * (-0.284_496_74 + t * (1.421_413_7 + t * (-1.453_152_1 + t * 1.061_405_4))));
-        (1.0 - poly * (-x * x).exp()).copysign(x)
-    }
-
-    /// The coverage the renderer draws: an inset shadow of the canvas color with the edge's
-    /// spread and `blur = 2 sigma` leaves the group `Phi((depth - spread) / sigma)`.
-    fn drawn_alpha(edge: GroupEdge, depth: f32) -> f32 {
-        let sigma = edge.blur / 2.0;
-        0.5 * (1.0 + erf((depth - edge.spread) / sigma / std::f32::consts::SQRT_2))
-    }
-
-    #[test]
-    fn the_group_ramp_is_smoothstep_over_the_theme_widths() {
-        for (edge, ramp, radius, inset) in [
-            (GroupEdge::STANDARD, 16.0, 20.0, 24.0),
-            (GroupEdge::COMPACT, 12.0, 16.0, 20.0),
-        ] {
-            assert_eq!((edge.ramp, edge.radius, edge.inset), (ramp, radius, inset));
-            assert_eq!(edge.alpha(0.0), 0.0);
-            assert_eq!(edge.alpha(ramp / 2.0), 0.5);
-            assert_eq!(edge.alpha(ramp), 1.0);
-            assert_eq!(edge.alpha(ramp * 3.0), 1.0);
-            assert_eq!(edge.alpha(-4.0), 0.0, "outside the boundary");
-            // Content never sits in the fading perimeter.
-            assert!(edge.inset >= edge.ramp);
-        }
-    }
-
-    #[test]
-    fn the_drawn_shadow_follows_the_smoothstep_ramp_closely() {
-        for edge in [GroupEdge::STANDARD, GroupEdge::COMPACT] {
-            let mut worst = 0.0f32;
-            let mut depth = 0.0;
-            while depth <= edge.ramp * 2.0 {
-                worst = worst.max((drawn_alpha(edge, depth) - edge.alpha(depth)).abs());
-                depth += 0.25;
-            }
-            assert!(worst < 0.03, "{edge:?} deviates by {worst}");
-        }
-    }
 
     #[test]
     fn only_submit_confirm_and_delete_finishes_carry_texture() {

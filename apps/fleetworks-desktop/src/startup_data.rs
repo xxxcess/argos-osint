@@ -1,0 +1,916 @@
+//! The cold-start workflow uses the same registered maintenance operations as Workstation Status.
+
+use fleetworks_contracts::readiness::DatasetKind;
+use fleetworks_contracts::readiness::DatasetRef;
+use fleetworks_contracts::readiness::MaintenanceOperation;
+use fleetworks_contracts::readiness::ReadinessCheck;
+use fleetworks_contracts::readiness::ReadinessCheckId;
+use fleetworks_contracts::readiness::ReadinessState;
+use fleetworks_contracts::readiness::WorkstationReadiness;
+use rune::El;
+use rune::Tx;
+use rune_kit::Kit;
+
+use crate::accessibility::ViewPreferences;
+use crate::app::Load;
+use crate::backend;
+use crate::backend_views;
+use crate::material::MetalFinish;
+use crate::theme::StatusTone;
+use crate::ui_components;
+use crate::ui_components::ActionButton;
+use crate::views;
+use crate::State;
+
+pub(crate) const PRIMARY: &str = "startup-data-primary";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Step {
+    Seed,
+    Index,
+    Classifier,
+}
+
+impl Step {
+    const ALL: [Self; 3] = [Self::Seed, Self::Index, Self::Classifier];
+
+    fn number(self) -> usize {
+        match self {
+            Self::Seed => 1,
+            Self::Index => 2,
+            Self::Classifier => 3,
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::Seed => "startup-data-step-seed",
+            Self::Index => "startup-data-step-index",
+            Self::Classifier => "startup-data-step-classifier",
+        }
+    }
+
+    fn review_key(self) -> &'static str {
+        match self {
+            Self::Seed => "startup-data-review-seed",
+            Self::Index => "startup-data-review-index",
+            Self::Classifier => "startup-data-review-classifier",
+        }
+    }
+
+    fn reset_key(self) -> &'static str {
+        match self {
+            Self::Seed => "startup-data-reset-seed",
+            Self::Index => "startup-data-reset-index",
+            Self::Classifier => "startup-data-reset-classifier",
+        }
+    }
+
+    fn short_name(self) -> &'static str {
+        match self {
+            Self::Seed => "Actor CSV",
+            Self::Index => "Search index",
+            Self::Classifier => "Training CSV",
+        }
+    }
+
+    fn reset_label(self) -> &'static str {
+        match self {
+            Self::Seed => "Reset actor CSV",
+            Self::Index => "Reset index input",
+            Self::Classifier => "Reset training CSV",
+        }
+    }
+
+    fn dataset_kind(self) -> Option<DatasetKind> {
+        match self {
+            Self::Seed => Some(DatasetKind::ActorCatalog),
+            Self::Index => None,
+            Self::Classifier => Some(DatasetKind::ClassifierTraining),
+        }
+    }
+
+    fn reset(self, state: &State) -> bool {
+        state.startup.data_reset[self.number() - 1]
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Seed => "Seed the actor catalog",
+            Self::Index => "Build the actor search index",
+            Self::Classifier => "Train the classifier",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Seed => "Choose a local actor CSV to populate the connected backend.",
+            Self::Index => "Build the index that makes actors searchable.",
+            Self::Classifier => {
+                "Choose a training CSV to create a classifier candidate. Training is optional."
+            }
+        }
+    }
+
+    fn operation(self) -> MaintenanceOperation {
+        match self {
+            Self::Seed => MaintenanceOperation::SeedActors,
+            Self::Index => MaintenanceOperation::ReindexActors,
+            Self::Classifier => MaintenanceOperation::TrainClassifier,
+        }
+    }
+
+    fn check(self) -> ReadinessCheckId {
+        match self {
+            Self::Seed => ReadinessCheckId::ActorCatalog,
+            Self::Index => ReadinessCheckId::ActorSearch,
+            Self::Classifier => ReadinessCheckId::ClassifierTraining,
+        }
+    }
+
+    fn job_operation(self) -> &'static str {
+        match self {
+            Self::Seed => "actor_seed",
+            Self::Index => "actor_reindex",
+            Self::Classifier => "classifier_train",
+        }
+    }
+
+    fn action(self) -> &'static str {
+        match self {
+            Self::Seed if cfg!(target_os = "linux") => "Enter actor CSV path",
+            Self::Seed => "Choose actor CSV…",
+            Self::Index => "Build actor index",
+            Self::Classifier if cfg!(target_os = "linux") => "Enter training CSV path",
+            Self::Classifier => "Choose classifier CSV…",
+        }
+    }
+
+    fn start(self, state: &mut State, tx: &mut Tx) {
+        if state.startup.data_step != Some(self)
+            || !matches!(stage(state, self), Stage::Action | Stage::Failed(_))
+        {
+            return;
+        }
+        state.maintenance.message = None;
+        if self == Self::Index {
+            if self.reset(state) {
+                if !state.readiness_pending()
+                    && current_check(state, Step::Seed)
+                        .is_some_and(|check| check.state == ReadinessState::Ready)
+                {
+                    state.startup.data_reset[self.number() - 1] = false;
+                    focus_stage(tx);
+                }
+                return;
+            }
+            state.preview_maintenance(self.operation());
+            tx.scroll_into_view("maintenance-confirmation");
+            tx.focus("maintenance-confirm", tx.by_keys());
+        } else if let Some(dataset) = saved_dataset(state, self).cloned() {
+            state.maintenance.selected_dataset = Some(dataset);
+            state.preview_maintenance(self.operation());
+            tx.scroll_into_view("maintenance-confirmation");
+            tx.focus("maintenance-confirm", tx.by_keys());
+        } else if let Some(kind) = self.dataset_kind() {
+            if cfg!(target_os = "linux") {
+                state.enter_csv_path(kind, tx);
+            } else {
+                state.choose_dataset(kind, tx);
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Stage<'a> {
+    Observing,
+    Action,
+    Working(Option<&'a backend::ActivityJob>),
+    Verifying,
+    Failed(&'a backend::ActivityJob),
+    Complete,
+}
+
+pub(crate) fn scoped_readiness(state: &State) -> Option<&WorkstationReadiness> {
+    let Load::Ready(readiness) = &state.readiness else {
+        return None;
+    };
+    let context = state.registration.context.as_ref()?;
+    let receipt = readiness.registration.as_ref()?;
+    (state.connected()
+        && readiness.deployment_id == context.deployment_id
+        && receipt.registration_id == context.registration_id
+        && receipt.revision == context.registration_revision)
+        .then_some(readiness)
+}
+
+fn current_check(state: &State, step: Step) -> Option<&ReadinessCheck> {
+    scoped_readiness(state)?
+        .checks
+        .iter()
+        .find(|check| check.id == step.check() && state.readiness_check_fresh(check))
+}
+
+fn saved_dataset(state: &State, step: Step) -> Option<&DatasetRef> {
+    let kind = step.dataset_kind()?;
+    if step.reset(state) {
+        return None;
+    }
+    if let Some(dataset) = state
+        .maintenance
+        .selected_dataset
+        .as_ref()
+        .filter(|dataset| dataset.kind == kind && dataset.validate().is_ok())
+    {
+        return Some(dataset);
+    }
+    let revision = state.configuration_revision()?;
+    scoped_readiness(state)?
+        .configured_inputs
+        .iter()
+        .filter(|input| {
+            input.operation == step.operation() && input.configuration_revision == revision
+        })
+        .filter_map(|input| input.dataset.as_ref())
+        .find(|dataset| dataset.kind == kind && dataset.validate().is_ok())
+}
+
+fn catalog_hash(state: &State) -> Option<&str> {
+    current_check(state, Step::Seed)?
+        .artifact_ids
+        .iter()
+        .filter_map(|artifact| artifact.strip_prefix("actor-catalog-sha256:"))
+        .find(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+fn stage(state: &State, step: Step) -> Stage<'_> {
+    let observation = current_check(state, step);
+    if step == Step::Index && state.maintenance.pending_reindex.is_some() {
+        return Stage::Action;
+    }
+    if state.maintenance.active_operation == Some(step.operation())
+        && matches!(state.maintenance.receipt, Load::Loading)
+    {
+        return Stage::Working(None);
+    }
+    if step.reset(state) {
+        return Stage::Action;
+    }
+    if matches!(&state.maintenance.receipt, Load::Ready(receipt)
+        if receipt.operation == step.operation() && receipt.already_completed)
+    {
+        if step == Step::Classifier
+            || observation.is_some_and(|check| check.state == ReadinessState::Ready)
+        {
+            return Stage::Complete;
+        }
+        return Stage::Verifying;
+    }
+    let record = state.maintenance.operation_job(step.operation());
+    if let Some(record) = record {
+        let Some(detail) = record.detail.as_ref().filter(|detail| {
+            detail.job.id == record.job_id && detail.job.operation == step.job_operation()
+        }) else {
+            return Stage::Working(None);
+        };
+        let job = &detail.job;
+        if backend::job_is_active(&job.state) {
+            return Stage::Working(Some(job));
+        }
+        if job.state != "completed" {
+            return Stage::Failed(job);
+        }
+        if step == Step::Classifier {
+            let candidate = detail.maintenance_result.as_ref().is_some_and(|result| {
+                result.operation == step.job_operation()
+                    && result
+                        .candidate_model_id
+                        .as_deref()
+                        .is_some_and(|candidate| !candidate.trim().is_empty())
+            });
+            if candidate {
+                return Stage::Complete;
+            }
+            return Stage::Verifying;
+        }
+        if observation.is_none_or(|check| check.state != ReadinessState::Ready) {
+            return Stage::Verifying;
+        }
+    }
+    match observation {
+        Some(check)
+            if if step == Step::Classifier {
+                check.state == ReadinessState::NotApplicable
+                    || check.state == ReadinessState::Ready
+                        && (check.reason_code == "embedded_training_completed"
+                            || check.artifact_ids.iter().any(|id| !id.trim().is_empty()))
+            } else {
+                check.state == ReadinessState::Ready
+            } =>
+        {
+            Stage::Complete
+        }
+        Some(check) if check.state == ReadinessState::Running && step != Step::Classifier => {
+            Stage::Verifying
+        }
+        Some(_) => Stage::Action,
+        None if state.readiness_pending()
+            || matches!(state.readiness, Load::Idle | Load::Pending | Load::Loading) =>
+        {
+            Stage::Observing
+        }
+        None => Stage::Action,
+    }
+}
+
+pub(crate) fn first_unfinished(state: &State) -> Option<Step> {
+    Step::ALL
+        .into_iter()
+        .find(|&step| !matches!(stage(state, step), Stage::Complete))
+}
+
+fn can_review(state: &State, step: Step) -> bool {
+    matches!(stage(state, step), Stage::Complete)
+        || Step::ALL
+            .into_iter()
+            .take(step.number() - 1)
+            .all(|earlier| matches!(stage(state, earlier), Stage::Complete))
+}
+
+fn can_reset(state: &State, step: Step) -> bool {
+    can_review(state, step)
+        && !state.maintenance.busy()
+        && !matches!(stage(state, step), Stage::Working(_))
+        && (step != Step::Index || state.maintenance.pending_reindex.is_none())
+}
+
+fn focus_stage(tx: &mut Tx) {
+    tx.scroll_into_view("startup-data-stage");
+    tx.focus("startup-data-stage", tx.by_keys());
+}
+
+impl State {
+    pub(crate) fn complete_startup_input(&mut self, operation: MaintenanceOperation) {
+        if let Some(step) = Step::ALL
+            .into_iter()
+            .find(|step| step.operation() == operation)
+        {
+            self.startup.data_reset[step.number() - 1] = false;
+        }
+    }
+
+    fn next_startup_data_step(&mut self, tx: &mut Tx) {
+        let Some(step) = self.startup.data_step else {
+            return;
+        };
+        if !matches!(stage(self, step), Stage::Complete) {
+            return;
+        }
+        self.maintenance.message = None;
+        self.startup.data_step = first_unfinished(self);
+        self.startup.data_checks = self.startup.data_step.is_none();
+        focus_stage(tx);
+    }
+
+    fn review_startup_input(&mut self, step: Step, tx: &mut Tx) {
+        if self.startup.data_setup_active() && can_review(self, step) {
+            self.startup.data_checks = false;
+            self.startup.data_step = Some(step);
+            focus_stage(tx);
+        }
+    }
+
+    fn reset_startup_input(&mut self, step: Step, tx: &mut Tx) {
+        if !self.startup.data_setup_active() || !can_reset(self, step) {
+            return;
+        }
+        if let Some(kind) = step.dataset_kind() {
+            if self
+                .maintenance
+                .selected_dataset
+                .as_ref()
+                .is_some_and(|dataset| dataset.kind == kind)
+            {
+                self.maintenance.selected_dataset = None;
+            }
+            if self
+                .maintenance
+                .local_dataset
+                .as_ref()
+                .is_some_and(|dataset| dataset.kind == kind)
+            {
+                self.maintenance.local_dataset = None;
+            }
+        } else if !self.readiness_pending() {
+            self.refresh_readiness();
+        }
+        self.maintenance.message = None;
+        self.startup.data_reset[step.number() - 1] = true;
+        self.startup.data_checks = false;
+        self.startup.data_step = Some(step);
+        focus_stage(tx);
+    }
+
+    fn finish_startup_data_later(&mut self, tx: &mut Tx) {
+        if !self.connected() || self.registration.context.is_none() {
+            return;
+        }
+        self.cancel_maintenance_confirmation();
+        self.maintenance.discard_csv_draft();
+        // Leave accepted operations and their registered receipts running on the backend.
+        self.startup.data_step = None;
+        self.startup.data_checks = true;
+        focus_stage(tx);
+    }
+
+    fn finish_startup_checks(&mut self, tx: &mut Tx) {
+        if self.startup.data_checks && self.connected() && self.registration.context.is_some() {
+            self.finish_startup(tx);
+        }
+    }
+
+    fn refresh_startup_data(&mut self) {
+        if !self.readiness_pending() {
+            self.refresh_readiness();
+        }
+        self.backend_read(backend::ReadRequest::Profile);
+        self.poll_maintenance_receipt_jobs();
+    }
+
+    pub(crate) fn startup_data_needs_observation(&self) -> bool {
+        self.startup
+            .data_step
+            .is_some_and(|step| matches!(stage(self, step), Stage::Observing | Stage::Verifying))
+    }
+}
+
+fn step_dots(step: Option<Step>, kit: &Kit) -> El {
+    let current = step.map_or(4, Step::number);
+    let mut dots = rune::row().key("startup-data-dots").center_y().gap(7.0);
+    for (index, key) in Step::ALL
+        .into_iter()
+        .map(Step::key)
+        .chain(std::iter::once("startup-data-step-checks"))
+        .enumerate()
+    {
+        dots = dots.child(
+            rune::el()
+                .key(key)
+                .size(7.0, 7.0)
+                .radius(8.0)
+                .fill(if index + 1 == current {
+                    kit.c.icon_accent
+                } else {
+                    kit.c.border_strong
+                })
+                .a11y_hidden(),
+        );
+    }
+    dots.role("status").label(format!("Step {current} of 4"))
+}
+
+fn panel(kit: &Kit, title: &str) -> El {
+    rune::col()
+        .key("startup-data-panel")
+        .w_full()
+        .max_w(510.0)
+        .min_w(0.0)
+        .gap(9.0)
+        .padding(16.0)
+        .radius(10.0)
+        .fill(kit.c.layer_01)
+        .border(1.0, crate::theme::hex(crate::theme::BORDER_SUBTLE))
+        .child(
+            views::heading(title, kit)
+                .key("startup-data-stage")
+                .role("heading")
+                .focusable(true)
+                .tab_index(-1),
+        )
+}
+
+pub(crate) fn checks_view(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
+    if crate::inbox_qa::setup_choice(state) {
+        let panel = panel(kit, "Backend inference")
+            .child(views::quiet(
+                "Optional answers about workstation health in the Inbox.",
+                kit,
+            ))
+            .child(crate::inbox_qa::settings_content(state, kit, preferences))
+            .child(
+                ActionButton::new("Continue to Workstation checks")
+                    .key("startup-inbox-qa-continue")
+                    .finish(MetalFinish::GoldCta)
+                    .on_press_tx(crate::inbox_qa::continue_setup)
+                    .build(kit, preferences, None),
+            );
+        return layout(
+            panel,
+            setup_sequence(state, None, preferences, kit),
+            step_dots(None, kit),
+        );
+    }
+    let panel = panel(kit, "Workstation checks")
+        .py(8.0)
+        .gap(6.0)
+        .child(crate::startup_checks::content(state, kit))
+        .child(
+            ActionButton::new("Open Workstation")
+                .key("startup-data-continue")
+                .finish(MetalFinish::GoldCta)
+                .on_press_tx(State::finish_startup_checks)
+                .build(kit, preferences, None),
+        );
+    layout(
+        panel,
+        setup_sequence(state, None, preferences, kit),
+        step_dots(None, kit),
+    )
+}
+
+pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit: &Kit) -> El {
+    let stage = stage(state, step);
+    let dots = step_dots(Some(step), kit);
+    let sequence = setup_sequence(state, Some(step), preferences, kit);
+    let mut panel = panel(kit, step.title())
+        .child(views::quiet(step.description(), kit))
+        .children(input_summary(state, step, kit));
+
+    if let Some(confirmation) = state
+        .maintenance
+        .confirmation
+        .as_ref()
+        .filter(|confirmation| confirmation.operation == step.operation())
+    {
+        return layout(
+            panel.child(backend_views::maintenance_confirmation_content(
+                state,
+                confirmation,
+                preferences,
+                kit,
+            )),
+            sequence,
+            dots,
+        );
+    }
+    if let Some(prompt) = &state.maintenance.csv_path_prompt {
+        return layout(
+            panel.child(backend_views::csv_path_prompt(
+                prompt,
+                preferences,
+                kit,
+                None,
+            )),
+            sequence,
+            dots,
+        );
+    }
+    if step == Step::Index {
+        if let Some(unresolved) =
+            backend_views::unresolved_actor_reindex_banner(state, preferences, kit)
+        {
+            return layout(
+                panel.child(unresolved).child(later(step, preferences, kit)),
+                sequence,
+                dots,
+            );
+        }
+    }
+
+    let preflight = state.maintenance_preflight(step.operation());
+    let progress = match stage {
+        Stage::Observing => Some(status(
+            "Checking readiness",
+            "Waiting for the connected backend to report its current state.",
+            StatusTone::Info,
+            true,
+            preferences,
+            kit,
+        )),
+        Stage::Working(job) => Some(job_progress(job, preferences, kit)),
+        Stage::Verifying => {
+            let detail = match step {
+                Step::Seed => "Waiting for the backend to verify the seeded catalog.",
+                Step::Index => "Waiting for the index to become searchable.",
+                Step::Classifier => "Waiting for verification of the trained candidate.",
+            };
+            Some(status(
+                "Verifying",
+                detail,
+                StatusTone::Info,
+                true,
+                preferences,
+                kit,
+            ))
+        }
+        Stage::Failed(job) => Some(status(
+            if job.state == "cancelled" {
+                "Cancelled"
+            } else {
+                "Needs attention"
+            },
+            if job.error_summary.is_empty() {
+                "The backend did not complete this step."
+            } else {
+                job.error_summary.as_str()
+            },
+            StatusTone::Warn,
+            false,
+            preferences,
+            kit,
+        )),
+        Stage::Complete => Some(status(
+            "Ready",
+            match step {
+                Step::Seed => "The actor catalog is seeded.",
+                Step::Index => "The search index is ready.",
+                Step::Classifier => "This step is complete. Model activation is separate.",
+            },
+            StatusTone::Ok,
+            false,
+            preferences,
+            kit,
+        )),
+        Stage::Action => None,
+    };
+    panel = panel.children(progress);
+
+    if let Some(record) = state.maintenance.operation_job(step.operation()) {
+        if let Some(error) = &record.poll_error {
+            panel = panel.child(views::quiet(
+                format!("Job status unavailable: {error}"),
+                kit,
+            ));
+        }
+    }
+    if let Load::Failed(error) = &state.maintenance.upload {
+        panel = panel.child(views::line(error.clone(), kit).role("alert"));
+    }
+    if let Load::Failed(error) = &state.maintenance.receipt {
+        panel = panel.child(views::line(error.clone(), kit).role("alert"));
+    }
+    if let Some(message) = &state.maintenance.message {
+        panel = panel.child(views::quiet(message.clone(), kit).role("status"));
+    }
+    if matches!(state.maintenance.upload, Load::Loading) {
+        panel = panel.child(status(
+            "Validating CSV",
+            "Waiting for the backend to validate the uploaded dataset.",
+            StatusTone::Info,
+            true,
+            preferences,
+            kit,
+        ));
+    }
+
+    let mut actions = rune::row().w_full().flex_wrap().gap(8.0);
+    match stage {
+        Stage::Complete => {
+            actions = actions.child(
+                ActionButton::new("Continue")
+                    .key("startup-data-continue")
+                    .finish(MetalFinish::GoldCta)
+                    .on_press_tx(State::next_startup_data_step)
+                    .build(kit, preferences, None),
+            );
+        }
+        Stage::Action | Stage::Failed(_) => {
+            let choose_catalog = step == Step::Index && step.reset(state);
+            let blocked = if choose_catalog {
+                (state.readiness_pending()
+                    || current_check(state, Step::Seed)
+                        .is_none_or(|check| check.state != ReadinessState::Ready))
+                .then(|| "Wait for the backend to verify the current actor catalog.".into())
+            } else {
+                preflight.disabled_reason()
+            };
+            let primary = if choose_catalog {
+                "Use current catalog"
+            } else if saved_dataset(state, step).is_some() {
+                "Use saved CSV"
+            } else {
+                step.action()
+            };
+            actions = actions.child(
+                ActionButton::new(primary)
+                    .key(PRIMARY)
+                    .finish(MetalFinish::GoldCta)
+                    .disabled(blocked.is_some() || state.maintenance.busy())
+                    .on_press_tx(move |state: &mut State, tx| step.start(state, tx))
+                    .build(kit, preferences, None),
+            );
+            if let Some(reason) = blocked {
+                panel = panel.child(views::quiet(reason, kit));
+                actions = actions.child(refresh(state, preferences, kit));
+            }
+        }
+        Stage::Observing | Stage::Verifying => {
+            actions = actions.child(refresh(state, preferences, kit));
+        }
+        Stage::Working(_) => {
+            if state
+                .maintenance
+                .operation_job(step.operation())
+                .is_some_and(|record| record.poll_error.is_some())
+            {
+                actions = actions.child(refresh(state, preferences, kit));
+            }
+        }
+    }
+    if !matches!(stage, Stage::Complete) {
+        actions = actions.child(later(step, preferences, kit));
+    }
+    layout(panel.child(actions), sequence, dots)
+}
+
+fn layout(panel: El, sequence: El, dots: El) -> El {
+    rune::col()
+        .key("startup-data-setup")
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .child(
+            rune::col()
+                .w_full()
+                .grow(1.0)
+                .min_h(0.0)
+                .scroll(rune::ScrollSpec {
+                    stick_bottom: false,
+                })
+                .child(
+                    rune::col()
+                        .w_full()
+                        .min_h(0.0)
+                        .items_center()
+                        .padding(18.0)
+                        .child(panel)
+                        .child(sequence)
+                        .child(rune::row().w_full().center().pt(10.0).child(dots)),
+                ),
+        )
+}
+
+fn input_summary(state: &State, step: Step, kit: &Kit) -> Option<El> {
+    if step.reset(state) {
+        return Some(if step == Step::Index {
+            catalog_hash(state).map_or_else(
+                || views::quiet("Choose the current actor catalog to continue.", kit),
+                |hash| {
+                    views::quiet(format!("Choose actor catalog · {}", &hash[..12]), kit)
+                        .description(format!("Current actor catalog SHA-256 {hash}"))
+                },
+            )
+        } else {
+            views::quiet(
+                "Input selection cleared. Existing backend data is kept.",
+                kit,
+            )
+        });
+    }
+    if let Some(dataset) = saved_dataset(state, step) {
+        return Some(
+            views::quiet(format!("Saved CSV · {}", &dataset.sha256[..12]), kit)
+                .description(format!("Saved CSV SHA-256 {}", dataset.sha256)),
+        );
+    }
+    if step != Step::Classifier {
+        return catalog_hash(state).map(|hash| {
+            views::quiet(format!("Current actor catalog · {}", &hash[..12]), kit)
+                .description(format!("Current actor catalog SHA-256 {hash}"))
+        });
+    }
+    None
+}
+
+fn setup_sequence(
+    state: &State,
+    current: Option<Step>,
+    preferences: ViewPreferences,
+    kit: &Kit,
+) -> El {
+    let mut sequence = rune::row()
+        .key("startup-data-sequence")
+        .max_w(510.0)
+        .w_full()
+        .pt(10.0)
+        .flex_wrap()
+        .gap(5.0);
+    for step in Step::ALL {
+        let complete = matches!(stage(state, step), Stage::Complete);
+        let label = format!(
+            "{} · {}",
+            step.short_name(),
+            if Some(step) == current {
+                "Current"
+            } else if complete {
+                "Ready"
+            } else {
+                "Pending"
+            }
+        );
+        sequence = sequence.child(
+            rune::row()
+                .min_w(0.0)
+                .gap(4.0)
+                .child(
+                    ActionButton::new(label)
+                        .key(step.review_key())
+                        .finish(MetalFinish::Gunmetal)
+                        .disabled(!can_review(state, step) || Some(step) == current)
+                        .on_press_tx(move |state: &mut State, tx| {
+                            state.review_startup_input(step, tx)
+                        })
+                        .build(kit, preferences, None),
+                )
+                .child(
+                    ActionButton::new(step.reset_label())
+                        .key(step.reset_key())
+                        .finish(MetalFinish::ObsidianPill)
+                        .disabled(!can_reset(state, step))
+                        .on_press_tx(move |state: &mut State, tx| {
+                            state.reset_startup_input(step, tx)
+                        })
+                        .build(kit, preferences, None),
+                ),
+        );
+    }
+    sequence
+}
+
+fn later(step: Step, preferences: ViewPreferences, kit: &Kit) -> El {
+    ActionButton::new(if step == Step::Classifier {
+        "Skip training"
+    } else {
+        "Finish later"
+    })
+    .key("startup-data-skip")
+    .finish(MetalFinish::Gunmetal)
+    .on_press_tx(State::finish_startup_data_later)
+    .build(kit, preferences, None)
+}
+
+fn refresh(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
+    ActionButton::new("Refresh checks")
+        .key("startup-data-refresh")
+        .disabled(state.readiness_pending())
+        .finish(MetalFinish::Gunmetal)
+        .on_press(State::refresh_startup_data)
+        .build(kit, preferences, None)
+}
+
+fn status(
+    title: &'static str,
+    detail: impl Into<String>,
+    tone: StatusTone,
+    busy: bool,
+    preferences: ViewPreferences,
+    kit: &Kit,
+) -> El {
+    rune::col()
+        .key("startup-data-progress")
+        .role("status")
+        .w_full()
+        .min_w(0.0)
+        .gap(4.0)
+        .child(
+            rune::row()
+                .center_y()
+                .gap(6.0)
+                .children(busy.then(|| ui_components::status_dot(tone, preferences)))
+                .child(ui_components::status_pill(title, None, tone, kit)),
+        )
+        .child(views::quiet(detail, kit))
+}
+
+fn job_progress(job: Option<&backend::ActivityJob>, preferences: ViewPreferences, kit: &Kit) -> El {
+    let Some(job) = job else {
+        return status(
+            "Waiting for job status",
+            "The backend has not yet reported work progress.",
+            StatusTone::Info,
+            true,
+            preferences,
+            kit,
+        );
+    };
+    let title = match job.state.as_str() {
+        "running" => "Running",
+        "retry_scheduled" => "Retrying",
+        _ => "Queued",
+    };
+    let mut detail = job.phase.trim().to_owned();
+    if let Some(done) = job.progress_done.filter(|done| *done >= 0) {
+        if !detail.is_empty() {
+            detail.push_str(" · ");
+        }
+        match job
+            .progress_total
+            .filter(|total| *total > 0 && *total >= done)
+        {
+            Some(total) => detail.push_str(&format!("{done} / {total} processed")),
+            None => detail.push_str(&format!("{done} processed")),
+        }
+    }
+    status(title, detail, StatusTone::Info, true, preferences, kit)
+}

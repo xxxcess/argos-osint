@@ -1,4 +1,5 @@
 "use client";
+import { glassProps } from "@argos/ui";
 import React from "react";
 import { View, Text, useWindowDimensions } from "react-native";
 import type { Article, Brief, Seed, BriefStage } from "@argos/api-client";
@@ -100,7 +101,7 @@ export function BriefView({
   const sourceName =
     shown.source_name || shown.source_domain || "Source unavailable";
   return (
-    <View nativeID="intel-brief" style={s.shell}>
+    <View {...glassProps.panel} nativeID="intel-brief" style={s.shell}>
       <BriefHeader
         article={shown}
         brief={brief}

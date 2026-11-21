@@ -16,6 +16,9 @@ on:
       runner:
         type: string
         required: true
+      inbox-qa:
+        type: boolean
+        default: false
     outputs:
       artifact-id:
         value: ${{ jobs.package.outputs.artifact-id }}
@@ -143,6 +146,9 @@ jobs:
             --scene assistant-open --scene assistant-opaque \
             --scene command-panel --scene command-panel-opaque \
             --scene catalog --scene catalog-opaque \
+            --scene workstation-settings --scene workstation-settings-matte \
+            --scene workstation-status-checks-mixed --scene workstation-status-checks-mixed-matte \
+            --scene inbox-drawer --scene inbox-drawer-matte \
             --size 1440x860 --size 640x480 --scale 1 \
             --script registration-ready=apps/fleetworks-desktop/tests/fixtures/scripts/workstation-settings-open.json \
             --script-expect-key registration-ready=workstation-settings-body
@@ -154,6 +160,21 @@ jobs:
             --revision "$FLEETWORKS_HEAD" --output "$RUNNER_TEMP/fleetworks-native-evidence/pairing-local-review" \
             --scene pairing-waiting --local-review-fixture \
             --size 1440x860 --size 640x480 --scale 1
+      - name: Capture Inbox QA production views
+        if: inputs.inbox-qa
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/fleetworks_verify.py native-ui --agent --require-clean \
+            --revision "$FLEETWORKS_HEAD" --output "$RUNNER_TEMP/fleetworks-native-evidence/inbox-qa" \
+            --scene inbox-qa-off-embedded --scene inbox-qa-off-distributed --scene inbox-qa-pending \
+            --scene inbox-qa-answered --scene inbox-qa-stopped \
+            --scene inbox-qa-pack-missing \
+            --scene inbox-qa-pack-invalid \
+            --scene inbox-qa-sandbox-unsupported \
+            --scene inbox-qa-worker-start-failed \
+            --scene gateway-qa-sandbox-unsupported \
+            --size 1280x800 --size 640x480 --scale 1
       - name: Build, archive, extract-verify and smoke-test the debug app for pull-request review
         if: inputs.release-version == ''
         shell: bash
@@ -232,6 +253,18 @@ jobs:
             FLEETWORKS_PARITY_REPORT_PATH="$evidence/http-ipc-parity-$NATIVE_TARGET.json" \
             python3 scripts/agent_cargo.py test --locked --target "$NATIVE_TARGET" \
             -p argos-api-host --features embedded --test http_ipc_parity -- --nocapture --test-threads=1
+      - name: Retain the verified debug app for the offline Inbox QA smoke
+        if: inputs.inbox-qa && inputs.release-version == ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: Fleetworks-macOS-Desktop-App-debug-${{ inputs.target }}-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/fleetworks-native-debug/Fleetworks-*.zip
+            ${{ runner.temp }}/fleetworks-native-debug/Fleetworks-*.zip.sha256
+            ${{ runner.temp }}/fleetworks-native-debug/Fleetworks.app.manifest.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
       - name: Package the trusted versioned release app
         if: inputs.release-version != ''
         id: package
@@ -268,7 +301,7 @@ jobs:
         id: upload
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: Fleetworks-app-${{ inputs.target }}-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}
+          name: Fleetworks-macOS-Desktop-App-${{ inputs.target }}-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/fleetworks-native-candidate/Fleetworks-*.zip
             ${{ runner.temp }}/fleetworks-native-candidate/Fleetworks-*.zip.sha256
@@ -281,7 +314,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: Fleetworks-native-evidence-${{ inputs.target }}-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}
+          name: Fleetworks-macOS-Desktop-Verification-${{ inputs.target }}-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}
           path: ${{ runner.temp }}/fleetworks-native-evidence/
           if-no-files-found: ignore
           retention-days: 14

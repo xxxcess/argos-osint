@@ -38,17 +38,8 @@ fn default_threshold() -> f64 {
     0.8
 }
 
-pub(super) struct Bundle {
-    config: Config,
-    pub(super) snapshot: ModelSnapshot,
-    pub(super) manifest_sha256: String,
-}
-
-impl Bundle {
-    pub(super) fn load(
-        home: &Path,
-        requested: Option<ModelSnapshot>,
-    ) -> Result<Self, ClassifierError> {
+impl Config {
+    fn load(home: &Path) -> Result<Self, ClassifierError> {
         let path = artifact::root_for(home)?.join("zero-shot.json");
         let file = File::open(&path).map_err(|error| {
             if error.kind() == io::ErrorKind::NotFound {
@@ -66,7 +57,7 @@ impl Bundle {
                 "zero-shot config exceeds 16 KiB".into(),
             ));
         }
-        let config: Config = serde_json::from_slice(&bytes).map_err(|error| {
+        let config: Self = serde_json::from_slice(&bytes).map_err(|error| {
             ClassifierError::InvalidArtifact(format!("zero-shot config: {error}"))
         })?;
         if !config.worker_path.is_absolute()
@@ -77,6 +68,43 @@ impl Bundle {
                 "zero-shot config requires absolute paths and a threshold in [0.5, 1)".into(),
             ));
         }
+        Ok(config)
+    }
+}
+
+/// Check the worker executable and model inputs without initializing inference.
+pub(super) fn check_configured_assets(home: &Path) -> Result<(), ClassifierError> {
+    let config = Config::load(home)?;
+    let worker = asset_metadata(&config.worker_path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if worker.permissions().mode() & 0o111 == 0 {
+            return Err(ClassifierError::InvalidArtifact(
+                "configured Atlas worker is not executable".into(),
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = worker;
+    for file in MODEL_FILES {
+        asset_metadata(&config.model_dir.join(file))?;
+    }
+    Ok(())
+}
+
+pub(super) struct Bundle {
+    config: Config,
+    pub(super) snapshot: ModelSnapshot,
+    pub(super) manifest_sha256: String,
+}
+
+impl Bundle {
+    pub(super) fn load(
+        home: &Path,
+        requested: Option<ModelSnapshot>,
+    ) -> Result<Self, ClassifierError> {
+        let config = Config::load(home)?;
         let (artifact_sha256, manifest_sha256) = bundle_hashes(&config)?;
         let mut snapshot = ModelSnapshot::new(
             format!("bert-{}", &manifest_sha256[..59]),
@@ -138,18 +166,24 @@ fn file_error(path: &Path, error: io::Error) -> ClassifierError {
     ClassifierError::Io(format!("{}: {error}", path.display()))
 }
 
-fn file_sha256(path: &Path) -> Result<String, ClassifierError> {
-    const MAX_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_ASSET_BYTES: u64 = 1024 * 1024 * 1024;
+
+fn asset_metadata(path: &Path) -> Result<std::fs::Metadata, ClassifierError> {
     let metadata = std::fs::metadata(path).map_err(|error| file_error(path, error))?;
-    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_BYTES {
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_ASSET_BYTES {
         return Err(ClassifierError::InvalidArtifact(format!(
             "zero-shot asset must be a nonempty file at most 1 GiB: {}",
             path.display()
         )));
     }
+    Ok(metadata)
+}
+
+fn file_sha256(path: &Path) -> Result<String, ClassifierError> {
+    let metadata = asset_metadata(path)?;
     let mut file = File::open(path)
         .map_err(|error| file_error(path, error))?
-        .take(MAX_BYTES + 1);
+        .take(MAX_ASSET_BYTES + 1);
     let mut hash = Sha256::new();
     let bytes = io::copy(&mut file, &mut hash).map_err(|error| file_error(path, error))?;
     if bytes != metadata.len() {

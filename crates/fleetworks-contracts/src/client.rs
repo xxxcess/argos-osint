@@ -24,6 +24,8 @@ pub use log_transfer::LogExportPage;
 mod configuration_transfer;
 pub use configuration_transfer::ConfigurationTransferReceipt;
 
+mod inbox_qa;
+
 pub(crate) const MAX_REQUEST_BYTES: usize = 16 * 1024;
 const MAX_QUERY_BYTES: usize = 8 * 1024;
 pub(crate) const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
@@ -145,6 +147,9 @@ pub struct Client {
 
 /// Validate a literal versioned API route path without query or traversal segments.
 pub(crate) fn validate_route(route: &str) -> Result<(), ClientError> {
+    if inbox_qa::is_qa_route(route) {
+        return Ok(());
+    }
     let tail = route
         .strip_prefix("/api/v1/")
         .ok_or(ClientError::InvalidRoute)?;
@@ -560,6 +565,11 @@ impl Client {
     async fn send<T: DeserializeOwned>(request: RequestBuilder) -> Result<T, ClientError> {
         let (http, request) = request.build_split();
         let request = request.map_err(|_| ClientError::InvalidRequest)?;
+        let response_limit = if inbox_qa::is_qa_route(request.url().path()) {
+            crate::chat::MAX_PAGE_BYTES
+        } else {
+            MAX_RESPONSE_BYTES
+        };
         if request
             .url()
             .query()
@@ -576,13 +586,13 @@ impl Client {
         }
         if response
             .content_length()
-            .is_some_and(|len| len > MAX_RESPONSE_BYTES as u64)
+            .is_some_and(|len| len > response_limit as u64)
         {
             return Err(ClientError::ResponseTooLarge);
         }
         let mut body = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(ClientError::transport)? {
-            if chunk.len() > MAX_RESPONSE_BYTES - body.len() {
+            if chunk.len() > response_limit - body.len() {
                 return Err(ClientError::ResponseTooLarge);
             }
             body.extend_from_slice(&chunk);

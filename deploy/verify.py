@@ -200,7 +200,8 @@ def exercise_atlas(port, token, proof):
         value = expect_status(request(port, f"/api/v1/jobs/detail?id={receipt['job_id']}", token, headers=proof),
                               200, "Atlas job detail")
         if value["job"]["state"] == "failed":
-            assert value["job"]["error_summary"] == "atlas_classifier_model_not_configured", "Atlas fixture failed for an unexpected reason"
+            reason = value["job"]["error_summary"]
+            assert reason == "atlas_gnews_key_missing", f"Atlas fixture reported {reason!r} before provider acquisition"
             assert value["job"]["attempts_used"] == 1, "Atlas fixture retry count changed"
             return
         time.sleep(0.25)
@@ -310,10 +311,14 @@ def require_unused_project(environment, platform):
 
 def verify(name, platform, *, web=False, dev=False, atlas=False, no_build=False,
            image_ids=None, source_journey=False):
+    if dev and not web:
+        raise ValueError("Development Web requires --web")
+    overrides = {key: os.environ[key] for key in IMAGE_OVERRIDES if key in os.environ} if no_build else None
+    if dev and no_build and (not image_ids or set(overrides) != set(IMAGE_OVERRIDES)):
+        raise ValueError("Preloaded development Web requires explicit tags and exact Compose image IDs")
     api_port, web_port = fixture_ports()
     revision = subprocess.check_output(["git", "rev-parse", "--verify", "HEAD"],
                                        cwd=native_review.ROOT, text=True).strip()
-    overrides = {key: os.environ[key] for key in IMAGE_OVERRIDES if key in os.environ} if no_build else None
     receipt = native_review.provision(native_review.ROOT, name, api_port, platform, revision,
                                       web_port=web_port if web else None, images=overrides)
     workspace = Path(receipt["workspace"])
@@ -402,14 +407,16 @@ def main():
     parser.add_argument("--name", required=True, help="fresh dedicated native-review name; never reuse an existing project")
     parser.add_argument("--platform", choices=("linux/amd64", "linux/arm64"), required=True)
     parser.add_argument("--web", action="store_true", help="also exercise actual Web Connect/session/relay/logout")
-    parser.add_argument("--dev", action="store_true", help="build the development Web overlay (requires --web)")
+    parser.add_argument("--dev", action="store_true", help="verify the development Web overlay (requires --web)")
     parser.add_argument("--atlas", action="store_true", help="also exercise private Atlas dispatch")
     parser.add_argument("--source-journey", action="store_true", help="run real synthetic seed/search/rebuild/train/activation/privacy journey")
     parser.add_argument("--no-build", action="store_true", help="use explicit preloaded images without building or pulling")
     parser.add_argument("--image-ids", type=Path, help="expected image ID for every Compose service")
     args = parser.parse_args()
-    if args.dev and (not args.web or args.no_build):
-        parser.error("--dev requires --web and a development image build")
+    if args.dev and not args.web:
+        parser.error("--dev requires --web")
+    if args.dev and args.no_build and not args.image_ids:
+        parser.error("--dev --no-build requires --image-ids")
     expected = json.loads(args.image_ids.read_text()) if args.image_ids else None
     verify(args.name, args.platform, web=args.web, dev=args.dev, atlas=args.atlas,
            no_build=args.no_build, image_ids=expected, source_journey=args.source_journey)

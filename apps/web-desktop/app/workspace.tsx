@@ -4,7 +4,7 @@ import type { RegisteredWebContext } from "@argos/api-client";
 import { IntelApp } from "@argos/intel";
 import { useEffect, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
-import { Button, colors, fonts, Notice } from "@argos/ui";
+import { Button, colors, fonts, glassProps, Notice } from "@argos/ui";
 import { createWebBackendSettings } from "./backend-settings";
 import { createWebNavigation } from "./navigation";
 import { createLiveTransport } from "./live-transport";
@@ -103,7 +103,7 @@ export function WebWorkspace({
       id="intel-web-workspace"
       style={{ display: "flex", flexDirection: "column" }}
     >
-      <View style={styles.bar}>
+      <View {...glassProps.chrome} style={styles.bar}>
         <Text style={styles.context}>Workstation: {connection.connect_id}</Text>
         <Button
           onPress={() => window.location.assign(`${basePath}/connect`)}

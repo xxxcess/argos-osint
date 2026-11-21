@@ -333,6 +333,14 @@ impl Maintenance {
             || self.operation_request.is_some()
             || self.reindex_reconcile_request.is_some()
     }
+    pub(crate) fn discard_csv_draft(&mut self) {
+        self.csv_path_prompt = None;
+        self.pending_preview = None;
+        self.upload_request = None;
+        self.upload_revision = self.upload_revision.wrapping_add(1);
+        self.upload = Load::Idle;
+    }
+
     pub(crate) fn invalidate_origin(&mut self) {
         self.csv_path_prompt = None;
         self.local_dataset = None;
@@ -434,11 +442,13 @@ impl State {
 
     /// The chooser is unavailable: let the operator type the path of a local CSV instead.
     pub(crate) fn open_csv_path_prompt(&mut self, kind: DatasetKind, tx: &mut Tx) {
-        self.maintenance.message = Some(
-            "The dataset chooser could not open a file. Enter the path of a local CSV instead."
-                .into(),
-        );
         self.enter_csv_path(kind, tx);
+        if let Some(prompt) = &mut self.maintenance.csv_path_prompt {
+            prompt.error = Some(
+                "The dataset chooser could not open a file. Enter the path of a local CSV instead."
+                    .into(),
+            );
+        }
     }
 
     pub(crate) fn cancel_csv_path_prompt(&mut self, tx: &mut Tx) {
@@ -449,6 +459,11 @@ impl State {
             DatasetKind::ActorCatalog => SEED_ACTION_KEY,
             DatasetKind::ClassifierTraining => TRAIN_ACTION_KEY,
             _ => return,
+        };
+        let opener = if self.startup.data_step.is_some() {
+            crate::startup_data::PRIMARY
+        } else {
+            opener
         };
         tx.focus(opener, tx.focus_visible());
         tx.scroll_into_view(opener);
@@ -735,6 +750,7 @@ impl State {
             dataset,
         });
         if self.page == crate::app::Page::Workstation
+            && self.startup.data_step.is_none()
             && operation == MaintenanceOperation::ReindexActors
         {
             self.confirm_maintenance_dialog = true;
@@ -763,6 +779,11 @@ impl State {
             });
         self.cancel_maintenance_confirmation();
         if let Some(opener) = opener {
+            let opener = if self.startup.data_step.is_some() {
+                crate::startup_data::PRIMARY
+            } else {
+                opener
+            };
             tx.focus(opener, true);
             tx.scroll_into_view(opener);
         }
@@ -1464,7 +1485,26 @@ impl State {
             self.maintenance.pending_reindex = admitted.pending_entry;
         }
         match admitted.outcome {
+            MaintenanceOutcome::Receipt(receipt) if receipt.already_completed => {
+                self.complete_startup_input(receipt.operation);
+                self.maintenance.message = Some(
+                    match receipt.operation {
+                        MaintenanceOperation::SeedActors => "This actor dataset is already seeded.",
+                        MaintenanceOperation::ReindexActors => {
+                            "The actor search index is already built."
+                        }
+                        MaintenanceOperation::TrainClassifier => {
+                            "This classifier dataset has already produced a candidate."
+                        }
+                        _ => "This maintenance operation is already complete.",
+                    }
+                    .into(),
+                );
+                self.maintenance.receipt = Load::Ready(receipt);
+                self.refresh_readiness();
+            }
             MaintenanceOutcome::Receipt(receipt) => {
+                self.complete_startup_input(receipt.operation);
                 if receipt.operation == MaintenanceOperation::SeedActors {
                     self.maintenance.seed_accepted_at = Some(receipt.origin.submitted_at.clone());
                 }
@@ -1591,7 +1631,23 @@ async fn admit_maintenance_request(
     };
     let outcome = match client.post::<MaintenanceReceipt>(route, &request).await {
         Ok(receipt) if valid_receipt(&receipt, confirmation, &request) => {
-            if confirmation.operation == MaintenanceOperation::ReindexActors {
+            if confirmation.operation == MaintenanceOperation::ReindexActors
+                && receipt.already_completed
+            {
+                if let Some(container) = container.cloned() {
+                    let origin_for_clear = origin.to_owned();
+                    let req_for_clear = request.clone();
+                    if matches!(
+                        tokio::task::spawn_blocking(move || {
+                            container.complete_actor_reindex(&origin_for_clear, &req_for_clear)
+                        })
+                        .await,
+                        Ok(Ok(()))
+                    ) {
+                        pending_entry = None;
+                    }
+                }
+            } else if confirmation.operation == MaintenanceOperation::ReindexActors {
                 if let Some(container) = container.cloned() {
                     let origin_for_accept = origin.to_owned();
                     let req_for_accept = request.clone();
@@ -1798,8 +1854,11 @@ fn valid_receipt(
     confirmation: &MaintenanceConfirmation,
     request: &MaintenanceRequest,
 ) -> bool {
-    !receipt.job_id.is_empty()
-        && receipt.operation == confirmation.operation
+    (if receipt.already_completed {
+        receipt.reused && receipt.job_id.is_empty()
+    } else {
+        !receipt.job_id.is_empty()
+    }) && receipt.operation == confirmation.operation
         && receipt.resource_scope == ResourceScope::Backend
         && receipt.dataset == request.dataset
         && receipt.origin.request_id == request.request_id

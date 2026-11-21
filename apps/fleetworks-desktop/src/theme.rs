@@ -1,7 +1,7 @@
-//! Matte deep-space colors shared by the actual views and their fixtures.
+//! Glass Canvas colors shared by the production views and fixtures.
 //!
 //! One uninterrupted `#060709` canvas, charcoal tonal steps, cool gray text and seven status
-//! hues that always travel with a label or icon. Sheen belongs to the main logo only.
+//! hues that always travel with a label or icon. Warm accents identify current selections.
 
 use rune::color;
 use rune::Color;
@@ -29,6 +29,9 @@ pub const ACCENT_HIGHLIGHT: &str = "#72E9FF";
 pub const ACCENT_DEEP: &str = "#0F6F75";
 pub const ON_ACCENT: &str = "#060709";
 pub const SELECTION_SURFACE: &str = "#10272D";
+pub const MOLTEN_SELECTION: &str = "#241D12";
+pub const MOLTEN_ACCENT: &str = "#E5B869";
+pub const MOLTEN_BRIGHT: &str = "#F1C84B";
 
 /// Cool dark-metal stops kept for the fractured-obsidian submit texture and the logo mark.
 pub const METAL_DARK_TOP: &str = "#222631";
@@ -61,6 +64,8 @@ pub const STATUS_ERR_BORDER: &str = "#6C3E4F";
 pub const STATUS_INFO: &str = "#53BAF5";
 pub const STATUS_INFO_BG: &str = "#12202A";
 pub const STATUS_INFO_BORDER: &str = "#295772";
+const STATUS_VIOLET_BG: &str = "#211B30";
+const STATUS_CYAN_BG: &str = "#0D2428";
 
 /// Entity & category accent hues derived from `intel-theme.ts`.
 pub const ENTITY_PERSON: &str = "#C08CF5";
@@ -69,10 +74,6 @@ pub const ENTITY_TECH: &str = "#21D9EE";
 pub const ENTITY_COMPUTE: &str = "#FFB347";
 pub const ENTITY_CLUSTER: &str = "#CAD9F0";
 pub const ENTITY_GRAPH: &str = "#B48EFF";
-
-/// Static decorative edge opacity, independent of functional boundaries/focus.
-pub const CARD_EDGE_ALPHA: f32 = 0.04;
-pub const SATIN_CONTROL_EDGE_ALPHA: f32 = 0.07;
 
 /// Parse a static theme hex color into a `rune::Color`.
 pub(crate) fn hex(value: &str) -> Color {
@@ -116,8 +117,8 @@ impl StatusTone {
             Self::Warn => hex(STATUS_WARN_BG),
             Self::Err => hex(STATUS_ERR_BG),
             Self::Info => hex(STATUS_INFO_BG),
-            Self::Violet => hex(ENTITY_GRAPH).alpha(0.14),
-            Self::Cyan => hex(STATUS_PENDING).alpha(0.14),
+            Self::Violet => hex(STATUS_VIOLET_BG),
+            Self::Cyan => hex(STATUS_CYAN_BG),
         }
     }
 
@@ -210,4 +211,34 @@ pub fn kit() -> Kit {
     kit.elevation.raised.clear();
     kit.elevation.md.clear();
     kit
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_pills_keep_readable_ink_in_glass_and_opaque_appearances() {
+        fn luminance(color: Color) -> f32 {
+            0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b
+        }
+
+        let backdrop = hex(SURFACE_ELEVATED);
+        for tone in [
+            StatusTone::Neutral,
+            StatusTone::Accent,
+            StatusTone::Ok,
+            StatusTone::Warn,
+            StatusTone::Err,
+            StatusTone::Info,
+            StatusTone::Violet,
+            StatusTone::Cyan,
+        ] {
+            for alpha in [0.82, 1.0] {
+                let background = backdrop.mix(tone.bg(), alpha);
+                let contrast = (luminance(tone.fg()) + 0.05) / (luminance(background) + 0.05);
+                assert!(contrast >= 4.5, "{tone:?} at alpha {alpha}: {contrast}");
+            }
+        }
+    }
 }

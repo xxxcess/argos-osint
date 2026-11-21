@@ -1,0 +1,166 @@
+//! Scripted startup scenes with synthetic, authority-matched readiness observations.
+
+use fleetworks_contracts::readiness::MaintenanceOperation;
+use fleetworks_contracts::readiness::ReadinessCheck;
+use fleetworks_contracts::readiness::ReadinessCheckId;
+use fleetworks_contracts::readiness::ReadinessState;
+use fleetworks_desktop::accessibility::FixtureAccessibility;
+use fleetworks_desktop::app::Intent;
+use fleetworks_desktop::app::Load;
+use fleetworks_desktop::backend::ReadKind;
+use fleetworks_desktop::local_backend::BinaryDiscoveryStatus;
+use fleetworks_desktop::Page;
+use fleetworks_desktop::State;
+use fleetworks_workstation::native::BackendKind;
+use rune::TextEdit;
+
+fn embedded_setup(state: &mut State, readiness_scene: fn(&mut State)) {
+    state.fixture_show_startup_setup(BackendKind::Local);
+    readiness_scene(state);
+    state.page = Page::Workstation;
+    state.setup_gateway = true;
+    state.connection.origin = TextEdit::new("local://embedded");
+    state.local_backend.binary_status =
+        BinaryDiscoveryStatus::Ready("/fixture/bundle/argos-api-host".into());
+    state.fixture_effect = Some(reply);
+}
+
+fn reply(state: &mut State, intent: &Intent) {
+    if !matches!(
+        intent,
+        Intent::BackendRead {
+            kind: ReadKind::Profile
+        }
+    ) {
+        super::reply(state, intent);
+    }
+}
+
+pub(super) fn seed(state: &mut State) {
+    embedded_setup(state, super::redesign_scenes::seed);
+}
+
+pub(super) fn index(state: &mut State) {
+    embedded_setup(state, super::redesign_scenes::seed_ready);
+}
+
+pub(super) fn index_queued(state: &mut State) {
+    index(state);
+    state.maintenance.set_operation_job(
+        MaintenanceOperation::ReindexActors,
+        "synthetic-startup-index-job".into(),
+        false,
+    );
+}
+
+fn ready_actor_data(state: &mut State) {
+    index(state);
+    set_check(
+        state,
+        ReadinessCheckId::ActorSearch,
+        ReadinessState::Ready,
+        "index_reader_visible",
+        "The synthetic actor index is reader-visible.",
+    );
+}
+
+pub(super) fn train(state: &mut State) {
+    ready_actor_data(state);
+    state
+        .connection
+        .capabilities
+        .as_mut()
+        .expect("synthetic Embedded capabilities")
+        .features
+        .push("classifier".into());
+    set_check(
+        state,
+        ReadinessCheckId::ClassifierTraining,
+        ReadinessState::Unknown,
+        "natural_resource_idle",
+        "No Natural training job has been observed.",
+    );
+}
+
+pub(super) fn checks_unavailable(state: &mut State) {
+    seed(state);
+    set_unavailable(state);
+    state.fixture_effect = Some(|state, intent| {
+        if matches!(intent, Intent::Readiness) {
+            set_unavailable(state);
+        } else {
+            reply(state, intent);
+        }
+    });
+}
+
+fn set_unavailable(state: &mut State) {
+    state.readiness = Load::Failed("Synthetic gateway could not read startup checks.".into());
+    state.readiness_received_at = None;
+}
+
+pub(super) fn ready(state: &mut State, reduced_motion: bool) {
+    train(state);
+    set_check(
+        state,
+        ReadinessCheckId::ClassifierTraining,
+        ReadinessState::Ready,
+        "natural_candidate_verified",
+        "A synthetic Natural classifier candidate has been prepared.",
+    )
+    .artifact_ids
+    .push("synthetic-natural-candidate".into());
+    state.accessibility.fixture_override = Some(FixtureAccessibility {
+        reduced_motion,
+        ..Default::default()
+    });
+}
+
+pub(super) fn mixed_checks(state: &mut State) {
+    ready(state, false);
+    set_check(
+        state,
+        ReadinessCheckId::ClassifierTraining,
+        ReadinessState::Ready,
+        "embedded_training_completed",
+        "Classifier training completed on this synthetic Embedded backend.",
+    )
+    .artifact_ids
+    .clear();
+    set_check(
+        state,
+        ReadinessCheckId::Jobs,
+        ReadinessState::NotReady,
+        "process_not_ready",
+        "The synthetic Jobs service reports that its dispatcher is not ready.",
+    );
+    set_check(
+        state,
+        ReadinessCheckId::Datastore,
+        ReadinessState::Ready,
+        "datastore_reachable",
+        "The last datastore observation is no longer current.",
+    )
+    .fresh_for_ms = 0;
+}
+
+fn set_check<'a>(
+    state: &'a mut State,
+    id: ReadinessCheckId,
+    status: ReadinessState,
+    reason: &str,
+    explanation: &str,
+) -> &'a mut ReadinessCheck {
+    let Load::Ready(readiness) = &mut state.readiness else {
+        panic!("Synthetic setup must contain scoped readiness");
+    };
+    let check = readiness
+        .checks
+        .iter_mut()
+        .find(|check| check.id == id)
+        .expect("synthetic setup check");
+    check.state = status;
+    check.reason_code = reason.into();
+    check.explanation = explanation.into();
+    check
+}

@@ -39,6 +39,19 @@ A turn request carries a durable `request_id`, the registered `context`, an opti
 
 Turn states are `queued`, `running`, `retrying`, `final` and `failed`. V1 is a status, then one final answer. There is no partial text, no tool execution and no automatic publication.
 
-## Not built yet
+## Inbox QA V2
 
-The server owns these, and they are not in this change: assistant replies, storage of threads and messages, the three reads, and admission that checks current authority, reconciles the original request before the revision and active-turn checks, and atomically creates one turn, message, job and outbox entry. Also queue leases, resumable events, exact-once application of the final answer, the typed SDK client calls and the IPC operations.
+The native Inbox uses the separate [V2 types](../../../crates/fleetworks-contracts/src/chat/qa.rs) when the selected backend advertises `inbox-qa-v2`. Embedded uses the companion’s framed IPC. Distributed uses the paired gateway, including loopback gateways. Settings, the latest exchange, and transcript access follow the current registration and selected backend.
+
+| Method | Path | Permission |
+| --- | --- | --- |
+| GET | `/api/v2/workstation/chat/settings` | Registered Native backend read |
+| POST | `/api/v2/workstation/chat/settings` | Registered Native `manage_inbox_qa`, current setting revision |
+| POST | `/api/v2/workstation/chat/turns` | Registered Native interactive submit and backend read |
+| GET | `/api/v2/workstation/chat/latest` | Registered Native workstation activity read |
+| GET | `/api/v2/workstation/chat/events` | Registered Native workstation activity read |
+| POST | `/api/v2/workstation/chat/cancel` | Registered Native interactive submit |
+
+When Embedded inference is unavailable, settings may include an `availability_reason`. The reason is a fixed code such as `pack_missing`, `pack_invalid`, `sandbox_unsupported`, or `worker_start_failed`. It contains no paths or process output. An unavailable reason leaves notifications usable and hides the QA composer. Distributed availability comes from the selected gateway.
+
+Each accepted turn freezes its authorized backend evidence. Published findings are checked against the source and its exact half-open Unicode scalar offsets. The latest answer holds at most three cited findings and 60 words. Events use a per-turn cursor with a bounded wait and include the canonical turn for gap recovery. Stop preserves committed findings and seals the turn. A request ID replay returns the existing turn when the original input matches. Off fences further QA and retires the displayed exchange. See [deployment and pack installation](../../../deploy/inbox-qa.md).

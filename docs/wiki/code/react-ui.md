@@ -2,7 +2,7 @@
 
 [Code route](index.md) · [Intel web contract](intel-web.md) · [Testing](react-ui-testing.md)
 
-Applies to `apps/web-desktop`, `packages/{ui,intel,api-client}`. The approved [matte-canvas theme](../../design/matte-canvas/theme.md) and [interaction-state contract](../../design/matte-canvas/interaction-state.md) own shared paint and generic loading/scroll targets. Preserve existing web composition, typography, routes and product contracts; native setup/service mockups do not add Intel destinations. Rune keeps its separate [native control allowlist](native-design-system.md); retired terminals are [historical](../../archive/cli-retirement.md).
+Applies to `apps/web-desktop`, `packages/{ui,intel,api-client}`. The approved [Glass Canvas theme](../../design/matte-canvas/theme.md) and [interaction-state contract](../../design/matte-canvas/interaction-state.md) own shared paint and generic loading/scroll targets. Preserve existing web composition, typography, routes and product contracts; native setup/service mockups do not add Intel destinations. Rune keeps its separate [native control allowlist](native-design-system.md); retired terminals are [historical](../../archive/cli-retirement.md).
 
 **Status:** current web composition and contracts below were audited at nightly `00b700afd77ddac6cba2e2bd7ae91ab3802b7197`. The linked design targets require implementation and verification; this documentation update and its mockups do not establish changed runtime behavior.
 
@@ -16,7 +16,7 @@ Before building, name the screen type, density and nearest shared primitive.
 | --- | --- |
 | Type | Existing scale; mono for navigation/metadata, body for prose |
 | Space | Visible record gaps; compact only for launchers, palettes, headlines and category bullets |
-| Color | Cool-gray text on deep matte charcoal; contextual cyan, blue, violet, mint, amber and rose retain semantic meaning |
+| Color | Cool-gray text on deep-space `#060709` with layered smoked/frosted glass surfaces, static liquid-metal rim highlights, warm molten-gold (`#E5B869`) active highlights and contextual cyan, blue, violet, mint, amber and rose semantic hues |
 | Components | Extend shared primitives; preserve functional boundaries and independent focus/selection |
 | States | Stable headings; distinct pending, retained refresh, authoritative generation, empty, error, unavailable, disabled, hover, press and keyboard focus |
 | Overflow | Wrap prose, continuously load long lists and retain usable hit targets, stable selection and scroll anchors |
@@ -49,31 +49,32 @@ Compiler optimization is not a correctness proof. Typecheck, Hooks/compiler diag
 
 | Authority | Responsibility |
 | --- | --- |
-| [Approved theme](../../design/matte-canvas/theme.md) | Canonical materials, semantic palette, symbol-only branding and approved visual references |
+| [Approved theme](../../design/matte-canvas/theme.md) | Canonical **Glass Canvas** materials, layered smoked/frosted glass, static liquid-metal rims, crescent texture, semantic palette, symbol-only branding and visual references |
 | [Interaction-state contract](../../design/matte-canvas/interaction-state.md) | Stable loading/refresh presentation, reduced motion and continuous-list behavior |
-| [Shared UI](../../../packages/ui/src/index.tsx) | Implementation owner for shared palette, fonts, recipes and primitives |
+| [Shared UI](../../../packages/ui/src/index.tsx) | Implementation owner for shared palette, fonts, smoked/frosted glass & rim recipes, crescent `RockTexture` and primitives |
 | [Intel theme](../../../packages/intel/src/shell/intel-theme.ts) | Evidence, metric and execution-state hues |
-| [Browser CSS](../../../apps/web-desktop/app/style.css) | Opaque canvas, functional focus ring and scrollbars |
+| [Browser CSS](../../../apps/web-desktop/app/style.css) | Deep-space backdrop, Glass Canvas surface blur/rim utilities with reduced-transparency fallback, functional focus ring and scrollbars |
 
-Use the single `#060709` canvas and the canonical theme's token values. Existing source tokens/assets are implementation inputs, not permission to retain superseded ivory/gold primary accents. Brand display areas show the approved symbol without a visible Fleetworks wordmark. The logo alone retains permanent metallic sheen; preserve its molten core, rocky crescent, five prisms and triangle/crescent clearance.
+Use the deep-space `#060709` backdrop and the canonical **Glass Canvas** tokens. Brand display areas show the simplified symbol (fractured obsidian crescent + warm molten core, no orbit triangles) without a visible Fleetworks wordmark. Build primary panels, shell bars, cards, controls and floating overlays as layered smoked/frosted glass with crisp static liquid-metal rim highlights, warm molten-gold active highlights alongside cool cyan interactive cues, and crescent-rock textures on committing/brand actions.
 
-Approved native visual references: [Workstation Status](../../design/matte-canvas/mockups/01-workstation-status.png), [Setup Gateway](../../design/matte-canvas/mockups/02-setup-gateway.png), [Jobs & Logs](../../design/matte-canvas/mockups/03-jobs-logs.png) and [compact Workstation Status](../../design/matte-canvas/mockups/04-compact-workstation.png). These guide shared paint and generic states, not web navigation or native-workflow adoption.
+Approved baseline layout references: [Workstation Status](../../design/matte-canvas/mockups/01-workstation-status.png), [Setup Gateway](../../design/matte-canvas/mockups/02-setup-gateway.png), [Jobs & Logs](../../design/matte-canvas/mockups/03-jobs-logs.png) and [compact Workstation Status](../../design/matte-canvas/mockups/04-compact-workstation.png), superseded in material finish by the **2026-11-20 Glass Canvas** desktop direction. These guide shared glass/rim depth and generic states without altering Intel Web routes or native-workflow boundaries.
 
-### Intel matte desk
+### Intel glass canvas desk
 
 @tag:look-and-feel @tag:react-ui @tag:intel-brief
 
 | Surface/state | Recipe |
 | --- | --- |
-| Reading, metrics and readiness | Smooth matte charcoal, diffuse edges blending into the canvas; group by spacing/type without card strokes or grid dividers |
-| Navigation and utility controls | Smooth matte; Settings, Cancel, filter, refresh, pop-out and read Retry never use rock texture; use a flat contextual selection marker |
-| Submit / Confirm / Create / Delete | Coarse matte fractured crescent-rock on the button face only; Connect qualifies as form submission; contextual color without metallic reflection. Use `<Button intent="submit" | "confirm" | "delete">` (`packages/ui/src/index.tsx`); the committed crescent tile is embedded by `rockTile.ts` |
-| Selected | Stable semantic treatment plus the appropriate accessible state; distinct from keyboard focus |
+| Reading, metrics, cards and readiness | Layered smoked dark glass (`#0B0F14`–`#121820` translucent fill + `backdrop-filter: blur(10–14px)`, crisp `1px` `#2B343F` hairline border & static liquid-metal top rim); keep grids uncluttered at rest with elevated glass hover lift |
+| Floating overlays & menus | Elevated frosted dark glass (`backdrop-filter: blur(14–18px)`, translucent `#121820`–`#19212B` fill, crisp `1px` liquid-metal specular top rim); opaque `#0B0F14`/`#121820`/`#19212B` fallback under `prefers-reduced-transparency: reduce` |
+| Navigation and utility controls | Translucent smoked glass with subtle warm molten-gold (`#E5B869` / `#241D12`) or metallic active pill highlights; Settings, Cancel, filter, refresh, pop-out and read Retry stay clean glass rather than heavily textured |
+| Submit / Confirm / Create / Delete | Fractured crescent-moon obsidian texture (`<Button intent="submit" \| "confirm" \| "delete">` via `rockTile.ts`) inside a tinted glass/obsidian button face with a crisp liquid-metal upper edge highlight; Connect qualifies |
+| Selected | Stable semantic treatment plus crisp metallic/accent border and accessible state; distinct from keyboard focus |
 | Disabled | Readable muted label and semantic disabled state; material eligibility still follows the action's intent |
-| Pending placeholder | Constant matte skeleton base with restrained cool translated sheen; localized to unresolved content and static for reduced motion |
-| Compatibility exports | Retain shared APIs such as `glass`/`glow()` while implementing the approved paint; names do not authorize glossy surfaces |
+| Pending placeholder | Constant skeleton base with restrained cool translated sheen; localized to unresolved content and static for reduced motion |
+| Shared exports | `glass`, `glow()`, `Panel`, `Button` and `RockTexture` in `packages/ui/src/index.tsx` implement the Glass Canvas blur, liquid-metal rim highlight and crescent texture recipes |
 
-Outside the approved logo and localized pending shimmer, use no metallic sheen, broad reflections, backdrop blur or decorative card-entry animation. Functional focus/selection cues remain visible even though decorative panel outlines are removed. Opaque preferences retain readable states. Existing view/camera motion stays preference-aware; this target introduces no renderer or animation-library requirement.
+Keep liquid-metal rim highlights static at rest (no resting animation wake loop, full-screen glare or pointer-lighting loop). Functional focus/selection cues remain crisp and independent of glass blur. Reduced-transparency and opaque preferences retain readable states with identical geometry. Existing view/camera motion stays preference-aware; this target introduces no new renderer or animation-library requirement.
 
 ## UI/UX guidance
 

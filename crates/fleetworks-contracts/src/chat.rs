@@ -10,6 +10,10 @@
 //! Permissions (the server rechecks them): reads need `ReadWorkstationActivity` and a
 //! registration; submit needs `SubmitInteractive` and a registration.
 
+mod qa;
+
+pub use qa::*;
+
 use std::fmt;
 
 use serde::Deserialize;

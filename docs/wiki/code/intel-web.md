@@ -40,8 +40,8 @@ The approved [matte canvas target](../../design/matte-canvas/README.md) uses coo
 
 | Surface | Presentation |
 | --- | --- |
-| Home/shell | Initial launcher, then Bulletin; bottom connection/metrics/clock/taskbar. Server returns Home with retained feed/filter/article state |
-| Bulletin | Categories, day/search and Latest/Hottest; whole-card open action; optional contained thumbnail |
+| Home/shell | Authenticated readiness admits Home; bottom connection/metrics/clock/taskbar. Server returns Home with retained feed/filter/article state |
+| Bulletin | Category and search stay visible; Day, Sort and Refresh group on narrow screens. Each article is one open action with a contained thumbnail when available |
 | Brief | One scroll shell, reading/context columns stacked below 900px; source images preserve intrinsic ratio with 520px cap |
 | Navigation | Selected/pressed state and independent visible focus; scroll-to-end appears when reading content overflows |
 
@@ -173,7 +173,7 @@ The browser requests relative `/api/v1/…` paths. The explicit Web overlay sets
 - [API contracts](../../../crates/argos-osint-api/tests/api_contract.rs) cover pagination, revisions, admission/reload idempotency, missing IDs and ingress rules.
 - [Browser fixtures](../../../tests/web/intel.spec.ts) cover production and development navigation, responsive presentation, mutations and reconnect. Follow [React UI verification](react-ui-testing.md).
 
-The Intel landing view reads the existing readiness query through the backend context (`health` and `connectionError`), without extra readiness requests. Its full-shell graph adds one orbiter for each passing API-response/service/version/storage/workspace check. Three-second status cycles appear below the core; its state progresses from red through amber checks and green healthy to blue ready. The separate landing offline indicator is hidden. Compatible readiness and completion of the admitted-orbiter arrival sequence both gate first Home workspace entry. The orbit does not replay when returning to Home from Bulletin, Brief or Topology, and it is skipped for those deep links; reduced-motion and non-WebGL fallback compositions are static.
+The Intel landing view reads the existing readiness query through the backend context (`health` and `connectionError`), without extra readiness requests. The landing mark shows an obsidian crescent and a warm core. A status halo and three-second status messages below the mark reflect the existing API-response, service, version, storage and workspace checks. The halo progresses from red through amber checks and green healthy to blue ready. The separate landing offline indicator is hidden. Authenticated workstation readiness admits Home immediately. A short pointer-transparent transition may finish over the interactive workspace. The orbit does not replay when returning to Home from Bulletin, Brief or Topology, and it is skipped for those deep links; reduced-motion and non-WebGL fallback compositions are static.
 
 ## Actor Dossier
 

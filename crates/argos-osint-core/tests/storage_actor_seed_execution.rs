@@ -23,9 +23,11 @@ use fleetworks_contracts::connect::RegistrationEnsureRequest;
 use fleetworks_contracts::context::JobOrigin;
 use fleetworks_contracts::context::MutationContext;
 use fleetworks_contracts::context::OriginSource;
+use fleetworks_contracts::context::RegisteredContext;
 use fleetworks_contracts::readiness::DatasetKind;
 use fleetworks_contracts::readiness::DatasetRef;
 use fleetworks_contracts::readiness::MaintenanceOperation;
+use fleetworks_contracts::readiness::MaintenanceReceipt;
 use fleetworks_contracts::readiness::MaintenanceRequest;
 use surrealdb::types::RecordId;
 
@@ -33,26 +35,7 @@ async fn claim_seed(repo: &Repository) -> ClaimedTask {
     claim_seed_dataset(repo, "fixture", 'b').await.task
 }
 
-async fn claim_seed_dataset(
-    repo: &Repository,
-    label: &str,
-    hash: char,
-) -> job_dispatch::DeliveryLease {
-    argos_osint_core::storage::bootstrap::ensure_network_identity(repo.db())
-        .await
-        .expect("actual deployment bootstrap");
-    connect_registry::initialize_control(repo.db())
-        .await
-        .expect("registry bootstrap");
-    job_dispatch::ensure_queue_transport(repo.db(), setup_jobs::SEED_POOL)
-        .await
-        .expect("real transport policy");
-    job_dispatch::enable_pool(repo.db(), setup_jobs::SEED_POOL)
-        .await
-        .expect("configured fixture consumer");
-    setup_jobs::enable_operation(repo.db(), MaintenanceOperation::SeedActors, true)
-        .await
-        .expect("explicit operation");
+async fn seed_context(repo: &Repository) -> (RegistryAuthority, RegisteredContext) {
     let authority =
         RegistryAuthority::new("synthetic-scope", "synthetic-native", "synthetic-epoch")
             .expect("bounded authority");
@@ -76,6 +59,74 @@ async fn claim_seed_dataset(
     )
     .await
     .expect("current proof");
+    (authority, context)
+}
+
+async fn submit_embedded_seed(repo: &Repository, label: &str, hash: char) -> MaintenanceReceipt {
+    let (authority, context) = seed_context(repo).await;
+    let dataset = DatasetRef::new(
+        format!("dataset-seed-repeat-{label}"),
+        DatasetKind::ActorCatalog,
+        hash.to_string().repeat(64),
+        128,
+    )
+    .expect("synthetic validated reference with a different upload ID");
+    setup_jobs::register_dataset(repo, &authority, &dataset, setup_jobs::DATASET_TTL)
+        .await
+        .expect("register immutable repeat upload");
+    let request_id = format!("seed-repeat-{label}");
+    let request =
+        MaintenanceRequest::for_seed(request_id.clone(), MutationContext::new(&context), dataset)
+            .expect("repeat request");
+    let origin = JobOrigin::new(
+        &context,
+        OriginSource::Native,
+        request_id,
+        Utc::now().to_rfc3339(),
+        1,
+        Vec::new(),
+    );
+    tx::run_tx(repo.db(), tx::RetryPolicy::default(), |transaction| {
+        let (authority, context, origin, request) = (&authority, &context, &origin, &request);
+        async move {
+            setup_jobs::admit_embedded_in(
+                &transaction,
+                authority,
+                context,
+                origin,
+                MaintenanceOperation::SeedActors,
+                request,
+                None,
+            )
+            .await
+        }
+    })
+    .await
+    .expect("repeat admission")
+    .value
+}
+
+async fn claim_seed_dataset(
+    repo: &Repository,
+    label: &str,
+    hash: char,
+) -> job_dispatch::DeliveryLease {
+    argos_osint_core::storage::bootstrap::ensure_network_identity(repo.db())
+        .await
+        .expect("actual deployment bootstrap");
+    connect_registry::initialize_control(repo.db())
+        .await
+        .expect("registry bootstrap");
+    job_dispatch::ensure_queue_transport(repo.db(), setup_jobs::SEED_POOL)
+        .await
+        .expect("real transport policy");
+    job_dispatch::enable_pool(repo.db(), setup_jobs::SEED_POOL)
+        .await
+        .expect("configured fixture consumer");
+    setup_jobs::enable_operation(repo.db(), MaintenanceOperation::SeedActors, true)
+        .await
+        .expect("explicit operation");
+    let (authority, context) = seed_context(repo).await;
     let dataset = DatasetRef::new(
         format!("dataset-seed-execution-{label}"),
         DatasetKind::ActorCatalog,
@@ -103,13 +154,14 @@ async fn claim_seed_dataset(
     let admitted = tx::run_tx(repo.db(), tx::RetryPolicy::default(), |transaction| {
         let (authority, context, origin, request) = (&authority, &context, &origin, &request);
         async move {
-            setup_jobs::admit_in(
+            setup_jobs::admit_embedded_in(
                 &transaction,
                 authority,
                 context,
                 origin,
                 MaintenanceOperation::SeedActors,
                 request,
+                None,
             )
             .await
         }
@@ -328,6 +380,11 @@ async fn streamed_claimed_imports_merge_selected_identities_and_keep_other_actor
     let repo = server.repo("seed_execution", "stream_merge").await;
     let cancel = AtomicBool::new(false);
     let first = claim_seed_dataset(&repo, "first", 'a').await;
+    let active_repeat = submit_embedded_seed(&repo, "active", 'a').await;
+    assert_eq!(active_repeat.job_id, first.task.job_id);
+    assert!(active_repeat.reused);
+    assert!(!active_repeat.already_completed);
+
     let execution = actor_catalog::SeedExecution::from_claimed(&repo, &first.task, &cancel)
         .await
         .expect("first actual execution");
@@ -350,6 +407,20 @@ async fn streamed_claimed_imports_merge_selected_identities_and_keep_other_actor
     .await
     .expect("first streamed import");
     assert!(first_progress.complete);
+    setup_jobs::record_result(
+        &repo,
+        &first.task,
+        &serde_json::json!({
+            "operation": "actor_seed",
+            "dataset_sha256": "a".repeat(64),
+            "processed": first_progress.processed,
+            "total": first_progress.total,
+            "database_seeded": first_progress.complete,
+        }),
+    )
+    .await
+    .expect("live-fenced result from actual imported actors");
+
     assert_eq!(
         support::count(repo.db(), "brain_actor_alias").await,
         260,
@@ -435,6 +506,43 @@ async fn streamed_claimed_imports_merge_selected_identities_and_keep_other_actor
     .await
     .expect("second task completes");
     let events = support::count(repo.db(), "actor_search_event").await;
+    let jobs = support::count(repo.db(), "job").await;
+    assert_eq!(support::count(repo.db(), "setup_completed_input").await, 1);
+    repo.db()
+        .query("DELETE setup_completed_input")
+        .await
+        .expect("model a pre-upgrade database without content markers")
+        .check()
+        .expect("remove synthetic marker");
+    let legacy = submit_embedded_seed(&repo, "legacy", 'a').await;
+    assert!(legacy.already_completed && legacy.job_id.is_empty());
+    assert_eq!(support::count(repo.db(), "setup_completed_input").await, 1);
+
+    repo.db()
+        .query("DELETE $setup; DELETE setup_dataset_pin WHERE job_id=$job; DELETE $staged;")
+        .bind((
+            "setup",
+            RecordId::new("setup_operation", first.task.job_id.clone()),
+        ))
+        .bind(("job", first.task.job_id.clone()))
+        .bind((
+            "staged",
+            RecordId::new("setup_dataset", "dataset-seed-execution-first"),
+        ))
+        .await
+        .expect("remove old job result and upload metadata to model retention")
+        .check()
+        .expect("retention statements");
+    let old_source = submit_embedded_seed(&repo, "retained", 'a').await;
+    assert!(old_source.already_completed && old_source.reused && old_source.job_id.is_empty());
+    let current_source = submit_embedded_seed(&repo, "current", 'c').await;
+    assert!(current_source.already_completed && current_source.job_id.is_empty());
+    assert_eq!(support::count(repo.db(), "job").await, jobs);
+    assert_eq!(
+        support::count(repo.db(), "actor_search_event").await,
+        events
+    );
+
     assert!(
         actor_catalog::seed_actors_stream_claimed(
             &repo,

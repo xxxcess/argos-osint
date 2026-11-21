@@ -98,7 +98,11 @@ construct this execution identity.
 An authorized registered maintenance request to
 `POST /api/v1/search/actors/reindex` creates or associates with a durable shared
 Reindex Job. Its consumer is enabled only with the configured real index pump.
-Status, query and readiness reads do not start work.
+Status, query and readiness reads do not start work. Workstation Status, Inbox,
+and the shared **Status checks** table label automatic catch-up as background
+indexing. The Jobs & Logs rail badge follows the registered workstation’s active
+tracked jobs, including a
+queued, running or retrying actor reindex, while another destination is open.
 From Workstation Status's **Actor search** hero card, **Build actor index** /
 **Rebuild actor index** opens an inline confirmation modal (`Escape` cancels and
 restores button focus). Before issuing the HTTP POST, the native client

@@ -217,6 +217,28 @@ class ReleasePlanTests(unittest.TestCase):
         self.assertEqual(result["base"], pending, "Event provenance remains exact")
         self.assertIn("desktop", result["scope"]["scopes"])
 
+    def test_inbox_qa_packs_are_selected_only_for_a_nightly_native_release(self):
+        tool = self.root / "tools/assistant-bert/Cargo.toml"
+        tool.parent.mkdir(parents=True)
+        tool.write_text("[workspace]\n")
+        self.git("add", str(tool.relative_to(self.root)))
+        self.git("commit", "--quiet", "-m", "feat(inbox): add optional offline packs")
+        initial = self.plan(branch="nightly")
+        self.assertTrue(initial["publish"] and initial["native"] and initial["inbox_qa"])
+        self.assertNotIn("inbox_qa", self.plan())
+        self.assertNotIn("inbox_qa", self.plan(branch="nightly", event="workflow_dispatch"))
+
+        self.publish_tag(initial)
+        backend = self.root / "services/api-host/src/main.rs"
+        backend.parent.mkdir(parents=True)
+        backend.write_text("synthetic service source")
+        self.git("add", str(backend.relative_to(self.root)))
+        self.git("commit", "--quiet", "-m", "fix(api): update a service")
+        scope = self.scope(base=initial["head"], scopes=["images", "server"], images=["runtime"])
+        backend = self.plan(branch="nightly", base=initial["head"], scope=scope)
+        self.assertTrue(backend["publish"])
+        self.assertNotIn("inbox_qa", backend)
+
     def test_first_artifact_covers_production_targets_and_test_only_web_stays_checked(self):
         self.git("tag", "--delete", self.initial_artifact)
         self.commit("ci: enable channel artifacts")

@@ -11,6 +11,9 @@ use fleetworks_contracts::context::MutationContext;
 use fleetworks_contracts::context::OriginSource;
 use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::context::RegisteredContext;
+use fleetworks_contracts::readiness::AtlasCyclePreflight;
+use fleetworks_contracts::readiness::AtlasKeyPresence;
+use fleetworks_contracts::readiness::ReadinessState;
 use fleetworks_contracts::AtlasCycleReceipt;
 use fleetworks_contracts::AtlasCycleRequest;
 use fleetworks_contracts::Client;
@@ -21,6 +24,8 @@ use fleetworks_contracts::ATLAS_CYCLE_OPERATION;
 use fleetworks_contracts::JOB_DETAIL_PATH;
 use fleetworks_contracts::TOOL_RESULT_PATH;
 use fleetworks_contracts::TOOL_RUN_PATH;
+use fleetworks_workstation::native::BackendKind;
+use rune::Tx;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -35,6 +40,8 @@ use crate::platform;
 const MAX_INPUT_BYTES: usize = 12 * 1024;
 const MAX_RESULT_TEXT: usize = 16 * 1024;
 const TOOLS_OPERATION: &str = "manual_tool";
+pub(crate) const ATLAS_DISTRIBUTED_REQUIREMENT: &str =
+    "News cycles require a Distributed gateway with Atlas enabled.";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SubmissionKind {
@@ -433,10 +440,123 @@ impl Submissions {
 }
 
 impl State {
+    pub(crate) fn atlas_advertised(&self) -> bool {
+        !self.is_local_backend() && self.submission_feature_enabled(SubmissionKind::Atlas)
+    }
+
+    pub(crate) fn open_atlas_distributed_setup(&mut self, tx: &mut Tx) {
+        self.set_backend_kind(BackendKind::Remote);
+        self.setup_gateway = true;
+        self.prefill_startup_distributed_url();
+        tx.scroll_into_view("gateway-origin");
+        tx.focus("gateway-origin", tx.by_keys());
+    }
+
+    fn reported_atlas_preflight(&self) -> Option<&AtlasCyclePreflight> {
+        crate::startup_data::scoped_readiness(self)?
+            .atlas_preflight
+            .as_ref()
+    }
+
+    pub(crate) fn atlas_preflight(&self) -> Option<&AtlasCyclePreflight> {
+        let received = self.readiness_received_at?;
+        let preflight = self.reported_atlas_preflight()?;
+        (self.clock >= received && (self.clock - received) * 1000.0 < preflight.fresh_for_ms as f64)
+            .then_some(preflight)
+    }
+
+    pub(crate) fn atlas_key_states(&self) -> [(&'static str, &'static str, AtlasKeyPresence); 4] {
+        use AtlasKeyPresence::Unchecked;
+
+        let current = self.atlas_preflight().filter(|preflight| {
+            preflight.configuration_revision.is_some()
+                && preflight.configuration_revision == self.configuration_revision()
+        });
+        [
+            (
+                "gnews",
+                "GNews",
+                current.map_or(Unchecked, |value| value.gnews),
+            ),
+            (
+                "newsdata",
+                "NewsData.io",
+                current.map_or(Unchecked, |value| value.newsdata),
+            ),
+            (
+                "newsapi",
+                "NewsAPI",
+                current.map_or(Unchecked, |value| value.newsapi),
+            ),
+            (
+                "currents",
+                "Currents",
+                current.map_or(Unchecked, |value| value.currents),
+            ),
+        ]
+    }
+
+    pub(crate) fn atlas_preflight_due(&self) -> bool {
+        self.atlas_advertised()
+            && self.permission(Permission::ReadBackend)
+            && !self.readiness_pending()
+            && self.clock >= self.readiness_refresh_at
+            && self.atlas_preflight().is_none()
+            && (self.reported_atlas_preflight().is_some()
+                || self
+                    .readiness_received_at
+                    .is_none_or(|at| self.clock >= at + 10.0))
+    }
+
+    fn submission_feature_enabled(&self, kind: SubmissionKind) -> bool {
+        self.connection
+            .capabilities
+            .as_ref()
+            .is_some_and(|capabilities| {
+                capabilities
+                    .features
+                    .iter()
+                    .any(|feature| feature == kind.feature())
+            })
+    }
+
+    fn atlas_prerequisite_blocker(&self) -> Option<String> {
+        let Some(preflight) = self.atlas_preflight() else {
+            return Some("Refresh the Atlas prerequisite checks before creating a cycle".into());
+        };
+        if preflight.atlas_worker != ReadinessState::Ready {
+            return Some("Ask the gateway operator to check the Atlas worker".into());
+        }
+        if preflight.rust_bert != ReadinessState::Ready {
+            return Some(
+                "Ask the gateway operator to check the Rust-BERT worker and checkpoint".into(),
+            );
+        }
+        for (_, provider, status) in self.atlas_key_states() {
+            match status {
+                AtlasKeyPresence::Missing => {
+                    return Some(if self.permission(Permission::ManageConfiguration) {
+                        format!("Add a {provider} API key using Configure API keys")
+                    } else {
+                        format!(
+                            "Ask the gateway operator to add a {provider} API key in OSINT Tools"
+                        )
+                    })
+                }
+                AtlasKeyPresence::Saved => {}
+                _ => return Some(format!("Refresh the saved key check for {provider}")),
+            }
+        }
+        None
+    }
+
     pub fn interactive_draft_edited(&mut self, kind: SubmissionKind) {
         self.submissions.lane_mut(kind).confirmation = None;
     }
     pub fn submission_disabled_reason(&self, kind: SubmissionKind) -> Option<String> {
+        if kind == SubmissionKind::Atlas && self.is_local_backend() {
+            return Some(ATLAS_DISTRIBUTED_REQUIREMENT.into());
+        }
         if !self.permission(Permission::SubmitInteractive) {
             return Some("Interactive submission permission required".into());
         }
@@ -448,18 +568,16 @@ impl State {
                 "Backend configuration is unavailable; check the gateway connection".into(),
             );
         }
-        if !self
-            .connection
-            .capabilities
-            .as_ref()
-            .is_some_and(|capabilities| {
-                capabilities
-                    .features
-                    .iter()
-                    .any(|feature| feature == kind.feature())
-            })
-        {
-            return Some("This gateway has not enabled the required durable worker".into());
+        if !self.submission_feature_enabled(kind) {
+            return Some(
+                match kind {
+                    SubmissionKind::Atlas => "Ask the Distributed gateway operator to enable Atlas",
+                    SubmissionKind::Tool => {
+                        "This gateway has not enabled the required durable worker"
+                    }
+                }
+                .into(),
+            );
         }
         let lane = self.submissions.lane(kind);
         if lane.busy() {
@@ -467,6 +585,9 @@ impl State {
         }
         if lane.delivery_uncertain {
             return Some("Resolve the current uncertain outcome or retry its exact request before starting another".into());
+        }
+        if kind == SubmissionKind::Atlas {
+            return self.atlas_prerequisite_blocker();
         }
         if kind == SubmissionKind::Tool {
             let Load::Ready(catalog) = &self.backend.tools else {

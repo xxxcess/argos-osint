@@ -73,6 +73,11 @@ async fn ready(State(engine): State<Engine>) -> Response {
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
+    let atlas_checkpoint_state = if engine.home.check_local_atlas_assets().await.is_ok() {
+        "available"
+    } else {
+        "unavailable"
+    };
     let warm = engine.warm.lock().await;
     let active_model = warm.as_ref().map(|warm| {
         json!({
@@ -91,6 +96,7 @@ async fn ready(State(engine): State<Engine>) -> Response {
             "service": "fleetworks-classifier",
             "api_version": remote::VERSION,
             "ready": ready,
+            "atlas_checkpoint_state": atlas_checkpoint_state,
             "model_state": model_state,
             "active_model": active_model,
         })),

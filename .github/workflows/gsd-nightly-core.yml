@@ -1,0 +1,276 @@
+name: "GSD Nightly: Core"
+
+on:
+  workflow_call:
+    inputs:
+      head:
+        type: string
+        required: true
+      full:
+        type: boolean
+        required: true
+      publish:
+        type: boolean
+        required: true
+      release-version:
+        type: string
+      linux-native:
+        type: boolean
+        required: true
+      backend-arch:
+        type: string
+        required: true
+      backend-matrix:
+        type: string
+        required: true
+      server:
+        type: boolean
+        required: true
+      storage:
+        type: boolean
+        required: true
+      queue:
+        type: boolean
+        required: true
+      bert:
+        type: boolean
+        required: true
+    secrets:
+      depot-ci-token:
+        required: false
+    outputs:
+      desktop_linux_result:
+        value: ${{ jobs.results.outputs.desktop_linux_result }}
+      embedded_result:
+        value: ${{ jobs.results.outputs.embedded_result }}
+      server_result:
+        value: ${{ jobs.results.outputs.server_result }}
+      bert_result:
+        value: ${{ jobs.results.outputs.bert_result }}
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  FLEETWORKS_HEAD: ${{ inputs.head }}
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+jobs:
+  desktop_linux:
+    name: Linux app / x86_64-unknown-linux-gnu
+    if: inputs.linux-native
+    uses: ./.github/workflows/fleetworks-native-linux-route.yml
+    with:
+      expected-head: ${{ inputs.head }}
+      mode: ${{ inputs.full && 'full' || 'pr' }}
+      profile: ${{ inputs.publish && 'release' || 'debug' }}
+      capture-ui: ${{ inputs.publish }}
+      release-version: ${{ inputs.release-version }}
+    secrets:
+      depot-ci-token: ${{ secrets.depot-ci-token }}
+
+  embedded:
+    name: Affected embedded storage
+    if: inputs.storage
+    uses: ./.github/workflows/embedded.yml
+    with:
+      head: ${{ inputs.head }}
+      arch: ${{ inputs.backend-arch }}
+      scoped: ${{ github.event_name == 'pull_request' }}
+
+  server:
+    name: Backend suite / Linux ${{ matrix.arch }}
+    if: inputs.server
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(inputs.backend-matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      EXPECTED_MACHINE: ${{ matrix.machine }}
+      EXPECTED_TARGET: ${{ matrix.target }}
+      EXPECTED_EXECUTABLE: ${{ matrix.executable }}
+      REVIEW_ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.FLEETWORKS_HEAD }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt
+      - name: Install libclang for the embedded delivery queue
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: distributed-backend-${{ matrix.arch }}
+          workspaces: . -> target/agents
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      - name: Resolve pinned isolated datastore before API tests
+        id: surreal
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="$(python3 scripts/test_surreal.py --mode server --fetch-only |
+            sed -n 's/^test-surreal: server binary //p')"
+          test -x "$binary"
+          printf 'binary=%s\n' "$binary" >> "$GITHUB_OUTPUT"
+          printf 'ARGOS_SURREAL_BIN=%s\nARGOS_SURREAL_MODE=server\nARGOS_SURREAL_REQUIRED=1\n' "$binary" >> "$GITHUB_ENV"
+      - name: Check, build, and test the backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$FLEETWORKS_HEAD"
+          test "$(uname -m)" = "$EXPECTED_MACHINE"
+          test "$(rustc -vV | sed -n 's/^host: //p')" = "$EXPECTED_TARGET"
+          rustc --version | grep -q '^rustc 1\.95\.0 '
+          cargo fmt --all -- --check
+          features=(--no-default-features --features server,nlp,classifier)
+          python3 scripts/fleetworks_verify.py timed --phase server-check -- \
+            python3 scripts/agent_cargo.py check --timings --locked -p argos-api-host "${features[@]}"
+          python3 scripts/fleetworks_verify.py timed --phase server-build -- \
+            python3 scripts/agent_cargo.py build --timings --locked -p argos-api-host --bin argos-api-host "${features[@]}"
+          file target/agents/debug/argos-api-host | grep -Ei "$EXPECTED_EXECUTABLE"
+          python3 scripts/fleetworks_verify.py timed --phase server-test -- \
+            python3 scripts/agent_cargo.py test --timings --locked -p argos-api-host -p argos-osint-api \
+              "${features[@]}" --bin argos-api-host --lib
+          verify_core_tests() {
+            local phase="$1" filter="$2" log
+            log="$RUNNER_TEMP/fleetworks-$phase.log"
+            python3 scripts/fleetworks_verify.py timed --phase "$phase" -- \
+              python3 scripts/agent_cargo.py test --timings --locked -p argos-osint-core \
+                "${features[@]}" --features fixtures --lib "$filter" | tee "$log"
+            if ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored' "$log"; then
+              echo "::error::The required $filter tests did not pass"
+              exit 1
+            fi
+          }
+          verify_core_tests execution-transport-test provider_attempt::remote::tests
+          verify_core_tests config-commit-test config_commit::tests
+      - name: Exercise bootstrap and network service roles on loopback
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x "$ARGOS_SURREAL_BIN"
+          python3 scripts/fleetworks_verify.py timed --phase network-smoke -- \
+            python3 scripts/fleetworks_network_smoke.py --host target/agents/debug/argos-api-host --surreal "$ARGOS_SURREAL_BIN"
+      - name: Run pinned disk storage contracts
+        if: inputs.full
+        env:
+          SURREAL_BIN: ${{ steps.surreal.outputs.binary }}
+        run: |
+          python3 scripts/fleetworks_verify.py timed --phase storage-contracts -- \
+            python3 scripts/test_surreal.py --mode server --bin "$SURREAL_BIN" --timings
+      - name: Test affected storage and brief recovery contracts
+        if: inputs.storage && !inputs.full
+        env:
+          ARGOS_SURREAL_MODE: server
+          ARGOS_SURREAL_REQUIRED: "1"
+          ARGOS_SURREAL_BIN: ${{ steps.surreal.outputs.binary }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset SURREAL_USER SURREAL_PASS
+          test -x "$ARGOS_SURREAL_BIN"
+          python3 scripts/fleetworks_verify.py timed --phase storage-affected -- \
+            python3 scripts/agent_cargo.py test --timings --locked -p argos-osint-core \
+              --no-default-features --features server,nlp,classifier,fixtures \
+              --test storage_contracts --test storage_jobs --test storage_brief --test storage_brief_publish \
+              --test storage_provider_pacer --test storage_provider_account --test storage_credits \
+              --test storage_actor_catalog --test storage_atlas_delete
+      - name: Test shared Atlas provider quota reservations
+        if: inputs.queue && !inputs.full
+        env:
+          ARGOS_SURREAL_MODE: server
+          ARGOS_SURREAL_REQUIRED: "1"
+          ARGOS_SURREAL_BIN: ${{ steps.surreal.outputs.binary }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset SURREAL_USER SURREAL_PASS
+          test -x "$ARGOS_SURREAL_BIN"
+          log="$RUNNER_TEMP/fleetworks-atlas-quota-test.log"
+          python3 scripts/agent_cargo.py test --locked -p argos-osint-core \
+            --no-default-features --features server,nlp,classifier,fixtures --test storage_atlas \
+            quota_reservations_share_daily_account_caps -- --exact --nocapture | tee "$log"
+          if ! grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored' "$log"; then
+            echo '::error::The required Atlas quota reservation test did not pass'
+            exit 1
+          fi
+      - name: Exercise SQLite jobs and embedded queue dispatch
+        if: inputs.queue
+        timeout-minutes: 12
+        env:
+          SURREAL_BIN: ${{ steps.surreal.outputs.binary }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Keep the server feature graph: a Jobs-only selection rebuilds RocksDB's C++ archive.
+          python3 scripts/agent_cargo.py test --locked -p argos-api-host -p fleetworks-jobs \
+            --no-default-features --features server,nlp,classifier
+          python3 scripts/fleetworks_verify.py timed --phase queue-smoke -- \
+            python3 scripts/fleetworks_atlas_smoke.py \
+              --host target/agents/debug/argos-api-host --surreal "$SURREAL_BIN"
+      - name: Validate scoped standalone Compose and optional overlays
+        shell: bash
+        run: |
+          set -euo pipefail
+          review="config-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$REVIEW_ARCH"
+          python3 deploy/native_review.py init --name "$review" --api-port 18091 --web-port 18092 --platform "linux/$REVIEW_ARCH"
+          workspace="$(python3 deploy/native_review.py value --name "$review" --field workspace)"
+          base=(docker compose --env-file "$workspace/compose.env" -f deploy/compose.native-review.yml)
+          "${base[@]}" config --quiet
+          "${base[@]}" -f deploy/compose.yml config --quiet
+          "${base[@]}" -f deploy/compose.yml -f deploy/compose.dev.yml config --quiet
+          "${base[@]}" -f deploy/compose.atlas.yml config --quiet
+      - name: Retain server phase timings
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: Fleetworks-Backend-Test-Timings-Linux-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/fleetworks-timings.jsonl
+            target/agents/cargo-timings/*.html
+          if-no-files-found: ignore
+          retention-days: 7
+
+  bert:
+    name: Atlas BERT runtime
+    if: inputs.bert
+    uses: ./.github/workflows/atlas-bert.yml
+    with:
+      head: ${{ inputs.head }}
+      arch: ${{ inputs.backend-arch }}
+
+  results:
+    name: Collect Core verification results
+    needs: [desktop_linux, embedded, server, bert]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      desktop_linux_result: ${{ steps.results.outputs.desktop_linux_result }}
+      embedded_result: ${{ steps.results.outputs.embedded_result }}
+      server_result: ${{ steps.results.outputs.server_result }}
+      bert_result: ${{ steps.results.outputs.bert_result }}
+    steps:
+      - name: Record selected lane outcomes
+        id: results
+        env:
+          DESKTOP_LINUX_RESULT: ${{ needs.desktop_linux.result }}
+          EMBEDDED_RESULT: ${{ needs.embedded.result }}
+          SERVER_RESULT: ${{ needs.server.result }}
+          BERT_RESULT: ${{ needs.bert.result }}
+        shell: bash
+        run: |
+          printf '%s=%s\n' desktop_linux_result "$DESKTOP_LINUX_RESULT" >> "$GITHUB_OUTPUT"
+          printf '%s=%s\n' embedded_result "$EMBEDDED_RESULT" >> "$GITHUB_OUTPUT"
+          printf '%s=%s\n' server_result "$SERVER_RESULT" >> "$GITHUB_OUTPUT"
+          printf '%s=%s\n' bert_result "$BERT_RESULT" >> "$GITHUB_OUTPUT"

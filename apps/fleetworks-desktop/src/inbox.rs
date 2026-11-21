@@ -1,20 +1,26 @@
-//! Native Inbox: a bell popover over allowlisted transitions this app already observed.
+//! Native Inbox: a drawer for backend answers and allowlisted workstation notifications.
 //!
-//! It is not a notification service. Nothing is pushed, nothing leaves this process, and it makes
-//! no claim about device-wide alerts. Items are built from fixed text plus a job title or a
-//! readiness check name, never from error text, URLs or credentials. The whole list resets when
-//! the connection authority changes.
+//! Notification items come from fixed text, job titles and readiness check names. The list
+//! resets when the connection authority changes.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
 
 use fleetworks_contracts::readiness::ReadinessState;
+use rune::Cx;
 use rune::El;
+use rune::Icon;
+use rune::TextEdit;
+use rune::Tx;
 use rune_kit::Kit;
 
+use crate::accessibility::ViewPreferences;
 use crate::icons;
+use crate::material;
+use crate::material::GlassSurface;
 use crate::theme;
+use crate::theme::StatusTone;
 use crate::State;
 
 /// Retained items. The oldest is dropped first.
@@ -23,40 +29,71 @@ pub(crate) const MAX_ITEMS: usize = 50;
 const MAX_SEEN_JOB_EVENTS: usize = 200;
 /// Bounded map of tracked job states across pagination and filtering.
 const MAX_TRACKED_JOBS: usize = 512;
+const DAY_SECONDS: f64 = 24.0 * 60.0 * 60.0;
+const DRAWER_WIDTH: f32 = 440.0;
+const BELL: Icon = Icon {
+    name: "fw-inbox-bell",
+    view: 16.0,
+    body: r#"<path d="M5.9 13.1a2.2 2.2 0 0 0 4.2 0M13 11.2H3l1.2-1.9V6a3.8 3.8 0 0 1 7.6 0v3.3L13 11.2Z" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" fill="none"/>"#,
+};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum Filter {
-    #[default]
-    All,
-    Unread,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Kind {
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Topic {
     Connection,
-    Job,
-    Readiness,
+    Job(String),
+    Readiness(String),
 }
 
-impl Kind {
-    fn label(self) -> &'static str {
+impl Topic {
+    fn key(&self) -> String {
         match self {
-            Self::Connection => "Connection",
-            Self::Job => "Job",
-            Self::Readiness => "Readiness",
+            Self::Connection => "inbox-group-connection".into(),
+            Self::Job(id) => format!("inbox-group-job-{id}"),
+            Self::Readiness(check) => format!("inbox-group-readiness-{check}"),
         }
     }
+
+    fn action(&self) -> Option<&'static str> {
+        match self {
+            Self::Connection => None,
+            Self::Job(_) => Some("Open job"),
+            Self::Readiness(_) => Some("View status"),
+        }
+    }
+}
+
+struct Group<'a> {
+    topic: &'a Topic,
+    title: &'a str,
+    items: Vec<&'a Item>,
+    unread: usize,
+}
+
+impl Group<'_> {
+    fn oldest_priority_item(&self) -> &Item {
+        self.items
+            .iter()
+            .copied()
+            .find(|item| !item.read)
+            .unwrap_or(self.items[0])
+    }
+}
+
+fn item_order(left: &Item, right: &Item) -> std::cmp::Ordering {
+    left.at.total_cmp(&right.at).then(left.id.cmp(&right.id))
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Item {
     pub id: u64,
-    pub kind: Kind,
+    topic: Topic,
+    group_title: String,
     pub title: String,
     pub detail: String,
     /// UI clock reading when the transition was observed.
     pub at: f64,
     pub read: bool,
+    tone: StatusTone,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -78,6 +115,7 @@ pub(crate) struct Observation {
     pub jobs: Vec<(String, String, String)>,
     /// (check name, state) from the latest readiness read.
     pub checks: Vec<(String, ReadinessState)>,
+    pub tracked_actor_reindex: bool,
 }
 
 /// Authorized job status update used to reconcile bounded known job states.
@@ -102,11 +140,13 @@ pub struct Inbox {
     checks: Vec<(String, ReadinessState)>,
     seen_job_events: VecDeque<String>,
     pub(crate) open: bool,
-    pub(crate) filter: Filter,
-    pub(crate) selected: Option<u64>,
+    query: TextEdit,
+    expanded: BTreeSet<Topic>,
+    selected: Option<u64>,
 }
 
 impl Inbox {
+    #[cfg(test)]
     pub(crate) fn items(&self) -> impl Iterator<Item = &Item> {
         self.items.iter().rev()
     }
@@ -115,12 +155,47 @@ impl Inbox {
         self.items.iter().filter(|item| !item.read).count()
     }
 
-    pub(crate) fn visible(&self) -> Vec<&Item> {
-        self.items()
-            .filter(|item| {
-                self.filter == Filter::All || !item.read || self.selected == Some(item.id)
+    fn groups(&self) -> Vec<Group<'_>> {
+        let mut grouped = BTreeMap::new();
+        for item in &self.items {
+            grouped
+                .entry(&item.topic)
+                .or_insert_with(Vec::new)
+                .push(item);
+        }
+        let mut groups: Vec<_> = grouped
+            .into_iter()
+            .map(|(topic, mut items)| {
+                items.sort_by(|left, right| item_order(left, right));
+                Group {
+                    topic,
+                    title: &items[items.len() - 1].group_title,
+                    unread: items.iter().filter(|item| !item.read).count(),
+                    items,
+                }
             })
-            .collect()
+            .collect();
+        groups.sort_by(|left, right| {
+            let priority = (left.unread == 0).cmp(&(right.unread == 0));
+            priority
+                .then_with(|| item_order(left.oldest_priority_item(), right.oldest_priority_item()))
+        });
+        groups
+    }
+
+    fn filtered_groups(&self) -> Vec<Group<'_>> {
+        let query = self.query.text.trim().to_lowercase();
+        let mut groups = self.groups();
+        if !query.is_empty() {
+            groups.retain(|group| {
+                group.title.to_lowercase().contains(&query)
+                    || group.items.iter().any(|item| {
+                        item.title.to_lowercase().contains(&query)
+                            || item.detail.to_lowercase().contains(&query)
+                    })
+            });
+        }
+        groups
     }
 
     #[cfg(test)]
@@ -132,15 +207,26 @@ impl Inbox {
             .collect()
     }
 
-    pub(crate) fn select(&mut self, id: u64) {
-        if self.selected == Some(id) {
-            self.selected = None;
-            return;
+    fn toggle_group(&mut self, topic: &Topic) {
+        if !self.expanded.remove(topic) {
+            self.expanded.insert(topic.clone());
         }
+    }
+
+    fn select(&mut self, id: u64) {
+        self.selected = (self.selected != Some(id)).then_some(id);
+    }
+
+    fn mark_read(&mut self, id: u64) {
         if let Some(item) = self.items.iter_mut().find(|item| item.id == id) {
             item.read = true;
-            self.selected = Some(id);
         }
+    }
+
+    pub(crate) fn close(&mut self) {
+        self.open = false;
+        self.query = TextEdit::new("");
+        self.selected = None;
     }
 
     pub(crate) fn mark_all_read(&mut self) {
@@ -151,11 +237,13 @@ impl Inbox {
 
     fn reset(&mut self) {
         self.items.clear();
+        self.query = TextEdit::new("");
         self.link = Link::Unknown;
         self.known_jobs.clear();
         self.known_job_order.clear();
         self.checks.clear();
         self.seen_job_events.clear();
+        self.expanded.clear();
         self.selected = None;
     }
 
@@ -210,11 +298,19 @@ impl Inbox {
                     self.seen_job_events.pop_front();
                 }
                 let state_label = describe_job_state(&state);
+                let tone = match state_label.as_str() {
+                    "completed" => StatusTone::Ok,
+                    "failed" => StatusTone::Err,
+                    "cancelled" => StatusTone::Warn,
+                    _ => StatusTone::Neutral,
+                };
                 self.push(
-                    Kind::Job,
+                    Topic::Job(id.clone()),
+                    title.to_owned(),
                     format!("Job {state_label}"),
                     format!("{title} is now {state_label}. Open Jobs & Logs for details."),
                     now,
+                    tone,
                 );
                 changed = true;
             }
@@ -249,20 +345,33 @@ impl Inbox {
         changed
     }
 
-    fn push(&mut self, kind: Kind, title: String, detail: String, at: f64) {
+    fn push(
+        &mut self,
+        topic: Topic,
+        group_title: String,
+        title: String,
+        detail: String,
+        at: f64,
+        tone: StatusTone,
+    ) {
         self.next_id += 1;
         self.items.push_back(Item {
             id: self.next_id,
-            kind,
+            topic,
+            group_title,
             title,
             detail,
             at,
             read: false,
+            tone,
         });
         while self.items.len() > MAX_ITEMS {
             if let Some(dropped) = self.items.pop_front() {
                 if self.selected == Some(dropped.id) {
                     self.selected = None;
+                }
+                if !self.items.iter().any(|item| item.topic == dropped.topic) {
+                    self.expanded.remove(&dropped.topic);
                 }
             }
         }
@@ -290,20 +399,24 @@ impl Inbox {
             match observation.link {
                 Link::Connected if self.link != Link::Unknown => {
                     self.push(
-                        Kind::Connection,
+                        Topic::Connection,
+                        "Connection".into(),
                         "Connected".into(),
                         "The connection to the backend is ready.".into(),
                         now,
+                        StatusTone::Ok,
                     );
                     changed = true;
                 }
                 Link::Failed => {
                     self.push(
-                        Kind::Connection,
+                        Topic::Connection,
+                        "Connection".into(),
                         "Connection failed".into(),
                         "The last connection attempt did not succeed. Open Setup Gateway for details."
                             .into(),
                         now,
+                        StatusTone::Err,
                     );
                     changed = true;
                 }
@@ -322,16 +435,36 @@ impl Inbox {
             let Some((_, previous)) = self.checks.iter().find(|(known, _)| known == name) else {
                 continue;
             };
-            if previous != state && (is_notable(*previous) || is_notable(*state)) {
+            if previous == state {
+                continue;
+            }
+            let actor_running = name == "Actor search" && *state == ReadinessState::Running;
+            if actor_running && observation.tracked_actor_reindex {
+                continue;
+            }
+            if actor_running || is_notable(*previous) || is_notable(*state) {
+                let title = if actor_running {
+                    crate::readiness_cards::ACTOR_INDEX_CATCH_UP.to_owned()
+                } else {
+                    format!("{name} is {}", readiness_word(*state))
+                };
                 self.push(
-                    Kind::Readiness,
-                    format!("{name} is {}", readiness_word(*state)),
+                    Topic::Readiness(name.clone()),
+                    name.clone(),
+                    title,
                     format!(
                         "{name} changed from {} to {}.",
                         readiness_word(*previous),
                         readiness_word(*state)
                     ),
                     now,
+                    match state {
+                        ReadinessState::Ready => StatusTone::Ok,
+                        ReadinessState::Running => StatusTone::Info,
+                        ReadinessState::Degraded => StatusTone::Warn,
+                        ReadinessState::NotReady | ReadinessState::Unavailable => StatusTone::Err,
+                        _ => StatusTone::Neutral,
+                    },
                 );
                 changed = true;
             }
@@ -399,6 +532,48 @@ pub(crate) fn age_label(now: f64, at: f64) -> String {
 }
 
 impl State {
+    pub(crate) fn open_inbox(&mut self) {
+        self.inbox.open = true;
+        self.inbox_qa.request_resume();
+    }
+
+    pub(crate) fn close_inbox(&mut self, tx: &mut Tx) {
+        self.inbox.close();
+        tx.focus("inbox-toggle", tx.focus_visible());
+    }
+
+    /// Populate the Inbox with a compact synthetic notification and room for a QA exchange.
+    #[doc(hidden)]
+    pub fn seed_inbox_qa_drawer_fixture(&mut self) {
+        if self.fixture {
+            self.inbox.push(
+                Topic::Connection,
+                "Connection".into(),
+                "Connected".into(),
+                "The connection to the backend is ready.".into(),
+                self.clock,
+                StatusTone::Ok,
+            );
+            self.inbox.open = true;
+        }
+    }
+
+    /// Populate the production Inbox with synthetic topics for native visual review.
+    pub fn seed_inbox_drawer_fixture(&mut self) {
+        if self.fixture {
+            seed_drawer(&mut self.inbox, self.clock);
+            self.inbox.push(
+                Topic::Connection,
+                "Connection".into(),
+                "Connecting".into(),
+                "The workstation started connecting to the backend.".into(),
+                self.clock - 25.0 * 3600.0 - 5.0,
+                StatusTone::Info,
+            );
+            self.inbox.mark_read(self.inbox.next_id);
+        }
+    }
+
     /// Fold what this app currently shows into the Inbox. Cheap, bounded, and read-only.
     pub(crate) fn observe_inbox(&mut self) -> bool {
         use crate::app::Load;
@@ -441,6 +616,8 @@ impl State {
             _ => Vec::new(),
         };
         let now = self.clock;
+        let tracked_actor_reindex = crate::views::active_actor_reindex(self).is_some()
+            || crate::views::queued_actor_reindex_id(self).is_some();
         self.inbox.observe(
             now,
             Observation {
@@ -448,157 +625,398 @@ impl State {
                 link,
                 jobs,
                 checks,
+                tracked_actor_reindex,
             },
         )
     }
 }
 
-/// The bell with its unread count, as the popover trigger.
-fn bell(inbox: &Inbox, kit: &Kit) -> El {
-    let unread = inbox.unread();
+pub(crate) fn toolbar_item(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
+    tray(state, kit, "inbox-toggle", preferences)
+}
+
+fn tray(state: &State, kit: &Kit, key: &'static str, preferences: ViewPreferences) -> El {
+    let unread = state.inbox.unread();
     let label = if unread == 0 {
         "Inbox".to_owned()
     } else {
         format!("Inbox, {unread} unread")
     };
-    let button = rune_kit::Button::new(if unread == 0 {
-        String::new()
-    } else if unread > 9 {
-        "9+".to_owned()
+    let bell = rune_kit::Button::new(label.clone())
+        .variant(rune_kit::ButtonVariant::Ghost)
+        .icon(&BELL)
+        .expanded(state.inbox.open)
+        .label_with(move |font, _| {
+            if unread == 0 {
+                return rune::el();
+            }
+            rune::el()
+                .key("inbox-unread-badge")
+                .center()
+                .fill(theme::hex(theme::MOLTEN_BRIGHT))
+                .radius(8.0)
+                .px(5.0)
+                .child(
+                    rune::text(unread.to_string())
+                        .font(font)
+                        .color(theme::hex(theme::ON_ACCENT)),
+                )
+        })
+        .on_press_tx(|state: &mut State, tx| {
+            if state.inbox.open {
+                state.close_inbox(tx);
+            } else if !state.has_active_confirmation()
+                && !state.settings_open
+                && !state.commands.open
+            {
+                state.open_inbox();
+            }
+        })
+        .build(kit)
+        .key(key)
+        .label(label)
+        .h(28.0)
+        .px(8.0)
+        .radius(999.0);
+    let bell = material::glass_control(bell, preferences);
+    if state.inbox.open {
+        bell.fill(
+            theme::hex(theme::SURFACE_ELEVATED).alpha(if preferences.matte() { 1.0 } else { 0.82 }),
+        )
     } else {
-        unread.to_string()
-    })
-    .variant(rune_kit::ButtonVariant::Ghost)
-    .icon(&icons::BELL)
-    .on_press(|state: &mut State| {
-        state.inbox.open = !state.inbox.open;
-    });
-    button.build(kit).key("inbox-toggle").label(label)
+        bell
+    }
 }
 
-/// The toolbar bell and its popover. The popover is pushed to `layers`.
-pub(crate) fn toolbar_item(
+pub(crate) fn drawer(
     state: &State,
+    cx: &Cx<State>,
     kit: &Kit,
     preferences: crate::accessibility::ViewPreferences,
-    layers: &mut Vec<El>,
-) -> El {
-    let inbox = &state.inbox;
-    let popover = rune_kit::Popover::new("inbox")
-        .trigger(bell(inbox, kit))
-        .title("Inbox")
-        .label("Inbox")
-        .placement(rune_kit::Placement::BottomEnd)
-        .open(inbox.open)
-        .padding(0.0)
-        .on_close(|state: &mut State| {
-            state.inbox.open = false;
-            state.inbox.selected = None;
-        })
-        .child(body(state, kit));
-    let mut inbox_layers = Vec::new();
-    let trigger = popover.build(kit, &mut inbox_layers);
-    // The kit puts the anchored panel above its dismiss layer. Keep the anchor and focus handling.
-    if let Some(panel) = inbox_layers.pop() {
-        layers.extend(inbox_layers);
-        layers.push(
-            panel
-                .transition(crate::app::surface_transition(
-                    preferences.reduced_motion,
-                    rune::Transition::offset(0.0, -4.0),
-                ))
-                .instant_changes(),
-        );
+) -> Option<El> {
+    if !state.inbox.open || state.has_active_confirmation() {
+        return None;
     }
-    trigger
+    let window_width = cx.layout_size("app-shell").map_or(640.0, |size| size[0]);
+    let mut panel = body(state, kit, preferences)
+        .w(DRAWER_WIDTH)
+        .max_w(DRAWER_WIDTH)
+        .h_full()
+        .min_h(0.0)
+        .transition(crate::app::surface_transition(
+            preferences.reduced_motion,
+            rune::Transition::offset(DRAWER_WIDTH, 0.0),
+        ))
+        .instant_changes();
+    for shadow in kit.shadow_layers(&kit.elevation.overlay) {
+        panel = panel.box_shadow(shadow);
+    }
+    let panel = material::glass(panel, GlassSurface::Overlay, preferences);
+    let scrim = rune::el()
+        .key("inbox-scrim")
+        .absolute(0.0, 0.0)
+        .w_full()
+        .h_full()
+        .fill(theme::hex(theme::BACKGROUND).alpha(if window_width < 820.0 { 0.44 } else { 0.28 }))
+        .a11y_hidden();
+    Some(
+        rune::el()
+            .key("inbox-layer")
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h_full()
+            .role("dialog")
+            .label("Inbox")
+            .focus_return("inbox-toggle")
+            .modal_tx(false, State::close_inbox)
+            .child(scrim)
+            .child(
+                rune::row()
+                    .key("inbox-panel-position")
+                    .w_full()
+                    .h_full()
+                    .child(dismiss_area("inbox-backdrop-left").grow(1.0).h_full())
+                    .child(panel),
+            ),
+    )
 }
 
-fn body(state: &State, kit: &Kit) -> El {
+fn dismiss_area(key: &'static str) -> El {
+    rune::el()
+        .key(key)
+        .a11y_hidden()
+        .tab_index(-1)
+        .on_press_tx(State::close_inbox)
+}
+
+fn body(state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
     let inbox = &state.inbox;
-    let visible = inbox.visible();
-    let filter = rune_kit::SegmentedControl::new(
-        &["All", "Unread"],
-        Some(match inbox.filter {
-            Filter::All => 0,
-            Filter::Unread => 1,
-        }),
-    )
-    .label("Inbox filter")
-    .on_pick(|state: &mut State, index, _| {
-        state.inbox.filter = if index == 1 {
-            Filter::Unread
-        } else {
-            Filter::All
-        };
-    })
-    .build(kit)
-    .key("inbox-filter");
+    let close = rune_kit::Button::new("Close")
+        .variant(rune_kit::ButtonVariant::Ghost)
+        .on_press_tx(State::close_inbox)
+        .build(kit)
+        .key("inbox-close")
+        .autofocus();
     let mark = rune_kit::Button::new("Mark all read")
         .variant(rune_kit::ButtonVariant::Ghost)
         .disabled(inbox.unread() == 0)
-        .on_press(|state: &mut State| state.inbox.mark_all_read())
+        .on_press_tx(|state: &mut State, tx| {
+            state.inbox.mark_all_read();
+            tx.focus("inbox-close", tx.focus_visible());
+        })
         .build(kit)
         .key("inbox-mark-all-read");
-    let mut rows = rune::col().key("inbox-list").w_full().gap(2.0);
-    if visible.is_empty() {
+    let filter = rune_kit::TextInput::new(&inbox.query)
+        .label("Filter notifications")
+        .placeholder("Search Inbox")
+        .on_edit(|state: &mut State| &mut state.inbox.query)
+        .build(kit)
+        .key("inbox-filter")
+        .w_full();
+    let mut rows = rune::col().key("inbox-list").gap(8.0);
+    let groups = inbox.filtered_groups();
+    if groups.is_empty() {
         rows = rows.child(
-            rune::text(match inbox.filter {
-                Filter::All => "Nothing yet. Job, readiness and connection changes appear here.",
-                Filter::Unread => "No unread items.",
+            rune::text(if inbox.query.text.trim().is_empty() {
+                "Job, readiness and connection changes appear here."
+            } else {
+                "No notifications match this search."
             })
+            .key("inbox-empty")
             .font(kit.ty.small)
             .color(theme::hex(theme::TEXT_MUTED))
-            .wrap()
-            .padding(12.0),
+            .wrap(),
         );
     }
-    for item in visible {
-        rows = rows.child(row(item, inbox.selected == Some(item.id), state.clock, kit));
+    let mut last_section = "";
+    for group in groups {
+        // The observation clock is elapsed time. Keep unread-first ordering, then group
+        // adjacent cards by the age of the item that determines each group's place.
+        let section = if state.clock - group.oldest_priority_item().at < DAY_SECONDS {
+            "PAST 24 HOURS"
+        } else {
+            "EARLIER"
+        };
+        if section != last_section {
+            rows = rows.child(
+                rune::text(section)
+                    .key(format!("inbox-time-{}", group.topic.key()))
+                    .role("heading")
+                    .font(kit.ty.small_medium)
+                    .color(theme::hex(theme::TEXT_MUTED)),
+            );
+            last_section = section;
+        }
+        rows = rows.child(group_view(&group, state, kit, preferences));
     }
     rune::col()
         .key("inbox-body")
-        .w(320.0)
-        .min_h(0.0)
         .child(
-            // The helper wraps inside the popover instead of running past its edge.
-            rune::col().w_full().px(12.0).pt(10.0).child(
-                rune::text("Changes this app observed. Nothing is sent to your device.")
-                    .key("inbox-helper")
-                    .font(kit.ty.small)
-                    .color(theme::hex(theme::TEXT_MUTED))
-                    .wrap()
-                    .min_w(0.0),
-            ),
-        )
-        .child(
-            // Filter and action stack, so the action stays inside the popover at any text width.
             rune::col()
+                .key("inbox-header")
                 .w_full()
-                .px(12.0)
+                .px(14.0)
                 .py(8.0)
                 .gap(6.0)
-                .child(filter)
-                .child(mark),
+                .border_sides([0.0, 0.0, 1.0, 0.0], theme::hex(theme::BORDER_SUBTLE))
+                .child(
+                    rune::row()
+                        .gap(8.0)
+                        .center_y()
+                        .child(
+                            rune::text("Inbox")
+                                .font(kit.ty.body_medium)
+                                .color(theme::hex(theme::TEXT_PRIMARY))
+                                .grow(1.0)
+                                .wrap(),
+                        )
+                        .child(material::glass_control(mark, preferences))
+                        .child(material::glass_control(close, preferences))
+                        .child(tray(state, kit, "inbox-toggle-close", preferences).tab_index(-1)),
+                )
+                .child(
+                    rune::text("Only changes observed by this workstation.")
+                        .key("inbox-helper")
+                        .font(kit.ty.small)
+                        .color(theme::hex(theme::TEXT_MUTED))
+                        .wrap(),
+                )
+                .child(material::glass_control(filter, preferences)),
         )
-        .child(rune_kit::popover::fit_scroll(rows))
+        .child(
+            rune::col()
+                .key("inbox-scroll")
+                .w_full()
+                .grow(1.0)
+                .min_h(0.0)
+                .scroll(rune::ScrollSpec {
+                    stick_bottom: false,
+                })
+                .scroll_anchor()
+                .child(
+                    rows.children(crate::inbox_qa::exchange(state, kit))
+                        .w_full()
+                        .padding(12.0),
+                ),
+        )
+        .child(crate::inbox_qa::footer(state, kit, preferences))
 }
 
-fn row(item: &Item, expanded: bool, now: f64, kit: &Kit) -> El {
-    let id = item.id;
-    let mut header = rune::row()
+fn group_view(group: &Group<'_>, state: &State, kit: &Kit, preferences: ViewPreferences) -> El {
+    let key = group.topic.key();
+    let expanded = state.inbox.expanded.contains(group.topic);
+    let toggle_key = format!("{key}-toggle");
+    let group_toggle_key = toggle_key.clone();
+    let topic = group.topic.clone();
+    let latest = group.items[group.items.len() - 1];
+    let count = format!("{} unread", group.unread);
+    let label = format!(
+        "{}, {}, {}",
+        group.title,
+        count,
+        age_label(state.clock, latest.at)
+    );
+    let trigger = rune::row()
+        .key(toggle_key)
+        .role("button")
+        .focusable(true)
+        .label(label)
+        .expanded(expanded)
         .w_full()
+        .min_h(42.0)
+        .px(10.0)
+        .py(6.0)
         .gap(8.0)
         .center_y()
+        .radius(5.0)
+        .hover(theme::hex(theme::SURFACE_ELEVATED))
+        .on_press_tx(move |state: &mut State, tx| {
+            state.inbox.toggle_group(&topic);
+            tx.keep_on_screen(group_toggle_key.clone());
+        })
+        .child(status_dot(latest.tone))
         .child(
-            rune::text(if item.read { " " } else { "●" })
-                .font(kit.ty.small)
-                .color(theme::hex(theme::ACCENT_HOVER))
+            rune::text(group.title.to_owned())
+                .font(kit.ty.small_medium)
+                .color(theme::hex(theme::TEXT_PRIMARY))
+                .wrap()
+                .min_w(0.0)
+                .grow(1.0)
                 .a11y_hidden(),
         )
         .child(
             rune::col()
-                .grow(1.0)
-                .min_w(0.0)
+                .gap(2.0)
+                .a11y_hidden()
+                .child(
+                    rune::text(count)
+                        .font(kit.ty.small_medium)
+                        .color(theme::hex(if group.unread == 0 {
+                            theme::TEXT_MUTED
+                        } else {
+                            theme::MOLTEN_ACCENT
+                        })),
+                )
+                .child(
+                    rune::text(age_label(state.clock, latest.at))
+                        .font(kit.ty.small)
+                        .color(theme::hex(theme::TEXT_MUTED)),
+                ),
+        )
+        .child(
+            rune::icon(
+                if expanded {
+                    &icons::CHEVRON_DOWN
+                } else {
+                    &icons::CHEVRON_RIGHT
+                },
+                12.0,
+            )
+            .color(theme::hex(theme::TEXT_SECONDARY))
+            .a11y_hidden(),
+        );
+    let border = theme::hex(if preferences.matte() {
+        theme::BORDER_CONTROL
+    } else {
+        theme::BORDER_SUBTLE
+    });
+    let card = rune::col().key("card").w_full().radius(8.0).child(trigger);
+    // The popover samples the backdrop once. Its stacked cards share the elevated tint
+    // and rim without repeatedly blurring the same scene.
+    let mut card = material::glass(card, GlassSurface::Overlay, preferences).backdrop_blur(0.0);
+    if expanded {
+        for item in &group.items {
+            card = card.child(row(item, state, kit));
+        }
+    }
+    let mut entry = rune::col().key(key).w_full().child(card);
+    if !expanded && group.items.len() > 1 {
+        for (key, inset) in [("near-lip", 7.0), ("far-lip", 13.0)] {
+            entry = entry.child(
+                rune::row().key(key).w_full().px(inset).a11y_hidden().child(
+                    rune::el()
+                        .grow(1.0)
+                        .h(3.0)
+                        .radius(2.0)
+                        .fill(
+                            theme::hex(theme::SURFACE_RAISED).alpha(if preferences.matte() {
+                                1.0
+                            } else {
+                                0.82
+                            }),
+                        )
+                        .border_sides([0.0, 1.0, 1.0, 1.0], border),
+                ),
+            );
+        }
+    }
+    entry
+}
+
+fn status_dot(tone: StatusTone) -> El {
+    rune::el()
+        .size(6.0, 6.0)
+        .radius(3.0)
+        .fill(tone.fg())
+        .a11y_hidden()
+}
+
+fn row(item: &Item, state: &State, kit: &Kit) -> El {
+    let id = item.id;
+    let expanded = state.inbox.selected == Some(id);
+    let row_key = format!("inbox-item-{id}-row");
+    let toggle_key = row_key.clone();
+    let age = age_label(state.clock, item.at);
+    let mut entry = rune::col()
+        .key(format!("inbox-item-{id}"))
+        .w_full()
+        .px(10.0)
+        .border_sides([1.0, 0.0, 0.0, 0.0], theme::hex(theme::BORDER_SUBTLE))
+        .child(
+            rune::row()
+                .key(row_key.clone())
+                .role("button")
+                .focusable(true)
+                .label(format!(
+                    "{}{}, {}",
+                    if item.read { "" } else { "Unread, " },
+                    item.title,
+                    age
+                ))
+                .expanded(expanded)
+                .w_full()
+                .min_h(34.0)
+                .px(8.0)
+                .py(5.0)
+                .gap(8.0)
+                .center_y()
+                .radius(5.0)
+                .hover(theme::hex(theme::SURFACE_ELEVATED))
+                .on_press_tx(move |state: &mut State, tx| {
+                    state.inbox.select(id);
+                    tx.keep_on_screen(toggle_key.clone());
+                })
+                .child(status_dot(item.tone))
                 .child(
                     rune::text(item.title.clone())
                         .font(if item.read {
@@ -607,38 +1025,147 @@ fn row(item: &Item, expanded: bool, now: f64, kit: &Kit) -> El {
                             kit.ty.small_medium
                         })
                         .color(theme::hex(theme::TEXT_PRIMARY))
-                        .wrap(),
+                        .min_w(0.0)
+                        .grow(1.0)
+                        .wrap()
+                        .a11y_hidden(),
                 )
                 .child(
-                    rune::text(format!(
-                        "{} · {}",
-                        item.kind.label(),
-                        age_label(now, item.at)
-                    ))
-                    .font(kit.ty.small)
-                    .color(theme::hex(theme::TEXT_MUTED)),
+                    rune::text(age)
+                        .font(kit.ty.small)
+                        .color(theme::hex(theme::TEXT_MUTED))
+                        .a11y_hidden(),
                 ),
         );
-    header = header.padding(8.0);
-    let mut entry = rune::col().key(format!("inbox-item-{id}")).w_full().child(
-        rune::row()
-            .key(format!("inbox-item-{id}-row"))
-            .w_full()
-            .on_press(move |state: &mut State| state.inbox.select(id))
-            .child(header),
-    );
-    if expanded {
-        entry = entry.child(
-            rune::text(item.detail.clone())
-                .key(format!("inbox-item-{id}-detail"))
-                .font(kit.ty.small)
-                .color(theme::hex(theme::TEXT_SECONDARY))
-                .wrap()
-                .px(24.0)
-                .pb(10.0),
+    if !expanded {
+        return entry;
+    }
+    let mut actions = rune::row().gap(6.0);
+    if !item.read {
+        let topic = item.topic.clone();
+        actions = actions.child(
+            rune_kit::Button::new("Mark read")
+                .variant(rune_kit::ButtonVariant::Ghost)
+                .on_press_tx(move |state: &mut State, tx| {
+                    let position = |inbox: &Inbox| {
+                        inbox
+                            .filtered_groups()
+                            .iter()
+                            .position(|group| group.topic == &topic)
+                    };
+                    let before = position(&state.inbox);
+                    state.inbox.mark_read(id);
+                    if position(&state.inbox) == before {
+                        tx.focus(row_key.clone(), tx.focus_visible());
+                        tx.keep_on_screen(row_key.clone());
+                    } else {
+                        // Keep the scroll viewport where the reader was when this group moves.
+                        tx.focus("inbox-close", tx.focus_visible());
+                    }
+                })
+                .build(kit)
+                .key(format!("inbox-item-{id}-mark")),
         );
     }
+    if let Some(label) = item.topic.action().filter(|_| {
+        !matches!(item.topic, Topic::Job(_))
+            || (state.connected() && state.registration.context.is_some())
+    }) {
+        let topic = item.topic.clone();
+        actions = actions.child(
+            rune_kit::Button::new(label)
+                .variant(rune_kit::ButtonVariant::Ghost)
+                .label_with(move |font, _| {
+                    rune::text(label)
+                        .font(font)
+                        .color(theme::hex(theme::MOLTEN_ACCENT))
+                })
+                .on_press_tx(move |state: &mut State, tx| {
+                    state.close_inbox(tx);
+                    match &topic {
+                        Topic::Job(id) => {
+                            state.setup_gateway = false;
+                            state.open_job(id);
+                        }
+                        Topic::Readiness(name) => {
+                            state.navigate(crate::app::Page::Workstation);
+                            let check = match &state.readiness {
+                                crate::app::Load::Ready(readiness) => readiness
+                                    .checks
+                                    .iter()
+                                    .find(|check| humanize(&format!("{:?}", check.id)) == *name)
+                                    .map(|check| check.id),
+                                _ => None,
+                            };
+                            if let Some(id) = check {
+                                state.reveal_readiness_check(id, tx);
+                            }
+                        }
+                        Topic::Connection => {}
+                    }
+                })
+                .build(kit)
+                .key(format!("inbox-item-{id}-action")),
+        );
+    }
+    entry = entry.child(
+        rune::col()
+            .key(format!("inbox-item-{id}-detail"))
+            .gap(5.0)
+            .px(12.0)
+            .pb(6.0)
+            .child(
+                rune::text(item.detail.clone())
+                    .font(kit.ty.small)
+                    .color(theme::hex(theme::TEXT_SECONDARY))
+                    .wrap(),
+            )
+            .child(actions),
+    );
     entry
+}
+
+fn seed_drawer(inbox: &mut Inbox, now: f64) {
+    let connection = Topic::Connection;
+    let readiness = Topic::Readiness("Actor search".into());
+    let job = Topic::Job("fixture-index-job".into());
+    let job_title = "Scheduled maintenance for the synthetic regional actor catalogue";
+    inbox.push(
+        connection.clone(),
+        "Connection".into(),
+        "Connected".into(),
+        "The connection to the backend is ready.".into(),
+        now - 25.0 * 3600.0,
+        StatusTone::Ok,
+    );
+    inbox.mark_all_read();
+    inbox.push(
+        readiness.clone(),
+        "Actor search".into(),
+        crate::readiness_cards::ACTOR_INDEX_CATCH_UP.into(),
+        "The index is warming up after backend startup. You can keep using the other workstation tools.".into(),
+        now - 120.0,
+        StatusTone::Info,
+    );
+    inbox.push(
+        job.clone(),
+        job_title.into(),
+        "Job completed".into(),
+        format!("{job_title} is complete. Open Jobs & Logs for details."),
+        now - 120.0,
+        StatusTone::Ok,
+    );
+    inbox.push(
+        readiness.clone(),
+        "Actor search".into(),
+        "Actor search is ready".into(),
+        "Actor search changed from running to ready.".into(),
+        now - 28.0,
+        StatusTone::Ok,
+    );
+    inbox.expanded.extend([readiness, job]);
+    inbox.selected = inbox.items.get(1).map(|item| item.id);
+    inbox.open = true;
 }
 
 #[cfg(test)]
@@ -766,65 +1293,57 @@ mod tests {
     }
 
     #[test]
-    fn selecting_marks_read_and_filters_follow() {
+    fn groups_use_oldest_unread_then_insertion_order_with_chronological_rows() {
         let mut inbox = Inbox::default();
-        inbox.observe(0.0, obs(1, Link::Connecting));
-        inbox.observe(1.0, obs(1, Link::Failed));
-        inbox.observe(2.0, obs(1, Link::Connected));
+        seed_drawer(&mut inbox, 900.0);
+        let actor = Topic::Readiness("Actor search".into());
+        let job = Topic::Job("fixture-index-job".into());
+
+        let groups = inbox.groups();
+        assert_eq!(
+            groups.iter().map(|group| group.topic).collect::<Vec<_>>(),
+            [&actor, &job, &Topic::Connection],
+        );
+        assert_eq!(groups[0].unread, 2);
+        let [earliest, latest] = groups[0].items.as_slice() else {
+            panic!("two ordered actor notifications");
+        };
+        assert!(earliest.at < latest.at);
+        assert_eq!(earliest.at, groups[1].items[0].at);
+        let earliest_id = earliest.id;
+        inbox.mark_read(earliest_id);
+        inbox.mark_read(earliest_id);
         assert_eq!(inbox.unread(), 2);
-        let id = inbox.items().next().expect("item").id;
-        inbox.select(id);
-        assert_eq!(inbox.unread(), 1);
-        inbox.filter = Filter::Unread;
-        // The expanded selected row stays visible in Unread until collapsed.
-        assert_eq!(inbox.visible().len(), 2);
-        inbox.select(id);
-        assert!(inbox.selected.is_none());
-        assert_eq!(inbox.visible().len(), 1);
+        let groups = inbox.groups();
+        assert_eq!(groups[0].topic, &job);
+        assert_eq!(groups[1].topic, &actor);
+        assert_eq!(groups[1].unread, 1);
+
         inbox.mark_all_read();
         assert_eq!(inbox.unread(), 0);
+        assert_eq!(inbox.groups()[0].topic, &Topic::Connection);
     }
 
     #[test]
-    fn unread_filter_keeps_selected_row_visible_until_collapse_and_decrements_once() {
-        let mut state = crate::tests::registered_fixture();
-        state.inbox.observe(0.0, obs(1, Link::Connecting));
-        state.inbox.observe(1.0, obs(1, Link::Connected));
-        state.inbox.filter = Filter::Unread;
-        state.inbox.open = true;
-        let id = state.inbox.items().next().expect("item").id;
+    fn background_actor_progress_is_a_readiness_item_only_when_untracked() {
+        for tracked in [false, true] {
+            let mut inbox = Inbox::default();
+            let mut base = obs(1, Link::Connected);
+            base.checks = vec![("Actor search".into(), ReadinessState::Unknown)];
+            inbox.observe(0.0, base.clone());
 
-        let mut runtime = rune::Runtime::new(
-            state,
-            crate::app::view,
-            (1180.0, 800.0),
-            rune::Env {
-                system_dark: true,
-                scale: 1.0,
-            },
-        );
-        runtime.frame(0.0);
-        runtime.frame(1.0 / 60.0);
-        assert_eq!(runtime.state.inbox.unread(), 1);
-        assert!(runtime.find(&format!("inbox-item-{id}")).is_some());
-
-        runtime.update(|state, _| state.inbox.select(id));
-        runtime.frame(2.0 / 60.0);
-        assert_eq!(runtime.state.inbox.unread(), 0);
-        assert!(
-            runtime.find(&format!("inbox-item-{id}")).is_some(),
-            "expanded row stays visible in Unread filter until collapsed"
-        );
-        assert!(
-            runtime.find(&format!("inbox-item-{id}-detail")).is_some(),
-            "expanded detail renders in Unread filter"
-        );
-
-        // Collapsing removes the read item from Unread and does not underflow unread count.
-        runtime.update(|state, _| state.inbox.select(id));
-        runtime.frame(3.0 / 60.0);
-        assert_eq!(runtime.state.inbox.unread(), 0);
-        assert!(runtime.find(&format!("inbox-item-{id}")).is_none());
+            base.tracked_actor_reindex = tracked;
+            base.checks[0].1 = ReadinessState::Running;
+            assert_eq!(inbox.observe(1.0, base), !tracked);
+            if tracked {
+                assert_eq!(inbox.unread(), 0);
+            } else {
+                let item = inbox.items().next().expect("actor readiness item");
+                assert_eq!(item.topic, Topic::Readiness("Actor search".into()));
+                assert_eq!(item.topic.action(), Some("View status"));
+                assert_eq!(item.title, crate::readiness_cards::ACTOR_INDEX_CATCH_UP);
+            }
+        }
     }
 
     #[test]
@@ -916,89 +1435,301 @@ mod tests {
         assert_eq!(age_label(8000.0, 0.0), "2h ago");
     }
 
-    #[test]
-    fn real_view_shows_the_bell_then_the_list_with_expandable_detail() {
-        let mut state = crate::tests::registered_fixture();
-        state.inbox.observe(0.0, obs(1, Link::Connecting));
-        state.inbox.observe(1.0, obs(1, Link::Connected));
-        let id = state.inbox.items().next().expect("item").id;
+    fn runtime(state: State, size: (f32, f32)) -> rune::Runtime<State> {
         let mut runtime = rune::Runtime::new(
             state,
             crate::app::view,
-            (1180.0, 800.0),
+            size,
             rune::Env {
                 system_dark: true,
                 scale: 1.0,
             },
         );
         runtime.frame(0.0);
-        assert!(runtime.find("inbox-toggle").is_some());
-        assert!(runtime.find("inbox-body").is_none());
+        runtime.frame(0.25);
+        runtime.frame(0.5);
+        runtime
+    }
 
-        runtime.update(|state, _| state.inbox.open = true);
-        runtime.frame(1.0 / 60.0);
-        runtime.frame(2.0 / 60.0);
-        assert!(runtime.find("inbox-body").is_some());
-        assert!(runtime.find(&format!("inbox-item-{id}")).is_some());
-        assert!(runtime.find(&format!("inbox-item-{id}-detail")).is_none());
-        assert_eq!(runtime.state.inbox.unread(), 1);
+    fn click(runtime: &mut rune::Runtime<State>, key: &str, now: f64) {
+        let (x, y) = runtime.find(key).unwrap_or_else(|| panic!("visible {key}"));
+        runtime.pointer_down(x, y);
+        runtime.pointer_up(x, y);
+        runtime.frame(now);
+    }
 
-        runtime.update(|state, _| state.inbox.select(id));
-        runtime.frame(3.0 / 60.0);
-        assert!(runtime.find(&format!("inbox-item-{id}-detail")).is_some());
-        assert_eq!(runtime.state.inbox.unread(), 0);
+    fn focused(runtime: &rune::Runtime<State>, key: &str) -> bool {
+        runtime.elements().into_iter().any(|element| {
+            element.key.as_deref() == Some(key) && element.focused && !element.exiting
+        })
     }
 
     #[test]
-    fn the_popover_helper_and_mark_all_read_stay_inside_it_at_wide_and_compact_sizes() {
-        for size in [(1280.0, 800.0), (640.0, 480.0)] {
-            let mut state = crate::tests::registered_fixture();
-            state.inbox.observe(0.0, obs(1, Link::Connecting));
-            state.inbox.observe(1.0, obs(1, Link::Connected));
-            state.inbox.open = true;
-            let mut runtime = rune::Runtime::new(
-                state,
-                crate::app::view,
-                size,
-                rune::Env {
-                    system_dark: true,
-                    scale: 1.0,
-                },
-            );
-            for frame in 0..4 {
-                runtime.frame(f64::from(frame) / 60.0);
+    fn modal_drawer_has_four_close_paths_and_preserves_the_workspace_at_minimum_size() {
+        let mut state = crate::tests::registered_fixture();
+        state.page = crate::app::Page::Workstation;
+        state.assistant.enabled = true;
+        state.assistant.preference = crate::assistant::Preference::Open;
+        state.inbox.observe(0.0, obs(1, Link::Connecting));
+        state.inbox.observe(1.0, obs(1, Link::Connected));
+        let mut runtime = runtime(state, (640.0, 480.0));
+        let (toolbar, _) = runtime.presented("toolbar").expect("toolbar geometry");
+        let (command, _) = runtime.presented("command-open").expect("command geometry");
+        let (telemetry, _) = runtime
+            .presented("toolbar-telemetry")
+            .expect("telemetry geometry");
+        assert!((command[0] + command[2] / 2.0 - toolbar[0] - toolbar[2] / 2.0).abs() < 0.5);
+        assert!(command[0] + command[2] <= telemetry[0]);
+
+        for (step, close) in [
+            "inbox-toggle-close",
+            "inbox-close",
+            "Escape",
+            "inbox-backdrop-left",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let now = 1.0 + step as f64 * 2.0;
+            click(&mut runtime, "inbox-toggle", now);
+            runtime.frame(now + 0.3);
+            assert_eq!(runtime.state.inbox.unread(), 1);
+            assert!(focused(&runtime, "inbox-close"));
+            assert!(runtime.find("assistant-dock").is_some());
+            assert!(runtime.find("screen-workstation").is_some());
+            let (panel, _) = runtime.presented("inbox-body").expect("drawer geometry");
+            for (coordinate, expected) in
+                panel
+                    .into_iter()
+                    .zip([640.0 - DRAWER_WIDTH, 0.0, DRAWER_WIDTH, 480.0])
+            {
+                assert!((coordinate - expected).abs() < 0.5, "{panel:?}");
             }
-            let rect = |key: &str| {
-                runtime
+            for key in [
+                "inbox-close",
+                "inbox-toggle-close",
+                "inbox-mark-all-read",
+                "inbox-helper",
+                "inbox-filter",
+                "inbox-scroll",
+            ] {
+                let (rect, _) = runtime.presented(key).expect(key);
+                assert!(
+                    rect[0] >= panel[0] && rect[0] + rect[2] <= 640.5,
+                    "{key}: {rect:?}"
+                );
+                assert!(
+                    rect[1] >= panel[1] && rect[1] + rect[3] <= 480.5,
+                    "{key}: {rect:?}"
+                );
+            }
+            let mut reached_group = false;
+            for seq in 0..5 {
+                runtime.key(rune::KeyEvent {
+                    key: rune::Key::Tab,
+                    mods: rune::Mods::default(),
+                });
+                runtime.frame(now + 0.4 + f64::from(seq) * 0.01);
+                if focused(&runtime, "inbox-group-connection-toggle") {
+                    reached_group = true;
+                    if step == 0 {
+                        runtime.key(rune::KeyEvent {
+                            key: rune::Key::Text(" ".into()),
+                            mods: rune::Mods::default(),
+                        });
+                        runtime.frame(now + 0.45 + f64::from(seq) * 0.01);
+                        assert!(runtime.find("inbox-item-1-row").is_some());
+                        break;
+                    }
+                }
+                assert!(runtime
                     .elements()
                     .into_iter()
-                    .find(|element| element.key.as_deref() == Some(key))
-                    .unwrap_or_else(|| panic!("{key} at {size:?}"))
-                    .rect
-            };
-            let (body, helper, mark) = (
-                rect("inbox-body"),
-                rect("inbox-helper"),
-                rect("inbox-mark-all-read"),
+                    .any(|element| { element.focused && element.path.contains("inbox-body") }));
+            }
+            assert!(reached_group);
+            if close == "Escape" {
+                runtime.key(rune::KeyEvent {
+                    key: rune::Key::Escape,
+                    mods: rune::Mods::default(),
+                });
+                runtime.frame(now + 0.6);
+            } else {
+                click(&mut runtime, close, now + 0.6);
+            }
+            runtime.frame(now + 0.9);
+            assert!(!runtime.state.inbox.open, "{close}");
+            assert!(runtime.find("inbox-body").is_none(), "{close}");
+            assert!(focused(&runtime, "inbox-toggle"), "{close}");
+            assert_eq!(
+                runtime.state.assistant.preference,
+                crate::assistant::Preference::Open
             );
-            let inside = |inner: [f32; 4]| {
-                inner[0] >= body[0] - 0.5
-                    && inner[0] + inner[2] <= body[0] + body[2] + 0.5
-                    && inner[1] >= body[1] - 0.5
-                    && inner[1] + inner[3] <= body[1] + body[3] + 0.5
-            };
-            assert!(
-                inside(helper),
-                "helper {helper:?} outside body {body:?} at {size:?}"
-            );
-            assert!(
-                inside(mark),
-                "action {mark:?} outside body {body:?} at {size:?}"
-            );
-            assert!(
-                body[0] >= 0.0 && body[0] + body[2] <= size.0,
-                "popover {body:?} leaves the {size:?} window"
-            );
+            assert_eq!(runtime.state.page, crate::app::Page::Workstation);
         }
+    }
+
+    #[test]
+    fn glass_and_opaque_chrome_and_inbox_keep_the_same_hit_bounds() {
+        use crate::accessibility::FixtureAccessibility;
+
+        for size in [(640.0, 480.0), (1280.0, 800.0)] {
+            let build = |opaque| {
+                let mut state = crate::tests::registered_fixture();
+                state.seed_inbox_drawer_fixture();
+                state.accessibility.fixture_override = Some(FixtureAccessibility {
+                    reduced_transparency: opaque,
+                    matte_fallback: opaque,
+                    ..FixtureAccessibility::default()
+                });
+                runtime(state, size)
+            };
+            let glass = build(false);
+            let opaque = build(true);
+            let rail = if size.0 < 820.0 {
+                "compact-icon-rail"
+            } else {
+                "sidebar"
+            };
+            for key in [
+                "toolbar-glass",
+                rail,
+                "command-open",
+                "connection-editor",
+                "inbox-toggle",
+                "inbox-body",
+                "inbox-filter",
+            ] {
+                let glass_bounds = glass.presented(key).unwrap_or_else(|| panic!("{key}"));
+                assert_eq!(
+                    Some(glass_bounds),
+                    opaque.presented(key),
+                    "{key} at {size:?}"
+                );
+            }
+            assert_eq!(glass.accessibility_json(), opaque.accessibility_json());
+        }
+    }
+
+    #[test]
+    fn inbox_filter_keeps_unread_totals_and_restores_all_groups_on_reopen() {
+        let mut state = crate::tests::registered_fixture();
+        state.seed_inbox_drawer_fixture();
+        let mut runtime = runtime(state, (1280.0, 800.0));
+        assert!(runtime.find("inbox-time-inbox-group-connection").is_some());
+        assert!(runtime.find("inbox-group-connection/near-lip").is_some());
+        assert!(runtime.find("inbox-group-job-fixture-index-job").is_some());
+
+        click(&mut runtime, "inbox-filter/value/input", 1.0);
+        runtime.key(rune::KeyEvent {
+            key: rune::Key::Text("WARMING UP".into()),
+            mods: rune::Mods::default(),
+        });
+        runtime.frame(1.25);
+        assert!(runtime.find("inbox-group-readiness-Actor search").is_some());
+        assert!(runtime.find("inbox-group-job-fixture-index-job").is_none());
+        assert!(runtime.find("inbox-group-connection").is_none());
+        assert_eq!(runtime.state.inbox.unread(), 3);
+
+        click(&mut runtime, "inbox-close", 1.5);
+        click(&mut runtime, "inbox-toggle", 1.75);
+        assert!(runtime.find("inbox-group-job-fixture-index-job").is_some());
+        assert_eq!(runtime.state.inbox.unread(), 3);
+    }
+
+    #[test]
+    fn drawer_view_status_reveals_the_matching_readiness_disclosure() {
+        use fleetworks_contracts::readiness::ReadinessCheck;
+        use fleetworks_contracts::readiness::ReadinessCheckId;
+        use fleetworks_contracts::readiness::WorkstationReadiness;
+
+        let mut state = crate::tests::registered_fixture();
+        state.page = crate::app::Page::Tools;
+        let stamp = "2026-01-01T00:00:00Z";
+        let mut check = ReadinessCheck::new(
+            ReadinessCheckId::ActorSearch,
+            ReadinessState::Running,
+            "index_catching_up".into(),
+            "Synthetic actor index catch-up".into(),
+            stamp.into(),
+        );
+        check.fresh_for_ms = 30_000;
+        state.readiness = crate::app::Load::Ready(WorkstationReadiness::new(
+            "synthetic-deployment".into(),
+            stamp.into(),
+            vec![check],
+        ));
+        state.readiness_received_at = Some(0.0);
+        seed_drawer(&mut state.inbox, 900.0);
+        let mut runtime = runtime(state, (640.0, 480.0));
+        click(&mut runtime, "inbox-item-2-action", 1.0);
+        runtime.frame(1.3);
+
+        assert_eq!(runtime.state.page, crate::app::Page::Workstation);
+        assert!(!runtime.state.inbox.open);
+        assert!(runtime.state.workstation_status_checks_open);
+        assert!(runtime.find("readiness-details-actor_search").is_some());
+        assert!(runtime.elements().iter().any(|element| {
+            element.key.as_deref() == Some("readiness-trigger-actor_search") && element.focused
+        }));
+        assert_eq!(runtime.state.inbox.unread(), 3);
+    }
+
+    #[test]
+    fn drawer_actions_update_badges_and_keep_the_selected_notification_on_screen() {
+        let mut state = crate::tests::registered_fixture();
+        seed_drawer(&mut state.inbox, 900.0);
+        let mut runtime = runtime(state, (640.0, 480.0));
+        let row = "inbox-item-2-row";
+        let later_row = "inbox-item-4-row";
+        let mark = "inbox-item-2-mark";
+        let status = "inbox-item-2-action";
+        let group = "inbox-group-job-fixture-index-job-toggle";
+        let label = |runtime: &rune::Runtime<State>, key: &str| {
+            runtime
+                .elements()
+                .into_iter()
+                .find(|element| element.key.as_deref() == Some(key))
+                .and_then(|element| element.label)
+                .unwrap_or_else(|| panic!("accessible {key}"))
+        };
+        assert_eq!(label(&runtime, "inbox-toggle-close"), "Inbox, 3 unread");
+        assert_eq!(label(&runtime, status), "View status");
+        assert!(label(&runtime, group).contains("1 unread"));
+
+        click(&mut runtime, mark, 1.0);
+        runtime.frame(1.3);
+        assert_eq!(label(&runtime, "inbox-toggle-close"), "Inbox, 2 unread");
+        assert!(focused(&runtime, "inbox-close"));
+        assert_eq!(
+            runtime.state.inbox.groups()[0].topic,
+            &Topic::Job("fixture-index-job".into())
+        );
+        assert!(runtime.find("inbox-item-2-detail").is_some());
+        assert!(runtime.find(mark).is_none());
+
+        runtime.update(|state, tx| {
+            tx.focus(row, true);
+            state.inbox.push(
+                Topic::Connection,
+                "Connection".into(),
+                "Connected".into(),
+                "The connection to the backend is ready.".into(),
+                901.0,
+                StatusTone::Ok,
+            );
+        });
+        runtime.frame(1.5);
+        assert_eq!(label(&runtime, "inbox-toggle-close"), "Inbox, 3 unread");
+        assert!(focused(&runtime, row));
+        assert!(runtime.find("inbox-item-2-detail").is_some());
+
+        click(&mut runtime, later_row, 1.6);
+        click(&mut runtime, "inbox-item-4-mark", 1.7);
+        assert!(focused(&runtime, "inbox-close"));
+        click(&mut runtime, "inbox-mark-all-read", 1.8);
+        assert_eq!(label(&runtime, "inbox-toggle-close"), "Inbox");
+        assert_eq!(runtime.state.inbox.unread(), 0);
+        assert!(focused(&runtime, "inbox-close"));
     }
 }

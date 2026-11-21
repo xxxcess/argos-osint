@@ -101,7 +101,7 @@ describe("Fleetworks palette compositing contracts (rendered verification remain
       colors.selectionSurface,
     ]);
   });
-  it("uses canonical five-ray geometry with a transparent crescent across web assets", () => {
+  it("uses the canonical core and transparent crescent across web assets", () => {
     const canonical = readFileSync(
       new URL("../../../assets/brand/fleetworks-mark.svg", import.meta.url),
       "utf8",
@@ -119,7 +119,8 @@ describe("Fleetworks palette compositing contracts (rendered verification remain
     );
     expect(publicMark).toBe(canonical);
     expect(shared).toContain(canonical.trim());
-    expect(canonical.match(/<polygon /g)).toHaveLength(5);
+    expect(canonical).not.toContain("<polygon");
+    expect(canonical).toContain('fill="url(#core)"');
     expect(canonical).toContain('mask="url(#crescent)"');
     expect(canonical).not.toContain("#141414");
     for (const name of ["icon.svg", "apple-icon.svg"]) {
@@ -127,7 +128,8 @@ describe("Fleetworks palette compositing contracts (rendered verification remain
         new URL(`../../../apps/web-desktop/app/${name}`, import.meta.url),
         "utf8",
       );
-      expect(icon.match(/<polygon /g)).toHaveLength(5);
+      expect(icon).not.toContain("<polygon");
+      expect(icon).toContain('fill="url(#core)"');
       expect(icon).toContain('fill="#060709"');
       expect(icon).toContain('mask="url(#crescent)"');
     }
@@ -166,6 +168,33 @@ describe("Fleetworks palette compositing contracts (rendered verification remain
     ])
       expect(contrast(colors.onAccent, accent)).toBeGreaterThanOrEqual(4.5);
     expect(contrast(colors.text, colors.accent)).toBeLessThan(4.5);
+  });
+  it("keeps Glass Canvas text and functional edges readable over the desk", () => {
+    const materials = [
+      "rgba(11, 15, 20, 0.8)",
+      "rgba(11, 15, 20, 0.82)",
+      "rgba(18, 24, 32, 0.82)",
+      "rgba(25, 33, 43, 0.88)",
+    ];
+    for (const face of materials) {
+      const overBrightImage = css(composite(face, "#FFFFFF"));
+      for (const ink of [colors.text, colors.dim]) {
+        expect(contrast(ink, overBrightImage)).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+    for (const background of [
+      colors.panel,
+      colors.raised,
+      colors.elevated,
+      ...materials.map((face) => css(composite(face, colors.elevated))),
+    ]) {
+      expect(contrast(colors.muted, background)).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(colors.border, background)).toBeGreaterThanOrEqual(3);
+      expect(contrast("#72E9FF", background)).toBeGreaterThanOrEqual(3);
+    }
+    expect(
+      contrast(colors.molten, colors.moltenSurface),
+    ).toBeGreaterThanOrEqual(4.5);
   });
   it("retains essential border/focus contrast after alpha blending", () => {
     for (const background of [

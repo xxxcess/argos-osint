@@ -35,7 +35,16 @@ use tokio::task::JoinHandle;
 
 use crate::capabilities::Capabilities;
 use crate::chat::ChatTurnRequest;
+use crate::chat::QaCancelRequest;
+use crate::chat::QaEventQuery;
+use crate::chat::QaSettingsUpdate;
+use crate::chat::QaTurnRequest;
 use crate::chat::CHAT_TURNS_PATH;
+use crate::chat::QA_CANCEL_PATH;
+use crate::chat::QA_EVENTS_PATH;
+use crate::chat::QA_LATEST_PATH;
+use crate::chat::QA_SETTINGS_PATH;
+use crate::chat::QA_TURNS_PATH;
 use crate::classifier_activation::ActivationRequest;
 use crate::classifier_activation::ACTIVATION_PATH;
 use crate::classifier_activation::ACTIVATION_RESULT_PATH;
@@ -688,6 +697,12 @@ pub enum IpcOperation {
     ReindexActors(MaintenanceRequest),
     ClassifierActivate(ActivationRequest),
     ChatTurnSubmit(ChatTurnRequest),
+    QaSettings,
+    QaSettingsUpdate(QaSettingsUpdate),
+    QaTurnSubmit(QaTurnRequest),
+    QaLatest,
+    QaEvents(QaEventQuery),
+    QaCancel(QaCancelRequest),
     ModelRoleSet(ModelRoleSetRequest),
     ProfileAccountUpsert(ProfileAccountUpsertRequest),
     ProfileAccountDelete(ProfileAccountDeleteRequest),
@@ -765,6 +780,12 @@ impl fmt::Debug for IpcOperation {
             Self::ClassifierActivate(r) => f.debug_tuple("ClassifierActivate").field(r).finish(),
             // Operator text stays out of debug output.
             Self::ChatTurnSubmit(_) => f.write_str("ChatTurnSubmit(..)"),
+            Self::QaSettings => f.write_str("QaSettings"),
+            Self::QaSettingsUpdate(_) => f.write_str("QaSettingsUpdate(..)"),
+            Self::QaTurnSubmit(_) => f.write_str("QaTurnSubmit(..)"),
+            Self::QaLatest => f.write_str("QaLatest"),
+            Self::QaEvents(_) => f.write_str("QaEvents(..)"),
+            Self::QaCancel(_) => f.write_str("QaCancel(..)"),
             Self::ModelRoleSet(r) => f.debug_tuple("ModelRoleSet").field(r).finish(),
             Self::ProfileAccountUpsert(r) => {
                 f.debug_tuple("ProfileAccountUpsert").field(r).finish()
@@ -833,6 +854,12 @@ impl IpcOperation {
         "reindex_actors",
         "classifier_activate",
         "chat_turn_submit",
+        "qa_settings",
+        "qa_settings_update",
+        "qa_turn_submit",
+        "qa_latest",
+        "qa_events",
+        "qa_cancel",
         "model_role_set",
         "profile_account_upsert",
         "profile_account_delete",
@@ -886,6 +913,12 @@ impl IpcOperation {
             Self::ReindexActors(_) => "reindex_actors",
             Self::ClassifierActivate(_) => "classifier_activate",
             Self::ChatTurnSubmit(_) => "chat_turn_submit",
+            Self::QaSettings => "qa_settings",
+            Self::QaSettingsUpdate(_) => "qa_settings_update",
+            Self::QaTurnSubmit(_) => "qa_turn_submit",
+            Self::QaLatest => "qa_latest",
+            Self::QaEvents(_) => "qa_events",
+            Self::QaCancel(_) => "qa_cancel",
             Self::ModelRoleSet(_) => "model_role_set",
             Self::ProfileAccountUpsert(_) => "profile_account_upsert",
             Self::ProfileAccountDelete(_) => "profile_account_delete",
@@ -939,6 +972,12 @@ impl IpcOperation {
             Self::ReindexActors(_) => (IpcMethod::Post, ACTOR_REINDEX_PATH),
             Self::ClassifierActivate(_) => (IpcMethod::Post, ACTIVATION_PATH),
             Self::ChatTurnSubmit(_) => (IpcMethod::Post, CHAT_TURNS_PATH),
+            Self::QaSettings => (IpcMethod::Get, QA_SETTINGS_PATH),
+            Self::QaSettingsUpdate(_) => (IpcMethod::Post, QA_SETTINGS_PATH),
+            Self::QaTurnSubmit(_) => (IpcMethod::Post, QA_TURNS_PATH),
+            Self::QaLatest => (IpcMethod::Get, QA_LATEST_PATH),
+            Self::QaEvents(_) => (IpcMethod::Get, QA_EVENTS_PATH),
+            Self::QaCancel(_) => (IpcMethod::Post, QA_CANCEL_PATH),
             Self::ModelRoleSet(_) => (IpcMethod::Post, MODELS_DEFAULTS_SET_PATH),
             Self::ProfileAccountUpsert(_) => (IpcMethod::Post, PROFILE_ACCOUNTS_UPSERT_PATH),
             Self::ProfileAccountDelete(_) => (IpcMethod::Post, PROFILE_ACCOUNTS_DELETE_PATH),
@@ -963,6 +1002,8 @@ impl IpcOperation {
             JOBS_PATH => Ok(Self::JobsList(JobsListQuery::default())),
             CYCLE_HISTORY_PATH => Ok(Self::CycleHistory(CycleHistoryQuery::default())),
             LOGS_PATH => Ok(Self::LogsPage(LogQuery::default())),
+            QA_SETTINGS_PATH => Ok(Self::QaSettings),
+            QA_LATEST_PATH => Ok(Self::QaLatest),
             _ => Err(ClientError::InvalidRoute),
         }
     }
@@ -997,6 +1038,7 @@ impl IpcOperation {
             CYCLE_HISTORY_PATH => decode_query(value).map(Self::CycleHistory),
             CANDIDATE_DETAIL_PATH => decode_query(value).map(Self::ClassifierCandidateDetail),
             ACTIVATION_RESULT_PATH => decode_query(value).map(Self::ClassifierActivationResult),
+            QA_EVENTS_PATH => decode_query(value).map(Self::QaEvents),
             _ => Err(ClientError::InvalidRoute),
         }
     }
@@ -1024,6 +1066,9 @@ impl IpcOperation {
             ACTOR_REINDEX_PATH => decode_body(body_bytes).map(Self::ReindexActors),
             ACTIVATION_PATH => decode_body(body_bytes).map(Self::ClassifierActivate),
             CHAT_TURNS_PATH => decode_body(body_bytes).map(Self::ChatTurnSubmit),
+            QA_SETTINGS_PATH => decode_body(body_bytes).map(Self::QaSettingsUpdate),
+            QA_TURNS_PATH => decode_body(body_bytes).map(Self::QaTurnSubmit),
+            QA_CANCEL_PATH => decode_body(body_bytes).map(Self::QaCancel),
             MODELS_DEFAULTS_SET_PATH => decode_body(body_bytes).map(Self::ModelRoleSet),
             PROFILE_ACCOUNTS_UPSERT_PATH => decode_body(body_bytes).map(Self::ProfileAccountUpsert),
             PROFILE_ACCOUNTS_DELETE_PATH => decode_body(body_bytes).map(Self::ProfileAccountDelete),

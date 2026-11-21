@@ -35,17 +35,25 @@ on:
         options: [auto, native, backend, all]
         default: auto
       image_builder:
-        description: Use the nightly pilot, or select a builder for an exact-head pilot
+        description: Use Depot for nightly reviews, or select an exact-head benchmark builder
         type: choice
         options: [auto, buildx, depot]
         default: auto
+      native_embedded_image:
+        description: Build a Linux x86_64 Embedded development image from the native package
+        type: boolean
+        default: false
+      depot_linux_native_pilot:
+        description: Compare Depot cold and warm Linux native builds with a same-revision GitHub baseline
+        type: boolean
+        default: false
 
 permissions:
   contents: read
   actions: read
 
 concurrency:
-  group: fleetworks-${{ github.event_name }}-${{ github.event_name == 'push' && github.ref != 'refs/heads/nightly' && 'stable' || github.event.pull_request.number || github.ref }}-${{ inputs.stage || 'standard' }}
+  group: fleetworks-${{ github.event_name }}-${{ github.event_name == 'push' && github.ref != 'refs/heads/nightly' && 'stable' || github.event.pull_request.number || github.ref }}-${{ inputs.depot_linux_native_pilot && 'depot-linux-native-pilot' || inputs.stage || 'standard' }}
   cancel-in-progress: ${{ github.event_name != 'push' }}
 
 env:
@@ -58,8 +66,18 @@ env:
   CARGO_PROFILE_TEST_DEBUG: 0
 
 jobs:
+  linux_native_depot_pilot:
+    name: Linux native Depot pilot
+    if: github.event_name == 'workflow_dispatch' && inputs.depot_linux_native_pilot
+    uses: ./.github/workflows/fleetworks-native-linux-depot-pilot.yml
+    with:
+      expected-head: ${{ inputs.head }}
+    secrets:
+      depot-ci-token: ${{ secrets.DEPOT_LINUX_NATIVE_PILOT_TOKEN }}
+
   scope:
     name: Select verification scopes
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.depot_linux_native_pilot) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -69,24 +87,26 @@ jobs:
     outputs:
       head: ${{ steps.release.outputs.head }}
       desktop_linux: ${{ steps.verification.outputs.desktop_linux }}
+      core_native_linux: ${{ steps.verification.outputs.core_native_linux }}
       desktop_macos: ${{ steps.verification.outputs.desktop_macos }}
       backend_matrix: ${{ steps.verification.outputs.backend_matrix }}
       backend_arch: ${{ steps.verification.outputs.backend_arch }}
-      image_matrix: ${{ steps.verification.outputs.image_matrix }}
-      depot_review: >-
-        ${{ vars.DEPOT_REVIEW_PROJECT_ID != '' && inputs.image_builder != 'buildx'
-          && ((github.event_name == 'pull_request'
-            && github.event.pull_request.head.repo.full_name == github.repository
-            && github.event.pull_request.base.ref == 'nightly')
-          || (github.event_name == 'workflow_dispatch'
-            && ((github.ref == 'refs/heads/nightly' && inputs.stage == 'standard')
-              || inputs.image_builder == 'depot'))) }}
+      review_image_matrix: ${{ steps.verification.outputs.review_image_matrix }}
+      review_image_builder: ${{ steps.image_execution.outputs.builder }}
+      review_image_skip_reason: ${{ steps.image_execution.outputs.skip_reason }}
+      depot_release: ${{ github.event_name == 'push' && github.ref == 'refs/heads/nightly' }}
       local_backend: ${{ steps.verification.outputs.local_backend }}
       server: ${{ steps.verification.outputs.server }}
       compose: ${{ steps.verification.outputs.compose }}
       queue: ${{ steps.verification.outputs.queue }}
       storage: ${{ steps.verification.outputs.storage }}
       bert: ${{ steps.verification.outputs.bert }}
+      inbox_qa: ${{ steps.verification.outputs.inbox_qa }}
+      inbox_qa_packs: ${{ steps.verification.outputs.inbox_qa_packs }}
+      inbox_qa_images: ${{ steps.verification.outputs.inbox_qa_images }}
+      inbox_qa_embedded: ${{ steps.verification.outputs.inbox_qa_embedded }}
+      inbox_qa_distributed: ${{ steps.verification.outputs.inbox_qa_distributed }}
+      inbox_qa_depot: ${{ steps.verification.outputs.inbox_qa_distributed == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
       web: ${{ steps.verification.outputs.web }}
       web_dev: ${{ steps.verification.outputs.web_dev }}
       images: ${{ steps.verification.outputs.images }}
@@ -98,15 +118,32 @@ jobs:
       release_image_tag: ${{ steps.release.outputs.image_tag }}
       release_plan: ${{ steps.release.outputs.plan }}
     steps:
-      - name: Validate explicitly requested Depot pilot
-        if: github.event_name == 'workflow_dispatch' && inputs.image_builder == 'depot'
+      - name: Validate explicitly requested image build
+        if: github.event_name == 'workflow_dispatch' && (inputs.image_builder != 'auto' || inputs.native_embedded_image)
         env:
           DEPOT_REVIEW_PROJECT_ID: ${{ vars.DEPOT_REVIEW_PROJECT_ID }}
           EXPECTED_HEAD: ${{ inputs.head }}
+          NATIVE_EMBEDDED_IMAGE: ${{ inputs.native_embedded_image }}
+          IMAGE_BUILDER: ${{ inputs.image_builder }}
+          MODE: ${{ inputs.mode }}
+          STAGE: ${{ inputs.stage }}
+          COMPONENTS: ${{ inputs.components }}
         shell: bash
         run: |
-          if [[ -z "$DEPOT_REVIEW_PROJECT_ID" || "$GITHUB_REF" != refs/heads/* || "$EXPECTED_HEAD" != "$GITHUB_SHA" ]]; then
-            echo '::error::A Depot pilot needs DEPOT_REVIEW_PROJECT_ID and an exact head on a repository branch'
+          if [[ "$GITHUB_REF" != refs/heads/* || "$EXPECTED_HEAD" != "$GITHUB_SHA" ]]; then
+            echo '::error::An explicitly requested image build requires an exact head on a repository branch'
+            exit 1
+          fi
+          if [[ ( "$IMAGE_BUILDER" == depot || "$NATIVE_EMBEDDED_IMAGE" == true ) && -z "$DEPOT_REVIEW_PROJECT_ID" ]]; then
+            echo '::error::Depot image builds require DEPOT_REVIEW_PROJECT_ID'
+            exit 1
+          fi
+          if [[ "$IMAGE_BUILDER" == buildx && "$STAGE" != standard ]]; then
+            echo '::error::Buildx image benchmarks require a standard manual dispatch'
+            exit 1
+          fi
+          if [[ "$NATIVE_EMBEDDED_IMAGE" == true && ( "$IMAGE_BUILDER" == buildx || "$MODE" != full || "$STAGE" != standard || ( "$COMPONENTS" != native && "$COMPONENTS" != all ) ) ]]; then
+            echo '::error::The native Embedded image requires a standard full dispatch with components=native or all and Depot enabled'
             exit 1
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -328,9 +365,58 @@ jobs:
 
       - name: Select jobs for the current pass
         id: verification
+        env:
+          INBOX_QA_ELIGIBLE: >-
+            ${{ (github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'nightly') ||
+                (github.event_name == 'workflow_dispatch' && inputs.stage == 'second' && steps.promotion.outputs.base_ref == 'nightly') ||
+                github.ref == 'refs/heads/nightly' ||
+                (github.event_name == 'workflow_dispatch' && inputs.image_builder == 'depot') }}
         run: |
           python3 .github/scripts/fleetworks_ci.py select --stage "$FLEETWORKS_STAGE" \
             --plan "$RUNNER_TEMP/release.json" --output "$GITHUB_OUTPUT"
+
+      - name: Require a separate Depot project for nightly release images
+        if: github.event_name == 'push' && github.ref == 'refs/heads/nightly' && steps.release.outputs.publish == 'true' && steps.verification.outputs.images == 'true'
+        env:
+          DEPOT_RELEASE_PROJECT_ID: ${{ vars.DEPOT_RELEASE_PROJECT_ID }}
+          DEPOT_REVIEW_PROJECT_ID: ${{ vars.DEPOT_REVIEW_PROJECT_ID }}
+        shell: bash
+        run: |
+          if [[ -z "$DEPOT_RELEASE_PROJECT_ID" || "$DEPOT_RELEASE_PROJECT_ID" == "$DEPOT_REVIEW_PROJECT_ID" ]]; then
+            echo '::error::Set DEPOT_RELEASE_PROJECT_ID to a Depot project separate from DEPOT_REVIEW_PROJECT_ID for nightly release images'
+            exit 1
+          fi
+
+      - name: Route selected review image builds
+        id: image_execution
+        if: steps.verification.outputs.review_images == 'true'
+        env:
+          FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          BUILDX_BENCHMARK: ${{ github.event_name == 'workflow_dispatch' && inputs.stage == 'standard' && inputs.image_builder == 'buildx' }}
+          DEPOT_ELIGIBLE: >-
+            ${{ (github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'nightly')
+              || (github.event_name == 'workflow_dispatch'
+                && ((github.ref == 'refs/heads/nightly' && inputs.stage == 'standard')
+                  || (inputs.stage == 'second' && steps.promotion.outputs.base_ref == 'nightly')
+                  || inputs.image_builder == 'depot'))
+              || (github.event_name == 'push' && github.ref == 'refs/heads/nightly') }}
+          DEPOT_REVIEW_PROJECT_ID: ${{ vars.DEPOT_REVIEW_PROJECT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$FORK_PR" == true ]]; then
+            printf '%s\n' 'skip_reason=fork' >> "$GITHUB_OUTPUT"
+          elif [[ "$BUILDX_BENCHMARK" == true ]]; then
+            printf '%s\n' 'builder=buildx' >> "$GITHUB_OUTPUT"
+          elif [[ "$DEPOT_ELIGIBLE" == true ]]; then
+            if [[ -z "$DEPOT_REVIEW_PROJECT_ID" ]]; then
+              echo '::error::Selected Docker review images require DEPOT_REVIEW_PROJECT_ID'
+              exit 1
+            fi
+            printf '%s\n' 'builder=depot' >> "$GITHUB_OUTPUT"
+          else
+            printf '%s\n' 'skip_reason=outside_nightly' >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Clean up trusted planner checkout
         if: always()
@@ -338,212 +424,113 @@ jobs:
         run: |
           rm -rf "$RUNNER_TEMP/trusted-planner" "$RUNNER_TEMP/trusted-planner-ready"
 
-  desktop:
-    name: Mac app / ${{ matrix.target }}
-    needs: [scope, desktop_linux]
-    if: always() && needs.scope.result == 'success' && needs.scope.outputs.desktop_macos == 'true' && (needs.desktop_linux.result == 'success' || needs.desktop_linux.result == 'skipped')
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-apple-darwin
-            runner: macos-15-intel
-          - target: aarch64-apple-darwin
-            runner: macos-15
-    uses: ./.github/workflows/fleetworks-native.yml
-    with:
-      expected-head: ${{ needs.scope.outputs.head }}
-      target: ${{ matrix.target }}
-      runner: ${{ matrix.runner }}
-      release-version: ${{ needs.scope.outputs.publish == 'true' && needs.scope.outputs.release_version || '' }}
-
-  desktop_linux:
-    name: Linux app / x86_64-unknown-linux-gnu
+  gsd_core:
+    name: "GSD Nightly: Core"
     needs: scope
-    if: needs.scope.outputs.desktop_linux == 'true'
-    uses: ./.github/workflows/fleetworks-native-linux.yml
-    with:
-      expected-head: ${{ needs.scope.outputs.head }}
-      mode: ${{ needs.scope.outputs.full == 'true' && 'full' || 'pr' }}
-      profile: ${{ needs.scope.outputs.publish == 'true' && 'release' || 'debug' }}
-      release-version: ${{ needs.scope.outputs.publish == 'true' && needs.scope.outputs.release_version || '' }}
-
-  embedded:
-    name: Affected embedded storage
-    needs: scope
-    if: needs.scope.outputs.storage == 'true'
-    uses: ./.github/workflows/embedded.yml
+    if: >-
+      needs.scope.outputs.core_native_linux == 'true' || needs.scope.outputs.server == 'true' ||
+      needs.scope.outputs.storage == 'true' || needs.scope.outputs.bert == 'true'
+    uses: ./.github/workflows/gsd-nightly-core.yml
     with:
       head: ${{ needs.scope.outputs.head }}
-      arch: ${{ needs.scope.outputs.backend_arch }}
-      scoped: ${{ github.event_name == 'pull_request' }}
+      full: ${{ needs.scope.outputs.full == 'true' }}
+      publish: ${{ needs.scope.outputs.publish == 'true' }}
+      release-version: ${{ needs.scope.outputs.publish == 'true' && needs.scope.outputs.release_version || '' }}
+      linux-native: ${{ needs.scope.outputs.core_native_linux == 'true' }}
+      backend-arch: ${{ needs.scope.outputs.backend_arch }}
+      backend-matrix: ${{ needs.scope.outputs.backend_matrix }}
+      server: ${{ needs.scope.outputs.server == 'true' }}
+      storage: ${{ needs.scope.outputs.storage == 'true' }}
+      queue: ${{ needs.scope.outputs.queue == 'true' }}
+      bert: ${{ needs.scope.outputs.bert == 'true' }}
+    secrets:
+      depot-ci-token: ${{ github.event_name == 'push' && github.ref == 'refs/heads/nightly' && needs.scope.outputs.core_native_linux == 'true' && needs.scope.outputs.publish == 'true' && vars.DEPOT_NIGHTLY_NATIVE_ENABLED == 'true' && secrets.DEPOT_LINUX_NATIVE_PILOT_TOKEN || '' }}
 
-  server:
-    name: Backend suite / Linux ${{ matrix.arch }}
+  gsd_ui:
+    name: "GSD Nightly: UI"
     needs: scope
-    if: needs.scope.outputs.server == 'true'
+    if: >-
+      (needs.scope.outputs.desktop_linux == 'true' && needs.scope.outputs.core_native_linux != 'true') ||
+      needs.scope.outputs.desktop_macos == 'true' || needs.scope.outputs.web == 'true'
+    uses: ./.github/workflows/gsd-nightly-ui.yml
+    with:
+      head: ${{ needs.scope.outputs.head }}
+      full: ${{ needs.scope.outputs.full == 'true' }}
+      publish: ${{ needs.scope.outputs.publish == 'true' }}
+      release-version: ${{ needs.scope.outputs.publish == 'true' && needs.scope.outputs.release_version || '' }}
+      linux-native: ${{ needs.scope.outputs.desktop_linux == 'true' && needs.scope.outputs.core_native_linux != 'true' }}
+      macos: ${{ needs.scope.outputs.desktop_macos == 'true' }}
+      web: ${{ needs.scope.outputs.web == 'true' }}
+      web-dev: ${{ needs.scope.outputs.web_dev == 'true' }}
+      inbox-qa: ${{ needs.scope.outputs.inbox_qa == 'true' }}
+    secrets:
+      depot-ci-token: ${{ github.event_name == 'push' && github.ref == 'refs/heads/nightly' && needs.scope.outputs.desktop_linux == 'true' && needs.scope.outputs.core_native_linux != 'true' && needs.scope.outputs.publish == 'true' && vars.DEPOT_NIGHTLY_NATIVE_ENABLED == 'true' && secrets.DEPOT_LINUX_NATIVE_PILOT_TOKEN || '' }}
+
+  inbox_qa_packs:
+    name: Inbox QA worker pack / ${{ matrix.target }}
+    needs: scope
+    if: needs.scope.outputs.inbox_qa == 'true'
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJson(needs.scope.outputs.backend_matrix) }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
-    env:
-      EXPECTED_MACHINE: ${{ matrix.machine }}
-      EXPECTED_TARGET: ${{ matrix.target }}
-      EXPECTED_EXECUTABLE: ${{ matrix.executable }}
-      REVIEW_ARCH: ${{ matrix.arch }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ env.FLEETWORKS_HEAD }}
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@1.95.0
-        with:
-          components: rustfmt
-      - name: Install libclang for the embedded delivery queue
-        run: sudo apt-get update && sudo apt-get install -y libclang-dev
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: distributed-backend-${{ matrix.arch }}
-          workspaces: . -> target/agents
-          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-      - name: Resolve pinned isolated datastore before API tests
-        id: surreal
-        shell: bash
-        run: |
-          set -euo pipefail
-          binary="$(python3 scripts/test_surreal.py --mode server --fetch-only |
-            sed -n 's/^test-surreal: server binary //p')"
-          test -x "$binary"
-          printf 'binary=%s\n' "$binary" >> "$GITHUB_OUTPUT"
-          printf 'ARGOS_SURREAL_BIN=%s\nARGOS_SURREAL_MODE=server\nARGOS_SURREAL_REQUIRED=1\n' "$binary" >> "$GITHUB_ENV"
-      - name: Check, build, and test the backend
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$FLEETWORKS_HEAD"
-          test "$(uname -m)" = "$EXPECTED_MACHINE"
-          test "$(rustc -vV | sed -n 's/^host: //p')" = "$EXPECTED_TARGET"
-          rustc --version | grep -q '^rustc 1\.95\.0 '
-          cargo fmt --all -- --check
-          features=(--no-default-features --features server,nlp,classifier)
-          python3 scripts/fleetworks_verify.py timed --phase server-check -- \
-            python3 scripts/agent_cargo.py check --timings --locked -p argos-api-host "${features[@]}"
-          python3 scripts/fleetworks_verify.py timed --phase server-build -- \
-            python3 scripts/agent_cargo.py build --timings --locked -p argos-api-host --bin argos-api-host "${features[@]}"
-          file target/agents/debug/argos-api-host | grep -Ei "$EXPECTED_EXECUTABLE"
-          python3 scripts/fleetworks_verify.py timed --phase server-test -- \
-            python3 scripts/agent_cargo.py test --timings --locked -p argos-api-host -p argos-osint-api \
-              "${features[@]}" --bin argos-api-host --lib
-          verify_core_tests() {
-            local phase="$1" filter="$2" log
-            log="$RUNNER_TEMP/fleetworks-$phase.log"
-            python3 scripts/fleetworks_verify.py timed --phase "$phase" -- \
-              python3 scripts/agent_cargo.py test --timings --locked -p argos-osint-core \
-                "${features[@]}" --features fixtures --lib "$filter" | tee "$log"
-            if ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored' "$log"; then
-              echo "::error::The required $filter tests did not pass"
-              exit 1
-            fi
-          }
-          verify_core_tests execution-transport-test provider_attempt::remote::tests
-          verify_core_tests config-commit-test config_commit::tests
-      - name: Exercise bootstrap and network service roles on loopback
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -x "$ARGOS_SURREAL_BIN"
-          python3 scripts/fleetworks_verify.py timed --phase network-smoke -- \
-            python3 scripts/fleetworks_network_smoke.py --host target/agents/debug/argos-api-host --surreal "$ARGOS_SURREAL_BIN"
-      - name: Run pinned disk storage contracts
-        if: needs.scope.outputs.full == 'true'
-        env:
-          SURREAL_BIN: ${{ steps.surreal.outputs.binary }}
-        run: |
-          python3 scripts/fleetworks_verify.py timed --phase storage-contracts -- \
-            python3 scripts/test_surreal.py --mode server --bin "$SURREAL_BIN" --timings
-      - name: Test affected storage and brief recovery contracts
-        if: needs.scope.outputs.storage == 'true' && needs.scope.outputs.full != 'true'
-        env:
-          ARGOS_SURREAL_MODE: server
-          ARGOS_SURREAL_REQUIRED: "1"
-          ARGOS_SURREAL_BIN: ${{ steps.surreal.outputs.binary }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          unset SURREAL_USER SURREAL_PASS
-          test -x "$ARGOS_SURREAL_BIN"
-          python3 scripts/fleetworks_verify.py timed --phase storage-affected -- \
-            python3 scripts/agent_cargo.py test --timings --locked -p argos-osint-core \
-              --no-default-features --features server,nlp,classifier,fixtures \
-              --test storage_contracts --test storage_jobs --test storage_brief --test storage_brief_publish \
-              --test storage_provider_pacer --test storage_provider_account --test storage_credits \
-              --test storage_actor_catalog --test storage_atlas_delete
-      - name: Test shared Atlas provider quota reservations
-        if: needs.scope.outputs.queue == 'true' && needs.scope.outputs.full != 'true'
-        env:
-          ARGOS_SURREAL_MODE: server
-          ARGOS_SURREAL_REQUIRED: "1"
-          ARGOS_SURREAL_BIN: ${{ steps.surreal.outputs.binary }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          unset SURREAL_USER SURREAL_PASS
-          test -x "$ARGOS_SURREAL_BIN"
-          log="$RUNNER_TEMP/fleetworks-atlas-quota-test.log"
-          python3 scripts/agent_cargo.py test --locked -p argos-osint-core \
-            --no-default-features --features server,nlp,classifier,fixtures --test storage_atlas \
-            quota_reservations_share_daily_account_caps -- --exact --nocapture | tee "$log"
-          if ! grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored' "$log"; then
-            echo '::error::The required Atlas quota reservation test did not pass'
-            exit 1
-          fi
-      - name: Exercise SQLite jobs and embedded queue dispatch
-        if: needs.scope.outputs.queue == 'true'
-        timeout-minutes: 12
-        env:
-          SURREAL_BIN: ${{ steps.surreal.outputs.binary }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Keep the server feature graph: a Jobs-only selection rebuilds RocksDB's C++ archive.
-          python3 scripts/agent_cargo.py test --locked -p argos-api-host -p fleetworks-jobs \
-            --no-default-features --features server,nlp,classifier
-          python3 scripts/fleetworks_verify.py timed --phase queue-smoke -- \
-            python3 scripts/fleetworks_atlas_smoke.py \
-              --host target/agents/debug/argos-api-host --surreal "$SURREAL_BIN"
-      - name: Validate scoped standalone Compose and optional overlays
-        shell: bash
-        run: |
-          set -euo pipefail
-          review="config-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$REVIEW_ARCH"
-          python3 deploy/native_review.py init --name "$review" --api-port 18091 --web-port 18092 --platform "linux/$REVIEW_ARCH"
-          workspace="$(python3 deploy/native_review.py value --name "$review" --field workspace)"
-          base=(docker compose --env-file "$workspace/compose.env" -f deploy/compose.native-review.yml)
-          "${base[@]}" config --quiet
-          "${base[@]}" -f deploy/compose.yml config --quiet
-          "${base[@]}" -f deploy/compose.yml -f deploy/compose.dev.yml config --quiet
-          "${base[@]}" -f deploy/compose.atlas.yml config --quiet
-      - name: Retain server phase timings
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: fleetworks-server-timings-${{ matrix.arch }}
-          path: |
-            ${{ runner.temp }}/fleetworks-timings.jsonl
-            target/agents/cargo-timings/*.html
-          if-no-files-found: ignore
-          retention-days: 7
+        include: ${{ fromJson(needs.scope.outputs.inbox_qa_packs) }}
+    uses: ./.github/workflows/fleetworks-inbox-qa-pack.yml
+    with:
+      head: ${{ needs.scope.outputs.head }}
+      target: ${{ matrix.target }}
+      runner: ${{ matrix.runner }}
+      streaming-test: ${{ needs.scope.outputs.publish != 'true' && matrix.target == 'x86_64-unknown-linux-gnu' }}
 
-  images:
-    name: Image checks / Linux ${{ matrix.arch }}
-    needs: scope
-    if: needs.scope.outputs.images == 'true' && needs.scope.outputs.publish != 'true' && needs.scope.outputs.depot_review != 'true'
+  inbox_qa_embedded:
+    name: Inbox QA Embedded / ${{ matrix.target }}
+    needs: [scope, inbox_qa_packs, gsd_ui]
+    if: ${{ !cancelled() && needs.scope.outputs.inbox_qa == 'true' }}
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJson(needs.scope.outputs.image_matrix) }}
+        include: ${{ fromJson(needs.scope.outputs.inbox_qa_embedded) }}
+    uses: ./.github/workflows/fleetworks-inbox-qa-smoke.yml
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    with:
+      head: ${{ needs.scope.outputs.head }}
+      target: ${{ matrix.target }}
+      runner: ${{ matrix.runner }}
+      arch: ${{ matrix.arch }}
+      runtime: embedded
+      release-version: ${{ needs.scope.outputs.publish == 'true' && needs.scope.outputs.release_version || '' }}
+      release-asset: ${{ fromJson(needs.scope.outputs.release_plan).inbox_qa == true }}
+
+  inbox_qa_distributed:
+    name: Inbox QA Distributed via Depot / Linux ${{ matrix.arch }}
+    needs: [scope, inbox_qa_packs]
+    if: ${{ !cancelled() && needs.scope.outputs.inbox_qa_depot == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.scope.outputs.inbox_qa_images) }}
+    uses: ./.github/workflows/fleetworks-inbox-qa-smoke.yml
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    with:
+      head: ${{ needs.scope.outputs.head }}
+      target: ${{ matrix.target }}
+      runner: ${{ matrix.runner }}
+      arch: ${{ matrix.arch }}
+      runtime: distributed
+
+  images_buildx_benchmark:
+    name: Docker image benchmark (Buildx) / Linux ${{ matrix.arch }}
+    needs: scope
+    if: github.event_name == 'workflow_dispatch' && inputs.stage == 'standard' && inputs.image_builder == 'buildx' && needs.scope.outputs.review_image_builder == 'buildx'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.scope.outputs.review_image_matrix) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     env:
@@ -559,7 +546,8 @@ jobs:
         run: |
           rustup toolchain install 1.95.0 --profile minimal
           python3 scripts/agent_cargo.py test --locked --no-default-features -p fleetworks-search-index
-      - name: Install pinned Depot CLI
+      - &install_depot
+        name: Install pinned Depot CLI
         if: env.IMAGE_BUILDER == 'depot'
         uses: depot/setup-action@91bc8495a33ebfc504ffc89e5674379ccf23c29c # v1
         with:
@@ -570,11 +558,13 @@ jobs:
           IMAGE_ARCH: ${{ matrix.arch }}
           OWNER: ${{ github.repository_owner }}
           COMPOSE_SELECTED: ${{ matrix.compose }}
+          DEV_SMOKE: ${{ matrix.dev }}
         shell: bash
         run: |
           set -euo pipefail
-          compose=()
-          if [[ "$COMPOSE_SELECTED" == true ]]; then compose=(--compose); fi
+          smoke=()
+          if [[ "$COMPOSE_SELECTED" == true ]]; then smoke+=(--compose); fi
+          if [[ "$DEV_SMOKE" == true ]]; then smoke+=(--dev-smoke); fi
           builder=(--builder "$IMAGE_BUILDER")
           if [[ "$IMAGE_BUILDER" == depot ]]; then
             builder+=(--depot-project "${DEPOT_REVIEW_PROJECT_ID:?Depot review project is required}")
@@ -583,29 +573,30 @@ jobs:
           python3 .github/scripts/release_images.py --revision "$FLEETWORKS_HEAD" \
             --version "$(cat version.txt)" --image-tag "review-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             --targets "$IMAGE_TARGETS" --arch "$IMAGE_ARCH" --registry "ghcr.io/${OWNER,,}" \
-            --directory "$RUNNER_TEMP/image-checks" "${builder[@]}" "${compose[@]}"
+            --directory "$RUNNER_TEMP/image-checks" "${builder[@]}" "${smoke[@]}"
       - name: Retain exact image smoke evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: fleetworks-image-checks-${{ matrix.arch }}-${{ github.run_id }}.${{ github.run_attempt }}
+          name: Fleetworks-Docker-Smoke-and-Timings-${{ env.IMAGE_BUILDER }}-Linux-${{ matrix.arch }}-${{ github.run_id }}.${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/image-checks/*.json
             .agent-scratch/native-review/images-*/public-smoke-*.json
+          include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
 
   images_depot:
     name: Image checks (Depot) / Linux ${{ matrix.arch }}
     needs: scope
-    if: needs.scope.outputs.images == 'true' && needs.scope.outputs.publish != 'true' && needs.scope.outputs.depot_review == 'true'
+    if: needs.scope.outputs.review_image_builder == 'depot'
     permissions:
       contents: read
       id-token: write
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJson(needs.scope.outputs.image_matrix) }}
+        include: ${{ fromJson(needs.scope.outputs.review_image_matrix) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     env:
@@ -613,76 +604,106 @@ jobs:
       DEPOT_REVIEW_PROJECT_ID: ${{ vars.DEPOT_REVIEW_PROJECT_ID }}
     steps: *image_check_steps
 
-  compose:
-    name: Packaged Compose / ${{ matrix.name }}
-    needs: scope
-    if: needs.scope.outputs.compose == 'true' && needs.scope.outputs.images != 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.scope.outputs.backend_matrix) }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 65
+  native_embedded_image:
+    name: Embedded desktop development image (Depot) / Linux x86_64
+    needs: [scope, gsd_ui]
+    if: >-
+      always() && needs.scope.result == 'success' && github.event_name == 'workflow_dispatch' &&
+      inputs.native_embedded_image && needs.gsd_ui.outputs.desktop_linux_result == 'success' &&
+      needs.scope.outputs.publish != 'true'
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      IMAGE_BUILDER: depot
+      DEPOT_REVIEW_PROJECT_ID: ${{ vars.DEPOT_REVIEW_PROJECT_ID }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ env.FLEETWORKS_HEAD }}
+          ref: ${{ needs.scope.outputs.head }}
           persist-credentials: false
-      - name: Exercise standalone packaged backend and selected Web
+          lfs: false
+      - name: Select exact Linux native package artifact
+        id: native_candidate
         env:
-          REVIEW_ARCH: ${{ matrix.arch }}
-          INCLUDE_WEB: ${{ needs.scope.outputs.web }}
-          EXPECTED_MACHINE: ${{ matrix.machine }}
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$FLEETWORKS_HEAD"
-          test "$(uname -m)" = "$EXPECTED_MACHINE"
-          test "$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')" = "linux/$REVIEW_ARCH"
-          python3 -B -m unittest discover -s deploy -p 'test_*.py'
-          web=()
-          if [[ "$INCLUDE_WEB" == true ]]; then web=(--web); fi
-          python3 scripts/fleetworks_verify.py timed --phase compose-build-and-smoke -- \
-            python3 deploy/verify.py --name "ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$REVIEW_ARCH" \
-              --platform "linux/$REVIEW_ARCH" "${web[@]}" --atlas --source-journey
-      - name: Exercise packaged development Web readiness
-        if: needs.scope.outputs.full == 'true' && needs.scope.outputs.web_dev == 'true' && matrix.arch == 'amd64'
+          prefix="Fleetworks-Linux-Desktop-App-x86_64-debug-$FLEETWORKS_HEAD-$GITHUB_RUN_ID."
+          artifact="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" |
+            jq -er --arg prefix "$prefix" --argjson max_attempt "$GITHUB_RUN_ATTEMPT" '
+              [ .[].artifacts[]
+                | select(.expired == false and (.id | type == "number") and (.name | startswith($prefix)))
+                | . + {attempt: (.name | ltrimstr($prefix) | select(test("^[1-9][0-9]*$")) | tonumber)}
+                | select(.attempt <= $max_attempt) ]
+              | (group_by(.attempt) | last) // []
+              | if length == 1 then .[0] | [.id, .attempt] | @tsv
+                else error("Expected exactly one Linux native package artifact at the latest eligible attempt") end
+            ')"
+          IFS=$'\t' read -r artifact_id candidate_attempt <<< "$artifact"
+          printf 'artifact_id=%s\ncandidate_attempt=%s\n' "$artifact_id" "$candidate_attempt" >> "$GITHUB_OUTPUT"
+      - name: Download and verify selected artifact digest
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ steps.native_candidate.outputs.artifact_id }}
+          path: ${{ runner.temp }}/native-embedded-candidate
+          digest-mismatch: error
+      - *install_depot
+      - name: Build, smoke, and export the Embedded development image
+        env:
+          CANDIDATE_ATTEMPT: ${{ steps.native_candidate.outputs.candidate_attempt }}
+        shell: bash
         run: |
-          python3 scripts/fleetworks_verify.py timed --phase compose-dev-smoke -- \
-            python3 deploy/verify.py --name "dev-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --platform linux/amd64 --web --dev
-      - name: Retain Compose phase timings
-        if: always()
+          set -euo pipefail
+          shopt -s nullglob
+          candidate="$RUNNER_TEMP/native-embedded-candidate"
+          archives=("$candidate"/Fleetworks-*.tar.gz)
+          manifests=("$candidate"/Fleetworks-*.manifest.json)
+          if (( ${#archives[@]} != 1 || ${#manifests[@]} != 1 )); then
+            echo '::error::The Linux native package must contain one archive and one manifest'
+            exit 1
+          fi
+          archive="${archives[0]}"
+          if [[ ! -f "$archive.sha256" ]]; then
+            echo '::error::The Linux native package must contain the archive SHA-256 sidecar'
+            exit 1
+          fi
+          version="$(cat version.txt)"
+          if ! jq -e --arg revision "$FLEETWORKS_HEAD" --arg version "$version" --arg run_id "$GITHUB_RUN_ID" --arg attempt "$CANDIDATE_ATTEMPT" '
+            .revision == $revision and .version == $version and .run_id == $run_id and .run_attempt == $attempt
+            and .platform == "linux" and .target == "x86_64-unknown-linux-gnu" and .profile == "debug" and .dirty == false
+            and .companion.relative_path == "bin/argos-api-host"
+          ' "${manifests[0]}" >/dev/null; then
+            echo '::error::The Linux native package manifest does not match the requested Embedded build'
+            exit 1
+          fi
+          read -r digest _ < "$archive.sha256"
+          output="$RUNNER_TEMP/native-embedded-image"
+          image_archive="$output/fleetworks-native-embedded-linux-x86_64-${FLEETWORKS_HEAD:0:12}.tar.gz"
+          mkdir -p "$output"
+          python3 scripts/fleetworks_native_embedded_image.py --archive "$archive" --sha256 "$digest" \
+            --revision "$FLEETWORKS_HEAD" --version "$version" --profile debug --builder depot \
+            --depot-project "$DEPOT_REVIEW_PROJECT_ID" --tag "fleetworks-native-embedded:dev-$GITHUB_RUN_ID.$GITHUB_RUN_ATTEMPT" \
+            --output "$image_archive" | tee "$output/image.json"
+          test -s "$image_archive"
+          test -s "$image_archive.sha256"
+      - name: Upload development image archive and checksum
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: fleetworks-compose-timings-${{ matrix.arch }}
-          path: |
-            ${{ runner.temp }}/fleetworks-timings.jsonl
-            .agent-scratch/native-review/ci-*/public-smoke-*.json
-          if-no-files-found: ignore
+          name: Fleetworks-Embedded-Desktop-Docker-Archive-Linux-x86_64-${{ needs.scope.outputs.head }}-${{ github.run_id }}.${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-embedded-image/*
+          if-no-files-found: error
+          compression-level: 0
           retention-days: 7
-
-  bert:
-    name: Atlas BERT runtime
-    needs: scope
-    if: needs.scope.outputs.bert == 'true'
-    uses: ./.github/workflows/atlas-bert.yml
-    with:
-      head: ${{ needs.scope.outputs.head }}
-      arch: ${{ needs.scope.outputs.backend_arch }}
-
-  web:
-    name: Scoped web
-    needs: scope
-    if: needs.scope.outputs.web == 'true'
-    uses: ./.github/workflows/intel-web.yml
-    with:
-      head: ${{ github.event.pull_request.head.sha || github.sha }}
-      development: ${{ needs.scope.outputs.web_dev == 'true' }}
 
   source_checks:
     name: ${{ inputs.stage == 'second' && 'Fleetworks second pass source checks' || github.event_name == 'workflow_dispatch' && 'Fleetworks manual source checks' || 'Fleetworks source checks' }}
-    needs: [scope, desktop, desktop_linux, server, embedded, compose, bert, web, images, images_depot]
-    if: always()
+    needs: [scope, gsd_core, gsd_ui, images_buildx_benchmark, images_depot, native_embedded_image, inbox_qa_packs, inbox_qa_embedded, inbox_qa_distributed]
+    if: always() && !(github.event_name == 'workflow_dispatch' && inputs.depot_linux_native_pilot)
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -691,28 +712,36 @@ jobs:
           SCOPE_RESULT: ${{ needs.scope.result }}
           PUBLISH_SELECTED: ${{ needs.scope.outputs.publish }}
           MAC_SELECTED: ${{ needs.scope.outputs.desktop_macos }}
-          LINUX_SELECTED: ${{ needs.scope.outputs.desktop_linux }}
+          CORE_LINUX_SELECTED: ${{ needs.scope.outputs.core_native_linux }}
+          UI_LINUX_SELECTED: ${{ needs.scope.outputs.desktop_linux == 'true' && needs.scope.outputs.core_native_linux != 'true' }}
           LOCAL_BACKEND_SELECTED: ${{ needs.scope.outputs.local_backend }}
           SERVER_SELECTED: ${{ needs.scope.outputs.server }}
-          COMPOSE_SELECTED: ${{ needs.scope.outputs.compose == 'true' && needs.scope.outputs.images != 'true' }}
           BERT_SELECTED: ${{ needs.scope.outputs.bert }}
           WEB_SELECTED: ${{ needs.scope.outputs.web }}
           WEB_DEV_SELECTED: ${{ needs.scope.outputs.web_dev }}
-          IMAGES_SELECTED: ${{ needs.scope.outputs.images == 'true' && needs.scope.outputs.publish != 'true' && needs.scope.outputs.depot_review != 'true' }}
-          DEPOT_IMAGES_SELECTED: ${{ needs.scope.outputs.images == 'true' && needs.scope.outputs.publish != 'true' && needs.scope.outputs.depot_review == 'true' }}
-          RELEASE_IMAGES_SELECTED: ${{ needs.scope.outputs.images == 'true' && needs.scope.outputs.publish == 'true' }}
+          BUILDX_BENCHMARK_SELECTED: ${{ needs.scope.outputs.review_image_builder == 'buildx' }}
+          DEPOT_IMAGES_SELECTED: ${{ needs.scope.outputs.review_image_builder == 'depot' }}
+          REVIEW_IMAGE_SKIP_REASON: ${{ needs.scope.outputs.review_image_skip_reason }}
+          NATIVE_EMBEDDED_IMAGE_SELECTED: ${{ github.event_name == 'workflow_dispatch' && inputs.native_embedded_image }}
           IMAGE_TARGETS: ${{ needs.scope.outputs.image_targets }}
           QUEUE_SELECTED: ${{ needs.scope.outputs.queue }}
           STORAGE_SELECTED: ${{ needs.scope.outputs.storage }}
-          DESKTOP_RESULT: ${{ needs.desktop.result }}
-          DESKTOP_LINUX_RESULT: ${{ needs.desktop_linux.result }}
-          SERVER_RESULT: ${{ needs.server.result }}
-          EMBEDDED_RESULT: ${{ needs.embedded.result }}
-          COMPOSE_RESULT: ${{ needs.compose.result }}
-          BERT_RESULT: ${{ needs.bert.result }}
-          WEB_RESULT: ${{ needs.web.result }}
-          IMAGES_RESULT: ${{ needs.images.result }}
+          DESKTOP_RESULT: ${{ needs.gsd_ui.result == 'skipped' && 'skipped' || needs.gsd_ui.outputs.desktop_result }}
+          CORE_LINUX_RESULT: ${{ needs.gsd_core.result == 'skipped' && 'skipped' || needs.gsd_core.outputs.desktop_linux_result }}
+          UI_LINUX_RESULT: ${{ needs.gsd_ui.result == 'skipped' && 'skipped' || needs.gsd_ui.outputs.desktop_linux_result }}
+          SERVER_RESULT: ${{ needs.gsd_core.result == 'skipped' && 'skipped' || needs.gsd_core.outputs.server_result }}
+          EMBEDDED_RESULT: ${{ needs.gsd_core.result == 'skipped' && 'skipped' || needs.gsd_core.outputs.embedded_result }}
+          BERT_RESULT: ${{ needs.gsd_core.result == 'skipped' && 'skipped' || needs.gsd_core.outputs.bert_result }}
+          WEB_RESULT: ${{ needs.gsd_ui.result == 'skipped' && 'skipped' || needs.gsd_ui.outputs.web_result }}
+          BUILDX_BENCHMARK_RESULT: ${{ needs.images_buildx_benchmark.result }}
           DEPOT_IMAGES_RESULT: ${{ needs.images_depot.result }}
+          NATIVE_EMBEDDED_IMAGE_RESULT: ${{ needs.native_embedded_image.result }}
+          INBOX_QA_SELECTED: ${{ needs.scope.outputs.inbox_qa }}
+          INBOX_QA_DISTRIBUTED_AFFECTED: ${{ needs.scope.outputs.inbox_qa_distributed }}
+          INBOX_QA_DEPOT_SELECTED: ${{ needs.scope.outputs.inbox_qa_depot }}
+          INBOX_QA_PACKS_RESULT: ${{ needs.inbox_qa_packs.result }}
+          INBOX_QA_EMBEDDED_RESULT: ${{ needs.inbox_qa_embedded.result }}
+          INBOX_QA_DISTRIBUTED_RESULT: ${{ needs.inbox_qa_distributed.result }}
         shell: bash
         run: |
           set -euo pipefail
@@ -755,14 +784,30 @@ jobs:
           else
             report desktop "$MAC_SELECTED" "$DESKTOP_RESULT"
           fi
-          verify desktop_linux "$LINUX_SELECTED" "$DESKTOP_LINUX_RESULT" || failed=1
+          verify "Core Linux native" "$CORE_LINUX_SELECTED" "$CORE_LINUX_RESULT" || failed=1
+          verify "UI Linux native" "$UI_LINUX_SELECTED" "$UI_LINUX_RESULT" || failed=1
           verify server "$SERVER_SELECTED" "$SERVER_RESULT" || failed=1
           verify embedded "$STORAGE_SELECTED" "$EMBEDDED_RESULT" || failed=1
-          verify compose "$COMPOSE_SELECTED" "$COMPOSE_RESULT" || failed=1
           verify bert "$BERT_SELECTED" "$BERT_RESULT" || failed=1
           verify web "$WEB_SELECTED" "$WEB_RESULT" || failed=1
-          verify images "$IMAGES_SELECTED" "$IMAGES_RESULT" || failed=1
+          verify images_buildx_benchmark "$BUILDX_BENCHMARK_SELECTED" "$BUILDX_BENCHMARK_RESULT" || failed=1
           verify images_depot "$DEPOT_IMAGES_SELECTED" "$DEPOT_IMAGES_RESULT" || failed=1
+          verify native_embedded_image "$NATIVE_EMBEDDED_IMAGE_SELECTED" "$NATIVE_EMBEDDED_IMAGE_RESULT" || failed=1
+          verify "Inbox QA packs" "$INBOX_QA_SELECTED" "$INBOX_QA_PACKS_RESULT" || failed=1
+          verify "Inbox QA Embedded" "$INBOX_QA_SELECTED" "$INBOX_QA_EMBEDDED_RESULT" || failed=1
+          verify "Inbox QA Distributed (Depot)" "$INBOX_QA_DEPOT_SELECTED" "$INBOX_QA_DISTRIBUTED_RESULT" || failed=1
+          if [[ "$INBOX_QA_DISTRIBUTED_AFFECTED:$INBOX_QA_DEPOT_SELECTED" == true:false ]]; then
+            printf 'Inbox QA Distributed was skipped because the fork cannot authenticate to Depot.\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          case "$REVIEW_IMAGE_SKIP_REASON" in
+            fork) reason='fork pull requests cannot use the Depot review project' ;;
+            outside_nightly) reason='outside the nightly rollout; use an exact-head manual Depot dispatch to verify' ;;
+            *) reason='' ;;
+          esac
+          if [[ -n "$reason" ]]; then
+            printf '::notice::Docker review images skipped: %s\n' "$reason"
+            printf 'Docker review images: skipped (%s).\n' "$reason" >> "$GITHUB_STEP_SUMMARY"
+          fi
           printf 'Server images: %s\n' "${IMAGE_TARGETS:-none}" >> "$GITHUB_STEP_SUMMARY"
           printf 'Queue selected: %s. Storage selected: %s. Local backend selected: %s. Development browser selected: %s.\n' \
             "${QUEUE_SELECTED:-missing}" "${STORAGE_SELECTED:-missing}" \
@@ -772,7 +817,7 @@ jobs:
   release_images:
     name: Verified release image staging / Linux ${{ matrix.arch }}
     needs: [scope, source_checks]
-    if: always() && needs.scope.result == 'success' && needs.source_checks.result == 'success' && needs.scope.outputs.publish == 'true' && needs.scope.outputs.images == 'true' && github.event_name == 'push' && contains(fromJson('["refs/heads/dev","refs/heads/nightly","refs/heads/main"]'), github.ref)
+    if: always() && needs.scope.result == 'success' && needs.source_checks.result == 'success' && needs.scope.outputs.publish == 'true' && needs.scope.outputs.images == 'true' && github.event_name == 'push' && contains(fromJson('["refs/heads/dev","refs/heads/main"]'), github.ref)
     permissions:
       contents: read
       packages: write
@@ -784,12 +829,15 @@ jobs:
           - {arch: arm64, runner: ubuntu-24.04-arm}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
-    steps:
+    env:
+      IMAGE_BUILDER: buildx
+    steps: &release_image_steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.scope.outputs.head }}
           persist-credentials: false
           lfs: false
+      - *install_depot
       - name: Test selected private search contracts
         if: contains(needs.scope.outputs.image_targets, 'search-index')
         run: |
@@ -808,19 +856,28 @@ jobs:
           IMAGE_ARCH: ${{ matrix.arch }}
           OWNER: ${{ github.repository_owner }}
           COMPOSE_SELECTED: ${{ needs.scope.outputs.compose == 'true' }}
+          DEPOT_TOKEN: ${{ env.IMAGE_BUILDER == 'depot' && secrets.DEPOT_RELEASE_TOKEN || '' }}
         shell: bash
         run: |
           set -euo pipefail
           registry="ghcr.io/${OWNER,,}"
           compose=()
           if [[ "$COMPOSE_SELECTED" == true ]]; then compose=(--compose); fi
+          builder=(--builder "$IMAGE_BUILDER")
+          if [[ "$IMAGE_BUILDER" == depot ]]; then
+            if [[ -z "$DEPOT_RELEASE_PROJECT_ID" || "$DEPOT_RELEASE_PROJECT_ID" == "$DEPOT_REVIEW_PROJECT_ID" || -z "$DEPOT_TOKEN" ]]; then
+              echo '::error::Nightly Depot staging requires a distinct release project and its protected environment token'
+              exit 1
+            fi
+            builder+=(--depot-project "$DEPOT_RELEASE_PROJECT_ID")
+          fi
           python3 .github/scripts/release_images.py --revision "$HEAD" --version "$VERSION" \
             --image-tag "$IMAGE_TAG" --targets "$IMAGE_TARGETS" --arch "$IMAGE_ARCH" \
-            --registry "$registry" --directory "$RUNNER_TEMP/release-images" --push "${compose[@]}"
+            --registry "$registry" --directory "$RUNNER_TEMP/release-images" --push "${builder[@]}" "${compose[@]}"
       - name: Retain exact staged digest identities and exported image archives
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: fleetworks-release-images-${{ matrix.arch }}-${{ github.run_id }}.${{ github.run_attempt }}
+          name: Fleetworks-Release-Docker-Images-Linux-${{ matrix.arch }}-${{ github.run_id }}.${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/release-images/release-images-*.json
             ${{ runner.temp }}/release-images/fleetworks-images-linux-*.tar.gz
@@ -832,28 +889,58 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: fleetworks-image-smoke-${{ matrix.arch }}-${{ github.run_id }}.${{ github.run_attempt }}
+          name: Fleetworks-Release-Docker-Smoke-Linux-${{ matrix.arch }}-${{ github.run_id }}.${{ github.run_attempt }}
           path: .agent-scratch/native-review/images-*/public-smoke-*.json
+          include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
 
+  release_images_depot:
+    name: Verified release image staging (Depot) / Linux ${{ matrix.arch }}
+    needs: [scope, source_checks]
+    if: always() && needs.scope.result == 'success' && needs.source_checks.result == 'success' && needs.scope.outputs.publish == 'true' && needs.scope.outputs.images == 'true' && needs.scope.outputs.depot_release == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/nightly'
+    permissions:
+      contents: read
+      packages: write
+    environment: fleetworks-release-images
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: amd64, runner: ubuntu-24.04}
+          - {arch: arm64, runner: ubuntu-24.04-arm}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      IMAGE_BUILDER: depot
+      DEPOT_RELEASE_PROJECT_ID: ${{ vars.DEPOT_RELEASE_PROJECT_ID }}
+      DEPOT_REVIEW_PROJECT_ID: ${{ vars.DEPOT_REVIEW_PROJECT_ID }}
+    steps: *release_image_steps
+
   prepublish:
     name: ${{ inputs.stage == 'second' && 'Fleetworks second pass artifact checks' || github.event_name == 'workflow_dispatch' && 'Fleetworks manual artifact checks' || 'Fleetworks artifact checks' }}
-    needs: [scope, source_checks, release_images]
-    if: always()
+    needs: [scope, source_checks, release_images, release_images_depot]
+    if: always() && !(github.event_name == 'workflow_dispatch' && inputs.depot_linux_native_pilot)
     runs-on: ubuntu-24.04
     steps:
       - name: Require source checks and every selected release image
         env:
           SOURCE_RESULT: ${{ needs.source_checks.result }}
-          IMAGES_SELECTED: ${{ needs.scope.outputs.publish == 'true' && needs.scope.outputs.images == 'true' }}
-          IMAGE_RESULT: ${{ needs.release_images.result }}
+          BUILDX_SELECTED: ${{ needs.scope.outputs.publish == 'true' && needs.scope.outputs.images == 'true' && needs.scope.outputs.depot_release != 'true' }}
+          DEPOT_SELECTED: ${{ needs.scope.outputs.publish == 'true' && needs.scope.outputs.images == 'true' && needs.scope.outputs.depot_release == 'true' }}
+          BUILDX_RESULT: ${{ needs.release_images.result }}
+          DEPOT_RESULT: ${{ needs.release_images_depot.result }}
         run: |
+          set -euo pipefail
           test "$SOURCE_RESULT" = success
-          case "$IMAGES_SELECTED:$IMAGE_RESULT" in
-            true:success|false:skipped) ;;
-            *) exit 1 ;;
-          esac
+          verify_staging() {
+            case "$2:$3" in
+              true:success|false:skipped) ;;
+              *) echo "::error::$1 staging selected=$2 result=$3"; return 1 ;;
+            esac
+          }
+          verify_staging Buildx "$BUILDX_SELECTED" "$BUILDX_RESULT"
+          verify_staging Depot "$DEPOT_SELECTED" "$DEPOT_RESULT"
 
   publish:
     name: Publish verified version and channel
@@ -874,21 +961,40 @@ jobs:
         if: fromJson(needs.scope.outputs.release_plan).native
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: Fleetworks-app-*-${{ github.run_id }}.${{ github.run_attempt }}
+          pattern: Fleetworks-macOS-Desktop-App-*-${{ github.run_id }}.${{ github.run_attempt }}
           path: ${{ runner.temp }}/release
           digest-mismatch: error
       - name: Download current-run verified Linux digests and image archives
         if: needs.scope.outputs.images == 'true'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: fleetworks-release-images-*-${{ github.run_id }}.${{ github.run_attempt }}
+          pattern: Fleetworks-Release-Docker-Images-Linux-*-${{ github.run_id }}.${{ github.run_attempt }}
           path: ${{ runner.temp }}/release
           digest-mismatch: error
       - name: Download current-run verified Atlas BERT Linux worker bundles
         if: fromJson(needs.scope.outputs.release_plan).bert
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: atlas-bert-*-${{ needs.scope.outputs.head }}-${{ github.run_id }}-${{ github.run_attempt }}
+          pattern: Fleetworks-Atlas-BERT-Worker-Bundle-Linux-*-${{ needs.scope.outputs.head }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release
+          digest-mismatch: error
+      - name: Select the three smoke-verified nightly Inbox QA pack pairs
+        if: fromJson(needs.scope.outputs.release_plan).inbox_qa == true
+        id: inbox_qa_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B .github/scripts/inbox_qa_artifact.py \
+            --family Fleetworks-Inbox-QA-Embedded-Release-x86_64-unknown-linux-gnu \
+            --family Fleetworks-Inbox-QA-Embedded-Release-x86_64-apple-darwin \
+            --family Fleetworks-Inbox-QA-Embedded-Release-aarch64-apple-darwin
+      - name: Download the exact smoke-verified Inbox QA pack pairs by ID
+        if: fromJson(needs.scope.outputs.release_plan).inbox_qa == true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ steps.inbox_qa_release.outputs.ids }}
           path: ${{ runner.temp }}/release
           digest-mismatch: error
       - name: Promote only the verified source plan
@@ -907,7 +1013,7 @@ jobs:
   required:
     name: ${{ inputs.stage == 'second' && 'Fleetworks second pass' || github.event_name == 'workflow_dispatch' && 'Fleetworks manual verification' || 'Fleetworks required' }}
     needs: [scope, prepublish, publish]
-    if: always()
+    if: always() && !(github.event_name == 'workflow_dispatch' && inputs.depot_linux_native_pilot)
     runs-on: ubuntu-24.04
     steps:
       - name: Require every selected check and publication

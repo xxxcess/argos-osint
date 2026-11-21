@@ -1,6 +1,6 @@
 # Fleetworks native client
 
-**Approved visual target:** [matte canvas reproduction](../../docs/design/matte-canvas/README.md) and [implementation handoff](../../.planning/2026-11-16-matte-canvas/handoff.md) supersede earlier gold/ivory, reflective-control and pager-style visual guidance. The [native verification guide](../../docs/wiki/code/native-verification.md) describes how to review the production views and exact-head packages.
+**Approved visual target:** [Glass Canvas design reference](../../docs/design/matte-canvas/README.md) (deep-space `#060709` backdrop, layered smoked/frosted glass across shell chrome, cards, controls and overlays, static liquid-metal rim highlights, warm molten-gold & cyan accents, and crescent-moon action textures, with opaque reduced-transparency fallbacks). The [native verification guide](../../docs/wiki/code/native-verification.md) describes how to review the production views and exact-head packages.
 
 The Rune/rune-kit macOS and Linux x86_64 API client supports **Embedded** and **Distributed** backends. Embedded uses a bundled stdio companion started explicitly by the user. Distributed connects to an operator-managed gateway. Backend engines run outside the desktop process. Its six sidebar destinations are DB Seed & Train, News Cycles, Brain Search, OSINT Tools, Model Assignments and Jobs & Logs. The gateway header opens Workstation Status, featuring the **Actor search** hero card alongside Native Client, Gateway Backend and Host Resources details. Setup Gateway selects the backend type. Distributed setup uses a gateway URL, operator approval and macOS Keychain or Linux D-Bus Secret Service, with explicit Linux session-only mode also available.
 
@@ -41,6 +41,38 @@ Protected settings create no default child and contain no polling/access secrets
 ```
 
 Add `--provision-gateway-credential` to save a protected exact-origin file reference and exit without GUI/network/service startup. This optional catalog operation does not configure normal GUI pairing. Files must remain private, bounded, single-link regular files; reprovision after replacement/rotation. Existing operator files remain untouched.
+
+## Embedded desktop in Docker
+
+Use the Linux x86_64 development image when you want the Rune app and its Embedded companion in one container. The desktop opens its usual backend chooser. Select **Embedded**, then choose **Start Embedded Backend**. The app starts its packaged companion over private stdio, so the container needs no published backend port.
+
+Download the `Fleetworks-Embedded-Desktop-Docker-Archive-*` artifact from an [opt-in image run](../../docs/wiki/code/ci.md#embedded-desktop-docker-image), verify its checksum, then load the image.
+
+```sh
+archive="$(find . -maxdepth 1 -type f -name 'fleetworks-native-embedded-linux-x86_64-*.tar.gz' -print -quit)"
+test -n "$archive"
+sha256sum -c "$archive.sha256"
+docker load --input "$archive"
+```
+
+On a Linux x86_64 Wayland desktop, use the image tag reported by `docker load`. Forward just your compositor socket and use a dedicated private home for Fleetworks settings and Embedded data.
+
+```sh
+image_tag='fleetworks-native-embedded:dev-<run-id>.<attempt>'
+state_home="$HOME/.local/share/fleetworks-container-home"
+install -d -m 700 "$state_home"
+docker run --rm --init \
+  --user "$(id -u):$(id -g)" --cap-drop ALL --security-opt no-new-privileges \
+  --tmpfs "/run/fleetworks:uid=$(id -u),gid=$(id -g),mode=0700" \
+  --env XDG_RUNTIME_DIR=/run/fleetworks --env WAYLAND_DISPLAY=/tmp/fleetworks-wayland \
+  --mount "type=bind,source=$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY,target=/tmp/fleetworks-wayland" \
+  --mount "type=bind,source=$state_home,target=/home/fleetworks" \
+  "$image_tag"
+```
+
+This example assumes the host compositor uses a relative `WAYLAND_DISPLAY` socket name. The development image does not expose the host Secret Service socket. Use the packaged host application for system-keyring review.
+
+To build from a verified Linux package on Linux x86_64, pass the package archive, adjacent checksum, exact source commit and artifact version to [the image helper](../../scripts/fleetworks_native_embedded_image.py). The helper builds locally by default and accepts `--builder depot --depot-project <id>` for remote execution.
 
 ## Selected views and durable actions
 

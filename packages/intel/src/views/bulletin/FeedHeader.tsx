@@ -1,5 +1,6 @@
 "use client";
 // @tag:react-ui — bulletin feed date filter overlays cards instead of expanding the list.
+import { colors, glassProps } from "@argos/ui";
 import React, { useState } from "react";
 import { View, Text, Pressable, StyleSheet } from "react-native";
 import { DeskButton } from "../desk-ui";
@@ -14,6 +15,7 @@ export function FeedHeader({
   onDay,
   refreshing,
   onRefresh,
+  compact = false,
 }: {
   sort: "latest" | "hottest";
   onSort: (sort: "latest" | "hottest") => void;
@@ -22,29 +24,40 @@ export function FeedHeader({
   onDay: (day: string) => void;
   refreshing: boolean;
   onRefresh: () => void;
+  compact?: boolean;
 }) {
   const [daysOpen, setDaysOpen] = useState(false);
+  const density = compact ? "compact" : "regular";
   return (
-    <View nativeID="intel-feed-header" style={s.header}>
-      <View style={s.filters}>
+    <View
+      nativeID="intel-feed-header"
+      role="group"
+      aria-label="Feed controls"
+      style={[s.header, compact && s.compactHeader]}
+    >
+      <View style={[s.filters, compact && s.compactFilters]}>
         {days.length > 0 ? (
-          <View style={s.dayMenu}>
+          <View style={[s.dayMenu, compact && s.compactDayMenu]}>
             <Pressable
+              {...glassProps.control}
               accessibilityRole="button"
               accessibilityLabel={`Retained day ${selectedDay}`}
               accessibilityState={{ expanded: daysOpen }}
               aria-expanded={daysOpen}
               onPress={() => setDaysOpen((open) => !open)}
-              style={s.dayTrigger}
+              style={[s.dayTrigger, compact && s.compactDayTrigger]}
             >
               <View style={s.dayValue}>
-                <Text style={s.dayCaption}>Day</Text>
-                <Text style={s.dayLabel}>{selectedDay}</Text>
+                {!compact ? <Text style={s.dayCaption}>Day</Text> : null}
+                <Text style={[s.dayLabel, compact && s.compactDayLabel]}>
+                  {selectedDay}
+                </Text>
               </View>
               <Text style={s.dayLabel}>{daysOpen ? "▴" : "▾"}</Text>
             </Pressable>
             {daysOpen ? (
               <View
+                {...glassProps.overlay}
                 nativeID="intel-day-overlay"
                 accessibilityRole="menu"
                 style={s.dayOverlay}
@@ -62,12 +75,19 @@ export function FeedHeader({
                     style={[
                       s.dayOption,
                       day === selectedDay && {
-                        borderColor: c.accentBorder,
-                        backgroundColor: c.accentSoft,
+                        borderColor: colors.molten,
+                        backgroundColor: colors.moltenSurface,
                       },
                     ]}
                   >
-                    <Text style={s.dayLabel}>{day}</Text>
+                    <Text
+                      style={[
+                        s.dayLabel,
+                        day === selectedDay && { color: colors.molten },
+                      ]}
+                    >
+                      {day}
+                    </Text>
                   </Pressable>
                 ))}
               </View>
@@ -76,10 +96,11 @@ export function FeedHeader({
         ) : (
           <View />
         )}
-        <View style={{ flexDirection: "row", gap: 8 }}>
+        <View style={[s.sort, compact && s.compactSort]}>
           {(["latest", "hottest"] as const).map((value) => (
             <DeskButton
               key={value}
+              density={density}
               active={sort === value}
               onPress={() => onSort(value)}
             >
@@ -88,8 +109,13 @@ export function FeedHeader({
           ))}
         </View>
       </View>
-      <DeskButton disabled={refreshing} onPress={onRefresh}>
-        Refresh feed
+      <DeskButton
+        density={density}
+        label="Refresh feed"
+        disabled={refreshing}
+        onPress={onRefresh}
+      >
+        {compact ? "Refresh" : "Refresh feed"}
       </DeskButton>
     </View>
   );
@@ -116,12 +142,17 @@ const s = StyleSheet.create({
     gap: 12,
     flexShrink: 1,
   },
+  compactHeader: { gap: 4, flexWrap: "nowrap" },
+  compactFilters: { gap: 4, flexWrap: "nowrap", flexGrow: 1 },
+  sort: { flexDirection: "row", gap: 8 },
+  compactSort: { gap: 4 },
   dayMenu: {
     position: "relative",
     width: 240,
     maxWidth: "100%",
     zIndex: 5,
   },
+  compactDayMenu: { flex: 1, width: "auto", minWidth: 98 },
   dayTrigger: {
     minHeight: 44,
     paddingHorizontal: 16,
@@ -133,9 +164,12 @@ const s = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
   },
+  compactDayTrigger: { paddingHorizontal: 8 },
+  compactDayLabel: { fontSize: 12 },
   dayOverlay: {
     position: "absolute",
-    top: 48,
+    top: "100%",
+    marginTop: 4,
     left: 0,
     right: 0,
     zIndex: 20,
@@ -145,7 +179,7 @@ const s = StyleSheet.create({
     borderRadius: intelRadius.control,
     borderWidth: 1,
     borderColor: c.borderStrong,
-    backgroundColor: c.panelRaised,
+    backgroundColor: colors.elevated,
   },
   dayOption: {
     minHeight: 40,

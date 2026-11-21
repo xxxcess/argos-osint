@@ -5,6 +5,7 @@
     <key>CFBundleName</key><string>Fleetworks</string>
     <key>CFBundleDisplayName</key><string>Fleetworks</string>
     <key>CFBundleIdentifier</key><string>dev.fleetworks.desktop</string>
+    <key>CFBundleIconFile</key><string>Fleetworks.icns</string>
     <key>CFBundleExecutable</key><string>fleetworks-desktop</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>0.2.1</string>

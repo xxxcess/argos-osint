@@ -121,7 +121,4 @@ export const intelStatus = Object.fromEntries(
 export const landingColors = {
   core: "#FFB347",
   coreGlow: "#FFB347",
-  orbiter: intelColors.accent,
-  orbiterAlt: intelColors.cool,
-  link: topologyColors.edge,
 };

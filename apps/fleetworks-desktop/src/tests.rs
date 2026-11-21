@@ -973,7 +973,8 @@ fn desktop_status_table_aligns_columns_and_exposes_the_granted_row_action() {
     runtime.reduced_motion = true;
     let mut frame = 0;
     tick_status_checks(&mut runtime, &mut frame);
-    let blocker = assert_status_check_fully_visible(&runtime, "readiness-critical-action");
+    let blocker = status_check_element(&runtime, "readiness-critical-action");
+    assert_eq!(blocker.visible, blocker.rect);
     assert_eq!(blocker.label.as_deref(), Some("Refresh checks"));
     assert!(runtime.find("workstation-open-seed").is_none());
     assert!(runtime.find(SEED).is_none());
@@ -1031,7 +1032,15 @@ fn desktop_status_table_aligns_columns_and_exposes_the_granted_row_action() {
     let catalog_status = status_check_element(&runtime, "readiness-status-actor_catalog");
     assert!(jobs_status.target[1] < catalog_status.target[1]);
     assert!(runtime.find(SEED).is_none());
-    focus_status_check(&mut runtime, "readiness-trigger-actor_catalog", &mut frame);
+    const CATALOG_ROW: &str = "readiness-trigger-actor_catalog";
+    runtime.update(|_, tx| {
+        tx.scroll_into_view(CATALOG_ROW);
+        tx.focus(CATALOG_ROW, true);
+    });
+    tick_status_checks(&mut runtime, &mut frame);
+    let catalog_row = status_check_element(&runtime, CATALOG_ROW);
+    assert!(catalog_row.focused);
+    assert_eq!(catalog_row.visible, catalog_row.rect);
     press_status_check(&mut runtime, &mut frame);
     assert!(runtime.find("readiness-details-actor_catalog").is_some());
     assert!(status_check_element(&runtime, SEED).focusable);

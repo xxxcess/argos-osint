@@ -1217,7 +1217,7 @@ mod tests {
         let (two_lines, _) = runtime.presented(COMPOSER).unwrap();
         for rows in [6, 10] {
             runtime
-                .update(|state, _| state.inbox_qa.draft = TextEdit::new(&"detail\n".repeat(rows)));
+                .update(|state, _| state.inbox_qa.draft = TextEdit::new("detail\n".repeat(rows)));
             runtime.frame(2.0 + rows as f64);
             runtime.frame(2.5 + rows as f64);
             let (height, _) = runtime.presented(COMPOSER).unwrap();

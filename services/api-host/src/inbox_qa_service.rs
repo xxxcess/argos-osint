@@ -412,16 +412,37 @@ impl Executor {
             }
             DeliveryClaim::Claimed(lease) => lease,
         };
-        let Some(evidence) = timeout(AUTH_TIMEOUT, store::start(&self.repo, &lease)).await?? else {
-            self.finish(
-                delivery,
-                &lease,
-                DeliveryOutcome::Failed {
-                    reason: "qa_stale_turn",
-                },
-            )
-            .await?;
-            return Ok(true);
+        let evidence = match timeout(AUTH_TIMEOUT, store::start(&self.repo, &lease)).await {
+            Ok(Ok(Some(evidence))) => evidence,
+            Ok(Ok(None)) => {
+                tracing::debug!(
+                    qa_turn_stage = "start_fenced",
+                    "Inbox QA turn could not start"
+                );
+                self.finish(
+                    delivery,
+                    &lease,
+                    DeliveryOutcome::Failed {
+                        reason: "qa_stale_turn",
+                    },
+                )
+                .await?;
+                return Ok(true);
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    qa_turn_stage = "start_store_error",
+                    "Inbox QA turn could not start"
+                );
+                return Err(error.into());
+            }
+            Err(error) => {
+                tracing::warn!(
+                    qa_turn_stage = "start_store_timeout",
+                    "Inbox QA turn could not start"
+                );
+                return Err(error.into());
+            }
         };
         let result = self
             .infer(&evidence, &lease, &delivery, generation, stop)
@@ -446,11 +467,23 @@ impl Executor {
                 false,
             ),
             RunResult::More | RunResult::Error => {
-                let _ = timeout(
+                let terminal = timeout(
                     AUTH_TIMEOUT,
                     store::publish(&self.repo, &lease, QaTurnState::Failed, None),
                 )
                 .await;
+                let stage = match terminal {
+                    Ok(Ok(true)) => None,
+                    Ok(Ok(false)) => Some("failure_terminal_fenced"),
+                    Ok(Err(_)) => Some("failure_terminal_store_error"),
+                    Err(_) => Some("failure_terminal_store_timeout"),
+                };
+                if let Some(stage) = stage {
+                    tracing::warn!(
+                        qa_turn_stage = stage,
+                        "Inbox QA failure could not be recorded"
+                    );
+                }
                 (
                     DeliveryOutcome::Failed {
                         reason: "qa_inference_failed",
@@ -503,29 +536,59 @@ impl Executor {
         let deadline = Instant::now() + TURN_TIMEOUT;
         let mut sequence = QaWorkerSequence::default();
         let mut model_finished = false;
+        let mut received_event = false;
         let result = loop {
             tokio::select! {
                 biased;
                 () = stop.cancelled() => break RunResult::Stopped,
-                () = tokio::time::sleep_until(deadline) => break RunResult::Error,
+                () = tokio::time::sleep_until(deadline) => {
+                    tracing::warn!(qa_turn_stage = "turn_deadline", "Inbox QA turn exceeded its budget");
+                    break RunResult::Error;
+                }
                 () = tokio::time::sleep_until(next_check) => {
                     next_check = Instant::now() + CHECK;
-                    if !matches!(timeout(AUTH_TIMEOUT, self.renew(lease, delivery, generation)).await, Ok(Ok(true))) {
+                    let stage = match timeout(AUTH_TIMEOUT, self.renew(lease, delivery, generation)).await {
+                        Ok(Ok(true)) => None,
+                        Ok(Ok(false)) => Some("lease_fenced"),
+                        Ok(Err(_)) => Some("lease_error"),
+                        Err(_) => Some("lease_timeout"),
+                    };
+                    if let Some(stage) = stage {
+                        tracing::warn!(qa_turn_stage = stage, "Inbox QA turn lease ended");
                         break RunResult::Fenced;
                     }
                 }
                 result = &mut inference, if !model_finished => {
                     model_finished = true;
                     if result.is_err() {
+                        let stage = if received_event { "worker_inference_error" } else { "worker_error_before_event" };
+                        tracing::warn!(qa_turn_stage = stage, "Inbox QA worker inference failed");
                         break RunResult::Error;
                     }
                 }
                 event = receiver.recv() => {
-                    let Some(event) = event else { break RunResult::Error };
+                    let Some(event) = event else {
+                        let stage = if received_event { "event_stream_incomplete" } else { "event_stream_empty" };
+                        tracing::warn!(qa_turn_stage = stage, "Inbox QA worker event stream ended");
+                        break RunResult::Error;
+                    };
+                    received_event = true;
                     match timeout(AUTH_TIMEOUT, publish(&self.repo, lease, evidence, event, &mut sequence)).await {
                         Ok(Ok(RunResult::More)) => {}
-                        Ok(Ok(other)) => break other,
-                        _ => break RunResult::Error,
+                        Ok(Ok(other)) => {
+                            if matches!(other, RunResult::Fenced) {
+                                tracing::warn!(qa_turn_stage = "publication_fenced", "Inbox QA event publication was fenced");
+                            }
+                            break other;
+                        }
+                        Ok(Err(_)) => {
+                            tracing::warn!(qa_turn_stage = "publication_error", "Inbox QA event publication failed");
+                            break RunResult::Error;
+                        }
+                        Err(_) => {
+                            tracing::warn!(qa_turn_stage = "publication_timeout", "Inbox QA event publication exceeded its budget");
+                            break RunResult::Error;
+                        }
                     }
                 }
             }

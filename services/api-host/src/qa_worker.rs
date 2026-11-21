@@ -299,16 +299,40 @@ impl QaInference for QaWorkerSupervisor {
                 .as_mut()
                 .ok_or_else(|| anyhow!("QA worker unavailable"))?;
             let child_pid = session.child_id();
-            let result = tokio::select! {
+            let (result, failure_stage) = tokio::select! {
                 biased;
-                _ = stopped.changed() => Err(anyhow!("QA worker is stopping")),
-                _ = cancel.cancelled() => Err(anyhow!("QA request was canceled")),
-                error = guard_resident(child_pid) => Err(error),
-                result = timeout(TURN_LIMIT, session.ask(request, events)) => {
-                    result.unwrap_or_else(|_| Err(anyhow!("QA request exceeded its execution budget")))
-                }
+                _ = stopped.changed() => (Err(anyhow!("QA worker is stopping")), None),
+                _ = cancel.cancelled() => (Err(anyhow!("QA request was canceled")), None),
+                error = guard_resident(child_pid) => (Err(error), Some("worker_memory_limit")),
+                result = timeout(TURN_LIMIT, session.ask(request, events)) => match result {
+                    Ok(Ok(())) => (Ok(()), None),
+                    Ok(Err(error)) => {
+                        let stage = if error.downcast_ref::<io::Error>().is_some_and(|error| {
+                            matches!(error.kind(), io::ErrorKind::UnexpectedEof | io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset)
+                        }) {
+                            "worker_eof"
+                        } else {
+                            "worker_frame"
+                        };
+                        (Err(error), Some(stage))
+                    }
+                    Err(_) => (Err(anyhow!("QA request exceeded its execution budget")), Some("worker_turn_timeout")),
+                },
             };
-            if result.is_err() {
+            if let Err(error) = &result {
+                if let Some(stage) = failure_stage {
+                    let status = session
+                        .child
+                        .as_mut()
+                        .and_then(|child| child.try_wait().ok().flatten());
+                    tracing::warn!(
+                        qa_turn_stage = stage,
+                        sanitized_os_error = ?error.downcast_ref::<io::Error>().and_then(io::Error::raw_os_error),
+                        worker_exit_code = ?status.and_then(|status| status.code()),
+                        worker_signal = ?status.and_then(|status| status.signal()),
+                        "Inbox QA worker could not finish the turn"
+                    );
+                }
                 if let Some(session) = slot.take() {
                     let _ = session.stop().await;
                 }

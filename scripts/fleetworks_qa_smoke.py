@@ -22,7 +22,7 @@ QA = "/api/v2/workstation/chat/"
 TERMINAL = {"answered", "insufficient_context", "canceled", "failed"}
 QUESTION = "What is the state of the gateway?"
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
-DIAGNOSTIC = re.compile(r'\b(qa_(?:warm|replica|queue)_stage)="?([a-z0-9_]{1,40})\b')
+DIAGNOSTIC = re.compile(r'\b(qa_(?:warm|replica|queue|turn)_stage)="?([a-z0-9_]{1,40})\b')
 DIAGNOSTIC_DETAIL = re.compile(
     r'\b(qa_warm_reason|qa_warm_elapsed_ms|landlock_abi|sanitized_os_error|worker_exit_code|worker_signal)'
     r'="?(Some\(-?\d{1,9}\)|-?\d{1,9}|abandoned|landlock_abi)(?=["\s,|]|$)'
@@ -113,6 +113,7 @@ def exercise(request, manage, registration, manager, model, readiness):
     request("turns", {**turn, "question": "Different question"}, expected=409)
     cursor = 0
     terminal_events = 0
+    observed_states = set()
     first_finding_ms = None
     deadline = time.monotonic() + 90
     while time.monotonic() < deadline:
@@ -125,11 +126,18 @@ def exercise(request, manage, registration, manager, model, readiness):
             if first_finding_ms is None and event.get("finding"):
                 first_finding_ms = round((time.monotonic() - started) * 1000, 1)
             terminal_events += int(event["state"] in TERMINAL)
+            if event["state"] in TERMINAL | {"queued", "running"}:
+                observed_states.add(event["state"])
         if snapshot["state"] in TERMINAL:
             break
     else:
         raise TimeoutError("QA turn did not finish")
     completed_ms = round((time.monotonic() - started) * 1000, 1)
+    if snapshot["state"] != "answered" or first_finding_ms is None:
+        print(json.dumps({"qa_smoke_stage": "first_turn_terminal", "state": snapshot["state"],
+                          "observed_states": sorted(observed_states), "finding_count": len(snapshot["findings"]),
+                          "model_warm_ms": ready_ms, "admission_ms": admission_ms,
+                          "completion_ms": completed_ms}), file=sys.stderr)
     require(terminal_events == 1 and snapshot["cursor"] == cursor, "terminal delivery was not exactly once")
     require(snapshot["state"] == "answered" and first_finding_ms is not None,
             "real local checkpoint did not return a cited answer")

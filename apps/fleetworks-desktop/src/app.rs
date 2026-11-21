@@ -252,6 +252,7 @@ pub enum Intent {
     ReconcileRebind { request_id: String },
     BackendRead { kind: ReadKind },
     ChooseDataset { kind: DatasetKind },
+    DownloadGithubDataset { kind: DatasetKind },
     UploadDataset { kind: DatasetKind },
     Datasets,
     Maintenance { operation: MaintenanceOperation },

@@ -18,6 +18,7 @@ pub mod configuration;
 mod configuration_views;
 pub mod connection;
 pub mod connection_profiles;
+mod github_dataset;
 pub mod icons;
 pub mod inbox;
 mod inbox_qa;

@@ -536,14 +536,14 @@ mod native {
                     false,
                 ));
             }
-            Intent::UploadDataset { kind } => {
+            Intent::UploadDataset { kind } | Intent::DownloadGithubDataset { kind } => {
                 let dataset =
                     DatasetRef::new("synthetic-dataset".into(), *kind, "a".repeat(64), 1024)
                         .expect("synthetic dataset");
                 state.maintenance.selected_dataset = Some(dataset.clone());
                 state.maintenance.upload = Load::Ready(
                     serde_json::from_value(
-                        serde_json::json!({"dataset":dataset,"expires_in_seconds":86400}),
+                        serde_json::json!({"dataset":dataset,"expires_in_seconds":86400,"row_count":3}),
                     )
                     .expect("synthetic upload receipt"),
                 );

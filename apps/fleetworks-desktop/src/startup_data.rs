@@ -1,5 +1,6 @@
 //! The cold-start workflow uses the same registered maintenance operations as Workstation Status.
 
+use fleetworks_contracts::client::DatasetUpload;
 use fleetworks_contracts::readiness::DatasetKind;
 use fleetworks_contracts::readiness::DatasetRef;
 use fleetworks_contracts::readiness::MaintenanceOperation;
@@ -8,8 +9,11 @@ use fleetworks_contracts::readiness::ReadinessCheckId;
 use fleetworks_contracts::readiness::ReadinessState;
 use fleetworks_contracts::readiness::WorkstationReadiness;
 use rune::El;
+use rune::TextEdit;
 use rune::Tx;
 use rune_kit::Kit;
+use rune_kit::SegmentedControl;
+use rune_kit::TextInput;
 
 use crate::accessibility::ViewPreferences;
 use crate::app::Load;
@@ -23,6 +27,49 @@ use crate::views;
 use crate::State;
 
 pub(crate) const PRIMARY: &str = "startup-data-primary";
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum CsvSource {
+    Local,
+    Github,
+}
+
+impl CsvSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Local => "Local CSV",
+            Self::Github => "GitHub CSV URL",
+        }
+    }
+}
+
+struct CsvInput {
+    source: CsvSource,
+    url: TextEdit,
+}
+
+impl CsvInput {
+    fn new(kind: DatasetKind) -> Self {
+        Self {
+            source: CsvSource::Github,
+            url: TextEdit::new(crate::github_dataset::default_url(kind).unwrap_or_default()),
+        }
+    }
+}
+
+pub(crate) struct CsvInputs {
+    actors: CsvInput,
+    training: CsvInput,
+}
+
+impl Default for CsvInputs {
+    fn default() -> Self {
+        Self {
+            actors: CsvInput::new(DatasetKind::ActorCatalog),
+            training: CsvInput::new(DatasetKind::ClassifierTraining),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Step {
@@ -82,11 +129,27 @@ impl Step {
         }
     }
 
-    fn dataset_kind(self) -> Option<DatasetKind> {
+    pub(crate) fn dataset_kind(self) -> Option<DatasetKind> {
         match self {
             Self::Seed => Some(DatasetKind::ActorCatalog),
             Self::Index => None,
             Self::Classifier => Some(DatasetKind::ClassifierTraining),
+        }
+    }
+
+    fn csv_input(self, inputs: &CsvInputs) -> Option<&CsvInput> {
+        match self {
+            Self::Seed => Some(&inputs.actors),
+            Self::Index => None,
+            Self::Classifier => Some(&inputs.training),
+        }
+    }
+
+    fn csv_input_mut(self, inputs: &mut CsvInputs) -> Option<&mut CsvInput> {
+        match self {
+            Self::Seed => Some(&mut inputs.actors),
+            Self::Index => None,
+            Self::Classifier => Some(&mut inputs.training),
         }
     }
 
@@ -104,7 +167,7 @@ impl Step {
 
     fn description(self) -> &'static str {
         match self {
-            Self::Seed => "Choose a local actor CSV to populate the connected backend.",
+            Self::Seed => "Validate an actor CSV before seeding the connected backend.",
             Self::Index => "Build the index that makes actors searchable.",
             Self::Classifier => {
                 "Choose a training CSV to create a classifier candidate. Training is optional."
@@ -146,9 +209,18 @@ impl Step {
         }
     }
 
+    fn validated_action(self) -> &'static str {
+        match self {
+            Self::Seed => "Seed actors",
+            Self::Classifier => "Train classifier",
+            Self::Index => self.action(),
+        }
+    }
+
     fn start(self, state: &mut State, tx: &mut Tx) {
         if state.startup.data_step != Some(self)
             || !matches!(stage(state, self), Stage::Action | Stage::Failed(_))
+            || state.maintenance.busy()
         {
             return;
         }
@@ -164,20 +236,38 @@ impl Step {
                 }
                 return;
             }
-            state.preview_maintenance(self.operation());
-            tx.scroll_into_view("maintenance-confirmation");
-            tx.focus("maintenance-confirm", tx.by_keys());
-        } else if let Some(dataset) = saved_dataset(state, self).cloned() {
-            state.maintenance.selected_dataset = Some(dataset);
-            state.preview_maintenance(self.operation());
-            tx.scroll_into_view("maintenance-confirmation");
-            tx.focus("maintenance-confirm", tx.by_keys());
+            self.preview(state, tx);
+        } else if validated_csv(state, self).is_some() {
+            self.preview(state, tx);
         } else if let Some(kind) = self.dataset_kind() {
-            if cfg!(target_os = "linux") {
-                state.enter_csv_path(kind, tx);
-            } else {
-                state.choose_dataset(kind, tx);
+            match self.csv_input(&state.startup.csv_inputs) {
+                Some(input) if input.source == CsvSource::Github => {
+                    state.download_github_dataset(kind, input.url.text.clone());
+                }
+                Some(_) if cfg!(target_os = "linux") => state.enter_csv_path(kind, tx),
+                Some(_) => state.choose_dataset(kind, tx),
+                None => {}
             }
+        }
+    }
+
+    fn use_saved_csv(self, state: &mut State, tx: &mut Tx) {
+        if state.startup.data_step == Some(self)
+            && matches!(stage(state, self), Stage::Action | Stage::Failed(_))
+            && !state.maintenance.busy()
+        {
+            if let Some(dataset) = saved_dataset(state, self).cloned() {
+                state.maintenance.selected_dataset = Some(dataset);
+                self.preview(state, tx);
+            }
+        }
+    }
+
+    fn preview(self, state: &mut State, tx: &mut Tx) {
+        state.preview_maintenance(self.operation());
+        if state.maintenance.confirmation.is_some() {
+            tx.scroll_into_view("maintenance-confirmation");
+            tx.focus("maintenance-confirm", tx.by_keys());
         }
     }
 }
@@ -234,6 +324,16 @@ fn saved_dataset(state: &State, step: Step) -> Option<&DatasetRef> {
         })
         .filter_map(|input| input.dataset.as_ref())
         .find(|dataset| dataset.kind == kind && dataset.validate().is_ok())
+}
+
+fn validated_csv(state: &State, step: Step) -> Option<&DatasetUpload> {
+    let Load::Ready(upload) = &state.maintenance.upload else {
+        return None;
+    };
+    (Some(upload.dataset.kind) == step.dataset_kind()
+        && state.maintenance.selected_dataset.as_ref() == Some(&upload.dataset)
+        && upload.dataset.validate().is_ok())
+    .then_some(upload)
 }
 
 fn catalog_hash(state: &State) -> Option<&str> {
@@ -351,6 +451,54 @@ fn focus_stage(tx: &mut Tx) {
 }
 
 impl State {
+    fn startup_csv_source(&mut self, step: Step, source: CsvSource) {
+        if self.startup.data_step != Some(step) {
+            return;
+        }
+        let Some(input) = step.csv_input_mut(&mut self.startup.csv_inputs) else {
+            return;
+        };
+        if input.source == source {
+            return;
+        }
+        input.source = source;
+        self.clear_startup_csv(step);
+    }
+
+    fn clear_startup_csv(&mut self, step: Step) {
+        let Some(kind) = step.dataset_kind() else {
+            return;
+        };
+        if self.startup.data_step == Some(step) {
+            self.maintenance.discard_csv_draft();
+            self.maintenance.message = None;
+        }
+        if self
+            .maintenance
+            .selected_dataset
+            .as_ref()
+            .is_some_and(|dataset| dataset.kind == kind)
+        {
+            self.maintenance.selected_dataset = None;
+        }
+        if self
+            .maintenance
+            .local_dataset
+            .as_ref()
+            .is_some_and(|dataset| dataset.kind == kind)
+        {
+            self.maintenance.local_dataset = None;
+        }
+        if self
+            .maintenance
+            .confirmation
+            .as_ref()
+            .is_some_and(|confirmation| confirmation.operation == step.operation())
+        {
+            self.cancel_maintenance_confirmation();
+        }
+    }
+
     pub(crate) fn complete_startup_input(&mut self, operation: MaintenanceOperation) {
         if let Some(step) = Step::ALL
             .into_iter()
@@ -375,6 +523,9 @@ impl State {
 
     fn review_startup_input(&mut self, step: Step, tx: &mut Tx) {
         if self.startup.data_setup_active() && can_review(self, step) {
+            if let Some(current) = self.startup.data_step.filter(|&current| current != step) {
+                self.clear_startup_csv(current);
+            }
             self.startup.data_checks = false;
             self.startup.data_step = Some(step);
             focus_stage(tx);
@@ -385,22 +536,13 @@ impl State {
         if !self.startup.data_setup_active() || !can_reset(self, step) {
             return;
         }
+        if let Some(current) = self.startup.data_step.filter(|&current| current != step) {
+            self.clear_startup_csv(current);
+        }
         if let Some(kind) = step.dataset_kind() {
-            if self
-                .maintenance
-                .selected_dataset
-                .as_ref()
-                .is_some_and(|dataset| dataset.kind == kind)
-            {
-                self.maintenance.selected_dataset = None;
-            }
-            if self
-                .maintenance
-                .local_dataset
-                .as_ref()
-                .is_some_and(|dataset| dataset.kind == kind)
-            {
-                self.maintenance.local_dataset = None;
+            self.clear_startup_csv(step);
+            if let Some(input) = step.csv_input_mut(&mut self.startup.csv_inputs) {
+                *input = CsvInput::new(kind);
             }
         } else if !self.readiness_pending() {
             self.refresh_readiness();
@@ -416,8 +558,16 @@ impl State {
         if !self.connected() || self.registration.context.is_none() {
             return;
         }
+        if let Some(step) = self
+            .startup
+            .data_step
+            .filter(|step| step.dataset_kind().is_some())
+        {
+            self.clear_startup_csv(step);
+        } else {
+            self.maintenance.discard_csv_draft();
+        }
         self.cancel_maintenance_confirmation();
-        self.maintenance.discard_csv_draft();
         // Leave accepted operations and their registered receipts running on the backend.
         self.startup.data_step = None;
         self.startup.data_checks = true;
@@ -533,9 +683,16 @@ pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit:
     let stage = stage(state, step);
     let dots = step_dots(Some(step), kit);
     let sequence = setup_sequence(state, Some(step), preferences, kit);
-    let mut panel = panel(kit, step.title())
-        .child(views::quiet(step.description(), kit))
-        .children(input_summary(state, step, kit));
+    let csv_input = step
+        .csv_input(&state.startup.csv_inputs)
+        .filter(|_| matches!(stage, Stage::Action | Stage::Failed(_)));
+    let upload = validated_csv(state, step);
+    let mut panel = panel(kit, step.title());
+    if csv_input.is_none() {
+        panel = panel
+            .child(views::quiet(step.description(), kit))
+            .children(input_summary(state, step, kit));
+    }
 
     if let Some(confirmation) = state
         .maintenance
@@ -635,6 +792,30 @@ pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit:
         Stage::Action => None,
     };
     panel = panel.children(progress);
+    if let Some(input) = csv_input {
+        panel = panel.child(csv_source_controls(step, input, kit));
+        if let Some(upload) = upload {
+            let detail = upload.row_count.map_or_else(
+                || format!("{} · CSV validated", input.source.label()),
+                |rows| format!("{} · {rows} rows validated", input.source.label()),
+            );
+            panel = panel.child(
+                status(
+                    if step == Step::Seed {
+                        "Ready to seed"
+                    } else {
+                        "Ready to train"
+                    },
+                    detail,
+                    StatusTone::Ok,
+                    false,
+                    preferences,
+                    kit,
+                )
+                .key("startup-csv-ready"),
+            );
+        }
+    }
 
     if let Some(record) = state.maintenance.operation_job(step.operation()) {
         if let Some(error) = &record.poll_error {
@@ -653,15 +834,18 @@ pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit:
     if let Some(message) = &state.maintenance.message {
         panel = panel.child(views::quiet(message.clone(), kit).role("status"));
     }
-    if matches!(state.maintenance.upload, Load::Loading) {
-        panel = panel.child(status(
-            "Validating CSV",
-            "Waiting for the backend to validate the uploaded dataset.",
-            StatusTone::Info,
-            true,
-            preferences,
-            kit,
-        ));
+    let downloading = state.maintenance.github_downloading;
+    let validating = matches!(state.maintenance.upload, Load::Loading);
+    if csv_input.is_some() && (downloading || validating) {
+        let (title, detail) = if downloading {
+            ("Downloading", "Fetching the CSV from GitHub.")
+        } else {
+            ("Validating", "Waiting for the backend to validate the CSV.")
+        };
+        panel = panel.child(
+            status(title, detail, StatusTone::Info, true, preferences, kit)
+                .key("startup-csv-progress"),
+        );
     }
 
     let mut actions = rune::row().w_full().flex_wrap().gap(8.0);
@@ -687,19 +871,45 @@ pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit:
             };
             let primary = if choose_catalog {
                 "Use current catalog"
-            } else if saved_dataset(state, step).is_some() {
-                "Use saved CSV"
+            } else if upload.is_some() {
+                step.validated_action()
+            } else if csv_input.is_some_and(|input| input.source == CsvSource::Github) {
+                "Download & validate"
             } else {
                 step.action()
             };
+            let busy = blocked.is_some() || downloading || validating || state.maintenance.busy();
             actions = actions.child(
                 ActionButton::new(primary)
                     .key(PRIMARY)
                     .finish(MetalFinish::GoldCta)
-                    .disabled(blocked.is_some() || state.maintenance.busy())
+                    .disabled(busy)
                     .on_press_tx(move |state: &mut State, tx| step.start(state, tx))
                     .build(kit, preferences, None),
             );
+            if csv_input.is_some() && upload.is_none() && saved_dataset(state, step).is_some() {
+                actions = actions.child(
+                    ActionButton::new("Use saved CSV")
+                        .key("startup-csv-saved")
+                        .finish(MetalFinish::Gunmetal)
+                        .disabled(busy)
+                        .on_press_tx(move |state: &mut State, tx| step.use_saved_csv(state, tx))
+                        .build(kit, preferences, None),
+                );
+            }
+            if upload.is_some() && csv_input.is_some_and(|input| input.source == CsvSource::Local) {
+                actions = actions.child(
+                    ActionButton::new("Choose another CSV")
+                        .key("startup-csv-change-local")
+                        .finish(MetalFinish::Gunmetal)
+                        .disabled(busy)
+                        .on_press_tx(move |state: &mut State, tx| {
+                            state.clear_startup_csv(step);
+                            step.start(state, tx);
+                        })
+                        .build(kit, preferences, None),
+                );
+            }
             if let Some(reason) = blocked {
                 panel = panel.child(views::quiet(reason, kit));
                 actions = actions.child(refresh(state, preferences, kit));
@@ -722,6 +932,50 @@ pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit:
         actions = actions.child(later(step, preferences, kit));
     }
     layout(panel.child(actions), sequence, dots)
+}
+
+fn csv_source_controls(step: Step, input: &CsvInput, kit: &Kit) -> El {
+    let options = SegmentedControl::new(
+        &[CsvSource::Local.label(), CsvSource::Github.label()],
+        Some(usize::from(input.source == CsvSource::Github)),
+    )
+    .label("CSV source")
+    .fit()
+    .on_pick(move |state: &mut State, index, _| {
+        let source = if index == 0 {
+            CsvSource::Local
+        } else {
+            CsvSource::Github
+        };
+        state.startup_csv_source(step, source);
+    })
+    .build(kit)
+    .key("startup-csv-source");
+    let url = (input.source == CsvSource::Github).then(|| {
+        TextInput::new(&input.url)
+            .label("GitHub CSV URL")
+            .placeholder("https://raw.githubusercontent.com/…")
+            .width(None)
+            .on_edit(move |state: &mut State| {
+                &mut step
+                    .csv_input_mut(&mut state.startup.csv_inputs)
+                    .expect("only dataset steps render a source URL")
+                    .url
+            })
+            .on_change(move |state: &mut State, _| {
+                if state.startup.data_step == Some(step) {
+                    state.clear_startup_csv(step);
+                }
+            })
+            .build(kit)
+            .key("startup-csv-github-url")
+    });
+    rune::col()
+        .w_full()
+        .min_w(0.0)
+        .gap(6.0)
+        .child(options)
+        .children(url)
 }
 
 fn layout(panel: El, sequence: El, dots: El) -> El {

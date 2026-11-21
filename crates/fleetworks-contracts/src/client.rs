@@ -37,6 +37,8 @@ const MAX_TOKEN_BYTES: usize = 4 * 1024;
 pub struct DatasetUpload {
     pub dataset: crate::readiness::DatasetRef,
     pub expires_in_seconds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_count: Option<u64>,
 }
 
 impl DatasetUpload {
@@ -46,6 +48,7 @@ impl DatasetUpload {
         Self {
             dataset,
             expires_in_seconds,
+            row_count: None,
         }
     }
 }

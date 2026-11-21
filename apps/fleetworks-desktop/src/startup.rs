@@ -79,6 +79,7 @@ pub struct Startup {
     pub(crate) data_step: Option<startup_data::Step>,
     pub(crate) data_reset: [bool; 3],
     pub(crate) data_checks: bool,
+    pub(crate) csv_inputs: startup_data::CsvInputs,
     started_at: Option<f64>,
     settled: bool,
     reduced_motion: Cell<bool>,
@@ -110,6 +111,7 @@ impl Startup {
         self.data_step = None;
         self.data_reset = [false; 3];
         self.data_checks = false;
+        self.csv_inputs = startup_data::CsvInputs::default();
     }
 
     /// Start the orbit clock once, at the first visible frame.
@@ -577,11 +579,12 @@ mod tests {
     use super::*;
     use crate::accessibility::FixtureAccessibility;
     use crate::app::Intent;
+    use fleetworks_contracts::client::DatasetUpload;
     use fleetworks_contracts::connect::RegistrationReceipt;
     use fleetworks_contracts::context::RegisteredContext;
     use fleetworks_contracts::readiness::{
-        DatasetKind, MaintenanceOperation, ReadinessAction, ReadinessActionId, ReadinessCheck,
-        ReadinessCheckId, ReadinessState, WorkstationReadiness,
+        DatasetKind, DatasetRef, MaintenanceOperation, ReadinessAction, ReadinessActionId,
+        ReadinessCheck, ReadinessCheckId, ReadinessState, WorkstationReadiness,
     };
 
     #[test]
@@ -960,6 +963,150 @@ mod tests {
     }
 
     #[test]
+    fn startup_prefills_github_csv_choices_and_only_downloads_after_press() {
+        use ReadinessState::{NotReady, Ready};
+        for (checks, kind) in [
+            ([NotReady; 3], DatasetKind::ActorCatalog),
+            ([Ready, Ready, NotReady], DatasetKind::ClassifierTraining),
+        ] {
+            let (mut runtime, _) = data_setup_runtime(checks);
+            runtime.frame(0.0);
+            click(&mut runtime, "gateway-setup-done");
+            runtime.frame(0.02);
+            let default = crate::github_dataset::default_url(kind).expect("default CSV URL");
+            let tree = runtime.accessibility_json().to_string();
+            assert!(tree.contains(default));
+            assert!(tree.contains("Local CSV"));
+            assert!(tree.contains("Download & validate"));
+            assert!(runtime.find("startup-csv-ready").is_none());
+            assert!(!runtime
+                .state
+                .intents
+                .contains(&Intent::DownloadGithubDataset { kind }));
+            click(&mut runtime, startup_data::PRIMARY);
+            runtime.frame(0.04);
+            assert!(runtime
+                .state
+                .intents
+                .contains(&Intent::DownloadGithubDataset { kind }));
+            assert!(runtime.state.maintenance.confirmation.is_none());
+        }
+    }
+
+    #[test]
+    fn startup_github_csv_requires_validation_and_discards_stale_edits_and_uploads() {
+        let kind = DatasetKind::ActorCatalog;
+        let (mut runtime, _) = data_setup_runtime([ReadinessState::NotReady; 3]);
+        runtime.frame(0.0);
+        click(&mut runtime, "gateway-setup-done");
+        runtime.frame(0.02);
+        click(&mut runtime, startup_data::PRIMARY);
+        runtime.update(|state, _| {
+            state.maintenance.github_downloading = true;
+            state.maintenance.upload = app::Load::Loading;
+        });
+        runtime.frame(0.04);
+        assert!(runtime
+            .accessibility_json()
+            .to_string()
+            .contains("Downloading"));
+        runtime.update(|state, _| state.maintenance.github_downloading = false);
+        runtime.frame(0.06);
+        assert!(runtime
+            .accessibility_json()
+            .to_string()
+            .contains("Validating"));
+        let complete = move |state: &mut State, result| {
+            state.complete_dataset_upload(
+                state.connection.epoch,
+                state.maintenance.upload_revision,
+                state.origin_revision(),
+                kind,
+                result,
+            );
+        };
+        runtime.update(|state, _| {
+            complete(state, Err("CSV row 2 is missing a required field".into()));
+        });
+        runtime.frame(0.08);
+        assert!(runtime
+            .accessibility_json()
+            .to_string()
+            .contains("CSV row 2"));
+        assert!(runtime.find("startup-csv-ready").is_none());
+        assert!(runtime.find("maintenance-confirm").is_none());
+
+        runtime.update(|_, tx| tx.scroll_into_view(startup_data::PRIMARY));
+        runtime.frame(0.09);
+        click(&mut runtime, startup_data::PRIMARY);
+        let dataset = DatasetRef::new("fixture-actors".into(), kind, "a".repeat(64), 120)
+            .expect("validated dataset");
+        let mut receipt = DatasetUpload::new(dataset.clone(), 60);
+        receipt.row_count = Some(12);
+        runtime.update(|state, _| complete(state, Ok(receipt.clone())));
+        runtime.frame(0.10);
+        let tree = runtime.accessibility_json().to_string();
+        assert!(tree.contains("Ready to seed"));
+        assert!(tree.contains("GitHub CSV URL · 12 rows validated"));
+        assert!(runtime.find("maintenance-confirm").is_none());
+
+        runtime.update(|_, tx| tx.scroll_into_view(startup_data::PRIMARY));
+        runtime.frame(0.12);
+        click(&mut runtime, startup_data::PRIMARY);
+        runtime.frame(0.14);
+        assert_eq!(
+            runtime
+                .state
+                .maintenance
+                .confirmation
+                .as_ref()
+                .and_then(|confirmation| confirmation.dataset.as_ref()),
+            Some(&dataset)
+        );
+        assert!(!runtime.state.intents.contains(&Intent::Maintenance {
+            operation: MaintenanceOperation::SeedActors,
+        }));
+
+        runtime.update(|state, tx| state.dismiss_maintenance_confirmation(tx));
+        runtime.frame(0.16);
+        runtime.update(|_, tx| tx.scroll_into_view("startup-csv-github-url/input"));
+        runtime.frame(0.17);
+        click(&mut runtime, "startup-csv-github-url/input");
+        runtime.frame(0.175);
+        let revision = runtime.state.maintenance.upload_revision;
+        let select_all = rune::KeyEvent {
+            key: rune::Key::Text("a".into()),
+            mods: rune::Mods {
+                cmd: true,
+                ..rune::Mods::default()
+            },
+        };
+        runtime.key(select_all.clone());
+        runtime.key_up(select_all);
+        let custom = "https://raw.githubusercontent.com/example/fixture/main/small.csv";
+        key(&mut runtime, rune::Key::Text(custom.into()));
+        runtime.frame(0.18);
+        assert!(runtime.accessibility_json().to_string().contains(custom));
+        assert!(runtime.state.maintenance.selected_dataset.is_none());
+        assert!(runtime.find("startup-csv-ready").is_none());
+        runtime.update(|state, _| {
+            state.complete_dataset_upload(
+                state.connection.epoch,
+                revision,
+                state.origin_revision(),
+                kind,
+                Ok(receipt),
+            );
+        });
+        runtime.frame(0.20);
+        assert!(runtime.state.maintenance.selected_dataset.is_none());
+        click(&mut runtime, "startup-csv-source/segment0");
+        runtime.frame(0.22);
+        assert!(runtime.find("startup-csv-github-url").is_none());
+        assert!(runtime.state.maintenance.confirmation.is_none());
+    }
+
+    #[test]
     fn data_setup_waits_for_scoped_work_and_only_advances_from_verified_results() {
         use ReadinessState::{NotReady, Ready};
         let (mut runtime, receipt) = data_setup_runtime([NotReady, NotReady, Ready]);
@@ -981,6 +1128,8 @@ mod tests {
         assert!((center(dots) - center(panel)).abs() < 0.5);
         assert!(dots[0] >= 0.0 && dots[0] + dots[2] <= 640.0);
 
+        click(&mut runtime, "startup-csv-source/segment0");
+        runtime.frame(0.03);
         click(&mut runtime, startup_data::PRIMARY);
         runtime.frame(0.04);
         if cfg!(target_os = "linux") {
@@ -1114,6 +1263,8 @@ mod tests {
             runtime.frame(0.02);
             runtime.state.intents.clear();
 
+            click(&mut runtime, "startup-csv-source/segment0");
+            runtime.frame(0.03);
             click(&mut runtime, startup_data::PRIMARY);
             runtime.frame(0.04);
             let prompt = runtime
@@ -1243,6 +1394,8 @@ mod tests {
             .iter()
             .any(|check| { check.id == ReadinessCheckId::ActorCatalog && check.state == Ready }));
 
+        runtime.update(|_, tx| tx.scroll_into_view("startup-data-skip"));
+        runtime.frame(0.09);
         click(&mut runtime, "startup-data-skip");
         runtime.frame(0.1);
         assert!(runtime.state.startup.data_checks);

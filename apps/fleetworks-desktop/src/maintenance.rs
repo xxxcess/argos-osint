@@ -196,6 +196,7 @@ pub struct Maintenance {
     pub local_dataset: Option<LocalDataset>,
     pub datasets: Load<DatasetList>,
     pub upload: Load<DatasetUpload>,
+    pub(crate) github_downloading: bool,
     pub selected_dataset: Option<DatasetRef>,
     pub confirmation: Option<MaintenanceConfirmation>,
     pub receipt: Load<MaintenanceReceipt>,
@@ -228,6 +229,7 @@ impl Default for Maintenance {
             local_dataset: None,
             datasets: Load::Idle,
             upload: Load::Idle,
+            github_downloading: false,
             selected_dataset: None,
             confirmation: None,
             receipt: Load::Idle,
@@ -339,6 +341,7 @@ impl Maintenance {
         self.upload_request = None;
         self.upload_revision = self.upload_revision.wrapping_add(1);
         self.upload = Load::Idle;
+        self.github_downloading = false;
     }
 
     pub(crate) fn invalidate_origin(&mut self) {
@@ -347,6 +350,7 @@ impl Maintenance {
         self.selected_dataset = None;
         self.datasets = Load::Idle;
         self.upload = Load::Idle;
+        self.github_downloading = false;
         self.upload_request = None;
         self.datasets_request = None;
         self.datasets_revision = self.datasets_revision.wrapping_add(1);
@@ -372,6 +376,7 @@ impl Maintenance {
     }
     pub(crate) fn cancel_requests(&mut self) {
         self.upload_request = None;
+        self.github_downloading = false;
         self.datasets_request = None;
         self.operation_request = None;
         self.receipt_poll_requests = [None, None, None];
@@ -417,6 +422,8 @@ impl State {
             return;
         }
         let epoch = self.connection.epoch;
+        let origin_revision = self.origin_revision;
+        let upload_revision = self.maintenance.upload_revision;
         tx.open_file(
             FileDialogOptions {
                 title: format!("Select {} CSV", dataset_kind_label(kind)),
@@ -424,7 +431,10 @@ impl State {
             }
             .filter("CSV", &["csv"]),
             move |state: &mut State, result, tx| {
-                if state.connection.epoch != epoch {
+                if state.connection.epoch != epoch
+                    || state.origin_revision != origin_revision
+                    || state.maintenance.upload_revision != upload_revision
+                {
                     return;
                 }
                 match result {
@@ -508,6 +518,63 @@ impl State {
         self.maintenance.message = None;
     }
 
+    pub(crate) fn download_github_dataset(&mut self, kind: DatasetKind, url: String) {
+        let operation = match kind {
+            DatasetKind::ActorCatalog => MaintenanceOperation::SeedActors,
+            DatasetKind::ClassifierTraining => MaintenanceOperation::TrainClassifier,
+            _ => return,
+        };
+        if self
+            .startup
+            .data_step
+            .and_then(crate::startup_data::Step::dataset_kind)
+            != Some(kind)
+        {
+            return;
+        }
+        if let Some(reason) = self.maintenance_disabled_reason(operation) {
+            self.maintenance.message = Some(reason);
+            return;
+        }
+        self.maintenance.discard_csv_draft();
+        self.maintenance.local_dataset = None;
+        self.maintenance.selected_dataset = None;
+        self.maintenance.confirmation = None;
+        self.maintenance.message = None;
+        self.record(Intent::DownloadGithubDataset { kind });
+        if self.fixture {
+            return;
+        }
+        let Some(client) = self.registered_dataset_client() else {
+            return;
+        };
+        let Some(services) = self.services.as_ref() else {
+            return;
+        };
+        self.maintenance.upload = Load::Loading;
+        self.maintenance.github_downloading = true;
+        self.maintenance.upload_request = services.download_dataset(
+            client,
+            kind,
+            url,
+            self.connection.epoch,
+            self.maintenance.upload_revision,
+            self.origin_revision,
+        );
+    }
+
+    fn registered_dataset_client(&mut self) -> Option<Client> {
+        let client = self.client.as_ref()?;
+        let context = self.registration.context.as_ref()?;
+        match client.with_registered_context(context) {
+            Ok(client) => Some(client),
+            Err(error) => {
+                self.maintenance.message = Some(error.to_string());
+                None
+            }
+        }
+    }
+
     pub fn upload_selected_dataset(&mut self) {
         if !self.permission(Permission::MaintainBackend)
             || matches!(self.maintenance.upload, Load::Loading)
@@ -523,18 +590,11 @@ impl State {
         if self.fixture {
             return;
         }
-        let (Some(services), Some(client)) = (&self.services, &self.client) else {
+        let Some(client) = self.registered_dataset_client() else {
             return;
         };
-        let Some(context) = &self.registration.context else {
+        let Some(services) = self.services.as_ref() else {
             return;
-        };
-        let client = match client.with_registered_context(context) {
-            Ok(client) => client,
-            Err(error) => {
-                self.maintenance.message = Some(error.to_string());
-                return;
-            }
         };
         self.maintenance.upload = Load::Loading;
         self.maintenance.upload_revision = self.maintenance.upload_revision.wrapping_add(1);
@@ -694,16 +754,25 @@ impl State {
             return;
         }
         self.maintenance.upload_request = None;
+        self.maintenance.github_downloading = false;
         match result {
             Ok(upload) if upload.dataset.kind == kind && upload.dataset.validate().is_ok() => {
                 self.maintenance.selected_dataset = Some(upload.dataset.clone());
                 self.maintenance.upload = Load::Ready(upload);
                 self.maintenance.last_request = None;
-                self.maintenance.pending_preview = Some(match kind {
+                let operation = match kind {
                     DatasetKind::ActorCatalog => MaintenanceOperation::SeedActors,
                     DatasetKind::ClassifierTraining => MaintenanceOperation::TrainClassifier,
                     _ => return,
-                });
+                };
+                if self
+                    .startup
+                    .data_step
+                    .and_then(crate::startup_data::Step::dataset_kind)
+                    != Some(kind)
+                {
+                    self.maintenance.pending_preview = Some(operation);
+                }
                 self.refresh_readiness();
                 self.finish_dataset_preview();
             }
@@ -1238,6 +1307,44 @@ impl State {
 }
 
 impl GatewayEffects {
+    fn download_dataset(
+        &self,
+        client: Client,
+        kind: DatasetKind,
+        url: String,
+        epoch: u64,
+        revision: u64,
+        origin_revision: u64,
+    ) -> Option<RequestTask> {
+        let ui = self.ui.get()?.clone();
+        let task = self.runtime.spawn(async move {
+            let result = match crate::github_dataset::download(&url, kind).await {
+                Ok(file) => {
+                    ui.update(move |state, _| {
+                        if state.connection.epoch == epoch
+                            && state.origin_revision == origin_revision
+                            && state.maintenance.upload_revision == revision
+                        {
+                            state.maintenance.github_downloading = false;
+                        }
+                    });
+                    let selection = LocalDataset {
+                        path: file.path().to_owned(),
+                        kind,
+                    };
+                    let result = upload(&client, selection).await;
+                    drop(file);
+                    result
+                }
+                Err(error) => Err(error),
+            };
+            ui.update(move |state, _| {
+                state.complete_dataset_upload(epoch, revision, origin_revision, kind, result);
+            });
+        });
+        Some(RequestTask(task.abort_handle()))
+    }
+
     fn upload_dataset(
         &self,
         client: Client,

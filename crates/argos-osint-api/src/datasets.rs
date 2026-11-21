@@ -30,9 +30,11 @@ use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::dataset_upload::DatasetUploadRequest;
 use fleetworks_contracts::readiness::DatasetKind;
 use fleetworks_contracts::readiness::DatasetRef;
+use fleetworks_contracts::DatasetUpload;
 use futures_util::Stream;
 use futures_util::StreamExt;
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::json;
 use sha2::Digest;
 use sha2::Sha256;
@@ -234,6 +236,7 @@ impl DatasetStore {
             stream,
         )
         .await
+        .map(|upload| upload.dataset)
     }
 
     pub(crate) async fn stage_checked<S, E>(
@@ -244,7 +247,7 @@ impl DatasetStore {
         expected_sha256: String,
         expectation: StageExpectation<'_>,
         stream: S,
-    ) -> anyhow::Result<DatasetRef>
+    ) -> anyhow::Result<DatasetUpload>
     where
         S: Stream<Item = Result<Bytes, E>> + Send,
         E: Send,
@@ -315,7 +318,7 @@ impl DatasetStore {
             file.sync_data().await?;
             let validation_path = part.clone();
             let cpu_cancel = Arc::clone(&cancelled);
-            spawn_validation(Arc::clone(&permit), move || {
+            let row_count = spawn_validation(Arc::clone(&permit), move || {
                 validate_csv(&validation_path, kind, &cpu_cancel)
             })
             .await??;
@@ -332,7 +335,9 @@ impl DatasetStore {
             let reference = DatasetRef::new(id, kind, actual, size)?;
             setup_jobs::register_dataset(repo, authority, &reference, setup_jobs::DATASET_TTL)
                 .await?;
-            Ok(reference)
+            let mut upload = DatasetUpload::new(reference, setup_jobs::DATASET_TTL.as_secs());
+            upload.row_count = Some(row_count);
+            Ok(upload)
         }
         .await;
         if result.is_err() {
@@ -380,24 +385,24 @@ impl DatasetStore {
     }
 }
 
-fn spawn_validation(
+fn spawn_validation<T: Send + 'static>(
     work_slot: Arc<OwnedSemaphorePermit>,
-    work: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
-) -> tokio::task::JoinHandle<anyhow::Result<()>> {
+    work: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
+) -> tokio::task::JoinHandle<anyhow::Result<T>> {
     tokio::task::spawn_blocking(move || {
         let _work_slot = work_slot;
         work()
     })
 }
 
-fn validate_csv(path: &Path, kind: DatasetKind, cancelled: &AtomicBool) -> anyhow::Result<()> {
+fn validate_csv(path: &Path, kind: DatasetKind, cancelled: &AtomicBool) -> anyhow::Result<u64> {
     anyhow::ensure!(
         !cancelled.load(Ordering::Acquire),
         "dataset validation cancelled"
     );
     let mut header = std::fs::File::open(path)?;
     fleetworks_contracts::dataset_upload::validate_csv_header(&mut header, kind)?;
-    match kind {
+    let rows = match kind {
         DatasetKind::ActorCatalog => {
             let file = std::fs::File::open(path)?;
             argos_osint_core::actor_catalog::scan_bounded(
@@ -406,7 +411,8 @@ fn validate_csv(path: &Path, kind: DatasetKind, cancelled: &AtomicBool) -> anyho
                 cancelled,
                 |_| Ok(()),
                 |_| Ok(()),
-            )?;
+            )?
+            .rows as u64
         }
         DatasetKind::ClassifierTraining => {
             let mut request = argos_osint_core::classifier::dataset::DatasetRequest::default();
@@ -419,15 +425,17 @@ fn validate_csv(path: &Path, kind: DatasetKind, cancelled: &AtomicBool) -> anyho
             request.executable = std::env::current_exe()?;
             request.home = request.cwd.clone();
             let resolution = argos_osint_core::classifier::dataset::resolve_dataset(&request)?;
-            argos_osint_core::classifier::dataset::parse_csv(&resolution)?;
+            argos_osint_core::classifier::dataset::parse_csv(&resolution)?
+                .summary
+                .rows
         }
         _ => anyhow::bail!("unsupported dataset kind"),
-    }
+    };
     anyhow::ensure!(
         !cancelled.load(Ordering::Acquire),
         "dataset validation cancelled"
     );
-    Ok(())
+    Ok(rows)
 }
 
 #[derive(Deserialize)]
@@ -724,17 +732,14 @@ pub(crate) async fn put_upload(
         )
         .await;
     match result {
-        Ok(reference) => {
+        Ok(upload) => {
             if context.revalidate(&state.repo).await.is_err() {
                 return response(
                     StatusCode::UNAUTHORIZED,
                     json!({"error":"Upload authority changed; recover staged metadata after reconnecting"}),
                 );
             }
-            response(
-                StatusCode::CREATED,
-                json!({"dataset":reference,"expires_in_seconds":setup_jobs::DATASET_TTL.as_secs()}),
-            )
+            response(StatusCode::CREATED, upload)
         }
         Err(_) => response(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -783,7 +788,7 @@ fn ticket_failure(
     response(status, json!({"error":message}))
 }
 
-fn response(status: StatusCode, value: serde_json::Value) -> Response {
+fn response<T: Serialize>(status: StatusCode, value: T) -> Response {
     let mut response = (status, Json(value)).into_response();
     response.headers_mut().insert(
         header::CACHE_CONTROL,
@@ -801,7 +806,10 @@ mod tests {
         let root = tempfile::tempdir().expect("temporary staging parent");
         let csv = root.path().join("actors.csv");
         std::fs::write(&csv,b"actor_id,actor_name,actor_type,aliases,name_normalized\nsynthetic-1,Harbor Union,organization,[],harbor union\n").expect("synthetic actor CSV");
-        assert!(validate_csv(&csv, DatasetKind::ActorCatalog, &AtomicBool::new(false)).is_ok());
+        assert_eq!(
+            validate_csv(&csv, DatasetKind::ActorCatalog, &AtomicBool::new(false)).unwrap(),
+            1
+        );
         assert!(validate_csv(
             &csv,
             DatasetKind::ClassifierTraining,
@@ -839,12 +847,15 @@ mod tests {
             }
         }
         std::fs::write(&training, rows).expect("synthetic training CSV");
-        assert!(validate_csv(
-            &training,
-            DatasetKind::ClassifierTraining,
-            &AtomicBool::new(false)
-        )
-        .is_ok());
+        assert_eq!(
+            validate_csv(
+                &training,
+                DatasetKind::ClassifierTraining,
+                &AtomicBool::new(false),
+            )
+            .unwrap(),
+            12
+        );
         assert!(validate_csv(
             &training,
             DatasetKind::ActorCatalog,

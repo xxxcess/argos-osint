@@ -15,7 +15,6 @@ use argos_osint_core::osint::manual::Tools;
 use argos_osint_core::storage;
 use argos_osint_core::storage::configuration_reset;
 use argos_osint_core::storage::job_actions;
-use argos_osint_core::storage::setup_jobs;
 use argos_osint_core::storage::upload_ticket;
 use argos_osint_core::storage::upload_ticket::UploadTicketBinding;
 use axum::body::Bytes;
@@ -33,7 +32,6 @@ use fleetworks_contracts::ipc::MAX_IPC_CHUNK_BYTES;
 use fleetworks_contracts::readiness::DatasetKind;
 use fleetworks_contracts::readiness::MaintenanceOperation;
 use fleetworks_contracts::search::ActorSearchMode;
-use fleetworks_contracts::DatasetUpload;
 use fleetworks_contracts::Ready;
 use fleetworks_contracts::API_VERSION;
 use serde::Serialize;
@@ -1586,17 +1584,14 @@ impl LocalGateway {
             .await;
         drop(session);
         match staged {
-            Ok(reference) => {
+            Ok(upload) => {
                 if context.revalidate(&self.state.repo).await.is_err() {
                     return Err(DispatchError::new(
                         StatusCode::UNAUTHORIZED,
                         "Upload authority changed; recover staged metadata after reconnecting",
                     ));
                 }
-                Ok(IpcPayload::DatasetUpload(DatasetUpload::new(
-                    reference,
-                    setup_jobs::DATASET_TTL.as_secs(),
-                )))
+                Ok(IpcPayload::DatasetUpload(upload))
             }
             Err(_) => Err(DispatchError::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -2351,6 +2346,7 @@ mod tests {
             panic!("expected DatasetUpload finish payload, got {finish_ok:?}");
         };
         assert_eq!(uploaded.dataset.size_bytes, csv_bytes.len() as u64);
+        assert_eq!(uploaded.row_count, Some(1));
 
         // Reset fence blocks subsequent local dispatch with 401.
         repo.db()

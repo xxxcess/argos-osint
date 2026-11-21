@@ -215,8 +215,10 @@ def test_window(app, registry, atspi, home, worker, pointer, journal, output):
         check=True, timeout=5,
     )
     subprocess.run(["xdotool", "type", "--clearmodifiers", QUESTION], check=True, timeout=5)
+    wait_for(lambda: find("inbox-qa-send", button=True), app, "enabled QA Send")
     started = time.monotonic()
-    button("inbox-qa-send")
+    # Submit via the already-focused composer, using the same keyboard path as an operator.
+    subprocess.run(["xdotool", "key", "--clearmodifiers", "Return"], check=True, timeout=5)
 
     def first_frame():
         records = read_journal(journal)

@@ -973,7 +973,9 @@ fn desktop_status_table_aligns_columns_and_exposes_the_granted_row_action() {
     runtime.reduced_motion = true;
     let mut frame = 0;
     tick_status_checks(&mut runtime, &mut frame);
-    assert!(runtime.find("workstation-open-seed").is_some());
+    let blocker = assert_status_check_fully_visible(&runtime, "readiness-critical-action");
+    assert_eq!(blocker.label.as_deref(), Some("Refresh checks"));
+    assert!(runtime.find("workstation-open-seed").is_none());
     assert!(runtime.find(SEED).is_none());
     runtime.update(|_, tx| tx.focus("status-checks-toggle", true));
     tick_status_checks(&mut runtime, &mut frame);

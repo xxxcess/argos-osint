@@ -628,7 +628,9 @@ mod tests {
     }
 
     fn click(runtime: &mut rune::Runtime<State>, key: &str) {
-        let (x, y) = runtime.find(key).expect("presented control");
+        let (x, y) = runtime
+            .find(key)
+            .unwrap_or_else(|| panic!("expected presented control {key}"));
         runtime.pointer_down(x, y);
         runtime.pointer_up(x, y);
     }
@@ -995,6 +997,9 @@ mod tests {
 
     #[test]
     fn startup_github_csv_requires_validation_and_discards_stale_edits_and_uploads() {
+        const URL_EDITOR: &str = "startup-csv-github-url/value/input";
+        const LOCAL_SOURCE: &str = "startup-csv-source/segment0";
+
         let kind = DatasetKind::ActorCatalog;
         let (mut runtime, _) = data_setup_runtime([ReadinessState::NotReady; 3]);
         runtime.frame(0.0);
@@ -1078,13 +1083,27 @@ mod tests {
 
         runtime.update(|state, tx| state.dismiss_maintenance_confirmation(tx));
         runtime.frame(0.16);
-        runtime.update(|_, tx| tx.scroll_into_view("startup-csv-github-url/input"));
+        runtime.update(|_, tx| tx.scroll_into_view(URL_EDITOR));
         runtime.frame(0.17);
-        click(&mut runtime, "startup-csv-github-url/input");
+        let editor = runtime
+            .elements()
+            .into_iter()
+            .find(|element| element.path.ends_with(URL_EDITOR) && !element.exiting)
+            .expect("compact GitHub URL editor");
+        let [x, y, width, height] = editor.rect;
+        assert_eq!(editor.visible, editor.rect, "the editor must not clip");
+        assert!(
+            x >= 0.0 && y >= 0.0 && x + width <= 640.5 && y + height <= 480.5,
+            "the editor must fit the compact window"
+        );
+        click(&mut runtime, URL_EDITOR);
         runtime.frame(0.175);
+        assert!(runtime.elements().iter().any(|element| {
+            element.path.ends_with(URL_EDITOR) && !element.exiting && element.focused
+        }));
         let revision = runtime.state.maintenance.upload_revision;
         let select_all = rune::KeyEvent {
-            key: rune::Key::Text("a".into()),
+            key: rune::Key::Command('a'),
             mods: rune::Mods {
                 cmd: true,
                 ..rune::Mods::default()
@@ -1109,7 +1128,9 @@ mod tests {
         });
         runtime.frame(0.20);
         assert!(runtime.state.maintenance.selected_dataset.is_none());
-        click(&mut runtime, "startup-csv-source/segment0");
+        runtime.update(|_, tx| tx.scroll_into_view(LOCAL_SOURCE));
+        runtime.frame(0.21);
+        click(&mut runtime, LOCAL_SOURCE);
         runtime.frame(0.22);
         assert!(runtime.find("startup-csv-github-url").is_none());
         assert!(runtime.state.maintenance.confirmation.is_none());

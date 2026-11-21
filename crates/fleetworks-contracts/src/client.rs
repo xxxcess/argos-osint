@@ -118,6 +118,12 @@ impl HttpClient {
             .http
             .request(method, url)
             .header(header::ACCEPT, "application/json");
+        if inbox_qa::is_qa_route(route) {
+            request = request.header(
+                crate::chat::QA_EVIDENCE_HEADER,
+                crate::chat::QA_EVIDENCE_VERSION,
+            );
+        }
         if let Some((registration, revision)) = &self.registration {
             request = request
                 .header("x-fleetworks-registration", registration.clone())

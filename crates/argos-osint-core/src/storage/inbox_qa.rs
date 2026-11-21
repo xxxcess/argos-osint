@@ -4,6 +4,7 @@ use chrono::Utc;
 use fleetworks_contracts::chat::ChatSourceReference;
 use fleetworks_contracts::chat::QaEvent;
 use fleetworks_contracts::chat::QaFinding;
+use fleetworks_contracts::chat::QaMeasurement;
 use fleetworks_contracts::chat::QaTurn;
 use fleetworks_contracts::chat::QaTurnRequest;
 use fleetworks_contracts::chat::QaTurnState;
@@ -172,6 +173,28 @@ pub struct Source {
     pub reference: ChatSourceReference,
     pub label: String,
     pub observed_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measurement: Option<QaMeasurement>,
+    /// For summary selections, display the complete observed state from the chosen passage.
+    #[serde(default)]
+    pub whole_passage: bool,
+}
+
+impl Source {
+    /// Attach frozen, server-side citation metadata to an exact source span.
+    #[must_use]
+    pub fn finding(&self, text: String, start: u32, end: u32) -> QaFinding {
+        let mut finding = QaFinding::new(
+            self.reference.clone(),
+            self.label.clone(),
+            text,
+            start,
+            end,
+            self.observed_at.clone(),
+        );
+        finding.measurement = self.measurement.clone();
+        finding
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -586,14 +609,7 @@ fn grounded_finding(evidence: &FrozenEvidence) -> Result<Option<QaFinding>, TxEr
         ([passage], [source]) if passage.source_id == source.opaque_id => {
             let end =
                 u32::try_from(passage.text.chars().count()).map_err(|_| abort("invalid_part"))?;
-            Ok(Some(QaFinding::new(
-                source.reference.clone(),
-                source.label.clone(),
-                passage.text.clone(),
-                0,
-                end,
-                source.observed_at.clone(),
-            )))
+            Ok(Some(source.finding(passage.text.clone(), 0, end)))
         }
         _ => Err(abort("invalid_part")),
     }
@@ -609,7 +625,6 @@ pub async fn admit(
 ) -> Result<QaTurn, TxError> {
     let key = actor.key()?;
     let id = turn_id(&key, &request.request_id, expected_generation);
-    let now = Utc::now();
     Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| {
         let key = &key;
         let id = &id;
@@ -631,8 +646,10 @@ pub async fn admit(
                 return Ok(exchange.turn);
             }
             let boundary = boundary_in(&tx, key, state.generation).await?;
+            let now = Utc::now();
             if evidence.sampled_at_ms <= boundary
                 || evidence.sampled_at_ms < now.timestamp_millis() - MAX_EVIDENCE_AGE_MS
+                || evidence.sampled_at_ms > now.timestamp_millis()
             {
                 return Err(abort("freshness"));
             }
@@ -680,7 +697,13 @@ pub async fn admit(
             if matches!(evidence.answer_mode, AnswerMode::Grounded) {
                 // Exact facts need no worker lease. Publish the canonical turn and its
                 // events in the admission transaction so Off need not race settlement.
-                let finding = grounded_finding(evidence)?;
+                let finding = if (0..=MAX_EVIDENCE_AGE_MS)
+                    .contains(&now_ms().saturating_sub(evidence.sampled_at_ms))
+                {
+                    grounded_finding(evidence)?
+                } else {
+                    None
+                };
                 let terminal = if finding.is_some() {
                     append_in(&tx, key, state.generation, &mut exchange, QaTurnState::Running, finding)
                         .await?;
@@ -966,6 +989,8 @@ pub struct HealthFact {
     pub label: String,
     pub status: String,
     pub explanation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(SurrealValue)]

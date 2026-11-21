@@ -890,6 +890,8 @@ fn citation_kind(kind: ChatSourceKind) -> &'static str {
         ChatSourceKind::Job => "Job",
         ChatSourceKind::Cycle => "Cycle",
         ChatSourceKind::Readiness => "Readiness",
+        ChatSourceKind::HostMetric => "Host metric",
+        ChatSourceKind::JobCount => "Job count",
         _ => "Evidence",
     }
 }

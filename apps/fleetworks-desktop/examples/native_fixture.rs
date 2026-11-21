@@ -20,6 +20,8 @@ mod native {
     use fleetworks_contracts::chat::ChatSourceReference;
     use fleetworks_contracts::chat::QaAvailabilityReason;
     use fleetworks_contracts::chat::QaFinding;
+    use fleetworks_contracts::chat::QaMeasurement;
+    use fleetworks_contracts::chat::QaMeasurementUnit;
     use fleetworks_contracts::chat::QaPhase;
     use fleetworks_contracts::chat::QaSettings;
     use fleetworks_contracts::chat::QaTurn;
@@ -626,14 +628,37 @@ mod native {
     fn inbox_qa_turn(state: &mut State, stage: QaTurnState) {
         registered(state);
         state.seed_inbox_qa_drawer_fixture();
+        let question = if stage == QaTurnState::Answered {
+            "What is the current memory usage?"
+        } else {
+            "Is actor search ready?"
+        };
         let mut turn = QaTurn::queued(
             "fixture-turn-1".into(),
             "fixture-request-1".into(),
-            "Is actor search ready?".into(),
+            question.into(),
         );
         turn.state = stage;
         turn.cursor = 1;
-        if matches!(stage, QaTurnState::Answered | QaTurnState::Canceled) {
+        if stage == QaTurnState::Answered {
+            let answer = "The connected gateway host memory usage is 42.5%.";
+            let mut finding = QaFinding::new(
+                ChatSourceReference::new(ChatSourceKind::HostMetric, "memory".into())
+                    .expect("fixture host metric source"),
+                "Connected gateway host memory usage".into(),
+                answer.into(),
+                0,
+                answer.len() as u32,
+                "2026-01-01T00:00:00Z".into(),
+            );
+            finding.measurement = Some(QaMeasurement::new(
+                425,
+                QaMeasurementUnit::PercentTenths,
+                "connected gateway host".into(),
+            ));
+            turn.findings.push(finding);
+            turn.cursor = 2;
+        } else if stage == QaTurnState::Canceled {
             let answer = "Actor search is ready.";
             turn.findings.push(QaFinding::new(
                 ChatSourceReference::new(ChatSourceKind::Readiness, "actor-search".into())

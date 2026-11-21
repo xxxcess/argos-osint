@@ -201,24 +201,28 @@ def test_window(app, registry, atspi, home, worker, pointer, journal, output):
     button("startup-data-continue", "Open Workstation")
     button("inbox-toggle")
 
-    x, y, width, height = wait_for(
-        lambda: screen_bounds(find("inbox-qa-composer"), atspi), app, "available QA composer", timeout=110,
-    )
-    # A bare Xvfb display has no window manager to grant keyboard focus.
-    windows = subprocess.check_output(
-        ["xdotool", "search", "--onlyvisible", "--name", "^Fleetworks$"], text=True, timeout=5,
-    ).split()
-    require(len(windows) == 1, "expected one visible Fleetworks window on the fixture display")
-    subprocess.run(
-        ["xdotool", "windowfocus", "--sync", windows[0],
-         "mousemove", str(x + width // 2), str(y + height // 2), "click", "1"],
-        check=True, timeout=5,
-    )
-    subprocess.run(["xdotool", "type", "--clearmodifiers", SUMMARY_QUESTION], check=True, timeout=5)
-    wait_for(lambda: find("inbox-qa-send", button=True), app, "enabled QA Send")
-    started = time.monotonic()
-    # Submit via the already-focused composer, using the same keyboard path as an operator.
-    subprocess.run(["xdotool", "key", "--clearmodifiers", "Return"], check=True, timeout=5)
+    def submit(question, *, timeout=20):
+        x, y, width, height = wait_for(
+            lambda: screen_bounds(find("inbox-qa-composer"), atspi), app, "available QA composer", timeout=timeout,
+        )
+        # A bare Xvfb display has no window manager to grant keyboard focus.
+        windows = subprocess.check_output(
+            ["xdotool", "search", "--onlyvisible", "--name", "^Fleetworks$"], text=True, timeout=5,
+        ).split()
+        require(len(windows) == 1, "expected one visible Fleetworks window on the fixture display")
+        subprocess.run(
+            ["xdotool", "windowfocus", "--sync", windows[0],
+             "mousemove", str(x + width // 2), str(y + height // 2), "click", "1"],
+            check=True, timeout=5,
+        )
+        subprocess.run(["xdotool", "type", "--clearmodifiers", question], check=True, timeout=5)
+        wait_for(lambda: find("inbox-qa-send", button=True), app, "enabled QA Send")
+        submitted_at = time.monotonic()
+        # Submit via the already-focused composer, using the same keyboard path as an operator.
+        subprocess.run(["xdotool", "key", "--clearmodifiers", "Return"], check=True, timeout=5)
+        return submitted_at
+
+    started = submit(SUMMARY_QUESTION, timeout=110)
 
     def first_frame():
         records = read_journal(journal)
@@ -266,11 +270,43 @@ def test_window(app, registry, atspi, home, worker, pointer, journal, output):
     final = wait_for(completed_frame, app, "completion in the same drawer", timeout=12)
     completion_ms = round((time.monotonic() - started) * 1000, 1)
     subprocess.run(["scrot", "--overwrite", str(output / "completed-turn.png")], check=True, timeout=5)
+
+    submit("What is the current memory usage?")
+
+    def grounded_memory():
+        admitted = [row for row in read_journal(journal) if row.get("op") == "qa_turn_submit"]
+        if len(admitted) < 2:
+            return None
+        require(len(admitted) == 2, "the GUI submitted more than one metric turn")
+        turn = admitted[-1]
+        sample = turn["memory_observation"]
+        require(turn["turn_id"] != final["turn_id"] and turn["state"] == "answered"
+                and len(turn["findings"]) == 1 and sample is not None,
+                "the metric did not resolve to one frozen memory observation")
+        whole, tenths = divmod(sample["value"], 10)
+        answer = find("chat-message-inbox-qa-answer")
+        if answer is None:
+            return None
+        expected_text = f"The API host memory usage is {whole}.{tenths}%."
+        expected_citation = f"Host metric: API host memory usage · {sample['observed_at']}"
+        citation = find("chat-citation-0", label=expected_citation)
+        if screen_bounds(citation, atspi) is None or not any(
+            node.name == expected_text and screen_bounds(node, atspi) is not None
+            for node in descendants(answer)
+        ):
+            return None
+        require(find("chat-citation-1") is None and find("inbox-qa-stop") is None,
+                "the completed memory answer showed unrelated evidence or an unfinished turn")
+        return sample
+
+    memory = wait_for(grounded_memory, app, "grounded memory reading and its original timestamp", timeout=16)
+    subprocess.run(["scrot", "--overwrite", str(output / "grounded-memory.png")], check=True, timeout=5)
     result = {
         "runtime": "embedded-stdio", "graphical": "x11", "first_citation_while_running": True,
         "stop_enabled_before_release": True, "same_turn": True, "terminal_events": 1,
         "finding_count": len(final["findings"]), "duplicate_findings": 0,
         "first_finding_ms": first_ms, "completion_ms": completion_ms,
+        "grounded_memory": memory,
     }
     (output / "streaming.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result))

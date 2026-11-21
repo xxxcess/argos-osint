@@ -4,6 +4,7 @@ use fleetworks_contracts::readiness::ReadinessCheckId;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Question {
     Readiness(ReadinessCheckId),
+    ReadinessExplanation(ReadinessCheckId),
     Metric(Metric),
     ContextStatus(ChatSourceKind),
     Summary,
@@ -45,6 +46,12 @@ pub(super) fn classify(question: &str) -> Question {
     }
     if let Some(check) = readiness(question, query) {
         return Question::Readiness(check);
+    }
+    if let Some(check) = question
+        .strip_prefix("why ")
+        .and_then(|question| readiness(question, question))
+    {
+        return Question::ReadinessExplanation(check);
     }
     let context = match query {
         "status of this job" | "state of this job" | "current job status" => {
@@ -141,7 +148,10 @@ fn readiness(question: &str, query: &str) -> Option<ReadinessCheckId> {
         | "is the actor catalog empty"
         | "is the actor catalog unseeded"
         | "is the catalog empty" => return Some(ReadinessCheckId::ActorCatalog),
-        "is the classifier trained" | "has the classifier been trained" => {
+        "is the classifier trained"
+        | "has the classifier been trained"
+        | "is the legacy natural classifier trained"
+        | "has the legacy natural classifier been trained" => {
             return Some(ReadinessCheckId::ClassifierTraining);
         }
         _ => {}
@@ -160,10 +170,14 @@ fn readiness(question: &str, query: &str) -> Option<ReadinessCheckId> {
             subject,
             &[
                 " not ready",
+                " not applicable",
                 " ready",
                 " healthy",
                 " reachable",
+                " unavailable",
                 " available",
+                " unknown",
+                " degraded",
                 " online",
                 " down",
                 " up",
@@ -185,8 +199,14 @@ fn readiness(question: &str, query: &str) -> Option<ReadinessCheckId> {
         "actor search" | "actor index" | "actor search index" => {
             Some(ReadinessCheckId::ActorSearch)
         }
-        "classifier inference" => Some(ReadinessCheckId::ClassifierInference),
-        "classifier training" => Some(ReadinessCheckId::ClassifierTraining),
+        "classifier inference"
+        | "atlas inference"
+        | "atlas rust bert inference"
+        | "rust bert inference" => Some(ReadinessCheckId::ClassifierInference),
+        "classifier training"
+        | "natural training"
+        | "legacy natural training"
+        | "natural classifier training" => Some(ReadinessCheckId::ClassifierTraining),
         _ => None,
     }
 }
@@ -296,6 +316,38 @@ mod tests {
             ),
         ] {
             assert_eq!(classify(question), Question::Metric(metric), "{question}");
+        }
+    }
+
+    #[test]
+    fn keeps_classifier_checks_and_explanations_distinct() {
+        for (question, intent) in [
+            (
+                "Is the classifier service ready?",
+                Question::Readiness(ReadinessCheckId::Classifier),
+            ),
+            (
+                "Is Atlas Rust-BERT inference ready?",
+                Question::Readiness(ReadinessCheckId::ClassifierInference),
+            ),
+            (
+                "What is the state of Legacy Natural training?",
+                Question::Readiness(ReadinessCheckId::ClassifierTraining),
+            ),
+            (
+                "Why is the actor catalog not ready?",
+                Question::ReadinessExplanation(ReadinessCheckId::ActorCatalog),
+            ),
+            (
+                "Why is the datastore unavailable?",
+                Question::ReadinessExplanation(ReadinessCheckId::Datastore),
+            ),
+            (
+                "Why is Atlas Rust-BERT inference unknown?",
+                Question::ReadinessExplanation(ReadinessCheckId::ClassifierInference),
+            ),
+        ] {
+            assert_eq!(classify(question), intent, "{question}");
         }
     }
 

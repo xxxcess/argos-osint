@@ -19,6 +19,7 @@ import fleetworks_qa_pack as pack
 
 ROOT = Path(__file__).resolve().parents[1]
 QA = "/api/v2/workstation/chat/"
+EVIDENCE_HEADER = "X-Fleetworks-Inbox-Evidence"
 TERMINAL = {"answered", "insufficient_context", "canceled", "failed"}
 SUMMARY_QUESTION = "What is the current workstation readiness?"
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
@@ -87,10 +88,84 @@ def cited_finding(turn, kind, source_id):
             and finding["end"] - finding["start"] == len(finding["text"])
             and datetime.fromisoformat(finding["observed_at"]).tzinfo is not None,
             f"{source_id} answer lacks valid offsets or an observation time")
-    return finding["text"]
+    return finding
 
 
-def exercise(request, manage, registration, manager, model, readiness, running_jobs, *, embedded_mode=False):
+def legacy_finding(finding):
+    if finding is None or finding["source"]["kind"] not in {"host_metric", "job_count"}:
+        return finding
+    legacy = {**finding, "source": {**finding["source"], "kind": "readiness"}}
+    del legacy["measurement"]
+    return legacy
+
+
+def legacy_turn(turn):
+    return {**turn, "findings": [legacy_finding(finding) for finding in turn["findings"]]}
+
+
+def grounded_turn(request, context, case, question, *, legacy_request=None):
+    payload = {"request_id": f"inbox-qa-smoke-{case}", "context": context, "question": question}
+    accepted = request("turns", payload, expected=(200, 201, 202))
+    require(accepted["state"] in TERMINAL, f"{case} did not finish within admission")
+    query = {"turn_id": accepted["turn_id"], "after": 0, "wait_seconds": 0}
+    page = request("events", query=query)
+    require(page["turn"] == accepted and not page["gap"], f"{case} admission differed from its event snapshot")
+    require([event["sequence"] for event in page["events"]] == list(range(1, accepted["cursor"] + 1)),
+            f"{case} event cursor skipped a sequence")
+    require([event["sequence"] for event in page["events"] if event["state"] in TERMINAL] == [accepted["cursor"]],
+            f"{case} did not emit exactly one terminal event")
+    require([event["finding"] for event in page["events"] if event["finding"]] == accepted["findings"],
+            f"{case} event evidence differs from the frozen answer")
+    require(request("latest") == accepted, f"{case} latest changed the frozen answer")
+    require(request("turns", payload, expected=(200, 201, 202)) == accepted, f"{case} replay changed the answer")
+    cancel = {"context": context, "turn_id": accepted["turn_id"]}
+    require(request("cancel", cancel) == accepted, f"{case} Stop changed a grounded terminal answer")
+    resume = {**query, "after": accepted["cursor"]}
+    require(request("events", query=resume) == {"turn": accepted, "events": [], "gap": False},
+            f"{case} terminal replay emitted another event")
+
+    if legacy_request is not None:
+        legacy = legacy_turn(accepted)
+        legacy_events = [{**event, "finding": legacy_finding(event["finding"])} for event in page["events"]]
+        require(legacy_request("latest") == legacy, f"{case} latest is unreadable by a legacy client")
+        require(legacy_request("events", query=query) == {"turn": legacy, "events": legacy_events, "gap": False},
+                f"{case} legacy event stream changed the cursor or evidence")
+        require(legacy_request("turns", payload, expected=(200, 201, 202)) == legacy,
+                f"{case} legacy submit replay changed the frozen answer")
+        require(legacy_request("cancel", cancel) == legacy, f"{case} legacy Stop changed the answer")
+        require(legacy_request("events", query=resume) == {"turn": legacy, "events": [], "gap": False},
+                f"{case} legacy resume emitted another event")
+    return accepted
+
+
+def cited_metric(turn, source_id, label, *, embedded_mode):
+    finding = cited_finding(turn, "host_metric", source_id)
+    measurement = finding["measurement"]
+    value = measurement["value"]
+    subject = f"{'API host' if embedded_mode else 'Connected gateway host'} {label}"
+    sentence = subject if embedded_mode else subject[0].lower() + subject[1:]
+    require(type(value) is int and 0 <= value <= 1000
+            and measurement == {"subject": subject, "unit": "percent_tenths", "value": value},
+            f"{source_id} evidence does not contain a valid utilization measurement")
+    whole, tenths = divmod(value, 10)
+    require(finding["label"] == subject
+            and finding["text"] == f"The {sentence} is {whole}.{tenths}%.",
+            f"{source_id} answer differs from its frozen measurement")
+    return {"value": value, "unit": measurement["unit"], "observed_at": finding["observed_at"]}
+
+
+def cited_running_jobs(turn, active_jobs):
+    finding = cited_finding(turn, "job_count", "running")
+    job_noun = "job" if active_jobs == 1 else "jobs"
+    require(finding["text"] == f"This workstation has {active_jobs} running {job_noun}."
+            and finding["measurement"] == {
+                "subject": "Running workstation jobs", "unit": "jobs", "value": active_jobs,
+            },
+            "Inbox running-job count differs from the registered workstation dashboard")
+
+
+def exercise(request, manage, registration, manager, model, readiness, running_jobs, *,
+             embedded_mode=False, legacy_request=None, verify_other_jobs=None):
     """Run the same real QA lifecycle over the supplied transport."""
     before = request("settings")
     require(not before["enabled"] and before["phase"] == "off", "QA did not default to Off")
@@ -160,6 +235,8 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
                 and finding["end"] - finding["start"] == len(finding["text"])
                 and finding["observed_at"] and finding["source"]["id"]
                 and finding["source"]["kind"] == "readiness", "invalid readiness citation")
+        require(re.search(r"\b\d{4}-\d{2}-\d{2}|\b\d{2}:\d{2}:\d{2}", finding["text"]) is None,
+                "the real-model summary leaked an observation timestamp into its answer")
     require(request("latest") == snapshot, "latest exchange differs from event snapshot")
     resumed = request("events", query={"turn_id": turn_id, "after": cursor, "wait_seconds": 0})
     require(not resumed["events"] and resumed["turn"] == snapshot, "terminal replay duplicated an event")
@@ -183,36 +260,44 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
     require(min(map(observed, next_turn["findings"])) > max(map(observed, snapshot["findings"])),
             "the follow-up reused an observation from before the previous terminal turn")
 
-    def ask(case, question):
-        accepted = request("turns", {**turn, "request_id": f"inbox-qa-smoke-{case}", "question": question},
-                           expected=(200, 201, 202))
-        require(accepted["state"] in TERMINAL, f"{case} did not finish within admission")
-        page = request("events", query={"turn_id": accepted["turn_id"], "after": 0, "wait_seconds": 0})
-        require(page["turn"] == accepted and not page["gap"]
-                and len([event for event in page["events"] if event["state"] in TERMINAL]) == 1,
-                f"{case} admission differed from its terminal event")
-        return accepted
+    context = authorize(registration)
+
+    def ask(case, question, *, check_legacy=False):
+        return grounded_turn(request, context, case, question,
+                             legacy_request=legacy_request if check_legacy else None)
 
     gateway = ask("gateway", "What is the state of the gateway?")
-    require(cited_finding(gateway, "readiness", "gateway") == "Gateway is ready.",
+    require(cited_finding(gateway, "readiness", "gateway")["text"]
+            == "Gateway is ready. An authenticated gateway request succeeded.",
             "gateway answer did not report the observed ready state")
     if embedded_mode:
-        catalog = ask("catalog", "Is the actor catalog ready?")
-        require(cited_finding(catalog, "readiness", "actor_catalog") == "Actor catalog is not ready.",
-                "an empty Embedded catalog did not answer with its negative readiness state")
+        catalog = ask("catalog", "Why is the actor catalog not ready?")
+        require(cited_finding(catalog, "readiness", "actor_catalog")["text"]
+                == "Actor catalog is not ready. No completed seed was verified, and existing records may remain.",
+                "the catalog answer did not preserve its actual seed status")
 
     active_jobs = running_jobs()
-    jobs = ask("jobs", "How many jobs are running?")
-    job_noun = "job" if active_jobs == 1 else "jobs"
-    require(cited_finding(jobs, "job_count", "running") == f"This workstation has {active_jobs} running {job_noun}.",
-            "Inbox running-job count differs from the registered workstation dashboard")
-    memory = ask("memory", "What is the current memory usage?")
-    require(re.fullmatch(r"The API host memory usage is (?:[0-9]{1,2}\.[0-9]|100\.0)%\.",
-                         cited_finding(memory, "host_metric", "memory")),
-            "memory answer did not report a current utilization percentage")
+    jobs = ask("jobs", "How many jobs are running?", check_legacy=True)
+    cited_running_jobs(jobs, active_jobs)
+    questions = (
+        ("cpu", "What is the current CPU utilization?", "CPU usage"),
+        ("memory", "What is the current memory usage?", "memory usage"),
+        ("disk", "What is the current disk usage?", "storage volume usage"),
+    )
+    readings = {}
+    for source_id, metric_question, label in questions:
+        metric = ask(source_id, metric_question, check_legacy=source_id == "memory")
+        readings[source_id] = cited_metric(metric, source_id, label, embedded_mode=embedded_mode)
+    memory_again = ask("memory-follow-up", "What is the current memory usage?")
+    readings["memory_follow_up"] = cited_metric(memory_again, "memory", "memory usage", embedded_mode=embedded_mode)
+    require(datetime.fromisoformat(readings["memory_follow_up"]["observed_at"])
+            > datetime.fromisoformat(readings["memory"]["observed_at"]),
+            "memory follow-up reused the previous observation timestamp")
     unsupported = ask("unsupported", "What is the current GPU temperature?")
     require(unsupported["state"] == "insufficient_context" and not unsupported["findings"],
             "unsupported measurement received an answer")
+    if verify_other_jobs is not None:
+        verify_other_jobs()
 
     started = time.monotonic()
     manage("settings", {"context": authorize(manager), "expected_revision": current["revision"], "enabled": False})
@@ -220,11 +305,17 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
           "QA did not finish unloading", timeout=40)
     require(not model(), "Off retained a live model process")
     require(request("latest") is None, "Off retained latest question and answer")
+    query = {"turn_id": unsupported["turn_id"], "after": 0, "wait_seconds": 0}
+    request("events", query=query, expected=404)
+    if legacy_request is not None:
+        require(legacy_request("latest") is None, "Off retained an exchange in the legacy view")
+        legacy_request("events", query=query, expected=404)
     return {"model_warm_ms": ready_ms, "admission_ms": admission_ms, "first_cited_finding_ms": first_finding_ms,
             "completion_ms": completed_ms, "unload_ms": round((time.monotonic() - started) * 1000, 1),
             "model_pid_count": len(active), "warm_model_rss_bytes": worker_rss_bytes,
             "fresh_observation": True, "terminal_events": terminal_events,
-            "grounded_readiness": True, "live_metrics": True, "unsupported_context": True}
+            "grounded_readiness": True, "live_metrics": True, "unsupported_context": True,
+            "frozen_samples": readings, "legacy_http_evidence": legacy_request is not None}
 
 
 def embedded_tree(parent):
@@ -395,20 +486,31 @@ def run_distributed(args):
         manager_identity = {**verify.native_fixture(manager_dir), "request_id": "qa-register-operator"}
         manager = verify.register_native(port, manager_token, manager_identity)
 
-        def client(bearer, context):
+        def client(bearer, context, *, typed_evidence=False):
+            headers = verify.native_headers(context)
+            if typed_evidence:
+                headers = {**headers, EVIDENCE_HEADER: "1"}
+
             def request(path, payload=None, *, query=None, expected=200):
                 route = QA + path + ("?" + urlencode(query) if query else "")
-                status, value = verify.request(port, route, bearer, payload, headers=verify.native_headers(context))
+                status, value, response_headers = verify.exchange(port, route, bearer, payload, headers=headers)
                 statuses = (expected,) if isinstance(expected, int) else expected
                 error = value.get("error") if isinstance(value, dict) else None
                 reason = SAFE_REJECTION.get(error if isinstance(error, str) else None, "unclassified")
                 require(status in statuses, f"{path} received HTTP {status} ({reason})")
+                if path != "settings" and 200 <= status < 300:
+                    normalized = {name.lower(): content.lower() for name, content in response_headers.items()}
+                    require(EVIDENCE_HEADER.lower() in {name.strip() for name in normalized.get("vary", "").split(",")}
+                            and {"private", "no-store"} <= {part.strip() for part in
+                                                            normalized.get("cache-control", "").split(",")},
+                            f"{path} response did not isolate the evidence view from HTTP caches")
                 return value
             return request
 
-        native = client(token, registration)
+        native = client(token, registration, typed_evidence=True)
+        legacy = client(token, registration)
         manage = client(manager_token, manager)
-        other_client = client(other_token, other)
+        other_client = client(other_token, other, typed_evidence=True)
         client(relay, registration)("settings", expected=(401, 403))
         require(not native("settings")["can_manage"], "ordinary paired native gained QA configuration authority")
         native("settings", {"context": authorize(registration), "expected_revision": native("settings")["revision"],
@@ -435,16 +537,25 @@ def run_distributed(args):
                                       headers=verify.native_headers(registration))
             return response[0] == 200
 
-        def running_jobs():
+        def running_jobs(bearer, context):
             value = verify.expect_status(
-                verify.request(port, "/api/v1/jobs?sort=newest", token, headers=verify.native_headers(registration)),
+                verify.request(port, "/api/v1/jobs?sort=newest", bearer, headers=verify.native_headers(context)),
                 200, "registered workstation jobs",
             )
             require(value["dashboard_counts_scope"] == "unfiltered_top_level_workstation_activity",
                     "paired jobs dashboard counts used the wrong scope")
             return value["counts"]["active"]
 
-        result = exercise(request, manage, registration, manager, model, readiness, running_jobs)
+        def verify_other_jobs():
+            expected = running_jobs(other_token, other)
+            observed = grounded_turn(other_client, authorize(other), "other-jobs", "How many jobs are running?")
+            cited_running_jobs(observed, expected)
+            native("events", query={"turn_id": observed["turn_id"], "after": 0, "wait_seconds": 0}, expected=404)
+
+        result = exercise(request, manage, registration, manager, model, readiness,
+                          lambda: running_jobs(token, registration), legacy_request=legacy,
+                          verify_other_jobs=verify_other_jobs)
+        require(other_client("latest") is None, "Off retained another registration's metric exchange")
         failed = False
         return {"runtime": "distributed-paired-http", "platform": args.platform, "model_image_id": info["Image"], **result}
     except Exception:

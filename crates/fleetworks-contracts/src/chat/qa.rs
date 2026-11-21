@@ -20,6 +20,9 @@ pub const QA_TURNS_PATH: &str = "/api/v2/workstation/chat/turns";
 pub const QA_LATEST_PATH: &str = "/api/v2/workstation/chat/latest";
 pub const QA_EVENTS_PATH: &str = "/api/v2/workstation/chat/events";
 pub const QA_CANCEL_PATH: &str = "/api/v2/workstation/chat/cancel";
+/// Opt in to typed metric citations on the gateway's V2 Inbox response routes.
+pub const QA_EVIDENCE_HEADER: &str = "x-fleetworks-inbox-evidence";
+pub const QA_EVIDENCE_VERSION: &str = "1";
 
 /// The Inbox displays at most three independent findings across at most 60 words.
 pub const QA_MAX_FINDINGS: usize = 3;
@@ -253,6 +256,35 @@ impl QaTurnState {
     }
 }
 
+/// Exact unit of a frozen metric reading. Percentages are stored in tenths of a percent.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum QaMeasurementUnit {
+    PercentTenths,
+    Jobs,
+}
+
+/// The authorized measurement cited by a finding at its original observation time.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct QaMeasurement {
+    pub value: u64,
+    pub unit: QaMeasurementUnit,
+    pub subject: String,
+}
+
+impl QaMeasurement {
+    #[must_use]
+    pub fn new(value: u64, unit: QaMeasurementUnit, subject: String) -> Self {
+        Self {
+            value,
+            unit,
+            subject,
+        }
+    }
+}
+
 /// A verified, cited span. The offsets count Unicode scalar values in the source passage.
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[non_exhaustive]
@@ -263,6 +295,8 @@ pub struct QaFinding {
     pub start: u32,
     pub end: u32,
     pub observed_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measurement: Option<QaMeasurement>,
 }
 
 impl fmt::Debug for QaFinding {
@@ -289,6 +323,7 @@ impl QaFinding {
             start,
             end,
             observed_at,
+            measurement: None,
         }
     }
 }

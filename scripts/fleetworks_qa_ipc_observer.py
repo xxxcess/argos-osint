@@ -32,6 +32,19 @@ def finding_digest(finding):
     return hashlib.sha256(json.dumps(finding, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def memory_observation(findings):
+    for finding in findings:
+        if finding["source"] != {"kind": "host_metric", "id": "memory"}:
+            continue
+        sample = finding["measurement"]
+        value = sample["value"]
+        observed_at = finding["observed_at"]
+        if (sample["unit"] == "percent_tenths" and sample["subject"] == "API host memory usage"
+                and type(value) is int and 0 <= value <= 1000 and len(observed_at) <= 40):
+            return {"value": value, "observed_at": observed_at}
+    return None
+
+
 def observe(companion, journal, args):
     pending = {}
     lock = threading.Lock()
@@ -84,6 +97,7 @@ def observe(companion, journal, args):
                     "state": turn["state"],
                     "cursor": turn["cursor"],
                     "findings": [finding_digest(finding) for finding in turn["findings"]],
+                    "memory_observation": memory_observation(turn["findings"]),
                     "gap": value.get("gap", False),
                     "events": [
                         {"sequence": event["sequence"], "state": event["state"],

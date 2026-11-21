@@ -4,7 +4,9 @@ use std::future::Future;
 use std::time::Duration;
 
 use anyhow::{anyhow, ensure, Context, Result};
-use argos_osint_api::inbox_qa::{CancellationToken, QaInference, QaRuntimeAvailability};
+use argos_osint_api::inbox_qa::{
+    validated_summary_finding, CancellationToken, QaInference, QaRuntimeAvailability,
+};
 use argos_osint_core::storage::inbox_qa::{self as store, AnswerMode, FrozenEvidence, POOL};
 use argos_osint_core::storage::job_dispatch::{
     self, DeliveryClaim, DeliveryFinish, DeliveryLease, DeliveryOutcome, Envelope,
@@ -561,7 +563,7 @@ impl Executor {
         tokio::pin!(inference);
         let mut next_check = Instant::now() + CHECK;
         let deadline = Instant::now() + TURN_TIMEOUT;
-        let mut sequence = QaWorkerSequence::default();
+        let mut publication = Publication::default();
         let mut model_finished = false;
         let mut received_event = false;
         let result = loop {
@@ -600,7 +602,7 @@ impl Executor {
                         break RunResult::Error;
                     };
                     received_event = true;
-                    match timeout(AUTH_TIMEOUT, publish(&self.repo, lease, evidence, event, &mut sequence)).await {
+                    match timeout(AUTH_TIMEOUT, publication.publish(&self.repo, lease, evidence, event)).await {
                         Ok(Ok(RunResult::More)) => {}
                         Ok(Ok(other)) => {
                             if matches!(other, RunResult::Fenced) {
@@ -688,57 +690,87 @@ enum RunResult {
     Error,
 }
 
-async fn publish(
-    repo: &Repository,
-    lease: &DeliveryLease,
+fn cited_finding(
     evidence: &FrozenEvidence,
-    event: QaWorkerEvent,
-    sequence: &mut QaWorkerSequence,
-) -> Result<RunResult> {
-    sequence.accept(&evidence.request, &event)?;
-    let (state, finding) = match event {
-        QaWorkerEvent::Finding {
-            source_id,
-            start,
-            end,
-            text,
-            ..
-        } => {
-            let source = evidence
-                .sources
-                .iter()
-                .find(|source| source.opaque_id == source_id)
-                .ok_or_else(|| anyhow!("unknown Inbox QA source"))?;
-            let finding = QaFinding::new(
-                source.reference.clone(),
-                source.label.clone(),
-                text,
+    source_id: &str,
+    start: u32,
+    end: u32,
+    text: String,
+) -> Result<Option<QaFinding>> {
+    let source = evidence
+        .sources
+        .iter()
+        .find(|source| source.opaque_id == source_id)
+        .ok_or_else(|| anyhow!("unknown Inbox QA source"))?;
+    if !source.whole_passage {
+        return Ok(Some(source.finding(text, start, end)));
+    }
+    let passage = evidence
+        .request
+        .passages
+        .iter()
+        .find(|passage| passage.source_id == source_id)
+        .ok_or_else(|| anyhow!("unknown Inbox QA passage"))?;
+    let Some(complete) = validated_summary_finding(&passage.text, &source.label, start, end, &text)
+    else {
+        return Ok(None);
+    };
+    let end = u32::try_from(complete.chars().count())?;
+    Ok(Some(source.finding(complete.to_owned(), 0, end)))
+}
+
+#[derive(Default)]
+struct Publication {
+    sequence: QaWorkerSequence,
+    has_finding: bool,
+}
+
+impl Publication {
+    async fn publish(
+        &mut self,
+        repo: &Repository,
+        lease: &DeliveryLease,
+        evidence: &FrozenEvidence,
+        event: QaWorkerEvent,
+    ) -> Result<RunResult> {
+        self.sequence.accept(&evidence.request, &event)?;
+        let (state, finding) = match event {
+            QaWorkerEvent::Finding {
+                source_id,
                 start,
                 end,
-                source.observed_at.clone(),
-            );
-            (QaTurnState::Running, Some(finding))
+                text,
+                ..
+            } => {
+                let Some(finding) = cited_finding(evidence, &source_id, start, end, text)? else {
+                    return Ok(RunResult::More);
+                };
+                (QaTurnState::Running, Some(finding))
+            }
+            QaWorkerEvent::Complete { outcome, .. } => {
+                let state = match outcome {
+                    QaWorkerOutcome::Answered if self.has_finding => QaTurnState::Answered,
+                    QaWorkerOutcome::Answered | QaWorkerOutcome::InsufficientContext => {
+                        QaTurnState::InsufficientContext
+                    }
+                    QaWorkerOutcome::Failed => QaTurnState::Failed,
+                    QaWorkerOutcome::Cancelled => QaTurnState::Canceled,
+                    _ => return Err(anyhow!("unsupported Inbox QA outcome")),
+                };
+                (state, None)
+            }
+            _ => return Err(anyhow!("unsupported Inbox QA event")),
+        };
+        self.has_finding |= finding.is_some();
+        if !store::publish(repo, lease, state, finding).await? {
+            return Ok(RunResult::Fenced);
         }
-        QaWorkerEvent::Complete { outcome, .. } => {
-            let state = match outcome {
-                QaWorkerOutcome::Answered => QaTurnState::Answered,
-                QaWorkerOutcome::InsufficientContext => QaTurnState::InsufficientContext,
-                QaWorkerOutcome::Failed => QaTurnState::Failed,
-                QaWorkerOutcome::Cancelled => QaTurnState::Canceled,
-                _ => return Err(anyhow!("unsupported Inbox QA outcome")),
-            };
-            (state, None)
-        }
-        _ => return Err(anyhow!("unsupported Inbox QA event")),
-    };
-    if !store::publish(repo, lease, state, finding).await? {
-        return Ok(RunResult::Fenced);
+        Ok(if state.is_terminal() {
+            RunResult::Completed
+        } else {
+            RunResult::More
+        })
     }
-    Ok(if state.is_terminal() {
-        RunResult::Completed
-    } else {
-        RunResult::More
-    })
 }
 
 #[cfg(test)]

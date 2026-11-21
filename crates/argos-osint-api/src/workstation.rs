@@ -902,6 +902,7 @@ pub(crate) async fn qa_snapshot(
                 && check.reason_code == "natural_resource_idle"
             {
                 check.state = ReadinessState::Ready;
+                check.reason_code = "embedded_training_completed".into();
             }
         }
     }
@@ -917,49 +918,89 @@ fn sample_time(observations: &Observations) -> Option<chrono::DateTime<Utc>> {
 pub(crate) type QaReadinessFact = (&'static str, &'static str, &'static str, &'static str);
 
 fn qa_fact(check: &ReadinessCheck) -> Option<QaReadinessFact> {
-    // Include fixed terminology only. Explanations from private probes may contain
-    // endpoint details. Never copy capability, artifact, action or identifier fields.
-    let (label, explanation) = match check.id {
-        ReadinessCheckId::Gateway => ("Gateway", "The gateway accepts authenticated requests."),
-        ReadinessCheckId::Datastore => ("Datastore", "The datastore holds backend records."),
-        ReadinessCheckId::Jobs => (
-            "Jobs service",
-            "The Jobs service coordinates background work.",
-        ),
-        ReadinessCheckId::Brain => (
-            "Brain service",
-            "The Brain service exposes Intel operations.",
-        ),
-        ReadinessCheckId::Control => (
-            "Control service",
-            "The Control service manages backend configuration.",
-        ),
-        ReadinessCheckId::Nlp => ("Natural language processing", "This engine analyzes text."),
-        ReadinessCheckId::Classifier => ("Classifier", "This engine classifies supported text."),
-        ReadinessCheckId::ActorCatalog => (
-            "Actor catalog",
-            "The catalog stores the backend actor records.",
-        ),
-        ReadinessCheckId::ActorSearch => (
-            "Actor search",
-            "Actor search uses the current backend index.",
-        ),
-        ReadinessCheckId::ClassifierInference => (
-            "Classifier inference",
-            "Inference uses the active classifier.",
-        ),
-        ReadinessCheckId::ClassifierTraining => (
-            "Classifier training",
-            "Training prepares a classifier for activation.",
-        ),
-        _ => return None,
-    };
+    let id = check.id.as_str();
+    let label = qa_readiness_label(id)?;
     let status = match check.state {
         ReadinessState::NotReady => "not ready",
         ReadinessState::NotApplicable => "not applicable",
         state => state.as_str(),
     };
-    Some((check.id.as_str(), label, status, explanation))
+    Some((id, label, status, qa_readiness_reason(check)))
+}
+
+pub(crate) fn qa_readiness_label(id: &str) -> Option<&'static str> {
+    Some(match id {
+        "gateway" => "Gateway",
+        "datastore" => "Datastore",
+        "jobs" => "Jobs service",
+        "brain" => "Brain service",
+        "control" => "Control service",
+        "nlp" => "Natural language processing",
+        "classifier" => "Classifier service",
+        "actor_catalog" => "Actor catalog",
+        "actor_search" => "Actor search",
+        "classifier_inference" => "Atlas Rust-BERT inference",
+        "classifier_training" => "Legacy Natural training",
+        _ => return None,
+    })
+}
+
+fn qa_readiness_reason(check: &ReadinessCheck) -> &'static str {
+    // Private probe diagnostics may include paths or endpoints. Translate only
+    // recognized outcomes to fixed public explanations.
+    match (check.state, check.reason_code.as_str()) {
+        (ReadinessState::Ready, "gateway_reachable") => {
+            "An authenticated gateway request succeeded."
+        }
+        (ReadinessState::Ready, "datastore_reachable") => "A bounded datastore read succeeded.",
+        (ReadinessState::Unavailable, "datastore_unavailable") => {
+            "The bounded datastore read did not complete successfully."
+        }
+        (ReadinessState::Unavailable, "owner_unavailable" | "inference_owner_unavailable") => {
+            "The configured status probe did not answer successfully."
+        }
+        (ReadinessState::Unknown, "owner_not_configured") => "No status owner is configured.",
+        (ReadinessState::Ready, "database_seeded") => {
+            "A completed seed and canonical actor records were observed."
+        }
+        (ReadinessState::NotReady, "database_catalog_empty") => {
+            "The completed seed has no canonical actor records."
+        }
+        (ReadinessState::NotReady, "database_seed_incomplete") => {
+            "No completed seed was verified, and existing records may remain."
+        }
+        (ReadinessState::Running, "database_seed_running") => {
+            "The accepted seed has not yet completed."
+        }
+        (ReadinessState::Unavailable, "seed_receipt_unavailable") => {
+            "The seed receipt and canonical records could not be checked."
+        }
+        (ReadinessState::Ready, "index_reader_visible") => {
+            "The index is visible through the observed source checkpoint."
+        }
+        (ReadinessState::Running, "index_building" | "index_catching_up") => {
+            "Index visibility is incomplete."
+        }
+        (ReadinessState::NotReady, "index_not_built" | "index_source_not_started") => {
+            "No serving index was observed."
+        }
+        (ReadinessState::Degraded, "index_ingest_paused") => "Index ingestion is paused.",
+        (ReadinessState::Unknown, "model_unverified") => {
+            "Service reachability alone does not verify inference."
+        }
+        (ReadinessState::Ready, "model_verified") => "The active model was verified.",
+        (ReadinessState::Unknown, "natural_resource_idle") => {
+            "Idle resource state does not verify training completion."
+        }
+        (ReadinessState::Running, "natural_resource_busy") => "No successful result was verified.",
+        (ReadinessState::Degraded, "natural_activation_reconciliation_required") => {
+            "An activation outcome must be reconciled before training can continue."
+        }
+        (ReadinessState::Ready, "embedded_training_completed") => {
+            "A completed Natural training result was observed."
+        }
+        _ => "",
+    }
 }
 
 pub(crate) async fn read_value(
@@ -1234,6 +1275,48 @@ fn reply(status: StatusCode, value: serde_json::Value) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inbox_readiness_keeps_observed_reasons_without_private_probe_details() {
+        const AT: &str = "2026-11-21T03:17:00Z";
+        let datastore = check(
+            ReadinessCheckId::Datastore,
+            ReadinessState::Unavailable,
+            "datastore_unavailable",
+            "Private host or socket detail",
+            AT,
+        );
+        assert_eq!(
+            qa_fact(&datastore),
+            Some((
+                "datastore",
+                "Datastore",
+                "unavailable",
+                "The bounded datastore read did not complete successfully.",
+            )),
+        );
+        let incomplete_catalog = catalog_observation(None, true, false, AT);
+        assert_eq!(
+            qa_fact(&incomplete_catalog),
+            Some((
+                "actor_catalog",
+                "Actor catalog",
+                "not ready",
+                "No completed seed was verified, and existing records may remain.",
+            )),
+        );
+        let classifier = check(
+            ReadinessCheckId::Classifier,
+            ReadinessState::NotReady,
+            "process_not_ready",
+            "Private diagnostic detail",
+            AT,
+        );
+        assert_eq!(
+            qa_fact(&classifier),
+            Some(("classifier", "Classifier service", "not ready", "")),
+        );
+    }
 
     #[test]
     fn atlas_checkpoint_presence_and_verified_inference_are_distinct() {

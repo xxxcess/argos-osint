@@ -1,6 +1,5 @@
 //! The cold-start workflow uses the same registered maintenance operations as Workstation Status.
 
-use fleetworks_contracts::client::DatasetUpload;
 use fleetworks_contracts::readiness::DatasetKind;
 use fleetworks_contracts::readiness::DatasetRef;
 use fleetworks_contracts::readiness::MaintenanceOperation;
@@ -8,6 +7,7 @@ use fleetworks_contracts::readiness::ReadinessCheck;
 use fleetworks_contracts::readiness::ReadinessCheckId;
 use fleetworks_contracts::readiness::ReadinessState;
 use fleetworks_contracts::readiness::WorkstationReadiness;
+use fleetworks_contracts::DatasetUpload;
 use rune::El;
 use rune::TextEdit;
 use rune::Tx;

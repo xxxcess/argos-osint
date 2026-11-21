@@ -579,13 +579,13 @@ mod tests {
     use super::*;
     use crate::accessibility::FixtureAccessibility;
     use crate::app::Intent;
-    use fleetworks_contracts::client::DatasetUpload;
     use fleetworks_contracts::connect::RegistrationReceipt;
     use fleetworks_contracts::context::RegisteredContext;
     use fleetworks_contracts::readiness::{
         DatasetKind, DatasetRef, MaintenanceOperation, ReadinessAction, ReadinessActionId,
         ReadinessCheck, ReadinessCheckId, ReadinessState, WorkstationReadiness,
     };
+    use fleetworks_contracts::DatasetUpload;
 
     #[test]
     fn opening_clock_runs_once_and_holds_the_last_pose() {

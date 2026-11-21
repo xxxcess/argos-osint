@@ -123,7 +123,7 @@ fn supported_url(url: &Url) -> bool {
         (Some("media.githubusercontent.com"), ["media", owner, repo, _, _, ..]) => (owner, repo),
         _ => return false,
     };
-    [owner, repo].into_iter().all(|segment| {
+    [*owner, *repo].into_iter().all(|segment| {
         segment
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))

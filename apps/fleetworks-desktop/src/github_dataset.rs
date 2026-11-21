@@ -31,7 +31,8 @@ const MAX_POINTER_BYTES: u64 = 1_024;
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(180);
 const URL_ERROR: &str = "Use the public HTTPS Raw link to a GitHub CSV without a token or query.";
 const REDIRECT_ERROR: &str = "This link redirected away from a supported public GitHub CSV.";
-const DOWNLOAD_ERROR: &str = "GitHub download was interrupted. Check your connection and retry.";
+const DOWNLOAD_ERROR: &str =
+    "GitHub download failed. Check your connection or HTTPS proxy, then retry or choose Local CSV.";
 const HTML_ERROR: &str =
     "GitHub returned a web page. Open the CSV on GitHub and copy its Raw link.";
 const LIMIT_ERROR: &str = "This file exceeds the upload limit for this dataset.";
@@ -55,18 +56,22 @@ pub(crate) async fn download(source: &str, kind: DatasetKind) -> Result<NamedTem
     if limit == 0 {
         return Err("This dataset does not support a GitHub CSV source.".to_owned());
     }
-    let client = Client::builder()
-        .https_only(true)
-        .no_proxy()
-        .redirect(Policy::none())
-        .referer(false)
-        .connect_timeout(Duration::from_secs(12))
-        .read_timeout(Duration::from_secs(20))
+    let client = download_client_builder()
         .build()
         .map_err(|_| DOWNLOAD_ERROR)?;
     tokio::time::timeout(DOWNLOAD_TIMEOUT, fetch_csv(&client, url, limit))
         .await
-        .map_err(|_| "GitHub download timed out. Retry or choose a local CSV.")?
+        .map_err(|_| "GitHub download timed out. Retry or choose Local CSV.")?
+}
+
+fn download_client_builder() -> reqwest::ClientBuilder {
+    // Use the workstation's proxy environment only for this credential-free client.
+    Client::builder()
+        .https_only(true)
+        .redirect(Policy::none())
+        .referer(false)
+        .connect_timeout(Duration::from_secs(12))
+        .read_timeout(Duration::from_secs(20))
 }
 
 fn parse_source(source: &str) -> Option<Url> {
@@ -327,8 +332,11 @@ async fn stage(
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
+
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
+    use tokio::net::TcpStream;
 
     use super::*;
 
@@ -407,6 +415,129 @@ mod tests {
         };
         let (response, ()) = tokio::join!(client.get(origin).send(), serve);
         response.unwrap()
+    }
+
+    async fn request_headers(socket: &mut TcpStream) -> String {
+        let mut bytes = Vec::new();
+        let mut buffer = [0_u8; 512];
+        while !bytes.ends_with(b"\r\n\r\n") {
+            let count = socket.read(&mut buffer).await.unwrap();
+            assert!(count > 0 && bytes.len() + count <= 4_096);
+            bytes.extend_from_slice(&buffer[..count]);
+        }
+        String::from_utf8(bytes).unwrap().to_ascii_lowercase()
+    }
+
+    async fn expect_tls_client_hello(socket: &mut TcpStream) {
+        let mut header = [0; 5];
+        socket.read_exact(&mut header).await.unwrap();
+        assert_eq!(&header[..2], &[0x16, 0x03], "expected TLS handshake record");
+        let length = usize::from(u16::from_be_bytes([header[3], header[4]]));
+        assert!((1..=16_384).contains(&length));
+        let mut handshake = vec![0; length];
+        socket.read_exact(&mut handshake).await.unwrap();
+        assert_eq!(handshake[0], 1, "expected TLS ClientHello");
+        // A rejected TLS peer must never yield a successful download response.
+        socket
+            .write_all(&[0x15, 0x03, 0x03, 0, 2, 2, 40])
+            .await
+            .unwrap();
+        socket.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn github_uses_configured_proxy_and_gateway_keeps_its_credential() {
+        const TEST: &str =
+            "github_dataset::tests::github_uses_configured_proxy_and_gateway_keeps_its_credential";
+        const TLS_PEER: &str = "FLEETWORKS_TEST_GITHUB_TLS_PEER";
+        const GATEWAY: &str = "FLEETWORKS_TEST_GITHUB_GATEWAY";
+        const TOKEN: &str = "synthetic-gateway-credential";
+        const HOST: &str = "media.githubusercontent.com";
+        if let Ok(address) = std::env::var(TLS_PEER) {
+            let address: SocketAddr = address.parse().unwrap();
+            let gateway_origin = format!("http://{}", std::env::var(GATEWAY).unwrap());
+            let gateway = fleetworks_contracts::Client::new(&gateway_origin, Some(TOKEN)).unwrap();
+            let github = download_client_builder()
+                .resolve(HOST, address)
+                .build()
+                .unwrap();
+            let official = parse_source(ACTORS).unwrap();
+            assert_eq!(
+                get(&github, official).await.err().as_deref(),
+                Some(DOWNLOAD_ERROR)
+            );
+            let value: serde_json::Value = gateway.get("/api/v1/host/metrics").await.unwrap();
+            assert!(value.is_object());
+            return;
+        }
+
+        for (configured, bypass) in [(false, false), (true, false), (true, true)] {
+            let direct = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let gateway = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+            child.args(["--exact", TEST]).kill_on_drop(true);
+            for key in [
+                "HTTP_PROXY",
+                "http_proxy",
+                "HTTPS_PROXY",
+                "https_proxy",
+                "ALL_PROXY",
+                "all_proxy",
+                "NO_PROXY",
+                "no_proxy",
+                "REQUEST_METHOD",
+            ] {
+                child.env_remove(key);
+            }
+            child.env(TLS_PEER, direct.local_addr().unwrap().to_string());
+            child.env(GATEWAY, gateway.local_addr().unwrap().to_string());
+            if configured {
+                let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
+                child
+                    .env("HTTPS_PROXY", &proxy_url)
+                    .env("HTTP_PROXY", &proxy_url);
+            }
+            if bypass {
+                child.env("NO_PROXY", HOST);
+            }
+            let serve = async {
+                if configured && !bypass {
+                    let (mut socket, _) = proxy.accept().await.unwrap();
+                    let headers = request_headers(&mut socket).await;
+                    assert!(headers.starts_with(&format!("connect {HOST}:443 http/1.1\r\n")));
+                    assert!(!headers.contains("authorization:") && !headers.contains(TOKEN));
+                    socket
+                        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                        .await
+                        .unwrap();
+                    expect_tls_client_hello(&mut socket).await;
+                } else {
+                    let (mut socket, _) = direct.accept().await.unwrap();
+                    expect_tls_client_hello(&mut socket).await;
+                }
+                let (mut socket, _) = gateway.accept().await.unwrap();
+                let headers = request_headers(&mut socket).await;
+                assert!(headers.starts_with("get /api/v1/host/metrics http/1.1\r\n"));
+                assert!(headers.contains(&format!("\r\nauthorization: bearer {TOKEN}\r\n")));
+                socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+                    .await
+                    .unwrap();
+                socket.shutdown().await.unwrap();
+            };
+            let (output, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+                tokio::join!(child.output(), serve)
+            })
+            .await
+            .expect("expected TLS peer, optional proxy, and direct gateway requests");
+            let output = output.unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "{stdout}"
+            );
+        }
     }
 
     #[tokio::test]

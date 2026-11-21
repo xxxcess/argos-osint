@@ -18,10 +18,6 @@ from fleetworks_local_backend_smoke import check_zero_bound_sockets, resolve_com
 from fleetworks_qa_pack import MANIFEST, WORKER, install, sha256, verify_directory
 
 SUMMARY_QUESTION = "What is the current workstation readiness?"
-ACTOR_DEFAULT = (
-    "https://media.githubusercontent.com/media/xxxcess/argos-osint/"
-    "cd371e39772a157bb791dc0d0dc6ac76c84e0ea5/datasets/argos_actors.csv"
-)
 TERMINAL = {"answered", "insufficient_context", "failed", "canceled"}
 
 
@@ -206,12 +202,11 @@ def test_window(app, registry, atspi, home, worker, pointer, journal, output):
         download = find("startup-data-primary", label="Download & validate", button=True)
         if screen_bounds(field, atspi) is None or screen_bounds(download, atspi) is None:
             return None
-        text = field.queryText()
-        require(text.getText(0, text.characterCount) == ACTOR_DEFAULT,
-                "the packaged catalog step did not prefill the pinned GitHub CSV")
+        # The X11 accessibility bridge exposes the control and action but no
+        # Text interface. The Runtime test asserts the exact prefilled value.
         return True
 
-    wait_for(actor_default_available, app, "prefilled GitHub actor CSV and Download & validate action")
+    wait_for(actor_default_available, app, "GitHub actor CSV and Download & validate action")
     subprocess.run(["scrot", "--overwrite", str(output / "startup-actor-default.png")], check=True, timeout=5)
     button("startup-data-skip")
     button("inbox-qa-toggle", "Turn On")
@@ -325,7 +320,7 @@ def test_window(app, registry, atspi, home, worker, pointer, journal, output):
         "finding_count": len(final["findings"]), "duplicate_findings": 0,
         "first_finding_ms": first_ms, "completion_ms": completion_ms,
         "grounded_memory": memory,
-        "startup_actor_default": True,
+        "startup_actor_default_controls": True,
     }
     (output / "streaming.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result))

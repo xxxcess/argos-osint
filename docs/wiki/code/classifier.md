@@ -16,7 +16,7 @@ A run pins the model assets, worker, six-domain contract, and threshold. The fin
 
 Use the [pinned synthetic corpus](../../../datasets/argos_atlas_strategic_domains_v2.csv). Fit on 440 training articles and select weights on 165 development articles. Select the shared admission threshold on 230 calibration articles scored with the same Rust worker. Freeze the model bytes, exact dataset digest, threshold, baseline identity and provenance before scoring the 185 held-out articles.
 
-The held-out report compares the candidate with the current pinned baseline using the actual Rust worker for both. Both the calibration partition and the independent held-out partition must score strictly above 65% macro F1. The report also includes per-domain and micro F1, false admissions for out-of-scope articles, and top-two behavior. A passing report qualifies the synthetic fixture for explicit promotion. Reviewed news-cycle evidence determines when to stop recalibrating.
+The held-out report compares the candidate with the current pinned baseline using the actual Rust worker for both. Both the calibration partition and the independent held-out partition must score strictly above 65% macro F1. The report also includes per-domain and micro F1, false admissions for out-of-scope articles, and top-two behavior. A passing report qualifies the synthetic fixture for explicit promotion. Agreement with reviewed provider mappings on news cycles determines when to stop recalibrating.
 
 On an isolated AMD64 Linux host with the pinned CPU Torch wheel from `verify_linux.py wheel` and the documented toolchain, run the complete proof from a clean revision.
 
@@ -43,24 +43,26 @@ The operator command keeps the writer lease from the expected revision check thr
 
 ## Recalibrate on reviewed news cycles
 
-Run these commands from the Distributed operator workspace with the deployed datastore credentials and worker paths. Set the native library loader path to the worker's bundled libraries, as in the classifier service. Start with an explicitly activated BERT candidate and completed news cycles. Export the captured observations for each cycle.
+Review the compiled NewsData and Currents category rules and the domain phrases that corroborate them. Use the SHA-256 digest from the rules you reviewed when you run recalibration.
 
 ```sh
-argos-api-host --role atlas-bert-review-export --review-cycle "$cycle" > reviewed-cycle.json
+argos-api-host --role atlas-bert-provider-mapping
 ```
 
-Review the article title and description. Set each reviewed item's `decision` to `complete` and supply all applicable `domains`. An empty domain list with a complete decision means the article is out of scope. Use `abstain` when the available text does not support a complete judgment. Keep the identifiers, source hashes, permanent fold assignments and revisions from the export. Labels come from the reviewer's judgment.
+Run recalibration from the Distributed operator workspace with an explicitly activated BERT candidate, deployed datastore credentials, and the same worker and native library paths as the classifier service.
 
 ```sh
-argos-api-host --role atlas-bert-review-import \
-  --review-file reviewed-cycle.json --review-reference "$review_reference"
 argos-api-host --role atlas-bert-recalibrate \
-  --expected-bert-revision "$prior_revision" --review-cycle "$cycle"
+  --expected-bert-revision "$prior_revision" \
+  --reviewed-mapping-sha256 "$reviewed_mapping_sha256" \
+  --review-cycle "$cycle"
 ```
 
-Repeat `--review-cycle` to select up to eight completed cycles for one assessment. Import validates each review against its exact captured observation and cycle. Recalibration uses one complete review per story family and keeps Calibration and Test families separate. Each partition needs at least 20 positive and 20 negative families for each domain, including at least 20 explicitly out-of-scope families. Previously scored Test families stay reserved across attempts.
+Repeat `--review-cycle` to select up to eight completed cycles. Fleetworks reads their captured news and uses one eligible observation per story family. The operator reviews the mapping rules once for each digest. The command derives strategic-domain reference sets from those rules and leaves entirely unmapped observations out of scoring. Prior article reviews remain available separately.
 
-The Rust worker scores the active weights. Calibration selects a threshold and Test measures the selected threshold. Both macro F1 values must exceed 65% to update the active revision. The result reports both scores, per-domain counts, false admissions, the exact reviewed cohort digest, and the applied revision when eligible. A resulting Test score strictly above 85% persists the freeze with that active checkpoint. Further recalibration attempts on the frozen checkpoint are refused, including after restart or reactivation of that checkpoint. News cycles still collect articles and monitoring evidence. Existing cycles retain their exact pinned threshold.
+Calibration selects the threshold on one set of families, and Test measures agreement on a separate set. Each split needs at least 20 families with a mapping match and 20 without a mapping match for each domain, among the families that have at least one mapped domain. Previously scored Test families stay reserved across attempts.
+
+Both mapping-agreement macro F1 scores must exceed 65% to apply the threshold. An independent Test score strictly above 85% freezes recalibration for that checkpoint across restarts and reactivation. The result includes the reviewed mapping digest, cohort digest, and per-domain agreement counts. These counts measure agreement with provider-derived reference sets. The mapping leaves actual article membership unknown for unmatched domains, so this assessment provides no out-of-scope accuracy estimate.
 
 ## Historical Natural records
 

@@ -26,6 +26,7 @@ pub(crate) enum ReviewCommand {
     Recalibrate {
         cycles: Vec<String>,
         expected_revision: String,
+        reviewed_mapping_sha256: String,
     },
 }
 
@@ -86,6 +87,16 @@ pub(crate) async fn run(
     }
 }
 
+pub(crate) fn report_provider_mapping() -> Result<()> {
+    anyhow::ensure!(
+        cfg!(feature = "classifier"),
+        "this build does not include Atlas BERT support"
+    );
+    let mapping = argos_osint_core::classifier::provider_labels::mapping_review_manifest();
+    println!("{}", serde_json::to_string_pretty(&mapping)?);
+    Ok(())
+}
+
 pub(crate) async fn run_review(
     workspace: PathBuf,
     repo: Repository,
@@ -105,8 +116,9 @@ pub(crate) async fn run_review(
             ReviewCommand::Recalibrate {
                 cycles,
                 expected_revision,
+                reviewed_mapping_sha256,
             } => {
-                let _ = (cycles, expected_revision);
+                let _ = (cycles, expected_revision, reviewed_mapping_sha256);
             }
         }
         anyhow::bail!("this build does not include Atlas BERT support")
@@ -133,11 +145,23 @@ pub(crate) async fn run_review(
             ReviewCommand::Recalibrate {
                 cycles,
                 expected_revision,
+                reviewed_mapping_sha256,
             } => {
-                let review = classifier_review::recalibration_cohort(&repo, cycles).await?;
+                use argos_osint_core::classifier::provider_labels::mapping_predicates_sha256;
+
+                anyhow::ensure!(
+                    reviewed_mapping_sha256 == mapping_predicates_sha256(),
+                    "review the current provider mapping and supply its digest with --reviewed-mapping-sha256"
+                );
+                let observations = classifier_review::mapping_cohort(&repo, cycles).await?;
                 let control = WorkControl::new();
-                let work =
-                    bert_activation::recalibrate(&workspace, &expected_revision, review, &control);
+                let work = bert_activation::recalibrate(
+                    &workspace,
+                    &expected_revision,
+                    &reviewed_mapping_sha256,
+                    observations,
+                    &control,
+                );
                 tokio::pin!(work);
                 let outcome = tokio::select! {
                     biased;

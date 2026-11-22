@@ -16,6 +16,7 @@ use crate::storage::tx::{run_tx, RetryPolicy, Tx, TxError};
 
 /// Maximum completed news cycles in one reviewed BERT recalibration cohort.
 pub const MAX_RECALIBRATION_CYCLES: usize = 8;
+const MAPPING_OBSERVATION_PAGE_SIZE: usize = 32;
 
 pub const SCHEMA: &str = "
 DEFINE TABLE IF NOT EXISTS classifier_review SCHEMAFULL;
@@ -97,6 +98,31 @@ async fn completed_cycle_origins(tx: &Tx, cycle: &str) -> Result<Vec<String>, Tx
         .await?
         .check()?;
     Ok(origins.take(0)?)
+}
+
+fn validated_cycles(mut cycles: Vec<String>) -> anyhow::Result<Vec<String>> {
+    if cycles.is_empty()
+        || cycles.len() > MAX_RECALIBRATION_CYCLES
+        || !cycles.iter().all(|cycle| valid_cycle_id(cycle))
+    {
+        anyhow::bail!("invalid_recalibration_cycles");
+    }
+    cycles.sort_unstable();
+    if cycles.windows(2).any(|pair| pair[0] == pair[1]) {
+        anyhow::bail!("duplicate_recalibration_cycle");
+    }
+    Ok(cycles)
+}
+
+async fn completed_observation_ids(
+    tx: &Tx,
+    cycles: &[String],
+) -> Result<BTreeSet<String>, TxError> {
+    let mut ids = BTreeSet::new();
+    for cycle in cycles {
+        ids.extend(completed_cycle_origins(tx, cycle).await?);
+    }
+    Ok(ids)
 }
 
 /// Deterministic bounded monitoring sample. Provider/category/model choices
@@ -260,27 +286,15 @@ struct RecalibrationRow {
 /// provenance, and family partitions are revalidated in the same read snapshot.
 pub async fn recalibration_cohort(
     repo: &Repository,
-    mut cycles: Vec<String>,
+    cycles: Vec<String>,
 ) -> anyhow::Result<ReviewExchange> {
-    if cycles.is_empty()
-        || cycles.len() > MAX_RECALIBRATION_CYCLES
-        || !cycles.iter().all(|cycle| valid_cycle_id(cycle))
-    {
-        anyhow::bail!("invalid_recalibration_cycles");
-    }
-    cycles.sort_unstable();
-    if cycles.windows(2).any(|pair| pair[0] == pair[1]) {
-        anyhow::bail!("duplicate_recalibration_cycle");
-    }
+    let cycles = validated_cycles(cycles)?;
     let requested_cycles = cycles.clone();
     let read = run_tx(repo.db(), RetryPolicy::default(), move |tx| {
         let cycles = requested_cycles.clone();
         async move {
-            let mut ids = BTreeSet::new();
-            for cycle in &cycles {
-                ids.extend(completed_cycle_origins(&tx, cycle).await?);
-            }
-            let reviews: Vec<_> = ids
+            let reviews: Vec<_> = completed_observation_ids(&tx, &cycles)
+                .await?
                 .into_iter()
                 .map(|id| jobs::rid("classifier_review", &id))
                 .collect();
@@ -366,6 +380,110 @@ pub async fn recalibration_cohort(
         items,
     };
     exchange.validate("persisted completed-cycle reviews")?;
+    Ok(exchange)
+}
+
+#[derive(SurrealValue)]
+struct MappingObservation {
+    observation_id: String,
+    payload_json: String,
+    payload_sha256: String,
+    family_id: String,
+    split: Option<String>,
+}
+
+/// Freeze a bounded cohort for assessment against the operator-reviewed
+/// mapping predicates. The exchange retains immutable source observations
+/// with empty labels. Existing per-article reviews do not enter this cohort.
+///
+/// # Errors
+/// Returns an error when the cycles are invalid or unsettled, the captured
+/// source is corrupt, or the eligible cohort exceeds the review exchange limits.
+pub async fn mapping_cohort(
+    repo: &Repository,
+    cycles: Vec<String>,
+) -> anyhow::Result<ReviewExchange> {
+    let cycles = validated_cycles(cycles)?;
+    let requested_cycles = cycles.clone();
+    let read = run_tx(repo.db(), RetryPolicy::default(), move |tx| {
+        let cycles = requested_cycles.clone();
+        async move {
+            let ids: Vec<_> = completed_observation_ids(&tx, &cycles).await?.into_iter().collect();
+            let mut families = BTreeMap::new();
+            let mut bytes = MAX_REVIEW_BYTES;
+            // Ascending observation identity picks the first eligible
+            // observation per permanent story family, across all cycles.
+            for page in ids.chunks(MAPPING_OBSERVATION_PAGE_SIZE) {
+                let records: Vec<_> = page
+                    .iter()
+                    .map(|id| jobs::rid("classifier_observation", id))
+                    .collect();
+                let mut response = tx
+                    .query(
+                        "SELECT record::id(id) AS observation_id,payload_json,payload_sha256,family_id,
+                         (SELECT VALUE split FROM ONLY type::record('classifier_story_family', $parent.family_id)) AS split
+                         FROM $observations
+                         WHERE family_id != '' AND bytes::len(type::bytes(payload_json)) <= $observation_limit
+                         ORDER BY observation_id;",
+                    )
+                    .bind(("observations", records))
+                    .bind(("observation_limit", provider_labels::MAX_OBSERVATION_BYTES as i64))
+                    .await?
+                    .check()?;
+                let rows: Vec<MappingObservation> = response.take(0)?;
+                for row in rows {
+                    let split = match row.split.as_deref() {
+                        Some("calibration") => Split::Calibration,
+                        Some("test") => Split::Test,
+                        _ => continue,
+                    };
+                    let family_id = FamilyId::parse(&row.family_id)
+                        .map_err(|_| invalid("mapping_cohort_family_invalid"))?;
+                    let std::collections::btree_map::Entry::Vacant(slot) =
+                        families.entry(family_id.clone())
+                    else {
+                        continue;
+                    };
+                    let observation: provider_labels::ProviderObservation =
+                        serde_json::from_str(&row.payload_json)
+                            .map_err(|_| invalid("mapping_cohort_observation_corrupt"))?;
+                    if observation.observation_id != row.observation_id {
+                        return Err(invalid("mapping_cohort_observation_identity"));
+                    }
+                    let reference = provider_labels::mapping_agreement_reference(&observation)
+                        .map_err(|_| invalid("mapping_cohort_observation_bound"))?;
+                    if reference.is_none() {
+                        continue;
+                    }
+                    bytes = bytes.checked_sub(row.payload_json.len())
+                        .ok_or_else(|| invalid("mapping_cohort_byte_bound"))?;
+                    slot.insert(ReviewItem {
+                        observation,
+                        payload_sha256: row.payload_sha256,
+                        family_id,
+                        split,
+                        revision: 1,
+                        decision: ReviewDecision::Unreviewed,
+                        domains: Vec::new(),
+                        review_note: String::new(),
+                    });
+                    if families.len() > MAX_REVIEW_ITEMS {
+                        return Err(invalid("mapping_cohort_item_bound"));
+                    }
+                }
+            }
+            Ok::<_, TxError>(families.into_values().collect::<Vec<_>>())
+        }
+    })
+    .await?;
+    let cycle_selection = crate::classifier::artifact::sha256_hex(&serde_json::to_vec(&cycles)?);
+    let exchange = ReviewExchange {
+        schema_version: REVIEW_SCHEMA.into(),
+        run_id: format!("provider-mapping-news-cycles:{cycle_selection}"),
+        sampling_bias: "Bounded earliest captured origins from the selected completed cycles. One supported provider-mapped observation per permanent Calibration or Test family. Provider and mapping coverage bias this cohort.".into(),
+        items: read.value,
+    };
+    exchange.validate("captured provider mapping cohort")?;
     Ok(exchange)
 }
 

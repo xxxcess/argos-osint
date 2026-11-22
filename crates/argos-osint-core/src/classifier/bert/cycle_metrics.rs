@@ -18,7 +18,22 @@ const MIN_FAMILIES_PER_CLASS: usize = calibration::MIN_ACCEPTED_FAMILIES_PER_DOM
 const MIN_PROMOTION_MACRO_F1_PERCENT: u128 = 65;
 const CALIBRATION_GOAL_MACRO_F1_PERCENT: u128 = 85;
 
-/// One complete, independently reviewed story family in canonical domain order.
+/// The reference used to judge domain selections in reviewed news cycles.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReviewedReferenceKind {
+    #[default]
+    CompleteArticleLabels,
+    ReviewedProviderMappings,
+}
+
+impl ReviewedReferenceKind {
+    fn is_complete(&self) -> bool {
+        *self == Self::CompleteArticleLabels
+    }
+}
+
+/// One reviewed story family with reference domain membership in canonical order.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ReviewedPrediction {
     /// Raw Atlas worker probabilities, before the runtime's log-odds round trip.
@@ -26,6 +41,8 @@ pub(crate) struct ReviewedPrediction {
     pub(crate) labels: [bool; 6],
 }
 
+/// Domain agreement counts. For provider mappings, an absent reference
+/// domain is a nonmatch to the mapped set, not a negative article label.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ReviewedDomainCounts {
     pub(crate) tp: usize,
@@ -48,6 +65,8 @@ impl ReviewedDomainCounts {
 /// Calibration and independent Test results at the selected threshold.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ReviewedCycleMetrics {
+    #[serde(default, skip_serializing_if = "ReviewedReferenceKind::is_complete")]
+    pub(crate) reference: ReviewedReferenceKind,
     pub(crate) threshold: f64,
     pub(crate) calibration_rows: usize,
     pub(crate) calibration_macro_f1: f64,
@@ -62,10 +81,16 @@ pub(crate) struct ReviewedCycleMetrics {
 }
 
 impl ReviewedCycleMetrics {
+    /// Whether the result compares against reviewed provider domain mappings.
+    pub(crate) fn is_mapping_agreement(&self) -> bool {
+        self.reference == ReviewedReferenceKind::ReviewedProviderMappings
+    }
+
     /// Checks the persisted score against the published counts and cohort bounds.
     pub(crate) fn valid(&self) -> bool {
         (50..100).any(|ticks| (f64::from(ticks) / 100.0 - self.threshold).abs() <= 1e-12)
             && valid_partition(
+                self.reference,
                 self.calibration_rows,
                 &self.calibration_per_domain,
                 self.calibration_out_of_scope_rows,
@@ -73,6 +98,7 @@ impl ReviewedCycleMetrics {
                 self.calibration_macro_f1,
             )
             && valid_partition(
+                self.reference,
                 self.test_rows,
                 &self.test_per_domain,
                 self.test_out_of_scope_rows,
@@ -108,14 +134,20 @@ fn exceeds_macro_f1(per_domain: &BTreeMap<DomainId, ReviewedDomainCounts>, perce
 }
 
 fn valid_partition(
+    reference: ReviewedReferenceKind,
     rows: usize,
     per_domain: &BTreeMap<DomainId, ReviewedDomainCounts>,
     out_of_scope_rows: usize,
     false_out_of_scope_admissions: usize,
     macro_f1: f64,
 ) -> bool {
+    let out_of_scope_supported = if reference.is_complete() {
+        (MIN_FAMILIES_PER_CLASS..=rows).contains(&out_of_scope_rows)
+    } else {
+        out_of_scope_rows == 0
+    };
     if rows > MAX_REVIEWED_ROWS
-        || !(MIN_FAMILIES_PER_CLASS..=rows).contains(&out_of_scope_rows)
+        || !out_of_scope_supported
         || false_out_of_scope_admissions > out_of_scope_rows
         || !(0.0..=1.0).contains(&macro_f1)
         || per_domain.len() != DomainId::ALL.len()
@@ -125,6 +157,7 @@ fn valid_partition(
     let mut sum_f1 = 0.0;
     let mut false_positives = 0;
     let mut selected_domains = 0;
+    let mut reference_domains = 0;
     for domain in DomainId::ALL {
         let Some(counts) = per_domain.get(&domain) else {
             return false;
@@ -144,9 +177,11 @@ fn valid_partition(
         }
         false_positives += counts.fp;
         selected_domains += counts.tp + counts.fp;
+        reference_domains += positives;
         sum_f1 += counts.f1();
     }
-    false_out_of_scope_admissions <= false_positives
+    (reference.is_complete() || reference_domains >= rows)
+        && false_out_of_scope_admissions <= false_positives
         && selected_domains <= 2 * rows
         && (sum_f1 / DomainId::ALL.len() as f64 - macro_f1).abs() <= 1e-12
 }
@@ -183,12 +218,46 @@ impl Metrics {
 /// # Errors
 /// Rejects non-probability scores, oversized cohorts and insufficient class
 /// support in either split.
+#[cfg(test)]
 pub(crate) fn calibrate_reviewed_cycle(
     calibration: &[ReviewedPrediction],
     test: &[ReviewedPrediction],
 ) -> Result<ReviewedCycleMetrics, ClassifierError> {
-    let mut calibration = prepare(calibration)?;
-    let mut test = prepare(test)?;
+    calibrate(
+        ReviewedReferenceKind::CompleteArticleLabels,
+        calibration,
+        test,
+    )
+}
+
+/// Selects a threshold from reviewed provider mapping agreement on Calibration
+/// and evaluates it against the independently mapped Test domain sets.
+///
+/// Rows without mapped domains are outside the cohort. A nonmatch to a mapped
+/// domain set is evidence of disagreement only and makes no claim about article
+/// truth or out-of-scope admissions.
+///
+/// # Errors
+/// Rejects non-probability scores, oversized cohorts and insufficient mapped or
+/// nonmapped reference support for any domain in either split.
+pub(crate) fn calibrate_mapping_cycle(
+    calibration: &[ReviewedPrediction],
+    test: &[ReviewedPrediction],
+) -> Result<ReviewedCycleMetrics, ClassifierError> {
+    calibrate(
+        ReviewedReferenceKind::ReviewedProviderMappings,
+        calibration,
+        test,
+    )
+}
+
+fn calibrate(
+    reference: ReviewedReferenceKind,
+    calibration: &[ReviewedPrediction],
+    test: &[ReviewedPrediction],
+) -> Result<ReviewedCycleMetrics, ClassifierError> {
+    let mut calibration = prepare(reference, calibration)?;
+    let mut test = prepare(reference, test)?;
     let mut threshold = 0.5;
     let mut selected = measure(&mut calibration, threshold);
     for ticks in 51..100 {
@@ -210,6 +279,7 @@ pub(crate) fn calibrate_reviewed_cycle(
     }
     let measured = measure(&mut test, threshold);
     Ok(ReviewedCycleMetrics {
+        reference,
         threshold,
         calibration_rows: calibration.len(),
         calibration_macro_f1: selected.macro_f1(),
@@ -224,13 +294,21 @@ pub(crate) fn calibrate_reviewed_cycle(
     })
 }
 
-fn prepare(rows: &[ReviewedPrediction]) -> Result<Vec<ScoredReview>, ClassifierError> {
+fn prepare(
+    reference: ReviewedReferenceKind,
+    rows: &[ReviewedPrediction],
+) -> Result<Vec<ScoredReview>, ClassifierError> {
     if rows.len() > MAX_REVIEWED_ROWS {
         return Err(ClassifierError::CorpusTooLarge);
     }
     let mut positives = [0; 6];
     let mut out_of_scope_rows = 0;
+    let mut scored = Vec::with_capacity(rows.len());
     for row in rows {
+        let has_reference = row.labels.contains(&true);
+        if !reference.is_complete() && !has_reference {
+            continue;
+        }
         if !row.scores.iter().all(|score| (0.0..=1.0).contains(score)) {
             return Err(ClassifierError::InvalidCalibrationData {
                 family_id: None,
@@ -240,11 +318,12 @@ fn prepare(rows: &[ReviewedPrediction]) -> Result<Vec<ScoredReview>, ClassifierE
         for (count, label) in positives.iter_mut().zip(row.labels) {
             *count += usize::from(label);
         }
-        out_of_scope_rows += usize::from(!row.labels.contains(&true));
+        out_of_scope_rows += usize::from(!has_reference);
+        scored.push(scored_review(row));
     }
-    if out_of_scope_rows < MIN_FAMILIES_PER_CLASS
+    if (reference.is_complete() && out_of_scope_rows < MIN_FAMILIES_PER_CLASS)
         || positives.iter().any(|&count| {
-            count < MIN_FAMILIES_PER_CLASS || rows.len() - count < MIN_FAMILIES_PER_CLASS
+            count < MIN_FAMILIES_PER_CLASS || scored.len() - count < MIN_FAMILIES_PER_CLASS
         })
     {
         return Err(ClassifierError::InvalidCalibrationData {
@@ -252,7 +331,7 @@ fn prepare(rows: &[ReviewedPrediction]) -> Result<Vec<ScoredReview>, ClassifierE
             reason: "insufficient_reviewed_bert_class_support".into(),
         });
     }
-    Ok(rows.iter().map(scored_review).collect())
+    Ok(scored)
 }
 
 fn scored_review(review: &ReviewedPrediction) -> ScoredReview {
@@ -344,6 +423,60 @@ mod tests {
         );
         assert!(noisy.test_macro_f1 < clean.test_macro_f1);
         assert!(noisy.valid());
+    }
+
+    #[test]
+    fn mapping_agreement_excludes_unmapped_rows_from_reference_support() {
+        let mut calibration = balanced(0.705, MIN_FAMILIES_PER_CLASS);
+        let mut test = balanced(0.905, MIN_FAMILIES_PER_CLASS);
+        let mapped_rows = MIN_FAMILIES_PER_CLASS * DomainId::ALL.len();
+        calibration.truncate(mapped_rows);
+        test.truncate(mapped_rows);
+        let clean = calibrate_mapping_cycle(&calibration, &test).expect("supported mapped cohorts");
+        assert!(clean.is_mapping_agreement());
+        assert_eq!(clean.threshold, 0.7);
+        assert_eq!(clean.calibration_rows, mapped_rows);
+        assert_eq!(clean.test_rows, mapped_rows);
+        assert!(clean.freeze_calibration());
+
+        test.push(ReviewedPrediction {
+            labels: [false; 6],
+            scores: [0.999, 0.0, 0.0, 0.0, 0.0, 0.0],
+        });
+        let still_clean =
+            calibrate_mapping_cycle(&calibration, &test).expect("unmapped row ignored");
+        assert_eq!(still_clean, clean);
+
+        test[0].scores[1] = 0.8;
+        let report = calibrate_mapping_cycle(&calibration, &test).expect("mapped nonmatch counted");
+        assert_eq!(report.test_per_domain[&DomainId::Security].fp, 1);
+        assert_eq!(report.test_out_of_scope_rows, 0);
+        assert_eq!(report.test_false_out_of_scope_admissions, 0);
+        assert!(report.valid());
+        assert!(calibrate_mapping_cycle(&calibration[MIN_FAMILIES_PER_CLASS..], &test).is_err());
+    }
+
+    #[test]
+    fn serialized_mapping_evidence_cannot_claim_out_of_scope_admissions() {
+        let complete = balanced(0.905, MIN_FAMILIES_PER_CLASS);
+        let legacy = calibrate_reviewed_cycle(&complete, &complete).expect("complete cohorts");
+        let legacy_json = serde_json::to_value(&legacy).expect("serialize complete report");
+        assert!(legacy_json.get("reference").is_none());
+        let decoded: ReviewedCycleMetrics =
+            serde_json::from_value(legacy_json).expect("read legacy report");
+        assert_eq!(decoded, legacy);
+        assert!(!decoded.is_mapping_agreement());
+
+        let mut mapping = calibrate_mapping_cycle(&complete, &complete).expect("mapped cohorts");
+        let mapping_json = serde_json::to_value(&mapping).expect("serialize mapping report");
+        assert_eq!(mapping_json["reference"], "reviewed_provider_mappings");
+        let decoded: ReviewedCycleMetrics =
+            serde_json::from_value(mapping_json).expect("read mapping report");
+        assert_eq!(decoded, mapping);
+        mapping.test_out_of_scope_rows = 1;
+        mapping.test_false_out_of_scope_admissions = 1;
+        assert!(!mapping.valid());
+        assert!(!mapping.freeze_calibration());
     }
 
     #[test]

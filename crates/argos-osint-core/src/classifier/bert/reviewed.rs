@@ -1,4 +1,4 @@
-//! Operator-owned calibration of an approved BERT checkpoint using reviewed news cycles.
+//! Operator-owned calibration of an approved BERT checkpoint using reviewed provider mappings.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -14,9 +14,10 @@ use super::{
     MICROBATCH_TIMEOUT, STARTUP_TIMEOUT,
 };
 use crate::classifier::artifact::ArtifactStore;
+use crate::classifier::provider_labels;
 use crate::classifier::remote::PinIdentity;
 use crate::classifier::review::{ReviewDecision, ReviewExchange};
-use crate::classifier::training::{FamilyId, LabelMembership, Split};
+use crate::classifier::training::{FamilyId, Split};
 use crate::classifier::{ClassifierError, ClassifyInput, Provenance, WorkControl};
 
 const RECORD_SCHEMA: &str = "atlas-bert-reviewed-calibration-v1";
@@ -24,12 +25,13 @@ const FROZEN_RECORD: &str = "atlas-bert-frozen-review.json";
 const TEST_LEDGER: &str = "atlas-bert-reviewed-test-families.json";
 const MAX_TEST_FAMILIES: usize = 1024;
 
-/// Result of evaluating a threshold on independent reviewed news-cycle families.
+/// Agreement with the reviewed provider mappings on independent news-cycle families.
 #[derive(Debug, Serialize)]
 pub struct ReviewedCalibrationOutcome {
     metrics: ReviewedCycleMetrics,
     /// Exact ranked subject used to score the cohort.
     assessed_revision: String,
+    reviewed_mapping_sha256: String,
     cohort_sha256: String,
     applied_revision: Option<String>,
     recalibration_frozen: bool,
@@ -42,6 +44,8 @@ pub(super) struct RecordedCalibration {
     frozen_sha256: String,
     evaluation_sha256: String,
     cohort_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reviewed_mapping_sha256: Option<String>,
     pub(super) metrics: ReviewedCycleMetrics,
 }
 
@@ -62,6 +66,11 @@ pub(super) fn load(
         || record.frozen_sha256 != frozen
         || record.evaluation_sha256 != evaluation
         || !is_sha256(&record.cohort_sha256)
+        || record.metrics.is_mapping_agreement() != record.reviewed_mapping_sha256.is_some()
+        || record
+            .reviewed_mapping_sha256
+            .as_deref()
+            .is_some_and(|digest| !is_sha256(digest))
         || !record.metrics.valid()
         || !record.metrics.promotion_eligible()
     {
@@ -138,19 +147,27 @@ struct Cohort {
     sha256: String,
 }
 
-fn prepare(exchange: ReviewExchange, ledger: &mut TestLedger) -> Result<Cohort, ClassifierError> {
-    exchange.validate("verified news-cycle review")?;
-    let sha256 = exchange.sha256()?;
+fn prepare(
+    exchange: ReviewExchange,
+    reviewed_mapping_sha256: &str,
+    ledger: &mut TestLedger,
+) -> Result<Cohort, ClassifierError> {
+    exchange.validate("reviewed provider mappings")?;
+    let sha256 = artifact::sha256_hex(
+        format!("{reviewed_mapping_sha256}\n{}", exchange.sha256()?).as_bytes(),
+    );
     let mut calibration = Vec::new();
     let mut test = Vec::new();
     let mut families = BTreeSet::new();
     for item in exchange.items {
         let family = FamilyId::parse(item.family_id.as_str())?;
-        if item.decision != ReviewDecision::Complete || !families.insert(family) {
+        if item.decision != ReviewDecision::Unreviewed || !families.insert(family) {
             return Err(candidate::invalid(
-                "a cohort requires one complete review per family",
+                "mapping agreement requires one unreviewed observation per family",
             ));
         }
+        let labels = provider_labels::mapping_agreement_reference(&item.observation)?
+            .ok_or_else(|| candidate::invalid("an observation has no eligible provider mapping"))?;
         let partition = match item.split {
             Split::Calibration => &mut calibration,
             Split::Test => {
@@ -168,9 +185,6 @@ fn prepare(exchange: ReviewExchange, ledger: &mut TestLedger) -> Result<Cohort, 
                 ))
             }
         };
-        let labels = item
-            .membership()
-            .map(|label| label == LabelMembership::Present);
         let observation = item.observation;
         let input = ClassifyInput::new(
             observation.observation_id,
@@ -226,12 +240,12 @@ async fn score(
     Ok(result)
 }
 
-/// Recalibrates an approved checkpoint using a verified operator-owned cohort.
+/// Recalibrates an approved checkpoint using the operator-reviewed provider mapping.
 ///
-/// Threshold selection uses the calibration partition. Independent test families
-/// are consumed once, and only a score strictly above the promotion floor can
-/// update the pointer. A threshold that meets the stop rule freezes its active
-/// model for subsequent recalibration requests.
+/// The operator supplies the reviewed digest of the compiled rules. Calibration
+/// selects a threshold. Independent Test families measure agreement with those
+/// rules and are consumed once. Both scores must clear the promotion floor to
+/// publish the threshold. The stop rule applies to the independent Test score.
 ///
 /// # Errors
 /// Returns an error for invalid evidence, a stale revision, a frozen model,
@@ -239,10 +253,18 @@ async fn score(
 pub async fn recalibrate(
     home: &Path,
     expected_revision: &str,
-    review: ReviewExchange,
+    reviewed_mapping_sha256: &str,
+    observations: ReviewExchange,
     control: &WorkControl,
 ) -> Result<ReviewedCalibrationOutcome, ClassifierError> {
     control.check_active()?;
+    if reviewed_mapping_sha256 != provider_labels::mapping_predicates_sha256() {
+        return Err(candidate::invalid(
+            "review the current provider mapping digest",
+        ));
+    }
+    let reviewed_mapping_sha256 = reviewed_mapping_sha256.to_owned();
+    let cohort_mapping_sha256 = reviewed_mapping_sha256.clone();
     let home = home.to_owned();
     let expected = expected_revision.to_owned();
     let lease_home = home.clone();
@@ -280,7 +302,7 @@ pub async fn recalibrate(
         }
         let root = store.root().to_owned();
         let mut ledger = TestLedger::load(&root)?;
-        let cohort = prepare(review, &mut ledger)?;
+        let cohort = prepare(observations, &cohort_mapping_sha256, &mut ledger)?;
         Ok::<_, ClassifierError>((lease, root, current, ledger, cohort))
     })
     .await
@@ -297,7 +319,7 @@ pub async fn recalibrate(
     let control = control.clone();
     tokio::task::spawn_blocking(move || {
         let _lease = lease;
-        let metrics = cycle_metrics::calibrate_reviewed_cycle(&calibration, &test)?;
+        let metrics = cycle_metrics::calibrate_mapping_cycle(&calibration, &test)?;
         let configured_root = artifact::root_for(&home)?;
         if configured_root.canonicalize().ok().as_ref() != Some(&root)
             || active_atlas_bert_revision(&home)? != expected
@@ -309,6 +331,7 @@ pub async fn recalibrate(
         let mut outcome = ReviewedCalibrationOutcome {
             recalibration_frozen: eligible && metrics.freeze_calibration(),
             assessed_revision: expected,
+            reviewed_mapping_sha256,
             cohort_sha256: sha256,
             applied_revision: None,
             metrics,
@@ -334,6 +357,7 @@ pub async fn recalibrate(
                 frozen_sha256: frozen_sha256.clone(),
                 evaluation_sha256: evaluation_sha256.clone(),
                 cohort_sha256: outcome.cohort_sha256.clone(),
+                reviewed_mapping_sha256: Some(outcome.reviewed_mapping_sha256.clone()),
                 metrics: outcome.metrics.clone(),
             };
             let bytes = artifact::bounded_json_bytes(&record)?;
@@ -397,13 +421,7 @@ mod tests {
             BaselineCheck::PinnedReplay,
         )
         .unwrap();
-        let mut predictions = vec![
-            ReviewedPrediction {
-                scores: [0.0; 6],
-                labels: [false; 6]
-            };
-            20
-        ];
+        let mut predictions = Vec::new();
         for index in 0..DomainId::ALL.len() {
             let mut scores = [0.1; 6];
             scores[index] = 0.95;
@@ -411,13 +429,15 @@ mod tests {
             labels[index] = true;
             predictions.extend(vec![ReviewedPrediction { scores, labels }; 20]);
         }
-        let metrics = cycle_metrics::calibrate_reviewed_cycle(&predictions, &predictions).unwrap();
+        let mapping_sha256 = provider_labels::mapping_predicates_sha256();
+        let metrics = cycle_metrics::calibrate_mapping_cycle(&predictions, &predictions).unwrap();
         assert!(metrics.freeze_calibration());
         let record = RecordedCalibration {
             schema_version: RECORD_SCHEMA.into(),
             frozen_sha256: installed.frozen_sha256.clone(),
             evaluation_sha256: installed.evaluation_sha256.clone(),
             cohort_sha256: "a".repeat(64),
+            reviewed_mapping_sha256: Some(mapping_sha256.clone()),
             metrics,
         };
         let bytes = artifact::bounded_json_bytes(&record).unwrap();
@@ -469,7 +489,25 @@ mod tests {
             items: vec![],
         };
         assert!(matches!(
-            recalibrate(home, &revision, exchange, &WorkControl::new()).await,
+            recalibrate(
+                home,
+                &revision,
+                "stale-mapping",
+                exchange.clone(),
+                &WorkControl::new()
+            )
+            .await,
+            Err(ClassifierError::InvalidArtifact(_))
+        ));
+        assert!(matches!(
+            recalibrate(
+                home,
+                &revision,
+                &mapping_sha256,
+                exchange,
+                &WorkControl::new()
+            )
+            .await,
             Err(ClassifierError::ActivationDenied { .. })
         ));
 

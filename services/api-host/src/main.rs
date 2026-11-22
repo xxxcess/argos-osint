@@ -51,6 +51,9 @@ struct Args {
     /// Exact prior revision returned by --role atlas-bert-revision.
     #[arg(long, required_if_eq("role", "atlas-bert-activate"))]
     expected_bert_revision: Option<String>,
+    /// Digest returned by --role atlas-bert-provider-mapping after operator review.
+    #[arg(long, required_if_eq("role", "atlas-bert-recalibrate"))]
+    reviewed_mapping_sha256: Option<String>,
     /// Completed Atlas cycle ID. Repeat to calibrate on several cycles.
     #[arg(long = "review-cycle")]
     review_cycles: Vec<String>,
@@ -111,11 +114,13 @@ enum Role {
     AtlasBertRevision,
     /// Explicitly activate a qualified, staged Atlas BERT candidate.
     AtlasBertActivate,
+    /// Print the news-provider category mapping rules for operator review.
+    AtlasBertProviderMapping,
     /// Export a completed Atlas cycle for independent human review.
     AtlasBertReviewExport,
     /// Import human labels for a completed Atlas cycle.
     AtlasBertReviewImport,
-    /// Recalibrate the exact active Atlas BERT revision using stored human reviews.
+    /// Recalibrate the exact active Atlas BERT revision using reviewed provider mappings.
     AtlasBertRecalibrate,
     /// Seed the Brain actor catalog from a pinned workspace CSV.
     SeedActors,
@@ -194,6 +199,10 @@ fn main() -> Result<()> {
             || (args.review_file.is_none() && args.review_reference.is_none()),
         "Review import flags require --role atlas-bert-review-import"
     );
+    ensure!(
+        args.role == Role::AtlasBertRecalibrate || args.reviewed_mapping_sha256.is_none(),
+        "--reviewed-mapping-sha256 requires --role atlas-bert-recalibrate"
+    );
     match args.role {
         Role::AtlasBertReviewExport => {
             ensure!(
@@ -251,6 +260,7 @@ async fn run_non_ipc(args: Args) -> Result<()> {
         candidate_sha256,
         evaluation_sha256,
         expected_bert_revision,
+        reviewed_mapping_sha256,
         review_cycles,
         review_file,
         review_reference,
@@ -288,6 +298,9 @@ async fn run_non_ipc(args: Args) -> Result<()> {
         return atlas_bert_admin::run(fleetworks::workspace_path()?, command, shutdown_signal())
             .await;
     }
+    if role == Role::AtlasBertProviderMapping {
+        return atlas_bert_admin::report_provider_mapping();
+    }
     let review_command = match role {
         Role::AtlasBertReviewExport => Some(atlas_bert_admin::ReviewCommand::Export {
             cycle: review_cycles.into_iter().next().expect("one export cycle"),
@@ -299,6 +312,8 @@ async fn run_non_ipc(args: Args) -> Result<()> {
         Role::AtlasBertRecalibrate => Some(atlas_bert_admin::ReviewCommand::Recalibrate {
             cycles: review_cycles,
             expected_revision: expected_bert_revision.expect("required for BERT recalibration"),
+            reviewed_mapping_sha256: reviewed_mapping_sha256
+                .expect("required for BERT recalibration"),
         }),
         _ => None,
     };
@@ -774,6 +789,30 @@ async fn shutdown_signal() {
 mod tests {
     use super::*;
     use axum::routing::get;
+
+    #[test]
+    fn recalibration_requires_reviewed_provider_mapping_digest() {
+        let recalibration = [
+            "argos-api-host",
+            "--role",
+            "atlas-bert-recalibrate",
+            "--review-cycle",
+            "cycle-1",
+            "--expected-bert-revision",
+            "model-revision",
+        ];
+        assert!(Args::try_parse_from(recalibration).is_err());
+        let args = Args::try_parse_from(
+            recalibration
+                .into_iter()
+                .chain(["--reviewed-mapping-sha256", "reviewed-rules"]),
+        )
+        .unwrap();
+        assert_eq!(
+            args.reviewed_mapping_sha256.as_deref(),
+            Some("reviewed-rules")
+        );
+    }
 
     #[tokio::test]
     async fn chrono_id_is_non_zero() {

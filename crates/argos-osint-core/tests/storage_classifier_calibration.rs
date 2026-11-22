@@ -502,7 +502,13 @@ async fn historical_review_import_and_approval_do_not_queue_training() {
     let ctx = context("review-cohort");
     let news:Vec<_>=(0u64..400).map(|index| {
         let distinctive=(0..40).map(|word|format!("w{:016x}",index*64+word)).collect::<Vec<_>>().join(" ");
-        serde_json::json!({"article_id":format!("story-{index}"),"link":format!("https://fixture.invalid/story-{index}"),"language":"en","source_name":"Fixture","category":["business","crime","politics","health","environment","science"],"title":distinctive,"description":"Fictional parliament discusses a military operation, central bank measures, hospital care, water pollution and laboratory research."})
+        let language = if index % 20 == 1 { "es" } else { "en" };
+        let categories = if index % 20 == 2 {
+            serde_json::json!(["unknown fixture category"])
+        } else {
+            serde_json::json!(["business", "crime", "politics", "health", "environment", "science"])
+        };
+        serde_json::json!({"article_id":format!("story-{index}"),"link":format!("https://fixture.invalid/story-{index}"),"language":language,"source_name":"Fixture","category":categories,"title":distinctive,"description":"Fictional parliament discusses a military operation, central bank measures, hospital care, water pollution and laboratory research."})
     }).collect();
     let capture = capture::capture_categories(
         ProviderFormat::NewsDataV1,
@@ -583,6 +589,36 @@ async fn historical_review_import_and_approval_do_not_queue_training() {
         "diagnostic sidecars do not mint human labels"
     );
     let cycles = vec![ctx.cycle_id.clone()];
+    let mapping = review::mapping_cohort(&repo, cycles.clone()).await.unwrap();
+    let holdout_items = exchange
+        .items
+        .iter()
+        .filter(|item| matches!(item.split, Split::Calibration | Split::Test));
+    assert!(holdout_items
+        .clone()
+        .any(|item| item.observation.language.as_deref() == Some("es")));
+    assert!(holdout_items.clone().any(|item| {
+        item.observation.raw_categories == serde_json::json!(["unknown fixture category"])
+    }));
+    let eligible: BTreeSet<_> = holdout_items
+        .filter(|item| {
+            item.observation.language.as_deref() == Some("en")
+                && item.observation.raw_categories
+                    != serde_json::json!(["unknown fixture category"])
+        })
+        .map(|item| item.observation.observation_id.as_str())
+        .collect();
+    assert!(!eligible.is_empty());
+    let mapped: BTreeSet<_> = mapping
+        .items
+        .iter()
+        .map(|item| {
+            assert_eq!(item.decision, ReviewDecision::Unreviewed);
+            assert!(item.domains.is_empty());
+            item.observation.observation_id.as_str()
+        })
+        .collect();
+    assert_eq!(mapped, eligible);
     assert!(review::recalibration_cohort(&repo, cycles.clone())
         .await
         .unwrap_err()
@@ -604,6 +640,11 @@ async fn historical_review_import_and_approval_do_not_queue_training() {
             .unwrap(),
         0,
         "exact review replay is idempotent"
+    );
+    assert_eq!(
+        mapping,
+        review::mapping_cohort(&repo, cycles.clone()).await.unwrap(),
+        "the provider mapping cohort does not depend on stored article reviews"
     );
     let cohort = review::recalibration_cohort(&repo, cycles.clone())
         .await

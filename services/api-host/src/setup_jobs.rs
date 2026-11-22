@@ -315,7 +315,7 @@ async fn seed(
     let mut last_logged_at: Option<Instant> = None;
     let mut last_published_at: Option<Instant> = None;
     let mut last_batch_at = Instant::now();
-    let progress_publish_interval = Duration::from_secs(5);
+    let progress_publish_interval = Duration::from_secs(10);
     let pressure_interval = Duration::from_secs(5);
     let mut pressure_tick = tokio::time::interval(pressure_interval);
     pressure_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);

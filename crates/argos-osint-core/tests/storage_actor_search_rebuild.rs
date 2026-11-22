@@ -746,7 +746,18 @@ async fn pressure_observation_is_fenced_and_source_pause_cancels_without_losing_
     })
     .await
     .expect("source entered actual pressure pause");
-    assert_eq!(support::count(repo.db(), "actor_search_event").await, 0);
+    for table in [
+        "brain_actor",
+        "brain_actor_alias",
+        "memory",
+        "actor_search_event",
+    ] {
+        assert_eq!(
+            support::count(repo.db(), table).await,
+            0,
+            "paused seed wrote {table}"
+        );
+    }
     cancel.store(true, Ordering::Release);
     assert!(pending.await.expect("joined source operation").is_err());
     status.pressure.as_mut().expect("measurement").paused = false;

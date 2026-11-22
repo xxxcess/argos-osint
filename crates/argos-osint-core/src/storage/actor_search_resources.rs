@@ -16,6 +16,7 @@ use super::instant;
 use super::invalid;
 use super::jobs;
 use super::run_tx;
+use super::Control;
 use super::Lease;
 use super::Repository;
 use super::RetryPolicy;
@@ -120,6 +121,60 @@ pub(super) fn limits(control: &super::Control) -> Result<ActorIndexLimits, TxErr
     Ok(limits)
 }
 
+fn bulk_pause_reason(control: &Control, now: DateTime<Utc>) -> Result<(&str, bool), TxError> {
+    let limits = limits(control)?;
+    let backlog = (control.next_sequence - control.acknowledged_sequence) as u64;
+    let backlog_paused = if control.backlog_paused {
+        backlog > limits.backlog_resume_events
+    } else {
+        backlog >= limits.backlog_pause_events
+    };
+    let stale = !control.pressure_observed_at.is_empty()
+        && (now - instant(&control.pressure_observed_at)?).num_seconds() > 30;
+    let reason = if backlog_paused {
+        "actor_index_backlog"
+    } else if stale {
+        "actor_index_pressure_stale"
+    } else if control.pressure_paused {
+        &control.pressure_reason
+    } else {
+        ""
+    };
+    Ok((reason, backlog_paused))
+}
+
+/// Check source capacity under the guard held through the chunk's outbox write.
+/// The successful chunk renews the source lease with its committed checkpoint.
+pub(crate) async fn check_bulk_capacity_in(
+    tx: &Tx,
+    owner: &str,
+    now: DateTime<Utc>,
+) -> Result<bool, TxError> {
+    guard(tx).await?;
+    let control = control_in(tx).await?;
+    let (reason, backlog_paused) = bulk_pause_reason(&control, now)?;
+    if !reason.is_empty() || backlog_paused != control.backlog_paused {
+        jobs::run(
+            tx,
+            tx.query(
+                "IF $reason != '' {
+                    IF (SELECT VALUE owner FROM ONLY brain_actor_seed:catalog) != $owner OR (SELECT VALUE status FROM ONLY brain_actor_seed:catalog) != 'running' { THROW 'actor seed lease changed'; };
+                    UPDATE brain_actor_seed:catalog SET index_pause_reason=$reason,lease_until=$until,updated_at=$now RETURN NONE;
+                };
+                IF $changed { UPDATE actor_search_control:catalog SET backlog_paused=$backlog RETURN NONE; };",
+            )
+            .bind(("owner", owner.to_owned()))
+            .bind(("reason", reason.to_owned()))
+            .bind(("until", (now + Duration::minutes(5)).to_rfc3339()))
+            .bind(("now", now.to_rfc3339()))
+            .bind(("changed", backlog_paused != control.backlog_paused))
+            .bind(("backlog", backlog_paused)),
+        )
+        .await?;
+    }
+    Ok(reason.is_empty())
+}
+
 /// Wait only at a committed seed chunk boundary. Keep the existing source
 /// ownership lease alive while pressure pauses work; cancellation remains real.
 pub async fn await_bulk_capacity(
@@ -152,11 +207,8 @@ async fn await_bulk_capacity_in(
         let now = Utc::now();
         let waiting=run_tx(repo.db(),RetryPolicy::default(),|tx|async move {
             if let Some(execution)=execution {execution.check_in(&tx,cancel).await?;}
-            guard(&tx).await?;let control=control_in(&tx).await?;let limits=limits(&control)?;
-            let backlog=(control.next_sequence-control.acknowledged_sequence) as u64;
-            let backlog_paused=if control.backlog_paused {backlog>limits.backlog_resume_events} else {backlog>=limits.backlog_pause_events};
-            let stale=!control.pressure_observed_at.is_empty()&&(now-instant(&control.pressure_observed_at)?).num_seconds()>30;
-            let reason=if backlog_paused {"actor_index_backlog"} else if stale {"actor_index_pressure_stale"} else if control.pressure_paused {&control.pressure_reason} else {""};
+            guard(&tx).await?;let control=control_in(&tx).await?;
+            let (reason, backlog_paused)=bulk_pause_reason(&control,now)?;
             jobs::run(&tx,tx.query("IF (SELECT VALUE owner FROM ONLY brain_actor_seed:catalog)!=$owner OR (SELECT VALUE status FROM ONLY brain_actor_seed:catalog)!='running' {THROW 'actor seed lease changed';};
                 UPDATE brain_actor_seed:catalog SET index_pause_reason=$reason,lease_until=$until,updated_at=$now RETURN NONE;
                 UPDATE actor_search_control:catalog SET backlog_paused=$backlog RETURN NONE")

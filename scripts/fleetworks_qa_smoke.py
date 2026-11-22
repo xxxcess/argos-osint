@@ -92,7 +92,7 @@ INDEX_PRESSURE_REASONS = {
 }
 SEED_EVENT = re.compile(r'\bcode="?embedded_(actor_seed_batch_elapsed|actor_seed_phase_elapsed|backend_shutdown_phase)"?(?=$|[\s,])')
 SEED_BATCH_FIELD = re.compile(
-    r'\b(capacity_wait_us|commit_us|plan_us|rows|checkpoint|transaction_retries)=([0-9]{1,20})(?=$|[\s,])'
+    r'\b(capacity_wait_us|capacity_in_commit_us|commit_us|plan_us|rows|checkpoint|transaction_retries)=([0-9]{1,20})(?=$|[\s,])'
 )
 SEED_PHASE_ELAPSED = re.compile(r'\belapsed_us=([0-9]{1,20})(?=$|[\s,])')
 CATALOG_PHASE = re.compile(r'\bphase="?([a-z_]{1,40})"?(?=$|[\s,])')
@@ -510,7 +510,7 @@ class CatalogIpcSession(embedded.LocalIpcSession):
         if code[1] == "actor_seed_batch_elapsed":
             matches = SEED_BATCH_FIELD.findall(event)
             fields = {name: int(value) for name, value in matches}
-            if (len(matches) == len(fields) == 6 and all(value < 2**64 for value in fields.values())
+            if (len(matches) == len(fields) == 7 and all(value < 2**64 for value in fields.values())
                     and 0 < fields["rows"] <= 128 and fields["rows"] <= fields["checkpoint"] <= CATALOG_ROWS):
                 timings = self.seed_batch_timings
                 timings["latest_checkpoint"] = fields.pop("checkpoint")

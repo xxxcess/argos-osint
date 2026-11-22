@@ -56,6 +56,7 @@ pub use rebuild::RebuildProgress;
 pub use resource_policy::resource_limits;
 pub use resources::await_bulk_capacity;
 pub(crate) use resources::await_bulk_capacity_claimed;
+pub(super) use resources::check_bulk_capacity_in;
 pub use resources::observe_resources;
 
 pub const SCHEMA: &str = concat!(
@@ -202,7 +203,17 @@ pub fn enqueue_actors_in<'a>(
     now: DateTime<Utc>,
 ) -> impl Future<Output = Result<(), TxError>> + Send + 'a {
     // Seed, lifecycle, and index backfill all nest this transaction operation.
-    Box::pin(enqueue_actor_events_in(tx, actors, cause, now))
+    Box::pin(enqueue_actor_events_in(tx, actors, cause, now, true))
+}
+
+/// Append from a seed transaction that already holds the coordinator guard.
+pub(super) fn enqueue_actors_under_guard_in<'a>(
+    tx: &'a Tx,
+    actors: &'a [String],
+    cause: Option<&'a SourceCause>,
+    now: DateTime<Utc>,
+) -> impl Future<Output = Result<(), TxError>> + Send + 'a {
+    Box::pin(enqueue_actor_events_in(tx, actors, cause, now, false))
 }
 
 async fn enqueue_actor_events_in(
@@ -210,6 +221,7 @@ async fn enqueue_actor_events_in(
     actors: &[String],
     cause: Option<&SourceCause>,
     now: DateTime<Utc>,
+    acquire_guard: bool,
 ) -> Result<(), TxError> {
     if actors.is_empty() {
         return Ok(());
@@ -217,7 +229,9 @@ async fn enqueue_actor_events_in(
     if actors.len() > MAX_BATCH_DOCUMENTS || actors.iter().any(|actor| !valid(actor)) {
         return Err(invalid("actor_index_source_bound"));
     }
-    guard(tx).await?;
+    if acquire_guard {
+        guard(tx).await?;
+    }
     let actors: Vec<String> = actors
         .iter()
         .cloned()

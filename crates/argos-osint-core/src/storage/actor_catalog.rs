@@ -901,9 +901,10 @@ impl SeedAliasPlan {
 async fn insert_seed_aliases(
     tx: &Tx,
     aliases: &[SeedAliasPlan],
-    execution: Option<&SeedExecution>,
     cancel: &AtomicBool,
 ) -> Result<(), TxError> {
+    const TARGET_PACKET_BYTES: usize = 512 * 1024;
+    const MAX_PACKET_BYTES: usize = 1024 * 1024;
     let mut position = 0;
     while position < aliases.len() {
         if cancel.load(Ordering::Acquire) {
@@ -913,10 +914,10 @@ async fn insert_seed_aliases(
         let mut bytes = 0;
         while let Some(alias) = aliases.get(position) {
             let charge = alias.packet_bytes()?;
-            if charge > 1024 * 1024 {
+            if charge > MAX_PACKET_BYTES {
                 return Err(TxError::Abort("actor_seed_batch_budget".into()));
             }
-            if !packet.is_empty() && bytes + charge > 256 * 1024 {
+            if !packet.is_empty() && bytes + charge > TARGET_PACKET_BYTES {
                 break;
             }
             bytes += charge;
@@ -929,8 +930,8 @@ async fn insert_seed_aliases(
                 .bind(("aliases", packet)),
         )
         .await?;
-        if let Some(execution) = execution {
-            execution.check_in(tx, cancel).await?;
+        if cancel.load(Ordering::Acquire) {
+            return Err(TxError::Abort("actor seeding cancelled".into()));
         }
     }
     Ok(())
@@ -1338,135 +1339,223 @@ where
             "actor_seed_count_changed"
         );
         let measure_batch = tracing::event_enabled!(tracing::Level::DEBUG);
-        let capacity_started = measure_batch.then(Instant::now);
-        if let Some(execution) = execution {
-            super::actor_search_outbox::await_bulk_capacity_claimed(repo, owner, cancel, execution)
-                .await?;
-        } else {
-            super::actor_search_outbox::await_bulk_capacity(repo, owner, cancel).await?;
-        }
-        if cancel.load(Ordering::Acquire) {
-            bail!("actor seeding cancelled; committed batches can be retried");
-        }
-        let plan_started = measure_batch.then(Instant::now);
-        let now = chrono::Utc::now().to_rfc3339();
-        let mut actor_rows = Vec::new();
-        let mut memories = Vec::new();
-        let mut aliases = Vec::new();
-        let mut graph = Vec::new();
-        for actor in &chunk {
-            let provenance = Arc::new(serde_json::to_string(&actor.metadata)?);
-            actor_rows.push(ActorRow {
-                id: rid("brain_actor", &actor.id),
-                subtype: actor.subtype.clone(),
-                display_name: actor.name.clone(),
-                identity_state: "resolved".into(),
-                scope_key: actor_catalog::SCOPE.into(),
-                revision: 1,
-                provenance_json: provenance.as_ref().clone(),
-                catalog_json: serde_json::to_string(actor)?,
-                catalog_id: actor.source_id.clone(),
-                created_at: now.clone(),
-                updated_at: now.clone(),
-            });
-            let payload = MemoryPayload::Actor(ActorPayload {
-                subtype: brain_actors::parse_subtype(&actor.subtype),
-                display_name: actor.name.clone(),
-                aliases: actor.aliases.clone(),
-                identifiers: vec![],
-                identity_state: IdentityState::Resolved,
-            });
-            memories.push(MemoryRow {
-                id: rid("memory", &actor.id), text: brain_actors::text_of(&payload), category: "fact".into(), pinned: false,
-                lifecycle: "active".into(), source_json: serde_json::json!({"app":"brain", "conversation_id": actor_catalog::SCOPE, "message_id":null,"reference":actor.source_id}).to_string(),
-                memory_kind: "actor".into(), payload_json: serde_json::to_string(&payload)?,
-            });
-            let mut keys = std::collections::BTreeSet::new();
-            // The canonical display name is itself a name alias (the matcher
-            // treats `name` and `aliases` identically), so exact-name search
-            // and binding resolve actors that list no explicit alias.
-            for alias in std::iter::once(&actor.name).chain(&actor.aliases) {
-                let normalized = brain_actors::normalize_alias(alias);
-                if normalized.chars().count() < 3 || !keys.insert(normalized.clone()) {
-                    continue;
+        let mut capacity_wait_us = 0;
+        let mut plan_us = 0;
+        let next = loop {
+            if cancel.load(Ordering::Acquire) {
+                bail!("actor seeding cancelled; committed batches can be retried");
+            }
+            let plan_started = measure_batch.then(Instant::now);
+            let now = chrono::Utc::now().to_rfc3339();
+            let mut actor_rows = Vec::new();
+            let mut memories = Vec::new();
+            let mut aliases = Vec::new();
+            let mut graph = Vec::new();
+            for actor in &chunk {
+                let provenance = Arc::new(serde_json::to_string(&actor.metadata)?);
+                actor_rows.push(ActorRow {
+                    id: rid("brain_actor", &actor.id),
+                    subtype: actor.subtype.clone(),
+                    display_name: actor.name.clone(),
+                    identity_state: "resolved".into(),
+                    scope_key: actor_catalog::SCOPE.into(),
+                    revision: 1,
+                    provenance_json: provenance.as_ref().clone(),
+                    catalog_json: serde_json::to_string(actor)?,
+                    catalog_id: actor.source_id.clone(),
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                });
+                let payload = MemoryPayload::Actor(ActorPayload {
+                    subtype: brain_actors::parse_subtype(&actor.subtype),
+                    display_name: actor.name.clone(),
+                    aliases: actor.aliases.clone(),
+                    identifiers: vec![],
+                    identity_state: IdentityState::Resolved,
+                });
+                memories.push(MemoryRow {
+                    id: rid("memory", &actor.id),
+                    text: brain_actors::text_of(&payload),
+                    category: "fact".into(),
+                    pinned: false,
+                    lifecycle: "active".into(),
+                    source_json: serde_json::json!({
+                        "app": "brain",
+                        "conversation_id": actor_catalog::SCOPE,
+                        "message_id": null,
+                        "reference": actor.source_id,
+                    })
+                    .to_string(),
+                    memory_kind: "actor".into(),
+                    payload_json: serde_json::to_string(&payload)?,
+                });
+                let mut keys = std::collections::BTreeSet::new();
+                // The canonical display name is itself a name alias (the matcher
+                // treats `name` and `aliases` identically), so exact-name search
+                // and binding resolve actors that list no explicit alias.
+                for alias in std::iter::once(&actor.name).chain(&actor.aliases) {
+                    let normalized = brain_actors::normalize_alias(alias);
+                    if normalized.chars().count() < 3 || !keys.insert(normalized.clone()) {
+                        continue;
+                    }
+                    aliases.push(SeedAliasPlan {
+                        id: RecordId::new(
+                            "brain_actor_alias",
+                            surrealdb::types::Array::from(vec![
+                                actor.id.clone(),
+                                normalized.clone(),
+                                "name".to_owned(),
+                            ]),
+                        ),
+                        actor_id: actor.id.clone(),
+                        alias: alias.clone(),
+                        normalized,
+                        provenance_json: Arc::clone(&provenance),
+                    });
                 }
-                aliases.push(SeedAliasPlan {
-                    id: RecordId::new(
-                        "brain_actor_alias",
-                        surrealdb::types::Array::from(vec![
-                            actor.id.clone(),
-                            normalized.clone(),
-                            "name".to_owned(),
-                        ]),
-                    ),
-                    actor_id: actor.id.clone(),
-                    alias: alias.clone(),
-                    normalized,
-                    provenance_json: Arc::clone(&provenance),
+                graph.push(GraphRow {
+                    id: rid("brain_graph_node", &super::graph::memory_node(&actor.id)),
+                    kind: "memory".into(),
+                    ref_id: actor.id.clone(),
+                    memory_kind: "actor".into(),
+                    lifecycle: "active".into(),
                 });
             }
-            graph.push(GraphRow {
-                id: rid("brain_graph_node", &super::graph::memory_node(&actor.id)),
-                kind: "memory".into(),
-                ref_id: actor.id.clone(),
-                memory_kind: "actor".into(),
-                lifecycle: "active".into(),
-            });
-        }
-        let next = Progress {
-            processed: progress.processed + chunk.len(),
-            total: progress.total,
-            aliases: progress.aliases + aliases.len(),
-            complete: false,
-        };
-        let actor_ids: Vec<String> = chunk.iter().map(|actor| actor.id.clone()).collect();
-        let data = Arc::new((actor_rows, memories, aliases, graph, actor_ids));
-        let commit_started = measure_batch.then(Instant::now);
-        let committed = run_tx(repo.db(), RetryPolicy::default(), |tx| {
-            let data = data.clone(); let owner = owner.to_owned(); let next = next.clone(); let now = now.clone();let cause=cause.cloned();
-            async move {
-                if let Some(execution)=execution {execution.check_in(&tx,cancel).await?;}
-                run(&tx, tx.query("IF (SELECT VALUE owner FROM ONLY brain_actor_seed:catalog) != $owner { THROW 'actor seed lease changed'; };
-                    IF $merge_selected {
-                        INSERT INTO brain_actor $actors ON DUPLICATE KEY UPDATE
-                            subtype=$input.subtype, display_name=$input.display_name,
-                            identity_state=identity_state ?? $input.identity_state, scope_key=$input.scope_key,
-                            revision=(revision ?? 0)+1, provenance_json=$input.provenance_json,
-                            catalog_json=$input.catalog_json, catalog_id=$input.catalog_id,
-                            created_at=created_at ?? $input.created_at, updated_at=$input.updated_at RETURN NONE;
-                        INSERT INTO memory $memories ON DUPLICATE KEY UPDATE
-                            text=$input.text, category=category ?? $input.category,
-                            pinned=pinned ?? $input.pinned, lifecycle=lifecycle ?? $input.lifecycle,
-                            source_json=$input.source_json, memory_kind=$input.memory_kind,
-                            payload_json=$input.payload_json RETURN NONE;
-                    } ELSE {
-                        INSERT IGNORE INTO brain_actor $actors RETURN NONE;
-                        INSERT IGNORE INTO memory $memories RETURN NONE;
-                    };
-                    INSERT IGNORE INTO brain_graph_node $graph RETURN NONE; UPDATE brain_actor_seed:catalog SET processed = $done, aliases = $alias_count, updated_at = $now, lease_until = $lease RETURN NONE;")
-                    .bind(("owner", owner.clone())).bind(("merge_selected", merge_selected)).bind(("actors", data.0.clone())).bind(("memories", data.1.clone())).bind(("graph", data.3.clone()))
-                    .bind(("done", next.processed)).bind(("alias_count", next.aliases)).bind(("now", now)).bind(("lease", (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339()))).await?;
-                insert_seed_aliases(&tx, &data.2, execution, cancel).await?;
-                super::jobs::bump(&tx,"job_guard","atlas-derivative-catalog-input").await?;
-                super::atlas_derivative_invalidation::enqueue_in(&tx,None,&format!("seed:{owner}:{}",next.processed),chrono::Utc::now()).await?;
-                super::actor_search_outbox::enqueue_actors_in(&tx,&data.4,cause.as_ref(),chrono::Utc::now()).await?;
-                if let Some(execution)=execution {execution.check_in(&tx,cancel).await?;}
-                Ok(())
+            let next = Progress {
+                processed: progress.processed + chunk.len(),
+                total: progress.total,
+                aliases: progress.aliases + aliases.len(),
+                complete: false,
+            };
+            let actor_ids: Vec<String> = chunk.iter().map(|actor| actor.id.clone()).collect();
+            let data = Arc::new((actor_rows, memories, aliases, graph, actor_ids));
+            let commit_started = measure_batch.then(Instant::now);
+            if let (Some(plan_started), Some(commit_started)) = (plan_started, commit_started) {
+                plan_us += commit_started.duration_since(plan_started).as_micros() as u64;
             }
-        }).await.map_err(|e| anyhow::anyhow!("actor seed batch: {e}"))?;
-        if let (Some(capacity_started), Some(plan_started), Some(commit_started)) =
-            (capacity_started, plan_started, commit_started)
-        {
-            tracing::debug!(
-                code = "embedded_actor_seed_batch_elapsed",
-                capacity_wait_us = plan_started.duration_since(capacity_started).as_micros() as u64,
-                plan_us = commit_started.duration_since(plan_started).as_micros() as u64,
-                commit_us = commit_started.elapsed().as_micros() as u64,
-                rows = chunk.len(),
-                checkpoint = next.processed,
-                transaction_retries = committed.retries,
-            );
-        }
+            let committed = run_tx(repo.db(), RetryPolicy::default(), |tx| {
+                let data = Arc::clone(&data);
+                let owner = owner.to_owned();
+                let next = next.clone();
+                let now = now.clone();
+                let cause = cause.cloned();
+                async move {
+                    if cancel.load(Ordering::Acquire) {
+                        return Err(TxError::Abort("actor seeding cancelled".into()));
+                    }
+                    if let Some(execution) = execution {
+                        execution.check_in(&tx, cancel).await?;
+                    }
+                    let capacity_started = measure_batch.then(Instant::now);
+                    let ready = super::actor_search_outbox::check_bulk_capacity_in(
+                        &tx,
+                        &owner,
+                        chrono::Utc::now(),
+                    )
+                    .await?;
+                    let capacity_us =
+                        capacity_started.map_or(0, |started| started.elapsed().as_micros() as u64);
+                    if ready {
+                        run(
+                            &tx,
+                            tx.query(
+                                "IF (SELECT VALUE owner FROM ONLY brain_actor_seed:catalog) != $owner
+                                    OR (SELECT VALUE status FROM ONLY brain_actor_seed:catalog) != 'running'
+                                    { THROW 'actor seed lease changed'; };
+                                IF $merge_selected {
+                                    INSERT INTO brain_actor $actors ON DUPLICATE KEY UPDATE
+                                        subtype=$input.subtype, display_name=$input.display_name,
+                                        identity_state=identity_state ?? $input.identity_state,
+                                        scope_key=$input.scope_key, revision=(revision ?? 0)+1,
+                                        provenance_json=$input.provenance_json,
+                                        catalog_json=$input.catalog_json, catalog_id=$input.catalog_id,
+                                        created_at=created_at ?? $input.created_at,
+                                        updated_at=$input.updated_at RETURN NONE;
+                                    INSERT INTO memory $memories ON DUPLICATE KEY UPDATE
+                                        text=$input.text, category=category ?? $input.category,
+                                        pinned=pinned ?? $input.pinned, lifecycle=lifecycle ?? $input.lifecycle,
+                                        source_json=$input.source_json, memory_kind=$input.memory_kind,
+                                        payload_json=$input.payload_json RETURN NONE;
+                                } ELSE {
+                                    INSERT IGNORE INTO brain_actor $actors RETURN NONE;
+                                    INSERT IGNORE INTO memory $memories RETURN NONE;
+                                };
+                                INSERT IGNORE INTO brain_graph_node $graph RETURN NONE;
+                                UPDATE brain_actor_seed:catalog SET processed = $done, aliases = $alias_count,
+                                    updated_at = $now, lease_until = $lease, index_pause_reason = '' RETURN NONE;",
+                            )
+                            .bind(("owner", owner.clone()))
+                            .bind(("merge_selected", merge_selected))
+                            .bind(("actors", data.0.clone()))
+                            .bind(("memories", data.1.clone()))
+                            .bind(("graph", data.3.clone()))
+                            .bind(("done", next.processed))
+                            .bind(("alias_count", next.aliases))
+                            .bind(("now", now))
+                            .bind((
+                                "lease",
+                                (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
+                            )),
+                        )
+                        .await?;
+                        insert_seed_aliases(&tx, &data.2, cancel).await?;
+                        super::jobs::bump(&tx, "job_guard", "atlas-derivative-catalog-input").await?;
+                        super::atlas_derivative_invalidation::enqueue_in(
+                            &tx,
+                            None,
+                            &format!("seed:{owner}:{}", next.processed),
+                            chrono::Utc::now(),
+                        )
+                        .await?;
+                        super::actor_search_outbox::enqueue_actors_under_guard_in(
+                            &tx,
+                            &data.4,
+                            cause.as_ref(),
+                            chrono::Utc::now(),
+                        )
+                        .await?;
+                    }
+                    if let Some(execution) = execution {
+                        execution.check_in(&tx, cancel).await?;
+                    }
+                    if cancel.load(Ordering::Acquire) {
+                        return Err(TxError::Abort("actor seeding cancelled".into()));
+                    }
+                    Ok(ready.then_some(capacity_us))
+                }
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("actor seed batch: {e}"))?;
+            let Some(capacity_in_commit_us) = committed.value else {
+                drop(data);
+                if let Some(execution) = execution {
+                    super::actor_search_outbox::await_bulk_capacity_claimed(
+                        repo, owner, cancel, execution,
+                    )
+                    .await?;
+                } else {
+                    super::actor_search_outbox::await_bulk_capacity(repo, owner, cancel).await?;
+                }
+                if let Some(commit_started) = commit_started {
+                    capacity_wait_us += commit_started.elapsed().as_micros() as u64;
+                }
+                continue;
+            };
+            if let Some(commit_started) = commit_started {
+                // The successful capacity check also contributes to commit_us.
+                tracing::debug!(
+                    code = "embedded_actor_seed_batch_elapsed",
+                    capacity_wait_us = capacity_wait_us + capacity_in_commit_us,
+                    capacity_in_commit_us,
+                    plan_us,
+                    commit_us = commit_started.elapsed().as_micros() as u64,
+                    rows = chunk.len(),
+                    checkpoint = next.processed,
+                    transaction_retries = committed.retries,
+                );
+            }
+            break next;
+        };
         progress = next;
         report(progress.clone());
     }

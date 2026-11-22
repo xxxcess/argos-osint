@@ -26,8 +26,12 @@ pub struct Measurement {
 
 #[derive(Default)]
 struct Policy {
-    paused: bool,
-    paused_at: Option<Instant>,
+    // A low watermark applies only after that same resource reached its high watermark.
+    memory_paused: bool,
+    disk_paused: bool,
+    query_paused: bool,
+    commit_paused: bool,
+    latency_paused_at: Option<Instant>,
     probe_inflight: bool,
     query_ms: u64,
     commit_ms: u64,
@@ -37,21 +41,25 @@ struct Policy {
 
 impl Policy {
     fn physical_reason(
-        &self,
+        &mut self,
         limits: &ActorIndexLimits,
         sample: Measurement,
     ) -> Option<&'static str> {
-        let (Some(memory), Some(disk)) = (sample.resident_bytes, sample.disk_free_bytes) else {
+        if let Some(memory) = sample.resident_bytes {
+            self.memory_paused = memory >= limits.memory_pause_bytes
+                || (self.memory_paused && memory > limits.memory_resume_bytes);
+        }
+        if let Some(disk) = sample.disk_free_bytes {
+            self.disk_paused = disk <= limits.disk_pause_free_bytes
+                || (self.disk_paused && disk < limits.disk_resume_free_bytes);
+        }
+        if sample.resident_bytes.is_none() || sample.disk_free_bytes.is_none() {
             return Some("pressure_measurement_unavailable");
-        };
-        if memory >= limits.memory_pause_bytes
-            || (self.paused && memory > limits.memory_resume_bytes)
-        {
+        }
+        if self.memory_paused {
             return Some("memory_high_water");
         }
-        if disk <= limits.disk_pause_free_bytes
-            || (self.paused && disk < limits.disk_resume_free_bytes)
-        {
+        if self.disk_paused {
             return Some("disk_high_water");
         }
         None
@@ -63,48 +71,33 @@ impl Policy {
         sample: Measurement,
         now: Instant,
     ) -> (bool, Option<&'static str>) {
+        self.query_paused = self.query_ms >= u64::from(limits.query_pause_ms)
+            || (self.query_paused && self.query_ms >= u64::from(limits.query_resume_ms));
+        self.commit_paused = self.commit_ms >= u64::from(limits.commit_pause_ms)
+            || (self.commit_paused && self.commit_ms >= u64::from(limits.commit_resume_ms));
+        let latency_paused = self.query_paused || self.commit_paused;
+        if !latency_paused {
+            self.latency_paused_at = None;
+        }
         if let Some(reason) = self.physical_reason(limits, sample) {
-            if !self.paused {
-                self.paused_at = Some(now);
-            }
-            self.paused = true;
             return (true, Some(reason));
         }
-        let query_slow = self.query_ms
-            >= u64::from(if self.paused {
-                limits.query_resume_ms
-            } else {
-                limits.query_pause_ms
-            });
-        let commit_slow = self.commit_ms
-            >= u64::from(if self.paused {
-                limits.commit_resume_ms
-            } else {
-                limits.commit_pause_ms
-            });
-        if query_slow || commit_slow {
-            if !self.paused {
-                self.paused_at = Some(now);
-            }
-            self.paused = true;
-            let probe_due = self.paused_at.is_some_and(|at| {
-                now.saturating_duration_since(at)
-                    >= Duration::from_millis(u64::from(limits.cooldown_ms))
-            });
+        if latency_paused {
+            let since = *self.latency_paused_at.get_or_insert(now);
+            let probe_due = now.saturating_duration_since(since)
+                >= Duration::from_millis(u64::from(limits.cooldown_ms));
             if probe_due && !self.probe_inflight {
                 return (false, Some("latency_probe_due"));
             }
             return (
                 true,
-                Some(if query_slow {
+                Some(if self.query_paused {
                     "query_latency_high_water"
                 } else {
                     "commit_latency_high_water"
                 }),
             );
         }
-        self.paused = false;
-        self.paused_at = None;
         (false, None)
     }
 
@@ -136,7 +129,7 @@ impl Policy {
             // Query pressure can clear only after a real newer query result,
             // never because the write probe guessed that queries were fast.
             self.probe_inflight = false;
-            self.paused_at = Some(now);
+            self.latency_paused_at = Some(now);
         } else {
             self.commit_ms = if self.last_commit.is_none() {
                 measured
@@ -145,6 +138,13 @@ impl Policy {
             };
         }
         self.last_commit = Some(now);
+    }
+
+    fn cancel_probe(&mut self, now: Instant) {
+        if self.probe_inflight {
+            self.probe_inflight = false;
+            self.latency_paused_at = Some(now);
+        }
     }
 }
 
@@ -251,10 +251,7 @@ impl Meter {
             .policy
             .lock()
             .map_err(|_| IndexError::unavailable("pressure_state_poisoned"))?;
-        if policy.probe_inflight {
-            policy.probe_inflight = false;
-            policy.paused_at = Some(Instant::now());
-        }
+        policy.cancel_probe(Instant::now());
         Ok(())
     }
 }
@@ -392,6 +389,108 @@ mod tests {
             now
         ));
         assert!(policy.admit(&limits, healthy(&limits), now + Duration::from_secs(302)));
+    }
+
+    #[test]
+    fn memory_and_disk_recover_independently() {
+        let limits = ActorIndexLimits::default();
+        let now = Instant::now();
+        let mut policy = Policy::default();
+        let disk_between = limits.disk_resume_free_bytes - 1;
+        let memory_between = limits.memory_resume_bytes + 1;
+
+        assert_eq!(
+            policy.observe(
+                &limits,
+                Measurement {
+                    resident_bytes: Some(limits.memory_pause_bytes),
+                    disk_free_bytes: Some(disk_between),
+                },
+                now,
+            ),
+            (true, Some("memory_high_water"))
+        );
+        assert!(policy.admit(
+            &limits,
+            Measurement {
+                disk_free_bytes: Some(disk_between),
+                ..healthy(&limits)
+            },
+            now
+        ));
+
+        assert_eq!(
+            policy.observe(
+                &limits,
+                Measurement {
+                    resident_bytes: Some(memory_between),
+                    disk_free_bytes: Some(limits.disk_pause_free_bytes),
+                },
+                now,
+            ),
+            (true, Some("disk_high_water"))
+        );
+        assert!(policy.admit(
+            &limits,
+            Measurement {
+                resident_bytes: Some(memory_between),
+                ..healthy(&limits)
+            },
+            now
+        ));
+    }
+
+    #[test]
+    fn missing_measurement_fails_closed_without_latching_healthy_resources() {
+        let limits = ActorIndexLimits::default();
+        let now = Instant::now();
+        let mut policy = Policy::default();
+        let memory_between = Some(limits.memory_resume_bytes + 1);
+
+        assert_eq!(
+            policy.observe(
+                &limits,
+                Measurement {
+                    resident_bytes: memory_between,
+                    disk_free_bytes: None,
+                },
+                now,
+            ),
+            (true, Some("pressure_measurement_unavailable"))
+        );
+        assert!(policy.admit(
+            &limits,
+            Measurement {
+                resident_bytes: memory_between,
+                disk_free_bytes: Some(limits.disk_resume_free_bytes - 1),
+            },
+            now
+        ));
+    }
+
+    #[test]
+    fn query_cooldown_probe_does_not_latch_memory_or_commit_latency() {
+        let limits = ActorIndexLimits::default();
+        let now = Instant::now();
+        let mut policy = Policy::default();
+        let readings = Measurement {
+            resident_bytes: Some(limits.memory_resume_bytes + 1),
+            ..healthy(&limits)
+        };
+        policy.commit(Duration::from_millis(u64::from(limits.commit_resume_ms)), now);
+        policy.query(Duration::from_millis(u64::from(limits.query_pause_ms)), now);
+        assert_eq!(
+            policy.observe(&limits, readings, now),
+            (true, Some("query_latency_high_water"))
+        );
+        let probe = now + Duration::from_millis(u64::from(limits.cooldown_ms));
+        assert!(policy.admit(&limits, readings, probe));
+        assert!(!policy.admit(&limits, readings, probe));
+        policy.cancel_probe(probe);
+        for _ in 0..16 {
+            policy.query(Duration::ZERO, probe);
+        }
+        assert_eq!(policy.observe(&limits, readings, probe), (false, None));
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

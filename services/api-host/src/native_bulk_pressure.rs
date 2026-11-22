@@ -33,7 +33,8 @@ pub(super) struct Measurement {
 
 #[derive(Default)]
 struct Admission {
-    paused: bool,
+    memory_paused: bool,
+    disk_paused: bool,
     cooldown_until: Option<Instant>,
     reclaim_unused_memory: bool,
 }
@@ -56,15 +57,20 @@ enum Decision {
 fn physical_reason(
     limits: &ActorIndexLimits,
     sample: Measurement,
-    resuming: bool,
+    resuming_memory: bool,
+    resuming_disk: bool,
 ) -> Option<&'static str> {
     let (Some(memory), Some(disk)) = (sample.resident_bytes, sample.workspace_free_bytes) else {
         return Some("worker_pressure_unknown");
     };
-    if memory >= limits.memory_pause_bytes || (resuming && memory > limits.memory_resume_bytes) {
+    if memory >= limits.memory_pause_bytes
+        || (resuming_memory && memory > limits.memory_resume_bytes)
+    {
         return Some("worker_memory_pressure");
     }
-    if disk <= limits.disk_pause_free_bytes || (resuming && disk < limits.disk_resume_free_bytes) {
+    if disk <= limits.disk_pause_free_bytes
+        || (resuming_disk && disk < limits.disk_resume_free_bytes)
+    {
         return Some("worker_workspace_disk_pressure");
     }
     None
@@ -78,9 +84,17 @@ impl Admission {
         now: Instant,
     ) -> Result<Decision> {
         limits.validate()?;
-        let reason = physical_reason(limits, sample, self.paused);
-        if reason.is_some() && !self.paused {
-            self.paused = true;
+        let was_paused = self.memory_paused || self.disk_paused;
+        // Preserve a missing resource's low-water requirement, without
+        // applying it to the other available reading.
+        self.memory_paused |= sample
+            .resident_bytes
+            .is_none_or(|memory| memory >= limits.memory_pause_bytes);
+        self.disk_paused |= sample
+            .workspace_free_bytes
+            .is_none_or(|disk| disk <= limits.disk_pause_free_bytes);
+        let reason = physical_reason(limits, sample, self.memory_paused, self.disk_paused);
+        if reason.is_some() && !was_paused {
             self.cooldown_until = Some(now + Duration::from_millis(u64::from(limits.cooldown_ms)));
         }
         if let Some(reason) = reason {
@@ -104,14 +118,15 @@ impl Admission {
         // other bounded worker work. Retained input has its own hard 32 MiB cap.
         let retained_bytes = ((limits.memory_pause_bytes - memory) / 4).min(32 * 1024 * 1024);
         if retained_bytes < 8 * 1024 * 1024 {
-            self.paused = true;
+            self.memory_paused = true;
             self.cooldown_until = Some(now + Duration::from_millis(u64::from(limits.cooldown_ms)));
             return Ok(Decision::Wait {
                 reason: "worker_parser_headroom",
                 retry_after: Duration::from_secs(5),
             });
         }
-        self.paused = false;
+        self.memory_paused = false;
+        self.disk_paused = false;
         self.cooldown_until = None;
         Ok(Decision::Ready(ParserBudget {
             limits: limits.clone(),
@@ -129,7 +144,7 @@ impl ParserBudget {
         }
     }
     fn check_sample(&self, sample: Measurement) -> Result<()> {
-        match physical_reason(&self.limits, sample, false) {
+        match physical_reason(&self.limits, sample, false, false) {
             Some(reason) => Err(anyhow::anyhow!(reason)),
             None => Ok(()),
         }
@@ -722,6 +737,63 @@ mod tests {
                 ..healthy()
             })
             .is_err());
+    }
+
+    #[test]
+    fn seed_admission_requires_low_water_only_for_the_resource_under_pressure() {
+        let limits = ActorIndexLimits::default();
+        let now = Instant::now();
+        let after_cooldown = now + Duration::from_millis(u64::from(limits.cooldown_ms));
+        let disk_between = Some(limits.disk_resume_free_bytes - 1);
+        let memory_between = Some(limits.memory_resume_bytes + 1);
+        let cases = [
+            (
+                Measurement {
+                    resident_bytes: Some(limits.memory_pause_bytes),
+                    workspace_free_bytes: disk_between,
+                },
+                "worker_memory_pressure",
+                Measurement {
+                    workspace_free_bytes: disk_between,
+                    ..healthy()
+                },
+            ),
+            (
+                Measurement {
+                    resident_bytes: memory_between,
+                    workspace_free_bytes: Some(limits.disk_pause_free_bytes),
+                },
+                "worker_workspace_disk_pressure",
+                Measurement {
+                    resident_bytes: memory_between,
+                    ..healthy()
+                },
+            ),
+            (
+                Measurement {
+                    resident_bytes: memory_between,
+                    workspace_free_bytes: None,
+                },
+                "worker_pressure_unknown",
+                Measurement {
+                    resident_bytes: memory_between,
+                    ..healthy()
+                },
+            ),
+        ];
+        for (high, expected, recovered) in cases {
+            let mut admission = Admission::default();
+            assert!(matches!(
+                admission.observe(&limits, high, now).expect("high watermark"),
+                Decision::Wait { reason, .. } if reason == expected
+            ));
+            assert!(matches!(
+                admission
+                    .observe(&limits, recovered, after_cooldown)
+                    .expect("low watermark"),
+                Decision::Ready(_)
+            ));
+        }
     }
 
     #[tokio::test]

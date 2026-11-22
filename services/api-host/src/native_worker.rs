@@ -453,16 +453,24 @@ async fn handle(
         }
         DeliveryClaim::Claimed(lease) => lease,
     };
+    // Seed and reindex have durable, idempotent checkpoints on both runtimes.
+    // A planned Distributed restart must not turn those checkpoints into a
+    // terminal failure or consume a failure retry.
+    let shutdown_reason = if relinquish_on_shutdown {
+        Some("local_backend_shutdown")
+    } else if matches!(lease.task.pool.as_str(), setup_jobs::SEED_POOL | setup_jobs::REINDEX_POOL) {
+        Some("native_worker_shutdown")
+    } else {
+        None
+    };
+    let shutdown_outcome = || match shutdown_reason {
+        Some(reason) => WorkerOutcome::Relinquish { reason },
+        None => WorkerOutcome::Failed {
+            reason: "native_worker_shutdown",
+        },
+    };
     let outcome = if *stop.borrow() {
-        if relinquish_on_shutdown {
-            WorkerOutcome::Relinquish {
-                reason: "local_backend_shutdown",
-            }
-        } else {
-            WorkerOutcome::Failed {
-                reason: "native_worker_shutdown",
-            }
-        }
+        shutdown_outcome()
     } else {
         crate::setup_jobs::record_job_event(
             repo,
@@ -536,15 +544,7 @@ async fn handle(
                     // Retain the operation until its cancellation is observed; a
                     // detached trainer/seed must not outlive its claimed lease.
                     let _ = operation.await;
-                    break if relinquish_on_shutdown {
-                        WorkerOutcome::Relinquish {
-                            reason: "local_backend_shutdown",
-                        }
-                    } else {
-                        WorkerOutcome::Failed {
-                            reason: "native_worker_shutdown",
-                        }
-                    };
+                    break shutdown_outcome();
                 }
                 _ = heartbeat.tick() => {
                     let queue_live = received.renew().await;
@@ -573,16 +573,14 @@ async fn handle(
                             WorkerOutcome::Complete { result_ref }
                         }
                         DurableToolOutcome::Failed { reason }
-                            if relinquish_on_shutdown
+                            if shutdown_reason.is_some()
                                 && (*stop.borrow()
                                     || matches!(
                                         reason,
                                         "setup_interrupted" | "actor_reindex_interrupted"
                                     )) =>
                         {
-                            WorkerOutcome::Relinquish {
-                                reason: "local_backend_shutdown",
-                            }
+                            shutdown_outcome()
                         }
                         DurableToolOutcome::Failed { reason }
                             if relinquish_on_shutdown
@@ -658,7 +656,7 @@ async fn handle(
                 Severity::Info,
                 "task.relinquished",
                 format!(
-                    "Relinquished {} on local backend shutdown",
+                    "Relinquished {} on worker shutdown",
                     jobs::job_title(&lease.task.operation)
                 ),
             )
@@ -707,6 +705,17 @@ mod tests {
 
     #[tokio::test]
     async fn relinquish_on_shutdown_preserves_retry_budget_and_resumes_same_job_id() {
+        check_reindex_worker_shutdown(true).await;
+    }
+
+    #[tokio::test]
+    async fn distributed_shutdown_requeues_reindex_under_the_same_job_id() {
+        check_reindex_worker_shutdown(false).await;
+    }
+
+    // Exercise the worker's transport-specific shutdown policy using isolated
+    // local storage and queue; the public HTTP contract is tested separately.
+    async fn check_reindex_worker_shutdown(embedded: bool) {
         let _lifecycle_guard = crate::tests::EMBEDDED_LIFECYCLE_TEST_LOCK.lock().await;
         use argos_osint_core::storage::bootstrap;
         use argos_osint_core::storage::connect_registry;
@@ -867,7 +876,7 @@ mod tests {
                     ActorIndexWorker::local(unready_search, "index-owner-1".into())
                         .expect("local index worker"),
                 ),
-                relinquish_on_shutdown: true,
+                relinquish_on_shutdown: embedded,
                 classifier_enabled: true,
             },
             async move {
@@ -954,7 +963,7 @@ mod tests {
                     ActorIndexWorker::local(ready_search, "index-owner-2".into())
                         .expect("local index worker 2"),
                 ),
-                relinquish_on_shutdown: true,
+                relinquish_on_shutdown: embedded,
                 classifier_enabled: true,
             },
             async move {

@@ -12,6 +12,10 @@ mod queue_client;
 #[allow(dead_code)]
 #[path = "../src/setup_jobs.rs"]
 mod setup_jobs;
+#[cfg(feature = "classifier")]
+#[allow(dead_code)]
+#[path = "../../../crates/argos-osint-core/tests/fixtures/classifier/activation_training.rs"]
+mod activation_training;
 
 #[allow(dead_code)]
 mod fleetworks {
@@ -186,6 +190,7 @@ struct ParityReport {
     covered_ipc_operations: usize,
     operations: BTreeMap<String, ParityOperationRecord>,
     intentional_exceptions: Vec<IntentionalExceptionRecord>,
+    classifier_lifecycle_verified: BTreeSet<String>,
 }
 
 impl ParityReport {
@@ -200,6 +205,7 @@ impl ParityReport {
             covered_ipc_operations: 0,
             operations: BTreeMap::new(),
             intentional_exceptions: Vec::new(),
+            classifier_lifecycle_verified: BTreeSet::new(),
         }
     }
 
@@ -519,6 +525,131 @@ struct SharedFlowResult {
     seed_job_id: String,
     seed_request_id: String,
     canonical_actor_id: String,
+}
+
+#[cfg(feature = "classifier")]
+async fn await_classifier_job(client: &Client, transport: &str, id: &str) -> serde_json::Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        let detail: serde_json::Value = client
+            .get_with_query(JOB_DETAIL_PATH, &[("id", id)])
+            .await
+            .expect("registered classifier job detail");
+        match detail["job"]["state"].as_str() {
+            Some("completed") => {
+                assert_eq!(detail["job"]["id"], id);
+                let jobs: Jobs = client.get(JOBS_PATH).await.expect("registered Jobs view");
+                assert_eq!(jobs.rows.iter().filter(|row| row.id == id).count(), 1);
+                return detail;
+            }
+            Some("failed" | "cancelled" | "interrupted") => panic!(
+                "{transport}: classifier job {id} did not complete: {}",
+                detail["job"]["error_summary"]
+            ),
+            _ => (),
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{transport}: classifier job {id} did not reach terminal completion"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[cfg(feature = "classifier")]
+async fn exercise_classifier_lifecycle(client: &Client, context: &MutationContext, transport: &str) {
+    use fleetworks_contracts::classifier_activation::ActivationReceipt;
+    use fleetworks_contracts::classifier_activation::ActivationResult;
+    use fleetworks_contracts::classifier_activation::ActivationState;
+    use fleetworks_contracts::classifier_activation::CandidatePreview;
+
+    let fixture = tempfile::tempdir().expect("private training fixture");
+    let (_, expected) = activation_training::prepare(fixture.path());
+    let file = tokio::fs::File::open(fixture.path().join("training.csv"))
+        .await
+        .expect("open synthetic training CSV");
+    let upload = client
+        .upload_dataset(
+            DatasetKind::ClassifierTraining,
+            &expected.sha256,
+            file,
+            expected.size_bytes,
+        )
+        .await
+        .expect("stage Natural training CSV through the tested transport");
+    assert_eq!(upload.dataset.sha256, expected.sha256);
+
+    let request = MaintenanceRequest::for_training(
+        format!("parity-real-train-{transport}"),
+        context.clone(),
+        upload.dataset,
+    )
+    .expect("candidate-only request");
+    let train: MaintenanceReceipt = client
+        .post(CLASSIFIER_TRAIN_PATH, &request)
+        .await
+        .expect("submit Natural training");
+    assert_eq!(train.operation, MaintenanceOperation::TrainClassifier);
+    let repeated: MaintenanceReceipt = client
+        .post(CLASSIFIER_TRAIN_PATH, &request)
+        .await
+        .expect("replay exact training request");
+    assert_eq!(repeated.job_id, train.job_id);
+    let detail = await_classifier_job(client, transport, &train.job_id).await;
+    let result = &detail["maintenance_result"];
+    assert_eq!(result["engine"], "natural");
+    assert_eq!(result["atlas_engine"], "rust_bert_zero_shot");
+    assert_eq!(result["dataset_sha256"], expected.sha256.as_str());
+    assert_eq!(result["activation_requested"], false);
+    assert_eq!(result["state"], "trained_not_activated");
+
+    let model = result["candidate_model_id"]
+        .as_str()
+        .expect("candidate id from durable result");
+    let query = [("training_job_id", train.job_id.as_str()), ("model_id", model)];
+    let preview: CandidatePreview = client
+        .get_with_query(CANDIDATE_DETAIL_PATH, &query)
+        .await
+        .expect("preview exact training-owned candidate");
+    assert_eq!(preview.candidate.training_job_id, train.job_id);
+    assert_eq!(preview.candidate.model_id, model);
+    assert_eq!(preview.candidate.dataset_sha256, expected.sha256);
+    assert_eq!(preview.expected_prior, ActiveModelRevision::NeverActivated);
+    assert!(preview.synthetic_baseline && preview.activation_supported);
+
+    let request = ActivationRequest::new(
+        format!("parity-real-activate-{transport}"),
+        context.clone(),
+        preview.candidate.clone(),
+        preview.expected_prior,
+        SyntheticBaselineConsent::ActivateSyntheticBaseline,
+    )
+    .expect("separate explicit activation for the synthetic fixture");
+    let activation: ActivationReceipt = client
+        .post(ACTIVATION_PATH, &request)
+        .await
+        .expect("submit Natural activation");
+    assert_eq!(activation.candidate, preview.candidate);
+    assert_ne!(activation.job_id, train.job_id);
+    let repeated: ActivationReceipt = client
+        .post(ACTIVATION_PATH, &request)
+        .await
+        .expect("replay exact activation request");
+    assert_eq!(repeated.job_id, activation.job_id);
+    await_classifier_job(client, transport, &activation.job_id).await;
+    let effect: ActivationResult = client
+        .get_with_query(ACTIVATION_RESULT_PATH, &[("job_id", activation.job_id.as_str())])
+        .await
+        .expect("operation-owned activation outcome");
+    assert_eq!(effect.job_id, activation.job_id);
+    assert_eq!(effect.candidate, preview.candidate);
+    assert_eq!(effect.state, ActivationState::Activated);
+    let revision = effect.activated_revision.expect("proof of activated revision");
+    let after: CandidatePreview = client
+        .get_with_query(CANDIDATE_DETAIL_PATH, &query)
+        .await
+        .expect("read back active model revision");
+    assert_eq!(after.expected_prior, revision);
 }
 
 async fn run_shared_flow(
@@ -1538,7 +1669,7 @@ async fn run_shared_flow(
     .expect("train dataset ref");
     let train_req = MaintenanceRequest::for_training(
         format!("parity-train-{transport}"),
-        stale_mutation,
+        stale_mutation.clone(),
         train_dataset,
     )
     .expect("build train request");
@@ -1557,6 +1688,11 @@ async fn run_shared_flow(
         "live_parity",
         "unavailable worker returns 503; missing training dataset returns 409",
     );
+    #[cfg(feature = "classifier")]
+    {
+        Box::pin(exercise_classifier_lifecycle(&client, &stale_mutation, transport)).await;
+        report.classifier_lifecycle_verified.insert(transport.to_owned());
+    }
 
     let logs_follow_op = IpcOperation::from_get_with_query(LOGS_FOLLOW_PATH, &LogQuery::default())
         .expect("logs/follow route mapping");

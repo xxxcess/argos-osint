@@ -5,6 +5,21 @@ use fleetworks_contracts::ipc::{IpcOperation, LocalIpcClient};
 use fleetworks_contracts::Client;
 use tokio::process::Command;
 
+const BINARY: &str = env!("CARGO_BIN_EXE_argos-api-host");
+
+#[test]
+fn built_api_host_shows_role_help() {
+    let output = std::process::Command::new(BINARY)
+        .arg("--help")
+        .output()
+        .expect("run the built service host with --help");
+    assert!(output.status.success(), "service help failed: {output:?}");
+    let help = std::str::from_utf8(&output.stdout).expect("UTF-8 service help");
+    assert!(help.contains("--role <ROLE>"), "{help}");
+    assert!(help.contains("bootstrap:"), "{help}");
+    assert!(help.contains("--state-dir <STATE_DIR>"), "{help}");
+}
+
 #[tokio::test]
 async fn built_local_ipc_binary_advertises_valid_contract_survives_restart_and_releases_lock_on_drop(
 ) {
@@ -18,11 +33,9 @@ async fn built_local_ipc_binary_advertises_valid_contract_survives_restart_and_r
             .expect("chmod state_dir 700");
     }
 
-    let binary = env!("CARGO_BIN_EXE_argos-api-host");
-
     // Session 1: boot real binary, validate HelloAck capabilities against production native
     // contract and transport-neutral Client endpoints, then shut down cleanly.
-    let mut cmd1 = Command::new(binary);
+    let mut cmd1 = Command::new(BINARY);
     cmd1.args(["--role", "local-ipc", "--state-dir"])
         .arg(&state_dir);
     let ipc1 = LocalIpcClient::spawn_command(&mut cmd1, "fleetworks-desktop-test", "0.2.1")
@@ -69,7 +82,7 @@ async fn built_local_ipc_binary_advertises_valid_contract_survives_restart_and_r
 
     // Session 2: immediately reopen on the exact same --state-dir, assert stable deployment_id
     // and lock availability right after shutdown, then drop without calling shutdown().
-    let mut cmd2 = Command::new(binary);
+    let mut cmd2 = Command::new(BINARY);
     cmd2.args(["--role", "local-ipc", "--state-dir"])
         .arg(&state_dir);
     let ipc2 = LocalIpcClient::spawn_command(&mut cmd2, "fleetworks-desktop-test", "0.2.1")
@@ -94,7 +107,7 @@ async fn built_local_ipc_binary_advertises_valid_contract_survives_restart_and_r
 
     // Session 3: immediately reopen after dropping last LocalIpcClient without shutdown();
     // broken Arc cycle + child kill/reap must have already released state.lock / RocksDB LOCK.
-    let mut cmd3 = Command::new(binary);
+    let mut cmd3 = Command::new(BINARY);
     cmd3.args(["--role", "local-ipc", "--state-dir"])
         .arg(&state_dir);
     let ipc3 = LocalIpcClient::spawn_command(&mut cmd3, "fleetworks-desktop-test", "0.2.1")

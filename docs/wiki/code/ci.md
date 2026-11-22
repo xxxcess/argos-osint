@@ -119,7 +119,7 @@ App assets are unsigned. Fixture generation and downloaded-byte verification do 
 
 ## `embedded.yml` — affected storage compatibility
 
-[Embedded compatibility](../../../.github/workflows/embedded.yml) is reusable for selected Linux storage changes. It runs format, Clippy with warnings denied, workspace tests, service-host help and required in-process storage contracts via `scripts/local_matrix.sh --storage embedded`. It enforces Jobs-only direct SQLite ownership and rejects LanceDB.
+[Embedded compatibility](../../../.github/workflows/embedded.yml) is reusable for selected Linux storage changes. It runs format, Clippy with warnings denied, workspace tests, and required in-process storage contracts via `scripts/local_matrix.sh --storage embedded`. The workspace tests check role help on the built service-host binary. CI enforces Jobs-only direct SQLite ownership and rejects LanceDB.
 
 A direct manual dispatch retains the four-platform diagnostic, including both Macs:
 

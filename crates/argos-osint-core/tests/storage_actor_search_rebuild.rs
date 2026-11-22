@@ -698,6 +698,24 @@ async fn pressure_observation_is_fenced_and_source_pause_cancels_without_losing_
     assert!(index::observe_resources(&repo, &stale, &status, now)
         .await
         .is_err());
+    let heartbeat = now + Duration::seconds(1);
+    status
+        .pressure
+        .as_mut()
+        .expect("measurement")
+        .observed_at_unix_ms = heartbeat.timestamp_millis() as u64;
+    index::observe_resources(&repo, &lease, &status, heartbeat)
+        .await
+        .expect("coalesce a sample with the same admission decision");
+    let mut observation = repo
+        .db()
+        .query("SELECT VALUE pressure_observed_at FROM ONLY actor_search_control:catalog")
+        .await
+        .expect("read verified pressure")
+        .check()
+        .expect("checked receipt");
+    let observed_at: Option<String> = observation.take(0).expect("decode observation time");
+    assert_eq!(observed_at.as_deref(), Some(now.to_rfc3339().as_str()));
     let cancel = AtomicBool::new(true);
     assert!(
         index::await_bulk_capacity(&repo, "no-source-owner", &cancel)

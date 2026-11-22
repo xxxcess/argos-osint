@@ -53,8 +53,6 @@ pub async fn observe_resources(
         }
         _ => "resource_measurement_unavailable".into(),
     };
-    let pressure_json = serde_json::to_string(&status.pressure)
-        .map_err(|_| invalid("actor_index_pressure_encoding"))?;
     #[derive(SurrealValue)]
     struct ObservedControl {
         deployment_id: String,
@@ -63,14 +61,13 @@ pub async fn observe_resources(
         lease_epoch: i64,
         lease_until: String,
         effective_limits_json: String,
-        pressure_json: String,
         pressure_paused: bool,
         pressure_reason: String,
         pressure_observed_at: String,
     }
     let mut current = repo
         .db()
-        .query("SELECT deployment_id, source_epoch, lease_owner, lease_epoch, <string>lease_until AS lease_until, effective_limits_json, pressure_json, pressure_paused, pressure_reason, pressure_observed_at FROM ONLY actor_search_control:catalog")
+        .query("SELECT deployment_id, source_epoch, lease_owner, lease_epoch, <string>lease_until AS lease_until, effective_limits_json, pressure_paused, pressure_reason, pressure_observed_at FROM ONLY actor_search_control:catalog")
         .await?
         .check()?;
     if let Some(observed) = current.take::<Option<ObservedControl>>(0)? {
@@ -81,11 +78,13 @@ pub async fn observe_resources(
                 || (observed.deployment_id == status.deployment_id
                     && observed.source_epoch == status.source_epoch))
             && observed.effective_limits_json == limits
-            && observed.pressure_json == pressure_json
             && observed.pressure_paused == !reason.is_empty()
             && observed.pressure_reason == reason
             && !observed.pressure_observed_at.is_empty()
         {
+            // Coalesce samples with the same admission decision. Changing
+            // timestamps and numeric readings do not require another write
+            // under the source's coordinator guard within this window.
             if let Ok(observed_at) = instant(&observed.pressure_observed_at) {
                 let age = now - observed_at;
                 if age >= Duration::zero() && age < Duration::seconds(10) {
@@ -94,6 +93,8 @@ pub async fn observe_resources(
             }
         }
     }
+    let pressure_json = serde_json::to_string(&status.pressure)
+        .map_err(|_| invalid("actor_index_pressure_encoding"))?;
     run_tx(repo.db(), RetryPolicy::default(), |tx| {
         let limits=limits.clone();let reason=reason.clone();let pressure_json=pressure_json.clone();
         async move {

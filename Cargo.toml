@@ -82,6 +82,18 @@ opt-level = 1
 [profile.dev.package.surrealdb-types]
 opt-level = 1
 
+# The debug companion also serializes catalog rows and writes them through
+# the datastore transaction and RocksDB adapter. Optimize the Rust write path
+# while sharing the existing native RocksDB archive.
+[profile.dev.package.argos-osint-core]
+opt-level = 1
+
+[profile.dev.package.surrealdb-datastore]
+opt-level = 1
+
+[profile.dev.package.surrealdb-kvs-rocksdb]
+opt-level = 1
+
 # Rune's full debug information can exceed the native development host's
 # memory budget. Preserve backtrace line tables without rebuilding unrelated
 # backend dependencies with a different global profile.

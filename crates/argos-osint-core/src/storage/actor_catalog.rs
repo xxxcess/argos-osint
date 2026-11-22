@@ -946,6 +946,13 @@ struct GraphRow {
     lifecycle: String,
 }
 
+#[derive(Default)]
+struct SeedWriteTimes {
+    canonical_us: u64,
+    aliases_us: u64,
+    derived_us: u64,
+}
+
 /// Validate offline, then insert stable identities in bounded transactions.
 /// Retries reuse committed IDs; completion is recorded only after all batches.
 /// The callback reports immutable snapshots and never runs inside a transaction.
@@ -1455,7 +1462,9 @@ where
                     .await?;
                     let capacity_us =
                         capacity_started.map_or(0, |started| started.elapsed().as_micros() as u64);
+                    let mut writes = SeedWriteTimes::default();
                     if ready {
+                        let canonical_started = measure_batch.then(Instant::now);
                         run(
                             &tx,
                             tx.query(
@@ -1498,8 +1507,15 @@ where
                             )),
                         )
                         .await?;
+                        if let Some(started) = canonical_started {
+                            writes.canonical_us = started.elapsed().as_micros() as u64;
+                        }
+                        let aliases_started = measure_batch.then(Instant::now);
                         insert_seed_aliases(&tx, &data.2, cancel).await?;
-                        super::jobs::bump(&tx, "job_guard", "atlas-derivative-catalog-input").await?;
+                        if let Some(started) = aliases_started {
+                            writes.aliases_us = started.elapsed().as_micros() as u64;
+                        }
+                        let derived_started = measure_batch.then(Instant::now);
                         super::atlas_derivative_invalidation::enqueue_in(
                             &tx,
                             None,
@@ -1514,6 +1530,9 @@ where
                             chrono::Utc::now(),
                         )
                         .await?;
+                        if let Some(started) = derived_started {
+                            writes.derived_us = started.elapsed().as_micros() as u64;
+                        }
                     }
                     if let Some(execution) = execution {
                         execution.check_in(&tx, cancel).await?;
@@ -1521,12 +1540,12 @@ where
                     if cancel.load(Ordering::Acquire) {
                         return Err(TxError::Abort("actor seeding cancelled".into()));
                     }
-                    Ok(ready.then_some(capacity_us))
+                    Ok(ready.then_some((capacity_us, writes)))
                 }
             })
             .await
             .map_err(|e| anyhow::anyhow!("actor seed batch: {e}"))?;
-            let Some(capacity_in_commit_us) = committed.value else {
+            let Some((capacity_in_commit_us, writes)) = committed.value else {
                 drop(data);
                 if let Some(execution) = execution {
                     super::actor_search_outbox::await_bulk_capacity_claimed(
@@ -1549,6 +1568,9 @@ where
                     capacity_in_commit_us,
                     plan_us,
                     commit_us = commit_started.elapsed().as_micros() as u64,
+                    canonical_write_us = writes.canonical_us,
+                    alias_write_us = writes.aliases_us,
+                    derived_write_us = writes.derived_us,
                     rows = chunk.len(),
                     checkpoint = next.processed,
                     transaction_retries = committed.retries,

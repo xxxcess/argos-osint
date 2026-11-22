@@ -194,6 +194,7 @@ class LocalIpcSession:
         self.client_version = client_version
         self._next_request_id = 1
         self.observed_events = []
+        self.last_shutdown_ack = None
         self._stderr_tail = collections.deque(maxlen=256)
         environment = clean_child_environment()
         if log_filter is not None:
@@ -287,9 +288,18 @@ class LocalIpcSession:
                 self.observed_events.append(frame.get("body"))
                 continue
             if frame.get("frame") == "shutdown_ack":
+                self.last_shutdown_ack = frame.get("body")
+                # Match the native client: a final acknowledgement closes the
+                # writer pipe and lets the companion's stdin reader see EOF.
+                self.proc.stdin.close()
                 exit_code = self.proc.wait(timeout=10)
                 self._stderr_thread.join(timeout=2)
-                return frame["body"], exit_code
+                if (
+                    not isinstance(self.last_shutdown_ack, dict)
+                    or self.last_shutdown_ack.get("checkpointed") is not True
+                ):
+                    raise ValueError("Companion did not acknowledge a checkpointed shutdown")
+                return self.last_shutdown_ack, exit_code
         raise TimeoutError("Timed out waiting for shutdown_ack")
 
     def close_unconditionally(self):

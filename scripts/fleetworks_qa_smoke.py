@@ -85,11 +85,19 @@ INDEX_PRESSURE_REASON = re.compile(r'\breason="?([a-z_]{1,40})"?(?=$|[\s,])')
 INDEX_PRESSURE_PAUSED = re.compile(r'\bpaused=(true|false)(?=$|[\s,])')
 INDEX_MERGE_FIELD = re.compile(r'\b(inputs|documents)=([0-9]{1,9})(?=$|[\s,])')
 INDEX_BATCH_DURATIONS = ("prepare_ms", "write_ms", "ack_ms")
-INDEX_EVENT_MILESTONES = 12
+CATALOG_EVENT_MILESTONES = 12
 INDEX_PRESSURE_REASONS = {
     "memory_high_water", "disk_high_water", "pressure_measurement_unavailable",
     "query_latency_high_water", "commit_latency_high_water", "latency_probe_due", "none",
 }
+SEED_EVENT = re.compile(r'\bcode="?embedded_(actor_seed_batch_elapsed|actor_seed_phase_elapsed|backend_shutdown_phase)"?(?=$|[\s,])')
+SEED_BATCH_FIELD = re.compile(
+    r'\b(capacity_wait_us|commit_us|plan_us|rows|checkpoint|transaction_retries)=([0-9]{1,20})(?=$|[\s,])'
+)
+SEED_PHASE_ELAPSED = re.compile(r'\belapsed_us=([0-9]{1,20})(?=$|[\s,])')
+CATALOG_PHASE = re.compile(r'\bphase="?([a-z_]{1,40})"?(?=$|[\s,])')
+SEED_PHASES = {"admission", "csv_spool_validation", "job_progress", "job_log", "final_progress"}
+SHUTDOWN_PHASES = {"ipc_drained", "health_stopped", "qa_stopped", "context_released"}
 
 
 def require(condition, description):
@@ -404,6 +412,24 @@ def sample_smaps_rollup(proc, phase_usage):
         phase_usage["smaps_rollup_peak_sample"] = {**sample, "stage_sample": phase_usage["samples"]}
 
 
+def retain_timing(aggregate, elapsed):
+    aggregate["count"] = aggregate.get("count", 0) + 1
+    aggregate["total"] = aggregate.get("total", 0) + elapsed
+    aggregate["max"] = max(aggregate.get("max", 0), elapsed)
+
+
+def sanitized_shutdown_ack(raw):
+    if not isinstance(raw, dict):
+        return None
+    ack = {}
+    if type(raw.get("checkpointed")) is bool:
+        ack["checkpointed"] = raw["checkpointed"]
+    leases = raw.get("relinquished_leases")
+    if type(leases) is int and 0 <= leases < 2**64:
+        ack["relinquished_leases"] = leases
+    return ack or None
+
+
 class CatalogIpcSession(embedded.LocalIpcSession):
     def __init__(self, binary, state, evidence):
         self.evidence = evidence
@@ -411,9 +437,14 @@ class CatalogIpcSession(embedded.LocalIpcSession):
         self.index_batch_timings = {}
         self.index_pressure_transitions = {}
         self.index_merge_plans = {}
+        self.seed_batch_timings = {}
+        self.seed_phase_timings = {}
+        self.shutdown_phases = {}
         super().__init__(binary, state, client_name="fleetworks-catalog-smoke",
                          log_filter="warn,surrealdb::core::kvs::rocksdb=info,"
-                                    "argos_api_host::actor_index_worker=info,fleetworks_search_index::engine=info")
+                                    "argos_api_host::actor_index_worker=info,fleetworks_search_index::engine=info,"
+                                    "argos_osint_core::storage::actor_catalog=debug,argos_api_host::setup_jobs=debug,"
+                                    "argos_api_host::local_ipc::embedded=debug")
 
     def _record_index_batch(self, event):
         matches = INDEX_BATCH_FIELD.findall(event)
@@ -430,11 +461,11 @@ class CatalogIpcSession(embedded.LocalIpcSession):
             aggregate["total"] += elapsed
             aggregate["max"] = max(aggregate["max"], elapsed)
 
-    def _retain_index_event(self, stages, fields):
+    def _retain_event(self, stages, fields):
         stage = stages.setdefault(self.evidence["stage"], {"count": 0, "first": []})
         sample = {**fields, "elapsed_ms": round((time.monotonic() - self.started) * 1000)}
         stage["count"] += 1
-        if len(stage["first"]) < INDEX_EVENT_MILESTONES:
+        if len(stage["first"]) < CATALOG_EVENT_MILESTONES:
             stage["first"].append(sample)
         stage["latest"] = sample
         return stage
@@ -456,17 +487,46 @@ class CatalogIpcSession(embedded.LocalIpcSession):
             fields = {name: int(value) for name, value in bytes_read}
             if (len(paused) == 1 and len(reasons) == 1 and reasons[0] in INDEX_PRESSURE_REASONS
                     and len(bytes_read) == len(fields) == 2 and all(value < 2**64 for value in fields.values())):
-                self._retain_index_event(self.index_pressure_transitions, {
+                self._retain_event(self.index_pressure_transitions, {
                     "paused": paused[0] == "true", "reason": reasons[0], **fields,
                 })
         else:
             matches = INDEX_MERGE_FIELD.findall(event)
             fields = {name: int(value) for name, value in matches}
             if len(matches) == len(fields) == 2:
-                stage = self._retain_index_event(self.index_merge_plans, fields)
+                stage = self._retain_event(self.index_merge_plans, fields)
                 for name, value in fields.items():
                     total = f"total_{name}"
                     stage[total] = stage.get(total, 0) + value
+        return True
+
+    def _record_seed_or_shutdown_event(self, text):
+        if "embedded_actor_seed_" not in text and "embedded_backend_shutdown_phase" not in text:
+            return False
+        event = ANSI.sub("", text)
+        code = SEED_EVENT.search(event)
+        if code is None:
+            return False
+        if code[1] == "actor_seed_batch_elapsed":
+            matches = SEED_BATCH_FIELD.findall(event)
+            fields = {name: int(value) for name, value in matches}
+            if (len(matches) == len(fields) == 6 and all(value < 2**64 for value in fields.values())
+                    and 0 < fields["rows"] <= 128 and fields["rows"] <= fields["checkpoint"] <= CATALOG_ROWS):
+                timings = self.seed_batch_timings
+                timings["latest_checkpoint"] = fields.pop("checkpoint")
+                for name, value in fields.items():
+                    retain_timing(timings.setdefault(name, {}), value)
+            return True
+        phases = CATALOG_PHASE.findall(event)
+        if len(phases) != 1:
+            return True
+        phase, = phases
+        if code[1] == "actor_seed_phase_elapsed":
+            elapsed = SEED_PHASE_ELAPSED.findall(event)
+            if phase in SEED_PHASES and len(elapsed) == 1 and int(elapsed[0]) < 2**64:
+                retain_timing(self.seed_phase_timings.setdefault(phase, {}), int(elapsed[0]))
+        elif phase in SHUTDOWN_PHASES:
+            self._retain_event(self.shutdown_phases, {"phase": phase})
         return True
 
     def _drain_stderr(self):
@@ -479,7 +539,7 @@ class CatalogIpcSession(embedded.LocalIpcSession):
             if not line:
                 return
             text = line.decode("utf-8", errors="replace").rstrip("\n")
-            if self._record_index_event(text):
+            if self._record_index_event(text) or self._record_seed_or_shutdown_event(text):
                 continue
             captured += len(text)
             if captured <= embedded.MAX_STDERR_TAIL_BYTES * 8:
@@ -816,7 +876,11 @@ def exercise_bundled_catalog(session, state, app, evidence):
 
     next_stage("shutdown")
     embedded.check_zero_bound_sockets(session.proc.pid)
-    _, exit_code = session.shutdown("bundled_catalog_smoke_complete")
+    ack, exit_code = session.shutdown("bundled_catalog_smoke_complete")
+    evidence["shutdown_ack"] = sanitized_shutdown_ack(ack)
+    evidence["shutdown_exit_code"] = exit_code
+    require(evidence["shutdown_ack"] is not None and evidence["shutdown_ack"].get("checkpointed") is True,
+            "bundled catalog companion did not acknowledge a checkpointed shutdown")
     require(exit_code == 0, "bundled catalog companion did not shut down cleanly")
     next_stage("complete")
 
@@ -860,6 +924,15 @@ def packaged_catalog_smoke(binary, app, state):
         evidence["actor_index_pressure_transitions"] = session.index_pressure_transitions
     if session.index_merge_plans:
         evidence["actor_index_merge_plans"] = session.index_merge_plans
+    if session.seed_batch_timings:
+        evidence["actor_seed_batch_timings"] = session.seed_batch_timings
+    if session.seed_phase_timings:
+        evidence["actor_seed_phase_timings"] = session.seed_phase_timings
+    if session.shutdown_phases:
+        evidence["backend_shutdown_phases"] = session.shutdown_phases
+    last_ack = sanitized_shutdown_ack(getattr(session, "last_shutdown_ack", None))
+    if last_ack is not None:
+        evidence["shutdown_ack"] = last_ack
     if "min_disk_free_bytes" in evidence:
         evidence["peak_disk_headroom_drop_bytes"] = evidence["baseline_disk_free_bytes"] - evidence["min_disk_free_bytes"]
     evidence["elapsed_ms"] = round((time.monotonic() - started) * 1000)
@@ -867,6 +940,8 @@ def packaged_catalog_smoke(binary, app, state):
         evidence["status"] = "failed"
         evidence["failure_reason"] = "catalog_watchdog_deadline"
         failure_type = "TimeoutError"
+    elif evidence["stage"] == "shutdown" and failure_type == "TimeoutExpired" and last_ack:
+        evidence["failure_reason"] = "catalog_teardown_timeout"
     if evidence["status"] == "failed":
         evidence["failure_type"] = failure_type
         evidence["elapsed_by_stage_ms"][evidence["stage"]] = max(

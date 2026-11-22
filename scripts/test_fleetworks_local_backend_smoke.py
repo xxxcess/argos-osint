@@ -15,6 +15,7 @@ from unittest import mock
 from fleetworks_local_backend_smoke import (
     EXPECTED_RESOURCE_SCOPES,
     MAX_IPC_FRAME_BYTES,
+    LocalIpcSession,
     check_zero_bound_sockets,
     clean_child_environment,
     encode_frame,
@@ -142,6 +143,8 @@ while True:
                 job["state"] = "completed"
         STATE_FILE.write_text(json.dumps(state))
         write_f({{"frame": "shutdown_ack", "body": {{"checkpointed": True, "relinquished_leases": 1}}}})
+        if sys.stdin.buffer.read(1) != b"":
+            sys.exit(3)
         break
     req_id = frame["body"]["request_id"]
     op = frame["body"]["op"]["op"]
@@ -193,6 +196,27 @@ while True:
                 self.assertEqual(summary["restart_resume_job_id"], expected_job)
                 self.assertEqual(summary["reindex_already_completed"], already_indexed)
                 self.assertEqual(summary["search_hits"], 1)
+                for key in ("shutdown_ack_1", "shutdown_ack_2"):
+                    self.assertEqual(summary[key], {"checkpointed": True, "relinquished_leases": 1})
+
+    def test_shutdown_retains_ack_when_the_process_wait_times_out(self):
+        acknowledgement = {"checkpointed": True, "relinquished_leases": 1}
+        with mock.patch("fleetworks_local_backend_smoke.subprocess.Popen") as spawn:
+            process = spawn.return_value
+            process.stdin = io.BytesIO()
+            process.stdout = io.BytesIO(encode_frame({"frame": "shutdown_ack", "body": acknowledgement}))
+            process.stderr = io.BytesIO()
+            session = LocalIpcSession(self.root / "synthetic-companion", self.root)
+
+            def wait(*, timeout):
+                self.assertTrue(process.stdin.closed)
+                self.assertEqual(session.last_shutdown_ack, acknowledgement)
+                raise subprocess.TimeoutExpired("synthetic-companion", timeout)
+
+            process.wait.side_effect = wait
+            with self.assertRaises(subprocess.TimeoutExpired):
+                session.shutdown()
+            process.wait.assert_called_once_with(timeout=10)
 
     def test_validate_native_contract_enforces_required_fields(self):
         valid = {

@@ -135,9 +135,14 @@ pub(crate) async fn execute(
         .await
         .context("setup_dataset_unavailable")?;
     let reclaim_unused_memory = embedded && payload.operation == MaintenanceOperation::SeedActors;
+    let started = Instant::now();
     let budget =
         bulk_pressure::await_admission(repo, task, &workspace, &cancel, reclaim_unused_memory)
-            .await?;
+            .await;
+    if reclaim_unused_memory {
+        report_seed_phase("admission", started);
+    }
+    let budget = budget?;
     match payload.operation {
         MaintenanceOperation::SeedActors => {
             seed(repo, task, workspace, path, dataset, budget, cancel).await
@@ -238,6 +243,14 @@ async fn check_shared_seed_pressure(repo: &Repository) -> anyhow::Result<()> {
     }
 }
 
+fn report_seed_phase(phase: &'static str, started: Instant) {
+    tracing::debug!(
+        code = "embedded_actor_seed_phase_elapsed",
+        phase,
+        elapsed_us = started.elapsed().as_micros() as u64,
+    );
+}
+
 async fn seed(
     repo: &Repository,
     task: &ClaimedTask,
@@ -249,17 +262,21 @@ async fn seed(
 ) -> anyhow::Result<SetupOutcome> {
     let execution = actor_catalog::SeedExecution::from_claimed(repo, task, &cancel).await?;
     let selected = dataset.clone();
+    let started = Instant::now();
     let validated = tokio::task::spawn_blocking({
         let cancel = Arc::clone(&cancel);
         let workspace = workspace.clone();
         let budget = budget.clone();
         move || bulk_pressure::scan_actors_checked(&path, &selected, &workspace, &budget, &cancel)
     })
-    .await??;
+    .await;
+    report_seed_phase("csv_spool_validation", started);
+    let validated = validated??;
     if cancel.load(Ordering::Acquire) {
         return Ok(SetupOutcome::Interrupted);
     }
     let total = validated.total;
+    let started = Instant::now();
     record_job_event(
         repo,
         task,
@@ -268,6 +285,7 @@ async fn seed(
         format!("Validated actor catalog dataset ({total} records)"),
     )
     .await;
+    report_seed_phase("job_log", started);
     let (send_batch, batches) = mpsc::channel(1);
     let producer = tokio::task::spawn_blocking({
         let cancel = Arc::clone(&cancel);
@@ -327,7 +345,10 @@ async fn seed(
                 // The source has already persisted its exact checkpoint.
                 // Coalesce the separate Jobs display counter during active work.
                 if last_published_at.is_none_or(|at| at.elapsed() >= progress_publish_interval) {
-                    if let Err(error)=setup_jobs::record_progress(repo,task,"Seeding actors",progress.processed as u64,progress.total as u64).await {
+                    let started = Instant::now();
+                    let published = setup_jobs::record_progress(repo,task,"Seeding actors",progress.processed as u64,progress.total as u64).await;
+                    report_seed_phase("job_progress", started);
+                    if let Err(error) = published {
                         argos_osint_core::cancellation::cancel_with_notify(&cancel);
                         // Retain the source future so owner-conditional partial
                         // cleanup closes only its already committed causal range.
@@ -342,30 +363,21 @@ async fn seed(
                     0
                 };
                 let bucket = pct / 10;
-                if last_logged_bucket < 0 {
-                    last_logged_bucket = bucket;
-                    last_logged_at = Some(Instant::now());
-                    record_job_event(
-                        repo,
-                        task,
-                        Severity::Info,
-                        "worker.progress",
-                        format!("Seeding actors started ({} / {})", progress.processed, progress.total),
-                    )
-                    .await;
+                let message = if last_logged_bucket < 0 {
+                    Some(format!("Seeding actors started ({} / {})", progress.processed, progress.total))
                 } else if bucket > last_logged_bucket
                     || last_logged_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(10))
                 {
+                    Some(format!("Seeding actors: {} / {} ({}%)", progress.processed, progress.total, pct))
+                } else {
+                    None
+                };
+                if let Some(message) = message {
+                    let started = Instant::now();
                     last_logged_bucket = bucket;
-                    last_logged_at = Some(Instant::now());
-                    record_job_event(
-                        repo,
-                        task,
-                        Severity::Info,
-                        "worker.progress",
-                        format!("Seeding actors: {} / {} ({}%)", progress.processed, progress.total, pct),
-                    )
-                    .await;
+                    last_logged_at = Some(started);
+                    record_job_event(repo, task, Severity::Info, "worker.progress", message).await;
+                    report_seed_phase("job_log", started);
                 }
             }
         }
@@ -411,14 +423,17 @@ async fn seed(
     } else {
         "Seed incomplete"
     };
-    setup_jobs::record_progress(
+    let started = Instant::now();
+    let published = setup_jobs::record_progress(
         repo,
         task,
         phase,
         complete.processed as u64,
         complete.total as u64,
     )
-    .await?;
+    .await;
+    report_seed_phase("final_progress", started);
+    published?;
     setup_jobs::record_result(repo,task,&json!({"operation":"actor_seed","dataset_sha256":dataset.sha256,"processed":complete.processed,"total":complete.total,"aliases":complete.aliases,"database_seeded":complete.complete,"actor_search_state":"not_observed"})).await?;
     record_job_event(
         repo,

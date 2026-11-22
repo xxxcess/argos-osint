@@ -2,6 +2,7 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -1336,6 +1337,8 @@ where
             progress.processed + chunk.len() <= progress.total,
             "actor_seed_count_changed"
         );
+        let measure_batch = tracing::event_enabled!(tracing::Level::DEBUG);
+        let capacity_started = measure_batch.then(Instant::now);
         if let Some(execution) = execution {
             super::actor_search_outbox::await_bulk_capacity_claimed(repo, owner, cancel, execution)
                 .await?;
@@ -1345,6 +1348,7 @@ where
         if cancel.load(Ordering::Acquire) {
             bail!("actor seeding cancelled; committed batches can be retried");
         }
+        let plan_started = measure_batch.then(Instant::now);
         let now = chrono::Utc::now().to_rfc3339();
         let mut actor_rows = Vec::new();
         let mut memories = Vec::new();
@@ -1417,7 +1421,8 @@ where
         };
         let actor_ids: Vec<String> = chunk.iter().map(|actor| actor.id.clone()).collect();
         let data = Arc::new((actor_rows, memories, aliases, graph, actor_ids));
-        run_tx(repo.db(), RetryPolicy::default(), |tx| {
+        let commit_started = measure_batch.then(Instant::now);
+        let committed = run_tx(repo.db(), RetryPolicy::default(), |tx| {
             let data = data.clone(); let owner = owner.to_owned(); let next = next.clone(); let now = now.clone();let cause=cause.cloned();
             async move {
                 if let Some(execution)=execution {execution.check_in(&tx,cancel).await?;}
@@ -1449,6 +1454,19 @@ where
                 Ok(())
             }
         }).await.map_err(|e| anyhow::anyhow!("actor seed batch: {e}"))?;
+        if let (Some(capacity_started), Some(plan_started), Some(commit_started)) =
+            (capacity_started, plan_started, commit_started)
+        {
+            tracing::debug!(
+                code = "embedded_actor_seed_batch_elapsed",
+                capacity_wait_us = plan_started.duration_since(capacity_started).as_micros() as u64,
+                plan_us = commit_started.duration_since(plan_started).as_micros() as u64,
+                commit_us = commit_started.elapsed().as_micros() as u64,
+                rows = chunk.len(),
+                checkpoint = next.processed,
+                transaction_retries = committed.retries,
+            );
+        }
         progress = next;
         report(progress.clone());
     }

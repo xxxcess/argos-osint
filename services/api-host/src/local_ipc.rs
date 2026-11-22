@@ -151,7 +151,13 @@ mod embedded {
         let context = LocalBackendContext::open(state_dir, nlp_cmd, classifier_cmd, true).await?;
         let stdin = tokio::io::stdin();
         let stdout = tokio::io::stdout();
-        context.serve(stdin, stdout, signal).await
+        let result = context.serve(stdin, stdout, signal).await;
+        report_shutdown_phase("context_released");
+        result
+    }
+
+    fn report_shutdown_phase(phase: &'static str) {
+        tracing::debug!(code = "embedded_backend_shutdown_phase", phase);
     }
 
     /// Fully initialized in-process backend ready to serve one IPC stream pair.
@@ -374,12 +380,15 @@ mod embedded {
                 signal,
             )
             .await;
+            report_shutdown_phase("ipc_drained");
             health_stop.cancel();
             let _ = health_refresh.await;
+            report_shutdown_phase("health_stopped");
             let _ = qa_stop.send(());
             if !matches!(qa_task.await, Ok(Ok(()))) {
                 tracing::warn!("Embedded Inbox QA executor shut down unexpectedly");
             }
+            report_shutdown_phase("qa_stopped");
             if let Some(helpers) = self.helpers.take() {
                 helpers.shutdown().await;
             }

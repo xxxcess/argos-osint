@@ -789,7 +789,12 @@ impl Engine {
         manifest.pending_checkpoint = Some(request.source_checkpoint);
         manifest.pending_writer_epoch = Some(request.writer_epoch);
         if let Err(error) = persist_manifest(&self.root, &manifest) {
-            state.active.writer = writer(&state.active.index, &self.config, false).ok();
+            state.active.writer = writer(
+                &state.active.index,
+                &self.config,
+                self.lazy_active_writer && !state.active.committed.source_complete,
+            )
+            .ok();
             return Err(error);
         }
         state.manifest = manifest.clone();

@@ -5,6 +5,7 @@
 mod support;
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -97,7 +98,7 @@ async fn embedded_rebuild(
     .map(|committed| committed.value)
 }
 
-async fn fixture(repo: &Repository) -> (job_dispatch::DeliveryLease, ActorIndexStatus) {
+async fn configured_index(repo: &Repository) -> ActorIndexStatus {
     argos_osint_core::storage::bootstrap::ensure_network_identity(repo.db())
         .await
         .expect("actual deployment bootstrap");
@@ -113,6 +114,51 @@ async fn fixture(repo: &Repository) -> (job_dispatch::DeliveryLease, ActorIndexS
     setup_jobs::enable_operation(repo.db(), MaintenanceOperation::ReindexActors, true)
         .await
         .expect("explicit operation");
+    let mut response = repo
+        .db()
+        .query("SELECT VALUE instance_id FROM ONLY storage_meta:identity")
+        .await
+        .expect("identity")
+        .check()
+        .expect("identity statement");
+    let deployment: Option<String> = response.take(0).expect("identity decode");
+    ActorIndexStatus {
+        protocol: 1,
+        deployment_id: deployment.expect("production identity"),
+        source_epoch: "synthetic-disk-source".into(),
+        schema_version: 1,
+        analyzer_version: 1,
+        tantivy_version: "0.27.0".into(),
+        index_format_version: 7,
+        active: Some(ActorIndexGeneration {
+            generation: "g1".into(),
+            committed_checkpoint: 0,
+            visible_checkpoint: 0,
+            source_complete: false,
+            writer_epoch: 0,
+        }),
+        rebuilding: None,
+        retained_generations: 0,
+        retained_generation_ids: Vec::new(),
+        manifest_checksum: Some("a".repeat(64)),
+        recovery_available: false,
+        limits: Default::default(),
+        pressure: Some(ActorIndexPressure {
+            resident_bytes: Some(64 * 1024 * 1024),
+            disk_free_bytes: Some(1024 * 1024 * 1024),
+            query_ewma_ms: 1,
+            commit_ewma_ms: 1,
+            paused: false,
+            reason_code: None,
+            observed_at_unix_ms: Utc::now().timestamp_millis() as u64,
+        }),
+        state: "not_built".into(),
+        reason_code: None,
+    }
+}
+
+async fn fixture(repo: &Repository) -> (job_dispatch::DeliveryLease, ActorIndexStatus) {
+    let status = configured_index(repo).await;
     let (authority, context) = rebuild_context(repo).await;
     let request =
         MaintenanceRequest::for_reindex("rebuild-fixture".into(), MutationContext::new(&context))
@@ -167,50 +213,7 @@ async fn fixture(repo: &Repository) -> (job_dispatch::DeliveryLease, ActorIndexS
         job_dispatch::DeliveryClaim::Claimed(lease) => *lease,
         other => panic!("expected actual claim, got {other:?}"),
     };
-    let mut response = repo
-        .db()
-        .query("SELECT VALUE instance_id FROM ONLY storage_meta:identity")
-        .await
-        .expect("identity")
-        .check()
-        .expect("identity statement");
-    let deployment: Option<String> = response.take(0).expect("identity decode");
-    (
-        claimed,
-        ActorIndexStatus {
-            protocol: 1,
-            deployment_id: deployment.expect("production identity"),
-            source_epoch: "synthetic-disk-source".into(),
-            schema_version: 1,
-            analyzer_version: 1,
-            tantivy_version: "0.27.0".into(),
-            index_format_version: 7,
-            active: Some(ActorIndexGeneration {
-                generation: "g1".into(),
-                committed_checkpoint: 0,
-                visible_checkpoint: 0,
-                source_complete: false,
-                writer_epoch: 0,
-            }),
-            rebuilding: None,
-            retained_generations: 0,
-            retained_generation_ids: Vec::new(),
-            manifest_checksum: Some("a".repeat(64)),
-            recovery_available: false,
-            limits: Default::default(),
-            pressure: Some(ActorIndexPressure {
-                resident_bytes: Some(64 * 1024 * 1024),
-                disk_free_bytes: Some(1024 * 1024 * 1024),
-                query_ewma_ms: 1,
-                commit_ewma_ms: 1,
-                paused: false,
-                reason_code: None,
-                observed_at_unix_ms: Utc::now().timestamp_millis() as u64,
-            }),
-            state: "not_built".into(),
-            reason_code: None,
-        },
-    )
+    (claimed, status)
 }
 
 fn actors(count: usize) -> Vec<Actor> {
@@ -461,6 +464,216 @@ async fn canonical_shadow_restarts_exact_pending_then_promotes_only_verified_vis
         .await
         .expect("genuine failure still admits recovery");
     assert!(!recovery.already_completed && !recovery.reused && !recovery.job_id.is_empty());
+}
+
+#[tokio::test]
+async fn embedded_live_batch_replays_after_pressure_and_reopen_before_source_is_ready() {
+    let Some(mut server) = support::Server::start() else {
+        return;
+    };
+    let repo = server.repo("search_live", "pressure_reopen").await;
+    let mut status = configured_index(&repo).await;
+    status.limits.batch_documents = 2;
+    let mut at = Utc::now();
+    let original_owner = "live-index-before-pressure";
+    let replacement_owner = "live-index-after-reopen";
+    assert!(index::claim(&repo, original_owner, at)
+        .await
+        .expect("initialize the Live outbox source")
+        .is_some());
+    assert!(matches!(
+        index::prepare_with_embedded_policy(&repo, original_owner, &status, at, true)
+            .await
+            .expect("scan the initially empty authoritative source"),
+        index::Preparation::Waiting
+    ));
+    actor_catalog::seed_actors_pinned(
+        &repo,
+        actors(3),
+        "synthetic-live-catalog",
+        &AtomicBool::new(false),
+        |_| {},
+    )
+    .await
+    .expect("three canonical actor events");
+    let jobs_before_recovery = support::count(repo.db(), "job").await;
+    at += Duration::seconds(1);
+    let index::Preparation::Batch {
+        lease: old_lease,
+        prepared: pending,
+    } = index::prepare_with_embedded_policy(&repo, original_owner, &status, at, true)
+        .await
+        .expect("persist bounded live batch")
+    else {
+        panic!("expected the first live batch");
+    };
+    assert_eq!(
+        (
+            pending.batch.from_checkpoint,
+            pending.batch.through_checkpoint
+        ),
+        (0, 2)
+    );
+    assert_eq!(pending.batch.mutations.len(), 2);
+    assert!(!pending.batch.source_complete);
+    let original_receipt = receipt(&pending.batch);
+
+    // The reader made the batch visible before pressure interrupted source acknowledgement.
+    let active = status.active.as_mut().expect("initial reader");
+    active.committed_checkpoint = original_receipt.committed_checkpoint;
+    active.visible_checkpoint = original_receipt.visible_checkpoint;
+    active.writer_epoch = original_receipt.writer_epoch;
+    status.state = "indexing".into();
+    let pressure = status.pressure.as_mut().expect("measured high water");
+    pressure.resident_bytes = Some(status.limits.memory_pause_bytes);
+    pressure.paused = true;
+    pressure.reason_code = Some("memory_high_water".into());
+    at += Duration::seconds(1);
+    index::observe_resources(&repo, &old_lease, &status, at)
+        .await
+        .expect("persist the pressure observation");
+    index::defer(
+        &repo,
+        &old_lease,
+        Some(std::time::Duration::from_secs(5)),
+        false,
+        at,
+    )
+    .await
+    .expect("wait without dropping the pending batch");
+    let retry_window = at + Duration::seconds(1);
+    assert!(index::claim(&repo, original_owner, retry_window)
+        .await
+        .expect("observe the durable backoff")
+        .is_none());
+    assert!(matches!(
+        index::prepare_with_embedded_policy(&repo, original_owner, &status, retry_window, true)
+            .await
+            .expect("read the transient backoff"),
+        index::Preparation::Waiting
+    ));
+
+    drop(repo);
+    server.restart();
+    let repo = server.repo("search_live", "pressure_reopen").await;
+    let source = index::observe(&repo)
+        .await
+        .expect("observe reopened source")
+        .expect("durable source control");
+    assert_eq!((source.acknowledged_sequence, source.next_sequence), (0, 3));
+    assert!(source.pressure_paused);
+    assert_eq!(source.pressure_reason, "memory_high_water");
+    assert_eq!(support::count(repo.db(), "actor_search_event").await, 3);
+    assert!(matches!(
+        embedded_rebuild(&repo, Some(&status), "live-reindex-while-paused").await,
+        Err(tx::TxError::Abort(code)) if code == "setup:actor_index_observation_pending"
+    ));
+
+    at += Duration::seconds(46);
+    let replacement = index::claim(&repo, replacement_owner, at)
+        .await
+        .expect("elect after the prior lease expires")
+        .expect("replacement coordinator");
+    assert!(replacement.epoch > old_lease.epoch);
+    let pressure = status.pressure.as_mut().expect("measured low water");
+    pressure.resident_bytes = Some(status.limits.memory_resume_bytes);
+    pressure.paused = false;
+    pressure.reason_code = None;
+    index::observe_resources(&repo, &replacement, &status, at)
+        .await
+        .expect("publish the recovery observation under the replacement lease");
+    let index::Preparation::Batch {
+        lease,
+        prepared: replay,
+    } = index::prepare_with_embedded_policy(&repo, replacement_owner, &status, at, true)
+        .await
+        .expect("recover the persisted live batch")
+    else {
+        panic!("expected the exact pending batch to replay");
+    };
+    assert_eq!(lease.epoch, replacement.epoch);
+    let mut expected = pending.batch.clone();
+    expected.writer_epoch = lease.epoch;
+    assert_eq!(replay.batch, expected);
+    let mut replay_receipt = receipt(&replay.batch);
+    assert_eq!(replay_receipt.checksum, original_receipt.checksum);
+    replay_receipt.replayed = true;
+    assert!(matches!(
+        index::acknowledge_with_retirement(&repo, &old_lease, &original_receipt, at, true).await,
+        Err(tx::TxError::Abort(code)) if code == "actor_index_lease_lost"
+    ));
+    index::acknowledge_with_retirement(&repo, &lease, &replay_receipt, at, true)
+        .await
+        .expect("acknowledge the original reader visibility once under the new lease");
+    assert_eq!(support::count(repo.db(), "actor_search_event").await, 1);
+    status
+        .active
+        .as_mut()
+        .expect("reopened reader")
+        .writer_epoch = lease.epoch;
+
+    at += Duration::seconds(1);
+    let index::Preparation::Batch {
+        lease,
+        prepared: tail,
+    } = index::prepare_with_embedded_policy(&repo, replacement_owner, &status, at, true)
+        .await
+        .expect("drain the independent tail")
+    else {
+        panic!("expected the final source event");
+    };
+    assert_eq!(
+        (tail.batch.from_checkpoint, tail.batch.through_checkpoint),
+        (2, 3)
+    );
+    assert!(tail.batch.source_complete);
+    assert_eq!(tail.batch.mutations.len(), 1);
+    let indexed: BTreeSet<_> = replay
+        .batch
+        .mutations
+        .iter()
+        .chain(&tail.batch.mutations)
+        .map(|mutation| mutation.actor_id.as_str())
+        .collect();
+    assert_eq!(
+        indexed,
+        BTreeSet::from([
+            "shadow-actor-0000",
+            "shadow-actor-0001",
+            "shadow-actor-0002"
+        ])
+    );
+
+    let tail_receipt = receipt(&tail.batch);
+    let active = status
+        .active
+        .as_mut()
+        .expect("reader reports the complete tail");
+    active.committed_checkpoint = tail_receipt.committed_checkpoint;
+    active.visible_checkpoint = tail_receipt.visible_checkpoint;
+    active.writer_epoch = tail_receipt.writer_epoch;
+    active.source_complete = true;
+    status.state = "ready".into();
+    assert!(matches!(
+        embedded_rebuild(&repo, Some(&status), "live-reindex-before-tail-ack").await,
+        Err(tx::TxError::Abort(code)) if code == "setup:actor_index_observation_pending"
+    ));
+    index::acknowledge_with_retirement(&repo, &lease, &tail_receipt, at, true)
+        .await
+        .expect("commit the final source barrier");
+    let source = index::observe(&repo)
+        .await
+        .expect("observe the final source")
+        .expect("durable source control");
+    assert_eq!(source.index_generation, tail_receipt.index_generation);
+    assert_eq!((source.acknowledged_sequence, source.next_sequence), (3, 3));
+    assert!(!source.pressure_paused);
+    assert_eq!(support::count(repo.db(), "actor_search_event").await, 0);
+    let no_op = embedded_rebuild(&repo, Some(&status), "live-reindex-after-tail-ack")
+        .await
+        .expect("source and reader now agree");
+    assert!(no_op.already_completed && no_op.reused && no_op.job_id.is_empty());
+    assert_eq!(support::count(repo.db(), "job").await, jobs_before_recovery);
 }
 
 #[tokio::test]

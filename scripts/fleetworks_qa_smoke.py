@@ -55,6 +55,7 @@ ROCKSDB_OPTIONS = {
     "min_write_buffer_number_to_merge": 1,
     "max_background_jobs": 2,
     "max_subcompactions": 1,
+    "max_open_files": 64,
 }
 ROCKSDB_BLOCK_CACHE_BYTES = 16 * 1024 * 1024
 SMAPS_ROLLUP_FIELDS = {
@@ -78,9 +79,18 @@ SAFE_INDEX_STATES = {
     "degraded", "indexing", "not_applicable", "not_built", "not_ready", "paused", "ready", "running",
     "stale", "throttled", "unavailable", "unknown",
 }
-INDEX_BATCH_EVENT = re.compile(r'\bcode="?embedded_actor_index_batch_elapsed"?(?=$|[\s,])')
+INDEX_EVENT = re.compile(r'\bcode="?embedded_actor_index_(batch_elapsed|pressure_transition|merge_planned)"?(?=$|[\s,])')
 INDEX_BATCH_FIELD = re.compile(r'\b(prepare_ms|write_ms|ack_ms|mutations)=([0-9]{1,9})(?=$|[\s,])')
+INDEX_PRESSURE_FIELD = re.compile(r'\b(resident_bytes|disk_free_bytes)=([0-9]{1,20})(?=$|[\s,])')
+INDEX_PRESSURE_REASON = re.compile(r'\breason="?([a-z_]{1,40})"?(?=$|[\s,])')
+INDEX_PRESSURE_PAUSED = re.compile(r'\bpaused=(true|false)(?=$|[\s,])')
+INDEX_MERGE_FIELD = re.compile(r'\b(inputs|documents)=([0-9]{1,9})(?=$|[\s,])')
 INDEX_BATCH_DURATIONS = ("prepare_ms", "write_ms", "ack_ms")
+INDEX_EVENT_MILESTONES = 12
+INDEX_PRESSURE_REASONS = {
+    "memory_high_water", "disk_high_water", "pressure_measurement_unavailable",
+    "query_latency_high_water", "commit_latency_high_water", "latency_probe_due", "none",
+}
 
 
 def require(condition, description):
@@ -398,21 +408,19 @@ def sample_smaps_rollup(proc, phase_usage):
 class CatalogIpcSession(embedded.LocalIpcSession):
     def __init__(self, binary, state, evidence):
         self.evidence = evidence
+        self.started = time.monotonic()
         self.index_batch_timings = {}
+        self.index_pressure_transitions = {}
+        self.index_merge_plans = {}
         super().__init__(binary, state, client_name="fleetworks-catalog-smoke",
                          log_filter="warn,surrealdb::core::kvs::rocksdb=info,"
-                                    "argos_api_host::actor_index_worker=info")
+                                    "argos_api_host::actor_index_worker=info,fleetworks_search_index::engine=info")
 
-    def _record_index_batch(self, text):
-        if "embedded_actor_index_batch_elapsed" not in text:
-            return False
-        event = ANSI.sub("", text)
-        if not INDEX_BATCH_EVENT.search(event):
-            return False
+    def _record_index_batch(self, event):
         matches = INDEX_BATCH_FIELD.findall(event)
         fields = {name: int(value) for name, value in matches}
         if len(matches) != 4 or len(fields) != 4:
-            return True
+            return
         stage = self.evidence["stage"]
         timings = self.index_batch_timings.setdefault(stage, {"batches": 0, "mutations": 0})
         timings["batches"] += 1
@@ -422,6 +430,44 @@ class CatalogIpcSession(embedded.LocalIpcSession):
             aggregate = timings.setdefault(name, {"total": 0, "max": 0})
             aggregate["total"] += elapsed
             aggregate["max"] = max(aggregate["max"], elapsed)
+
+    def _retain_index_event(self, stages, fields):
+        stage = stages.setdefault(self.evidence["stage"], {"count": 0, "first": []})
+        sample = {**fields, "elapsed_ms": round((time.monotonic() - self.started) * 1000)}
+        stage["count"] += 1
+        if len(stage["first"]) < INDEX_EVENT_MILESTONES:
+            stage["first"].append(sample)
+        stage["latest"] = sample
+        return stage
+
+    def _record_index_event(self, text):
+        if "embedded_actor_index_" not in text:
+            return False
+        event = ANSI.sub("", text)
+        code = INDEX_EVENT.search(event)
+        if code is None:
+            return False
+        kind = code[1]
+        if kind == "batch_elapsed":
+            self._record_index_batch(event)
+        elif kind == "pressure_transition":
+            paused = INDEX_PRESSURE_PAUSED.findall(event)
+            reasons = INDEX_PRESSURE_REASON.findall(event)
+            bytes_read = INDEX_PRESSURE_FIELD.findall(event)
+            fields = {name: int(value) for name, value in bytes_read}
+            if (len(paused) == 1 and len(reasons) == 1 and reasons[0] in INDEX_PRESSURE_REASONS
+                    and len(bytes_read) == len(fields) == 2 and all(value < 2**64 for value in fields.values())):
+                self._retain_index_event(self.index_pressure_transitions, {
+                    "paused": paused[0] == "true", "reason": reasons[0], **fields,
+                })
+        else:
+            matches = INDEX_MERGE_FIELD.findall(event)
+            fields = {name: int(value) for name, value in matches}
+            if len(matches) == len(fields) == 2:
+                stage = self._retain_index_event(self.index_merge_plans, fields)
+                for name, value in fields.items():
+                    total = f"total_{name}"
+                    stage[total] = stage.get(total, 0) + value
         return True
 
     def _drain_stderr(self):
@@ -434,7 +480,7 @@ class CatalogIpcSession(embedded.LocalIpcSession):
             if not line:
                 return
             text = line.decode("utf-8", errors="replace").rstrip("\n")
-            if self._record_index_batch(text):
+            if self._record_index_event(text):
                 continue
             captured += len(text)
             if captured <= embedded.MAX_STDERR_TAIL_BYTES * 8:
@@ -811,6 +857,10 @@ def packaged_catalog_smoke(binary, app, state):
         session.close_unconditionally()
     if session.index_batch_timings:
         evidence["actor_index_batch_timings"] = session.index_batch_timings
+    if session.index_pressure_transitions:
+        evidence["actor_index_pressure_transitions"] = session.index_pressure_transitions
+    if session.index_merge_plans:
+        evidence["actor_index_merge_plans"] = session.index_merge_plans
     if "min_disk_free_bytes" in evidence:
         evidence["peak_disk_headroom_drop_bytes"] = evidence["baseline_disk_free_bytes"] - evidence["min_disk_free_bytes"]
     evidence["elapsed_ms"] = round((time.monotonic() - started) * 1000)

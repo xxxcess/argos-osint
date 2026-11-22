@@ -29,11 +29,14 @@ use tantivy::directory::DirectoryLock;
 use tantivy::directory::Lock;
 use tantivy::directory::MmapDirectory;
 use tantivy::indexer::IndexWriterOptions;
+use tantivy::merge_policy::MergeCandidate;
+use tantivy::merge_policy::MergePolicy;
 use tantivy::Index;
 use tantivy::IndexReader;
 use tantivy::IndexWriter;
 use tantivy::ReloadPolicy;
 use tantivy::Searcher;
+use tantivy::SegmentMeta;
 use tantivy::TantivyDocument;
 use tantivy::Term;
 
@@ -43,6 +46,66 @@ use crate::IndexError;
 
 const RECEIPT_WINDOW: usize = 64;
 const META_FORMAT: u16 = 1;
+
+#[derive(Debug)]
+struct EmbeddedCatchUpMerge;
+
+impl MergePolicy for EmbeddedCatchUpMerge {
+    fn compute_merge_candidates(&self, segments: &[SegmentMeta]) -> Vec<MergeCandidate> {
+        // One catch-up batch produces at most 500 documents. Merge four
+        // small segments at a time so an earlier merge does not amplify
+        // memory use as the initial catalog grows.
+        const INPUTS: usize = 4;
+        const MAX_INPUT_DOCUMENTS: u32 = 500;
+        let inputs: Vec<_> = segments
+            .iter()
+            .filter(|segment| segment.max_doc() <= MAX_INPUT_DOCUMENTS)
+            .take(INPUTS)
+            .collect();
+        if inputs.len() < INPUTS {
+            return Vec::new();
+        }
+        tracing::info!(
+            code = "embedded_actor_index_merge_planned",
+            inputs = INPUTS,
+            documents = inputs.iter().map(|segment| segment.max_doc()).sum::<u32>(),
+            "Planning a bounded actor index merge"
+        );
+        vec![MergeCandidate(
+            inputs.iter().map(|segment| segment.id()).collect(),
+        )]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tantivy::schema::Schema;
+    use tantivy::Index;
+    use tantivy::SegmentId;
+
+    use super::EmbeddedCatchUpMerge;
+    use super::MergePolicy;
+
+    #[test]
+    fn embedded_catch_up_keeps_merges_bounded_as_segments_accumulate() {
+        let index = Index::create_in_ram(Schema::builder().build());
+        let complete = index.new_segment_meta(SegmentId::generate_random(), 2_000);
+        let mut segments = vec![complete];
+        for _ in 0..3 {
+            segments.push(index.new_segment_meta(SegmentId::generate_random(), 500));
+        }
+        assert!(EmbeddedCatchUpMerge
+            .compute_merge_candidates(&segments)
+            .is_empty());
+        for _ in 0..8 {
+            segments.push(index.new_segment_meta(SegmentId::generate_random(), 500));
+        }
+        let candidates = EmbeddedCatchUpMerge.compute_merge_candidates(&segments);
+        assert_eq!(candidates.len(), 1);
+        let inputs: Vec<_> = segments[1..5].iter().map(|segment| segment.id()).collect();
+        assert_eq!(candidates[0].0, inputs);
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct EngineConfig {
@@ -192,7 +255,7 @@ impl Generation {
             return Err(IndexError::unavailable("index_schema_incompatible"));
         }
         let mut writer = if writable || create {
-            Some(writer(&index, config)?)
+            Some(writer(&index, config, false)?)
         } else {
             None
         };
@@ -226,14 +289,22 @@ impl Generation {
         })
     }
 
-    fn reconcile(&mut self, config: &EngineConfig) -> Result<(), IndexError> {
+    fn reconcile(
+        &mut self,
+        config: &EngineConfig,
+        embedded_active: bool,
+    ) -> Result<(), IndexError> {
         // Reopen the writer from the durable commit authority. Uncommitted
         // queue contents after a failed prepare/commit must not leak into a
         // different batch; never guess whether an ambiguous commit succeeded.
         self.writer = None;
         let committed = metadata(&self.index, config, &self.committed.generation)?;
         self.reader.reload().map_err(IndexError::storage)?;
-        self.writer = Some(writer(&self.index, config)?);
+        self.writer = Some(writer(
+            &self.index,
+            config,
+            embedded_active && !committed.source_complete,
+        )?);
         self.committed = committed.clone();
         self.visible = committed;
         self.recover = false;
@@ -545,14 +616,19 @@ impl Engine {
         if generation.committed.generation != batch.index_generation {
             return Err(IndexError::conflict("target_generation_mismatch"));
         }
+        let embedded_active = self.lazy_active_writer && !targets_pending;
         if generation.recover {
-            generation.reconcile(&self.config)?;
+            generation.reconcile(&self.config, embedded_active)?;
         } else if generation.writer.is_none() {
-            if !self.lazy_active_writer || targets_pending {
+            if !embedded_active {
                 *error = Some("writer_inactive");
                 return Err(IndexError::unavailable("writer_inactive"));
             }
-            generation.writer = Some(writer(&generation.index, &self.config)?);
+            generation.writer = Some(writer(
+                &generation.index,
+                &self.config,
+                !generation.committed.source_complete,
+            )?);
         }
         if batch.writer_epoch < generation.committed.writer_epoch {
             return Err(IndexError::conflict("stale_writer_epoch"));
@@ -713,7 +789,7 @@ impl Engine {
         manifest.pending_checkpoint = Some(request.source_checkpoint);
         manifest.pending_writer_epoch = Some(request.writer_epoch);
         if let Err(error) = persist_manifest(&self.root, &manifest) {
-            state.active.writer = writer(&state.active.index, &self.config).ok();
+            state.active.writer = writer(&state.active.index, &self.config, false).ok();
             return Err(error);
         }
         state.manifest = manifest.clone();
@@ -817,15 +893,20 @@ impl Engine {
 fn writer(
     index: &Index,
     config: &EngineConfig,
+    embedded_catch_up: bool,
 ) -> Result<IndexWriter<TantivyDocument>, IndexError> {
     let options = IndexWriterOptions::builder()
         .num_worker_threads(config.writer_threads)
         .num_merge_threads(config.merge_threads)
         .memory_budget_per_thread(config.writer_memory_bytes / config.writer_threads)
         .build();
-    index
+    let writer = index
         .writer_with_options(options)
-        .map_err(IndexError::storage)
+        .map_err(IndexError::storage)?;
+    if embedded_catch_up {
+        writer.set_merge_policy(Box::new(EmbeddedCatchUpMerge));
+    }
+    Ok(writer)
 }
 
 fn metadata(

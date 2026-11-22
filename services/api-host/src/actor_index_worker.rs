@@ -178,6 +178,28 @@ impl ActorIndexWorker {
         {
             return Err(DeliveryFailure::permanent());
         }
+        if let Some(pressure) = status
+            .pressure
+            .as_ref()
+            .filter(|_| matches!(&self.transport, IndexTransport::Local(_)))
+        {
+            let previous = self
+                .status
+                .as_ref()
+                .and_then(|(_, status)| status.pressure.as_ref());
+            if previous.is_none_or(|previous| {
+                previous.paused != pressure.paused || previous.reason_code != pressure.reason_code
+            }) {
+                tracing::info!(
+                    code = "embedded_actor_index_pressure_transition",
+                    paused = pressure.paused,
+                    reason = pressure.reason_code.as_deref().unwrap_or("none"),
+                    resident_bytes = pressure.resident_bytes.unwrap_or(0),
+                    disk_free_bytes = pressure.disk_free_bytes.unwrap_or(0),
+                    "Observed an Embedded actor index pressure change"
+                );
+            }
+        }
         self.status = Some((Instant::now(), status.clone()));
         Ok(status)
     }
@@ -236,6 +258,16 @@ impl ActorIndexWorker {
         };
         actor_search_outbox::observe_resources(repo, &claim, &status, Utc::now()).await?;
         let embedded = matches!(&self.transport, IndexTransport::Local(_));
+        if embedded
+            && status
+                .pressure
+                .as_ref()
+                .is_some_and(|pressure| pressure.paused)
+        {
+            // Preserve any pending receipt and avoid allocating a new projection
+            // while the co-located writer is waiting for resources.
+            return Ok(TickReport::Waiting);
+        }
         let embedded_catch_up = embedded
             && status
                 .active

@@ -74,6 +74,14 @@ opt-level = 3
 [profile.dev.package.sha2]
 opt-level = 3
 
+# The bundled Embedded import executes SurrealQL and persists every row in
+# debug packages as well. Optimize the database executor and value conversion.
+[profile.dev.package.surrealdb-core]
+opt-level = 1
+
+[profile.dev.package.surrealdb-types]
+opt-level = 1
+
 # Rune's full debug information can exceed the native development host's
 # memory budget. Preserve backtrace line tables without rebuilding unrelated
 # backend dependencies with a different global profile.

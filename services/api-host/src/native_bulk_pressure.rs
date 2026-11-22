@@ -34,12 +34,14 @@ pub(super) struct Measurement {
 struct Admission {
     paused: bool,
     cooldown_until: Option<Instant>,
+    reclaim_unused_memory: bool,
 }
 
 #[derive(Clone, Debug)]
 pub(super) struct ParserBudget {
     limits: ActorIndexLimits,
     retained_bytes: u64,
+    reclaim_unused_memory: bool,
 }
 
 enum Decision {
@@ -113,6 +115,7 @@ impl Admission {
         Ok(Decision::Ready(ParserBudget {
             limits: limits.clone(),
             retained_bytes,
+            reclaim_unused_memory: self.reclaim_unused_memory,
         }))
     }
 }
@@ -145,7 +148,12 @@ impl ParserBudget {
     /// Use on a blocking worker at bounded training progress intervals. On
     /// failure the caller cancels and awaits the actual training operation.
     pub(super) fn check_running(&self, workspace: &Path) -> Result<()> {
-        self.check_sample(measure(workspace))
+        let reclaim_from = self.reclaim_unused_memory.then(|| {
+            self.limits
+                .memory_pause_bytes
+                .saturating_sub(8 * 1024 * 1024)
+        });
+        self.check_sample(measure(workspace, reclaim_from))
     }
 }
 
@@ -157,14 +165,19 @@ pub(super) async fn await_admission(
     task: &ClaimedTask,
     workspace: &Path,
     cancel: &AtomicBool,
+    reclaim_unused_memory: bool,
 ) -> Result<ParserBudget> {
-    let mut policy = Admission::default();
+    let mut policy = Admission {
+        reclaim_unused_memory,
+        ..Admission::default()
+    };
     loop {
         ensure!(!cancel.load(Ordering::Acquire), "worker_bulk_cancelled");
         let limits = actor_search_outbox::resource_limits(repo).await?;
+        let reclaim_from = reclaim_unused_memory.then_some(limits.memory_resume_bytes);
         let sample = tokio::task::spawn_blocking({
             let workspace = workspace.to_owned();
-            move || measure(&workspace)
+            move || measure(&workspace, reclaim_from)
         })
         .await?;
         ensure!(!cancel.load(Ordering::Acquire), "worker_bulk_cancelled");
@@ -255,7 +268,7 @@ pub(super) fn scan_actors_checked(
     cancel: &AtomicBool,
 ) -> Result<ValidatedActors> {
     scan_actors_with_probe(path, dataset, budget, cancel, || {
-        budget.check_sample(measure(workspace))
+        budget.check_running(workspace)
     })
 }
 
@@ -324,7 +337,7 @@ pub(super) fn produce_actor_batches(
     sender: tokio::sync::mpsc::Sender<Result<Vec<Actor>>>,
 ) -> Result<()> {
     produce_actor_batches_with_probe(validated, cancel, sender, || {
-        budget.check_sample(measure(workspace))
+        budget.check_running(workspace)
     })
 }
 
@@ -403,11 +416,31 @@ fn produce_actor_batches_with_probe(
     Ok(())
 }
 
-fn measure(workspace: &Path) -> Measurement {
+fn measure(workspace: &Path, reclaim_from: Option<u64>) -> Measurement {
+    let resident = resident_bytes();
+    let reclaim = resident
+        .zip(reclaim_from)
+        .is_some_and(|(resident, threshold)| resident >= threshold);
+    let resident = if reclaim && release_unused_heap() {
+        resident_bytes()
+    } else {
+        resident
+    };
     Measurement {
-        resident_bytes: resident_bytes(),
+        resident_bytes: resident,
         workspace_free_bytes: free_bytes(workspace),
     }
+}
+
+fn release_unused_heap() -> bool {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        // SAFETY: glibc reclaims whole free pages under its own allocator
+        // locks. No caller-owned pointer or live allocation is accessed.
+        unsafe { libc::malloc_trim(0) != 0 }
+    }
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+    false
 }
 
 fn resident_bytes() -> Option<u64> {
@@ -502,6 +535,7 @@ mod tests {
         ParserBudget {
             limits: ActorIndexLimits::default(),
             retained_bytes: 32 * 1024 * 1024,
+            reclaim_unused_memory: false,
         }
     }
 
@@ -735,7 +769,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let rss = resident_bytes().expect("resident bytes reported on host OS");
         assert!(rss > 0);
-        let measured = measure(dir.path());
+        let measured = measure(dir.path(), None);
         assert!(measured.resident_bytes.is_some_and(|value| value > 0));
     }
 
@@ -743,7 +777,7 @@ mod tests {
     #[test]
     fn combined_backend_rss_budget_coordinates_search_meter_and_bulk_admission() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let live = measure(dir.path());
+        let live = measure(dir.path(), None);
         let rss = live.resident_bytes.expect("process RSS available");
         assert!(rss > 0);
 

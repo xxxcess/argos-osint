@@ -117,6 +117,7 @@ pub(crate) async fn execute(
     store: &DatasetStore,
     task: &ClaimedTask,
     cancel: Arc<AtomicBool>,
+    embedded: bool,
 ) -> anyhow::Result<SetupOutcome> {
     let payload = setup_jobs::payload(repo, &task.job_id, &task.input_hash).await?;
     anyhow::ensure!(
@@ -131,7 +132,10 @@ pub(crate) async fn execute(
         .path_for_job(repo, &task.job_id, &dataset)
         .await
         .context("setup_dataset_unavailable")?;
-    let budget = bulk_pressure::await_admission(repo, task, &workspace, &cancel).await?;
+    let reclaim_unused_memory = embedded && payload.operation == MaintenanceOperation::SeedActors;
+    let budget =
+        bulk_pressure::await_admission(repo, task, &workspace, &cancel, reclaim_unused_memory)
+            .await?;
     match payload.operation {
         MaintenanceOperation::SeedActors => {
             seed(repo, task, workspace, path, dataset, budget, cancel).await

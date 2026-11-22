@@ -10,6 +10,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::future::Future;
 
 use chrono::DateTime;
 use chrono::Duration;
@@ -192,7 +193,17 @@ struct EventWrite {
 
 /// Join the actual source transaction after actor/alias/lifecycle writes. A
 /// rollback cannot leave index intent. Even no-op seed retries reconcile work.
-pub async fn enqueue_actors_in(
+pub fn enqueue_actors_in<'a>(
+    tx: &'a Tx,
+    actors: &'a [String],
+    cause: Option<&'a SourceCause>,
+    now: DateTime<Utc>,
+) -> impl Future<Output = Result<(), TxError>> + Send + 'a {
+    // Seed, lifecycle, and index backfill all nest this transaction operation.
+    Box::pin(enqueue_actor_events_in(tx, actors, cause, now))
+}
+
+async fn enqueue_actor_events_in(
     tx: &Tx,
     actors: &[String],
     cause: Option<&SourceCause>,

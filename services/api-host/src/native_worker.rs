@@ -507,6 +507,7 @@ async fn handle(
                     store,
                     &lease.task,
                     cancel.clone(),
+                    relinquish_on_shutdown,
                 )
                 .await?
                 {

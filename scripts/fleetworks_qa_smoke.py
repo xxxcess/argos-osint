@@ -55,7 +55,6 @@ ROCKSDB_OPTIONS = {
     "min_write_buffer_number_to_merge": 1,
     "max_background_jobs": 2,
     "max_subcompactions": 1,
-    "max_open_files": 64,
 }
 ROCKSDB_BLOCK_CACHE_BYTES = 16 * 1024 * 1024
 SMAPS_ROLLUP_FIELDS = {

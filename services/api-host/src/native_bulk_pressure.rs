@@ -137,6 +137,10 @@ impl Admission {
 }
 
 impl ParserBudget {
+    pub(super) fn has_co_located_index(&self) -> bool {
+        self.reclaim_unused_memory
+    }
+
     fn actor_limits(&self) -> ActorReadLimits {
         ActorReadLimits {
             max_retained_bytes: self.retained_bytes,

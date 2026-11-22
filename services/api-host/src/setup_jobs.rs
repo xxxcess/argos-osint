@@ -12,6 +12,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::Context;
 use argos_osint_api::datasets::DatasetStore;
@@ -26,6 +27,7 @@ use argos_osint_core::classifier::Provenance;
 use argos_osint_core::events::NewEvent;
 use argos_osint_core::events::Severity;
 use argos_osint_core::storage::actor_catalog;
+use argos_osint_core::storage::actor_search_outbox;
 use argos_osint_core::storage::event_log;
 use argos_osint_core::storage::jobs;
 use argos_osint_core::storage::jobs::ClaimedTask;
@@ -218,6 +220,24 @@ fn read_actors(path: &Path, dataset: &DatasetRef) -> anyhow::Result<Vec<Actor>> 
     Ok(actors)
 }
 
+async fn check_shared_seed_pressure(repo: &Repository) -> anyhow::Result<()> {
+    let Some(observation) = actor_search_outbox::observe(repo)
+        .await?
+        .filter(|observation| observation.pressure_paused)
+    else {
+        return Ok(());
+    };
+    // Physical pressure from the co-located index describes the seed worker too.
+    match observation.pressure_reason.as_str() {
+        "memory_high_water" => anyhow::bail!("worker_memory_pressure"),
+        "disk_high_water" => anyhow::bail!("worker_workspace_disk_pressure"),
+        "pressure_measurement_unavailable" | "resource_measurement_unavailable" => {
+            anyhow::bail!("worker_pressure_unknown")
+        }
+        _ => Ok(()),
+    }
+}
+
 async fn seed(
     repo: &Repository,
     task: &ClaimedTask,
@@ -274,23 +294,47 @@ async fn seed(
         },
     ));
     let mut last_logged_bucket: i64 = -1;
-    let mut last_logged_at: Option<std::time::Instant> = None;
+    let mut last_logged_at: Option<Instant> = None;
+    let mut last_published_at: Option<Instant> = None;
+    let mut last_batch_at = Instant::now();
+    let progress_publish_interval = Duration::from_secs(5);
+    let pressure_interval = Duration::from_secs(5);
+    let mut pressure_tick = tokio::time::interval(pressure_interval);
+    pressure_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let complete = loop {
         tokio::select! {
             result=&mut operation=>break result,
+            _ = pressure_tick.tick(), if budget.has_co_located_index() => {
+                if last_batch_at.elapsed() < pressure_interval {
+                    continue;
+                }
+                // While the shared guard is paused, the source future can
+                // wait indefinitely without sending another Progress event.
+                if let Err(error) = check_shared_seed_pressure(repo).await {
+                    argos_osint_core::cancellation::cancel_with_notify(&cancel);
+                    let _ = operation.as_mut().await;
+                    break Err(error);
+                }
+            }
             Some(progress)=receive.recv()=>{
+                last_batch_at = Instant::now();
                 let observation=tokio::task::spawn_blocking({let workspace=workspace.clone();let budget=budget.clone();move||budget.check_running(&workspace)}).await;
                 if let Err(error) = observation.map_err(anyhow::Error::from).and_then(|result| result) {
                     argos_osint_core::cancellation::cancel_with_notify(&cancel);
                     let _=operation.as_mut().await;
                     break Err(error);
                 }
-                if let Err(error)=setup_jobs::record_progress(repo,task,"Seeding actors",progress.processed as u64,progress.total as u64).await {
-                    argos_osint_core::cancellation::cancel_with_notify(&cancel);
-                    // Retain the source future so owner-conditional partial
-                    // cleanup closes only its already committed causal range.
-                    let _=operation.as_mut().await;
-                    break Err(error.into());
+                // The source has already persisted its exact checkpoint.
+                // Coalesce the separate Jobs display counter during active work.
+                if last_published_at.is_none_or(|at| at.elapsed() >= progress_publish_interval) {
+                    if let Err(error)=setup_jobs::record_progress(repo,task,"Seeding actors",progress.processed as u64,progress.total as u64).await {
+                        argos_osint_core::cancellation::cancel_with_notify(&cancel);
+                        // Retain the source future so owner-conditional partial
+                        // cleanup closes only its already committed causal range.
+                        let _=operation.as_mut().await;
+                        break Err(error.into());
+                    }
+                    last_published_at = Some(Instant::now());
                 }
                 let pct = if progress.total > 0 {
                     ((progress.processed as u64 * 100) / progress.total as u64).min(100) as i64
@@ -300,7 +344,7 @@ async fn seed(
                 let bucket = pct / 10;
                 if last_logged_bucket < 0 {
                     last_logged_bucket = bucket;
-                    last_logged_at = Some(std::time::Instant::now());
+                    last_logged_at = Some(Instant::now());
                     record_job_event(
                         repo,
                         task,
@@ -313,7 +357,7 @@ async fn seed(
                     || last_logged_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(10))
                 {
                     last_logged_bucket = bucket;
-                    last_logged_at = Some(std::time::Instant::now());
+                    last_logged_at = Some(Instant::now());
                     record_job_event(
                         repo,
                         task,

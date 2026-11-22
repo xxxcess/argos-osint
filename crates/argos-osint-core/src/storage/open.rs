@@ -20,8 +20,7 @@ use super::tx::TxError;
 
 // One 16 MiB cache plus two 8 MiB memtables gives SurrealDB's write buffer
 // manager a 32 MiB budget. Limit background concurrency to leave room for
-// compaction, transaction allocations and the rest of the companion. The
-// open-file limit also bounds table-reader metadata outside the shared cache.
+// compaction, transaction allocations and the rest of the companion.
 #[cfg(feature = "embedded")]
 const EMBEDDED_ROCKSDB_OPTIONS: &str = concat!(
     "versioned=false&sync=every",
@@ -32,7 +31,6 @@ const EMBEDDED_ROCKSDB_OPTIONS: &str = concat!(
     "&rocksdb_thread_count=2",
     "&rocksdb_jobs_count=2",
     "&rocksdb_max_concurrent_subcompactions=1",
-    "&rocksdb_max_open_files=64",
 );
 
 /// Where the store lives.
@@ -300,7 +298,6 @@ mod tests {
             "min_write_buffer_number_to_merge=1",
             "max_background_jobs=2",
             "max_subcompactions=1",
-            "max_open_files=64",
         ] {
             assert!(
                 options.lines().any(|line| line.trim() == expected),

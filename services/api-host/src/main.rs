@@ -122,9 +122,36 @@ fn ensure_platform_name_is_bootstrap_only(args: &Args) -> Result<()> {
     Ok(())
 }
 
+fn configure_embedded_allocator() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        // Share arenas across the short-lived import and search allocations.
+        // Keep large buffers separately mapped so dropping them returns their
+        // pages even when smaller, long-lived allocations share an arena.
+        const ARENA_LIMIT: libc::c_int = 2;
+        const MMAP_THRESHOLD_BYTES: libc::c_int = 128 * 1024;
+        // SAFETY: Called once on the main thread before the runtime starts any workers.
+        let (arenas, mappings) = unsafe {
+            (
+                libc::mallopt(libc::M_ARENA_MAX, ARENA_LIMIT),
+                libc::mallopt(libc::M_MMAP_THRESHOLD, MMAP_THRESHOLD_BYTES),
+            )
+        };
+        if arenas == 0 || mappings == 0 {
+            tracing::warn!(
+                code = "embedded_allocator_options_unavailable",
+                "Could not set every Embedded allocator option"
+            );
+        }
+    }
+}
+
 fn main() -> Result<()> {
     init_tracing();
     let args = Args::parse();
+    if args.role == Role::LocalIpc {
+        configure_embedded_allocator();
+    }
     let runtime = tokio::runtime::Runtime::new()?;
     ensure_platform_name_is_bootstrap_only(&args)?;
     if args.role == Role::LocalIpc {

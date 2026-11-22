@@ -186,7 +186,8 @@ def read_process_rss_bytes(pid, *, runner=None):
 class LocalIpcSession:
     """Managed child `argos-api-host --role local-ipc` process speaking binary IPC frames."""
 
-    def __init__(self, binary, state_dir, *, client_name="fleetworks-local-smoke", client_version="0.2.1"):
+    def __init__(self, binary, state_dir, *, client_name="fleetworks-local-smoke", client_version="0.2.1",
+                 log_filter=None):
         self.binary = Path(binary)
         self.state_dir = Path(state_dir)
         self.client_name = client_name
@@ -194,12 +195,15 @@ class LocalIpcSession:
         self._next_request_id = 1
         self.observed_events = []
         self._stderr_tail = collections.deque(maxlen=256)
+        environment = clean_child_environment()
+        if log_filter is not None:
+            environment["RUST_LOG"] = log_filter
         self.proc = subprocess.Popen(
             [str(self.binary), "--role", "local-ipc", "--state-dir", str(self.state_dir)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=clean_child_environment(),
+            env=environment,
         )
         self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
         self._stderr_thread.start()
@@ -216,7 +220,7 @@ class LocalIpcSession:
                 self._stderr_tail.append(text[:512])
 
     def stderr_excerpt(self):
-        return "\n".join(self._stderr_tail)[-MAX_STDERR_TAIL_BYTES:]
+        return "\n".join(list(self._stderr_tail))[-MAX_STDERR_TAIL_BYTES:]
 
     def hello(self, *, protocol_version=IPC_PROTOCOL_VERSION, min_protocol_version=IPC_MIN_PROTOCOL_VERSION):
         envelope = {

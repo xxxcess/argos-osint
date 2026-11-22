@@ -69,6 +69,10 @@ impl SeedExecution {
         &self.task.job_id
     }
 
+    pub(super) fn lease_epoch(&self) -> i64 {
+        self.task.lease_epoch
+    }
+
     pub(super) fn fingerprint(&self) -> &str {
         &self.fingerprint
     }

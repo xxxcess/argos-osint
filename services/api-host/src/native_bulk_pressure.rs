@@ -125,11 +125,10 @@ impl ParserBudget {
         }
     }
     fn check_sample(&self, sample: Measurement) -> Result<()> {
-        ensure!(
-            physical_reason(&self.limits, sample, false).is_none(),
-            "worker_parse_resource_budget"
-        );
-        Ok(())
+        match physical_reason(&self.limits, sample, false) {
+            Some(reason) => Err(anyhow::anyhow!(reason)),
+            None => Ok(()),
+        }
     }
 
     /// The existing Natural parser already bounds rows, raw records and corpus

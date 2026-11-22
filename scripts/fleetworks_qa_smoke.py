@@ -2,15 +2,20 @@
 """Exercise a real Inbox QA pack through a packaged companion or paired gateway."""
 
 import argparse
+import base64
 from datetime import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import secrets
+import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from urllib.parse import urlencode
 
@@ -37,6 +42,24 @@ SAFE_REJECTION = {
     "Backend inference is unavailable": "coordinator_unavailable",
     "Current backend health could not be verified": "fresh_health_unavailable",
     "Inbox inference is busy": "busy",
+}
+CATALOG_TIMEOUT_SECONDS = 15 * 60
+CATALOG_ROWS = 94_987
+TRAINING_ROWS = 1_020
+ROCKSDB_OPTIONS = {
+    "write_buffer_size": 16 * 1024 * 1024,
+    "max_write_buffer_number": 2,
+    "min_write_buffer_number_to_merge": 1,
+    "max_background_jobs": 2,
+    "max_subcompactions": 1,
+}
+ROCKSDB_BLOCK_CACHE_BYTES = 32 * 1024 * 1024
+TERMINAL_JOB_STATES = {"completed", "failed", "cancelled", "canceled", "stopped", "skipped", "superseded"}
+ACTIVE_JOB_STATES = {"queued", "running", "waiting", "reconciling", "retry_scheduled"}
+SAFE_CATALOG_FAILURES = {
+    "setup_worker_resource_pressure", "setup_dataset_resource_budget",
+    "setup_worker_memory_pressure", "setup_worker_disk_pressure", "setup_worker_pressure_unavailable",
+    "setup_interrupted", "native_domain_operation_failed",
 }
 
 
@@ -337,6 +360,256 @@ def embedded_tree(parent):
     return children
 
 
+def sample_catalog_resources(proc, state, evidence, stop):
+    while proc.poll() is None:
+        phase = evidence["stage"]
+        try:
+            status = Path(f"/proc/{proc.pid}/status").read_text()
+            disk_free = shutil.disk_usage(state).free
+        except OSError:
+            break
+        usage = {
+            name: int(kib) * 1024
+            for name, kib in re.findall(r"^(VmRSS|VmHWM|RssAnon|RssFile):\s+(\d+) kB$", status, re.M)
+        }
+        evidence.setdefault("baseline_disk_free_bytes", disk_free)
+        if "VmRSS" in usage:
+            evidence.setdefault("baseline_rss_bytes", usage["VmRSS"])
+            evidence["peak_sampled_rss_bytes"] = max(evidence.get("peak_sampled_rss_bytes", 0), usage["VmRSS"])
+        evidence["min_disk_free_bytes"] = min(evidence.get("min_disk_free_bytes", disk_free), disk_free)
+        phase_usage = evidence["resources_by_stage"].setdefault(phase, {"samples": 0})
+        phase_usage["samples"] += 1
+        phase_usage["min_disk_free_bytes"] = min(phase_usage.get("min_disk_free_bytes", disk_free), disk_free)
+        for field, name in (("peak_sampled_rss_bytes", "VmRSS"), ("peak_sampled_anon_bytes", "RssAnon"),
+                            ("peak_sampled_file_bytes", "RssFile"), ("kernel_rss_high_water_bytes", "VmHWM")):
+            if name in usage:
+                phase_usage[field] = max(phase_usage.get(field, 0), usage[name])
+        if stop.wait(1):
+            break
+
+
+def persisted_rocksdb_options(state):
+    files = list((state / "surreal").rglob("OPTIONS-*"))
+    require(files, "Embedded RocksDB did not persist an OPTIONS file")
+    options = {}
+    source = max(files, key=lambda path: path.name).read_text()
+    for key, value in re.findall(r"^[ \t]*([a-z_]+)=(\d+)[ \t]*$", source, re.M):
+        if key in ROCKSDB_OPTIONS:
+            require(key not in options or options[key] == int(value), "RocksDB options disagree across column families")
+            options[key] = int(value)
+    return options
+
+
+def stage_bundled_csv(call, directory, kind, pin, rows):
+    path = directory / pin["filename"]
+    require(path.stat().st_size == pin["size_bytes"], "bundled dataset byte count changed")
+    ticket = call("dataset_upload_start", {
+        "kind": kind, "sha256": pin["sha256"], "size_bytes": pin["size_bytes"],
+    })
+    upload_id = ticket["upload_path"].rstrip("/").rsplit("/", 1)[-1]
+    offset = 0
+    with path.open("rb") as file:
+        while chunk := file.read(256 * 1024):
+            call("dataset_upload_chunk", {
+                "upload_id": upload_id, "offset": offset, "data_b64": base64.b64encode(chunk).decode("ascii"),
+            }, allow_non_json=True)
+            offset += len(chunk)
+    upload = call("dataset_upload_finish", {"upload_id": upload_id})
+    require(upload["row_count"] == rows and upload["dataset"]["sha256"] == pin["sha256"],
+            "backend validation did not match the bundled digest and row count")
+    return upload["dataset"]
+
+
+def exercise_bundled_catalog(session, state, app, evidence):
+    phase_started = time.monotonic()
+
+    def next_stage(stage):
+        nonlocal phase_started
+        now = time.monotonic()
+        evidence["elapsed_by_stage_ms"][evidence["stage"]] = round((now - phase_started) * 1000)
+        evidence["stage"] = stage
+        phase_started = now
+
+    require(session.hello()["compatible"], "packaged companion rejected the fixture protocol")
+    embedded.check_zero_bound_sockets(session.proc.pid)
+    evidence["rocksdb_options"] = persisted_rocksdb_options(state)
+
+    def block_cache_capacities():
+        log = ANSI.sub("", session.stderr_excerpt())
+        return {int(capacity) for capacity in re.findall(r"\bMemory manager: block cache size: (\d+)B\b", log)}
+
+    capacities = until(block_cache_capacities, bool, "RocksDB startup omitted its block cache capacity", timeout=5)
+    evidence["rocksdb_block_cache_bytes"] = sorted(capacities)
+    require(evidence["rocksdb_options"] == ROCKSDB_OPTIONS, "persisted RocksDB options differ from the Embedded profile")
+    require(capacities == {ROCKSDB_BLOCK_CACHE_BYTES}, "RocksDB startup did not report the bounded block cache")
+    ensured, _ = session.request_json({"op": "registration_ensure", "args": {
+        "request_id": "bundled-catalog-registration", "workstation_ip": None,
+        "installation_marker": secrets.token_hex(32),
+    }})
+    response, _ = session.request_json({"op": "registration_context", "args": {
+        "registration_id": ensured["registration_id"], "expected_revision": ensured["revision"],
+    }})
+    registration = response["context"]
+    mutation_context = {**authorize(registration), "expected_configuration_revision": 0}
+
+    def call(operation, args=None, *, allow_non_json=False):
+        request = {"op": operation}
+        if args is not None:
+            request["args"] = args
+        outcome, _ = session.request(request, registration=registration)
+        data = outcome["data"]
+        if outcome["outcome"] != "ok":
+            evidence["rpc_error"] = {"operation": operation, "status": data.get("status")}
+            if (operation == "reindex_actors" and data.get("status") == 422
+                    and data.get("message", "").startswith("Actor index status is still checking or catching up.")):
+                return None
+            raise ValueError("bundled catalog IPC operation failed")
+        require(allow_non_json or data["payload"] in ("json", "dataset_upload"), "unexpected catalog IPC payload")
+        return data.get("value")
+
+    def check(check_id):
+        checks = call("workstation_readiness")["checks"]
+        return next(item for item in checks if item["id"] == check_id)
+
+    def jobs():
+        return call("jobs_list", {"sort": "newest"})["rows"]
+
+    def await_job(receipt, operation):
+        job_id = receipt["job_id"]
+        require(job_id and not receipt["already_completed"], "fresh catalog job was not durably accepted")
+        while True:
+            row = next((row for row in jobs() if row["id"] == job_id and row["operation"] == operation), None)
+            if row is not None:
+                state = row["state"]
+                # Never retain job IDs, arbitrary error messages, titles or row payloads.
+                observed = {
+                    "state": state if state in TERMINAL_JOB_STATES | ACTIVE_JOB_STATES else "other",
+                    "reported_rows": row.get("progress_done"), "expected_rows": row.get("progress_total"),
+                }
+                if row.get("error_summary") in SAFE_CATALOG_FAILURES:
+                    observed["reason"] = row["error_summary"]
+                    reasons = evidence.setdefault("job_reasons_seen", [])
+                    if observed["reason"] not in reasons:
+                        reasons.append(observed["reason"])
+                evidence[operation] = observed
+                if state in TERMINAL_JOB_STATES:
+                    if operation == "actor_seed":
+                        detail = call("job_detail", {"id": job_id})
+                        committed = detail["maintenance_result"]
+                        if committed and committed["operation"] == "actor_seed":
+                            observed["committed_rows"] = committed["processed"]
+                            observed["committed_total"] = committed["total"]
+                            observed["database_seeded"] = committed["database_seeded"]
+                    return observed
+            time.sleep(2)
+
+    pins = json.loads((ROOT / "datasets/native-defaults.json").read_text())["datasets"]
+    directory = app / "share/fleetworks/resources/datasets"
+    require(check("actor_catalog")["state"] != "ready", "fresh catalog reported ready without a seed")
+    next_stage("actor_csv_validation")
+    dataset = stage_bundled_csv(call, directory, "actor_catalog", pins["actor_catalog"], CATALOG_ROWS)
+    evidence["actor_validated_rows"] = CATALOG_ROWS
+    require(check("actor_catalog")["state"] != "ready", "staged catalog reported ready without a seed")
+
+    next_stage("actor_seed")
+    receipt = call("seed_actors", {
+        "request_id": "bundled-catalog-seed", "context": mutation_context, "dataset": dataset,
+    })
+    seed = await_job(receipt, "actor_seed")
+    evidence["actor_catalog_ready"] = check("actor_catalog")["state"] == "ready"
+    require(seed["state"] == "completed" and seed.get("database_seeded") is True
+            and seed.get("committed_rows") == seed.get("committed_total") == CATALOG_ROWS,
+            "full bundled actor seed did not complete")
+    if not evidence["actor_catalog_ready"]:
+        until(lambda: check("actor_catalog"), lambda value: value["state"] == "ready",
+              "completed actor catalog was not ready", timeout=30)
+        evidence["actor_catalog_ready"] = True
+
+    next_stage("actor_index_admission")
+    receipt = until(lambda: call("reindex_actors", {
+        "request_id": "bundled-catalog-reindex", "context": mutation_context,
+    }), bool, "packaged actor index could not be accepted", timeout=120)
+    evidence.pop("rpc_error", None)
+    next_stage("actor_index")
+    if receipt["already_completed"]:
+        evidence["actor_reindex"] = {"state": "already_completed"}
+    else:
+        require(await_job(receipt, "actor_reindex")["state"] == "completed", "packaged actor index did not complete")
+
+    next_stage("actor_search")
+    # The final catalog row proves that the serving index covers the tail of the import.
+    source_id = "ucdp:999"
+    actor_id = "catalog-actor-" + hashlib.sha256(source_id.encode()).hexdigest()[:24]
+    query = {"query": "Chakosi", "mode": "discovery", "limit": 10}
+
+    def exact_actor_visible(response):
+        index = response["index"]
+        return index["state"] == "ready" and any(
+            hit["actor_id"] == actor_id and hit["label"] == query["query"]
+            and hit["index_generation"] == index["generation"] for hit in response["rows"]
+        )
+
+    search = until(lambda: call("actors_search", query), exact_actor_visible,
+                   "bundled catalog tail actor was not reader-visible", timeout=180)
+    index = search["index"]
+    require(index["generation"] and index["visible_checkpoint"], "ready index lacks a visible serving generation")
+    evidence["actor_search"] = {"source_id": source_id, "visible_checkpoint": index["visible_checkpoint"]}
+
+    next_stage("training_csv_preview")
+    training = check("classifier_training")
+    require(any(action["id"] == "train_classifier" and action["allowed"] for action in training["actions"]),
+            "training preview lacked an authorized backend operation")
+    stage_bundled_csv(call, directory, "classifier_training", pins["classifier_training"], TRAINING_ROWS)
+    evidence["training_validated_rows"] = TRAINING_ROWS
+    evidence["training_job_accepted"] = any(row["operation"] == "classifier_train" for row in jobs())
+    require(not evidence["training_job_accepted"], "training ran without confirmation")
+
+    next_stage("shutdown")
+    embedded.check_zero_bound_sockets(session.proc.pid)
+    _, exit_code = session.shutdown("bundled_catalog_smoke_complete")
+    require(exit_code == 0, "bundled catalog companion did not shut down cleanly")
+    next_stage("complete")
+
+
+def packaged_catalog_smoke(binary, app, state):
+    evidence = {"status": "failed", "stage": "startup", "resources_by_stage": {}, "elapsed_by_stage_ms": {}}
+    require([name for _, name in socket.if_nameindex()] == ["lo"], "bundled catalog smoke needs an offline namespace")
+    state.mkdir(mode=0o700)
+    started = time.monotonic()
+    stop = threading.Event()
+    session = embedded.LocalIpcSession(binary, state, client_name="fleetworks-catalog-smoke",
+                                       log_filter="warn,surrealdb::core::kvs::rocksdb=info")
+
+    def expire():
+        if session.proc.poll() is None:
+            evidence["timed_out"] = True
+            session.proc.kill()
+
+    timeout = threading.Timer(CATALOG_TIMEOUT_SECONDS, expire)
+    timeout.daemon = True
+    timeout.start()
+    sampler = threading.Thread(target=sample_catalog_resources, args=(session.proc, state, evidence, stop), daemon=True)
+    sampler.start()
+    try:
+        exercise_bundled_catalog(session, state, app, evidence)
+        require(evidence.get("peak_sampled_rss_bytes", 0) > 0
+                and evidence["resources_by_stage"].get("actor_seed", {}).get("samples", 0) > 0,
+                "bundled catalog smoke did not collect seed resource observations")
+        evidence["status"] = "passed"
+    except (OSError, ValueError, KeyError, StopIteration, subprocess.SubprocessError) as error:
+        evidence["failure_type"] = type(error).__name__
+        print(f"Offline bundled catalog smoke failed during {evidence['stage']} ({type(error).__name__})", file=sys.stderr)
+    finally:
+        timeout.cancel()
+        stop.set()
+        sampler.join(timeout=5)
+        session.close_unconditionally()
+    if "min_disk_free_bytes" in evidence:
+        evidence["peak_disk_headroom_drop_bytes"] = evidence["baseline_disk_free_bytes"] - evidence["min_disk_free_bytes"]
+    evidence["elapsed_ms"] = round((time.monotonic() - started) * 1000)
+    return evidence
+
+
 def run_embedded(args):
     # Run this program inside a network-denied environment for release verification.
     require(not any((Path.home() / path).exists() for path in (
@@ -398,12 +671,17 @@ def run_embedded(args):
                               embedded_mode=True)
             _, exit_code = session.shutdown()
             require(exit_code == 0, "companion shutdown failed after unloading QA")
-            return {"runtime": "embedded-stdio", "target": digests["target"], **result}
         except Exception:
             report_diagnostics(session.stderr_excerpt())
             raise
         finally:
             session.close_unconditionally()
+
+        if digests["target"] == "x86_64-unknown-linux-gnu":
+            manifest = json.loads((args.app / "share/fleetworks/fleetworks-manifest.json").read_text())
+            if manifest["profile"] == "debug":
+                result["bundled_catalog"] = packaged_catalog_smoke(binary, args.app, root / "catalog-state")
+        return {"runtime": "embedded-stdio", "target": digests["target"], **result}
 
 
 def run_distributed(args):
@@ -588,7 +866,8 @@ def main():
     else:
         result = run_distributed(args)
     print(json.dumps(result, indent=2))
+    return int(result.get("bundled_catalog", {}).get("status") == "failed")
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

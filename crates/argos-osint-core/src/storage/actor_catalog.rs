@@ -1113,6 +1113,106 @@ async fn seed_actors_with_source_policy(
     .await
 }
 
+// Encode the claimed job in the existing opaque source-lease token. Catalogs
+// written by older backends need no schema change and use the old replay path.
+pub(super) fn job_owner_prefix(job_id: &str) -> String {
+    format!("setup:{}:", crate::evidence::content_hash(job_id))
+}
+
+#[derive(SurrealValue)]
+struct SeedCheckpoint {
+    status: String,
+    lease_until: String,
+    fingerprint: String,
+    owner: String,
+    processed: usize,
+    total: usize,
+    aliases: usize,
+}
+
+async fn acquire_seed_in(
+    tx: &Tx,
+    fingerprint: &str,
+    owner: &str,
+    total: usize,
+    allow_different_source: bool,
+    resume: Option<(&str, i64)>,
+) -> Result<Progress, TxError> {
+    let now = chrono::Utc::now();
+    let at = now.to_rfc3339();
+    let mut response = run(
+        tx,
+        tx.query(
+            "SELECT status,lease_until,fingerprint,owner,processed,total,aliases
+             FROM ONLY brain_actor_seed:catalog",
+        ),
+    )
+    .await?;
+    let previous: Option<SeedCheckpoint> = take(&mut response, 0)?;
+    let mut progress = Progress {
+        total,
+        ..Progress::default()
+    };
+    if let Some(previous) = previous {
+        let resume_previous = resume.and_then(|(job_id, epoch)| {
+            let prefix = job_owner_prefix(job_id);
+            let (previous_epoch, _) = previous.owner.strip_prefix(&prefix)?.split_once(':')?;
+            Some((job_id, epoch > previous_epoch.parse::<i64>().ok()?))
+        });
+        let takes_over = resume_previous.is_some_and(|(_, takes_over)| takes_over);
+        let running = previous.status == "running";
+        if running && previous.lease_until > at && !takes_over {
+            return Err(TxError::Abort("actor seed is already running".into()));
+        }
+        if !allow_different_source && previous.fingerprint != fingerprint {
+            return Err(TxError::Abort(
+                "actor catalog already has a different source fingerprint".into(),
+            ));
+        }
+        if let Some((job_id, _)) = resume_previous {
+            if previous.total != total
+                || previous.processed > total
+                || previous.fingerprint != fingerprint
+            {
+                return Err(TxError::Abort("actor_seed_checkpoint_mismatch".into()));
+            }
+            progress.processed = previous.processed;
+            progress.aliases = previous.aliases;
+            // A delivery may take over a crashed source attempt. Old intent
+            // stays durable and the new lease owns only the remaining batches.
+            if running {
+                super::actor_search_outbox::close_cause_in(
+                    tx,
+                    &super::actor_search_outbox::SourceCause {
+                        parent_job: job_id.to_owned(),
+                        operation_id: previous.owner,
+                    },
+                    true,
+                    now,
+                )
+                .await?;
+            }
+        }
+    }
+    run(
+        tx,
+        tx.query(
+            "UPSERT brain_actor_seed:catalog SET status='running',fingerprint=$hash,processed=$done,
+             total=$total,aliases=$aliases,owner=$owner,lease_until=$lease,
+             index_pause_reason='',updated_at=$now RETURN NONE",
+        )
+        .bind(("hash", fingerprint.to_owned()))
+        .bind(("done", progress.processed))
+        .bind(("total", total))
+        .bind(("aliases", progress.aliases))
+        .bind(("owner", owner.to_owned()))
+        .bind(("lease", (now + chrono::Duration::minutes(5)).to_rfc3339()))
+        .bind(("now", at)),
+    )
+    .await?;
+    Ok(progress)
+}
+
 async fn seed_actor_batches_with_source_policy<S>(
     repo: &Repository,
     total: usize,
@@ -1137,34 +1237,49 @@ where
         }
     }
     let fingerprint = fingerprint.to_owned();
-    let owner = format!(
+    let resume = execution
+        .filter(|_| merge_selected)
+        .map(|execution| (execution.parent_job(), execution.lease_epoch()));
+    let nonce = format!(
         "{}:{}",
         std::process::id(),
         chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
     );
-    let now = chrono::Utc::now().to_rfc3339();
-    run_tx(repo.db(),RetryPolicy::default(),|tx| {
-        let fingerprint=fingerprint.clone();let owner=owner.clone();let now=now.clone();
+    let owner = match resume {
+        Some((job_id, epoch)) => format!("{}{epoch}:{nonce}", job_owner_prefix(job_id)),
+        None => nonce,
+    };
+    let checkpoint = run_tx(repo.db(), RetryPolicy::default(), |tx| {
+        let fingerprint = fingerprint.clone();
+        let owner = owner.clone();
         async move {
-            if let Some(execution)=execution {execution.check_in(&tx,cancel).await?;}
-            run(&tx,tx.query(
-                "LET $previous = (SELECT status, lease_until, fingerprint FROM ONLY brain_actor_seed:catalog);
-                 IF $previous.status = 'running' AND $previous.lease_until > $now { THROW 'actor seed is already running'; };
-                 IF $allow_different_source = false AND $previous != NONE AND $previous.fingerprint != $hash { THROW 'actor catalog already has a different source fingerprint'; };
-                 UPSERT brain_actor_seed:catalog SET status='running',fingerprint=$hash,processed=0,total=$total,aliases=0,owner=$owner,lease_until=$lease,updated_at=$now RETURN NONE;")
-                .bind(("allow_different_source",allow_different_source)).bind(("now",now)).bind(("hash",fingerprint)).bind(("total",total)).bind(("owner",owner))
-                .bind(("lease",(chrono::Utc::now()+chrono::Duration::minutes(5)).to_rfc3339()))).await?;
-            if let Some(execution)=execution {execution.check_in(&tx,cancel).await?;}
-            Ok(())
+            if let Some(execution) = execution {
+                execution.check_in(&tx, cancel).await?;
+            }
+            let progress = acquire_seed_in(
+                &tx,
+                &fingerprint,
+                &owner,
+                total,
+                allow_different_source,
+                resume,
+            )
+            .await?;
+            if let Some(execution) = execution {
+                execution.check_in(&tx, cancel).await?;
+            }
+            Ok(progress)
         }
-    }).await?;
+    })
+    .await?
+    .value;
     let cause = cause_job.map(|parent| super::actor_search_outbox::SourceCause {
         parent_job: parent.to_owned(),
         operation_id: owner.clone(),
     });
     let result = ingest(
         repo,
-        total,
+        checkpoint,
         batches,
         &owner,
         cause.as_ref(),
@@ -1189,7 +1304,7 @@ where
 
 async fn ingest<S>(
     repo: &Repository,
-    total: usize,
+    mut progress: Progress,
     batches: S,
     owner: &str,
     cause: Option<&super::actor_search_outbox::SourceCause>,
@@ -1201,20 +1316,24 @@ async fn ingest<S>(
 where
     S: futures_util::Stream<Item = Result<Vec<Actor>>>,
 {
-    let mut progress = Progress {
-        total,
-        ..Progress::default()
-    };
+    let mut remaining_prefix = progress.processed;
     report(progress.clone());
     let mut batches = std::pin::pin!(batches);
     while let Some(chunk) = futures_util::StreamExt::next(&mut batches).await {
-        let chunk = chunk?;
+        let mut chunk = chunk?;
         anyhow::ensure!(
             !chunk.is_empty() && chunk.len() <= BATCH,
             "actor_seed_batch_budget"
         );
+        anyhow::ensure!(!cancel.load(Ordering::Acquire), "actor_seed_cancelled");
+        let skip = remaining_prefix.min(chunk.len());
+        remaining_prefix -= skip;
+        drop(chunk.drain(..skip));
+        if chunk.is_empty() {
+            continue;
+        }
         anyhow::ensure!(
-            progress.processed + chunk.len() <= total,
+            progress.processed + chunk.len() <= progress.total,
             "actor_seed_count_changed"
         );
         if let Some(execution) = execution {
@@ -1337,6 +1456,7 @@ where
         progress = next;
         report(progress.clone());
     }
+    anyhow::ensure!(remaining_prefix == 0, "actor_seed_count_changed");
     run_tx(repo.db(),RetryPolicy::default(),|tx| {let owner=owner.to_owned();let cause=cause.cloned();let total=progress.total;async move {
         if let Some(execution)=execution {execution.check_in(&tx,cancel).await?;}
         run(&tx,tx.query("IF (SELECT VALUE owner FROM ONLY brain_actor_seed:catalog) != $owner OR (SELECT VALUE processed FROM ONLY brain_actor_seed:catalog) != $total { THROW 'actor seed completion lost ownership'; }; UPDATE brain_actor_seed:catalog SET status='complete',lease_until='' RETURN NONE")

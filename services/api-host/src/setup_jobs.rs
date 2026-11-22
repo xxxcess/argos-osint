@@ -54,6 +54,9 @@ pub(crate) fn safe_failure_reason(error: &anyhow::Error) -> &'static str {
     for cause in error.chain() {
         match cause.to_string().as_str() {
             "worker_bulk_cancelled" => return "setup_interrupted",
+            "worker_memory_pressure" => return "setup_worker_memory_pressure",
+            "worker_workspace_disk_pressure" => return "setup_worker_disk_pressure",
+            "worker_pressure_unknown" => return "setup_worker_pressure_unavailable",
             "worker_parse_resource_budget"
             | "worker_seed_resource_budget"
             | "worker_training_resource_budget" => return "setup_worker_resource_pressure",
@@ -70,6 +73,15 @@ pub(crate) fn safe_failure_reason(error: &anyhow::Error) -> &'static str {
         }
     }
     "native_domain_operation_failed"
+}
+
+pub(crate) fn is_worker_pressure_failure(reason: &str) -> bool {
+    matches!(
+        reason,
+        "setup_worker_memory_pressure"
+            | "setup_worker_disk_pressure"
+            | "setup_worker_pressure_unavailable"
+    )
 }
 
 /// Best-effort operational summary write so worker milestones appear in Logs.
@@ -259,16 +271,15 @@ async fn seed(
     ));
     let mut last_logged_bucket: i64 = -1;
     let mut last_logged_at: Option<std::time::Instant> = None;
-    let mut last_processed: usize = 0;
     let complete = loop {
         tokio::select! {
             result=&mut operation=>break result,
             Some(progress)=receive.recv()=>{
                 let observation=tokio::task::spawn_blocking({let workspace=workspace.clone();let budget=budget.clone();move||budget.check_running(&workspace)}).await;
-                if !matches!(observation,Ok(Ok(()))) {
+                if let Err(error) = observation.map_err(anyhow::Error::from).and_then(|result| result) {
                     argos_osint_core::cancellation::cancel_with_notify(&cancel);
                     let _=operation.as_mut().await;
-                    break Err(anyhow::anyhow!("worker_seed_resource_budget"));
+                    break Err(error);
                 }
                 if let Err(error)=setup_jobs::record_progress(repo,task,"Seeding actors",progress.processed as u64,progress.total as u64).await {
                     argos_osint_core::cancellation::cancel_with_notify(&cancel);
@@ -277,7 +288,6 @@ async fn seed(
                     let _=operation.as_mut().await;
                     break Err(error.into());
                 }
-                last_processed = progress.processed;
                 let pct = if progress.total > 0 {
                     ((progress.processed as u64 * 100) / progress.total as u64).min(100) as i64
                 } else {
@@ -292,7 +302,7 @@ async fn seed(
                         task,
                         Severity::Info,
                         "worker.progress",
-                        format!("Seeding actors started (0 / {})", progress.total),
+                        format!("Seeding actors started ({} / {})", progress.processed, progress.total),
                     )
                     .await;
                 } else if bucket > last_logged_bucket
@@ -312,26 +322,39 @@ async fn seed(
             }
         }
     };
-    if let Err(error) = &complete {
+    if complete.is_err() {
         argos_osint_core::cancellation::cancel_with_notify(&cancel);
-        record_job_event(
-            repo,
-            task,
-            Severity::Error,
-            "worker.error",
-            format!(
-                "Actor seed failed at {} / {}: {}",
-                last_processed,
-                total,
-                safe_failure_reason(error)
-            ),
-        )
-        .await;
     }
     // Dropping the completed source future closes its bounded receiver before
     // joining, so a blocked producer always wakes on failure/cancellation.
     drop(operation);
     let produced = producer.await;
+    if let Err(error) = &complete {
+        let reason = safe_failure_reason(error);
+        let message =
+            match setup_jobs::actor_seed_checkpoint(repo, &task.job_id, &dataset.sha256).await {
+                Ok(Some(checkpoint)) if checkpoint.status == "failed" => {
+                    let _ = setup_jobs::record_result(
+                        repo,
+                        task,
+                        &json!({
+                            "operation": "actor_seed",
+                            "dataset_sha256": dataset.sha256,
+                            "processed": checkpoint.processed,
+                            "total": checkpoint.total,
+                            "database_seeded": false,
+                        }),
+                    )
+                    .await;
+                    format!(
+                        "Actor seed stopped at {} / {} committed rows: {}",
+                        checkpoint.processed, checkpoint.total, reason
+                    )
+                }
+                _ => format!("Actor seed stopped: {reason}"),
+            };
+        record_job_event(repo, task, Severity::Error, "worker.error", message).await;
+    }
     let complete = complete?;
     produced.context("actor batch producer stopped")??;
     let phase = if complete.complete {
@@ -524,6 +547,25 @@ mod tests {
             )),
             "native_domain_operation_failed"
         );
+    }
+
+    #[test]
+    fn physical_seed_failures_keep_safe_distinct_retry_reasons() {
+        for (code, reason) in [
+            ("worker_memory_pressure", "setup_worker_memory_pressure"),
+            (
+                "worker_workspace_disk_pressure",
+                "setup_worker_disk_pressure",
+            ),
+            (
+                "worker_pressure_unknown",
+                "setup_worker_pressure_unavailable",
+            ),
+        ] {
+            assert_eq!(safe_failure_reason(&anyhow::anyhow!(code)), reason);
+            assert!(is_worker_pressure_failure(reason));
+        }
+        assert!(!is_worker_pressure_failure("setup_dataset_resource_budget"));
     }
 
     #[test]

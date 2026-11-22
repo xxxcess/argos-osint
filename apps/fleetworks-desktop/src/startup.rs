@@ -900,6 +900,7 @@ mod tests {
         operation: MaintenanceOperation,
         wire_operation: &str,
         job_state: &str,
+        error_summary: &str,
         result: serde_json::Value,
     ) {
         let id = format!("fixture-{wire_operation}");
@@ -918,7 +919,7 @@ mod tests {
                 "phase": "reading data",
                 "progress_done": 8,
                 "progress_total": 20,
-                "error_summary": "",
+                "error_summary": error_summary,
                 "private_details_available": true,
                 "activity_actions_available": false,
                 "status_only": false
@@ -932,6 +933,94 @@ mod tests {
         state
             .maintenance
             .update_operation_job_detail(operation, &id, detail);
+    }
+
+    #[test]
+    fn actor_seed_pressure_uses_only_matching_committed_progress() {
+        let kind = DatasetKind::ActorCatalog;
+        let (mut runtime, _) = data_setup_runtime([ReadinessState::NotReady; 3]);
+        runtime.frame(0.0);
+        click(&mut runtime, "gateway-setup-done");
+        runtime.frame(0.02);
+        let dataset = DatasetRef::new("fixture-actors".into(), kind, "a".repeat(64), 120).unwrap();
+        let mut upload = DatasetUpload::new(dataset.clone(), 60);
+        upload.row_count = Some(94_987);
+        runtime.update(|state, _| {
+            state.complete_dataset_upload(
+                state.connection.epoch,
+                state.maintenance.upload_revision,
+                state.origin_revision(),
+                kind,
+                Ok(upload),
+            );
+        });
+        let checkpoint = serde_json::json!({
+            "operation": "actor_seed",
+            "dataset_sha256": dataset.sha256,
+            "processed": 822,
+            "total": 94_987,
+            "database_seeded": false
+        });
+        for (job_state, error, label, message) in [
+            (
+                "queued",
+                "setup_worker_memory_pressure",
+                "Retrying",
+                "The backend reached its memory limit.",
+            ),
+            (
+                "failed",
+                "setup_worker_disk_pressure",
+                "Needs attention",
+                "Free space in the backend workspace fell below its disk limit.",
+            ),
+            (
+                "failed",
+                "setup_worker_pressure_unavailable",
+                "Needs attention",
+                "The backend could not measure memory use or free workspace space.",
+            ),
+        ] {
+            runtime.update(|state, _| {
+                observe_job(
+                    state,
+                    MaintenanceOperation::SeedActors,
+                    "actor_seed",
+                    job_state,
+                    error,
+                    checkpoint.clone(),
+                );
+            });
+            runtime.frame(0.02);
+            let tree = runtime.accessibility_json().to_string();
+            assert!(tree.contains(label), "{job_state}: {tree}");
+            assert!(tree.contains(message), "{error}: {tree}");
+            assert!(tree.contains("822 / 94,987 actor rows committed"));
+            assert!(!tree.contains("8 / 20 processed"));
+            assert!(!tree.contains("Ready to seed"));
+            assert!(runtime.find("startup-data-continue").is_none());
+            assert!(runtime.find("maintenance-confirm").is_none());
+        }
+
+        let mut other_dataset = checkpoint.clone();
+        other_dataset["dataset_sha256"] = "b".repeat(64).into();
+        let mut seeded = checkpoint;
+        seeded["database_seeded"] = true.into();
+        for result in [other_dataset, seeded, serde_json::Value::Null] {
+            runtime.update(|state, _| {
+                observe_job(
+                    state,
+                    MaintenanceOperation::SeedActors,
+                    "actor_seed",
+                    "failed",
+                    "setup_worker_disk_pressure",
+                    result,
+                );
+            });
+            runtime.frame(0.02);
+            assert!(runtime.find("startup-seed-committed").is_none());
+            assert!(runtime.find("startup-data-continue").is_none());
+        }
     }
 
     fn data_setup_runtime(
@@ -1311,6 +1400,7 @@ mod tests {
                 MaintenanceOperation::SeedActors,
                 "actor_seed",
                 "retry_scheduled",
+                "",
                 serde_json::Value::Null,
             );
         });
@@ -1325,6 +1415,7 @@ mod tests {
                 MaintenanceOperation::SeedActors,
                 "actor_seed",
                 "completed",
+                "",
                 serde_json::Value::Null,
             );
         });
@@ -1372,6 +1463,7 @@ mod tests {
                 MaintenanceOperation::TrainClassifier,
                 "classifier_train",
                 "completed",
+                "",
                 serde_json::json!({
                     "operation": "classifier_train",
                     "candidate_model_id": "verified-candidate"

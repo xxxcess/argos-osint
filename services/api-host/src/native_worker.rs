@@ -396,6 +396,7 @@ struct DeliveryLane<'a> {
 enum WorkerOutcome {
     Complete { result_ref: String },
     Failed { reason: &'static str },
+    RetrySeedPressure { reason: &'static str },
     Relinquish { reason: &'static str },
     Stale,
 }
@@ -569,6 +570,13 @@ async fn handle(
                                 reason: "local_backend_shutdown",
                             }
                         }
+                        DurableToolOutcome::Failed { reason }
+                            if relinquish_on_shutdown
+                                && lease.task.pool == setup_jobs::SEED_POOL
+                                && crate::setup_jobs::is_worker_pressure_failure(reason) =>
+                        {
+                            WorkerOutcome::RetrySeedPressure { reason }
+                        }
                         DurableToolOutcome::Failed { reason } => WorkerOutcome::Failed { reason },
                         DurableToolOutcome::Stale => WorkerOutcome::Stale,
                         _ => return Err(anyhow::anyhow!("native_domain_outcome_unsupported")),
@@ -612,6 +620,19 @@ async fn handle(
                 repo.db(),
                 &lease,
                 DeliveryOutcome::Failed { reason },
+                Utc::now(),
+            )
+            .await?
+        }
+        WorkerOutcome::RetrySeedPressure { reason } => {
+            // The dispatcher applies the existing finite attempt limit.
+            job_dispatch::finish_delivery(
+                repo.db(),
+                &lease,
+                DeliveryOutcome::Retry {
+                    reason,
+                    delay_secs: 60,
+                },
                 Utc::now(),
             )
             .await?

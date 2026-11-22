@@ -66,6 +66,28 @@ pub async fn actor_seed_observation(repo: &Repository) -> Result<Option<SeedObse
     Ok(response.take(0)?)
 }
 
+/// Read the committed seed checkpoint associated with this exact setup job and dataset.
+pub async fn actor_seed_checkpoint(
+    repo: &Repository,
+    job_id: &str,
+    fingerprint: &str,
+) -> Result<Option<SeedObservation>, TxError> {
+    let mut response = repo
+        .db()
+        .query(
+            "SELECT status,processed,total FROM ONLY brain_actor_seed:catalog
+             WHERE string::starts_with(owner, $owner_prefix) AND fingerprint=$fingerprint",
+        )
+        .bind((
+            "owner_prefix",
+            super::actor_catalog::job_owner_prefix(job_id),
+        ))
+        .bind(("fingerprint", fingerprint.to_owned()))
+        .await?
+        .check()?;
+    Ok(response.take(0)?)
+}
+
 pub fn dataset_limit(kind: DatasetKind) -> u64 {
     match kind {
         DatasetKind::ActorCatalog => ACTOR_DATASET_LIMIT,

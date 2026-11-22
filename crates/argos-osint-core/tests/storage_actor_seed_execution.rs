@@ -194,6 +194,10 @@ async fn claim_seed_dataset(
         replay, admitted,
         "exact replay retains the original receipt"
     );
+    claim_ready_seed(repo, label).await
+}
+
+async fn claim_ready_seed(repo: &Repository, label: &str) -> job_dispatch::DeliveryLease {
     let relay = job_dispatch::claim_ready(
         repo.db(),
         setup_jobs::SEED_POOL,
@@ -563,42 +567,95 @@ async fn streamed_claimed_imports_merge_selected_identities_and_keep_other_actor
 }
 
 #[tokio::test]
-async fn streamed_source_error_preserves_only_committed_batches_and_refuses_completion() {
-    let Some(server) = support::Server::start() else {
+async fn pressure_retry_reopens_and_resumes_only_uncommitted_rows() {
+    let Some(mut server) = support::Server::start() else {
         return;
     };
     let repo = server.repo("seed_execution", "stream_error").await;
-    let task = claim_seed(&repo).await;
+    let first = claim_seed_dataset(&repo, "pressure", 'b').await;
     let cancel = AtomicBool::new(false);
-    let execution = actor_catalog::SeedExecution::from_claimed(&repo, &task, &cancel)
+    let execution = actor_catalog::SeedExecution::from_claimed(&repo, &first.task, &cancel)
         .await
         .expect("actual execution");
     let batches = futures_util::stream::iter([
         Ok(actors(1)),
-        Err(anyhow::anyhow!("synthetic producer failure")),
+        Err(anyhow::anyhow!("worker_memory_pressure")),
     ]);
-    assert!(actor_catalog::seed_actors_stream_claimed(
+    let failure =
+        actor_catalog::seed_actors_stream_claimed(&repo, 2, batches, &execution, &cancel, |_| {})
+            .await
+            .expect_err("injected memory pressure stops before any second write");
+    assert_eq!(failure.to_string(), "worker_memory_pressure");
+    assert_eq!(support::count(repo.db(), "brain_actor").await, 1);
+    assert_eq!(support::count(repo.db(), "actor_search_event").await, 1);
+    let checkpoint = setup_jobs::actor_seed_checkpoint(&repo, &first.task.job_id, &"b".repeat(64))
+        .await
+        .expect("committed checkpoint")
+        .expect("exact lease's source");
+    assert_eq!(
+        (
+            checkpoint.status.as_str(),
+            checkpoint.processed,
+            checkpoint.total
+        ),
+        ("failed", 1, 2)
+    );
+    assert_eq!(
+        job_dispatch::finish_delivery(
+            repo.db(),
+            &first,
+            job_dispatch::DeliveryOutcome::Retry {
+                reason: "setup_worker_memory_pressure",
+                delay_secs: 0,
+            },
+            Utc::now(),
+        )
+        .await
+        .expect("bounded delivery retry"),
+        job_dispatch::DeliveryFinish::Requeued,
+    );
+
+    drop(repo);
+    server.restart();
+    let repo = server.repo("seed_execution", "stream_error").await;
+    let resumed = claim_ready_seed(&repo, "after-pressure").await;
+    assert_eq!(resumed.task.job_id, first.task.job_id);
+    assert!(resumed.task.lease_epoch > first.task.lease_epoch);
+    let execution = actor_catalog::SeedExecution::from_claimed(&repo, &resumed.task, &cancel)
+        .await
+        .expect("new delivery execution");
+    // Revalidation can produce different batch boundaries for the same bytes.
+    // The committed prefix ends inside the new first batch.
+    let initial_progress = std::cell::Cell::new(None);
+    let result = actor_catalog::seed_actors_stream_claimed(
         &repo,
         2,
-        batches,
+        futures_util::stream::iter([Ok(actors(2))]),
         &execution,
         &cancel,
-        |_| {}
+        |progress| {
+            if initial_progress.get().is_none() {
+                initial_progress.set(Some(progress.processed));
+            }
+        },
     )
     .await
-    .is_err());
-    assert_eq!(support::count(repo.db(), "brain_actor").await, 1);
-    let mut response = repo
+    .expect("resume from exact committed prefix");
+    assert_eq!(initial_progress.get(), Some(1));
+    assert!(result.complete);
+    assert_eq!(result.processed, 2);
+    assert_eq!(support::count(repo.db(), "brain_actor").await, 2);
+    assert_eq!(support::count(repo.db(), "actor_search_event").await, 2);
+    let mut revisions = repo
         .db()
-        .query("SELECT status,processed,total FROM ONLY brain_actor_seed:catalog")
+        .query("SELECT VALUE revision FROM brain_actor ORDER BY id")
         .await
-        .expect("source observation")
+        .expect("query canonical actor revisions")
         .check()
-        .expect("source query");
-    let source: Option<setup_jobs::SeedObservation> = response.take(0).expect("typed receipt");
-    let source = source.expect("source exists");
+        .expect("revision query");
     assert_eq!(
-        (source.status.as_str(), source.processed, source.total),
-        ("failed", 1, 2)
+        revisions.take::<Vec<i64>>(0).expect("actor revisions"),
+        [1, 1],
+        "the resumed seed never writes the committed actor a second time"
     );
 }

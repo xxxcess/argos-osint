@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::readiness::DatasetKind;
 use fleetworks_contracts::readiness::DatasetRef;
 use fleetworks_contracts::readiness::MaintenanceOperation;
@@ -293,9 +294,9 @@ impl Step {
 enum Stage<'a> {
     Observing,
     Action,
-    Working(Option<&'a backend::ActivityJob>),
+    Working(Option<&'a backend::JobDetail>),
     Verifying,
-    Failed(&'a backend::ActivityJob),
+    Failed(&'a backend::JobDetail),
     Complete,
 }
 
@@ -353,6 +354,47 @@ fn validated_csv(state: &State, step: Step) -> Option<&DatasetUpload> {
     .then_some(upload)
 }
 
+fn committed_seed_progress(state: &State, detail: &backend::JobDetail) -> Option<String> {
+    if !state.permission(Permission::ReadWorkstationActivity)
+        || state.registration.context.is_none()
+        || !detail.private_details_available
+        || !detail.job.private_details_available
+        || detail.job.status_only
+        || detail.job.operation != Step::Seed.job_operation()
+    {
+        return None;
+    }
+    let upload = validated_csv(state, Step::Seed)?;
+    let result = detail.maintenance_result.as_ref()?;
+    let (processed, total) = (result.processed?, result.total?);
+    (result.operation == Step::Seed.job_operation()
+        && result.dataset_sha256.as_deref() == Some(upload.dataset.sha256.as_str())
+        && result.database_seeded == Some(false)
+        && total > 0
+        && processed <= total
+        && upload.row_count.is_none_or(|validated| validated == total))
+    .then(|| {
+        format!(
+            "{} / {} actor rows committed",
+            format_row_count(processed),
+            format_row_count(total)
+        )
+    })
+}
+
+fn pressure_explanation(error_summary: &str) -> Option<&'static str> {
+    match error_summary {
+        "setup_worker_memory_pressure" => Some("The backend reached its memory limit."),
+        "setup_worker_disk_pressure" => {
+            Some("Free space in the backend workspace fell below its disk limit.")
+        }
+        "setup_worker_pressure_unavailable" => {
+            Some("The backend could not measure memory use or free workspace space.")
+        }
+        _ => None,
+    }
+}
+
 fn catalog_hash(state: &State) -> Option<&str> {
     current_check(state, Step::Seed)?
         .artifact_ids
@@ -393,10 +435,10 @@ fn stage(state: &State, step: Step) -> Stage<'_> {
         };
         let job = &detail.job;
         if backend::job_is_active(&job.state) {
-            return Stage::Working(Some(job));
+            return Stage::Working(Some(detail));
         }
         if job.state != "completed" {
-            return Stage::Failed(job);
+            return Stage::Failed(detail);
         }
         if step == Step::Classifier {
             let candidate = detail.maintenance_result.as_ref().is_some_and(|result| {
@@ -841,7 +883,11 @@ pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit:
             preferences,
             kit,
         )),
-        Stage::Working(job) => Some(job_progress(job, preferences, kit)),
+        Stage::Working(detail) => Some(job_progress(
+            detail.map(|detail| &detail.job),
+            preferences,
+            kit,
+        )),
         Stage::Verifying => {
             let detail = match step {
                 Step::Seed => "Waiting for the backend to verify the seeded catalog.",
@@ -857,22 +903,28 @@ pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit:
                 kit,
             ))
         }
-        Stage::Failed(job) => Some(status(
-            if job.state == "cancelled" {
-                "Cancelled"
-            } else {
-                "Needs attention"
-            },
-            if job.error_summary.is_empty() {
-                "The backend did not complete this step."
-            } else {
-                job.error_summary.as_str()
-            },
-            StatusTone::Warn,
-            false,
-            preferences,
-            kit,
-        )),
+        Stage::Failed(detail) => {
+            let job = &detail.job;
+            let explanation = pressure_explanation(&job.error_summary).unwrap_or_else(|| {
+                if job.error_summary.is_empty() {
+                    "The backend did not complete this step."
+                } else {
+                    job.error_summary.as_str()
+                }
+            });
+            Some(status(
+                if job.state == "cancelled" {
+                    "Cancelled"
+                } else {
+                    "Needs attention"
+                },
+                explanation,
+                StatusTone::Warn,
+                false,
+                preferences,
+                kit,
+            ))
+        }
         Stage::Complete => Some(status(
             "Ready",
             match step {
@@ -888,6 +940,15 @@ pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit:
         Stage::Action => None,
     };
     panel = panel.children(progress);
+    if step == Step::Seed {
+        if let Stage::Working(Some(detail)) | Stage::Failed(detail) = stage {
+            panel = panel.children(committed_seed_progress(state, detail).map(|progress| {
+                views::quiet(progress, kit)
+                    .key("startup-seed-committed")
+                    .role("status")
+            }));
+        }
+    }
     if let Some(input) = csv_input {
         panel = panel.children(csv_source_controls(step, input, kit));
         if let Some(upload) = upload {
@@ -903,10 +964,10 @@ pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit:
             );
             panel = panel.child(
                 status(
-                    if step == Step::Seed {
-                        "Ready to seed"
-                    } else {
-                        "Ready to train"
+                    match (step, stage) {
+                        (Step::Seed, Stage::Failed(_)) => "CSV validated",
+                        (Step::Seed, _) => "Ready to seed",
+                        _ => "Ready to train",
                     },
                     detail,
                     StatusTone::Ok,
@@ -1293,6 +1354,18 @@ fn job_progress(job: Option<&backend::ActivityJob>, preferences: ViewPreferences
             kit,
         );
     };
+    if matches!(job.state.as_str(), "queued" | "retry_scheduled") {
+        if let Some(explanation) = pressure_explanation(&job.error_summary) {
+            return status(
+                "Retrying",
+                explanation,
+                StatusTone::Warn,
+                true,
+                preferences,
+                kit,
+            );
+        }
+    }
     let title = match job.state.as_str() {
         "running" => "Running",
         "retry_scheduled" => "Retrying",

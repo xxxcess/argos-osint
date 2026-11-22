@@ -395,6 +395,32 @@ pub async fn observe(repo: &Repository) -> Result<Option<Observation>, TxError> 
     Ok(response.take(0)?)
 }
 
+/// Check whether indexing can wait for a local initial seed. The source can
+/// still commit while the backlog has headroom. Prepared work must reconcile.
+pub async fn defer_initial_seed_index(
+    repo: &Repository,
+    backlog_resume_events: u64,
+) -> Result<bool, TxError> {
+    let mut response = repo
+        .db()
+        .query(
+            "SELECT VALUE (backfill_complete AND pending_json = '' AND !backlog_paused
+                AND next_sequence - acknowledged_sequence < $limit)
+             FROM ONLY actor_search_control:catalog;
+             SELECT VALUE IF job_id != '' {
+                 type::record('job',job_id).state IN ['queued','running','waiting','reconciling']
+             } ELSE { false } FROM ONLY setup_resource:actor_catalog;",
+        )
+        .bind((
+            "limit",
+            i64::try_from(backlog_resume_events).unwrap_or(i64::MAX),
+        ))
+        .await?
+        .check()?;
+    Ok(response.take::<Option<bool>>(0)? == Some(true)
+        && response.take::<Option<bool>>(1)? == Some(true))
+}
+
 #[derive(Clone, SurrealValue)]
 struct Control {
     next_sequence: i64,

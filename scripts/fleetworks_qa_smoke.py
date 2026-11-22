@@ -44,6 +44,7 @@ SAFE_REJECTION = {
     "Inbox inference is busy": "busy",
 }
 CATALOG_TIMEOUT_SECONDS = 15 * 60
+CHECKPOINT_POLL_SECONDS = 10
 CATALOG_ROWS = 94_987
 TRAINING_ROWS = 1_020
 ROCKSDB_OPTIONS = {
@@ -360,14 +361,20 @@ def embedded_tree(parent):
     return children
 
 
-def sample_catalog_resources(proc, state, evidence, stop):
-    while proc.poll() is None:
+def sample_catalog_resources(session, state, evidence, stop):
+    while session.proc.poll() is None:
         phase = evidence["stage"]
         try:
-            status = Path(f"/proc/{proc.pid}/status").read_text()
+            status = Path(f"/proc/{session.proc.pid}/status").read_text()
             disk_free = shutil.disk_usage(state).free
         except OSError:
             break
+        if "embedded_actor_index_seed_deferred" not in evidence and re.search(
+            r"\bembedded_actor_index_seed_deferred\b", session.stderr_excerpt()
+        ):
+            evidence["embedded_actor_index_seed_deferred"] = {"observed_stage": phase}
+        if phase == "actor_seed" and evidence.get("actor_seed", {}).get("recovery_observed"):
+            phase = "actor_seed_recovery"
         usage = {
             name: int(kib) * 1024
             for name, kib in re.findall(r"^(VmRSS|VmHWM|RssAnon|RssFile):\s+(\d+) kB$", status, re.M)
@@ -452,13 +459,16 @@ def exercise_bundled_catalog(session, state, app, evidence):
     registration = response["context"]
     mutation_context = {**authorize(registration), "expected_configuration_revision": 0}
 
-    def call(operation, args=None, *, allow_non_json=False):
+    def call(operation, args=None, *, allow_non_json=False, diagnostic=False):
         request = {"op": operation}
         if args is not None:
             request["args"] = args
         outcome, _ = session.request(request, registration=registration)
         data = outcome["data"]
         if outcome["outcome"] != "ok":
+            if diagnostic:
+                evidence["checkpoint_rpc_status"] = data.get("status")
+                return None
             evidence["rpc_error"] = {"operation": operation, "status": data.get("status")}
             if (operation == "reindex_actors" and data.get("status") == 422
                     and data.get("message", "").startswith("Actor index status is still checking or catching up.")):
@@ -474,9 +484,31 @@ def exercise_bundled_catalog(session, state, app, evidence):
     def jobs():
         return call("jobs_list", {"sort": "newest"})["rows"]
 
+    def seed_checkpoint(job_id, dataset, *, terminal):
+        detail = call("job_detail", {"id": job_id}, diagnostic=not terminal)
+        if detail is None or not detail["private_details_available"]:
+            return None
+        committed = detail["maintenance_result"]
+        if (not committed or committed["operation"] != "actor_seed"
+                or committed.get("dataset_sha256") != dataset["sha256"]):
+            return None
+        processed, total = committed.get("processed"), committed.get("total")
+        if type(processed) is not int or total != CATALOG_ROWS or not 0 <= processed <= total:
+            return None
+        evidence.pop("checkpoint_rpc_status", None)
+        return {
+            "committed_rows": processed, "committed_total": total,
+            "database_seeded": committed["database_seeded"],
+            "checkpoint_observed_elapsed_ms": round((time.monotonic() - phase_started) * 1000),
+        }
+
     def await_job(receipt, operation):
         job_id = receipt["job_id"]
         require(job_id and not receipt["already_completed"], "fresh catalog job was not durably accepted")
+        checkpoint = {}
+        recovery_observed = False
+        next_checkpoint = 0
+        max_reported_rows = 0
         while True:
             row = next((row for row in jobs() if row["id"] == job_id and row["operation"] == operation), None)
             if row is not None:
@@ -486,20 +518,28 @@ def exercise_bundled_catalog(session, state, app, evidence):
                     "state": state if state in TERMINAL_JOB_STATES | ACTIVE_JOB_STATES else "other",
                     "reported_rows": row.get("progress_done"), "expected_rows": row.get("progress_total"),
                 }
+                terminal = state in TERMINAL_JOB_STATES
                 if row.get("error_summary") in SAFE_CATALOG_FAILURES:
                     observed["reason"] = row["error_summary"]
                     reasons = evidence.setdefault("job_reasons_seen", [])
                     if observed["reason"] not in reasons:
                         reasons.append(observed["reason"])
+                if operation == "actor_seed":
+                    max_reported_rows = max(max_reported_rows, observed["reported_rows"] or 0)
+                    recovery_observed = (
+                        recovery_observed or bool(observed.get("reason"))
+                        or state in {"retry_scheduled", "waiting", "reconciling"}
+                    )
+                    observed.update(checkpoint, max_reported_rows=max_reported_rows, recovery_observed=recovery_observed)
                 evidence[operation] = observed
-                if state in TERMINAL_JOB_STATES:
-                    if operation == "actor_seed":
-                        detail = call("job_detail", {"id": job_id})
-                        committed = detail["maintenance_result"]
-                        if committed and committed["operation"] == "actor_seed":
-                            observed["committed_rows"] = committed["processed"]
-                            observed["committed_total"] = committed["total"]
-                            observed["database_seeded"] = committed["database_seeded"]
+                now = time.monotonic()
+                if operation == "actor_seed" and (terminal or (recovery_observed and now >= next_checkpoint)):
+                    latest = seed_checkpoint(job_id, receipt["dataset"], terminal=terminal)
+                    next_checkpoint = now + CHECKPOINT_POLL_SECONDS
+                    if latest is not None:
+                        checkpoint = latest
+                        observed.update(checkpoint)
+                if terminal:
                     return observed
             time.sleep(2)
 
@@ -578,7 +618,8 @@ def packaged_catalog_smoke(binary, app, state):
     started = time.monotonic()
     stop = threading.Event()
     session = embedded.LocalIpcSession(binary, state, client_name="fleetworks-catalog-smoke",
-                                       log_filter="warn,surrealdb::core::kvs::rocksdb=info")
+                                       log_filter="warn,surrealdb::core::kvs::rocksdb=info,"
+                                                  "argos_api_host::actor_index_worker=info")
 
     def expire():
         if session.proc.poll() is None:
@@ -588,8 +629,9 @@ def packaged_catalog_smoke(binary, app, state):
     timeout = threading.Timer(CATALOG_TIMEOUT_SECONDS, expire)
     timeout.daemon = True
     timeout.start()
-    sampler = threading.Thread(target=sample_catalog_resources, args=(session.proc, state, evidence, stop), daemon=True)
+    sampler = threading.Thread(target=sample_catalog_resources, args=(session, state, evidence, stop), daemon=True)
     sampler.start()
+    failure_type = None
     try:
         exercise_bundled_catalog(session, state, app, evidence)
         require(evidence.get("peak_sampled_rss_bytes", 0) > 0
@@ -597,16 +639,26 @@ def packaged_catalog_smoke(binary, app, state):
                 "bundled catalog smoke did not collect seed resource observations")
         evidence["status"] = "passed"
     except (OSError, ValueError, KeyError, StopIteration, subprocess.SubprocessError) as error:
-        evidence["failure_type"] = type(error).__name__
-        print(f"Offline bundled catalog smoke failed during {evidence['stage']} ({type(error).__name__})", file=sys.stderr)
+        failure_type = type(error).__name__
     finally:
         timeout.cancel()
+        timeout.join(timeout=1)
         stop.set()
         sampler.join(timeout=5)
         session.close_unconditionally()
     if "min_disk_free_bytes" in evidence:
         evidence["peak_disk_headroom_drop_bytes"] = evidence["baseline_disk_free_bytes"] - evidence["min_disk_free_bytes"]
     evidence["elapsed_ms"] = round((time.monotonic() - started) * 1000)
+    if evidence.get("timed_out"):
+        evidence["status"] = "failed"
+        evidence["failure_reason"] = "catalog_watchdog_deadline"
+        failure_type = "TimeoutError"
+    if evidence["status"] == "failed":
+        evidence["failure_type"] = failure_type
+        evidence["elapsed_by_stage_ms"][evidence["stage"]] = max(
+            0, evidence["elapsed_ms"] - sum(evidence["elapsed_by_stage_ms"].values()),
+        )
+        print(f"Offline bundled catalog smoke failed during {evidence['stage']} ({failure_type})", file=sys.stderr)
     return evidence
 
 

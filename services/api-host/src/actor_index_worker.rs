@@ -85,6 +85,7 @@ pub struct ActorIndexWorker {
     transport: IndexTransport,
     owner: String,
     status: Option<(Instant, ActorIndexStatus)>,
+    deferred_initial_seed: bool,
 }
 
 fn validate_owner(owner: &str) -> anyhow::Result<()> {
@@ -125,6 +126,7 @@ impl ActorIndexWorker {
             },
             owner,
             status: None,
+            deferred_initial_seed: false,
         })
     }
 
@@ -135,6 +137,7 @@ impl ActorIndexWorker {
             transport: IndexTransport::Local(service),
             owner,
             status: None,
+            deferred_initial_seed: false,
         })
     }
 
@@ -232,6 +235,28 @@ impl ActorIndexWorker {
             }
         };
         actor_search_outbox::observe_resources(repo, &claim, &status, Utc::now()).await?;
+        let defer_initial_seed = matches!(&self.transport, IndexTransport::Local(_))
+            && status.rebuilding.is_none()
+            && status
+                .active
+                .as_ref()
+                .is_some_and(|active| active.visible_checkpoint == 0 && !active.source_complete)
+            && actor_search_outbox::defer_initial_seed_index(
+                repo,
+                status.limits.backlog_resume_events,
+            )
+            .await?;
+        if defer_initial_seed {
+            if !self.deferred_initial_seed {
+                tracing::info!(
+                    code = "embedded_actor_index_seed_deferred",
+                    "Holding initial actor index writes while the catalog commits"
+                );
+            }
+            self.deferred_initial_seed = true;
+            return Ok(TickReport::Waiting);
+        }
+        self.deferred_initial_seed = false;
         match actor_search_outbox::next_rebuild(repo, &self.owner, &status, Utc::now()).await {
             Ok(Some(action)) => return self.rebuild_tick(repo, action).await,
             Ok(None) => (),

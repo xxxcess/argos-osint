@@ -293,11 +293,25 @@ pub struct Engine {
     fields: Fields,
     serving: RwLock<Arc<Snapshot>>,
     control: Mutex<Control>,
+    lazy_active_writer: bool,
     _root_lock: DirectoryLock,
 }
 
 impl Engine {
     pub fn open(config: EngineConfig) -> Result<Self, IndexError> {
+        Self::open_with_writer(config, false)
+    }
+
+    /// Open the serving reader and allocate its writer on the first apply.
+    /// Embedded keeps the initial index writer outside the catalog import phase.
+    pub fn open_embedded(config: EngineConfig) -> Result<Self, IndexError> {
+        Self::open_with_writer(config, true)
+    }
+
+    fn open_with_writer(
+        config: EngineConfig,
+        lazy_active_writer: bool,
+    ) -> Result<Self, IndexError> {
         config.validate()?;
         reject_symlinks(&config.directory)?;
         fs::create_dir_all(&config.directory).map_err(IndexError::storage)?;
@@ -354,7 +368,7 @@ impl Engine {
             &root.join(&manifest.active),
             CommitMeta::new(&config, manifest.active.clone(), 0, 0),
             create,
-            manifest.pending.is_none(),
+            manifest.pending.is_none() && !lazy_active_writer,
         )?;
         let pending_result = manifest
             .pending
@@ -404,6 +418,7 @@ impl Engine {
                 pending,
                 error,
             }),
+            lazy_active_writer,
             _root_lock: root_lock,
         })
     }
@@ -530,12 +545,14 @@ impl Engine {
         if generation.committed.generation != batch.index_generation {
             return Err(IndexError::conflict("target_generation_mismatch"));
         }
-        if generation.writer.is_none() && !generation.recover {
-            *error = Some("writer_inactive");
-            return Err(IndexError::unavailable("writer_inactive"));
-        }
         if generation.recover {
             generation.reconcile(&self.config)?;
+        } else if generation.writer.is_none() {
+            if !self.lazy_active_writer || targets_pending {
+                *error = Some("writer_inactive");
+                return Err(IndexError::unavailable("writer_inactive"));
+            }
+            generation.writer = Some(writer(&generation.index, &self.config)?);
         }
         if batch.writer_epoch < generation.committed.writer_epoch {
             return Err(IndexError::conflict("stale_writer_epoch"));

@@ -11,6 +11,7 @@ use std::sync::atomic::Ordering;
 
 use argos_osint_core::actor_catalog::Actor;
 use argos_osint_core::storage::actor_catalog;
+use argos_osint_core::storage::actor_search_outbox;
 use argos_osint_core::storage::connect_registry;
 use argos_osint_core::storage::connect_registry::RegistryAuthority;
 use argos_osint_core::storage::job_dispatch;
@@ -588,6 +589,18 @@ async fn pressure_retry_reopens_and_resumes_only_uncommitted_rows() {
     assert_eq!(failure.to_string(), "worker_memory_pressure");
     assert_eq!(support::count(repo.db(), "brain_actor").await, 1);
     assert_eq!(support::count(repo.db(), "actor_search_event").await, 1);
+    repo.db()
+        .query("UPDATE actor_search_control:catalog SET backfill_complete=true RETURN NONE")
+        .await
+        .expect("configure the initial empty-index fixture")
+        .check()
+        .expect("finish fixture backfill");
+    assert!(actor_search_outbox::defer_initial_seed_index(&repo, 2)
+        .await
+        .expect("defer while the seed is active and the outbox has headroom"));
+    assert!(!actor_search_outbox::defer_initial_seed_index(&repo, 1)
+        .await
+        .expect("the writer can drain under outbox pressure"));
     let checkpoint = setup_jobs::actor_seed_checkpoint(&repo, &first.task.job_id, &"b".repeat(64))
         .await
         .expect("committed checkpoint")

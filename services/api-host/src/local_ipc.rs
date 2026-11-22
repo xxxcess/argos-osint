@@ -226,7 +226,7 @@ mod embedded {
             )?;
             let engine = tokio::task::spawn_blocking({
                 let config = engine_config.engine.clone();
-                move || Engine::open(config)
+                move || Engine::open_embedded(config)
             })
             .await??;
             let engine_slot = Arc::new(EngineSlot::new(Some(Arc::new(engine))));

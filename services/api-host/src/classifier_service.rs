@@ -512,8 +512,14 @@ mod tests {
         .await
         .unwrap();
         // Apply the same JSON round trip to the local receipt before comparing floats.
-        let local_over_json: Vec<ClassificationReceipt> =
+        let mut local_over_json: Vec<ClassificationReceipt> =
             serde_json::from_slice(&serde_json::to_vec(&local_receipt).unwrap()).unwrap();
+        // The independent evaluations record their own observation times.
+        for (local, remote) in local_over_json.iter_mut().zip(&remote_receipt) {
+            chrono::DateTime::parse_from_rfc3339(&local.evaluated_at).unwrap();
+            chrono::DateTime::parse_from_rfc3339(&remote.evaluated_at).unwrap();
+            local.evaluated_at.clone_from(&remote.evaluated_at);
+        }
         assert_eq!(remote_receipt, local_over_json);
         assert_eq!(
             remote_receipt[0].selected_domains,

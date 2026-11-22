@@ -79,9 +79,9 @@ impl MergePolicy for EmbeddedCatchUpMerge {
 
 #[cfg(test)]
 mod tests {
+    use tantivy::index::SegmentId;
     use tantivy::schema::Schema;
     use tantivy::Index;
-    use tantivy::SegmentId;
 
     use super::EmbeddedCatchUpMerge;
     use super::MergePolicy;

@@ -905,13 +905,12 @@ pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit:
         }
         Stage::Failed(detail) => {
             let job = &detail.job;
-            let explanation = pressure_explanation(&job.error_summary).unwrap_or_else(|| {
-                if job.error_summary.is_empty() {
-                    "The backend did not complete this step."
-                } else {
-                    job.error_summary.as_str()
-                }
-            });
+            let fallback = if job.error_summary.is_empty() {
+                "The backend did not complete this step."
+            } else {
+                job.error_summary.as_str()
+            };
+            let explanation = pressure_explanation(&job.error_summary).unwrap_or(fallback);
             Some(status(
                 if job.state == "cancelled" {
                     "Cancelled"

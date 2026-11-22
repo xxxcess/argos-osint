@@ -45,22 +45,33 @@ SAFE_REJECTION = {
 }
 CATALOG_TIMEOUT_SECONDS = 15 * 60
 CHECKPOINT_POLL_SECONDS = 10
+CATALOG_PROGRESS_MILESTONES = 6
 CATALOG_ROWS = 94_987
 TRAINING_ROWS = 1_020
 ROCKSDB_OPTIONS = {
-    "write_buffer_size": 16 * 1024 * 1024,
+    "write_buffer_size": 8 * 1024 * 1024,
     "max_write_buffer_number": 2,
     "min_write_buffer_number_to_merge": 1,
     "max_background_jobs": 2,
     "max_subcompactions": 1,
 }
-ROCKSDB_BLOCK_CACHE_BYTES = 32 * 1024 * 1024
+ROCKSDB_BLOCK_CACHE_BYTES = 16 * 1024 * 1024
+SMAPS_ROLLUP_FIELDS = {
+    "Rss", "Pss_Anon", "Pss_File", "Pss_Shmem", "Private_Clean", "Private_Dirty",
+    "Shared_Clean", "Shared_Dirty", "Anonymous", "Swap",
+}
 TERMINAL_JOB_STATES = {"completed", "failed", "cancelled", "canceled", "stopped", "skipped", "superseded"}
 ACTIVE_JOB_STATES = {"queued", "running", "waiting", "reconciling", "retry_scheduled"}
 SAFE_CATALOG_FAILURES = {
     "setup_worker_resource_pressure", "setup_dataset_resource_budget",
     "setup_worker_memory_pressure", "setup_worker_disk_pressure", "setup_worker_pressure_unavailable",
     "setup_interrupted", "native_domain_operation_failed",
+}
+SAFE_INDEX_REASONS = {
+    "index_building", "index_catching_up", "index_generation_mismatch", "index_ingest_paused",
+    "index_not_built", "index_not_ready", "index_reader_visible", "index_rebuild_correction_required",
+    "index_rebuild_interrupted", "index_recovery_required", "index_source_mismatch",
+    "index_source_not_started", "index_status_unavailable",
 }
 
 
@@ -77,13 +88,13 @@ def authorize(registration):
     }
 
 
-def until(probe, ready, description, *, timeout=90):
+def until(probe, ready, description, *, timeout=90, interval=0.25):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         value = probe()
         if ready(value):
             return value
-        time.sleep(0.25)
+        time.sleep(interval)
     raise TimeoutError(description)
 
 
@@ -361,11 +372,27 @@ def embedded_tree(parent):
     return children
 
 
+def sample_smaps_rollup(proc, phase_usage):
+    try:
+        rollup = (proc / "smaps_rollup").read_text()
+    except OSError:
+        return
+    sample = {
+        f"{name.lower()}_bytes": int(kib) * 1024
+        for name, kib in re.findall(r"^([A-Za-z_]+):[ \t]+(\d+) kB$", rollup, re.M)
+        if name in SMAPS_ROLLUP_FIELDS
+    }
+    previous = phase_usage.get("smaps_rollup_peak_sample", {})
+    if sample.get("rss_bytes", 0) > previous.get("rss_bytes", 0):
+        phase_usage["smaps_rollup_peak_sample"] = {**sample, "stage_sample": phase_usage["samples"]}
+
+
 def sample_catalog_resources(session, state, evidence, stop):
+    proc = Path(f"/proc/{session.proc.pid}")
     while session.proc.poll() is None:
         phase = evidence["stage"]
         try:
-            status = Path(f"/proc/{session.proc.pid}/status").read_text()
+            status = (proc / "status").read_text()
             disk_free = shutil.disk_usage(state).free
         except OSError:
             break
@@ -387,10 +414,17 @@ def sample_catalog_resources(session, state, evidence, stop):
         phase_usage = evidence["resources_by_stage"].setdefault(phase, {"samples": 0})
         phase_usage["samples"] += 1
         phase_usage["min_disk_free_bytes"] = min(phase_usage.get("min_disk_free_bytes", disk_free), disk_free)
+        if "VmRSS" in usage:
+            rss = usage["VmRSS"]
+            phase_usage["min_sampled_rss_bytes"] = min(phase_usage.get("min_sampled_rss_bytes", rss), rss)
+            phase_usage["last_sampled_rss_bytes"] = rss
         for field, name in (("peak_sampled_rss_bytes", "VmRSS"), ("peak_sampled_anon_bytes", "RssAnon"),
                             ("peak_sampled_file_bytes", "RssFile"), ("kernel_rss_high_water_bytes", "VmHWM")):
             if name in usage:
                 phase_usage[field] = max(phase_usage.get(field, 0), usage[name])
+        # Read the kernel aggregate every ten samples. Retain only numeric fields from one sample.
+        if phase_usage["samples"] % 10 == 1:
+            sample_smaps_rollup(proc, phase_usage)
         if stop.wait(1):
             break
 
@@ -472,6 +506,7 @@ def exercise_bundled_catalog(session, state, app, evidence):
             evidence["rpc_error"] = {"operation": operation, "status": data.get("status")}
             if (operation == "reindex_actors" and data.get("status") == 422
                     and data.get("message", "").startswith("Actor index status is still checking or catching up.")):
+                evidence["actor_index_admission_waits"] = evidence.get("actor_index_admission_waits", 0) + 1
                 return None
             raise ValueError("bundled catalog IPC operation failed")
         require(allow_non_json or data["payload"] in ("json", "dataset_upload"), "unexpected catalog IPC payload")
@@ -531,6 +566,14 @@ def exercise_bundled_catalog(session, state, app, evidence):
                         or state in {"retry_scheduled", "waiting", "reconciling"}
                     )
                     observed.update(checkpoint, max_reported_rows=max_reported_rows, recovery_observed=recovery_observed)
+                    progress = evidence.setdefault("actor_seed_progress", {})
+                    samples = progress.setdefault("during_recovery" if recovery_observed else "initial", [])
+                    rows = observed["reported_rows"]
+                    if (type(rows) is int and len(samples) < CATALOG_PROGRESS_MILESTONES
+                            and (not samples or rows > samples[-1]["reported_rows"])):
+                        samples.append({
+                            "reported_rows": rows, "elapsed_ms": round((time.monotonic() - phase_started) * 1000),
+                        })
                 evidence[operation] = observed
                 now = time.monotonic()
                 if operation == "actor_seed" and (terminal or (recovery_observed and now >= next_checkpoint)):
@@ -539,6 +582,13 @@ def exercise_bundled_catalog(session, state, app, evidence):
                     if latest is not None:
                         checkpoint = latest
                         observed.update(checkpoint)
+                        samples = evidence["actor_seed_progress"].setdefault("committed_checkpoints", [])
+                        rows = checkpoint["committed_rows"]
+                        if (len(samples) < CATALOG_PROGRESS_MILESTONES
+                                and (not samples or rows != samples[-1]["committed_rows"])):
+                            samples.append({
+                                "committed_rows": rows, "elapsed_ms": checkpoint["checkpoint_observed_elapsed_ms"],
+                            })
                 if terminal:
                     return observed
             time.sleep(2)
@@ -565,16 +615,28 @@ def exercise_bundled_catalog(session, state, app, evidence):
               "completed actor catalog was not ready", timeout=30)
         evidence["actor_catalog_ready"] = True
 
+    next_stage("actor_index_catch_up")
+
+    def serving_index_ready():
+        observation = check("actor_search")
+        reason = observation.get("reason_code")
+        if reason in SAFE_INDEX_REASONS:
+            evidence["actor_search_readiness"] = reason
+        return observation["state"] == "ready" and reason == "index_reader_visible"
+
+    # The Embedded source drains automatically. The shared catalog watchdog still bounds this wait.
+    until(serving_index_ready, bool, "initial actor index outbox did not become reader-visible",
+          timeout=CATALOG_TIMEOUT_SECONDS, interval=2)
+
     next_stage("actor_index_admission")
     receipt = until(lambda: call("reindex_actors", {
         "request_id": "bundled-catalog-reindex", "context": mutation_context,
     }), bool, "packaged actor index could not be accepted", timeout=120)
     evidence.pop("rpc_error", None)
-    next_stage("actor_index")
-    if receipt["already_completed"]:
-        evidence["actor_reindex"] = {"state": "already_completed"}
-    else:
-        require(await_job(receipt, "actor_reindex")["state"] == "completed", "packaged actor index did not complete")
+    require(receipt["already_completed"] and not receipt["job_id"]
+            and not any(row["operation"] == "actor_reindex" for row in jobs()),
+            "reader-visible initial index queued a redundant rebuild")
+    evidence["actor_reindex"] = {"state": "already_completed"}
 
     next_stage("actor_search")
     # The final catalog row proves that the serving index covers the tail of the import.

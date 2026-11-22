@@ -1423,21 +1423,17 @@ where
                 if let Some(execution)=execution {execution.check_in(&tx,cancel).await?;}
                 run(&tx, tx.query("IF (SELECT VALUE owner FROM ONLY brain_actor_seed:catalog) != $owner { THROW 'actor seed lease changed'; };
                     IF $merge_selected {
-                        FOR $actor IN $actors {
-                            LET $actor_id=$actor.id;
-                            UPSERT $actor_id SET subtype=$actor.subtype, display_name=$actor.display_name,
-                                identity_state=identity_state ?? $actor.identity_state, scope_key=$actor.scope_key,
-                                revision=(revision ?? 0)+1, provenance_json=$actor.provenance_json,
-                                catalog_json=$actor.catalog_json, catalog_id=$actor.catalog_id,
-                                created_at=created_at ?? $actor.created_at, updated_at=$actor.updated_at RETURN NONE;
-                        };
-                        FOR $memory IN $memories {
-                            LET $memory_id=$memory.id;
-                            UPSERT $memory_id SET text=$memory.text, category=category ?? $memory.category,
-                                pinned=pinned ?? $memory.pinned, lifecycle=lifecycle ?? $memory.lifecycle,
-                                source_json=$memory.source_json, memory_kind=$memory.memory_kind,
-                                payload_json=$memory.payload_json RETURN NONE;
-                        };
+                        INSERT INTO brain_actor $actors ON DUPLICATE KEY UPDATE
+                            subtype=$input.subtype, display_name=$input.display_name,
+                            identity_state=identity_state ?? $input.identity_state, scope_key=$input.scope_key,
+                            revision=(revision ?? 0)+1, provenance_json=$input.provenance_json,
+                            catalog_json=$input.catalog_json, catalog_id=$input.catalog_id,
+                            created_at=created_at ?? $input.created_at, updated_at=$input.updated_at RETURN NONE;
+                        INSERT INTO memory $memories ON DUPLICATE KEY UPDATE
+                            text=$input.text, category=category ?? $input.category,
+                            pinned=pinned ?? $input.pinned, lifecycle=lifecycle ?? $input.lifecycle,
+                            source_json=$input.source_json, memory_kind=$input.memory_kind,
+                            payload_json=$input.payload_json RETURN NONE;
                     } ELSE {
                         INSERT IGNORE INTO brain_actor $actors RETURN NONE;
                         INSERT IGNORE INTO memory $memories RETURN NONE;

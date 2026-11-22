@@ -21,6 +21,8 @@ use fleetworks_contracts::actor_index::ActorProjection;
 use fleetworks_contracts::actor_index::MAX_BATCH_DOCUMENTS;
 use serde::Deserialize;
 use serde::Serialize;
+use surrealdb::types::Datetime;
+use surrealdb::types::RecordId;
 use surrealdb::types::SurrealValue;
 
 use super::jobs;
@@ -170,6 +172,24 @@ async fn ensure_child_in(
     Ok(child)
 }
 
+#[derive(SurrealValue)]
+struct HeadWrite {
+    id: RecordId,
+    actor_id: String,
+    revision: i64,
+    updated_at: Datetime,
+}
+
+#[derive(SurrealValue)]
+struct EventWrite {
+    id: RecordId,
+    sequence: i64,
+    actor_id: String,
+    revision: i64,
+    cause_job: Option<String>,
+    created_at: Datetime,
+}
+
 /// Join the actual source transaction after actor/alias/lifecycle writes. A
 /// rollback cannot leave index intent. Even no-op seed retries reconcile work.
 pub async fn enqueue_actors_in(
@@ -196,18 +216,71 @@ pub async fn enqueue_actors_in(
     } else {
         None
     };
-    jobs::run(tx, tx.query("FOR $actor IN $actors {
-        UPDATE actor_search_control:catalog SET next_sequence+=1 RETURN NONE;
-        LET $sequence=(SELECT VALUE next_sequence FROM ONLY actor_search_control:catalog);
-        LET $head=type::record('actor_search_head',$actor);
-        UPSERT $head SET actor_id=$actor,revision=(revision ?? 0)+1,updated_at=<datetime>$now RETURN NONE;
-        LET $revision=(SELECT VALUE revision FROM ONLY $head);
-        CREATE type::record('actor_search_event',$sequence) SET sequence=$sequence,actor_id=$actor,revision=$revision,cause_job=$cause,created_at=<datetime>$now RETURN NONE;
-    }; IF $cause != NONE {
-        UPDATE type::record('actor_search_cause',$cause) SET required_sequence=(SELECT VALUE next_sequence FROM ONLY actor_search_control:catalog),total_events+=array::len($actors),closed=false RETURN NONE;
-        UPDATE type::record('job',$cause) SET progress_total=(SELECT VALUE total_events FROM ONLY type::record('actor_search_cause',$cause)) RETURN NONE;
-    };")
-        .bind(("actors",actors)).bind(("cause",child)).bind(("now",now.to_rfc3339()))).await?;
+    // The coordinator guard protects this whole consecutive sequence range.
+    // One control write suffices for the sorted, distinct actor IDs.
+    let count = actors.len() as i64;
+    let heads: Vec<_> = actors
+        .iter()
+        .map(|actor| HeadWrite {
+            id: jobs::rid("actor_search_head", actor),
+            actor_id: actor.clone(),
+            revision: 1,
+            updated_at: now.into(),
+        })
+        .collect();
+    let mut response = jobs::run(
+        tx,
+        tx.query(
+            "UPDATE actor_search_control:catalog SET next_sequence += $count RETURN NONE;
+             SELECT VALUE next_sequence FROM ONLY actor_search_control:catalog;
+             INSERT INTO actor_search_head $heads ON DUPLICATE KEY UPDATE
+                 actor_id=$input.actor_id,revision=(revision ?? 0)+1,
+                 updated_at=$input.updated_at RETURN AFTER;",
+        )
+        .bind(("count", count))
+        .bind(("heads", heads)),
+    )
+    .await?;
+    let end = jobs::take::<Option<i64>>(&mut response, 1)?
+        .filter(|end| *end >= count)
+        .ok_or_else(|| invalid("actor_index_sequence_invalid"))?;
+    let revisions: BTreeMap<_, _> = jobs::take::<Vec<HeadRow>>(&mut response, 2)?
+        .into_iter()
+        .map(|head| (head.actor_id, head.revision))
+        .collect();
+    let events = (end - count + 1..=end)
+        .zip(actors)
+        .map(|(sequence, actor_id)| {
+            let revision = *revisions
+                .get(&actor_id)
+                .ok_or_else(|| invalid("actor_index_revision_missing"))?;
+            Ok(EventWrite {
+                id: RecordId::new("actor_search_event", sequence),
+                sequence,
+                actor_id,
+                revision,
+                cause_job: child.clone(),
+                created_at: now.into(),
+            })
+        })
+        .collect::<Result<Vec<_>, TxError>>()?;
+    jobs::run(
+        tx,
+        tx.query(
+            "INSERT INTO actor_search_event $events RETURN NONE;
+             IF $cause != NONE {
+                 UPDATE type::record('actor_search_cause',$cause)
+                     SET required_sequence=$end,total_events+=$count,closed=false RETURN NONE;
+                 UPDATE type::record('job',$cause)
+                     SET progress_total=(SELECT VALUE total_events FROM ONLY type::record('actor_search_cause',$cause)) RETURN NONE;
+             };",
+        )
+        .bind(("events", events))
+        .bind(("cause", child))
+        .bind(("end", end))
+        .bind(("count", count)),
+    )
+    .await?;
     Ok(())
 }
 

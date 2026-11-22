@@ -155,7 +155,19 @@ pub(crate) async fn run_with_config(
     let tools = Arc::new(manual::Tools::default());
     let relinquished = Arc::new(AtomicUsize::new(0));
     let mut tasks = JoinSet::new();
-    tasks.spawn(index_loop(repo.clone(), index, receive.clone()));
+    let index_interval = if relinquish_on_shutdown {
+        // Embedded drains the initial durable backlog at the configured
+        // writer pace. The coordinator and service still enforce admission.
+        Duration::from_millis(500)
+    } else {
+        Duration::from_secs(1)
+    };
+    tasks.spawn(index_loop(
+        repo.clone(),
+        index,
+        receive.clone(),
+        index_interval,
+    ));
     let runtime = LaneRuntime {
         repo: repo.clone(),
         workspace,
@@ -212,8 +224,9 @@ async fn index_loop(
     repo: Repository,
     mut index: Option<ActorIndexWorker>,
     mut stop: watch::Receiver<bool>,
+    interval: Duration,
 ) -> Result<()> {
-    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    let mut tick = tokio::time::interval(interval);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         tokio::select! {

@@ -18,14 +18,14 @@ use url::Url;
 use super::bootstrap::{self, Bootstrap};
 use super::tx::TxError;
 
-// One 32 MiB cache plus two 16 MiB memtables gives SurrealDB's write buffer
-// manager a 64 MiB budget. Limit background concurrency to leave room for
+// One 16 MiB cache plus two 8 MiB memtables gives SurrealDB's write buffer
+// manager a 32 MiB budget. Limit background concurrency to leave room for
 // compaction, transaction allocations and the rest of the companion.
 #[cfg(feature = "embedded")]
 const EMBEDDED_ROCKSDB_OPTIONS: &str = concat!(
     "versioned=false&sync=every",
-    "&rocksdb_block_cache_size=33554432",
-    "&rocksdb_write_buffer_size=16777216",
+    "&rocksdb_block_cache_size=16777216",
+    "&rocksdb_write_buffer_size=8388608",
     "&rocksdb_max_write_buffer_number=2",
     "&rocksdb_min_write_buffer_number_to_merge=1",
     "&rocksdb_thread_count=2",
@@ -293,7 +293,7 @@ mod tests {
             .expect("RocksDB must persist its effective options when opened");
         let options = std::fs::read_to_string(options_path).unwrap();
         for expected in [
-            "write_buffer_size=16777216",
+            "write_buffer_size=8388608",
             "max_write_buffer_number=2",
             "min_write_buffer_number_to_merge=1",
             "max_background_jobs=2",

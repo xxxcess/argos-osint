@@ -5,6 +5,7 @@ import argparse
 import base64
 from datetime import datetime
 import hashlib
+from itertools import islice
 import json
 import os
 from pathlib import Path
@@ -98,7 +99,21 @@ SEED_BATCH_FIELD = re.compile(
 SEED_PHASE_ELAPSED = re.compile(r'\belapsed_us=([0-9]{1,20})(?=$|[\s,])')
 CATALOG_PHASE = re.compile(r'\bphase="?([a-z_]{1,40})"?(?=$|[\s,])')
 SEED_PHASES = {"admission", "csv_spool_validation", "job_progress", "job_log", "final_progress"}
-SHUTDOWN_PHASES = {"ipc_drained", "health_stopped", "qa_stopped", "context_released"}
+SHUTDOWN_PHASES = {
+    "ipc_drained", "health_stopped", "qa_stopped", "context_released",
+    "runtime_shutdown_started", "runtime_shutdown_finished",
+}
+ROCKSDB_SHUTDOWN_INFO = re.compile(
+    r'(?:^|\s)INFO[ \t]+surrealdb::core::kvs::rocksdb:[ \t]+'
+    r'(?:Waiting for in-flight compactions to drain \(timeout: ([0-9]{1,4})s\)|Cancelling background work)$'
+)
+SHUTDOWN_TASK_LIMIT = 64
+SHUTDOWN_WAIT_CHANNELS = {
+    "bit_wait_io", "do_epoll_wait", "do_wait", "ep_poll", "filemap_fdatawait_range",
+    "folio_wait_bit_common", "futex_wait", "futex_wait_queue", "futex_wait_queue_me",
+    "hrtimer_nanosleep", "io_schedule", "io_schedule_timeout", "pipe_read", "pipe_write",
+    "poll_schedule_timeout", "schedule_timeout", "wait_for_completion", "wait_woken",
+}
 
 
 def require(condition, description):
@@ -431,6 +446,46 @@ def sanitized_shutdown_ack(raw):
     return ack or None
 
 
+def post_ack_wait_summary(proc):
+    def read(path, limit):
+        try:
+            with path.open(encoding="ascii", errors="replace") as stream:
+                return stream.read(limit)
+        except OSError:
+            return ""
+
+    def wait_channel(path):
+        symbol = read(path, 64).strip()
+        if symbol in SHUTDOWN_WAIT_CHANNELS:
+            return symbol
+        return "unspecified" if symbol in {"", "0"} else "other"
+
+    status = read(proc / "status", 8192)
+    state = re.search(r"^State:[ \t]+([RSDZTtXxIKWP])(?=[ \t]|$)", status, re.M)
+    summary = {"main_wait_channel": wait_channel(proc / "wchan"), "task_wait_channels": {}}
+    if state:
+        summary["state"] = state[1]
+    for name, key in (("Threads", "reported_threads"), ("VmRSS", "rss_kib")):
+        value = re.search(rf"^{name}:[ \t]+([0-9]{{1,12}})(?: kB)?$", status, re.M)
+        if value:
+            summary[key] = int(value[1])
+    try:
+        with os.scandir(proc / "task") as tasks:
+            entries = list(islice(tasks, SHUTDOWN_TASK_LIMIT + 1))
+    except OSError:
+        summary["task_snapshot_available"] = False
+        return summary
+
+    summary["task_snapshot_available"] = True
+    summary["task_snapshot_truncated"] = len(entries) > SHUTDOWN_TASK_LIMIT
+    counts = summary["task_wait_channels"]
+    for entry in entries[:SHUTDOWN_TASK_LIMIT]:
+        channel = wait_channel(Path(entry.path) / "wchan")
+        counts[channel] = counts.get(channel, 0) + 1
+    summary["sampled_tasks"] = sum(counts.values())
+    return summary
+
+
 class CatalogIpcSession(embedded.LocalIpcSession):
     def __init__(self, binary, state, evidence):
         self.evidence = evidence
@@ -441,6 +496,7 @@ class CatalogIpcSession(embedded.LocalIpcSession):
         self.seed_batch_timings = {}
         self.seed_phase_timings = {}
         self.shutdown_phases = {}
+        self.rocksdb_shutdown_phases = {}
         super().__init__(binary, state, client_name="fleetworks-catalog-smoke",
                          log_filter="warn,surrealdb::core::kvs::rocksdb=info,"
                                     "argos_api_host::actor_index_worker=info,fleetworks_search_index::engine=info,"
@@ -530,6 +586,19 @@ class CatalogIpcSession(embedded.LocalIpcSession):
             self._retain_event(self.shutdown_phases, {"phase": phase})
         return True
 
+    def _record_rocksdb_shutdown_event(self, text):
+        if "in-flight compactions to drain" not in text and "Cancelling background work" not in text:
+            return False
+        match = ROCKSDB_SHUTDOWN_INFO.search(ANSI.sub("", text))
+        if match is None:
+            return False
+        if match[1] is None:
+            fields = {"phase": "cancelling_background_work"}
+        else:
+            fields = {"phase": "compaction_drain", "timeout_seconds": int(match[1])}
+        self._retain_event(self.rocksdb_shutdown_phases, fields)
+        return True
+
     def _drain_stderr(self):
         captured = 0
         while True:
@@ -540,7 +609,8 @@ class CatalogIpcSession(embedded.LocalIpcSession):
             if not line:
                 return
             text = line.decode("utf-8", errors="replace").rstrip("\n")
-            if self._record_index_event(text) or self._record_seed_or_shutdown_event(text):
+            if (self._record_index_event(text) or self._record_seed_or_shutdown_event(text)
+                    or self._record_rocksdb_shutdown_event(text)):
                 continue
             captured += len(text)
             if captured <= embedded.MAX_STDERR_TAIL_BYTES * 8:
@@ -913,6 +983,9 @@ def packaged_catalog_smoke(binary, app, state):
         evidence["status"] = "passed"
     except (OSError, ValueError, KeyError, StopIteration, subprocess.SubprocessError) as error:
         failure_type = type(error).__name__
+        if (evidence["stage"] == "shutdown" and isinstance(error, subprocess.TimeoutExpired)
+                and sanitized_shutdown_ack(session.last_shutdown_ack) is not None and session.proc.poll() is None):
+            evidence["shutdown_wait_snapshot"] = post_ack_wait_summary(Path(f"/proc/{session.proc.pid}"))
     finally:
         timeout.cancel()
         timeout.join(timeout=1)
@@ -931,6 +1004,8 @@ def packaged_catalog_smoke(binary, app, state):
         evidence["actor_seed_phase_timings"] = session.seed_phase_timings
     if session.shutdown_phases:
         evidence["backend_shutdown_phases"] = session.shutdown_phases
+    if session.rocksdb_shutdown_phases:
+        evidence["rocksdb_shutdown_phases"] = session.rocksdb_shutdown_phases
     last_ack = sanitized_shutdown_ack(getattr(session, "last_shutdown_ack", None))
     if last_ack is not None:
         evidence["shutdown_ack"] = last_ack

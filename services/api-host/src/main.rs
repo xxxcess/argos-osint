@@ -167,7 +167,17 @@ fn main() -> Result<()> {
         ));
         // `local_ipc::run` drops storage/index/lock/helpers before returning; bound teardown so
         // an external parent that waits for child exit before closing stdin cannot hang on `read(0)`.
+        tracing::debug!(
+            target: "argos_api_host::local_ipc::embedded",
+            code = "embedded_backend_shutdown_phase",
+            phase = "runtime_shutdown_started",
+        );
         runtime.shutdown_timeout(Duration::from_millis(100));
+        tracing::debug!(
+            target: "argos_api_host::local_ipc::embedded",
+            code = "embedded_backend_shutdown_phase",
+            phase = "runtime_shutdown_finished",
+        );
         return result;
     }
     runtime.block_on(run_non_ipc(args))

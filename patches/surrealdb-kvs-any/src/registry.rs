@@ -82,6 +82,7 @@ impl<'a> Backends<'a> {
 							| "rocksdb_thread_count"
 							| "rocksdb_jobs_count"
 							| "rocksdb_max_concurrent_subcompactions"
+							| "rocksdb_shutdown_wait_for_compact_seconds"
 					) {
 					key
 				} else {

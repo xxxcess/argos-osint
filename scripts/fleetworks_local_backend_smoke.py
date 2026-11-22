@@ -747,7 +747,7 @@ def run_ci_bundled_catalog(app, output):
             or environment.get("GITHUB_EVENT_NAME") != "pull_request"
             or environment.get("LINUX_TARGET") != "x86_64-unknown-linux-gnu"
             or environment.get("LINUX_PROFILE") != "debug"):
-        return
+        raise ValueError("Full bundled catalog verification requires a Linux x86-64 debug PR package and output path")
     revision = environment["EXPECTED_HEAD"]
     run_id = environment["GITHUB_RUN_ID"]
     run_attempt = environment["GITHUB_RUN_ATTEMPT"]
@@ -787,6 +787,8 @@ def main():
     parser.add_argument("--rust-probe-bin", type=Path, help="Optional prebuilt local_ipc_probe Rust binary")
     parser.add_argument("--skip-rust-probe", action="store_true", help="Skip the compiled Rust LocalIpcClient probe")
     parser.add_argument("--output", type=Path, help="Optional file path to write JSON smoke summary")
+    parser.add_argument("--full-bundled-catalog", action="store_true",
+                        help="Also run the full offline catalog import on a verified Linux debug PR package")
     args = parser.parse_args()
     try:
         binary = resolve_companion_binary(host=args.host, app=args.app)
@@ -804,11 +806,12 @@ def main():
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered + "\n", encoding="utf-8")
     print(rendered, flush=True)
-    try:
-        run_ci_bundled_catalog(args.app, args.output)
-    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
-        print(f"fleetworks-local-backend-smoke: {error}", file=sys.stderr)
-        return 1
+    if args.full_bundled_catalog:
+        try:
+            run_ci_bundled_catalog(args.app, args.output)
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+            print(f"fleetworks-local-backend-smoke: {error}", file=sys.stderr)
+            return 1
     return 0
 
 

@@ -12,6 +12,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import fleetworks_local_backend_smoke as smoke
 from fleetworks_local_backend_smoke import (
     EXPECTED_RESOURCE_SCOPES,
     MAX_IPC_FRAME_BYTES,
@@ -217,6 +218,23 @@ while True:
             with self.assertRaises(subprocess.TimeoutExpired):
                 session.shutdown()
             process.wait.assert_called_once_with(timeout=10)
+
+    def test_packaged_smoke_requires_an_explicit_full_catalog_request(self):
+        app = self.root / "app"
+        output = self.root / "report.json"
+        args = ["smoke", "--app", str(app), "--output", str(output)]
+        with (
+            mock.patch.object(smoke, "resolve_companion_binary", return_value=self.root / "companion"),
+            mock.patch.object(smoke, "run_smoke", return_value={"status": "pass"}),
+            mock.patch.object(smoke, "run_ci_bundled_catalog") as full_catalog,
+            mock.patch.object(sys, "stdout", io.StringIO()),
+        ):
+            with mock.patch.object(sys, "argv", args):
+                self.assertEqual(smoke.main(), 0)
+            full_catalog.assert_not_called()
+            with mock.patch.object(sys, "argv", [*args, "--full-bundled-catalog"]):
+                self.assertEqual(smoke.main(), 0)
+            full_catalog.assert_called_once_with(app, output)
 
     def test_validate_native_contract_enforces_required_fields(self):
         valid = {

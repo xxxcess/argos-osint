@@ -702,6 +702,18 @@ async fn backfill_in(tx: &Tx, control: &Control, now: DateTime<Utc>) -> Result<(
     Ok(())
 }
 
+/// Live outbox event IDs are their numeric sequence. Reserve and address a
+/// bounded consecutive range without scanning the rest of the backlog.
+fn event_records(after: i64, through: i64) -> Result<Vec<RecordId>, TxError> {
+    let count = through
+        .checked_sub(after)
+        .filter(|count| (0..=MAX_BATCH_DOCUMENTS as i64).contains(count))
+        .ok_or_else(|| invalid("actor_index_event_range"))?;
+    Ok((1..=count)
+        .map(|offset| RecordId::new("actor_search_event", after + offset))
+        .collect())
+}
+
 /// Prepare one bounded live source page under the shared lease/rate fence.
 pub async fn prepare(
     repo: &Repository,
@@ -729,9 +741,12 @@ pub async fn acknowledge(
         if prepared.batch.batch_id!=receipt.batch_id || prepared.batch.content_checksum().map_err(|_|invalid("actor_index_checksum"))?!=receipt.checksum
             || prepared.batch.index_generation!=receipt.index_generation || receipt.visible_checkpoint!=prepared.batch.through_checkpoint
             || receipt.committed_checkpoint!=receipt.visible_checkpoint || receipt.writer_epoch!=lease.epoch {return Err(invalid("actor_index_receipt_mismatch"));}
+        let from = i64::try_from(prepared.batch.from_checkpoint).map_err(|_| invalid("actor_index_event_range"))?;
+        let through = i64::try_from(receipt.visible_checkpoint).map_err(|_| invalid("actor_index_event_range"))?;
+        let events = event_records(from, through)?;
         jobs::run(&tx,tx.query("UPDATE actor_search_control:catalog SET acknowledged_sequence=$through,pending_json='',failures=0,last_error='',retry_at=<datetime>$now RETURN NONE;
-            DELETE actor_search_event WHERE sequence>$from AND sequence<=$through RETURN NONE;")
-            .bind(("through",receipt.visible_checkpoint as i64)).bind(("from",prepared.batch.from_checkpoint as i64)).bind(("now",now.to_rfc3339()))).await?;
+            IF array::len($events)>0 { DELETE $events RETURN NONE; };")
+            .bind(("through",through)).bind(("events",events)).bind(("now",now.to_rfc3339()))).await?;
         for (cause,count) in prepared.cause_counts {
             root_guard_in(&tx,&cause).await?;
             jobs::run(&tx,tx.query("UPDATE $cause SET acknowledged_events+=$count RETURN NONE;

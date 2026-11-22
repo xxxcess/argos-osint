@@ -271,6 +271,7 @@ impl ActorIndexWorker {
             }
             Err(error) => return Err(error.into()),
         }
+        let prepare_started = Instant::now();
         let preparation =
             match actor_search_outbox::prepare(repo, &self.owner, &status, Utc::now()).await {
                 Ok(preparation) => preparation,
@@ -289,6 +290,8 @@ impl ActorIndexWorker {
         let Preparation::Batch { lease, prepared } = preparation else {
             return Ok(TickReport::Waiting);
         };
+        let prepare_ms = prepare_started.elapsed().as_millis() as u64;
+        let write_started = Instant::now();
         let result = {
             let delivery = self.deliver(&prepared.batch);
             tokio::pin!(delivery);
@@ -302,8 +305,10 @@ impl ActorIndexWorker {
                 }
             }
         };
+        let write_ms = write_started.elapsed().as_millis() as u64;
         match result {
             Ok(receipt) => {
+                let acknowledge_started = Instant::now();
                 if let Err(error) =
                     actor_search_outbox::acknowledge(repo, &lease, &receipt, Utc::now()).await
                 {
@@ -316,6 +321,22 @@ impl ActorIndexWorker {
                         });
                     }
                     return Err(error.into());
+                }
+                if matches!(&self.transport, IndexTransport::Local(_))
+                    && status
+                        .active
+                        .as_ref()
+                        .is_some_and(|active| !active.source_complete)
+                {
+                    tracing::info!(
+                        code = "embedded_actor_index_batch_elapsed",
+                        prepare_ms,
+                        write_ms,
+                        ack_ms = acknowledge_started.elapsed().as_millis() as u64,
+                        mutations = prepared.batch.mutations.len(),
+                        checkpoint = receipt.visible_checkpoint,
+                        "Embedded initial actor index batch acknowledged"
+                    );
                 }
                 if let Some((_, status)) = &mut self.status {
                     if let Some(active) = &mut status.active {

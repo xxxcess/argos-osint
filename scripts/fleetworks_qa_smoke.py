@@ -78,6 +78,9 @@ SAFE_INDEX_STATES = {
     "degraded", "indexing", "not_applicable", "not_built", "not_ready", "paused", "ready", "running",
     "stale", "throttled", "unavailable", "unknown",
 }
+INDEX_BATCH_EVENT = re.compile(r'\bcode="?embedded_actor_index_batch_elapsed"?(?=$|[\s,])')
+INDEX_BATCH_FIELD = re.compile(r'\b(prepare_ms|write_ms|ack_ms|mutations)=([0-9]{1,9})(?=$|[\s,])')
+INDEX_BATCH_DURATIONS = ("prepare_ms", "write_ms", "ack_ms")
 
 
 def require(condition, description):
@@ -390,6 +393,58 @@ def sample_smaps_rollup(proc, phase_usage):
     previous = phase_usage.get("smaps_rollup_peak_sample", {})
     if sample.get("rss_bytes", 0) > previous.get("rss_bytes", 0):
         phase_usage["smaps_rollup_peak_sample"] = {**sample, "stage_sample": phase_usage["samples"]}
+
+
+class CatalogIpcSession(embedded.LocalIpcSession):
+    def __init__(self, binary, state, evidence):
+        self.evidence = evidence
+        self.index_batch_timings = {}
+        super().__init__(binary, state, client_name="fleetworks-catalog-smoke",
+                         log_filter="warn,surrealdb::core::kvs::rocksdb=info,"
+                                    "argos_api_host::actor_index_worker=info")
+
+    def _record_index_batch(self, text):
+        if "embedded_actor_index_batch_elapsed" not in text:
+            return False
+        event = ANSI.sub("", text)
+        if not INDEX_BATCH_EVENT.search(event):
+            return False
+        matches = INDEX_BATCH_FIELD.findall(event)
+        fields = {name: int(value) for name, value in matches}
+        if len(matches) != 4 or len(fields) != 4:
+            return True
+        stage = self.evidence["stage"]
+        timings = self.index_batch_timings.setdefault(stage, {"batches": 0, "mutations": 0})
+        timings["batches"] += 1
+        timings["mutations"] += fields["mutations"]
+        for name in INDEX_BATCH_DURATIONS:
+            elapsed = fields[name]
+            aggregate = timings.setdefault(name, {"total": 0, "max": 0})
+            aggregate["total"] += elapsed
+            aggregate["max"] = max(aggregate["max"], elapsed)
+        return True
+
+    def _drain_stderr(self):
+        captured = 0
+        while True:
+            try:
+                line = self.proc.stderr.readline()
+            except (OSError, ValueError):
+                return
+            if not line:
+                return
+            text = line.decode("utf-8", errors="replace").rstrip("\n")
+            if self._record_index_batch(text):
+                continue
+            captured += len(text)
+            if captured <= embedded.MAX_STDERR_TAIL_BYTES * 8:
+                self._stderr_tail.append(text[:512])
+
+    def close_unconditionally(self):
+        if self.proc.poll() is not None:
+            self._stderr_thread.join(timeout=2)
+        super().close_unconditionally()
+        self._stderr_thread.join(timeout=2)
 
 
 def sample_catalog_resources(session, state, evidence, stop):
@@ -727,9 +782,7 @@ def packaged_catalog_smoke(binary, app, state):
     state.mkdir(mode=0o700)
     started = time.monotonic()
     stop = threading.Event()
-    session = embedded.LocalIpcSession(binary, state, client_name="fleetworks-catalog-smoke",
-                                       log_filter="warn,surrealdb::core::kvs::rocksdb=info,"
-                                                  "argos_api_host::actor_index_worker=info")
+    session = CatalogIpcSession(binary, state, evidence)
 
     def expire():
         if session.proc.poll() is None:
@@ -756,6 +809,8 @@ def packaged_catalog_smoke(binary, app, state):
         stop.set()
         sampler.join(timeout=5)
         session.close_unconditionally()
+    if session.index_batch_timings:
+        evidence["actor_index_batch_timings"] = session.index_batch_timings
     if "min_disk_free_bytes" in evidence:
         evidence["peak_disk_headroom_drop_bytes"] = evidence["baseline_disk_free_bytes"] - evidence["min_disk_free_bytes"]
     evidence["elapsed_ms"] = round((time.monotonic() - started) * 1000)

@@ -14,6 +14,7 @@ use fleetworks_contracts::actor_index::ACTOR_INDEX_PROTOCOL;
 use super::backfill_in;
 use super::canonical_many_in;
 use super::control_in;
+use super::event_records;
 use super::finish_causes_in;
 use super::guard;
 use super::hash;
@@ -128,9 +129,22 @@ pub(super) async fn prepare(
         } else {
             if active.visible_checkpoint!=control.acknowledged_sequence as u64 {return Err(invalid("actor_index_unknown_remote_checkpoint"));}
             backfill_in(&tx,&control,now).await?;control=control_in(&tx).await?;
-            let mut response=jobs::run(&tx,tx.query("SELECT sequence,actor_id,cause_job FROM actor_search_event WITH INDEX actor_search_event_sequence WHERE sequence>$after ORDER BY sequence LIMIT $limit")
-                .bind(("after",control.acknowledged_sequence)).bind(("limit",page as i64))).await?;
-            let events:Vec<Event>=jobs::take(&mut response,0)?;
+            let through = control.acknowledged_sequence.saturating_add(page as i64).min(control.next_sequence);
+            let records = event_records(control.acknowledged_sequence, through)?;
+            let events = if records.is_empty() {
+                Vec::new()
+            } else {
+                let mut response = jobs::run(
+                    &tx,
+                    tx.query("SELECT sequence,actor_id,cause_job FROM $events ORDER BY sequence")
+                        .bind(("events", records)),
+                ).await?;
+                let events: Vec<Event> = jobs::take(&mut response, 0)?;
+                if events.len() as i64 != through - control.acknowledged_sequence {
+                    return Err(invalid("actor_index_outbox_gap"));
+                }
+                events
+            };
             let mut seed=jobs::run(&tx,tx.query("RETURN (SELECT VALUE status FROM ONLY brain_actor_seed:catalog)='complete'")).await?;
             let caught_up=events.last().map(|event|event.sequence).unwrap_or(control.acknowledged_sequence)==control.next_sequence;
             let source_complete=control.backfill_complete&&caught_up&&jobs::take::<Option<bool>>(&mut seed,0)?==Some(true);

@@ -21,6 +21,7 @@ import struct
 import subprocess
 import sys
 import tarfile
+import venv
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[3]
@@ -37,6 +38,10 @@ TARGETS = {
 MAX_LOG = 64 * 1024 * 1024
 MAX_BUNDLE = 1024 * 1024 * 1024
 MAX_FILES = 2048
+MAX_CANDIDATE_PROOF = 320 * 1024 * 1024
+CANDIDATE_PROOF_FILES = frozenset(f"proof/candidate/{name}" for name in (
+    "config.json", "vocab.txt", "rust_model.ot", "atlas-bert-frozen.json", "atlas-bert-evaluation.json",
+))
 BASELINE_LIBRARIES = frozenset(("libc.so.6", "libm.so.6", "libpthread.so.0", "libdl.so.2", "librt.so.1",
                                "libgcc_s.so.1", "libstdc++.so.6", "libutil.so.1", "libresolv.so.2"))
 
@@ -215,15 +220,22 @@ class Commands:
             raise VerifyError("An isolated worker verification command timed out") from None
 
 
-def payload_files(root):
-    result, total = [], 0
+def payload_files(root, *, proof=False):
+    result, total, proof_total = [], 0, 0
     for path in sorted(root.rglob("*")):
         if path.is_symlink() or not (path.is_dir() or path.is_file()):
             raise VerifyError("Bundle contains a link or unsupported filesystem object")
         if path.is_file():
-            total += path.stat().st_size
+            name = path.relative_to(root).as_posix()
+            size = path.stat().st_size
+            if name.startswith("proof/"):
+                if not proof or name not in CANDIDATE_PROOF_FILES:
+                    raise VerifyError("Unexpected candidate model proof payload")
+                proof_total += size
+            else:
+                total += size
             result.append(path)
-            if len(result) > MAX_FILES or total > MAX_BUNDLE:
+            if len(result) > MAX_FILES or total > MAX_BUNDLE or proof_total > MAX_CANDIDATE_PROOF:
                 raise VerifyError("Bundle exceeds bounded file count or bytes")
     return result
 
@@ -261,9 +273,9 @@ def checkpoint_pins():
     return values
 
 
-def safe_unpack(archive, destination):
+def safe_unpack(archive, destination, *, proof=False):
     destination.mkdir(mode=0o700)
-    total = 0
+    total = proof_total = 0
     with tarfile.open(archive, "r:gz") as opened:
         members = opened.getmembers()
         if len(members) > MAX_FILES:
@@ -274,8 +286,13 @@ def safe_unpack(archive, destination):
             if path.is_absolute() or ".." in path.parts or not path.parts or str(path) != member.name or member.name in names or not member.isfile():
                 raise VerifyError("Archive has an unsafe, duplicate or non-file entry")
             names.add(member.name)
-            total += member.size
-            if total > MAX_BUNDLE or member.size < 0 or member.mode & 0o7000:
+            if member.name.startswith("proof/"):
+                if not proof or member.name not in CANDIDATE_PROOF_FILES:
+                    raise VerifyError("Unexpected candidate model proof archive entry")
+                proof_total += member.size
+            else:
+                total += member.size
+            if total > MAX_BUNDLE or proof_total > MAX_CANDIDATE_PROOF or member.size < 0 or member.mode & 0o7000:
                 raise VerifyError("Archive exceeds its bound or has unsupported permissions")
             target = destination.joinpath(*path.parts)
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -284,18 +301,19 @@ def safe_unpack(archive, destination):
             target.chmod(0o755 if member.mode & 0o111 else 0o644)
 
 
-def check_bundle(bundle, target, revision):
+def check_bundle(bundle, target, revision, *, proof=False):
     manifest = json.loads((bundle / "manifest.json").read_text())
     if manifest.get("format_version") != 1 or manifest.get("source_sha") != revision or manifest.get("target") != target or manifest.get("status") != "runtime_verified":
         raise VerifyError("Bundle source, target or runtime receipt does not match")
     expected = manifest["files"]
-    actual = {str(path.relative_to(bundle)) for path in payload_files(bundle)} - {"manifest.json", "SHA256SUMS"}
+    files = payload_files(bundle, proof=proof)
+    actual = {str(path.relative_to(bundle)) for path in files} - {"manifest.json", "SHA256SUMS"}
     if set(expected) != actual:
         raise VerifyError("Bundle has missing or unlisted payloads")
     for name in actual:
         if sha(bundle / name) != expected[name]["sha256"] or (bundle / name).stat().st_size != expected[name]["bytes"]:
             raise VerifyError("Bundle payload checksum mismatch")
-    wanted = {str(path.relative_to(bundle)): sha(path) for path in payload_files(bundle) if path.relative_to(bundle) != Path("SHA256SUMS")}
+    wanted = {str(path.relative_to(bundle)): sha(path) for path in files if path.relative_to(bundle) != Path("SHA256SUMS")}
     recorded = {}
     for line in (bundle / "SHA256SUMS").read_text().splitlines():
         digest, name = line.split("  ", 1)
@@ -308,7 +326,87 @@ def check_bundle(bundle, target, revision):
     elf(binary, target)
     if not os.access(binary, os.X_OK):
         raise VerifyError("Bundled worker executable permission is missing")
+    if proof:
+        from finetune import EVALUATION_NAME, load_frozen
+
+        candidate = bundle / "proof/candidate"
+        if not CANDIDATE_PROOF_FILES <= actual or manifest.get("candidate_proof", {}).get("kind") != "synthetic-regression-only":
+            raise VerifyError("Synthetic model proof is missing its explicit provenance")
+        _, frozen_sha = load_frozen(candidate, bundle / "model", binary)
+        evaluated = json.loads((candidate / EVALUATION_NAME).read_text())
+        if evaluated["frozen_sha256"] != frozen_sha or evaluated["passed"] is not True:
+            raise VerifyError("Synthetic model proof does not pass for the frozen candidate")
+    elif "candidate_proof" in manifest:
+        raise VerifyError("Baseline worker bundles cannot contain candidate proof")
     return manifest
+
+
+def managed_finetune(target, revision, env):
+    repository = env.get("GITHUB_REPOSITORY", "")
+    ref = env.get("GITHUB_REF", "")
+    if (
+        target != "x86_64-unknown-linux-gnu"
+        or env.get("GITHUB_ACTIONS") != "true"
+        or env.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
+        or not repository
+        or not ref.startswith("refs/heads/")
+        or ref in {"refs/heads/main", "refs/heads/dev", "refs/heads/nightly"}
+        or env.get("GITHUB_WORKFLOW_REF") != f"{repository}/.github/workflows/fleetworks.yml@{ref}"
+    ):
+        return False
+    event = json.loads(Path(env["GITHUB_EVENT_PATH"]).read_text())
+    inputs = event.get("inputs") or {}
+    if any(inputs.get(key) != expected for key, expected in (
+        ("stage", "standard"), ("mode", "pr"), ("components", "backend"),
+    )):
+        return False
+    base = inputs.get("base", "")
+    if (
+        inputs.get("head") != revision
+        or env.get("GITHUB_SHA") != revision
+        or not re.fullmatch(r"[0-9a-f]{40}", base)
+        or base in {"0" * 40, revision}
+    ):
+        raise VerifyError("Managed BERT fitting requires the exact dispatched head and comparison base")
+    return True
+
+
+def fine_tune(output, prepared, binary, commands, build_env, revision, evidence):
+    from finetune import EVALUATION_NAME, FROZEN_NAME
+
+    fitting_env = output / "fitting-venv"
+    venv.EnvBuilder(system_site_packages=True, with_pip=True).create(fitting_env)
+    python = fitting_env / "bin/python"
+    env = {key: build_env[key] for key in (
+        "HOME", "PATH", "CARGO_HOME", "CARGO_TARGET_DIR", "RUSTUP_HOME", "LIBTORCH_USE_PYTORCH",
+        "LD_LIBRARY_PATH", "CARGO_PROFILE_DEV_DEBUG", "CARGO_INCREMENTAL",
+    ) if key in build_env}
+    env["PATH"] = f"{python.parent}{os.pathsep}{env.get('PATH', os.defpath)}"
+    env.update({"PIP_CONFIG_FILE": os.devnull, "PYTHONDONTWRITEBYTECODE": "1"})
+    scripts = ROOT / "tools/atlas-bert/scripts"
+    commands.run("fit-dependencies", [
+        python, "-m", "pip", "--disable-pip-version-check", "install", "--no-input", "--no-deps",
+        "--only-binary=:all:", "--index-url", "https://pypi.org/simple", "--requirement",
+        scripts / "requirements-finetune.txt",
+    ], env=env, timeout=300)
+    env.update({"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "CARGO_NET_OFFLINE": "true"})
+    candidate = output / "candidate"
+    common = ["--worker", binary, "--candidate", candidate]
+    report = {"status": "failed"}
+    evidence["fine_tuning"] = report
+    try:
+        commands.run("fit-candidate", [python, scripts / "finetune.py", "fit", *common,
+                                      "--prepared", prepared, "--revision", revision],
+                     env=env, timeout=35 * 60)
+        commands.run("evaluate-candidate", [python, scripts / "finetune.py", "evaluate", *common,
+                                           "--baseline", prepared / "model"], env=env, timeout=12 * 60)
+        report["status"] = "passed"
+    finally:
+        for key, name in (("frozen", FROZEN_NAME), ("held_out", EVALUATION_NAME)):
+            path = candidate / name
+            if path.is_file():
+                report[key] = {"sha256": sha(path), "report": json.loads(path.read_text())}
+    return candidate
 
 
 def run(arguments):
@@ -353,8 +451,15 @@ def run(arguments):
         binary = executable(build)
         elf(binary, arguments.target)
         evidence["unit_tests_passed"] = unit_result(commands.run("unit-tests", [*cargo, "test", *common], env=env))
-        model = output / "checkpoint"
-        commands.run("prepare-model", ["bash", str(ROOT / "tools/atlas-bert/scripts/prepare-model.sh"), str(model)], env=env)
+        fit_candidate = arguments.finetune or managed_finetune(arguments.target, arguments.revision, env)
+        if fit_candidate and arguments.target != "x86_64-unknown-linux-gnu":
+            raise VerifyError("Atlas synthetic candidate fitting is selected on native Linux amd64")
+        prepared = output / "checkpoint-inputs" if fit_candidate else output / "checkpoint"
+        prepare = ["bash", ROOT / "tools/atlas-bert/scripts/prepare-model.sh"]
+        if fit_candidate:
+            prepare.append("--keep-training-inputs")
+        commands.run("prepare-model", [*prepare, prepared], env=env)
+        model = prepared / "model" if fit_candidate else prepared
         pins = checkpoint_pins()
         for name in ("config.json", "vocab.txt"):
             if sha(model / name) != pins[name]:
@@ -369,7 +474,9 @@ def run(arguments):
         libraries += extra
         evidence["additional_runtime_libraries"] = origins
         evidence["runtime_abi"] = symbol_versions(commands.run("symbols", ["readelf", "--version-info", str(binary), *map(str, libraries)]))
-        shutil.copytree(model, bundle / "model")
+        (bundle / "model").mkdir()
+        for name in ("config.json", "vocab.txt", "rust_model.ot"):
+            shutil.copyfile(model / name, bundle / "model" / name)
         license_files = sorted(torch_root.parent.glob("torch-*.dist-info/LICENSE*")) + sorted(torch_root.parent.glob("torch-*.dist-info/NOTICE*"))
         if not license_files:
             raise VerifyError("Pinned Torch distribution license is missing")
@@ -379,6 +486,12 @@ def run(arguments):
         launcher = bundle / "run-worker"
         launcher.write_text('#!/bin/sh\nset -eu\nhere=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)\nexport LD_LIBRARY_PATH="$here/python/torch/lib:$here/python/torch.libs"\nexec "$here/bin/argos-atlas-bert" "$@"\n')
         launcher.chmod(0o755)
+        if fit_candidate:
+            candidate = fine_tune(output, prepared, binary, commands, env, arguments.revision, evidence)
+            proof_dir = bundle / "proof/candidate"
+            proof_dir.mkdir(parents=True)
+            for path in sorted(CANDIDATE_PROOF_FILES):
+                shutil.copyfile(candidate / Path(path).name, bundle / path)
         manifest = {"format_version": 1, "status": "runtime_verified", "source_sha": arguments.revision,
                     "dirty": dirty, "target": arguments.target, "toolchain": evidence["toolchain"],
                     "worker_lock_sha256": evidence["worker_lock_sha256"],
@@ -386,16 +499,19 @@ def run(arguments):
                     "additional_runtime_libraries": origins,
                     "checkpoint": {"repository": "typeform/distilbert-base-uncased-mnli", "commit": MODEL_COMMIT,
                                    "source_sha256": pins, "conversion_script_sha256": sha(ROOT / "tools/atlas-bert/scripts/prepare-model.sh")},
-                    "files": {str(path.relative_to(bundle)): {"bytes": path.stat().st_size, "sha256": sha(path)} for path in payload_files(bundle)}}
+                    "files": {str(path.relative_to(bundle)): {"bytes": path.stat().st_size, "sha256": sha(path)} for path in payload_files(bundle, proof=fit_candidate)}}
+        if fit_candidate:
+            manifest["candidate_proof"] = {"kind": "synthetic-regression-only", "directory": "proof/candidate",
+                                           "activation": "explicit-operator-only"}
         save(bundle / "manifest.json", manifest)
-        (bundle / "SHA256SUMS").write_text("".join(sha(path) + "  " + str(path.relative_to(bundle)) + "\n" for path in payload_files(bundle)))
+        (bundle / "SHA256SUMS").write_text("".join(sha(path) + "  " + str(path.relative_to(bundle)) + "\n" for path in payload_files(bundle, proof=fit_candidate)))
         archive = output / ("atlas-bert-linux-" + evidence["arch"] + ".tar.gz")
         with tarfile.open(archive, "w:gz") as opened:
-            for path in payload_files(bundle):
+            for path in payload_files(bundle, proof=fit_candidate):
                 opened.add(path, arcname=str(path.relative_to(bundle)), recursive=False)
         extracted = output / "extracted"
-        safe_unpack(archive, extracted)
-        check_bundle(extracted, arguments.target, arguments.revision)
+        safe_unpack(archive, extracted, proof=fit_candidate)
+        check_bundle(extracted, arguments.target, arguments.revision, proof=fit_candidate)
         isolated = env.copy()
         isolated.pop("LIBTORCH_USE_PYTORCH", None)
         isolated["LD_LIBRARY_PATH"] = str(extracted / "python/torch/lib") + ":" + str(extracted / "python/torch.libs")
@@ -420,6 +536,7 @@ def main(argv=None):
     verify.add_argument("--output", type=Path, required=True)
     verify.add_argument("--agent", action="store_true")
     verify.add_argument("--require-clean", action="store_true")
+    verify.add_argument("--finetune", action="store_true", help="also fit and evaluate a separate synthetic Atlas BERT candidate")
     arguments = parser.parse_args(argv)
     try:
         if arguments.command == "wheel":

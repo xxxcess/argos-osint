@@ -51,6 +51,15 @@ struct Args {
     /// Exact prior revision returned by --role atlas-bert-revision.
     #[arg(long, required_if_eq("role", "atlas-bert-activate"))]
     expected_bert_revision: Option<String>,
+    /// Completed Atlas cycle ID. Repeat to calibrate on several cycles.
+    #[arg(long = "review-cycle")]
+    review_cycles: Vec<String>,
+    /// Bounded JSON file from an Atlas BERT review export, labeled by a reviewer.
+    #[arg(long, required_if_eq("role", "atlas-bert-review-import"))]
+    review_file: Option<std::path::PathBuf>,
+    /// Trusted operator's external review reference.
+    #[arg(long, required_if_eq("role", "atlas-bert-review-import"))]
+    review_reference: Option<String>,
     /// Private state directory for `--role local-ipc` (enforced `0o700`).
     #[arg(long, required_if_eq("role", "local-ipc"))]
     state_dir: Option<std::path::PathBuf>,
@@ -102,6 +111,12 @@ enum Role {
     AtlasBertRevision,
     /// Explicitly activate a qualified, staged Atlas BERT candidate.
     AtlasBertActivate,
+    /// Export a completed Atlas cycle for independent human review.
+    AtlasBertReviewExport,
+    /// Import human labels for a completed Atlas cycle.
+    AtlasBertReviewImport,
+    /// Recalibrate the exact active Atlas BERT revision using stored human reviews.
+    AtlasBertRecalibrate,
     /// Seed the Brain actor catalog from a pinned workspace CSV.
     SeedActors,
     /// Initialize storage and provision the runtime database account.
@@ -164,11 +179,39 @@ fn main() -> Result<()> {
     ensure_platform_name_is_bootstrap_only(&args)?;
     ensure!(
         args.role == Role::AtlasBertActivate
-            || (args.candidate_sha256.is_none()
-                && args.evaluation_sha256.is_none()
-                && args.expected_bert_revision.is_none()),
+            || (args.candidate_sha256.is_none() && args.evaluation_sha256.is_none()),
         "Atlas BERT activation flags require --role atlas-bert-activate"
     );
+    ensure!(
+        matches!(
+            args.role,
+            Role::AtlasBertActivate | Role::AtlasBertRecalibrate
+        ) || args.expected_bert_revision.is_none(),
+        "--expected-bert-revision requires Atlas BERT activation or recalibration"
+    );
+    ensure!(
+        args.role == Role::AtlasBertReviewImport
+            || (args.review_file.is_none() && args.review_reference.is_none()),
+        "Review import flags require --role atlas-bert-review-import"
+    );
+    match args.role {
+        Role::AtlasBertReviewExport => {
+            ensure!(
+                args.review_cycles.len() == 1,
+                "Export requires exactly one --review-cycle"
+            );
+        }
+        Role::AtlasBertRecalibrate => {
+            ensure!(
+                !args.review_cycles.is_empty() && args.expected_bert_revision.is_some(),
+                "Recalibration requires --review-cycle and --expected-bert-revision"
+            );
+        }
+        _ => ensure!(
+            args.review_cycles.is_empty(),
+            "--review-cycle requires Atlas BERT review export or recalibration"
+        ),
+    }
     if args.role == Role::LocalIpc {
         ensure!(
             args.file.is_none() && args.expected_sha256.is_none(),
@@ -208,6 +251,9 @@ async fn run_non_ipc(args: Args) -> Result<()> {
         candidate_sha256,
         evaluation_sha256,
         expected_bert_revision,
+        review_cycles,
+        review_file,
+        review_reference,
         state_dir,
         nlp_cmd,
         classifier_cmd,
@@ -242,6 +288,24 @@ async fn run_non_ipc(args: Args) -> Result<()> {
         return atlas_bert_admin::run(fleetworks::workspace_path()?, command, shutdown_signal())
             .await;
     }
+    let review_command = match role {
+        Role::AtlasBertReviewExport => Some(atlas_bert_admin::ReviewCommand::Export {
+            cycle: review_cycles.into_iter().next().expect("one export cycle"),
+        }),
+        Role::AtlasBertReviewImport => Some(atlas_bert_admin::ReviewCommand::Import {
+            file: review_file.expect("required for review import"),
+            reference: review_reference.expect("required for review import"),
+        }),
+        Role::AtlasBertRecalibrate => Some(atlas_bert_admin::ReviewCommand::Recalibrate {
+            cycles: review_cycles,
+            expected_revision: expected_bert_revision.expect("required for BERT recalibration"),
+        }),
+        _ => None,
+    };
+    ensure!(
+        review_command.is_none() || cfg!(feature = "classifier"),
+        "this build does not include Atlas BERT support"
+    );
     if matches!(role, Role::Nlp | Role::Classifier) {
         let (bind, policy, router) = tokio::task::spawn_blocking(move || {
             let (engine, router) = if role == Role::Nlp {
@@ -317,6 +381,17 @@ async fn run_non_ipc(args: Args) -> Result<()> {
         None
     };
     let repo = storage::runtime::repository().await?;
+    if let Some(command) = review_command {
+        let result = atlas_bert_admin::run_review(
+            fleetworks::workspace_path()?,
+            repo,
+            command,
+            shutdown_signal(),
+        )
+        .await;
+        drain_storage().await;
+        return result;
+    }
     if role == Role::Bootstrap {
         fleetworks::provision_user(
             &repo,

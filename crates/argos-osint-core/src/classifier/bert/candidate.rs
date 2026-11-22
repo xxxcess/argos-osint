@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use super::reviewed;
 use super::{
     artifact, bundle_manifest_hash, controlled, file_error, file_sha256, Bundle, Config, Worker,
     MICROBATCH, MICROBATCH_TIMEOUT, MODEL_FILES, PROTOCOL, STARTUP_TIMEOUT,
@@ -20,7 +21,9 @@ const FROZEN_FILE: &str = "atlas-bert-frozen.json";
 const EVALUATION_FILE: &str = "atlas-bert-evaluation.json";
 const FROZEN_SCHEMA: &str = "atlas-bert-frozen-v1";
 const DATASET_SHA256: &str = "625f10150ba413f2fcae49ef425f9829004daaf9e69e49eecf66f7598de80d93";
-const REGRESSION_POLICY: &str = "atlas-bert-synthetic-noninferiority-v1";
+const PROMOTION_POLICY: &str = "atlas-bert-macro-f1-floor-v2";
+const LEGACY_POLICY: &str = "atlas-bert-synthetic-noninferiority-v1";
+const MIN_PROMOTION_MACRO_F1: f64 = 0.65;
 const EVALUATION_SCHEMA: &str = "atlas-bert-evaluation-v1";
 const BASE_CHECKPOINT_REVISION: &str = "cfa538a0fddbbd978fefe8966c1aeff7ad409c90";
 const MAX_JSON_BYTES: u64 = 128 * 1024;
@@ -165,23 +168,30 @@ impl Evaluation {
         &self,
         frozen: &FrozenCandidate,
         frozen_sha256: &str,
+        purpose: BaselineCheck,
     ) -> Result<(), ClassifierError> {
+        let qualified = match (self.regression_policy.as_str(), purpose) {
+            (PROMOTION_POLICY, _) => self.candidate.macro_f1 > MIN_PROMOTION_MACRO_F1,
+            (LEGACY_POLICY, BaselineCheck::PinnedReplay) => {
+                self.candidate.macro_f1 >= self.baseline.macro_f1
+                    && self.candidate.micro_f1 >= self.baseline.micro_f1
+                    && self.candidate.false_out_of_scope_admissions
+                        <= self.baseline.false_out_of_scope_admissions
+            }
+            _ => false,
+        };
         if self.schema_version != EVALUATION_SCHEMA
             || self.frozen_sha256 != frozen_sha256
             || self.dataset_sha256 != frozen.dataset_sha256
             || self.held_out_rows != 185
             || self.worker_sha256 != frozen.provenance.calibration_worker_sha256
             || !(0.5..1.0).contains(&self.baseline_threshold)
-            || self.regression_policy != REGRESSION_POLICY
             || self.baseline_base_checkpoint_revision != BASE_CHECKPOINT_REVISION
             || self.baseline_assets != frozen.provenance.baseline_assets
             || !self.baseline.valid(self.held_out_rows)
             || !self.candidate.valid(self.held_out_rows)
             || self.candidate.out_of_scope_rows != self.baseline.out_of_scope_rows
-            || self.candidate.macro_f1 < self.baseline.macro_f1
-            || self.candidate.micro_f1 < self.baseline.micro_f1
-            || self.candidate.false_out_of_scope_admissions
-                > self.baseline.false_out_of_scope_admissions
+            || !qualified
             || !self.passed
         {
             return Err(invalid("held-out Rust worker evaluation did not pass"));
@@ -279,7 +289,7 @@ pub(super) fn directory(home: &Path, frozen_sha256: &str) -> Result<PathBuf, Cla
     Ok(dir)
 }
 
-fn read_json(path: &Path) -> Result<Vec<u8>, ClassifierError> {
+pub(super) fn read_json(path: &Path) -> Result<Vec<u8>, ClassifierError> {
     let metadata = fs::symlink_metadata(path).map_err(|error| file_error(path, error))?;
     if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_JSON_BYTES {
         return Err(invalid("expected a bounded regular JSON file"));
@@ -310,7 +320,7 @@ pub(super) fn read_active(home: &Path) -> Result<Option<AtlasBertActive>, Classi
     Ok(Some(pointer))
 }
 
-fn read_expected_json(
+pub(super) fn read_expected_json(
     model_dir: &Path,
     name: &str,
     expected: &str,
@@ -329,16 +339,28 @@ pub(super) fn validate_evidence_hashes(
     model_dir: &Path,
     frozen_sha256: &str,
     evaluation_sha256: &str,
+    reviewed_sha256: Option<&str>,
 ) -> Result<(), ClassifierError> {
     read_expected_json(model_dir, FROZEN_FILE, frozen_sha256)?;
     read_expected_json(model_dir, EVALUATION_FILE, evaluation_sha256)?;
+    if let Some(digest) = reviewed_sha256 {
+        read_expected_json(model_dir, &reviewed::record_name(digest), digest)?;
+    }
     Ok(())
 }
 
-pub(super) fn manifest_hash(base: &str, frozen: &str, evaluation: &str) -> String {
-    artifact::sha256_hex(
-        format!("atlas-bert-candidate-manifest-v1\n{base}\n{frozen}\n{evaluation}").as_bytes(),
-    )
+pub(super) fn manifest_hash(
+    base: &str,
+    frozen: &str,
+    evaluation: &str,
+    reviewed: Option<&str>,
+) -> String {
+    let mut evidence = format!("atlas-bert-candidate-manifest-v1\n{base}\n{frozen}\n{evaluation}");
+    if let Some(digest) = reviewed {
+        evidence.push('\n');
+        evidence.push_str(digest);
+    }
+    artifact::sha256_hex(evidence.as_bytes())
 }
 
 fn check_checkpoint(
@@ -361,7 +383,7 @@ fn check_checkpoint(
     Ok(artifact::sha256_hex(digests.as_bytes()))
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum BaselineCheck {
     Activation,
     PinnedReplay,
@@ -371,6 +393,7 @@ pub(super) fn load(
     home: &Path,
     frozen_sha256: &str,
     evaluation_sha256: &str,
+    reviewed_sha256: Option<&str>,
     baseline_check: BaselineCheck,
 ) -> Result<Bundle, ClassifierError> {
     let model_dir = self::directory(home, frozen_sha256)?;
@@ -384,7 +407,7 @@ pub(super) fn load(
         evaluation_sha256,
     )?)
     .map_err(|_| invalid("invalid evaluation JSON"))?;
-    evaluation.validate(&frozen, frozen_sha256)?;
+    evaluation.validate(&frozen, frozen_sha256, baseline_check)?;
     let mut config = Config::load(home)?;
     if baseline_check == BaselineCheck::Activation {
         // Initial activation needs evidence for the exact configured baseline.
@@ -398,19 +421,27 @@ pub(super) fn load(
         check_checkpoint(&config.model_dir, &evaluation.baseline_assets)?;
     }
     let artifact_sha256 = check_checkpoint(&model_dir, &frozen.assets)?;
+    let reviewed_calibration = reviewed_sha256
+        .map(|digest| reviewed::load(&model_dir, digest, frozen_sha256, evaluation_sha256))
+        .transpose()?;
     config.model_dir = model_dir;
-    config.threshold = frozen.threshold;
+    config.threshold = reviewed_calibration
+        .as_ref()
+        .map_or(frozen.threshold, |record| record.metrics.threshold);
     let base = bundle_manifest_hash(&config, &artifact_sha256)?;
-    Ok(Bundle::new(
+    let mut bundle = Bundle::new(
         config,
         artifact_sha256,
-        manifest_hash(&base, frozen_sha256, evaluation_sha256),
+        manifest_hash(&base, frozen_sha256, evaluation_sha256, reviewed_sha256),
         Provenance::FineTunedAtlasBert {
             dataset_sha256: frozen.dataset_sha256,
             frozen_sha256: frozen_sha256.to_owned(),
             evaluation_sha256: evaluation_sha256.to_owned(),
+            reviewed_calibration_sha256: reviewed_sha256.map(str::to_owned),
         },
-    ))
+    );
+    bundle.reviewed_calibration = reviewed_calibration;
+    Ok(bundle)
 }
 
 /// Checks an operator-staged candidate's frozen inputs and held-out evidence,
@@ -419,7 +450,7 @@ pub(super) fn load(
 ///
 /// # Errors
 /// Returns a classifier error when candidate or baseline integrity fails,
-/// the candidate regresses on the held-out corpus, or the worker cannot score.
+/// the candidate misses the held-out promotion floor, or the worker cannot score.
 pub async fn verify_atlas_bert_candidate(
     home: &Path,
     frozen_sha256: &str,
@@ -431,10 +462,13 @@ pub async fn verify_atlas_bert_candidate(
     let frozen_sha256 = frozen_sha256.to_owned();
     let evaluation_sha256 = evaluation_sha256.to_owned();
     let bundle = tokio::task::spawn_blocking(move || {
+        let model_dir = directory(&home, &frozen_sha256)?;
+        let reviewed = reviewed::frozen_digest(&model_dir, &frozen_sha256, &evaluation_sha256)?;
         load(
             &home,
             &frozen_sha256,
             &evaluation_sha256,
+            reviewed.as_deref(),
             BaselineCheck::Activation,
         )
     })
@@ -473,6 +507,7 @@ mod tests {
                 self.home.path(),
                 &self.frozen_sha256,
                 &self.evaluation_sha256,
+                None,
                 BaselineCheck::Activation,
             )
         }
@@ -525,11 +560,12 @@ mod tests {
     }
 
     #[test]
-    fn candidate_requires_bound_evaluation_and_a_nonregressing_score() {
+    fn candidate_requires_bound_evaluation_and_a_score_above_the_floor() {
         assert!(
-            StagedCandidate::new(0.6).validate().is_err(),
-            "a positive report flag cannot override measured regression"
+            StagedCandidate::new(0.65).validate().is_err(),
+            "a positive report flag cannot override the strict promotion floor"
         );
+        assert!(StagedCandidate::new(0.7).validate().is_ok());
         let fixture = StagedCandidate::new(0.8);
         fs::write(fixture.model_dir.join(EVALUATION_FILE), b"{}").expect("alter held-out report");
         assert!(

@@ -220,9 +220,13 @@ fn valid_bert_provenance(provenance: &Provenance) -> bool {
             dataset_sha256,
             frozen_sha256,
             evaluation_sha256,
-        } => [dataset_sha256, frozen_sha256, evaluation_sha256]
-            .into_iter()
-            .all(|digest| is_sha256(digest)),
+            reviewed_calibration_sha256,
+        } => {
+            [dataset_sha256, frozen_sha256, evaluation_sha256]
+                .into_iter()
+                .all(|digest| is_sha256(digest))
+                && reviewed_calibration_sha256.as_deref().is_none_or(is_sha256)
+        }
         _ => false,
     }
 }

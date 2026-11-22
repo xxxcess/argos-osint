@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use super::artifact::{self, ArtifactStore};
+pub use super::bert::reviewed::{recalibrate, ReviewedCalibrationOutcome};
 use super::bert::{
     self, active_atlas_bert_revision, verify_atlas_bert_candidate, ATLAS_BERT_ACTIVE_FILE,
 };

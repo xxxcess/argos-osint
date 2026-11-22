@@ -1,6 +1,8 @@
 //! Local Rust-BERT worker and immutable Atlas checkpoint identity.
 
 mod candidate;
+pub(crate) mod cycle_metrics;
+pub(super) mod reviewed;
 use std::fs::File;
 use std::future::Future;
 use std::io::{self, Read};
@@ -114,6 +116,7 @@ pub(super) struct Bundle {
     config: Config,
     pub(super) snapshot: ModelSnapshot,
     pub(super) manifest_sha256: String,
+    reviewed_calibration: Option<reviewed::RecordedCalibration>,
 }
 
 impl Bundle {
@@ -164,11 +167,13 @@ impl Bundle {
             Provenance::FineTunedAtlasBert {
                 frozen_sha256,
                 evaluation_sha256,
+                reviewed_calibration_sha256,
                 ..
             } => candidate::load(
                 home,
                 frozen_sha256,
                 evaluation_sha256,
+                reviewed_calibration_sha256.as_deref(),
                 candidate::BaselineCheck::PinnedReplay,
             )?,
             _ => {
@@ -208,6 +213,7 @@ impl Bundle {
             config,
             snapshot,
             manifest_sha256,
+            reviewed_calibration: None,
         }
     }
 
@@ -489,14 +495,21 @@ impl Engine {
                 Provenance::FineTunedAtlasBert {
                     frozen_sha256,
                     evaluation_sha256,
+                    reviewed_calibration_sha256,
                     ..
                 } => {
                     candidate::validate_evidence_hashes(
                         &self.bundle.config.model_dir,
                         frozen_sha256,
                         evaluation_sha256,
+                        reviewed_calibration_sha256.as_deref(),
                     )?;
-                    candidate::manifest_hash(&manifest, frozen_sha256, evaluation_sha256)
+                    candidate::manifest_hash(
+                        &manifest,
+                        frozen_sha256,
+                        evaluation_sha256,
+                        reviewed_calibration_sha256.as_deref(),
+                    )
                 }
                 _ => manifest,
             };
@@ -526,6 +539,12 @@ impl Engine {
     }
 }
 
+fn worker_text(input: &ClassifyInput) -> Option<String> {
+    calibration::input_rejection(input)
+        .is_none()
+        .then(|| format!("{}\n{}", input.title, input.description))
+}
+
 impl InferenceEngine for Engine {
     fn classify_batch(
         &mut self,
@@ -545,11 +564,9 @@ impl InferenceEngine for Engine {
             let mut texts = Vec::new();
             let mut score_input = Vec::with_capacity(batch.len());
             for input in batch {
-                let usable = calibration::input_rejection(input).is_none();
-                if usable {
-                    texts.push(format!("{}\n{}", input.title, input.description));
-                }
-                score_input.push(usable);
+                let text = worker_text(input);
+                score_input.push(text.is_some());
+                texts.extend(text);
             }
             let scores = if texts.is_empty() {
                 Vec::new()

@@ -481,8 +481,11 @@ async fn empty_terminal_is_completed_without_model_and_observed_terminal_is_bloc
 
 #[tokio::test]
 async fn historical_review_import_and_approval_do_not_queue_training() {
+    use std::collections::BTreeSet;
+
     use argos_osint_core::atlas_taxonomy::DomainId;
     use argos_osint_core::classifier::review::ReviewDecision;
+    use argos_osint_core::classifier::training::Split;
     use argos_osint_core::storage::classifier_review as review;
     let _serial = fixture::serial().await;
     let installed = tokio::task::spawn_blocking(fixture::install).await.unwrap();
@@ -512,6 +515,12 @@ async fn historical_review_import_and_approval_do_not_queue_training() {
         calibration::capture(&repo, &ctx, batch).await.unwrap();
     }
     finish(&repo, &installed.home, &ctx.cycle_id, true).await;
+    let incomplete = review::export_completed_cycle(&repo, &ctx.cycle_id)
+        .await
+        .unwrap_err();
+    assert!(incomplete
+        .to_string()
+        .contains("review_cycle_monitoring_not_complete"));
     calibration::drain_one(
         &repo,
         &installed.home,
@@ -525,7 +534,9 @@ async fn historical_review_import_and_approval_do_not_queue_training() {
         0,
         "uncertified labels only monitor"
     );
-    let mut exchange = review::export(&repo, &ctx.cycle_id).await.unwrap();
+    let mut exchange = review::export_completed_cycle(&repo, &ctx.cycle_id)
+        .await
+        .unwrap();
     assert_eq!(
         exchange.items.len(),
         400,
@@ -535,7 +546,7 @@ async fn historical_review_import_and_approval_do_not_queue_training() {
         exchange
             .items
             .iter()
-            .filter(|item| item.split == argos_osint_core::classifier::training::Split::Train)
+            .filter(|item| item.split == Split::Train)
             .count()
             >= 100
     );
@@ -561,10 +572,7 @@ async fn historical_review_import_and_approval_do_not_queue_training() {
             .iter()
             .find(|item| item.observation.observation_id == replay.observation_id)
             .unwrap();
-        assert_ne!(
-            item.split,
-            argos_osint_core::classifier::training::Split::Test
-        );
+        assert_ne!(item.split, Split::Test);
         assert_eq!(replay.payload_sha256, item.payload_sha256);
         assert_eq!(replay.receipt.scores.len(), 6);
     }
@@ -574,6 +582,12 @@ async fn historical_review_import_and_approval_do_not_queue_training() {
         roundtrip.items, annotated.review.items,
         "diagnostic sidecars do not mint human labels"
     );
+    let cycles = vec![ctx.cycle_id.clone()];
+    assert!(review::recalibration_cohort(&repo, cycles.clone())
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("recalibration_requires_all_six_reviewed_domains_in_each_split"));
     for item in &mut exchange.items {
         item.decision = ReviewDecision::Complete;
         item.domains = DomainId::ALL.to_vec();
@@ -591,6 +605,23 @@ async fn historical_review_import_and_approval_do_not_queue_training() {
         0,
         "exact review replay is idempotent"
     );
+    let cohort = review::recalibration_cohort(&repo, cycles.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        cohort,
+        review::recalibration_cohort(&repo, cycles).await.unwrap(),
+        "the same stored evidence freezes the same cohort"
+    );
+    let mut families = BTreeSet::new();
+    assert!(cohort.items.iter().all(|item| {
+        item.decision == ReviewDecision::Complete
+            && matches!(item.split, Split::Calibration | Split::Test)
+            && families.insert(item.family_id.clone())
+    }));
+    for split in [Split::Calibration, Split::Test] {
+        assert!(cohort.items.iter().any(|item| item.split == split));
+    }
     let mut conflict = exchange.clone();
     conflict.items[0].domains.clear();
     assert!(
@@ -621,6 +652,22 @@ async fn historical_review_import_and_approval_do_not_queue_training() {
     )
     .await
     .unwrap();
+    let mut wrong_cycle = exchange.clone();
+    wrong_cycle.run_id = next.cycle_id.clone();
+    wrong_cycle
+        .items
+        .retain(|item| item.observation.observation_id != capture.observations[0].observation_id);
+    let outside_cycle = review::import(
+        &repo,
+        &installed.home,
+        &wrong_cycle,
+        "isolated-human-review",
+    )
+    .await
+    .unwrap_err();
+    assert!(outside_cycle
+        .to_string()
+        .contains("review_observation_outside_completed_cycle"));
     assert_eq!(
         count(&repo, "classifier_learning_job").await,
         0,
@@ -635,7 +682,7 @@ async fn historical_review_import_and_approval_do_not_queue_training() {
     let mut edited = changed
         .items
         .iter()
-        .find(|item| item.split == argos_osint_core::classifier::training::Split::Development)
+        .find(|item| item.split == Split::Development)
         .unwrap()
         .clone();
     edited.revision += 1;

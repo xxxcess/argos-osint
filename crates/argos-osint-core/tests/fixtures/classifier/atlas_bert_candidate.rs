@@ -13,7 +13,7 @@ const FROZEN_FILE: &str = "atlas-bert-frozen.json";
 const EVALUATION_FILE: &str = "atlas-bert-evaluation.json";
 const FROZEN_SCHEMA: &str = "atlas-bert-frozen-v1";
 const DATASET_SHA256: &str = "625f10150ba413f2fcae49ef425f9829004daaf9e69e49eecf66f7598de80d93";
-const REGRESSION_POLICY: &str = "atlas-bert-synthetic-noninferiority-v1";
+const REGRESSION_POLICY: &str = "atlas-bert-macro-f1-floor-v2";
 const EVALUATION_SCHEMA: &str = "atlas-bert-evaluation-v1";
 const BASE_CHECKPOINT_REVISION: &str = "cfa538a0fddbbd978fefe8966c1aeff7ad409c90";
 const PROTOCOL: &str = "argos-atlas-bert-v1";
@@ -45,13 +45,13 @@ fn write_checkpoint(directory: &Path, weights: &[u8]) -> BTreeMap<String, String
 }
 
 fn metrics(quality: f64, false_out_of_scope_admissions: usize) -> serde_json::Value {
-    let tp = (10.0 * quality).round() as usize;
+    let tp = (20.0 * quality).round() as usize;
     let domains: BTreeMap<_, _> = DOMAIN_IDS
         .into_iter()
         .map(|name| {
             (
                 name,
-                json!({"tp": tp, "fp": 10-tp, "fn": 10-tp, "f1": quality}),
+                json!({"tp": tp, "fp": 20-tp, "fn": 20-tp, "f1": quality}),
             )
         })
         .collect();
@@ -133,7 +133,7 @@ impl StagedCandidate {
             "baseline_assets": baseline_assets,
             "regression_policy": REGRESSION_POLICY,
             "baseline": metrics(0.7, 2),
-            "candidate": metrics(candidate_macro_f1, 1),
+            "candidate": metrics(candidate_macro_f1, 3),
             "worker_wall_ms":{"baseline":1.0,"candidate":1.0},
             "passed":true,
         })

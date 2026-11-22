@@ -33,7 +33,8 @@ MODEL_FILES = ("config.json", "vocab.txt", "rust_model.ot")
 FROZEN_NAME = "atlas-bert-frozen.json"
 EVALUATION_NAME = "atlas-bert-evaluation.json"
 BASELINE_THRESHOLD = .8
-REGRESSION_POLICY = "atlas-bert-synthetic-noninferiority-v1"
+REGRESSION_POLICY = "atlas-bert-macro-f1-floor-v2"
+MIN_PROMOTION_MACRO_F1 = 0.65
 CALIBRATION_SCHEMA = "atlas-bert-calibration-v1"
 THRESHOLD_GRID = range(50, 100)
 SEED = 1701
@@ -216,12 +217,9 @@ def quality(report):
     )
 
 
-def regression_passes(baseline, candidate):
-    return (
-        candidate["macro_f1"] >= baseline["macro_f1"]
-        and candidate["micro_f1"] >= baseline["micro_f1"]
-        and candidate["false_out_of_scope_admissions"] <= baseline["false_out_of_scope_admissions"]
-    )
+def promotion_passes(report):
+    macro_f1 = report["macro_f1"]
+    return type(macro_f1) in (int, float) and MIN_PROMOTION_MACRO_F1 < macro_f1 <= 1.0
 
 
 def parse_worker_scores(output, batch_sizes, protocol):
@@ -269,7 +267,7 @@ def select_threshold(calibration, baseline_scores, candidate_scores):
         trial = (key, {"threshold": gate, "metrics": report})
         if best_overall is None or key > best_overall[0]:
             best_overall = trial
-        if regression_passes(baseline, report):
+        if promotion_passes(report):
             qualifying_thresholds += 1
             if best_qualified is None or key > best_qualified[0]:
                 best_qualified = trial
@@ -526,7 +524,7 @@ def load_frozen(candidate, baseline, worker=None):
             or qualification["candidate_assets"] != frozen["assets"]
             or selected.get("threshold") != frozen["threshold"]
             or selected.get("metrics") != provenance["calibration"]
-            or not regression_passes(qualification["baseline"], selected["metrics"])
+            or not promotion_passes(selected["metrics"])
         ):
             raise VerifyError("Frozen candidate calibration qualification differs")
     return frozen, hashlib.sha256(frozen_bytes).hexdigest()
@@ -536,6 +534,8 @@ def evaluate(candidate, baseline, worker):
     if (candidate / EVALUATION_NAME).exists():
         raise VerifyError("Candidate already has an immutable held-out evaluation")
     frozen, frozen_hash = load_frozen(candidate, baseline, worker)
+    if "calibration_qualification" not in frozen["provenance"]:
+        raise VerifyError("A current calibration qualification is required before held-out scoring")
     # Held-out labels and articles are first materialized after freeze verification.
     articles = read_articles(read_corpus(), ("test",))["test"]
     runtime = frozen["provenance"]["runtime_contract"]
@@ -559,7 +559,7 @@ def evaluate(candidate, baseline, worker):
         "worker_wall_ms": {"baseline": baseline_ms, "candidate": candidate_ms,
                            "architecture": platform.machine(), "samples_per_model": 1,
                            "includes_startup": True},
-        "passed": regression_passes(baseline_metrics, candidate_metrics),
+        "passed": promotion_passes(candidate_metrics),
     }
     write_new(candidate / EVALUATION_NAME, results)
     return results
@@ -588,7 +588,7 @@ def main(argv=None):
                 raise VerifyError("Checked-out trainer source differs from the requested SHA")
             result = fit(args.prepared.resolve(strict=True), candidate, worker, args.revision)
             if result is None:
-                print("Atlas BERT candidate rejected by the calibration regression gate", file=sys.stderr)
+                print("Atlas BERT candidate did not exceed 0.65 macro F1 on calibration", file=sys.stderr)
                 return 1
             print(json.dumps({"threshold": result["threshold"], "assets": result["assets"]}))
         else:

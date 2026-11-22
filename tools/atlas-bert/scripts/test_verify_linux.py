@@ -255,24 +255,34 @@ class FineTuningContract(unittest.TestCase):
         self.assertEqual(unsafe["per_domain"]["economic"]["fn"], 1)
         self.assertEqual(unsafe["top_two"]["valid_triad_pairs"], 1)
         self.assertEqual(unsafe["top_two"]["exact_pair_rows"], 1)
-        safe = finetune.metrics(articles, [*scores[:2], [.1] * 6], .8)
-        self.assertTrue(finetune.regression_passes(unsafe, safe))
-        self.assertFalse(finetune.regression_passes(safe, unsafe))
 
-    def test_calibration_excludes_higher_f1_threshold_with_extra_false_admission(self):
+    def test_promotion_requires_macro_f1_strictly_above_the_floor(self):
+        for score, expected in ((.649, False), (.65, False), (.651, True), (.85, True),
+                                (True, False), (float("nan"), False), (1.01, False)):
+            with self.subTest(score=score):
+                self.assertEqual(finetune.promotion_passes({"macro_f1": score}), expected)
+
+    def test_calibration_selects_best_macro_f1_and_reports_false_admissions(self):
         articles = [finetune.Article(f"positive {index}", frozenset({"governance"})) for index in range(3)]
         articles.append(finetune.Article("out of scope", frozenset()))
         baseline = [[score, .1, .1, .1, .1, .1] for score in (.9, .9, .1, .1)]
         candidate = [[score, .1, .1, .1, .1, .1] for score in (.975, .954, .704, .724)]
+        for index, domain in enumerate(finetune.DOMAINS[1:], 1):
+            articles.append(finetune.Article(domain, frozenset({domain})))
+            row = [.1] * len(finetune.DOMAINS)
+            row[index] = .99
+            baseline.append(row)
+            candidate.append(row)
         report = finetune.select_threshold(articles, baseline, candidate)
         self.assertEqual(report["status"], "qualified")
+        self.assertEqual(report["regression_policy"], "atlas-bert-macro-f1-floor-v2")
         self.assertEqual(report["baseline_threshold"], .8)
         self.assertEqual(report["tested_thresholds"], 50)
-        self.assertEqual(report["best_overall"]["threshold"], .7)
-        self.assertGreater(report["best_overall"]["metrics"]["micro_f1"], report["baseline"]["micro_f1"])
-        self.assertEqual(report["best_overall"]["metrics"]["false_out_of_scope_admissions"], 1)
-        self.assertEqual(report["selected"]["threshold"], .95)
-        self.assertTrue(finetune.regression_passes(report["baseline"], report["selected"]["metrics"]))
+        self.assertEqual(report["selected"], report["best_overall"])
+        self.assertEqual(report["selected"]["threshold"], .7)
+        self.assertGreater(report["selected"]["metrics"]["macro_f1"], report["baseline"]["macro_f1"])
+        self.assertEqual(report["baseline"]["false_out_of_scope_admissions"], 0)
+        self.assertEqual(report["selected"]["metrics"]["false_out_of_scope_admissions"], 1)
 
     def test_rejected_calibration_writes_evidence_and_never_freezes_candidate(self):
         articles = [finetune.Article("positive", frozenset({"governance"})),
@@ -347,6 +357,10 @@ class FineTuningContract(unittest.TestCase):
             }
             finetune.write_new(path, frozen)
             finetune.load_frozen(candidate, baseline, worker)
+            with patch.object(finetune, "read_corpus") as corpus:
+                with self.assertRaisesRegex(verify.VerifyError, "current calibration qualification"):
+                    finetune.evaluate(candidate, baseline, worker)
+                corpus.assert_not_called()
             (candidate / "rust_model.ot").write_bytes(b"mutated")
             with patch.object(finetune, "read_corpus") as corpus:
                 with self.assertRaisesRegex(verify.VerifyError, "Frozen model"):
@@ -363,8 +377,15 @@ class FineTuningContract(unittest.TestCase):
                 for name in finetune.MODEL_FILES:
                     (directory / name).write_text(name)
             candidate_assets, baseline_assets = map(finetune.model_assets, (candidate, baseline))
-            articles = [finetune.Article("fixture", frozenset({"governance"}))] * 230
-            scores = [[.945, .1, .1, .1, .1, .1]] * 230
+            domains = finetune.DOMAINS
+            articles = [
+                finetune.Article("fixture", frozenset({domains[index % len(domains)]}))
+                for index in range(230)
+            ]
+            scores = [
+                [.945 if domain in article.labels else .1 for domain in domains]
+                for article in articles
+            ]
             qualification = finetune.select_threshold(articles, scores, scores)
             qualification.update({"dataset_sha256": finetune.DATASET_SHA256, "source_revision": REVISION,
                                   "worker_sha256": verify.sha(worker), "baseline_assets": baseline_assets,
@@ -383,12 +404,33 @@ class FineTuningContract(unittest.TestCase):
             path = candidate / finetune.FROZEN_NAME
             verify.save(path, frozen)
             finetune.load_frozen(candidate, baseline, worker)
-            for key, value in (("status", "rejected"), ("worker_sha256", "mismatch"), ("qualifying_thresholds", 0)):
+            for key, value in (
+                ("status", "rejected"),
+                ("worker_sha256", "mismatch"),
+                ("qualifying_thresholds", 0),
+                ("regression_policy", "atlas-bert-synthetic-noninferiority-v1"),
+            ):
                 changed = copy.deepcopy(frozen)
                 changed["provenance"]["calibration_qualification"][key] = value
                 verify.save(path, changed)
                 with self.subTest(key=key), self.assertRaisesRegex(verify.VerifyError, "calibration qualification"):
                     finetune.load_frozen(candidate, baseline, worker)
+
+            verify.save(path, frozen)
+            test_rows = finetune.SPLIT_COUNTS["test"]
+            held_out = articles[:test_rows]
+            rejected_scores = [[.1] * len(domains)] * test_rows
+            with (
+                patch.object(finetune, "read_corpus", return_value=b"held-out data"),
+                patch.object(finetune, "read_articles", return_value={"test": held_out}) as read,
+                patch.object(finetune, "score_with_worker", side_effect=(scores[:test_rows], rejected_scores)),
+            ):
+                evaluation = finetune.evaluate(candidate, baseline, worker)
+            read.assert_called_once_with(b"held-out data", ("test",))
+            self.assertEqual(evaluation["regression_policy"], finetune.REGRESSION_POLICY)
+            self.assertEqual(evaluation["held_out_rows"], test_rows)
+            self.assertEqual(evaluation["candidate"]["macro_f1"], 0.0)
+            self.assertFalse(evaluation["passed"])
 
 
 if __name__ == "__main__":

@@ -818,6 +818,9 @@ pub enum Provenance {
         dataset_sha256: String,
         frozen_sha256: String,
         evaluation_sha256: String,
+        /// Immutable threshold and reviewed news-cycle evidence, when present.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reviewed_calibration_sha256: Option<String>,
     },
     SyntheticBaseline {
         dataset_version: String,

@@ -379,10 +379,11 @@ impl WorkerPool {
                         if !surreal_elected(&repo, &owner).await? {
                             return Ok(0);
                         }
-                        crate::storage::classifier_calibration::drain_one(
+                        let monitored = crate::storage::classifier_calibration::drain_one(
                             &repo, &home, &owner, cancel,
                         )
-                        .await
+                        .await?;
+                        Ok(monitored)
                     });
                     let busy = matches!(result, Ok(count) if count > 0);
                     report_drainer(&db_path, "classifier-calibration", result);

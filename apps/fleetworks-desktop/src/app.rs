@@ -670,7 +670,7 @@ impl State {
         self.activity_tab = ActivityTab::Jobs;
         self.startup.data_step = None;
         self.startup.data_checks = false;
-        self.startup.data_reset = [false; 3];
+        self.startup.data_reset.fill(false);
         self.workstation_diagnostics_open = false;
         self.workstation_status_checks_open = false;
         self.setup_advanced_open = false;

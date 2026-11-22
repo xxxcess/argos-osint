@@ -671,6 +671,8 @@ async fn process_task(
         }
         .into();
     }
+    let terminal = report.state != "queued";
+    let captured = (task, report, after, job.activation);
     admission::owned_tx(owner,RetryPolicy::default(),move|tx| {
         let(task,report,after,activation)=captured.clone();
         async move {

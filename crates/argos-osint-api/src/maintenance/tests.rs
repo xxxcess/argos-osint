@@ -249,18 +249,17 @@ async fn picked_datasets_preserve_fences_and_reindex_requires_completed_nonempty
         training.clone(),
     )
     .expect("train request");
-    assert_eq!(
+    // An upgraded workspace can still have an enabled pool and staged
+    // training dataset. The gateway must reject new Natural training anyway.
+    assert!(matches!(
         super::train(
             State(state.clone()),
             Extension(context.clone()),
             Json(training_request)
         )
-        .await
-        .map_err(|ApiError(status, message)| (status, message))
-        .expect("direct uploaded training reference")
-        .0,
-        StatusCode::ACCEPTED
-    );
+        .await,
+        Err(ApiError(StatusCode::GONE, _))
+    ));
     let mut stale = request.clone();
     stale.request_id = "stale-revision".into();
     stale.context.expected_configuration_revision = Some(1);

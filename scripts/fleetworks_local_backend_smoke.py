@@ -730,6 +730,45 @@ def run_smoke(binary, *, state_dir=None, check_sockets=True, run_rust_probe=True
             cleanup_dir.cleanup()
 
 
+def run_ci_bundled_catalog(app, output):
+    # The Linux native package step has already verified and extracted this exact archive.
+    environment = os.environ
+    if (app is None or output is None or environment.get("GITHUB_ACTIONS") != "true"
+            or environment.get("GITHUB_EVENT_NAME") != "pull_request"
+            or environment.get("LINUX_TARGET") != "x86_64-unknown-linux-gnu"
+            or environment.get("LINUX_PROFILE") != "debug"):
+        return
+    revision = environment["EXPECTED_HEAD"]
+    run_id = environment["GITHUB_RUN_ID"]
+    run_attempt = environment["GITHUB_RUN_ATTEMPT"]
+    evidence = output.with_name("bundled-catalog-x86_64-unknown-linux-gnu.json")
+    script = Path(__file__).resolve().with_name("fleetworks_qa_smoke.py")
+    result = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="fleetworks-catalog-home-") as home, evidence.open("w") as report:
+            command = [
+                "/usr/bin/sudo", "--non-interactive", "--", "/usr/bin/unshare", "--net",
+                "--setgid", str(os.getgid()), "--setuid", str(os.getuid()), "--",
+                "/usr/bin/env", "-i", f"HOME={home}", "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
+                "/usr/bin/python3", "-B", str(script), "catalog", "--app", str(app.resolve()),
+                "--revision", revision, "--run-id", run_id, "--run-attempt", run_attempt,
+            ]
+            completed = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=report, timeout=45 * 60, check=False)
+        result = json.loads(evidence.read_text())
+        if (completed.returncode != 0 or not isinstance(result, dict)
+                or result.get("source_sha") != revision or result.get("run_id") != run_id
+                or result.get("run_attempt") != run_attempt or not isinstance(result.get("bundled_catalog"), dict)
+                or result["bundled_catalog"].get("status") != "passed"):
+            raise ValueError("offline bundled catalog smoke did not pass")
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+        if not isinstance(result, dict) or not isinstance(result.get("bundled_catalog"), dict):
+            evidence.write_text(json.dumps({
+                "source_sha": revision, "run_id": run_id, "run_attempt": run_attempt,
+                "bundled_catalog": {"status": "failed", "stage": "offline_launch", "failure_type": type(error).__name__},
+            }, indent=2) + "\n", encoding="utf-8")
+        raise
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", type=Path, help="Path to argos-api-host executable")
@@ -754,7 +793,12 @@ def main():
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered + "\n", encoding="utf-8")
-    print(rendered)
+    print(rendered, flush=True)
+    try:
+        run_ci_bundled_catalog(args.app, args.output)
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+        print(f"fleetworks-local-backend-smoke: {error}", file=sys.stderr)
+        return 1
     return 0
 
 

@@ -155,6 +155,13 @@ impl ParserBudget {
         });
         self.check_sample(measure(workspace, reclaim_from))
     }
+
+    /// Release free pages before the Embedded index starts applying committed work.
+    pub(super) fn release_seed_allocations(&self) {
+        if self.reclaim_unused_memory {
+            release_unused_heap();
+        }
+    }
 }
 
 /// Wait before reading/parsing any bulk input, retaining no Actor Vec. The

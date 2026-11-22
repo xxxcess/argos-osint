@@ -361,6 +361,7 @@ async fn seed(
     }
     let complete = complete?;
     produced.context("actor batch producer stopped")??;
+    let _ = tokio::task::spawn_blocking(move || budget.release_seed_allocations()).await;
     let phase = if complete.complete {
         "Database seeded"
     } else {

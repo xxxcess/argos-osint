@@ -43,7 +43,7 @@ SAFE_REJECTION = {
     "Current backend health could not be verified": "fresh_health_unavailable",
     "Inbox inference is busy": "busy",
 }
-CATALOG_TIMEOUT_SECONDS = 15 * 60
+CATALOG_TIMEOUT_SECONDS = 43 * 60
 CHECKPOINT_POLL_SECONDS = 10
 CATALOG_PROGRESS_MILESTONES = 6
 CATALOG_ROWS = 94_987
@@ -724,6 +724,29 @@ def packaged_catalog_smoke(binary, app, state):
     return evidence
 
 
+def run_catalog(args):
+    require(os.geteuid() == os.getuid() != 0 and os.getegid() == os.getgid(),
+            "bundled catalog smoke requires the unprivileged runner account")
+    require([name for _, name in socket.if_nameindex()] == ["lo"], "bundled catalog smoke needs an offline namespace")
+    require(re.fullmatch(r"[0-9a-f]{40}", args.revision), "catalog package requires the exact source revision")
+    app = args.app.resolve()
+    binary = embedded.resolve_companion_binary(app=app)
+    manifest = json.loads((app / "share/fleetworks/fleetworks-manifest.json").read_text())
+    require(manifest["platform"] == "linux" and manifest["target"] == "x86_64-unknown-linux-gnu"
+            and manifest["profile"] == "debug" and manifest["dirty"] is False
+            and manifest["revision"] == args.revision and str(manifest["run_id"]) == args.run_id
+            and str(manifest["run_attempt"]) == args.run_attempt, "catalog package provenance does not match this run")
+    companion_sha = pack.sha256(binary)
+    require(companion_sha == manifest["companion"]["sha256"], "catalog companion checksum differs from its manifest")
+    with tempfile.TemporaryDirectory(prefix="fleetworks-bundled-catalog-") as temporary:
+        result = packaged_catalog_smoke(binary, app, Path(temporary) / "state")
+    return {
+        "runtime": "embedded-stdio", "target": manifest["target"], "source_sha": args.revision,
+        "run_id": args.run_id, "run_attempt": args.run_attempt, "companion_sha256": companion_sha,
+        "bundled_catalog": result,
+    }
+
+
 def run_embedded(args):
     # Run this program inside a network-denied environment for release verification.
     require(not any((Path.home() / path).exists() for path in (
@@ -791,10 +814,6 @@ def run_embedded(args):
         finally:
             session.close_unconditionally()
 
-        if digests["target"] == "x86_64-unknown-linux-gnu":
-            manifest = json.loads((args.app / "share/fleetworks/fleetworks-manifest.json").read_text())
-            if manifest["profile"] == "debug":
-                result["bundled_catalog"] = packaged_catalog_smoke(binary, args.app, root / "catalog-state")
         return {"runtime": "embedded-stdio", "target": digests["target"], **result}
 
 
@@ -969,6 +988,11 @@ def main():
     local.add_argument("--app", type=Path, required=True)
     local.add_argument("--archive", type=Path, required=True)
     local.add_argument("--digests", type=Path, required=True)
+    catalog = modes.add_parser("catalog", help="Run the offline bundled catalog smoke for the verified Linux PR package")
+    catalog.add_argument("--app", type=Path, required=True)
+    catalog.add_argument("--revision", required=True)
+    catalog.add_argument("--run-id", required=True)
+    catalog.add_argument("--run-attempt", required=True)
     remote = modes.add_parser("distributed")
     remote.add_argument("--name", required=True)
     remote.add_argument("--image", required=True)
@@ -977,8 +1001,17 @@ def main():
     if args.runtime == "embedded":
         os.environ["RUST_LOG"] = "warn,argos_api_host::inbox_qa_service=info"
         result = run_embedded(args)
-    else:
+    elif args.runtime == "distributed":
         result = run_distributed(args)
+    else:
+        try:
+            result = run_catalog(args)
+        except (OSError, ValueError, KeyError) as error:
+            result = {
+                "source_sha": args.revision, "run_id": args.run_id, "run_attempt": args.run_attempt,
+                "bundled_catalog": {"status": "failed", "stage": "package_preflight",
+                                    "failure_type": type(error).__name__},
+            }
     print(json.dumps(result, indent=2))
     return int(result.get("bundled_catalog", {}).get("status") == "failed")
 

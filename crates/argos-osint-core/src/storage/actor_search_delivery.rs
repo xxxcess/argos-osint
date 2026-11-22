@@ -148,21 +148,52 @@ pub(super) async fn prepare(
             let canonical=canonical_many_in(&tx,&ids).await?.into_iter().map(|row|(row.actor_id.clone(),row)).collect::<BTreeMap<_,_>>();
             let mut candidate=ActorIndexBatch {protocol:ACTOR_INDEX_PROTOCOL,deployment_id:status.deployment_id.clone(),source_epoch:status.source_epoch.clone(),index_generation:active.generation.clone(),
                 batch_id:String::new(),writer_epoch:epoch as u64,from_checkpoint:control.acknowledged_sequence as u64,through_checkpoint:control.acknowledged_sequence as u64,source_complete:false,mutations:Vec::new()};
-            let mut counts=BTreeMap::<String,u64>::new();let mut seen=BTreeSet::new();
-            for (offset,event) in events.into_iter().enumerate() {
-                if event.sequence!=control.acknowledged_sequence+offset as i64+1 {return Err(invalid("actor_index_outbox_gap"));}
-                let mut next=candidate.clone();
-                if seen.insert(event.actor_id.clone()) {
-                    let row=canonical.get(&event.actor_id).ok_or_else(||invalid("actor_projection_missing"))?;
-                    next.mutations.push(ActorIndexMutation::new(row.actor_id.clone(),row.revision,row.projection.clone()).map_err(|_|invalid("actor_projection_invalid"))?);
+            let mut counts = BTreeMap::<String, u64>::new();
+            let mut seen = BTreeSet::new();
+            let source_hash = hash(&[&status.source_epoch]);
+            // Keep the serialized envelope empty while accumulating individual
+            // mutation lengths. JSON array separators are the only extra bytes.
+            let mut envelope = candidate.clone();
+            let mut mutation_bytes = 0;
+            for (offset, event) in events.into_iter().enumerate() {
+                if event.sequence != control.acknowledged_sequence + offset as i64 + 1 {
+                    return Err(invalid("actor_index_outbox_gap"));
                 }
-                next.through_checkpoint=event.sequence as u64;
-                next.batch_id=format!("actor-{}-{}-{}",hash(&[&status.source_epoch]),next.from_checkpoint,next.through_checkpoint);
-                if serde_json::to_vec(&next).map_err(|_|invalid("actor_index_encoding"))?.len()>status.limits.batch_bytes as usize {
-                    if candidate.mutations.is_empty() {return Err(invalid("actor_projection_oversize"));}break;
+                let mutation = if seen.insert(event.actor_id.clone()) {
+                    let row = canonical
+                        .get(&event.actor_id)
+                        .ok_or_else(|| invalid("actor_projection_missing"))?;
+                    Some(ActorIndexMutation::new(row.actor_id.clone(), row.revision, row.projection.clone())
+                        .map_err(|_| invalid("actor_projection_invalid"))?)
+                } else {
+                    None
+                };
+                let added_bytes = match mutation.as_ref() {
+                    Some(mutation) => serde_json::to_vec(mutation)
+                        .map_err(|_| invalid("actor_index_encoding"))?
+                        .len() + usize::from(!candidate.mutations.is_empty()),
+                    None => 0,
+                };
+                envelope.through_checkpoint = event.sequence as u64;
+                envelope.batch_id = format!("actor-{source_hash}-{}-{}", envelope.from_checkpoint, envelope.through_checkpoint);
+                let envelope_bytes = serde_json::to_vec(&envelope)
+                    .map_err(|_| invalid("actor_index_encoding"))?
+                    .len();
+                if envelope_bytes + mutation_bytes + added_bytes > status.limits.batch_bytes as usize {
+                    if candidate.mutations.is_empty() {
+                        return Err(invalid("actor_projection_oversize"));
+                    }
+                    break;
                 }
-                if let Some(cause)=event.cause_job {*counts.entry(cause).or_default()+=1;}
-                candidate=next;
+                mutation_bytes += added_bytes;
+                if let Some(mutation) = mutation {
+                    candidate.mutations.push(mutation);
+                }
+                if let Some(cause) = event.cause_job {
+                    *counts.entry(cause).or_default() += 1;
+                }
+                candidate.through_checkpoint = envelope.through_checkpoint;
+                candidate.batch_id = std::mem::take(&mut envelope.batch_id);
             }
             candidate.source_complete=source_complete&&candidate.through_checkpoint==control.next_sequence as u64;
             if candidate.through_checkpoint==candidate.from_checkpoint {candidate.batch_id=format!("actor-barrier-{}-{}",hash(&[&status.source_epoch]),candidate.through_checkpoint);}

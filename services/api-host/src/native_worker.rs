@@ -156,9 +156,9 @@ pub(crate) async fn run_with_config(
     let relinquished = Arc::new(AtomicUsize::new(0));
     let mut tasks = JoinSet::new();
     let index_interval = if relinquish_on_shutdown {
-        // Embedded drains the initial durable backlog at the configured
-        // writer pace. The coordinator and service still enforce admission.
-        Duration::from_millis(500)
+        // Poll between the writer admission windows so local batches don't
+        // miss a full window to scheduling jitter. Write pacing is unchanged.
+        Duration::from_millis(250)
     } else {
         Duration::from_secs(1)
     };

@@ -152,6 +152,7 @@ pub struct Meter {
     directory: PathBuf,
     limits: ActorIndexLimits,
     policy: Mutex<Policy>,
+    reclaimed_at: Option<Mutex<Option<Instant>>>,
 }
 
 impl Meter {
@@ -161,11 +162,43 @@ impl Meter {
             directory,
             limits,
             policy: Mutex::new(Policy::default()),
+            reclaimed_at: None,
         })
     }
 
+    /// Return free allocator pages ahead of co-located Embedded pressure checks.
+    pub fn with_unused_memory_reclaim(mut self) -> Self {
+        if cfg!(all(target_os = "linux", target_env = "gnu")) {
+            self.reclaimed_at = Some(Mutex::new(None));
+        }
+        self
+    }
+
+    fn sample(&self) -> Result<Measurement, IndexError> {
+        let mut sample = measure(&self.directory);
+        let reclaim = self.reclaimed_at.as_ref().filter(|_| {
+            sample
+                .resident_bytes
+                .is_some_and(|resident| resident >= self.limits.memory_resume_bytes)
+        });
+        if let Some(reclaim) = reclaim {
+            // Status and writes share one trim window. The pressure policy is
+            // locked only after the fresh system measurement is available.
+            let mut last = reclaim
+                .lock()
+                .map_err(|_| IndexError::unavailable("pressure_state_poisoned"))?;
+            let now = Instant::now();
+            if last.is_none_or(|at| now.saturating_duration_since(at) >= Duration::from_secs(1)) {
+                *last = Some(now);
+                release_unused_heap();
+            }
+            sample.resident_bytes = resident_bytes();
+        }
+        Ok(sample)
+    }
+
     pub fn snapshot(&self) -> Result<ActorIndexPressure, IndexError> {
-        let sample = measure(&self.directory);
+        let sample = self.sample()?;
         let mut policy = self
             .policy
             .lock()
@@ -187,7 +220,7 @@ impl Meter {
     }
 
     pub fn admit_write(&self) -> Result<(), IndexError> {
-        let sample = measure(&self.directory);
+        let sample = self.sample()?;
         let mut policy = self
             .policy
             .lock()
@@ -224,6 +257,18 @@ impl Meter {
         }
         Ok(())
     }
+}
+
+/// Return whole free pages managed by the local allocator to the kernel.
+pub fn release_unused_heap() -> bool {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        // SAFETY: glibc reclaims only free pages under its own allocator locks.
+        // No caller-owned pointer or live allocation is accessed.
+        unsafe { libc::malloc_trim(0) != 0 }
+    }
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+    false
 }
 
 pub fn measure(directory: &Path) -> Measurement {

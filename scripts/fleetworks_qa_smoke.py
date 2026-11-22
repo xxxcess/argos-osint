@@ -45,6 +45,7 @@ SAFE_REJECTION = {
 }
 CATALOG_TIMEOUT_SECONDS = 43 * 60
 CHECKPOINT_POLL_SECONDS = 10
+INDEX_PROGRESS_POLL_SECONDS = 20
 CATALOG_PROGRESS_MILESTONES = 6
 CATALOG_ROWS = 94_987
 TRAINING_ROWS = 1_020
@@ -72,6 +73,10 @@ SAFE_INDEX_REASONS = {
     "index_not_built", "index_not_ready", "index_reader_visible", "index_rebuild_correction_required",
     "index_rebuild_interrupted", "index_recovery_required", "index_source_mismatch",
     "index_source_not_started", "index_status_unavailable",
+}
+SAFE_INDEX_STATES = {
+    "degraded", "indexing", "not_applicable", "not_built", "not_ready", "paused", "ready", "running",
+    "stale", "throttled", "unavailable", "unknown",
 }
 
 
@@ -493,15 +498,15 @@ def exercise_bundled_catalog(session, state, app, evidence):
     registration = response["context"]
     mutation_context = {**authorize(registration), "expected_configuration_revision": 0}
 
-    def call(operation, args=None, *, allow_non_json=False, diagnostic=False):
+    def call(operation, args=None, *, allow_non_json=False, diagnostic=None):
         request = {"op": operation}
         if args is not None:
             request["args"] = args
         outcome, _ = session.request(request, registration=registration)
         data = outcome["data"]
         if outcome["outcome"] != "ok":
-            if diagnostic:
-                evidence["checkpoint_rpc_status"] = data.get("status")
+            if diagnostic is not None:
+                evidence[diagnostic] = data.get("status")
                 return None
             evidence["rpc_error"] = {"operation": operation, "status": data.get("status")}
             if (operation == "reindex_actors" and data.get("status") == 422
@@ -520,7 +525,8 @@ def exercise_bundled_catalog(session, state, app, evidence):
         return call("jobs_list", {"sort": "newest"})["rows"]
 
     def seed_checkpoint(job_id, dataset, *, terminal):
-        detail = call("job_detail", {"id": job_id}, diagnostic=not terminal)
+        diagnostic = None if terminal else "checkpoint_rpc_status"
+        detail = call("job_detail", {"id": job_id}, diagnostic=diagnostic)
         if detail is None or not detail["private_details_available"]:
             return None
         committed = detail["maintenance_result"]
@@ -615,14 +621,59 @@ def exercise_bundled_catalog(session, state, app, evidence):
               "completed actor catalog was not ready", timeout=30)
         evidence["actor_catalog_ready"] = True
 
+    # The final catalog row proves that the serving index covers the tail of the import.
+    source_id = "ucdp:999"
+    actor_id = "catalog-actor-" + hashlib.sha256(source_id.encode()).hexdigest()[:24]
+    query = {"query": "Chakosi", "mode": "discovery", "limit": 10}
+
+    def retain_index_observation(kind, snapshot):
+        progress = evidence.setdefault("actor_index_progress", {})
+        series = progress.setdefault(kind, {"milestones": []})
+        entry = {
+            "stage": evidence["stage"], "elapsed_ms": round((time.monotonic() - phase_started) * 1000),
+            "observation": snapshot,
+        }
+        previous = series.get("latest", {}).get("observation")
+        if snapshot != previous and len(series["milestones"]) < CATALOG_PROGRESS_MILESTONES:
+            series["milestones"].append(entry)
+        series["latest"] = entry
+        return progress
+
+    def retain_index_checkpoint(response):
+        index = response["index"]
+        snapshot = {"state": index["state"] if index["state"] in SAFE_INDEX_STATES else "other"}
+        for key in ("committed_checkpoint", "visible_checkpoint", "pending_work"):
+            value = index.get(key)
+            if type(value) is int and value >= 0:
+                snapshot[key] = value
+        progress = retain_index_observation("checkpoints", snapshot)
+        visible = snapshot.get("visible_checkpoint")
+        if visible is not None:
+            progress["max_visible_checkpoint"] = max(progress.get("max_visible_checkpoint", 0), visible)
+
     next_stage("actor_index_catch_up")
+    next_index_probe = 0
 
     def serving_index_ready():
+        nonlocal next_index_probe
         observation = check("actor_search")
+        state = observation["state"]
         reason = observation.get("reason_code")
+        snapshot = {"state": state if state in SAFE_INDEX_STATES else "other"}
         if reason in SAFE_INDEX_REASONS:
             evidence["actor_search_readiness"] = reason
-        return observation["state"] == "ready" and reason == "index_reader_visible"
+            snapshot["reason"] = reason
+        retain_index_observation("readiness", snapshot)
+        ready = state == "ready" and reason == "index_reader_visible"
+        now = time.monotonic()
+        if not ready and now >= next_index_probe:
+            # The aggregate readiness response omits index counters. Sample the public search view.
+            next_index_probe = now + INDEX_PROGRESS_POLL_SECONDS
+            response = call("actors_search", {**query, "limit": 1}, diagnostic="actor_index_probe_rpc_status")
+            if response is not None:
+                evidence.pop("actor_index_probe_rpc_status", None)
+                retain_index_checkpoint(response)
+        return ready
 
     # The Embedded source drains automatically. The shared catalog watchdog still bounds this wait.
     until(serving_index_ready, bool, "initial actor index outbox did not become reader-visible",
@@ -639,10 +690,6 @@ def exercise_bundled_catalog(session, state, app, evidence):
     evidence["actor_reindex"] = {"state": "already_completed"}
 
     next_stage("actor_search")
-    # The final catalog row proves that the serving index covers the tail of the import.
-    source_id = "ucdp:999"
-    actor_id = "catalog-actor-" + hashlib.sha256(source_id.encode()).hexdigest()[:24]
-    query = {"query": "Chakosi", "mode": "discovery", "limit": 10}
 
     def exact_actor_visible(response):
         index = response["index"]
@@ -655,6 +702,7 @@ def exercise_bundled_catalog(session, state, app, evidence):
                    "bundled catalog tail actor was not reader-visible", timeout=180)
     index = search["index"]
     require(index["generation"] and index["visible_checkpoint"], "ready index lacks a visible serving generation")
+    retain_index_checkpoint(search)
     evidence["actor_search"] = {"source_id": source_id, "visible_checkpoint": index["visible_checkpoint"]}
 
     next_stage("training_csv_preview")

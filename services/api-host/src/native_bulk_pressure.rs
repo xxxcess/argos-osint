@@ -23,6 +23,7 @@ use argos_osint_core::storage::repo::Repository;
 use argos_osint_core::storage::setup_jobs;
 use fleetworks_contracts::actor_index::ActorIndexLimits;
 use fleetworks_contracts::readiness::DatasetRef;
+use fleetworks_search_index::pressure::release_unused_heap;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Measurement {
@@ -437,17 +438,6 @@ fn measure(workspace: &Path, reclaim_from: Option<u64>) -> Measurement {
         resident_bytes: resident,
         workspace_free_bytes: free_bytes(workspace),
     }
-}
-
-fn release_unused_heap() -> bool {
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    {
-        // SAFETY: glibc reclaims whole free pages under its own allocator
-        // locks. No caller-owned pointer or live allocation is accessed.
-        unsafe { libc::malloc_trim(0) != 0 }
-    }
-    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-    false
 }
 
 fn resident_bytes() -> Option<u64> {

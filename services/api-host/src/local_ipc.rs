@@ -89,6 +89,7 @@ mod embedded {
     use fleetworks_jobs::Store;
     use fleetworks_search_index::config::LocalEngineConfig;
     use fleetworks_search_index::engine::Engine;
+    use fleetworks_search_index::pressure::Meter;
     use fleetworks_search_index::service::EngineSlot;
     use fleetworks_search_index::service::SearchService;
     use tokio::io::AsyncRead;
@@ -217,7 +218,13 @@ mod embedded {
             })
             .await??;
 
-            let limits = ActorIndexLimits::default();
+            let limits = ActorIndexLimits {
+                writer_memory_bytes: 32 * 1024 * 1024,
+                ..ActorIndexLimits::default()
+            };
+            let meter = Arc::new(
+                Meter::new(layout.search.clone(), limits.clone())?.with_unused_memory_reclaim(),
+            );
             let engine_config = LocalEngineConfig::for_identity(
                 layout.search.clone(),
                 deployment.deployment_id.clone(),
@@ -230,11 +237,14 @@ mod embedded {
             })
             .await??;
             let engine_slot = Arc::new(EngineSlot::new(Some(Arc::new(engine))));
-            let search_service = Arc::new(SearchService::new(
-                engine_config,
-                Arc::clone(&engine_slot),
-                "actor_index_unavailable",
-            )?);
+            let search_service = Arc::new(
+                SearchService::new(
+                    engine_config,
+                    Arc::clone(&engine_slot),
+                    "actor_index_unavailable",
+                )?
+                .with_meter(meter),
+            );
 
             let dataset_store = tokio::task::spawn_blocking({
                 let staged = layout.staged_datasets.clone();

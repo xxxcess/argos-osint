@@ -1051,7 +1051,7 @@ mod embedded {
             }
             server_task.await.expect("join").expect("clean reject");
 
-            // Compatible handshake advertises warmed in-process engines without helper commands.
+            // Compatible handshake advertises warmed NLP and omits the retired classifier capability.
             let context2 = LocalBackendContext::open(state_dir, None, None, false)
                 .await
                 .expect("reopen context");
@@ -1088,10 +1088,7 @@ mod embedded {
                 caps.features.iter().any(|feature| feature == "nlp"),
                 cfg!(feature = "nlp")
             );
-            assert_eq!(
-                caps.features.iter().any(|feature| feature == "classifier"),
-                cfg!(feature = "classifier")
-            );
+            assert!(!caps.features.iter().any(|feature| feature == "classifier"));
             assert!(!dir.path().join("state/classifier/active.json").exists());
             assert!(!dir.path().join("state/classifier/models").exists());
             assert!(caps.auth);

@@ -480,10 +480,10 @@ async fn empty_terminal_is_completed_without_model_and_observed_terminal_is_bloc
 }
 
 #[tokio::test]
-async fn actual_review_import_and_approval_queue_and_fit_one_durable_candidate() {
+async fn historical_review_import_and_approval_do_not_queue_training() {
     use argos_osint_core::atlas_taxonomy::DomainId;
     use argos_osint_core::classifier::review::ReviewDecision;
-    use argos_osint_core::storage::{classifier_learning as learning, classifier_review as review};
+    use argos_osint_core::storage::classifier_review as review;
     let _serial = fixture::serial().await;
     let installed = tokio::task::spawn_blocking(fixture::install).await.unwrap();
     let repo = Repository::connect(
@@ -621,45 +621,15 @@ async fn actual_review_import_and_approval_queue_and_fit_one_durable_candidate()
     )
     .await
     .unwrap();
-    assert_eq!(count(&repo, "classifier_learning_job").await, 1);
     assert_eq!(
-        learning::drain_one(
-            &repo,
-            &installed.home,
-            "candidate-worker",
-            Arc::new(AtomicBool::new(false))
-        )
-        .await
-        .unwrap(),
-        1
+        count(&repo, "classifier_learning_job").await,
+        0,
+        "approved legacy reviews cannot submit new Natural training"
     );
-    let mut response = repo
-        .db()
-        .query("SELECT VALUE result_json FROM classifier_learning_job;")
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
-    let results: Vec<String> = response.take(0).unwrap();
-    let result: serde_json::Value = serde_json::from_str(&results[0]).unwrap();
-    assert_eq!(result["state"], "candidate_retained", "{result}");
-    assert_eq!(result["promoted"], false);
-    assert!(count(&repo, "classifier_learning_used").await >= 100);
+    assert_eq!(count(&repo, "classifier_learning_used").await, 0);
     assert_eq!(
         std::fs::read(installed.directory.path().join("classifier/active.json")).unwrap(),
-        active,
-        "candidate fitting never confers activation authority"
-    );
-    assert_eq!(
-        learning::drain_one(
-            &repo,
-            &installed.home,
-            "candidate-restart",
-            Arc::new(AtomicBool::new(false))
-        )
-        .await
-        .unwrap(),
-        0
+        active
     );
     let mut changed = exchange.clone();
     let mut edited = changed

@@ -685,6 +685,11 @@ impl ClassifierHome {
         if requested.is_some_and(|snapshot| {
             snapshot.algorithm_version != super::ZERO_SHOT_ALGORITHM_VERSION
         }) {
+            // Archive fixtures replay their original exact receipts. Shipping
+            // builds compile out the Natural runtime.
+            if super::LEGACY_RUNTIME_AVAILABLE {
+                return self.pin_natural(requested).await;
+            }
             return Err(ClassifierError::Incompatible(
                 "historical Natural models are retained for audit and cannot run Atlas inference"
                     .into(),

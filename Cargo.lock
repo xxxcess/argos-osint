@@ -8258,8 +8258,6 @@ dependencies = [
 [[package]]
 name = "surrealdb-kvs-any"
 version = "3.3.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1257ac3abc1bbd19de387ed8322566833611134fcfb97bb7e1a3473517d23536"
 dependencies = [
  "surrealdb-cnf",
  "surrealdb-kvs",

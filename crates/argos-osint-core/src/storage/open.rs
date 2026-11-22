@@ -18,6 +18,21 @@ use url::Url;
 use super::bootstrap::{self, Bootstrap};
 use super::tx::TxError;
 
+// One 32 MiB cache plus two 16 MiB memtables gives SurrealDB's write buffer
+// manager a 64 MiB budget. Limit background concurrency to leave room for
+// compaction, transaction allocations and the rest of the companion.
+#[cfg(feature = "embedded")]
+const EMBEDDED_ROCKSDB_OPTIONS: &str = concat!(
+    "versioned=false&sync=every",
+    "&rocksdb_block_cache_size=33554432",
+    "&rocksdb_write_buffer_size=16777216",
+    "&rocksdb_max_write_buffer_number=2",
+    "&rocksdb_min_write_buffer_number_to_merge=1",
+    "&rocksdb_thread_count=2",
+    "&rocksdb_jobs_count=2",
+    "&rocksdb_max_concurrent_subcompactions=1",
+);
+
 /// Where the store lives.
 #[derive(Clone, PartialEq, Eq)]
 pub enum Target {
@@ -154,7 +169,7 @@ pub async fn open(target: &Target, ns: &str, database: &str) -> Result<Opened, T
         Target::Embedded { path } => {
             let path = std::path::absolute(path)
                 .map_err(|e| TxError::Abort(format!("embedded store path: {e}")))?;
-            let url = format!("rocksdb://{}?versioned=false&sync=every", path.display());
+            let url = format!("rocksdb://{}?{EMBEDDED_ROCKSDB_OPTIONS}", path.display());
             // The SDK has no explicit close: dropping the last client of a
             // datastore releases RocksDB's LOCK asynchronously, so a reopen
             // in the same process (reset, status after init) can briefly
@@ -257,6 +272,39 @@ async fn connect_network(_: &Url) -> Result<Surreal<Any>, TxError> {
 #[cfg(test)]
 mod tests {
     use super::{NetworkAccess, Target};
+
+    #[cfg(feature = "embedded")]
+    #[tokio::test]
+    async fn embedded_open_applies_rocksdb_resource_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store");
+        let _opened = super::open(&Target::Embedded { path: path.clone() }, "argos", "profile")
+            .await
+            .unwrap();
+
+        let options_path = std::fs::read_dir(path)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("OPTIONS-"))
+            })
+            .max()
+            .expect("RocksDB must persist its effective options when opened");
+        let options = std::fs::read_to_string(options_path).unwrap();
+        for expected in [
+            "write_buffer_size=16777216",
+            "max_write_buffer_number=2",
+            "min_write_buffer_number_to_merge=1",
+            "max_background_jobs=2",
+            "max_subcompactions=1",
+        ] {
+            assert!(
+                options.lines().any(|line| line.trim() == expected),
+                "missing effective RocksDB option {expected}"
+            );
+        }
+    }
 
     #[test]
     fn network_targets_accept_only_websocket_origins_and_redact_credentials() {

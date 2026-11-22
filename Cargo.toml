@@ -63,6 +63,8 @@ scraper = "0.27"
 [patch.crates-io]
 wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "205b8d4f7e60fa6248b83bfbbb4c6a06096c59ff" }
 winit = { git = "https://github.com/anomalyco/rune", rev = "205b8d4f7e60fa6248b83bfbbb4c6a06096c59ff" }
+# SurrealDB 3.3.4 drops RocksDB-specific options passed by its Embedded SDK.
+surrealdb-kvs-any = { path = "patches/surrealdb-kvs-any" }
 
 # The embedded JS engine must meet local interrupt deadlines in debug builds too.
 [profile.dev.package.rquickjs-sys]

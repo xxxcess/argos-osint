@@ -235,7 +235,13 @@ impl ActorIndexWorker {
             }
         };
         actor_search_outbox::observe_resources(repo, &claim, &status, Utc::now()).await?;
-        let defer_initial_seed = matches!(&self.transport, IndexTransport::Local(_))
+        let embedded = matches!(&self.transport, IndexTransport::Local(_));
+        let embedded_catch_up = embedded
+            && status
+                .active
+                .as_ref()
+                .is_some_and(|active| !active.source_complete);
+        let defer_initial_seed = embedded
             && status.rebuilding.is_none()
             && status
                 .active
@@ -272,21 +278,28 @@ impl ActorIndexWorker {
             Err(error) => return Err(error.into()),
         }
         let prepare_started = Instant::now();
-        let preparation =
-            match actor_search_outbox::prepare(repo, &self.owner, &status, Utc::now()).await {
-                Ok(preparation) => preparation,
-                Err(TxError::Abort(reason)) => {
-                    // Known source/schema/generation/oversize conflicts require a
-                    // reviewed correction. Unavailable service state is retried.
-                    let permanent = reason != "actor_index_service_unavailable";
-                    self.status = None;
-                    actor_search_outbox::defer(repo, &claim, None, permanent, Utc::now()).await?;
-                    return Ok(TickReport::Deferred {
-                        correction_required: permanent,
-                    });
-                }
-                Err(error) => return Err(error.into()),
-            };
+        let preparation = match actor_search_outbox::prepare_with_embedded_policy(
+            repo,
+            &self.owner,
+            &status,
+            Utc::now(),
+            embedded,
+        )
+        .await
+        {
+            Ok(preparation) => preparation,
+            Err(TxError::Abort(reason)) => {
+                // Known source/schema/generation/oversize conflicts require a
+                // reviewed correction. Unavailable service state is retried.
+                let permanent = reason != "actor_index_service_unavailable";
+                self.status = None;
+                actor_search_outbox::defer(repo, &claim, None, permanent, Utc::now()).await?;
+                return Ok(TickReport::Deferred {
+                    correction_required: permanent,
+                });
+            }
+            Err(error) => return Err(error.into()),
+        };
         let Preparation::Batch { lease, prepared } = preparation else {
             return Ok(TickReport::Waiting);
         };
@@ -309,8 +322,14 @@ impl ActorIndexWorker {
         match result {
             Ok(receipt) => {
                 let acknowledge_started = Instant::now();
-                if let Err(error) =
-                    actor_search_outbox::acknowledge(repo, &lease, &receipt, Utc::now()).await
+                if let Err(error) = actor_search_outbox::acknowledge_with_retirement(
+                    repo,
+                    &lease,
+                    &receipt,
+                    Utc::now(),
+                    embedded_catch_up,
+                )
+                .await
                 {
                     self.status = None;
                     if matches!(&error,TxError::Abort(reason) if reason=="actor_index_receipt_mismatch" || reason=="actor_index_checksum")
@@ -322,12 +341,7 @@ impl ActorIndexWorker {
                     }
                     return Err(error.into());
                 }
-                if matches!(&self.transport, IndexTransport::Local(_))
-                    && status
-                        .active
-                        .as_ref()
-                        .is_some_and(|active| !active.source_complete)
-                {
+                if embedded_catch_up {
                     tracing::info!(
                         code = "embedded_actor_index_batch_elapsed",
                         prepare_ms,

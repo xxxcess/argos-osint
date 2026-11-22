@@ -182,6 +182,67 @@ async fn missing_event_at_live_cursor_tail_refuses_visibility() {
 }
 
 #[tokio::test]
+async fn embedded_initial_ack_keeps_future_delivery_after_retired_rows() {
+    let Some(server) = support::Server::start() else {
+        return;
+    };
+    let repo = server.repo("actor_search", "embedded_retirement").await;
+    let mut status = status(&repo).await;
+    repo.db()
+        .query("UPSERT actor_search_control:catalog SET next_sequence=4096,acknowledged_sequence=4096,backfill_complete=true RETURN NONE")
+        .await
+        .expect("represent a previously delivered prefix")
+        .check()
+        .expect("setup checkpoint");
+    let active = status.active.as_mut().expect("initial generation");
+    active.visible_checkpoint = 4096;
+    active.committed_checkpoint = 4096;
+    actor_catalog::seed_actors_pinned(
+        &repo,
+        actors(2),
+        "fixture-sha",
+        &AtomicBool::new(false),
+        |_| {},
+    )
+    .await
+    .expect("new contiguous source events");
+    let (lease, prepared) = batch(&repo, "leader-retirement", &status, now()).await;
+    assert!(prepared.batch.source_complete);
+    assert_eq!(prepared.batch.through_checkpoint, 4098);
+    actor_search_outbox::acknowledge_with_retirement(
+        &repo,
+        &lease,
+        &receipt(&prepared.batch),
+        now(),
+        true,
+    )
+    .await
+    .expect("retain logically retired events during import");
+    let observed = actor_search_outbox::observe(&repo)
+        .await
+        .expect("read durable cursor")
+        .expect("source control");
+    assert_eq!(observed.acknowledged_sequence, 4098);
+    assert_eq!(support::count(repo.db(), "actor_search_event").await, 2);
+
+    let active = status.active.as_mut().expect("serving generation");
+    active.visible_checkpoint = 4098;
+    active.committed_checkpoint = 4098;
+    active.source_complete = true;
+    let preparation = actor_search_outbox::prepare_with_embedded_policy(
+        &repo,
+        "leader-retirement",
+        &status,
+        now() + Duration::seconds(2),
+        true,
+    )
+    .await
+    .expect("maintenance turn collects retired rows");
+    assert!(matches!(preparation, Preparation::Waiting));
+    assert_eq!(support::count(repo.db(), "actor_search_event").await, 0);
+}
+
+#[tokio::test]
 async fn attributed_seed_waits_for_exact_reader_visible_ack_and_fences_replicas() {
     let Some(server) = support::Server::start() else {
         return;

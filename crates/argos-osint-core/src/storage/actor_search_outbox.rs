@@ -64,6 +64,8 @@ pub const SCHEMA: &str = concat!(
     include_str!("schema/actor_search_rebuild.surql")
 );
 const BACKFILL_PAGE: usize = 128;
+const INITIAL_RETIREMENT_LIMIT: i64 = 100_000;
+const INITIAL_RETIREMENT_MIN_CATALOG: i64 = 4_096;
 
 /// Actual server-side execution identity, never supplied by a UI context field.
 #[derive(Clone)]
@@ -721,16 +723,38 @@ pub async fn prepare(
     status: &ActorIndexStatus,
     now: DateTime<Utc>,
 ) -> Result<Preparation, TxError> {
-    delivery::prepare(repo, owner, status, now).await
+    prepare_with_embedded_policy(repo, owner, status, now, false).await
 }
 
-/// Acknowledge only the exact persisted batch's reader-visible receipt. Outbox
-/// deletion, progress and genuine causal-job completion share this transaction.
+/// Embedded catch-up uses the configured writer batch with bounded source reads.
+pub async fn prepare_with_embedded_policy(
+    repo: &Repository,
+    owner: &str,
+    status: &ActorIndexStatus,
+    now: DateTime<Utc>,
+    embedded: bool,
+) -> Result<Preparation, TxError> {
+    delivery::prepare(repo, owner, status, now, embedded).await
+}
+
+/// Acknowledge only the exact persisted batch's reader-visible receipt.
 pub async fn acknowledge(
     repo: &Repository,
     lease: &Lease,
     receipt: &ActorIndexReceipt,
     now: DateTime<Utc>,
+) -> Result<(), TxError> {
+    acknowledge_with_retirement(repo, lease, receipt, now, false).await
+}
+
+/// Retire a verified batch logically with its durable cursor. During an initial
+/// Embedded import a bounded number of retired rows can be deleted later.
+pub async fn acknowledge_with_retirement(
+    repo: &Repository,
+    lease: &Lease,
+    receipt: &ActorIndexReceipt,
+    now: DateTime<Utc>,
+    embedded_catch_up: bool,
 ) -> Result<(), TxError> {
     let lease = lease.clone();
     let receipt = receipt.clone();
@@ -743,7 +767,15 @@ pub async fn acknowledge(
             || receipt.committed_checkpoint!=receipt.visible_checkpoint || receipt.writer_epoch!=lease.epoch {return Err(invalid("actor_index_receipt_mismatch"));}
         let from = i64::try_from(prepared.batch.from_checkpoint).map_err(|_| invalid("actor_index_event_range"))?;
         let through = i64::try_from(receipt.visible_checkpoint).map_err(|_| invalid("actor_index_event_range"))?;
-        let events = event_records(from, through)?;
+        let mut events = event_records(from, through)?;
+        if embedded_catch_up
+            && control.next_sequence > INITIAL_RETIREMENT_MIN_CATALOG
+            && through <= INITIAL_RETIREMENT_LIMIT
+        {
+            // The persisted cursor excludes retired events from delivery, even
+            // after restart. Keep synchronous deletion out of the import path.
+            events.clear();
+        }
         jobs::run(&tx,tx.query("UPDATE actor_search_control:catalog SET acknowledged_sequence=$through,pending_json='',failures=0,last_error='',retry_at=<datetime>$now RETURN NONE;
             IF array::len($events)>0 { DELETE $events RETURN NONE; };")
             .bind(("through",through)).bind(("events",events)).bind(("now",now.to_rfc3339()))).await?;

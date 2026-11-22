@@ -24,7 +24,7 @@ News cycles require a Distributed gateway with Atlas enabled. Embedded Setup and
 
 If readiness expires while you review a validated CSV, the app keeps the dataset and review visible. Use **Refresh checks** in the review and confirm explicitly once the operation is available for the same registration and configuration revision. Changes to the backend context or configuration require a new review.
 
-Embedded seeding uses the companion’s memory and disk guard. A resource interruption can retry the same job from its committed rows after revalidating the pinned CSV. Startup identifies memory pressure, low workspace space, and unavailable measurements separately. The catalog becomes ready after the complete seed receipt, and index readiness requires a separate reader observation. During an initial Embedded seed, the empty search index can defer writes while the durable outbox has headroom. The index then applies the committed changes and verifies the serving reader.
+Embedded seeding uses the companion’s memory and disk guard. A resource interruption can retry the same job from its committed rows after revalidating the pinned CSV. Startup identifies memory pressure, low workspace space, and unavailable measurements separately. The catalog becomes ready after the complete seed receipt, and index readiness requires a separate reader observation. During an initial Embedded seed, the empty search index can defer writes while the durable outbox has headroom. The index then applies the committed changes and verifies the serving reader. Its durable cursor advances after matching reader receipts. Embedded deletes a bounded set of already acknowledged events during later maintenance turns.
 
 ## Backend types and parity
 

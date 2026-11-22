@@ -174,7 +174,11 @@ async fn await_bulk_capacity_in(
 /// A shadow promotion may acknowledge millions of rows at once. Delete at most
 /// one bounded keyset page per coordinator turn, never an unbounded range.
 pub(super) async fn prune_in(tx: &Tx, through: i64) -> Result<(), TxError> {
-    jobs::run(tx,tx.query("LET $expired=(SELECT VALUE id FROM actor_search_event WITH INDEX actor_search_event_sequence WHERE sequence<=$through ORDER BY sequence LIMIT 500); DELETE $expired RETURN NONE;")
-        .bind(("through",through))).await?;
+    prune_in_bounded(tx, through, 500).await
+}
+
+pub(super) async fn prune_in_bounded(tx: &Tx, through: i64, limit: i64) -> Result<(), TxError> {
+    jobs::run(tx,tx.query("LET $expired=(SELECT VALUE id FROM actor_search_event WITH INDEX actor_search_event_sequence WHERE sequence<=$through ORDER BY sequence LIMIT $limit); DELETE $expired RETURN NONE;")
+        .bind(("through",through)).bind(("limit",limit))).await?;
     Ok(())
 }

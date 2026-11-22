@@ -379,8 +379,6 @@ mod tests {
     use crate::classifier::review::REVIEW_SCHEMA;
 
     mod fixture {
-        use super::{artifact, DomainId, DOMAIN_IDS};
-
         include!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/classifier/atlas_bert_candidate.rs"

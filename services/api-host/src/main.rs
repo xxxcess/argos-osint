@@ -1,8 +1,8 @@
 mod actor_index_worker;
 mod actor_seed;
+mod atlas_bert_admin;
 mod atlas_worker;
 mod classifier_service;
-mod classifier_train;
 mod execution_service;
 mod fleetworks;
 mod inbox_qa_service;
@@ -37,14 +37,20 @@ struct Args {
     origins: Vec<String>,
     #[arg(long, value_enum, default_value_t = Role::Combined)]
     role: Role,
-    /// Private workspace CSV snapshot selected by Venture.
-    #[arg(long, required_if_eq_any([("role", "train-classifier"), ("role", "seed-actors")]))]
+    /// Private workspace actor CSV snapshot.
+    #[arg(long, required_if_eq("role", "seed-actors"))]
     file: Option<std::path::PathBuf>,
-    #[arg(long, required_if_eq_any([("role", "train-classifier"), ("role", "seed-actors")]))]
+    #[arg(long, required_if_eq("role", "seed-actors"))]
     expected_sha256: Option<String>,
-    /// Activate the synthetic Natural baseline after successful training.
-    #[arg(long)]
-    activate: bool,
+    /// Digest of the frozen Atlas BERT candidate in the classifier workspace.
+    #[arg(long, required_if_eq("role", "atlas-bert-activate"))]
+    candidate_sha256: Option<String>,
+    /// Digest of the candidate's qualified held-out evaluation.
+    #[arg(long, required_if_eq("role", "atlas-bert-activate"))]
+    evaluation_sha256: Option<String>,
+    /// Exact prior revision returned by --role atlas-bert-revision.
+    #[arg(long, required_if_eq("role", "atlas-bert-activate"))]
+    expected_bert_revision: Option<String>,
     /// Private state directory for `--role local-ipc` (enforced `0o700`).
     #[arg(long, required_if_eq("role", "local-ipc"))]
     state_dir: Option<std::path::PathBuf>,
@@ -92,8 +98,10 @@ enum Role {
     Nlp,
     /// Serve pinned Rust-BERT inference without a database session.
     Classifier,
-    /// Train the optional Natural classifier from a workspace dataset.
-    TrainClassifier,
+    /// Print the exact active revision from the Atlas classifier workspace.
+    AtlasBertRevision,
+    /// Explicitly activate a qualified, staged Atlas BERT candidate.
+    AtlasBertActivate,
     /// Seed the Brain actor catalog from a pinned workspace CSV.
     SeedActors,
     /// Initialize storage and provision the runtime database account.
@@ -154,9 +162,16 @@ fn main() -> Result<()> {
     }
     let runtime = tokio::runtime::Runtime::new()?;
     ensure_platform_name_is_bootstrap_only(&args)?;
+    ensure!(
+        args.role == Role::AtlasBertActivate
+            || (args.candidate_sha256.is_none()
+                && args.evaluation_sha256.is_none()
+                && args.expected_bert_revision.is_none()),
+        "Atlas BERT activation flags require --role atlas-bert-activate"
+    );
     if args.role == Role::LocalIpc {
         ensure!(
-            args.file.is_none() && args.expected_sha256.is_none() && !args.activate,
+            args.file.is_none() && args.expected_sha256.is_none(),
             "CSV worker options are incompatible with --role local-ipc"
         );
         let result = runtime.block_on(local_ipc::run(
@@ -190,7 +205,9 @@ async fn run_non_ipc(args: Args) -> Result<()> {
         origins,
         file,
         expected_sha256,
-        activate,
+        candidate_sha256,
+        evaluation_sha256,
+        expected_bert_revision,
         state_dir,
         nlp_cmd,
         classifier_cmd,
@@ -200,18 +217,7 @@ async fn run_non_ipc(args: Args) -> Result<()> {
         state_dir.is_none() && nlp_cmd.is_none() && classifier_cmd.is_none(),
         "--state-dir, --nlp-cmd, and --classifier-cmd require --role local-ipc"
     );
-    if role == Role::TrainClassifier {
-        return classifier_train::run(
-            fleetworks::workspace_path()?,
-            file.expect("required for classifier training"),
-            expected_sha256.expect("required for classifier training"),
-            activate,
-            shutdown_signal(),
-        )
-        .await;
-    }
     if role == Role::SeedActors {
-        ensure!(!activate, "--activate requires --role train-classifier");
         return actor_seed::run(
             file.expect("required for actor catalog seeding"),
             expected_sha256.expect("required for actor catalog seeding"),
@@ -220,9 +226,22 @@ async fn run_non_ipc(args: Args) -> Result<()> {
         .await;
     }
     ensure!(
-        file.is_none() && expected_sha256.is_none() && !activate,
-        "CSV worker options require --role train-classifier or --role seed-actors"
+        file.is_none() && expected_sha256.is_none(),
+        "CSV worker options require --role seed-actors"
     );
+    if matches!(role, Role::AtlasBertRevision | Role::AtlasBertActivate) {
+        let command = if role == Role::AtlasBertActivate {
+            atlas_bert_admin::Command::Activate {
+                frozen_sha256: candidate_sha256.expect("required for BERT activation"),
+                evaluation_sha256: evaluation_sha256.expect("required for BERT activation"),
+                expected_revision: expected_bert_revision.expect("required for BERT activation"),
+            }
+        } else {
+            atlas_bert_admin::Command::Revision
+        };
+        return atlas_bert_admin::run(fleetworks::workspace_path()?, command, shutdown_signal())
+            .await;
+    }
     if matches!(role, Role::Nlp | Role::Classifier) {
         let (bind, policy, router) = tokio::task::spawn_blocking(move || {
             let (engine, router) = if role == Role::Nlp {

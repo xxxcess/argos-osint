@@ -49,7 +49,6 @@ CHECKPOINT_POLL_SECONDS = 10
 INDEX_PROGRESS_POLL_SECONDS = 20
 CATALOG_PROGRESS_MILESTONES = 6
 CATALOG_ROWS = 94_987
-TRAINING_ROWS = 1_020
 ROCKSDB_OPTIONS = {
     "write_buffer_size": 8 * 1024 * 1024,
     "max_write_buffer_number": 2,
@@ -936,14 +935,13 @@ def exercise_bundled_catalog(session, state, app, evidence):
     retain_index_checkpoint(search)
     evidence["actor_search"] = {"source_id": source_id, "visible_checkpoint": index["visible_checkpoint"]}
 
-    next_stage("training_csv_preview")
-    training = check("classifier_training")
-    require(any(action["id"] == "train_classifier" and action["allowed"] for action in training["actions"]),
-            "training preview lacked an authorized backend operation")
-    stage_bundled_csv(call, directory, "classifier_training", pins["classifier_training"], TRAINING_ROWS)
-    evidence["training_validated_rows"] = TRAINING_ROWS
-    evidence["training_job_accepted"] = any(row["operation"] == "classifier_train" for row in jobs())
-    require(not evidence["training_job_accepted"], "training ran without confirmation")
+    next_stage("verify_retired_classifier_maintenance")
+    readiness = call("workstation_readiness")
+    require(not any(action["id"] == "train_classifier" and action["allowed"]
+                    for probe in readiness["checks"] for action in probe.get("actions", [])),
+            "the companion advertised a retired Natural training operation")
+    require(not any(row["operation"] == "classifier_train" for row in jobs()),
+            "a retired Natural training operation was accepted")
 
     next_stage("shutdown")
     embedded.check_zero_bound_sockets(session.proc.pid)

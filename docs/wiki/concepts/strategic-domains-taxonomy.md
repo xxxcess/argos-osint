@@ -53,7 +53,7 @@ Only title and description are model features. The frozen v1 version contains 1,
 
 Rows with no labels are explicit negatives for all six binary models; single-domain examples can be admitted under the current policy; the frozen v1 annotation contract retains its original exact-two expectations. Partial provider labels use a separate masked typed pipeline. A CSV claiming `reviewed_real` is rejected; an unverified text field cannot confer independent review approval.
 
-The seed supports development and explicit **Synthetic baseline** activation. Its correlated row count does not prove production accuracy, and it cannot authorize automatic promotion. See [dataset resolution and validation](../code/classifier.md#legacy-dataset-resolution-and-validation).
+The synthetic corpus supports offline Atlas BERT fitting and held-out comparison. Correlated fixture rows do not establish production accuracy. Activation requires an explicit operator command after qualification. [Candidate proof](../code/classifier.md#fit-and-verify-a-candidate)
 
 ## Versioned v2 dataset and policy
 

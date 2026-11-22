@@ -139,7 +139,6 @@ impl State {
             || self.transfer.confirmation.is_some()
             || self.submissions.atlas.confirmation.is_some()
             || self.submissions.tools.confirmation.is_some()
-            || self.classifier_activation.confirmation.is_some()
             || self.job_actions.confirmation.is_some()
             || self.workspaces.confirmation.is_some()
             || self.rebind.confirmation.is_some()

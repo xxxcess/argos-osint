@@ -184,12 +184,26 @@ fn validate_snapshot(snapshot: &ModelSnapshot) -> Result<(), ClassifierError> {
         || snapshot.algorithm_version != ZERO_SHOT_ALGORITHM_VERSION
         || snapshot.preprocessing_version != PREPROCESSING_VERSION
         || snapshot.policy_version != ADMISSION_POLICY_VERSION
-        || snapshot.provenance != Provenance::ZeroShot
+        || !valid_bert_provenance(&snapshot.provenance)
         || chrono::DateTime::parse_from_rfc3339(&snapshot.activated_at).is_err()
     {
         return Err(protocol_error("invalid_snapshot"));
     }
     Ok(())
+}
+
+fn valid_bert_provenance(provenance: &Provenance) -> bool {
+    match provenance {
+        Provenance::ZeroShot => true,
+        Provenance::FineTunedAtlasBert {
+            dataset_sha256,
+            frozen_sha256,
+            evaluation_sha256,
+        } => [dataset_sha256, frozen_sha256, evaluation_sha256]
+            .into_iter()
+            .all(|digest| is_sha256(digest)),
+        _ => false,
+    }
 }
 
 fn is_sha256(value: &str) -> bool {

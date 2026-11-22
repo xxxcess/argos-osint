@@ -649,7 +649,6 @@ impl State {
                 self.configuration.message = None;
                 self.maintenance.confirmation = None;
                 self.submissions.invalidate_confirmations();
-                self.classifier_activation.invalidate_confirmation();
                 Load::Ready(saved)
             }
             Ok(_) => {

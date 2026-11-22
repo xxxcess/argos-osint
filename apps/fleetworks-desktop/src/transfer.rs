@@ -331,7 +331,6 @@ impl GatewayEffects {
                         state.configuration.confirmation = None;
                         state.maintenance.confirmation = None;
                         state.submissions.invalidate_confirmations();
-                        state.classifier_activation.invalidate_confirmation();
                         Load::Ready(format!(
                             "Current-format profile imported at backend revision {}",
                             receipt.configuration_revision

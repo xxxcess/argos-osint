@@ -2313,24 +2313,10 @@ fn maintenance_preflight_status(
     operation: MaintenanceOperation,
     preflight: &crate::maintenance::MaintenancePreflight,
 ) -> (&'static str, StatusTone, bool) {
-    if matches!(state.maintenance.upload, Load::Loading) {
-        let uploading_op = state
-            .maintenance
-            .local_dataset
-            .as_ref()
-            .and_then(|dataset| match dataset.kind {
-                DatasetKind::ActorCatalog => Some(MaintenanceOperation::SeedActors),
-                DatasetKind::ClassifierTraining => Some(MaintenanceOperation::TrainClassifier),
-                _ => None,
-            })
-            .or(state.maintenance.pending_preview)
-            .unwrap_or(match state.seed_stage {
-                SeedStage::Classifier => MaintenanceOperation::TrainClassifier,
-                SeedStage::Seed | SeedStage::Maintenance => MaintenanceOperation::SeedActors,
-            });
-        if uploading_op == operation {
-            return ("Uploading…", StatusTone::Accent, true);
-        }
+    if matches!(state.maintenance.upload, Load::Loading)
+        && operation == MaintenanceOperation::SeedActors
+    {
+        return ("Uploading…", StatusTone::Accent, true);
     }
     let queuing_for_op = (matches!(state.maintenance.receipt, Load::Loading)
         || state.maintenance.busy())
@@ -2355,7 +2341,6 @@ fn operation_key(operation: MaintenanceOperation) -> &'static str {
     match operation {
         MaintenanceOperation::SeedActors => "seed",
         MaintenanceOperation::ReindexActors => "reindex",
-        MaintenanceOperation::TrainClassifier => "train",
         _ => "other",
     }
 }
@@ -2447,13 +2432,6 @@ fn operation_job_card_status(
                         "Index built".to_owned()
                     } else {
                         "Search index ready".to_owned()
-                    }
-                }
-                MaintenanceOperation::TrainClassifier => {
-                    if result.and_then(|r| r.active_model_id.as_ref()).is_some() {
-                        "Classifier trained".to_owned()
-                    } else {
-                        "Candidate trained · Not activated".to_owned()
                     }
                 }
                 _ => "Completed".to_owned(),
@@ -2567,7 +2545,6 @@ pub(crate) fn maintenance(
     let active_step = match state.seed_stage {
         SeedStage::Seed => 0,
         SeedStage::Maintenance => 1,
-        SeedStage::Classifier => 2,
     };
     let checking_readiness = matches!(state.readiness, Load::Pending | Load::Loading);
     let refresh_btn = ActionButton::new("Refresh checks")
@@ -2591,24 +2568,17 @@ pub(crate) fn maintenance(
         .on_press(|state: &mut State| state.refresh_page())
         .build(kit, preferences, pointer_ref);
 
-    let stage_picker = SegmentedControl::new(
-        &[
-            "1. Seed Actors",
-            "2. Search Index",
-            "Optional · Train Classifier",
-        ],
-        Some(active_step),
-    )
-    .label("Maintenance stage")
-    .fit()
-    .on_pick(|state: &mut State, idx, _| {
-        state.seed_stage = match idx {
-            1 => SeedStage::Maintenance,
-            2 => SeedStage::Classifier,
-            _ => SeedStage::Seed,
-        };
-    })
-    .build(kit);
+    let stage_picker =
+        SegmentedControl::new(&["1. Seed Actors", "2. Search Index"], Some(active_step))
+            .label("Maintenance stage")
+            .fit()
+            .on_pick(|state: &mut State, idx, _| {
+                state.seed_stage = match idx {
+                    1 => SeedStage::Maintenance,
+                    _ => SeedStage::Seed,
+                };
+            })
+            .build(kit);
 
     let readiness_unsynced = state.readiness_error.as_ref().map(|error| {
         crate::views::unsynced_glyph(
@@ -2621,8 +2591,8 @@ pub(crate) fn maintenance(
         .gap(12.0)
         .child(ui_components::section_header(
             &icons::SEED,
-            "DB Seed & Train",
-            Some("Seed Actors → Search Index; Train Classifier is independent and optional."),
+            "Actor Maintenance",
+            Some("Seed the actor catalog, then make it searchable."),
             readiness_unsynced,
             Some(refresh_btn),
             kit,
@@ -2679,15 +2649,6 @@ pub(crate) fn maintenance(
             &icons::BRAIN,
             MetalFinish::Gunmetal,
         ),
-        (
-            SeedStage::Classifier,
-            "Optional · Train Classifier (Natural)",
-            MaintenanceOperation::TrainClassifier,
-            maintenance::TRAIN_ACTION_KEY,
-            "Independent of search indexing. Use a training CSV for a Natural candidate. Activation is separate.",
-            &icons::MODELS,
-            MetalFinish::Gunmetal,
-        ),
     ] {
         let preflight = state.maintenance_preflight(operation);
         let reason = preflight.disabled_reason();
@@ -2696,14 +2657,10 @@ pub(crate) fn maintenance(
         let focused = state.seed_stage == stage_match;
         let dataset = match operation {
             MaintenanceOperation::SeedActors => Some(DatasetKind::ActorCatalog),
-            MaintenanceOperation::TrainClassifier => Some(DatasetKind::ClassifierTraining),
             _ => None,
         };
         let action_label = match dataset {
             Some(DatasetKind::ActorCatalog) if cfg!(target_os = "linux") => "Enter actor CSV path",
-            Some(DatasetKind::ClassifierTraining) if cfg!(target_os = "linux") => {
-                "Enter training CSV path"
-            }
             _ => label,
         };
         let mut operation_card = rune::col().padding(10.0).gap(8.0).child(
@@ -2757,10 +2714,6 @@ pub(crate) fn maintenance(
             let matches_card = matches!(
                 (operation, prompt.kind),
                 (MaintenanceOperation::SeedActors, DatasetKind::ActorCatalog)
-                    | (
-                        MaintenanceOperation::TrainClassifier,
-                        DatasetKind::ClassifierTraining
-                    )
             );
             if matches_card {
                 operation_card =

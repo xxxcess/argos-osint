@@ -334,7 +334,6 @@ mod tests {
     fn accepts_public_raw_branch_commit_and_lfs_urls() {
         for source in [
             default_url(DatasetKind::ActorCatalog).unwrap(),
-            default_url(DatasetKind::ClassifierTraining).unwrap(),
             "https://raw.githubusercontent.com/example/repo/main/Actor.CSV",
             "https://raw.githubusercontent.com/example/repo/refs/heads/feature/data/datasets/actors.csv",
             "https://github.com/example/repo/raw/main/datasets/data%20set.csv",

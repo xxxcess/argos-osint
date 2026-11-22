@@ -1,9 +1,5 @@
 #![cfg(feature = "embedded")]
 
-#[cfg(feature = "classifier")]
-#[allow(dead_code)]
-#[path = "../../../crates/argos-osint-core/tests/fixtures/classifier/activation_training.rs"]
-mod activation_training;
 #[allow(dead_code)]
 #[path = "../src/actor_index_worker.rs"]
 mod actor_index_worker;
@@ -93,7 +89,6 @@ use fleetworks_contracts::readiness::DatasetRef;
 use fleetworks_contracts::readiness::MaintenanceOperation;
 use fleetworks_contracts::readiness::MaintenanceReceipt;
 use fleetworks_contracts::readiness::MaintenanceRequest;
-use fleetworks_contracts::readiness::ReadinessActionId;
 use fleetworks_contracts::readiness::ReadinessCheckId;
 use fleetworks_contracts::readiness::ReadinessState;
 use fleetworks_contracts::readiness::WorkstationReadiness;
@@ -190,7 +185,6 @@ struct ParityReport {
     covered_ipc_operations: usize,
     operations: BTreeMap<String, ParityOperationRecord>,
     intentional_exceptions: Vec<IntentionalExceptionRecord>,
-    classifier_lifecycle_verified: BTreeSet<String>,
 }
 
 impl ParityReport {
@@ -205,7 +199,6 @@ impl ParityReport {
             covered_ipc_operations: 0,
             operations: BTreeMap::new(),
             intentional_exceptions: Vec::new(),
-            classifier_lifecycle_verified: BTreeSet::new(),
         }
     }
 
@@ -399,16 +392,14 @@ impl HttpHarness {
         let dataset_store = DatasetStore::open(staged_dir).expect("open dataset store");
         let readiness = ReadinessOwners::new(deployment.deployment_id.clone(), Vec::new())
             .expect("readiness owners");
-        let mut services = PrivateServices::default()
+        let services = PrivateServices::default()
             .with_search(SearchClient::from_local(Arc::new(LocalActorSearchBackend(
                 Arc::clone(&search_service),
             ))))
-            .with_workstation(readiness, dataset_store.clone());
-        if cfg!(feature = "classifier") {
-            services = services.with_activation_artifacts(
-                ActivationArtifacts::new(root.clone()).expect("HTTP activation artifact owner"),
+            .with_workstation(readiness, dataset_store.clone())
+            .with_activation_artifacts(
+                ActivationArtifacts::new(root.clone()).expect("historical artifact owner"),
             );
-        }
 
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -478,7 +469,6 @@ impl HttpHarness {
             store: dataset_store,
             index: Some(index_worker),
             relinquish_on_shutdown: false,
-            classifier_enabled: cfg!(feature = "classifier"),
         };
         let worker_repo = repo.clone();
         let worker_root = root.clone();
@@ -527,143 +517,6 @@ struct SharedFlowResult {
     canonical_actor_id: String,
 }
 
-#[cfg(feature = "classifier")]
-async fn await_classifier_job(client: &Client, transport: &str, id: &str) -> serde_json::Value {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
-    loop {
-        let detail: serde_json::Value = client
-            .get_with_query(JOB_DETAIL_PATH, &[("id", id)])
-            .await
-            .expect("registered classifier job detail");
-        match detail["job"]["state"].as_str() {
-            Some("completed") => {
-                assert_eq!(detail["job"]["id"], id);
-                let jobs: Jobs = client.get(JOBS_PATH).await.expect("registered Jobs view");
-                assert_eq!(jobs.rows.iter().filter(|row| row.id == id).count(), 1);
-                return detail;
-            }
-            Some("failed" | "cancelled" | "interrupted") => panic!(
-                "{transport}: classifier job {id} did not complete: {}",
-                detail["job"]["error_summary"]
-            ),
-            _ => (),
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "{transport}: classifier job {id} did not reach terminal completion"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
-#[cfg(feature = "classifier")]
-async fn exercise_classifier_lifecycle(
-    client: &Client,
-    context: &MutationContext,
-    transport: &str,
-) {
-    use fleetworks_contracts::classifier_activation::ActivationReceipt;
-    use fleetworks_contracts::classifier_activation::ActivationResult;
-    use fleetworks_contracts::classifier_activation::ActivationState;
-    use fleetworks_contracts::classifier_activation::CandidatePreview;
-
-    let fixture = tempfile::tempdir().expect("private training fixture");
-    let (_, expected) = activation_training::prepare(fixture.path());
-    let file = tokio::fs::File::open(fixture.path().join("training.csv"))
-        .await
-        .expect("open synthetic training CSV");
-    let upload = client
-        .upload_dataset(
-            DatasetKind::ClassifierTraining,
-            &expected.sha256,
-            file,
-            expected.size_bytes,
-        )
-        .await
-        .expect("stage Natural training CSV through the tested transport");
-    assert_eq!(upload.dataset.sha256, expected.sha256);
-
-    let request = MaintenanceRequest::for_training(
-        format!("parity-real-train-{transport}"),
-        context.clone(),
-        upload.dataset,
-    )
-    .expect("candidate-only request");
-    let train: MaintenanceReceipt = client
-        .post(CLASSIFIER_TRAIN_PATH, &request)
-        .await
-        .expect("submit Natural training");
-    assert_eq!(train.operation, MaintenanceOperation::TrainClassifier);
-    let repeated: MaintenanceReceipt = client
-        .post(CLASSIFIER_TRAIN_PATH, &request)
-        .await
-        .expect("replay exact training request");
-    assert_eq!(repeated.job_id, train.job_id);
-    let detail = await_classifier_job(client, transport, &train.job_id).await;
-    let result = &detail["maintenance_result"];
-    assert_eq!(result["engine"], "natural");
-    assert_eq!(result["atlas_engine"], "rust_bert_zero_shot");
-    assert_eq!(result["dataset_sha256"], expected.sha256.as_str());
-    assert_eq!(result["activation_requested"], false);
-    assert_eq!(result["state"], "trained_not_activated");
-
-    let model = result["candidate_model_id"]
-        .as_str()
-        .expect("candidate id from durable result");
-    let query = [
-        ("training_job_id", train.job_id.as_str()),
-        ("model_id", model),
-    ];
-    let preview: CandidatePreview = client
-        .get_with_query(CANDIDATE_DETAIL_PATH, &query)
-        .await
-        .expect("preview exact training-owned candidate");
-    assert_eq!(preview.candidate.training_job_id, train.job_id);
-    assert_eq!(preview.candidate.model_id, model);
-    assert_eq!(preview.candidate.dataset_sha256, expected.sha256);
-    assert_eq!(preview.expected_prior, ActiveModelRevision::NeverActivated);
-    assert!(preview.synthetic_baseline && preview.activation_supported);
-
-    let request = ActivationRequest::new(
-        format!("parity-real-activate-{transport}"),
-        context.clone(),
-        preview.candidate.clone(),
-        preview.expected_prior,
-        SyntheticBaselineConsent::ActivateSyntheticBaseline,
-    )
-    .expect("separate explicit activation for the synthetic fixture");
-    let activation: ActivationReceipt = client
-        .post(ACTIVATION_PATH, &request)
-        .await
-        .expect("submit Natural activation");
-    assert_eq!(activation.candidate, preview.candidate);
-    assert_ne!(activation.job_id, train.job_id);
-    let repeated: ActivationReceipt = client
-        .post(ACTIVATION_PATH, &request)
-        .await
-        .expect("replay exact activation request");
-    assert_eq!(repeated.job_id, activation.job_id);
-    await_classifier_job(client, transport, &activation.job_id).await;
-    let effect: ActivationResult = client
-        .get_with_query(
-            ACTIVATION_RESULT_PATH,
-            &[("job_id", activation.job_id.as_str())],
-        )
-        .await
-        .expect("operation-owned activation outcome");
-    assert_eq!(effect.job_id, activation.job_id);
-    assert_eq!(effect.candidate, preview.candidate);
-    assert_eq!(effect.state, ActivationState::Activated);
-    let revision = effect
-        .activated_revision
-        .expect("proof of activated revision");
-    let after: CandidatePreview = client
-        .get_with_query(CANDIDATE_DETAIL_PATH, &query)
-        .await
-        .expect("read back active model revision");
-    assert_eq!(after.expected_prior, revision);
-}
-
 async fn run_shared_flow(
     base_client: &Client,
     unauthenticated_http_client: Option<&Client>,
@@ -702,12 +555,8 @@ async fn run_shared_flow(
     assert!(caps.features.iter().any(|f| f == "logs"));
     let local = transport == "ipc";
     let local_nlp = local && cfg!(feature = "nlp");
-    let classifier_enabled = cfg!(feature = "classifier");
     assert_eq!(caps.features.iter().any(|f| f == "nlp"), local_nlp);
-    assert_eq!(
-        caps.features.iter().any(|f| f == "classifier"),
-        local && classifier_enabled
-    );
+    assert!(!caps.features.iter().any(|f| f == "classifier"));
     record(
         &mut *report,
         "capabilities",
@@ -1301,22 +1150,11 @@ async fn run_shared_flow(
         local_nlp,
         "{transport}: readiness must reflect the bundled NLP startup probe"
     );
-    for id in [
-        ReadinessActionId::TrainClassifier,
-        ReadinessActionId::ActivateClassifier,
-    ] {
-        assert_eq!(
-            readiness
-                .checks
-                .iter()
-                .flat_map(|check| &check.actions)
-                .find(|action| action.id == id)
-                .expect("classifier preflight action")
-                .allowed,
-            classifier_enabled,
-            "{transport}: preflight {id:?} must reflect the configured Natural worker"
-        );
-    }
+    assert!(readiness.checks.iter().any(|check| {
+        check.id == ReadinessCheckId::ClassifierTraining
+            && check.state == ReadinessState::NotApplicable
+            && check.actions.is_empty()
+    }));
     record(
         &mut *report,
         "workstation_readiness",
@@ -1595,9 +1433,7 @@ async fn run_shared_flow(
         "missing job_cancel 404 parity",
     );
 
-    // Both configured backends reach the scoped lookup. An unavailable
-    // classifier must fail closed before resolving the synthetic candidate.
-    let candidate_status = if classifier_enabled { 404 } else { 503 };
+    // Both transports retire Natural writes and retain protected historical reads.
     let candidate = CandidateIdentity::new(
         "candidate-1".to_owned(),
         "train-job-1".to_owned(),
@@ -1620,14 +1456,14 @@ async fn run_shared_flow(
             .post::<serde_json::Value>(ACTIVATION_PATH, &activate_req)
             .await
             .unwrap_err(),
-        ClientError::Status(candidate_status),
-        "{transport}: activation rejects an absent candidate or unavailable engine"
+        ClientError::Status(410),
+        "{transport}: Natural activation is retired"
     );
     record(
         &mut *report,
         "classifier_activate",
         "live_parity",
-        "activation rejects the missing candidate or unavailable service",
+        "legacy activation returns 410",
     );
 
     assert_eq!(
@@ -1638,14 +1474,14 @@ async fn run_shared_flow(
             )
             .await
             .unwrap_err(),
-        ClientError::Status(candidate_status),
-        "{transport}: candidate preview rejects an absent candidate or unavailable engine"
+        ClientError::Status(404),
+        "{transport}: protected readback rejects an absent historical candidate"
     );
     record(
         &mut *report,
         "classifier_candidate_detail",
         "live_parity",
-        "preview rejects the missing candidate or unavailable service",
+        "missing historical candidate returns 404",
     );
 
     let act_result_err = client
@@ -1654,22 +1490,14 @@ async fn run_shared_flow(
         .unwrap_err();
     assert_eq!(
         act_result_err,
-        ClientError::Status(if local && !classifier_enabled {
-            503
-        } else {
-            404
-        }),
-        "{transport}: activation result requires an enabled IPC engine and an existing job"
+        ClientError::Status(404),
+        "{transport}: protected readback requires an existing activation job"
     );
     record(
         &mut *report,
         "classifier_activation_result",
-        if classifier_enabled {
-            "live_parity"
-        } else {
-            "intentional_exception"
-        },
-        "disabled IPC engine returns 503; missing activation job returns 404",
+        "live_parity",
+        "missing historical activation job returns 404",
     );
 
     let train_dataset = DatasetRef::new(
@@ -1691,28 +1519,15 @@ async fn run_shared_flow(
         .unwrap_err();
     assert_eq!(
         train_err,
-        ClientError::Status(if classifier_enabled { 409 } else { 503 }),
-        "{transport}: training requires an enabled worker and a valid dataset"
+        ClientError::Status(410),
+        "{transport}: Natural training is retired"
     );
     record(
         &mut *report,
         "train_classifier",
         "live_parity",
-        "unavailable worker returns 503; missing training dataset returns 409",
+        "legacy training returns 410 before staging or training",
     );
-    #[cfg(feature = "classifier")]
-    {
-        Box::pin(exercise_classifier_lifecycle(
-            &client,
-            &stale_mutation,
-            transport,
-        ))
-        .await;
-        report
-            .classifier_lifecycle_verified
-            .insert(transport.to_owned());
-    }
-
     let logs_follow_op = IpcOperation::from_get_with_query(LOGS_FOLLOW_PATH, &LogQuery::default())
         .expect("logs/follow route mapping");
     assert_eq!(
@@ -1948,17 +1763,16 @@ async fn http_and_local_ipc_backends_satisfy_parity_and_intentional_exceptions()
         verified: true,
     });
     report.record_exception(IntentionalExceptionRecord {
-        id: "optional_classifier_and_nlp_capabilities".to_owned(),
+        id: "optional_nlp_capabilities".to_owned(),
         operations: vec![
             "capabilities".to_owned(),
             "workstation_readiness".to_owned(),
-            "classifier_activation_result".to_owned(),
         ],
-        reason: "Embedded IPC advertises bundled engines after startup probes. Distributed HTTP clients use readiness for configured workers and independently probed services."
+        reason: "Embedded IPC advertises bundled NLP after a startup probe. Distributed HTTP clients use readiness for independently probed services."
             .to_owned(),
-        http_behavior: "Capabilities omit the bundled engine flags. The fixture does not configure a private NLP probe. A configured worker exposes Natural training and activation; missing activation job results return 404."
+        http_behavior: "The HTTP fixture has no private NLP probe and does not advertise bundled NLP."
             .to_owned(),
-        ipc_behavior: "Enabled builds report NLP Ready and expose the same Natural maintenance workflow. Disabled classifier builds reject classifier operations with 503."
+        ipc_behavior: "Enabled IPC builds report NLP Ready after the bundled probe."
             .to_owned(),
         verified: true,
     });

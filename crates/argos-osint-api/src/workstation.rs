@@ -11,7 +11,6 @@ use std::time::Instant;
 use argos_osint_core::atlas::AtlasProvider;
 use argos_osint_core::provider::SettingsFile;
 use argos_osint_core::storage::actor_search_outbox;
-use argos_osint_core::storage::classifier_activation;
 use argos_osint_core::storage::job_dispatch;
 use argos_osint_core::storage::job_dispatch::AtlasWorkerAvailability;
 use argos_osint_core::storage::setup_jobs;
@@ -263,7 +262,6 @@ struct Observations {
     captured: Instant,
     at: String,
     checks: Vec<ReadinessCheck>,
-    natural: Option<classifier_activation::NaturalResourceObservation>,
     atlas_checkpoint: AtlasCheckpoint,
 }
 
@@ -645,17 +643,13 @@ async fn collect(
 ) -> Observations {
     let at = Utc::now().to_rfc3339();
     let database_repo = state.repo.clone();
-    let natural_repo = state.repo.clone();
-    let (database, catalog, search, services, natural) = tokio::join!(
+    let (database, catalog, search, services) = tokio::join!(
         crate::run_shielded_timeout(DEADLINE, async move {
             database_repo.db().query("RETURN 1").await?.check()
         }),
         catalog(state, &at),
         search(state, owners, client, &at),
         join_all(owners.probes.iter().map(|probe| probe.observe(&at))),
-        crate::run_shielded_timeout(DEADLINE, async move {
-            classifier_activation::observation(&natural_repo).await
-        })
     );
     let mut checks = vec![
         check(
@@ -683,7 +677,6 @@ async fn collect(
             )
         },
     ];
-    let natural = natural.and_then(Result::ok);
     checks.push(catalog);
     let mut atlas_checkpoint = AtlasCheckpoint::from_service(None);
     for (service, checkpoint) in services {
@@ -732,25 +725,13 @@ async fn collect(
         checks.push(unavailable(ReadinessCheckId::ClassifierInference, &at));
     }
     checks.push(search);
-    let training = match natural.as_ref() {
-        Some(resource) if resource.effect_uncertain => check(
-            ReadinessCheckId::ClassifierTraining, ReadinessState::Degraded,
-            "natural_activation_reconciliation_required",
-            "An activation effect needs reconciliation; training and activation remain blocked", &at,
-        ),
-        Some(resource) if resource.blocked => check(
-            ReadinessCheckId::ClassifierTraining, ReadinessState::Running,
-            "natural_resource_busy",
-            "The shared Natural resource has unfinished work; no candidate or active-model success is inferred", &at,
-        ),
-        Some(_) => check(
-            ReadinessCheckId::ClassifierTraining, ReadinessState::Unknown,
-            "natural_resource_idle",
-            "No unfinished Natural resource work is observed; select an authorized training job for candidate evidence", &at,
-        ),
-        None => unavailable(ReadinessCheckId::ClassifierTraining, &at),
-    };
-    checks.push(training);
+    checks.push(check(
+        ReadinessCheckId::ClassifierTraining,
+        ReadinessState::NotApplicable,
+        "legacy_classifier_retired",
+        "Atlas BERT candidates are evaluated and activated by the backend operator.",
+        &at,
+    ));
     checks.push(check(
         ReadinessCheckId::Registration,
         ReadinessState::Unknown,
@@ -762,7 +743,6 @@ async fn collect(
         captured: Instant::now(),
         at,
         checks,
-        natural,
         atlas_checkpoint,
     }
 }
@@ -856,7 +836,7 @@ pub(crate) async fn qa_snapshot(
     owners: &ReadinessOwners,
     search: Option<&SearchClient>,
     observed_after_ms: i64,
-    embedded: bool,
+    _embedded: bool,
 ) -> Option<(chrono::DateTime<Utc>, Vec<QaReadinessFact>)> {
     // The protocol persists millisecond boundaries, so every independent check
     // must start strictly after the last terminal boundary.
@@ -882,30 +862,7 @@ pub(crate) async fn qa_snapshot(
         }
         Some((at, observations.checks.clone()))
     };
-    let embedded_training = async {
-        if !embedded {
-            return false;
-        }
-        let repo = state.repo.clone();
-        matches!(
-            crate::run_shielded_timeout(DEADLINE, async move {
-                setup_jobs::embedded_setup_observation(&repo).await
-            }).await,
-            Some(Ok(setup)) if setup.training_completed
-        )
-    };
-    let (projection, training_completed) = tokio::join!(projection, embedded_training);
-    let (at, mut checks) = projection?;
-    if training_completed {
-        for check in &mut checks {
-            if check.id == ReadinessCheckId::ClassifierTraining
-                && check.reason_code == "natural_resource_idle"
-            {
-                check.state = ReadinessState::Ready;
-                check.reason_code = "embedded_training_completed".into();
-            }
-        }
-    }
+    let (at, checks) = projection.await?;
     Some((at, checks.iter().filter_map(qa_fact).collect()))
 }
 
@@ -989,15 +946,8 @@ fn qa_readiness_reason(check: &ReadinessCheck) -> &'static str {
             "Service reachability alone does not verify inference."
         }
         (ReadinessState::Ready, "model_verified") => "The active model was verified.",
-        (ReadinessState::Unknown, "natural_resource_idle") => {
-            "Idle resource state does not verify training completion."
-        }
-        (ReadinessState::Running, "natural_resource_busy") => "No successful result was verified.",
-        (ReadinessState::Degraded, "natural_activation_reconciliation_required") => {
-            "An activation outcome must be reconciled before training can continue."
-        }
-        (ReadinessState::Ready, "embedded_training_completed") => {
-            "A completed Natural training result was observed."
+        (ReadinessState::NotApplicable, "legacy_classifier_retired") => {
+            "Legacy Natural training has been retired."
         }
         _ => "",
     }
@@ -1032,7 +982,6 @@ pub(crate) async fn read_value(
     };
     let mut checks = observations.checks.clone();
     let observed_at = observations.at.clone();
-    let natural = observations.natural.clone();
     let atlas_checkpoint = observations.atlas_checkpoint;
     drop(cache);
     let permitted = principal.permits(Permission::MaintainBackend);
@@ -1066,17 +1015,6 @@ pub(crate) async fn read_value(
                         .push(format!("actor-catalog-sha256:{hash}"));
                 }
             }
-            if setup.training_completed {
-                if let Some(training) = checks.iter_mut().find(|check| {
-                    check.id == ReadinessCheckId::ClassifierTraining
-                        && check.reason_code == "natural_resource_idle"
-                }) {
-                    training.state = ReadinessState::Ready;
-                    training.reason_code = "embedded_training_completed".into();
-                    training.explanation =
-                        "Classifier training completed on this Embedded backend.".into();
-                }
-            }
         }
     }
 
@@ -1107,7 +1045,9 @@ pub(crate) async fn read_value(
     .ok();
     let mut configured_inputs = Vec::new();
     for input in &owners.configured_inputs {
-        if Some(input.configuration_revision) != revision {
+        if input.operation == MaintenanceOperation::TrainClassifier
+            || Some(input.configuration_revision) != revision
+        {
             continue;
         }
         let usable = if let Some(dataset) = &input.dataset {
@@ -1143,11 +1083,6 @@ pub(crate) async fn read_value(
             ReadinessActionId::SeedActors,
         ),
         (
-            ReadinessCheckId::ClassifierTraining,
-            MaintenanceOperation::TrainClassifier,
-            ReadinessActionId::TrainClassifier,
-        ),
-        (
             ReadinessCheckId::ActorSearch,
             MaintenanceOperation::ReindexActors,
             ReadinessActionId::RebuildActorIndex,
@@ -1169,47 +1104,6 @@ pub(crate) async fn read_value(
                 registered,
                 catalog_ready,
             ));
-        }
-    }
-    if let Some(check) = checks
-        .iter_mut()
-        .find(|check| check.id == ReadinessCheckId::ClassifierTraining)
-    {
-        let native = principal.purpose()
-            == fleetworks_contracts::context::CredentialPurpose::Native
-            && principal.permits(Permission::ReadWorkstationActivity);
-        let enabled = natural
-            .as_ref()
-            .is_some_and(|resource| resource.consumer_enabled && !resource.blocked);
-        let mut activation = action(
-            ReadinessActionId::ActivateClassifier,
-            enabled,
-            permitted && native,
-            registered,
-        );
-        activation.preconditions = vec![
-            "registered_origin".into(),
-            "configuration_revision".into(),
-            "authorized_completed_training_job".into(),
-            "exact_candidate_hashes".into(),
-            "expected_prior_activation".into(),
-            "explicit_synthetic_baseline_consent".into(),
-        ];
-        if permitted
-            && native
-            && registered
-            && natural.as_ref().is_some_and(|resource| resource.blocked)
-        {
-            activation.disabled_reason = Some("natural_resource_busy_or_uncertain".into());
-        }
-        check.actions.push(activation);
-        if natural.as_ref().is_some_and(|resource| resource.blocked) {
-            for action in &mut check.actions {
-                if action.id == ReadinessActionId::TrainClassifier {
-                    action.allowed = false;
-                    action.disabled_reason = Some("natural_resource_busy_or_uncertain".into());
-                }
-            }
         }
     }
     let mut response = WorkstationReadiness::new(owners.deployment_id.clone(), observed_at, checks);

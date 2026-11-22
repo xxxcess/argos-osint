@@ -263,7 +263,7 @@ mod embedded {
             })
             .await??;
 
-            let (nlp_enabled, classifier_enabled) = warm_local_engines().await;
+            let nlp_enabled = warm_local_nlp().await;
 
             let readiness = ReadinessOwners::new(deployment.deployment_id.clone(), Vec::new())?
                 .with_platform_display_name(deployment.platform_display_name.clone())?
@@ -285,7 +285,7 @@ mod embedded {
 
             let capability_config = LocalCapabilityConfig {
                 nlp_enabled,
-                classifier_enabled,
+                classifier_enabled: false,
                 search_enabled: true,
                 jobs_enabled: true,
             };
@@ -309,13 +309,11 @@ mod embedded {
                 store: dataset_store,
                 index: Some(index_worker),
                 relinquish_on_shutdown: true,
-                classifier_enabled,
             };
 
             tracing::info!(
                 role = "local-ipc",
                 nlp = nlp_enabled,
-                classifier = classifier_enabled,
                 search = true,
                 jobs = true,
                 "Fleetworks startup summary: embedded local-ipc backend ready"
@@ -396,9 +394,8 @@ mod embedded {
         }
     }
 
-    /// Warm only optional in-process engines. Failure never prevents base IPC startup.
-    /// Helper process presence is not proof of either capability.
-    async fn warm_local_engines() -> (bool, bool) {
+    /// Warm optional in-process NLP. Engine availability cannot block IPC startup.
+    async fn warm_local_nlp() -> bool {
         let nlp = async {
             if !cfg!(feature = "nlp") {
                 return false;
@@ -425,33 +422,12 @@ mod embedded {
                 && result.validate(&source)
                 && !result.sentences.is_empty()
         };
-        let classifier = async {
-            if !cfg!(feature = "classifier") {
-                return false;
-            }
-            matches!(
-                tokio::task::spawn_blocking(argos_osint_core::classifier::training_runtime_ready,)
-                    .await,
-                Ok(Ok(()))
-            )
-        };
         let deadline = std::time::Duration::from_secs(10);
-        let (nlp, classifier) = tokio::join!(
-            tokio::time::timeout(deadline, nlp),
-            tokio::time::timeout(deadline, classifier),
-        );
-        let nlp = nlp.unwrap_or(false);
-        let classifier = classifier.unwrap_or(false);
-        if !nlp {
+        let ready = tokio::time::timeout(deadline, nlp).await.unwrap_or(false);
+        if !ready {
             tracing::warn!(component = "nlp", "Optional local NLP engine unavailable");
         }
-        if !classifier {
-            tracing::warn!(
-                component = "natural-training",
-                "Optional Natural training runtime unavailable"
-            );
-        }
-        (nlp, classifier)
+        ready
     }
 
     fn native_ipc_permissions() -> Vec<Permission> {
@@ -953,9 +929,7 @@ mod embedded {
 
         #[tokio::test]
         async fn local_engines_warm_without_helpers_or_training() {
-            let (nlp, classifier) = warm_local_engines().await;
-            assert_eq!(nlp, cfg!(feature = "nlp"));
-            assert_eq!(classifier, cfg!(feature = "classifier"));
+            assert_eq!(warm_local_nlp().await, cfg!(feature = "nlp"));
         }
 
         fn test_base64_encode(input: &[u8]) -> String {

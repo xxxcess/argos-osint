@@ -54,7 +54,6 @@ pub struct LocalJobProgress {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LocalCapabilityAssessment {
     pub nlp_available: bool,
-    pub classifier_available: bool,
     pub actor_search_available: bool,
     pub warnings: Vec<String>,
 }
@@ -67,24 +66,11 @@ pub fn assess_local_capabilities(capabilities: &Capabilities) -> LocalCapability
             .categories
             .iter()
             .any(|category| category == "nlp");
-    let classifier_available = capabilities
-        .features
-        .iter()
-        .any(|feature| feature == "classifier")
-        || capabilities
-            .categories
-            .iter()
-            .any(|category| category == "classifier");
     let actor_search_available = capabilities.require_actor_search().is_ok();
 
     let mut warnings = Vec::new();
     if !nlp_available {
         warnings.push("The embedded backend is not advertising NLP support.".into());
-    }
-    if !classifier_available {
-        warnings.push(
-            "The embedded backend is not advertising Natural classifier support. Training and activation are unavailable.".into(),
-        );
     }
     if !actor_search_available {
         warnings.push(
@@ -94,7 +80,6 @@ pub fn assess_local_capabilities(capabilities: &Capabilities) -> LocalCapability
     }
     LocalCapabilityAssessment {
         nlp_available,
-        classifier_available,
         actor_search_available,
         warnings,
     }

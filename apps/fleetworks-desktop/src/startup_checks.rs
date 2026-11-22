@@ -27,7 +27,10 @@ pub(crate) fn content(state: &State, kit: &Kit) -> El {
         (ReadinessCheckId::Jobs, "Jobs"),
         (ReadinessCheckId::ActorCatalog, "Actor catalog"),
         (ReadinessCheckId::ActorSearch, "Actor search"),
-        (ReadinessCheckId::ClassifierTraining, "Classifier training"),
+        (
+            ReadinessCheckId::ClassifierInference,
+            "Atlas BERT inference",
+        ),
     ] {
         let current = checks
             .and_then(|checks| checks.iter().find(|check| check.id == id))
@@ -62,13 +65,7 @@ fn status(check: Option<&ReadinessCheck>) -> (&'static str, &'static rune::Icon,
         return ("Pending", &glyphs::DASH, StatusTone::Neutral);
     };
     match check.state {
-        ReadinessState::Ready
-            if check.id != ReadinessCheckId::ClassifierTraining
-                || check.reason_code == "embedded_training_completed"
-                || check.artifact_ids.iter().any(|id| !id.trim().is_empty()) =>
-        {
-            ("Passed", &glyphs::CHECK, StatusTone::Ok)
-        }
+        ReadinessState::Ready => ("Passed", &glyphs::CHECK, StatusTone::Ok),
         ReadinessState::NotReady if check.reason_code == "process_not_ready" => {
             ("Failed", &glyphs::CLOSE, StatusTone::Err)
         }
@@ -79,31 +76,5 @@ fn status(check: Option<&ReadinessCheck>) -> (&'static str, &'static rune::Icon,
         ReadinessState::Unavailable => ("Unavailable", &glyphs::DASH, StatusTone::Neutral),
         ReadinessState::NotApplicable => ("N/A", &glyphs::DASH, StatusTone::Neutral),
         _ => ("Pending", &glyphs::DASH, StatusTone::Neutral),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn confirmed_embedded_training_passes_without_a_candidate_id() {
-        let mut check = ReadinessCheck::new(
-            ReadinessCheckId::ClassifierTraining,
-            ReadinessState::Ready,
-            "embedded_training_completed".into(),
-            "Classifier training completed on this Embedded backend.".into(),
-            "2026-01-01T00:00:00Z".into(),
-        );
-        let (caption, glyph, tone) = status(Some(&check));
-        assert_eq!(caption, "Passed");
-        assert_eq!(glyph.name, glyphs::CHECK.name);
-        assert_eq!(tone, StatusTone::Ok);
-
-        check.reason_code = "training_not_verified".into();
-        let (caption, glyph, tone) = status(Some(&check));
-        assert_eq!(caption, "Pending");
-        assert_eq!(glyph.name, glyphs::DASH.name);
-        assert_eq!(tone, StatusTone::Neutral);
     }
 }

@@ -256,20 +256,6 @@ fn local_capabilities_summary(
                     kit,
                 ))
                 .child(ui_components::status_pill(
-                    if assessment.classifier_available {
-                        "Natural classifier available"
-                    } else {
-                        "Natural classifier unavailable"
-                    },
-                    None,
-                    if assessment.classifier_available {
-                        StatusTone::Ok
-                    } else {
-                        StatusTone::Warn
-                    },
-                    kit,
-                ))
-                .child(ui_components::status_pill(
                     if assessment.actor_search_available {
                         "Search ready"
                     } else {
@@ -1456,19 +1442,16 @@ fn workstation_active_operation(
     preferences: ViewPreferences,
     kit: &Kit,
 ) -> Option<El> {
-    let (title, record) = [
-        ("Seed actors", MaintenanceOperation::SeedActors),
-        ("Train classifier", MaintenanceOperation::TrainClassifier),
-    ]
-    .into_iter()
-    .find_map(|(title, operation)| {
-        let record = state.maintenance.operation_job(operation)?;
-        let finished = record
-            .detail
-            .as_ref()
-            .is_some_and(|detail| !crate::backend::job_is_active(&detail.job.state));
-        (!finished).then_some((title, record))
-    })?;
+    let record = state
+        .maintenance
+        .operation_job(MaintenanceOperation::SeedActors)?;
+    if record
+        .detail
+        .as_ref()
+        .is_some_and(|detail| !crate::backend::job_is_active(&detail.job.state))
+    {
+        return None;
+    }
     let (label, phase) = record.detail.as_ref().map_or(("Queued", ""), |detail| {
         let label = if detail.job.state == "running" {
             "Running"
@@ -1484,7 +1467,7 @@ fn workstation_active_operation(
             .flex_wrap()
             .center_y()
             .gap(6.0)
-            .child(heading(title, kit))
+            .child(heading("Seed actors", kit))
             .child(ui_components::status_pill(
                 label,
                 None,

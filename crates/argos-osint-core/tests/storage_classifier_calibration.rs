@@ -354,7 +354,7 @@ async fn provider_capture_survives_country_filtering_replay_restart_and_bounded_
         (result.processed, result.state.as_str(), result.promoted),
         (515, "completed", false)
     );
-    assert_eq!(result.reason, "insufficient_reviewed_evidence");
+    assert_eq!(result.reason, "legacy_classifier_monitoring_only");
     assert_eq!(
         std::fs::read(installed.directory.path().join("classifier/active.json")).unwrap(),
         active

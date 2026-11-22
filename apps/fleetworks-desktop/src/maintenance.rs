@@ -22,7 +22,6 @@ use fleetworks_contracts::readiness::ReadinessCheckId;
 use fleetworks_contracts::readiness::ReadinessState;
 use fleetworks_contracts::readiness::ACTOR_REINDEX_OPERATION;
 use fleetworks_contracts::readiness::ACTOR_SEED_PATH;
-use fleetworks_contracts::readiness::CLASSIFIER_TRAIN_PATH;
 use fleetworks_contracts::search::ACTOR_REINDEX_PATH;
 use fleetworks_contracts::Client;
 use fleetworks_contracts::ClientError;
@@ -85,7 +84,6 @@ pub enum MaintenancePreflight {
     Ready,
     Uploading,
     RequestPending,
-    LocalClassifierUnavailable,
     PermissionRequired,
     RegistrationRequired,
     ReadinessUnobserved,
@@ -105,9 +103,6 @@ impl MaintenancePreflight {
     pub fn disabled_reason(&self) -> Option<String> {
         match self {
             Self::Ready => None,
-            Self::LocalClassifierUnavailable => {
-                Some("Natural classifier training is unavailable on this embedded backend.".into())
-            }
             Self::PermissionRequired => Some("Backend maintenance permission required".into()),
             Self::RegistrationRequired => Some("Register this workstation first".into()),
             Self::ReadinessUnobserved => {
@@ -150,7 +145,6 @@ impl MaintenancePreflight {
             Self::Ready => ("Ready", StatusTone::Ok),
             Self::Uploading => ("Upload active", StatusTone::Info),
             Self::RequestPending => ("Request active", StatusTone::Info),
-            Self::LocalClassifierUnavailable => ("Unavailable", StatusTone::Neutral),
             Self::PermissionRequired => ("No permission", StatusTone::Err),
             Self::RegistrationRequired => ("Register first", StatusTone::Warn),
             Self::ReadinessUnobserved | Self::RegistrationContextMismatch | Self::ChecksStale => {
@@ -177,9 +171,8 @@ pub struct OperationJobRecord {
     pub poll_error: Option<String>,
 }
 
-const OPERATION_SLOTS: usize = 3;
+const OPERATION_SLOTS: usize = 2;
 pub(crate) const SEED_ACTION_KEY: &str = "maintenance-seed";
-pub(crate) const TRAIN_ACTION_KEY: &str = "maintenance-train";
 pub(crate) const REINDEX_ACTION_KEY: &str = "maintenance-reindex";
 pub(crate) const WORKSTATION_REINDEX_ACTION_KEY: &str = "workstation-build-actor-index";
 pub(crate) const CSV_PATH_KEY: &str = "maintenance-csv-path";
@@ -188,7 +181,6 @@ fn operation_slot(operation: MaintenanceOperation) -> Option<usize> {
     match operation {
         MaintenanceOperation::SeedActors => Some(0),
         MaintenanceOperation::ReindexActors => Some(1),
-        MaintenanceOperation::TrainClassifier => Some(2),
         _ => None,
     }
 }
@@ -235,7 +227,7 @@ impl Default for Maintenance {
             selected_dataset: None,
             confirmation: None,
             receipt: Load::Idle,
-            operation_jobs: [None, None, None],
+            operation_jobs: [None, None],
             message: None,
             active_operation: None,
             pending_preview: None,
@@ -252,7 +244,7 @@ impl Default for Maintenance {
             upload_request: None,
             datasets_request: None,
             operation_request: None,
-            receipt_poll_requests: [None, None, None],
+            receipt_poll_requests: [None, None],
             reindex_journal_request: None,
             reindex_reconcile_request: None,
         }
@@ -366,7 +358,7 @@ impl Maintenance {
         self.reindex_association = None;
         self.reindex_details_open = false;
         self.operation_request = None;
-        self.receipt_poll_requests = [None, None, None];
+        self.receipt_poll_requests = [None, None];
         for revision in &mut self.receipt_poll_revisions {
             *revision = revision.wrapping_add(1);
         }
@@ -374,14 +366,14 @@ impl Maintenance {
         self.reindex_reconcile_request = None;
         self.operation_revision = self.operation_revision.wrapping_add(1);
         self.receipt = Load::Idle;
-        self.operation_jobs = [None, None, None];
+        self.operation_jobs = [None, None];
     }
     pub(crate) fn cancel_requests(&mut self) {
         self.upload_request = None;
         self.github_downloading = false;
         self.datasets_request = None;
         self.operation_request = None;
-        self.receipt_poll_requests = [None, None, None];
+        self.receipt_poll_requests = [None, None];
         self.reindex_journal_request = None;
         self.reindex_reconcile_request = None;
     }
@@ -395,6 +387,9 @@ impl State {
     }
 
     fn prepare_csv_path_prompt(&mut self, kind: DatasetKind) {
+        if kind != DatasetKind::ActorCatalog {
+            return;
+        }
         if self
             .maintenance
             .csv_path_prompt
@@ -410,10 +405,8 @@ impl State {
     }
 
     pub fn choose_dataset(&mut self, kind: DatasetKind, tx: &mut Tx) {
-        let operation = match kind {
-            DatasetKind::ActorCatalog => MaintenanceOperation::SeedActors,
-            DatasetKind::ClassifierTraining => MaintenanceOperation::TrainClassifier,
-            _ => return,
+        let Some(operation) = dataset_operation(kind) else {
+            return;
         };
         if let Some(reason) = self.maintenance_disabled_reason(operation) {
             self.maintenance.message = Some(reason);
@@ -469,7 +462,6 @@ impl State {
         };
         let opener = match prompt.kind {
             DatasetKind::ActorCatalog => SEED_ACTION_KEY,
-            DatasetKind::ClassifierTraining => TRAIN_ACTION_KEY,
             _ => return,
         };
         let opener = if self.startup.data_step.is_some() {
@@ -487,10 +479,8 @@ impl State {
             return;
         };
         let kind = prompt.kind;
-        let operation = match kind {
-            DatasetKind::ActorCatalog => MaintenanceOperation::SeedActors,
-            DatasetKind::ClassifierTraining => MaintenanceOperation::TrainClassifier,
-            _ => return,
+        let Some(operation) = dataset_operation(kind) else {
+            return;
         };
         let path = parse_local_csv_path(&prompt.input.text, std::env::var_os("HOME").as_deref())
             .and_then(|path| match self.maintenance_disabled_reason(operation) {
@@ -553,10 +543,8 @@ impl State {
     }
 
     pub(crate) fn download_github_dataset(&mut self, kind: DatasetKind, url: String) {
-        let operation = match kind {
-            DatasetKind::ActorCatalog => MaintenanceOperation::SeedActors,
-            DatasetKind::ClassifierTraining => MaintenanceOperation::TrainClassifier,
-            _ => return,
+        let Some(operation) = dataset_operation(kind) else {
+            return;
         };
         if self
             .startup
@@ -619,7 +607,13 @@ impl State {
         {
             return false;
         }
-        let Some(selection) = self.maintenance.local_dataset.clone() else {
+        let Some(selection) = self
+            .maintenance
+            .local_dataset
+            .as_ref()
+            .filter(|selection| selection.kind == DatasetKind::ActorCatalog)
+            .cloned()
+        else {
             return false;
         };
         let intent = Intent::UploadDataset {
@@ -691,19 +685,9 @@ impl State {
 
     #[must_use]
     pub fn maintenance_preflight(&self, operation: MaintenanceOperation) -> MaintenancePreflight {
-        if operation == MaintenanceOperation::TrainClassifier
-            && self.is_local_backend()
-            && self
-                .connection
-                .capabilities
-                .as_ref()
-                .is_some_and(|capabilities| {
-                    !crate::local_backend::assess_local_capabilities(capabilities)
-                        .classifier_available
-                })
-        {
-            return MaintenancePreflight::LocalClassifierUnavailable;
-        }
+        let Some(action_id) = action_id(operation) else {
+            return MaintenancePreflight::UnsupportedOperation;
+        };
         if !self.permission(Permission::MaintainBackend) {
             return MaintenancePreflight::PermissionRequired;
         }
@@ -719,9 +703,6 @@ impl State {
         }) {
             return MaintenancePreflight::RegistrationContextMismatch;
         }
-        let Some(action_id) = action_id(operation) else {
-            return MaintenancePreflight::UnsupportedOperation;
-        };
         for check in &readiness.checks {
             if let Some(action) = check.actions.iter().find(|action| action.id == action_id) {
                 let fresh = self.readiness_check_fresh(check);
@@ -798,6 +779,9 @@ impl State {
         {
             return;
         }
+        let Some(operation) = dataset_operation(kind) else {
+            return;
+        };
         self.maintenance.upload_request = None;
         self.maintenance.github_downloading = false;
         match result {
@@ -805,11 +789,6 @@ impl State {
                 self.maintenance.selected_dataset = Some(upload.dataset.clone());
                 self.maintenance.upload = Load::Ready(upload);
                 self.maintenance.last_request = None;
-                let operation = match kind {
-                    DatasetKind::ActorCatalog => MaintenanceOperation::SeedActors,
-                    DatasetKind::ClassifierTraining => MaintenanceOperation::TrainClassifier,
-                    _ => return,
-                };
                 if self
                     .startup
                     .data_step
@@ -884,7 +863,6 @@ impl State {
             .as_ref()
             .and_then(|confirmation| match confirmation.operation {
                 MaintenanceOperation::SeedActors => Some(SEED_ACTION_KEY),
-                MaintenanceOperation::TrainClassifier => Some(TRAIN_ACTION_KEY),
                 MaintenanceOperation::ReindexActors if self.confirm_maintenance_dialog => {
                     Some(WORKSTATION_REINDEX_ACTION_KEY)
                 }
@@ -1515,7 +1493,7 @@ impl State {
         }
     }
 
-    /// Refresh the bounded set of active Seed & Train receipt job IDs independently of the Jobs
+    /// Refresh the bounded set of active actor maintenance receipt job IDs independently of the Jobs
     /// page filter or selection.
     pub(crate) fn poll_maintenance_receipt_jobs(&mut self) -> usize {
         if !self.connected() || !self.permission(Permission::ReadWorkstationActivity) {
@@ -1646,9 +1624,6 @@ impl State {
                         MaintenanceOperation::ReindexActors => {
                             "The actor search index is already built."
                         }
-                        MaintenanceOperation::TrainClassifier => {
-                            "This classifier dataset has already produced a candidate."
-                        }
                         _ => "This maintenance operation is already complete.",
                     }
                     .into(),
@@ -1778,7 +1753,6 @@ async fn admit_maintenance_request(
     };
     let route = match confirmation.operation {
         MaintenanceOperation::SeedActors => ACTOR_SEED_PATH,
-        MaintenanceOperation::TrainClassifier => CLASSIFIER_TRAIN_PATH,
         MaintenanceOperation::ReindexActors => ACTOR_REINDEX_PATH,
         _ => return Err("Unsupported maintenance operation".into()),
     };
@@ -1982,15 +1956,6 @@ fn prepare_maintenance_attempt(
                 .dataset
                 .clone()
                 .ok_or_else(|| "Actor catalog dataset required".to_owned())?,
-        )
-        .map_err(|error| error.to_string())?,
-        MaintenanceOperation::TrainClassifier => MaintenanceRequest::for_training(
-            id,
-            context,
-            confirmation
-                .dataset
-                .clone()
-                .ok_or_else(|| "Training dataset required".to_owned())?,
         )
         .map_err(|error| error.to_string())?,
         _ => return Err("Unsupported maintenance operation".into()),
@@ -2263,21 +2228,18 @@ pub(crate) fn parse_local_csv_path(
 pub fn dataset_kind_label(kind: DatasetKind) -> &'static str {
     match kind {
         DatasetKind::ActorCatalog => "actor catalog",
-        DatasetKind::ClassifierTraining => "Natural training corpus",
         _ => "unsupported dataset",
     }
 }
 pub fn dataset_limit(kind: DatasetKind) -> u64 {
     match kind {
         DatasetKind::ActorCatalog => 256 * 1024 * 1024,
-        DatasetKind::ClassifierTraining => 128 * 1024 * 1024,
         _ => 0,
     }
 }
 fn dataset_kind(operation: MaintenanceOperation) -> Option<DatasetKind> {
     match operation {
         MaintenanceOperation::SeedActors => Some(DatasetKind::ActorCatalog),
-        MaintenanceOperation::TrainClassifier => Some(DatasetKind::ClassifierTraining),
         _ => None,
     }
 }
@@ -2285,14 +2247,12 @@ fn dataset_kind(operation: MaintenanceOperation) -> Option<DatasetKind> {
 fn dataset_operation(kind: DatasetKind) -> Option<MaintenanceOperation> {
     match kind {
         DatasetKind::ActorCatalog => Some(MaintenanceOperation::SeedActors),
-        DatasetKind::ClassifierTraining => Some(MaintenanceOperation::TrainClassifier),
         _ => None,
     }
 }
 fn action_id(operation: MaintenanceOperation) -> Option<ReadinessActionId> {
     match operation {
         MaintenanceOperation::SeedActors => Some(ReadinessActionId::SeedActors),
-        MaintenanceOperation::TrainClassifier => Some(ReadinessActionId::TrainClassifier),
         MaintenanceOperation::ReindexActors => Some(ReadinessActionId::RebuildActorIndex),
         _ => None,
     }

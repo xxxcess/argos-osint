@@ -2,7 +2,6 @@
 
 import argparse
 import contextlib
-import hashlib
 import http.client
 import http.cookies
 import json
@@ -171,25 +170,6 @@ def web_connect(port, context):
 def web_logout(port, headers):
     assert request(port, "/api/connect/logout", payload={}, headers=headers)[0] == 200, "normal logout failed"
     assert request(port, "/api/v1/health/ready", headers=headers)[0] == 401, "logged-out cookie remained valid"
-
-
-def exercise_training(port, token, context, workspace, source):
-    """Actual staged Natural maintenance, retaining prior activation explicitly."""
-    original = source.read_bytes()
-    assert 0 < len(original) <= 128 * 1024 * 1024, "training fixture exceeds supported bound"
-    active = workspace / "classifier/active.json"
-    previous = active.read_bytes() if active.exists() else None
-    for index, content in enumerate((original, original + b"\r\n")):
-        digest = hashlib.sha256(content).hexdigest()
-        status, uploaded, _ = exchange(port, f"/api/v1/workstation/datasets/upload?kind=classifier_training&sha256={digest}", token,
-            content, headers={**native_headers(context), "Content-Type": "text/csv"})
-        assert status == 201 and uploaded["dataset"]["sha256"] == digest, "real dataset staging failed"
-        payload = {"request_id": f"compose-train-{index}", "dataset": uploaded["dataset"], "engine": "natural", "context": submission_context(port, token, native_headers(context))}
-        status, receipt = request(port, "/api/v1/workstation/maintenance/train-classifier", token, payload, headers=native_headers(context))
-        assert status == 202 and receipt["origin"]["source"] == "native", "durable attributed training was not admitted"
-        wait_job(port, token, native_headers(context), receipt["job_id"], 180)
-        assert (active.read_bytes() if active.exists() else None) == previous, "maintenance training changed model activation"
-    print("Registered Natural training persisted two staged dataset outcomes; prior activation retained")
 
 
 def exercise_atlas(port, token, proof):
@@ -412,7 +392,7 @@ def main():
     parser.add_argument("--web", action="store_true", help="also exercise actual Web Connect/session/relay/logout")
     parser.add_argument("--dev", action="store_true", help="verify the development Web overlay (requires --web)")
     parser.add_argument("--atlas", action="store_true", help="also exercise private Atlas dispatch")
-    parser.add_argument("--source-journey", action="store_true", help="run real synthetic seed/search/rebuild/train/activation/privacy journey")
+    parser.add_argument("--source-journey", action="store_true", help="run the synthetic seed, search, rebuild and privacy journey")
     parser.add_argument("--no-build", action="store_true", help="use explicit preloaded images without building or pulling")
     parser.add_argument("--image-ids", type=Path, help="expected image ID for every Compose service")
     args = parser.parse_args()

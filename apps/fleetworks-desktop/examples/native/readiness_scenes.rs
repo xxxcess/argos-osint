@@ -73,12 +73,6 @@ pub fn observed(state: &mut State) {
             "inference_not_observed",
             "No real inference receipt has been observed. Model assets or training alone do not prove inference readiness.",
         ),
-        check(
-            ReadinessCheckId::ClassifierTraining,
-            ReadinessState::NotApplicable,
-            "optional_natural_training",
-            "Natural classifier training is optional and has not been requested.",
-        ),
     ];
     let mut readiness =
         WorkstationReadiness::new("synthetic-deployment".into(), OBSERVED.into(), checks);
@@ -93,12 +87,9 @@ pub fn observed(state: &mut State) {
 pub fn mixed_status_checks(state: &mut State) {
     observed(state);
     if let Load::Ready(readiness) = &mut state.readiness {
-        readiness.checks.retain(|probe| {
-            !matches!(
-                probe.id,
-                ReadinessCheckId::ClassifierInference | ReadinessCheckId::ClassifierTraining
-            )
-        });
+        readiness
+            .checks
+            .retain(|probe| probe.id != ReadinessCheckId::ClassifierInference);
         for probe in &mut readiness.checks {
             *probe = match probe.id {
                 ReadinessCheckId::Jobs => check(
@@ -219,19 +210,21 @@ pub fn partial_seed_progress(state: &mut State) {
     }
 }
 
-pub fn training(state: &mut State) {
+pub fn inference_verified(state: &mut State) {
     observed(state);
+    state.workstation_status_checks_open = true;
     if let Load::Ready(readiness) = &mut state.readiness {
-        for check in &mut readiness.checks {
-            if check.id == ReadinessCheckId::ClassifierTraining {
-                *check = self::check(
-                    ReadinessCheckId::ClassifierTraining,
-                    ReadinessState::Running,
-                    "training_running",
-                    "A Natural candidate is training on the backend. The prior active model remains unchanged; activation is a separate action.",
-                );
-                check.job_ids = vec!["synthetic-training-job".into()];
-            }
+        if let Some(check) = readiness
+            .checks
+            .iter_mut()
+            .find(|check| check.id == ReadinessCheckId::ClassifierInference)
+        {
+            *check = self::check(
+                ReadinessCheckId::ClassifierInference,
+                ReadinessState::Ready,
+                "model_verified",
+                "Rust-BERT inference owner reports a verified active model.",
+            );
         }
     }
 }

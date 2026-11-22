@@ -154,19 +154,7 @@ impl ParserBudget {
         }
     }
 
-    /// The existing Natural parser already bounds rows, raw records and corpus
-    /// text. Apply an additional conservative local input cap before starting
-    /// that domain worker; larger validated uploads remain explicit failures.
-    pub(super) fn check_training_input(&self, input_bytes: u64) -> Result<()> {
-        ensure!(
-            input_bytes <= self.retained_bytes,
-            "worker_training_input_budget"
-        );
-        Ok(())
-    }
-
-    /// Use on a blocking worker at bounded training progress intervals. On
-    /// failure the caller cancels and awaits the actual training operation.
+    /// Rechecks physical pressure while the operation is running.
     pub(super) fn check_running(&self, workspace: &Path) -> Result<()> {
         let reclaim_from = self.reclaim_unused_memory.then(|| {
             self.limits

@@ -2300,7 +2300,7 @@ fn read_bounded_file(
 /// fsync, rename, then fsync the directory. Mode 0600 on Unix. Mirrors the
 /// storage home writer without importing it (the classifier must not depend
 /// on the storage module).
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), ClassifierError> {
+pub(super) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), ClassifierError> {
     write_atomic_policy(path, bytes, true)
 }
 

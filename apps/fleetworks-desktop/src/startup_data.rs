@@ -72,14 +72,12 @@ impl CsvInput {
 
 pub(crate) struct CsvInputs {
     actors: CsvInput,
-    training: CsvInput,
 }
 
 impl Default for CsvInputs {
     fn default() -> Self {
         Self {
             actors: CsvInput::new(DatasetKind::ActorCatalog),
-            training: CsvInput::new(DatasetKind::ClassifierTraining),
         }
     }
 }
@@ -88,17 +86,15 @@ impl Default for CsvInputs {
 pub(crate) enum Step {
     Seed,
     Index,
-    Classifier,
 }
 
 impl Step {
-    const ALL: [Self; 3] = [Self::Seed, Self::Index, Self::Classifier];
+    const ALL: [Self; 2] = [Self::Seed, Self::Index];
 
     fn number(self) -> usize {
         match self {
             Self::Seed => 1,
             Self::Index => 2,
-            Self::Classifier => 3,
         }
     }
 
@@ -106,7 +102,6 @@ impl Step {
         match self {
             Self::Seed => "startup-data-step-seed",
             Self::Index => "startup-data-step-index",
-            Self::Classifier => "startup-data-step-classifier",
         }
     }
 
@@ -114,7 +109,6 @@ impl Step {
         match self {
             Self::Seed => "startup-data-review-seed",
             Self::Index => "startup-data-review-index",
-            Self::Classifier => "startup-data-review-classifier",
         }
     }
 
@@ -122,7 +116,6 @@ impl Step {
         match self {
             Self::Seed => "startup-data-reset-seed",
             Self::Index => "startup-data-reset-index",
-            Self::Classifier => "startup-data-reset-classifier",
         }
     }
 
@@ -130,7 +123,6 @@ impl Step {
         match self {
             Self::Seed => "Actor CSV",
             Self::Index => "Search index",
-            Self::Classifier => "Training CSV",
         }
     }
 
@@ -138,7 +130,6 @@ impl Step {
         match self {
             Self::Seed => "Reset actor CSV",
             Self::Index => "Reset index input",
-            Self::Classifier => "Reset training CSV",
         }
     }
 
@@ -146,7 +137,6 @@ impl Step {
         match self {
             Self::Seed => Some(DatasetKind::ActorCatalog),
             Self::Index => None,
-            Self::Classifier => Some(DatasetKind::ClassifierTraining),
         }
     }
 
@@ -154,7 +144,6 @@ impl Step {
         match self {
             Self::Seed => Some(&inputs.actors),
             Self::Index => None,
-            Self::Classifier => Some(&inputs.training),
         }
     }
 
@@ -162,7 +151,6 @@ impl Step {
         match self {
             Self::Seed => Some(&mut inputs.actors),
             Self::Index => None,
-            Self::Classifier => Some(&mut inputs.training),
         }
     }
 
@@ -174,7 +162,6 @@ impl Step {
         match self {
             Self::Seed => "Seed the actor catalog",
             Self::Index => "Build the actor search index",
-            Self::Classifier => "Train the classifier",
         }
     }
 
@@ -182,9 +169,6 @@ impl Step {
         match self {
             Self::Seed => "Validate an actor CSV before seeding the connected backend.",
             Self::Index => "Build the index that makes actors searchable.",
-            Self::Classifier => {
-                "Validate a training CSV before creating an optional classifier candidate."
-            }
         }
     }
 
@@ -192,7 +176,6 @@ impl Step {
         match self {
             Self::Seed => MaintenanceOperation::SeedActors,
             Self::Index => MaintenanceOperation::ReindexActors,
-            Self::Classifier => MaintenanceOperation::TrainClassifier,
         }
     }
 
@@ -200,7 +183,6 @@ impl Step {
         match self {
             Self::Seed => ReadinessCheckId::ActorCatalog,
             Self::Index => ReadinessCheckId::ActorSearch,
-            Self::Classifier => ReadinessCheckId::ClassifierTraining,
         }
     }
 
@@ -208,7 +190,6 @@ impl Step {
         match self {
             Self::Seed => "actor_seed",
             Self::Index => "actor_reindex",
-            Self::Classifier => "classifier_train",
         }
     }
 
@@ -217,15 +198,12 @@ impl Step {
             Self::Seed if cfg!(target_os = "linux") => "Enter actor CSV path",
             Self::Seed => "Choose actor CSV…",
             Self::Index => "Build actor index",
-            Self::Classifier if cfg!(target_os = "linux") => "Enter training CSV path",
-            Self::Classifier => "Choose classifier CSV…",
         }
     }
 
     fn validated_action(self) -> &'static str {
         match self {
             Self::Seed => "Seed actors",
-            Self::Classifier => "Train classifier",
             Self::Index => self.action(),
         }
     }
@@ -419,9 +397,7 @@ fn stage(state: &State, step: Step) -> Stage<'_> {
     if matches!(&state.maintenance.receipt, Load::Ready(receipt)
         if receipt.operation == step.operation() && receipt.already_completed)
     {
-        if step == Step::Classifier
-            || observation.is_some_and(|check| check.state == ReadinessState::Ready)
-        {
+        if observation.is_some_and(|check| check.state == ReadinessState::Ready) {
             return Stage::Complete;
         }
         return Stage::Verifying;
@@ -440,39 +416,13 @@ fn stage(state: &State, step: Step) -> Stage<'_> {
         if job.state != "completed" {
             return Stage::Failed(detail);
         }
-        if step == Step::Classifier {
-            let candidate = detail.maintenance_result.as_ref().is_some_and(|result| {
-                result.operation == step.job_operation()
-                    && result
-                        .candidate_model_id
-                        .as_deref()
-                        .is_some_and(|candidate| !candidate.trim().is_empty())
-            });
-            if candidate {
-                return Stage::Complete;
-            }
-            return Stage::Verifying;
-        }
         if observation.is_none_or(|check| check.state != ReadinessState::Ready) {
             return Stage::Verifying;
         }
     }
     match observation {
-        Some(check)
-            if if step == Step::Classifier {
-                check.state == ReadinessState::NotApplicable
-                    || check.state == ReadinessState::Ready
-                        && (check.reason_code == "embedded_training_completed"
-                            || check.artifact_ids.iter().any(|id| !id.trim().is_empty()))
-            } else {
-                check.state == ReadinessState::Ready
-            } =>
-        {
-            Stage::Complete
-        }
-        Some(check) if check.state == ReadinessState::Running && step != Step::Classifier => {
-            Stage::Verifying
-        }
+        Some(check) if check.state == ReadinessState::Ready => Stage::Complete,
+        Some(check) if check.state == ReadinessState::Running => Stage::Verifying,
         Some(_) => Stage::Action,
         None if state.readiness_pending()
             || matches!(state.readiness, Load::Idle | Load::Pending | Load::Loading) =>
@@ -734,7 +684,8 @@ impl State {
 }
 
 fn step_dots(step: Option<Step>, kit: &Kit) -> El {
-    let current = step.map_or(4, Step::number);
+    let total = Step::ALL.len() + 1;
+    let current = step.map_or(total, Step::number);
     let mut dots = rune::row().key("startup-data-dots").center_y().gap(7.0);
     for (index, key) in Step::ALL
         .into_iter()
@@ -755,7 +706,8 @@ fn step_dots(step: Option<Step>, kit: &Kit) -> El {
                 .a11y_hidden(),
         );
     }
-    dots.role("status").label(format!("Step {current} of 4"))
+    dots.role("status")
+        .label(format!("Step {current} of {total}"))
 }
 
 fn panel(kit: &Kit, title: &str) -> El {
@@ -866,7 +818,7 @@ pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit:
             backend_views::unresolved_actor_reindex_banner(state, preferences, kit)
         {
             return layout(
-                panel.child(unresolved).child(later(step, preferences, kit)),
+                panel.child(unresolved).child(later(preferences, kit)),
                 sequence,
                 dots,
             );
@@ -892,7 +844,6 @@ pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit:
             let detail = match step {
                 Step::Seed => "Waiting for the backend to verify the seeded catalog.",
                 Step::Index => "Waiting for the index to become searchable.",
-                Step::Classifier => "Waiting for verification of the trained candidate.",
             };
             Some(status(
                 "Verifying",
@@ -929,7 +880,6 @@ pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit:
             match step {
                 Step::Seed => "The actor catalog is seeded.",
                 Step::Index => "The search index is ready.",
-                Step::Classifier => "This step is complete. Model activation is separate.",
             },
             StatusTone::Ok,
             false,
@@ -963,10 +913,10 @@ pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit:
             );
             panel = panel.child(
                 status(
-                    match (step, stage) {
-                        (Step::Seed, Stage::Failed(_)) => "CSV validated",
-                        (Step::Seed, _) => "Ready to seed",
-                        _ => "Ready to train",
+                    if matches!(stage, Stage::Failed(_)) {
+                        "CSV validated"
+                    } else {
+                        "Ready to seed"
                     },
                     detail,
                     StatusTone::Ok,
@@ -1113,7 +1063,7 @@ pub(crate) fn view(state: &State, step: Step, preferences: ViewPreferences, kit:
         }
     }
     if !matches!(stage, Stage::Complete) {
-        actions = actions.child(later(step, preferences, kit));
+        actions = actions.child(later(preferences, kit));
     }
     layout(panel.child(actions), sequence, dots)
 }
@@ -1233,13 +1183,10 @@ fn input_summary(state: &State, step: Step, kit: &Kit) -> Option<El> {
                 .description(format!("Saved CSV SHA-256 {}", dataset.sha256)),
         );
     }
-    if step != Step::Classifier {
-        return catalog_hash(state).map(|hash| {
-            views::quiet(format!("Current actor catalog · {}", &hash[..12]), kit)
-                .description(format!("Current actor catalog SHA-256 {hash}"))
-        });
-    }
-    None
+    catalog_hash(state).map(|hash| {
+        views::quiet(format!("Current actor catalog · {}", &hash[..12]), kit)
+            .description(format!("Current actor catalog SHA-256 {hash}"))
+    })
 }
 
 fn setup_sequence(
@@ -1297,16 +1244,12 @@ fn setup_sequence(
     sequence
 }
 
-fn later(step: Step, preferences: ViewPreferences, kit: &Kit) -> El {
-    ActionButton::new(if step == Step::Classifier {
-        "Skip training"
-    } else {
-        "Finish later"
-    })
-    .key("startup-data-skip")
-    .finish(MetalFinish::Gunmetal)
-    .on_press_tx(State::finish_startup_data_later)
-    .build(kit, preferences, None)
+fn later(preferences: ViewPreferences, kit: &Kit) -> El {
+    ActionButton::new("Finish later")
+        .key("startup-data-skip")
+        .finish(MetalFinish::Gunmetal)
+        .on_press_tx(State::finish_startup_data_later)
+        .build(kit, preferences, None)
 }
 
 fn refresh(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {

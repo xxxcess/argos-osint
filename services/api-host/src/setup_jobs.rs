@@ -18,12 +18,6 @@ use anyhow::Context;
 use argos_osint_api::datasets::DatasetStore;
 #[cfg(test)]
 use argos_osint_core::actor_catalog::Actor;
-use argos_osint_core::classifier::dataset::DatasetRequest;
-use argos_osint_core::classifier::readiness::ClassifierHome;
-use argos_osint_core::classifier::readiness::ManualTrainRequest;
-use argos_osint_core::classifier::readiness::TrainingJobState;
-use argos_osint_core::classifier::training::SyntheticActivation;
-use argos_osint_core::classifier::Provenance;
 use argos_osint_core::events::NewEvent;
 use argos_osint_core::events::Severity;
 use argos_osint_core::storage::actor_catalog;
@@ -146,9 +140,6 @@ pub(crate) async fn execute(
     match payload.operation {
         MaintenanceOperation::SeedActors => {
             seed(repo, task, workspace, path, dataset, budget, cancel).await
-        }
-        MaintenanceOperation::TrainClassifier => {
-            train(repo, task, workspace, path, dataset, budget, cancel).await
         }
         // Reindex belongs to the actual index coordinator, not CSV ingestion.
         _ => anyhow::bail!("setup_operation_requires_its_own_consumer"),
@@ -455,137 +446,6 @@ async fn seed(
     } else {
         SetupOutcome::Interrupted
     })
-}
-
-async fn train(
-    repo: &Repository,
-    task: &ClaimedTask,
-    workspace: PathBuf,
-    path: PathBuf,
-    dataset: DatasetRef,
-    budget: bulk_pressure::ParserBudget,
-    cancel: Arc<AtomicBool>,
-) -> anyhow::Result<SetupOutcome> {
-    budget.check_training_input(dataset.size_bytes)?;
-    let check_path = path.clone();
-    let check_dataset = dataset.clone();
-    tokio::task::spawn_blocking(move || {
-        let mut reader = verified_reader(&check_path, &check_dataset)?;
-        std::io::copy(&mut reader, &mut std::io::sink())?;
-        verify_complete(reader, &check_dataset)
-    })
-    .await??;
-    let mut request = DatasetRequest::default();
-    request.explicit_file = Some(path);
-    request.cwd = workspace.clone();
-    request.executable = std::env::current_exe()?;
-    request.home = workspace.clone();
-    tokio::task::spawn_blocking({
-        let workspace = workspace.clone();
-        let budget = budget.clone();
-        move || budget.check_running(&workspace)
-    })
-    .await??;
-    if cancel.load(Ordering::Acquire) {
-        return Ok(SetupOutcome::Interrupted);
-    }
-    let home = ClassifierHome::new(workspace.clone());
-    // The exact durable job ID is the stable domain request key. Activation is
-    // absent from the public maintenance request and explicitly retained here.
-    let accepted = home
-        .start_training(ManualTrainRequest::new(
-            request,
-            task.job_id.clone(),
-            SyntheticActivation::RetainPrior,
-        ))
-        .await?;
-    record_job_event(
-        repo,
-        task,
-        Severity::Info,
-        "worker.progress",
-        "Classifier training started",
-    )
-    .await;
-    let mut tick = tokio::time::interval(Duration::from_millis(250));
-    tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    let mut cancelled = false;
-    let mut pressure_failed = false;
-    let mut last_pressure = std::time::Instant::now();
-    let mut last_stage = String::new();
-    let mut last_stage_log: Option<std::time::Instant> = None;
-    let result = async {loop {
-        tick.tick().await;
-        if last_pressure.elapsed()>=Duration::from_secs(1) {
-            let observation=tokio::task::spawn_blocking({let workspace=workspace.clone();let budget=budget.clone();move||budget.check_running(&workspace)}).await?;
-            last_pressure=std::time::Instant::now();
-            if observation.is_err()&&!cancelled {
-                home.cancel_training(&accepted.job_id).await?;
-                cancelled=true;pressure_failed=true;
-            }
-        }
-        if cancel.load(Ordering::Acquire) && !cancelled {
-            home.cancel_training(&accepted.job_id).await?;
-            cancelled = true;
-        }
-        let detail = home.job_detail(&accepted.job_id).await?;
-        if let Some(progress) = detail.progress {
-            let stage = progress.stage.as_str();
-            setup_jobs::record_progress(
-                repo,
-                task,
-                stage,
-                progress.rows_seen,
-                progress.rows_total,
-            )
-            .await?;
-            if stage != last_stage
-                || last_stage_log.is_none_or(|at| at.elapsed() >= Duration::from_secs(10))
-            {
-                last_stage = stage.to_owned();
-                last_stage_log = Some(std::time::Instant::now());
-                record_job_event(
-                    repo,
-                    task,
-                    Severity::Info,
-                    "worker.progress",
-                    format!(
-                        "Classifier training ({stage}): {} / {}",
-                        progress.rows_seen, progress.rows_total
-                    ),
-                )
-                .await;
-            }
-        }
-        match detail.state {
-            TrainingJobState::Completed => {
-                anyhow::ensure!(!pressure_failed,"worker_training_resource_budget");
-                let outcome = detail
-                    .outcome
-                    .ok_or_else(|| anyhow::anyhow!("training_completed_without_candidate"))?;
-                let Provenance::SyntheticBaseline { dataset_sha256, .. } =
-                    &outcome.report.provenance
-                else {
-                    anyhow::bail!("training_dataset_provenance_unavailable");
-                };
-                anyhow::ensure!(
-                    dataset_sha256 == &dataset.sha256,
-                    "training_dataset_hash_mismatch"
-                );
-                setup_jobs::record_result(repo,task,&json!({"operation":"classifier_train","engine":"natural","atlas_engine":"rust_bert_zero_shot","dataset_sha256":dataset.sha256,"candidate_model_id":outcome.candidate_model_id,"active_model_id":outcome.active_model_id,"activation_requested":false,"state":outcome.state})).await?;
-                break Ok(SetupOutcome::Complete);
-            }
-            TrainingJobState::Cancelled | TrainingJobState::Interrupted => {
-                anyhow::ensure!(!pressure_failed,"worker_training_resource_budget");
-                break Ok(SetupOutcome::Interrupted)
-            }
-            TrainingJobState::Failed => break Err(anyhow::anyhow!("natural_training_failed")),
-            _ => {}
-        }
-    }}.await;
-    let stopped = home.shutdown().await;
-    stopped?;
-    result
 }
 
 #[cfg(test)]

@@ -29,6 +29,10 @@
 pub mod artifact;
 #[cfg(feature = "classifier")]
 pub(crate) mod bert;
+#[cfg(feature = "classifier")]
+pub mod bert_activation;
+#[cfg(feature = "classifier")]
+pub use bert::{verify_atlas_bert_candidate, AtlasBertActive};
 pub mod calibration;
 pub mod candidate_activation;
 pub mod dataset;
@@ -804,6 +808,12 @@ pub fn decode_receipt(json: &str) -> Result<DecodedReceipt, ClassifierError> {
 pub enum Provenance {
     /// Externally pretrained NLI weights with no Atlas fitting or calibration.
     ZeroShot,
+    /// Atlas DistilBERT fine-tuned and evaluated on the frozen synthetic corpus.
+    FineTunedAtlasBert {
+        dataset_sha256: String,
+        frozen_sha256: String,
+        evaluation_sha256: String,
+    },
     SyntheticBaseline {
         dataset_version: String,
         dataset_sha256: String,
@@ -863,6 +873,7 @@ impl Provenance {
     pub fn label(&self) -> &'static str {
         match self {
             Provenance::ZeroShot => "Rust-BERT zero-shot (unfitted thresholds)",
+            Provenance::FineTunedAtlasBert { .. } => "Atlas BERT fine-tuned on synthetic data",
             Provenance::SyntheticBaseline { .. } => "Synthetic baseline",
             Provenance::ReviewedReal { .. } => "Reviewed real",
             Provenance::ApprovedProvider { .. } => "Approved weak provider labels",

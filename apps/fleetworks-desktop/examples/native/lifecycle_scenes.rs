@@ -84,7 +84,7 @@ pub fn trash_recovery(state: &mut State) {
     state.workspaces.message = Some("Synthetic Trash outcome is uncertain. Recheck the saved folder reference; no user files or OS Trash were changed.".into());
 }
 
-pub fn training_result(state: &mut State) {
+pub fn legacy_classifier_result(state: &mut State) {
     result(state, true);
 }
 pub fn seed_result(state: &mut State) {
@@ -100,7 +100,7 @@ fn result(state: &mut State, training: bool) {
         }
         .into();
         detail.job.title = if training {
-            "Synthetic classifier training"
+            "Historical Natural classifier training"
         } else {
             "Synthetic actor seed"
         }

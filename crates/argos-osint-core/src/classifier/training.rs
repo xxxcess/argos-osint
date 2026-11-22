@@ -554,7 +554,9 @@ fn invalid_source() -> ClassifierError {
 
 pub(crate) fn validate_provenance(provenance: &Provenance) -> Result<(), ClassifierError> {
     let (version, hash, review) = match provenance {
-        Provenance::ZeroShot => return Err(invalid_source()),
+        Provenance::ZeroShot | Provenance::FineTunedAtlasBert { .. } => {
+            return Err(invalid_source())
+        }
         Provenance::SyntheticBaseline {
             dataset_version,
             dataset_sha256,
@@ -897,7 +899,9 @@ pub fn train_candidate<W: ClassifierWorker + ?Sized>(
         Provenance::SyntheticBaseline { dataset_sha256, .. }
         | Provenance::ReviewedReal { dataset_sha256, .. }
         | Provenance::MixedTraining { dataset_sha256, .. } => dataset_sha256,
-        Provenance::ApprovedProvider { .. } | Provenance::ZeroShot => return Err(invalid_source()),
+        Provenance::ApprovedProvider { .. }
+        | Provenance::ZeroShot
+        | Provenance::FineTunedAtlasBert { .. } => return Err(invalid_source()),
     };
     if request_hash != &corpus.dataset_sha256
         || (matches!(request.provenance, Provenance::ReviewedReal { .. })

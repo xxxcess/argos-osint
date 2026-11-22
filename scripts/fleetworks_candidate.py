@@ -50,6 +50,9 @@ DATASET_DOWNLOAD_TIMEOUT = 180
 DATASET_DOWNLOAD_IDLE_TIMEOUT = 20
 DATASET_LIMITS = {
     "actor_catalog": ("argos_actors.csv", "https://media.githubusercontent.com/media/xxxcess/argos-osint", 256 * 1024 * 1024),
+}
+LEGACY_DATASET_LIMITS = {
+    **DATASET_LIMITS,
     "classifier_training": ("argos_atlas_strategic_domains_v2.csv", "https://raw.githubusercontent.com/xxxcess/argos-osint", 128 * 1024 * 1024),
 }
 NATIVE_CPU_TYPES = {"x86_64-apple-darwin": 0x01000007, "aarch64-apple-darwin": 0x0100000C}
@@ -478,15 +481,22 @@ def _json_bytes(value):
     return (json.dumps(value, sort_keys=True, indent=2) + "\n").encode("utf-8")
 
 
-def _validated_dataset_pins(pins):
+def _validated_dataset_pins(pins, *, allow_legacy=False):
     if not isinstance(pins, dict) or set(pins) != {"schema", "revision", "datasets"} \
-            or type(pins["schema"]) is not int or pins["schema"] != 1 \
+            or type(pins["schema"]) is not int \
             or not isinstance(pins["revision"], str) \
             or not re.fullmatch(r"[0-9a-f]{40}", pins["revision"]) \
-            or not isinstance(pins["datasets"], dict) \
-            or set(pins["datasets"]) != set(DATASET_LIMITS):
-        raise ValueError("Native dataset pins must describe both CSVs at an exact revision")
-    for kind, (filename, origin, limit) in DATASET_LIMITS.items():
+            or not isinstance(pins["datasets"], dict):
+        raise ValueError("Native dataset pins must describe the catalog at an exact revision")
+    if pins["schema"] == 2:
+        limits = DATASET_LIMITS
+    elif pins["schema"] == 1 and allow_legacy:
+        limits = LEGACY_DATASET_LIMITS
+    else:
+        raise ValueError("Unsupported Native dataset pins schema")
+    if set(pins["datasets"]) != set(limits):
+        raise ValueError("Native dataset pins do not match the expected schema and resources")
+    for kind, (filename, origin, limit) in limits.items():
         dataset = pins["datasets"][kind]
         if not isinstance(dataset, dict) or set(dataset) != {"filename", "sha256", "size_bytes", "download_url"} \
                 or dataset["filename"] != filename or not isinstance(dataset["sha256"], str) \
@@ -585,7 +595,7 @@ def _verify_bundled_datasets(manifest, resources, sizes):
         if "default_datasets" in manifest:
             raise ValueError("Legacy Native archive unexpectedly declares default datasets")
         return
-    pins = _validated_dataset_pins(manifest.get("default_datasets"))
+    pins = _validated_dataset_pins(manifest.get("default_datasets"), allow_legacy=True)
     relative_dir = f"{resources}/datasets"
     expectations = {f"{relative_dir}/{pin['filename']}": (pin["size_bytes"], pin["sha256"])
                     for pin in pins["datasets"].values()}

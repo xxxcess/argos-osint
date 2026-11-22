@@ -249,7 +249,6 @@ fn material_and_matte_preserve_interactive_hit_bounds_and_a11y_on_status_and_see
                 "maintenance-refresh",
                 "maintenance-seed",
                 "maintenance-reindex",
-                "maintenance-train",
             ],
         ),
     ] {

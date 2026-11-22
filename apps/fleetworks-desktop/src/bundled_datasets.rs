@@ -29,7 +29,7 @@ pub(crate) fn pin(kind: DatasetKind) -> Option<&'static DatasetPin> {
         serde_json::from_str(include_str!("../../../datasets/native-defaults.json"))
             .expect("checked-in native dataset pins")
     });
-    (pins.schema == 1).then_some(())?;
+    (pins.schema == 2).then_some(())?;
     pins.datasets.get(&kind)
 }
 

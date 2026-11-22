@@ -700,7 +700,6 @@ impl LocalGateway {
                 json_payload(history)
             }
             IpcOperation::ClassifierCandidateDetail(query) => {
-                self.require_classifier_enabled()?;
                 let context = self
                     .resolve(
                         principal,
@@ -725,7 +724,6 @@ impl LocalGateway {
                 json_payload(preview)
             }
             IpcOperation::ClassifierActivationResult(query) => {
-                self.require_classifier_enabled()?;
                 let context = self
                     .resolve(
                         principal,
@@ -926,8 +924,6 @@ impl LocalGateway {
                 json_payload(receipt)
             }
             IpcOperation::TrainClassifier(request) => {
-                self.require_jobs_enabled()?;
-                self.require_classifier_enabled()?;
                 let context = self
                     .resolve(
                         principal,
@@ -977,8 +973,7 @@ impl LocalGateway {
                 .await?;
                 json_payload(receipt)
             }
-            IpcOperation::ClassifierActivate(request) => {
-                self.require_classifier_enabled()?;
+            IpcOperation::ClassifierActivate(_) => {
                 let context = self
                     .resolve(
                         principal,
@@ -987,13 +982,8 @@ impl LocalGateway {
                         ContextRequirement::Registered,
                     )
                     .await?;
-                let owner = self.services.activation.as_ref().ok_or_else(|| {
-                    DispatchError::unavailable("Classifier activation unavailable")
-                })?;
-                let receipt =
-                    classifier_activation::submit_request(&self.state, &context, owner, request)
-                        .await?;
-                json_payload(receipt)
+                classifier_activation::ensure_activation_authority(&context)?;
+                Err(classifier_activation::retired_activation().into())
             }
             IpcOperation::ModelRoleSet(request) => {
                 let context = self
@@ -1201,15 +1191,6 @@ impl LocalGateway {
         if !self.capability_config.search_enabled {
             return Err(DispatchError::unavailable(
                 "Actor search capability is disabled",
-            ));
-        }
-        Ok(())
-    }
-
-    fn require_classifier_enabled(&self) -> Result<(), DispatchError> {
-        if !self.capability_config.classifier_enabled {
-            return Err(DispatchError::unavailable(
-                "Classifier capability is disabled",
             ));
         }
         Ok(())
@@ -2260,17 +2241,14 @@ mod tests {
             },
         }))
         .expect("maintenance request");
-        let disabled_train = disabled_gateway
+        let retired_train = disabled_gateway
             .dispatch(
                 &principal,
                 Some(&registration),
                 IpcOperation::TrainClassifier(maint_req),
             )
             .await;
-        assert!(matches!(
-            disabled_train,
-            IpcOutcome::Err { status: 503, .. }
-        ));
+        assert!(matches!(retired_train, IpcOutcome::Err { status: 410, .. }));
 
         // Enabled search succeeds (returning NotBuilt before outbox indexing begins).
         let search_outcome = gateway

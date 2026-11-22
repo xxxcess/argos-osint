@@ -14,7 +14,6 @@ use argos_osint_core::events::Severity;
 use argos_osint_core::osint::manual;
 use argos_osint_core::osint::manual::DurableToolOutcome;
 use argos_osint_core::storage::classifier_activation;
-use argos_osint_core::storage::classifier_activation::ActivationWork;
 use argos_osint_core::storage::job_dispatch;
 use argos_osint_core::storage::job_dispatch::DeliveryClaim;
 use argos_osint_core::storage::job_dispatch::DeliveryFinish;
@@ -50,7 +49,6 @@ pub(crate) struct LocalWorkerConfig {
     pub(crate) store: DatasetStore,
     pub(crate) index: Option<ActorIndexWorker>,
     pub(crate) relinquish_on_shutdown: bool,
-    pub(crate) classifier_enabled: bool,
 }
 
 pub(crate) async fn run(
@@ -95,7 +93,6 @@ pub(crate) async fn run(
             store,
             index,
             relinquish_on_shutdown: false,
-            classifier_enabled: true,
         },
         signal,
     )
@@ -116,42 +113,27 @@ pub(crate) async fn run_with_config(
         store,
         index,
         relinquish_on_shutdown,
-        classifier_enabled,
     } = config;
     let reindex = index.is_some();
     let pools: Vec<&'static str> = lanes::Lane::ALL
         .into_iter()
         .filter(|lane| reindex || *lane != lanes::Lane::Reindex)
-        .filter(|lane| {
-            classifier_enabled || !matches!(lane, lanes::Lane::Train | lanes::Lane::Activate)
-        })
+        .filter(|lane| !matches!(lane, lanes::Lane::Train | lanes::Lane::Activate))
         .map(lanes::Lane::pool)
         .collect();
-    if !classifier_enabled {
-        job_dispatch::configure_pool(repo.db(), setup_jobs::TRAIN_POOL, false).await?;
-        classifier_activation::configure_consumer(&repo, false).await?;
-    }
+    job_dispatch::configure_pool(repo.db(), setup_jobs::TRAIN_POOL, false).await?;
+    classifier_activation::configure_consumer(&repo, false).await?;
+    setup_jobs::enable_operation(repo.db(), MaintenanceOperation::TrainClassifier, false).await?;
     for pool in &pools {
         job_dispatch::ensure_queue_transport(repo.db(), pool).await?;
         job_dispatch::enable_pool(repo.db(), pool).await?;
     }
-    for operation in [
-        MaintenanceOperation::SeedActors,
-        MaintenanceOperation::TrainClassifier,
-    ] {
-        setup_jobs::enable_operation(
-            repo.db(),
-            operation,
-            operation != MaintenanceOperation::TrainClassifier || classifier_enabled,
-        )
-        .await?;
-    }
+    setup_jobs::enable_operation(repo.db(), MaintenanceOperation::SeedActors, true).await?;
     if reindex {
         setup_jobs::enable_operation(repo.db(), MaintenanceOperation::ReindexActors, true).await?;
     }
     let (stop, receive) = watch::channel(false);
-    let (routes, receivers) =
-        lanes::bounded_for_capabilities::<Received>(reindex, classifier_enabled);
+    let (routes, receivers) = lanes::bounded_for_capabilities::<Received>(reindex, false);
     let tools = Arc::new(manual::Tools::default());
     let relinquished = Arc::new(AtomicUsize::new(0));
     let mut tasks = JoinSet::new();
@@ -184,8 +166,6 @@ pub(crate) async fn run_with_config(
             receive.clone(),
         ));
     }
-    // Queue transport and the actual bounded activation lane are now owned.
-    classifier_activation::configure_consumer(&repo, classifier_enabled).await?;
     tracing::info!(
         role = if relinquish_on_shutdown {
             "local-ipc-worker"
@@ -493,22 +473,6 @@ async fn handle(
                 tools
                     .execute_claimed(repo, &lease.task, cancel.clone())
                     .await
-            } else if lease.task.pool == classifier_activation::POOL {
-                match classifier_activation::execute_claimed(
-                    repo,
-                    workspace.to_path_buf(),
-                    &lease.task,
-                    cancel.clone(),
-                )
-                .await?
-                {
-                    ActivationWork::Complete { result_ref } => {
-                        Ok(DurableToolOutcome::Complete { result_ref })
-                    }
-                    ActivationWork::Failed { reason } => Ok(DurableToolOutcome::Failed { reason }),
-                    ActivationWork::Stale => Ok(DurableToolOutcome::Stale),
-                    _ => Err(anyhow::anyhow!("activation_outcome_unsupported")),
-                }
             } else if lease.task.pool == setup_jobs::REINDEX_POOL {
                 reindex_job::execute(repo, &lease.task, &cancel).await
             } else {
@@ -880,7 +844,6 @@ mod tests {
                         .expect("local index worker"),
                 ),
                 relinquish_on_shutdown: embedded,
-                classifier_enabled: true,
             },
             async move {
                 let _ = stop1_rx.await;
@@ -967,7 +930,6 @@ mod tests {
                         .expect("local index worker 2"),
                 ),
                 relinquish_on_shutdown: embedded,
-                classifier_enabled: true,
             },
             async move {
                 let _ = stop2_rx.await;

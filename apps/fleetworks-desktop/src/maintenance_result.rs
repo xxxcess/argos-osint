@@ -39,9 +39,9 @@ impl MaintenanceResult {
     pub(crate) fn view(&self, kit: &Kit) -> El {
         let title = match self.operation.as_str() {
             "actor_seed" => "Actor seed result",
-            "classifier_train" => "Classifier training result",
+            "classifier_train" => "Historical Natural training result",
             "actor_reindex" => "Actor search index result",
-            "classifier_activate" => "Classifier activation result",
+            "classifier_activate" => "Historical Natural activation result",
             _ => return rune::col(),
         };
         let mut body = rune::col()
@@ -106,7 +106,7 @@ impl MaintenanceResult {
         }
         if self.operation == "classifier_train" && self.active_model_id.is_none() {
             body = body.child(quiet(
-                "Training produced a candidate. Model activation is a separate confirmed action.",
+                "This historical result records Natural candidate creation.",
                 kit,
             ));
         }

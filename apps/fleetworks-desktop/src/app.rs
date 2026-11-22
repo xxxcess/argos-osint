@@ -46,8 +46,6 @@ use crate::accessibility::ViewPreferences;
 use crate::backend::Backend;
 use crate::backend::ReadKind;
 use crate::brain::Brain;
-use crate::classifier_activation::ActivationAction;
-use crate::classifier_activation::ClassifierActivation;
 use crate::configuration::Configuration;
 use crate::configuration::ConfigurationAction;
 use crate::connection::Connected;
@@ -112,7 +110,7 @@ impl Page {
 
     pub fn title(self) -> &'static str {
         match self {
-            Self::Seed => "DB Seed & Train",
+            Self::Seed => "Actor Maintenance",
             Self::Atlas => "News Cycles",
             Self::Brain => "Brain Search",
             Self::Tools => "OSINT Tools",
@@ -126,7 +124,7 @@ impl Page {
 
     fn compact_title(self) -> &'static str {
         match self {
-            Self::Seed => "Seed & Train",
+            Self::Seed => "Actors",
             Self::Atlas => "Cycles",
             Self::Brain => "Brain",
             Self::Tools => "Tools",
@@ -188,12 +186,11 @@ impl Page {
     }
 }
 
-/// Active progressive disclosure stage on `DB Seed & Train`.
+/// Active progressive disclosure stage on `Actor Maintenance`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum SeedStage {
     #[default]
     Seed,
-    Classifier,
     Maintenance,
 }
 
@@ -268,7 +265,6 @@ pub enum Intent {
     ResolveInteractive { kind: SubmissionKind },
     PrepareJobAction { action: JobAction },
     PostJobAction { action: JobAction },
-    ClassifierActivation { action: ActivationAction },
     ConnectionProfile { action: ProfileAction },
     ConnectionCredentialSelected,
     ChooseConnectionCredential,
@@ -334,7 +330,6 @@ pub struct State {
     pub transfer: Transfer,
     pub submissions: Submissions,
     pub job_actions: JobActions,
-    pub classifier_activation: ClassifierActivation,
     pub scoped_logs: LogState,
     pub scoped_jobs: JobsQueryState,
     pub activity_tab: ActivityTab,
@@ -420,7 +415,6 @@ impl Default for State {
             transfer: Transfer::default(),
             submissions: Submissions::default(),
             job_actions: JobActions::default(),
-            classifier_activation: ClassifierActivation::default(),
             scoped_logs: LogState::default(),
             scoped_jobs: JobsQueryState::default(),
             activity_tab: ActivityTab::Jobs,
@@ -547,7 +541,6 @@ impl State {
         self.transfer.request = None;
         self.submissions.cancel_requests();
         self.job_actions.request = None;
-        self.classifier_activation.cancel_requests();
         self.scoped_logs.cancel_requests();
         self.scoped_jobs.cancel_reads();
         self.brain.in_flight = false;
@@ -715,7 +708,6 @@ impl State {
         self.transfer = Transfer::default();
         self.submissions = Submissions::default();
         self.job_actions = JobActions::default();
-        self.classifier_activation = ClassifierActivation::default();
         self.rebind = Rebind::default();
     }
 
@@ -997,7 +989,6 @@ impl State {
             || self.cycles.confirmation.is_some()
             || self.configuration.confirmation.is_some()
             || self.job_actions.confirmation.is_some()
-            || self.classifier_activation.confirmation.is_some()
             || self.transfer.confirmation.is_some()
             || self.rebind.confirmation.is_some()
             || self.connection_profiles.confirmation.is_some()

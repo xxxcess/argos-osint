@@ -9,7 +9,7 @@ use argos_osint_core::classifier::readiness::{ClassifierHome, PinnedClassifier};
 use argos_osint_core::classifier::remote::{
     self, InferRequest, InferResponse, PinRequest, PinResponse, ValidateRequest,
 };
-use argos_osint_core::classifier::{ClassifierError, WorkControl};
+use argos_osint_core::classifier::{ClassifierError, Provenance, WorkControl};
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::StatusCode;
@@ -73,17 +73,25 @@ async fn ready(State(engine): State<Engine>) -> Response {
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
-    let atlas_checkpoint_state = if engine.home.check_local_atlas_assets().await.is_ok() {
+    let checkpoint = engine.home.check_local_atlas_checkpoint().await;
+    let atlas_checkpoint_state = if checkpoint.is_ok() {
         "available"
     } else {
         "unavailable"
     };
     let warm = engine.warm.lock().await;
-    let active_model = warm.as_ref().map(|warm| {
-        json!({
+    let active_model = warm.as_ref().and_then(|warm| match &checkpoint {
+        Ok(Some(selected))
+            if selected.matches_bundle(&warm.classifier)
+                && warm.activations.contains(&selected.snapshot.activated_at) =>
+        {
+            Some(json!(selected))
+        }
+        Ok(None) if warm.classifier.snapshot.provenance == Provenance::ZeroShot => Some(json!({
             "snapshot": warm.classifier.snapshot,
             "manifest_sha256": warm.classifier.manifest_sha256,
-        })
+        })),
+        _ => None,
     });
     let model_state = if active_model.is_some() {
         "verified"
@@ -260,9 +268,21 @@ fn error(status: StatusCode, code: &'static str) -> Response {
 #[cfg(all(test, feature = "classifier", unix))]
 mod tests {
     use super::*;
-    use argos_osint_core::classifier::{ClassifyInput, RejectionReason};
+    use argos_osint_core::atlas_taxonomy::{DomainId, DOMAIN_IDS};
+    use argos_osint_core::classifier::{
+        artifact, bert_activation, ClassificationReceipt, ClassifyInput, RejectionReason,
+    };
     use std::fs;
     use std::path::{Path, PathBuf};
+
+    mod candidate_fixture {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../crates/argos-osint-core/tests/fixtures/classifier/atlas_bert_candidate.rs"
+        ));
+    }
+
+    use self::candidate_fixture::StagedCandidate;
 
     const TOKEN: &str = "00001111222233334444555566667777";
 
@@ -311,21 +331,44 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn authenticated_batch_uses_exact_warm_pin() {
-        let fixture = Fixture::new();
-        let home = ClassifierHome::new(fixture.0.clone());
+    async fn start_service(home: ClassifierHome) -> (String, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let origin = format!("http://{address}");
         let policy = argos_osint_api::NetworkPolicy::new(&[address.to_string()], TOKEN).unwrap();
         let app = argos_osint_api::guard_network(
-            router(home.clone()),
+            router(home),
             policy,
             Arc::new(Vec::new()),
             address.port(),
         );
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (origin, server)
+    }
+
+    async fn active_model(origin: &str) -> Option<remote::PinIdentity> {
+        let ready: serde_json::Value = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("{origin}{}", remote::READY_PATH))
+            .bearer_auth(TOKEN)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        serde_json::from_value(ready["active_model"].clone()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn authenticated_batch_uses_exact_warm_pin() {
+        let fixture = Fixture::new();
+        let home = ClassifierHome::new(fixture.0.clone());
+        let (origin, server) = start_service(home.clone()).await;
 
         let wrong = Arc::new(remote::Client::new(&origin, &"x".repeat(32)).unwrap());
         assert!(
@@ -359,6 +402,131 @@ mod tests {
             client.pin(Some(&exact.snapshot)).await,
             Err(ClassifierError::Incompatible(_))
         ));
+        server.abort();
+        let _ = server.await;
+        home.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn activated_candidate_matches_local_pins_and_receipts_after_http_restart() {
+        let fixture = StagedCandidate::new(0.8);
+        let path = fixture.home.path();
+        let home = ClassifierHome::new(path.to_owned());
+        let (origin, server) = start_service(home.clone()).await;
+        let client = Arc::new(remote::Client::new(&origin, TOKEN).unwrap());
+        let baseline = client.pin(None).await.unwrap();
+        assert_eq!(baseline.snapshot.provenance, Provenance::ZeroShot);
+        assert_eq!(
+            active_model(&origin).await.unwrap().snapshot,
+            baseline.snapshot
+        );
+        let prior_revision = bert_activation::revision(path).await.unwrap();
+
+        let cancelled = WorkControl::new();
+        cancelled.cancel.store(true, Ordering::Release);
+        assert!(matches!(
+            bert_activation::activate(
+                path,
+                &fixture.frozen_sha256,
+                &fixture.evaluation_sha256,
+                &prior_revision,
+                &cancelled,
+            )
+            .await,
+            Err(ClassifierError::Cancelled)
+        ));
+        assert_eq!(
+            bert_activation::revision(path).await.unwrap(),
+            prior_revision
+        );
+        assert_eq!(client.pin(None).await.unwrap().snapshot, baseline.snapshot);
+
+        let activated = bert_activation::activate(
+            path,
+            &fixture.frozen_sha256,
+            &fixture.evaluation_sha256,
+            &prior_revision,
+            &WorkControl::new(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            activated.snapshot.provenance,
+            Provenance::FineTunedAtlasBert { .. }
+        ));
+        let active_revision = bert_activation::revision(path).await.unwrap();
+        assert_ne!(prior_revision, active_revision);
+        assert!(
+            active_model(&origin).await.is_none(),
+            "the historical warm bundle is not the active model"
+        );
+        assert!(matches!(
+            bert_activation::activate(
+                path,
+                &fixture.frozen_sha256,
+                &fixture.evaluation_sha256,
+                &prior_revision,
+                &WorkControl::new(),
+            )
+            .await,
+            Err(ClassifierError::StaleActivation)
+        ));
+
+        server.abort();
+        let _ = server.await;
+        home.shutdown().await.unwrap();
+        let home = ClassifierHome::new(path.to_owned());
+        let (origin, server) = start_service(home.clone()).await;
+        let client = Arc::new(remote::Client::new(&origin, TOKEN).unwrap());
+        assert_eq!(
+            bert_activation::revision(path).await.unwrap(),
+            active_revision
+        );
+        let local = home.pin_atlas_local(None).await.unwrap();
+        let remote = client.pin(None).await.unwrap();
+        assert_eq!(local.snapshot, activated.snapshot);
+        assert_eq!(remote.snapshot, activated.snapshot);
+        assert_eq!(local.manifest_sha256, activated.manifest_sha256);
+        assert_eq!(remote.manifest_sha256, activated.manifest_sha256);
+        assert_eq!(active_model(&origin).await, Some(activated));
+
+        let baseline_replay = client.pin(Some(&baseline.snapshot)).await.unwrap();
+        assert_eq!(baseline_replay.snapshot, baseline.snapshot);
+        assert_eq!(baseline_replay.manifest_sha256, baseline.manifest_sha256);
+        assert!(
+            active_model(&origin).await.is_none(),
+            "replaying a saved pin must not present it as active"
+        );
+
+        let input = ClassifyInput::new("probe", "National policy", "Fixture article", None);
+        let remote_input = input.clone();
+        let local_receipt =
+            tokio::task::spawn_blocking(move || local.service.classify_batch(vec![input]).unwrap())
+                .await
+                .unwrap();
+        let remote_receipt = tokio::task::spawn_blocking(move || {
+            remote.service.classify_batch(vec![remote_input]).unwrap()
+        })
+        .await
+        .unwrap();
+        // Apply the same JSON round trip to the local receipt before comparing floats.
+        let local_over_json: Vec<ClassificationReceipt> =
+            serde_json::from_slice(&serde_json::to_vec(&local_receipt).unwrap()).unwrap();
+        assert_eq!(remote_receipt, local_over_json);
+        assert_eq!(
+            remote_receipt[0].selected_domains,
+            [DomainId::Governance, DomainId::Security]
+        );
+
+        fs::write(
+            fixture.model_dir.join("rust_model.ot"),
+            "tampered candidate",
+        )
+        .unwrap();
+        assert!(
+            client.pin(None).await.is_err(),
+            "a modified active checkpoint cannot be replaced silently by the baseline"
+        );
         server.abort();
         let _ = server.await;
         home.shutdown().await.unwrap();

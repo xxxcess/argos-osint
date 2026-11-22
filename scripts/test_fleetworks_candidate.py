@@ -1,5 +1,6 @@
 """Offline contracts for the native Mac candidate package."""
 
+import hashlib
 import io
 import json
 import os
@@ -19,9 +20,10 @@ from unittest import mock
 
 from fleetworks_candidate import (
     COMPANION_BINARY, COMPANION_PACKAGE, MAX_NATIVE_ARCHIVE_BYTES, MAX_NATIVE_UNPACKED_BYTES,
-    DATASET_LIMITS, DATASET_PINS, LEGACY_NATIVE_FORMAT, NATIVE_APP, NATIVE_BINARY, NATIVE_FORMAT,
+    DATASET_LIMITS, DATASET_PINS, LEGACY_DATASET_LIMITS, LEGACY_NATIVE_FORMAT, NATIVE_APP, NATIVE_BINARY, NATIVE_FORMAT,
     NATIVE_MANIFEST,
 )
+from fleetworks_candidate import _json_bytes, _validated_dataset_pins, _verify_bundled_datasets
 from fleetworks_candidate import main, native_main, open_native, _run_cargo, apple_versions, cargo_companion_command, cargo_executable, cargo_native_command
 from fleetworks_candidate import artifact_version, checksum_line, elf_architecture, extract_native, linux_runtime_preflight, native_output, package_native, sha256, verify_engine_free
 
@@ -30,7 +32,7 @@ def fixture_datasets(test):
     root = test.root / "datasets"
     root.mkdir()
     revision = "d" * 40
-    pins = {"schema": 1, "revision": revision, "datasets": {}}
+    pins = {"schema": 2, "revision": revision, "datasets": {}}
     for kind, (filename, origin, _) in DATASET_LIMITS.items():
         source = root / filename
         source.write_text(f"id,kind\nfixture,{kind}\n", encoding="utf-8")
@@ -43,6 +45,38 @@ def fixture_datasets(test):
     configured.start()
     test.addCleanup(configured.stop)
     return root, pins
+
+
+class NativeDatasetTests(unittest.TestCase):
+    def test_legacy_dataset_archive_requires_both_exact_pins(self):
+        revision = "d" * 40
+        resources = "Fleetworks.app/Contents/Resources"
+        datasets = {
+            kind: {
+                "filename": filename,
+                "size_bytes": 10,
+                "sha256": "a" * 64,
+                "download_url": f"{origin}/{revision}/datasets/{filename}",
+            }
+            for kind, (filename, origin, _) in LEGACY_DATASET_LIMITS.items()
+        }
+        pins = {"schema": 1, "revision": revision, "datasets": datasets}
+        files = {
+            f"{resources}/datasets/{pin['filename']}": pin["sha256"]
+            for pin in datasets.values()
+        }
+        sizes = {name: 10 for name in files}
+        receipt = _json_bytes(pins)
+        receipt_path = f"{resources}/datasets/{DATASET_PINS}"
+        files[receipt_path] = hashlib.sha256(receipt).hexdigest()
+        sizes[receipt_path] = len(receipt)
+        manifest = {"format": NATIVE_FORMAT, "default_datasets": pins, "files": files}
+        _verify_bundled_datasets(manifest, resources, sizes)
+        with self.assertRaises(ValueError):
+            _validated_dataset_pins(pins)
+        del sizes[f"{resources}/datasets/{datasets['classifier_training']['filename']}"]
+        with self.assertRaises(ValueError):
+            _verify_bundled_datasets(manifest, resources, sizes)
 
 
 class NativeAppTests(unittest.TestCase):

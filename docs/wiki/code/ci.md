@@ -137,7 +137,7 @@ Units and browser checks retain permission, reconnect, responsive-layout and Rea
 
 ## `atlas-bert.yml` — classifier worker checks
 
-The [BERT workflow](../../../.github/workflows/atlas-bert.yml) runs only for affected classifier inputs or explicit full selection. Both physical Linux architectures use `python:3.11-bookworm`, matching deployment ABI. It configures the exact checkout's Git ownership before source checks, then verifies pinned Torch/checkpoint dependencies and real inference from the extracted worker bundle. Native app checks are separate. [Classifier boundary and commands](classifier.md)
+The [BERT workflow](../../../.github/workflows/atlas-bert.yml) runs only for affected classifier inputs or explicit full selection. Both physical Linux architectures use `python:3.11-bookworm`, matching deployment ABI. It configures the exact checkout's Git ownership before source checks, then verifies pinned Torch/checkpoint dependencies and real inference from the extracted worker bundle. An explicit exact-head `standard` PR dispatch with `components=backend` also runs the AMD64 classifier candidate proof. Native app checks are separate. [Classifier boundary and commands](classifier.md)
 
 ## Release, policy and diagnostics
 

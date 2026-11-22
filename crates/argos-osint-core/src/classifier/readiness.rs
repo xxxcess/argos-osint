@@ -90,6 +90,17 @@ impl From<&Provenance> for ProvenanceSummary {
                     seed_dataset_sha256: None,
                 }
             }
+            Provenance::FineTunedAtlasBert { dataset_sha256, .. } => {
+                return Self {
+                    kind: "fine_tuned_atlas_bert".into(),
+                    label: value.label().into(),
+                    dataset_version: "atlas-bert-frozen-v1".into(),
+                    dataset_sha256: dataset_sha256.clone(),
+                    review_reference: None,
+                    seed_dataset_sha256: None,
+                };
+            }
+
             Provenance::SyntheticBaseline {
                 dataset_version,
                 dataset_sha256,
@@ -549,6 +560,14 @@ impl ClassifierHome {
     /// Checks that the configured Atlas worker and checkpoint files are present.
     /// This observation starts no worker and does not certify inference or a model pin.
     pub async fn check_local_atlas_assets(&self) -> Result<(), ClassifierError> {
+        self.check_local_atlas_checkpoint().await.map(|_| ())
+    }
+
+    /// Checks local Atlas assets and reads the selected candidate pointer when present.
+    /// This observation starts no worker and does not certify inference or the model bytes.
+    pub async fn check_local_atlas_checkpoint(
+        &self,
+    ) -> Result<Option<super::remote::PinIdentity>, ClassifierError> {
         #[cfg(feature = "classifier")]
         {
             let home = self.inner.home.clone();
@@ -666,7 +685,10 @@ impl ClassifierHome {
         if requested.is_some_and(|snapshot| {
             snapshot.algorithm_version != super::ZERO_SHOT_ALGORITHM_VERSION
         }) {
-            return self.pin_natural(requested).await;
+            return Err(ClassifierError::Incompatible(
+                "historical Natural models are retained for audit and cannot run Atlas inference"
+                    .into(),
+            ));
         }
         if super::remote::is_configured() {
             return super::remote::pin_configured(requested, &self.inner.cancel).await;
@@ -712,14 +734,17 @@ impl ClassifierHome {
             {
                 let mut pins = self.inner.pins.lock().map_err(|_| ClassifierError::Busy)?;
                 if let Some(service) = pins.get(&key).and_then(Weak::upgrade) {
-                    let snapshot = if current {
-                        service
-                            .pinned_model()
-                            .cloned()
-                            .ok_or(ClassifierError::Unavailable)?
-                    } else {
-                        snapshot
-                    };
+                    // A BERT activation persists its timestamp even when the same
+                    // model bytes were already warm from an earlier activation.
+                    let snapshot =
+                        if current && matches!(&snapshot.provenance, Provenance::ZeroShot) {
+                            service
+                                .pinned_model()
+                                .cloned()
+                                .ok_or(ClassifierError::Unavailable)?
+                        } else {
+                            snapshot
+                        };
                     return Ok(PinnedClassifier {
                         snapshot,
                         manifest_sha256,

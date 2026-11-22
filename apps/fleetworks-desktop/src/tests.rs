@@ -1236,12 +1236,12 @@ fn seed_button_preflight_status_shimmer_and_progressive_disclosure_reflect_state
     assert!(runtime.find("preflight-datastore").is_none());
     assert!(runtime.find("preflight-dataset").is_none());
     assert!(runtime.find("maintenance-seed").is_some());
-    assert!(runtime.find("maintenance-train").is_some());
+    assert!(runtime.find("maintenance-train").is_none());
     assert!(runtime.find("maintenance-reindex").is_some());
-    let (seed_action, train_action) = if cfg!(target_os = "linux") {
-        ("Enter actor CSV path", "Enter training CSV path")
+    let seed_action = if cfg!(target_os = "linux") {
+        "Enter actor CSV path"
     } else {
-        ("1. Seed Actors", "Optional · Train Classifier (Natural)")
+        "1. Seed Actors"
     };
     let seed_explanation =
         "Use a CSV to add or update actors. Existing actors outside this CSV are kept.";
@@ -1249,7 +1249,6 @@ fn seed_button_preflight_status_shimmer_and_progressive_disclosure_reflect_state
     assert!(!seed_tree.contains("Pre-flight Checklist"));
     assert!(seed_tree.contains(&format!("{seed_action} (Ready)")));
     assert!(seed_tree.contains("2. Build Search Index (Unavailable)"));
-    assert!(seed_tree.contains(&format!("{train_action} (Unavailable)")));
     assert!(seed_tree.contains(seed_explanation));
     assert!(!seed_tree.contains("Use a training CSV for a Natural candidate."));
     assert!(runtime.find("loading-shimmer").is_none());
@@ -1269,13 +1268,6 @@ fn seed_button_preflight_status_shimmer_and_progressive_disclosure_reflect_state
         state.maintenance.upload = Load::Idle;
         state.maintenance.local_dataset = None;
     });
-
-    runtime.update(|state, _| state.seed_stage = SeedStage::Classifier);
-    runtime.frame(1.0 / 60.0);
-    let classifier_tree = runtime.accessibility_json().to_string();
-    assert!(classifier_tree
-        .contains("This gateway has not advertised a durable consumer for this operation"));
-    assert!(!classifier_tree.contains(seed_explanation));
 
     runtime.update(|state, _| state.seed_stage = SeedStage::Maintenance);
     runtime.frame(2.0 / 60.0);

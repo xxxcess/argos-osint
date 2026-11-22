@@ -66,7 +66,6 @@ impl State {
         self.transfer.confirmation = None;
         self.submissions.invalidate_origin();
         self.job_actions.invalidate_origin();
-        self.classifier_activation.invalidate_origin();
         self.scoped_logs.invalidate_origin();
         self.scoped_jobs.invalidate_origin();
         self.backend.invalidate_activity();

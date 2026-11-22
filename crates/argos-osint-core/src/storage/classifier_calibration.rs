@@ -663,25 +663,14 @@ async fn process_task(
         }
         .into();
     }
-    if report.state == "completed" && after >= job.watermark && zero_shot {
-        report.reason = "zero_shot_provider_monitoring_only".into();
-    } else if report.state == "completed" && after >= job.watermark {
-        report.reason = match super::classifier_learning::consider(owner, home).await {
-            Ok("unapproved_mapping_monitor_only") => "insufficient_reviewed_evidence".into(),
-            Ok(reason) => reason.into(),
-            Err(TxError::Abort(code))
-                if code.len() <= 128
-                    && code
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') =>
-            {
-                code
-            }
-            Err(_) => "learning_capture_failed".into(),
-        };
+    if report.state == "completed" && after >= job.watermark {
+        report.reason = if zero_shot {
+            "zero_shot_provider_monitoring_only"
+        } else {
+            "legacy_classifier_monitoring_only"
+        }
+        .into();
     }
-    let terminal = report.state != "queued";
-    let captured = (task, report, after, job.activation);
     admission::owned_tx(owner,RetryPolicy::default(),move|tx| {
         let(task,report,after,activation)=captured.clone();
         async move {

@@ -13,7 +13,6 @@ pub mod brain;
 mod bundled_datasets;
 mod catalog;
 mod chat_ui;
-pub mod classifier_activation;
 pub mod command_panel;
 pub mod configuration;
 mod configuration_views;

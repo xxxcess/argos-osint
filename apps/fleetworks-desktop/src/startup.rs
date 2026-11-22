@@ -77,7 +77,7 @@ impl Flight {
 pub struct Startup {
     active: bool,
     pub(crate) data_step: Option<startup_data::Step>,
-    pub(crate) data_reset: [bool; 3],
+    pub(crate) data_reset: [bool; 2],
     pub(crate) data_checks: bool,
     pub(crate) csv_inputs: startup_data::CsvInputs,
     started_at: Option<f64>,
@@ -109,7 +109,7 @@ impl Startup {
     pub(crate) fn finish(&mut self) {
         self.active = false;
         self.data_step = None;
-        self.data_reset = [false; 3];
+        self.data_reset = [false; 2];
         self.data_checks = false;
         self.csv_inputs = startup_data::CsvInputs::default();
     }
@@ -876,6 +876,12 @@ mod tests {
                 60_000,
             ),
             (
+                ReadinessCheckId::ClassifierInference,
+                ReadinessState::Ready,
+                "model_verified",
+                60_000,
+            ),
+            (
                 ReadinessCheckId::Datastore,
                 ReadinessState::Ready,
                 "datastore_reachable",
@@ -1056,141 +1062,122 @@ mod tests {
 
     #[test]
     fn startup_github_csv_is_opt_in_and_only_downloads_after_press() {
-        use ReadinessState::{NotReady, Ready};
-        for (checks, kind) in [
-            ([NotReady; 3], DatasetKind::ActorCatalog),
-            ([Ready, Ready, NotReady], DatasetKind::ClassifierTraining),
-        ] {
-            let (mut runtime, _) = data_setup_runtime(checks);
-            runtime.frame(0.0);
-            click(&mut runtime, "gateway-setup-done");
-            runtime.frame(0.02);
-            assert!(runtime.find("startup-csv-github-url").is_none());
-            click(&mut runtime, "startup-csv-source/segment1");
-            runtime.frame(0.01);
-            let default = crate::github_dataset::default_url(kind).expect("default CSV URL");
-            let tree = runtime.accessibility_json().to_string();
-            assert!(tree.contains(default));
-            assert!(tree.contains("Local CSV"));
-            assert!(tree.contains("Download & validate"));
-            assert!(runtime.find("startup-csv-ready").is_none());
-            assert!(!runtime
-                .state
-                .intents
-                .contains(&Intent::DownloadGithubDataset { kind }));
-            click(&mut runtime, startup_data::PRIMARY);
-            runtime.frame(0.04);
-            assert!(runtime
-                .state
-                .intents
-                .contains(&Intent::DownloadGithubDataset { kind }));
-            assert!(runtime.state.maintenance.confirmation.is_none());
-        }
+        let kind = DatasetKind::ActorCatalog;
+        let (mut runtime, _) = data_setup_runtime([ReadinessState::NotReady; 3]);
+        runtime.frame(0.0);
+        click(&mut runtime, "gateway-setup-done");
+        runtime.frame(0.02);
+        assert!(runtime.find("startup-csv-github-url").is_none());
+        click(&mut runtime, "startup-csv-source/segment1");
+        runtime.frame(0.01);
+        let default = crate::github_dataset::default_url(kind).expect("default CSV URL");
+        let tree = runtime.accessibility_json().to_string();
+        assert!(tree.contains(default));
+        assert!(tree.contains("Local CSV"));
+        assert!(tree.contains("Download & validate"));
+        assert!(runtime.find("startup-csv-ready").is_none());
+        assert!(!runtime
+            .state
+            .intents
+            .contains(&Intent::DownloadGithubDataset { kind }));
+        click(&mut runtime, startup_data::PRIMARY);
+        runtime.frame(0.04);
+        assert!(runtime
+            .state
+            .intents
+            .contains(&Intent::DownloadGithubDataset { kind }));
+        assert!(runtime.state.maintenance.confirmation.is_none());
     }
 
     #[test]
-    fn startup_validates_each_bundled_csv_once_then_waits_for_confirmation() {
-        use ReadinessState::{NotReady, Ready};
-        for (checks, kind, operation, ready_label, action_label) in [
-            (
-                [NotReady; 3],
-                DatasetKind::ActorCatalog,
-                MaintenanceOperation::SeedActors,
-                "Ready to seed",
-                "Seed actors",
-            ),
-            (
-                [Ready, Ready, NotReady],
-                DatasetKind::ClassifierTraining,
-                MaintenanceOperation::TrainClassifier,
-                "Ready to train",
-                "Train classifier",
-            ),
-        ] {
-            let (mut runtime, _) = data_setup_runtime(checks);
-            runtime.state.fixture_bundled_csv = true;
-            runtime.state.intents.clear();
-            let profile = std::mem::replace(&mut runtime.state.backend.profile, app::Load::Idle);
-            runtime.frame(0.0);
-            click(&mut runtime, "gateway-setup-done");
-            runtime.frame(0.02);
-            assert!(!runtime
-                .state
-                .intents
-                .contains(&Intent::UploadDataset { kind }));
-            runtime.update(|state, _| {
-                state.backend.profile = profile;
-                assert!(state.drive_startup_dataset());
-            });
-            runtime.frame(0.02);
-            assert!(runtime
-                .state
-                .intents
-                .contains(&Intent::UploadDataset { kind }));
-            let tree = runtime.accessibility_json().to_string();
-            assert!(tree.contains("Bundled CSV"));
-            assert!(tree.contains("Validating"));
-            assert!(!tree.contains(action_label));
-            let complete = move |state: &mut State, result| {
-                state.complete_dataset_upload(
-                    state.connection.epoch,
-                    state.maintenance.upload_revision,
-                    state.origin_revision(),
-                    kind,
-                    result,
-                );
-            };
-            runtime.update(|state, _| {
-                assert!(!state.drive_startup_dataset());
-                complete(state, Err("Could not validate the bundled CSV".into()));
-                assert!(!state.drive_startup_dataset());
-            });
-            runtime.frame(0.02);
-            assert!(!runtime
-                .accessibility_json()
-                .to_string()
-                .contains(action_label));
-            assert_eq!(
-                runtime
-                    .state
-                    .intents
-                    .iter()
-                    .filter(|intent| matches!(intent, Intent::UploadDataset { .. }))
-                    .count(),
-                1
+    fn startup_validates_bundled_actor_csv_once_then_waits_for_confirmation() {
+        let kind = DatasetKind::ActorCatalog;
+        let operation = MaintenanceOperation::SeedActors;
+        let ready_label = "Ready to seed";
+        let action_label = "Seed actors";
+        let (mut runtime, _) = data_setup_runtime([ReadinessState::NotReady; 3]);
+        runtime.state.fixture_bundled_csv = true;
+        runtime.state.intents.clear();
+        let profile = std::mem::replace(&mut runtime.state.backend.profile, app::Load::Idle);
+        runtime.frame(0.0);
+        click(&mut runtime, "gateway-setup-done");
+        runtime.frame(0.02);
+        assert!(!runtime
+            .state
+            .intents
+            .contains(&Intent::UploadDataset { kind }));
+        runtime.update(|state, _| {
+            state.backend.profile = profile;
+            assert!(state.drive_startup_dataset());
+        });
+        runtime.frame(0.02);
+        assert!(runtime
+            .state
+            .intents
+            .contains(&Intent::UploadDataset { kind }));
+        let tree = runtime.accessibility_json().to_string();
+        assert!(tree.contains("Bundled CSV"));
+        assert!(tree.contains("Validating"));
+        assert!(!tree.contains(action_label));
+        let complete = move |state: &mut State, result| {
+            state.complete_dataset_upload(
+                state.connection.epoch,
+                state.maintenance.upload_revision,
+                state.origin_revision(),
+                kind,
+                result,
             );
-            runtime.update(|_, tx| tx.scroll_into_view(startup_data::PRIMARY));
-            runtime.frame(0.02);
-            click(&mut runtime, startup_data::PRIMARY);
-            runtime.frame(0.02);
-            let dataset = DatasetRef::new("fixture-bundle".into(), kind, "b".repeat(64), 120)
-                .expect("validated dataset");
-            let mut upload = DatasetUpload::new(dataset.clone(), 60);
-            upload.row_count = Some(94_987);
-            runtime.update(|state, _| complete(state, Ok(upload)));
-            runtime.frame(0.02);
-            let tree = runtime.accessibility_json().to_string();
-            assert!(tree.contains(ready_label));
-            assert!(tree.contains("Bundled CSV · 94,987 rows validated"));
-            assert!(runtime.state.maintenance.confirmation.is_none());
-            runtime.update(|_, tx| tx.scroll_into_view(startup_data::PRIMARY));
-            runtime.frame(0.02);
-            click(&mut runtime, startup_data::PRIMARY);
-            runtime.frame(0.02);
-            assert_eq!(
-                runtime
-                    .state
-                    .maintenance
-                    .confirmation
-                    .as_ref()
-                    .and_then(|confirmation| confirmation.dataset.as_ref()),
-                Some(&dataset)
-            );
-            assert!(!runtime
+        };
+        runtime.update(|state, _| {
+            assert!(!state.drive_startup_dataset());
+            complete(state, Err("Could not validate the bundled CSV".into()));
+            assert!(!state.drive_startup_dataset());
+        });
+        runtime.frame(0.02);
+        assert!(!runtime
+            .accessibility_json()
+            .to_string()
+            .contains(action_label));
+        assert_eq!(
+            runtime
                 .state
                 .intents
-                .contains(&Intent::Maintenance { operation }));
-        }
+                .iter()
+                .filter(|intent| matches!(intent, Intent::UploadDataset { .. }))
+                .count(),
+            1
+        );
+        runtime.update(|_, tx| tx.scroll_into_view(startup_data::PRIMARY));
+        runtime.frame(0.02);
+        click(&mut runtime, startup_data::PRIMARY);
+        runtime.frame(0.02);
+        let dataset = DatasetRef::new("fixture-bundle".into(), kind, "b".repeat(64), 120)
+            .expect("validated dataset");
+        let mut upload = DatasetUpload::new(dataset.clone(), 60);
+        upload.row_count = Some(94_987);
+        runtime.update(|state, _| complete(state, Ok(upload)));
+        runtime.frame(0.02);
+        let tree = runtime.accessibility_json().to_string();
+        assert!(tree.contains(ready_label));
+        assert!(tree.contains("Bundled CSV · 94,987 rows validated"));
+        assert!(runtime.state.maintenance.confirmation.is_none());
+        runtime.update(|_, tx| tx.scroll_into_view(startup_data::PRIMARY));
+        runtime.frame(0.02);
+        click(&mut runtime, startup_data::PRIMARY);
+        runtime.frame(0.02);
+        assert_eq!(
+            runtime
+                .state
+                .maintenance
+                .confirmation
+                .as_ref()
+                .and_then(|confirmation| confirmation.dataset.as_ref()),
+            Some(&dataset)
+        );
+        assert!(!runtime
+            .state
+            .intents
+            .contains(&Intent::Maintenance { operation }));
     }
 
     #[test]
@@ -1451,28 +1438,17 @@ mod tests {
         runtime.frame(0.2);
         click(&mut runtime, "startup-data-continue");
         runtime.frame(0.22);
-        // A service claiming Ready without an artifact does not prove a trained candidate.
-        assert_eq!(
-            runtime.state.startup.data_step,
-            Some(startup_data::Step::Classifier)
-        );
-        assert!(runtime.find("startup-data-continue").is_none());
-        runtime.update(|state, _| {
-            observe_job(
-                state,
-                MaintenanceOperation::TrainClassifier,
-                "classifier_train",
-                "completed",
-                "",
-                serde_json::json!({
-                    "operation": "classifier_train",
-                    "candidate_model_id": "verified-candidate"
-                }),
-            );
-        });
-        runtime.frame(0.24);
-        click(&mut runtime, "startup-data-continue");
-        runtime.frame(0.26);
+        assert!(runtime.state.startup.data_step.is_none());
+        assert!(runtime.find("startup-data-step-classifier").is_none());
+        assert!(runtime
+            .find("startup-data-check-classifier_training")
+            .is_none());
+        assert!(!runtime.state.intents.contains(&Intent::UploadDataset {
+            kind: DatasetKind::ClassifierTraining,
+        }));
+        assert!(!runtime.state.intents.contains(&Intent::Maintenance {
+            operation: MaintenanceOperation::TrainClassifier,
+        }));
         assert!(runtime.state.startup.data_checks);
         assert!(runtime.find("screen-workstation").is_none());
         assert!(runtime.find("startup-data-checklist").is_some());
@@ -1555,6 +1531,10 @@ mod tests {
         for (key, label) in [
             ("startup-data-check-gateway", "Gateway: Passed"),
             ("startup-data-check-jobs", "Jobs: Failed"),
+            (
+                "startup-data-check-classifier_inference",
+                "Atlas BERT inference: Passed",
+            ),
             ("startup-data-check-datastore", "Datastore: Pending"),
         ] {
             let row = runtime
@@ -1567,15 +1547,12 @@ mod tests {
         for key in [
             "startup-data-review-seed",
             "startup-data-review-index",
-            "startup-data-review-classifier",
             "startup-data-reset-seed",
             "startup-data-reset-index",
-            "startup-data-reset-classifier",
             "startup-data-checklist",
             "startup-data-continue",
             "startup-data-step-seed",
             "startup-data-step-index",
-            "startup-data-step-classifier",
             "startup-data-step-checks",
         ] {
             let element = runtime

@@ -2,7 +2,6 @@
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod native {
-    mod activation_scenes;
     mod appearance_scenes;
     mod connection_profile_scenes;
     mod job_action_scenes;
@@ -419,9 +418,6 @@ mod native {
         if connection_profile_scenes::reply(state, intent) {
             return;
         }
-        if activation_scenes::reply(state, intent) {
-            return;
-        }
         if lifecycle_scenes::reply(state, intent) {
             return;
         }
@@ -755,7 +751,8 @@ mod native {
                     "startup-data-index-queued",
                     startup_data_scenes::index_queued,
                 ),
-                ("startup-data-train", startup_data_scenes::train),
+                // Stable scenario key used by the Linux capture workflow.
+                ("startup-data-train", startup_data_scenes::index),
                 (
                     "startup-health-checks-mixed",
                     startup_data_scenes::mixed_checks,
@@ -825,15 +822,6 @@ mod native {
                 (
                     "connection-profile-switch-confirm",
                     connection_profile_scenes::dirty_switch,
-                ),
-                ("activation-candidate-preview", activation_scenes::preview),
-                ("activation-confirmation", activation_scenes::confirmation),
-                ("activation-accepted", activation_scenes::accepted),
-                ("activation-effect-uncertain", activation_scenes::uncertain),
-                ("activation-completed", activation_scenes::completed),
-                (
-                    "activation-acceptance-unknown",
-                    activation_scenes::acceptance_unknown,
                 ),
                 ("catalog", overhaul_scenes::catalog),
                 ("catalog-opaque", overhaul_scenes::catalog_opaque),
@@ -967,7 +955,10 @@ mod native {
                     "maintenance-partial-seed-progress",
                     readiness_scenes::partial_seed_progress,
                 ),
-                ("workstation-training", readiness_scenes::training),
+                (
+                    "workstation-bert-verified",
+                    readiness_scenes::inference_verified,
+                ),
                 (
                     "workstation-inference-unverified",
                     readiness_scenes::inference_unverified,
@@ -1061,8 +1052,8 @@ mod native {
                 ),
                 ("workspace-trash-recovery", lifecycle_scenes::trash_recovery),
                 (
-                    "maintenance-training-result",
-                    lifecycle_scenes::training_result,
+                    "jobs-legacy-classifier-result",
+                    lifecycle_scenes::legacy_classifier_result,
                 ),
                 ("maintenance-seed-result", lifecycle_scenes::seed_result),
                 ("jobs-shared-status", |state| {

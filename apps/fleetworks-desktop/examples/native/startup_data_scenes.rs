@@ -65,24 +65,6 @@ fn ready_actor_data(state: &mut State) {
     );
 }
 
-pub(super) fn train(state: &mut State) {
-    ready_actor_data(state);
-    state
-        .connection
-        .capabilities
-        .as_mut()
-        .expect("synthetic Embedded capabilities")
-        .features
-        .push("classifier".into());
-    set_check(
-        state,
-        ReadinessCheckId::ClassifierTraining,
-        ReadinessState::Unknown,
-        "natural_resource_idle",
-        "No Natural training job has been observed.",
-    );
-}
-
 pub(super) fn checks_unavailable(state: &mut State) {
     seed(state);
     set_unavailable(state);
@@ -101,16 +83,7 @@ fn set_unavailable(state: &mut State) {
 }
 
 pub(super) fn ready(state: &mut State, reduced_motion: bool) {
-    train(state);
-    set_check(
-        state,
-        ReadinessCheckId::ClassifierTraining,
-        ReadinessState::Ready,
-        "natural_candidate_verified",
-        "A synthetic Natural classifier candidate has been prepared.",
-    )
-    .artifact_ids
-    .push("synthetic-natural-candidate".into());
+    ready_actor_data(state);
     state.accessibility.fixture_override = Some(FixtureAccessibility {
         reduced_motion,
         ..Default::default()
@@ -119,15 +92,6 @@ pub(super) fn ready(state: &mut State, reduced_motion: bool) {
 
 pub(super) fn mixed_checks(state: &mut State) {
     ready(state, false);
-    set_check(
-        state,
-        ReadinessCheckId::ClassifierTraining,
-        ReadinessState::Ready,
-        "embedded_training_completed",
-        "Classifier training completed on this synthetic Embedded backend.",
-    )
-    .artifact_ids
-    .clear();
     set_check(
         state,
         ReadinessCheckId::Jobs,

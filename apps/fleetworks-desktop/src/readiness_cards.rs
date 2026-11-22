@@ -112,7 +112,11 @@ fn summary_label(state: &State) -> String {
         return "Status checks · no observations".to_owned();
     }
     let (mut passed, mut failed, mut unresolved) = (0, 0, 0);
-    for check in &readiness.checks {
+    for check in readiness
+        .checks
+        .iter()
+        .filter(|check| check.id != ReadinessCheckId::ClassifierTraining)
+    {
         let fresh = state.readiness_check_fresh(check);
         match CheckStatus::of(check, fresh) {
             CheckStatus::NotApplicable => (),
@@ -201,6 +205,7 @@ fn checks(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
     let mut rows: Vec<_> = readiness
         .checks
         .iter()
+        .filter(|check| check.id != ReadinessCheckId::ClassifierTraining)
         .map(|check| {
             let fresh = state.readiness_check_fresh(check);
             let status = if crate::views::actor_search_is_background_indexing(state, check) {
@@ -521,6 +526,7 @@ pub(crate) fn primary_issue(
         .iter()
         .filter(|check| {
             check.id != ReadinessCheckId::Registration
+                && check.id != ReadinessCheckId::ClassifierTraining
                 && (state.setup_gateway
                     || !matches!(
                         check.id,
@@ -566,9 +572,6 @@ pub(crate) fn primary_issue(
 fn maintenance_action(action: ReadinessActionId) -> Option<(MaintenanceOperation, &'static str)> {
     Some(match action {
         ReadinessActionId::SeedActors => (MaintenanceOperation::SeedActors, "Seed actors…"),
-        ReadinessActionId::TrainClassifier => {
-            (MaintenanceOperation::TrainClassifier, "Train classifier…")
-        }
         ReadinessActionId::RebuildActorIndex => {
             (MaintenanceOperation::ReindexActors, "Build actor index")
         }
@@ -605,9 +608,6 @@ fn maintenance_button(
         .disabled(reason.is_some())
         .on_press_tx(move |state: &mut State, tx| match operation {
             MaintenanceOperation::SeedActors => state.choose_dataset(DatasetKind::ActorCatalog, tx),
-            MaintenanceOperation::TrainClassifier => {
-                state.choose_dataset(DatasetKind::ClassifierTraining, tx)
-            }
             MaintenanceOperation::ReindexActors => state.preview_maintenance(operation),
             _ => {}
         })
@@ -730,7 +730,7 @@ fn title(check: ReadinessCheckId) -> &'static str {
         ReadinessCheckId::Registration => "Registration",
         ReadinessCheckId::ActorCatalog => "Actor catalog",
         ReadinessCheckId::ActorSearch => "Actor search",
-        ReadinessCheckId::ClassifierInference => "Classifier inference",
+        ReadinessCheckId::ClassifierInference => "Atlas BERT inference",
         ReadinessCheckId::ClassifierTraining => "Classifier training",
         _ => "Backend check",
     }

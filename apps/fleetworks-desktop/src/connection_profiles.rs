@@ -148,8 +148,6 @@ impl State {
             || self.submissions.tools.confirmation.is_some()
             || self.submissions.atlas.delivery_uncertain
             || self.submissions.tools.delivery_uncertain
-            || self.classifier_activation.uncertain
-            || self.classifier_activation.confirmation.is_some()
             || self.backend.tool_inputs.text != "{}"
     }
 

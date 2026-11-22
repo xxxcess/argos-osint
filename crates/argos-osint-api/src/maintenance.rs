@@ -40,6 +40,12 @@ pub(crate) async fn admit_request(
             "Native backend maintenance authority required",
         ));
     }
+    if operation == MaintenanceOperation::TrainClassifier {
+        return Err(ApiError(
+            StatusCode::GONE,
+            "Natural classifier training has been retired",
+        ));
+    }
     let admission = crate::admission::capture_checked(
         state,
         context,

@@ -245,16 +245,11 @@ impl Bundle {
 
 pub(super) fn active_atlas_bert_revision(home: &Path) -> Result<String, ClassifierError> {
     let active = Bundle::load(home, None)?;
-    Ok(match active.snapshot.provenance {
-        Provenance::ZeroShot => active.manifest_sha256,
-        _ => artifact::sha256_hex(
-            format!(
-                "atlas-bert-active-revision-v1\n{}\n{}",
-                active.manifest_sha256, active.snapshot.activated_at,
-            )
-            .as_bytes(),
-        ),
-    })
+    AtlasBertActive {
+        snapshot: active.snapshot,
+        manifest_sha256: active.manifest_sha256,
+    }
+    .activation_revision()
 }
 
 pub(super) fn validate_atlas_bert_identity(

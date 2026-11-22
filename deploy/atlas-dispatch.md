@@ -37,4 +37,4 @@ Atlas also needs a compatible Rust-BERT worker and pinned model. The standard im
 }
 ```
 
-The classifier readiness endpoint reports service availability, checkpoint presence, and model verification. Checkpoint presence lets the first cycle proceed to its Atlas pin, which verifies the assets for the selected worker. If a pin fails, the Atlas job reports the failure reason in **Jobs & Logs**. Actor catalog setup, actor search and Natural candidate training are separate workflows.
+The classifier readiness endpoint reports service availability, checkpoint presence, and model verification. Checkpoint presence lets the first cycle proceed to its Atlas pin, which verifies the assets for the selected worker. If a pin fails, the Atlas job reports the failure reason in **Jobs & Logs**. The operator can evaluate and explicitly activate a frozen Atlas BERT candidate in the classifier workspace. [Qualification and activation](../docs/wiki/code/classifier.md#explicit-activation)

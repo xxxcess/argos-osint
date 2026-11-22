@@ -76,7 +76,7 @@ Provision provider credentials, the Atlas worker, private NLP and a Rust-BERT mo
 
 | Area | What you can do |
 | --- | --- |
-| DB Seed & Train | Trigger configured actor seed, search-index build and Natural candidate training; acceptance is distinct from completion. |
+| DB Setup | Confirm actor seeding and search-index build. Follow the job through reader-visible completion. |
 | News Cycles and Brain Search | Queue cycles, inspect workstation cycle history, discover actors and read dossiers. |
 | OSINT Tools and Model Assignments | Read service/provider cards, provision keys and edit supported model routing with confirmed revisions. |
 | Workstation Status and Setup Gateway | Inspect identity, readiness and backend resources. Start Embedded or pair and reconnect to Distributed. |

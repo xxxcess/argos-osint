@@ -22,12 +22,12 @@ pub fn compare(pairs: &[Pair], control: &WorkControl) -> Result<Vec<Similarity>,
     {
         return Err(ClassifierError::ModelTooLarge);
     }
-    #[cfg(not(feature = "classifier"))]
+    #[cfg(not(all(feature = "classifier", feature = "legacy-natural-fixtures")))]
     {
         let _ = (pairs, control);
         Err(ClassifierError::Unavailable)
     }
-    #[cfg(feature = "classifier")]
+    #[cfg(all(feature = "classifier", feature = "legacy-natural-fixtures"))]
     {
         use std::sync::atomic::Ordering;
         use std::time::Instant;
@@ -86,7 +86,7 @@ pub fn compare(pairs: &[Pair], control: &WorkControl) -> Result<Vec<Similarity>,
     }
 }
 
-#[cfg(all(test, feature = "classifier"))]
+#[cfg(all(test, feature = "classifier", feature = "legacy-natural-fixtures"))]
 mod tests {
     use super::*;
     #[tokio::test]

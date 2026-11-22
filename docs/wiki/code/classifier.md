@@ -8,7 +8,7 @@ Atlas uses a private Rust-BERT worker. The worker scores the six ordered domain 
 
 ## Runtime and model identity
 
-The [standalone worker](../../../tools/atlas-bert) supplies LibTorch independently of the Fleetworks service host. The [classifier service](../../../services/api-host/src/classifier_service.rs) exposes authenticated private pin, validate, and inference routes for Distributed. A backend using the local workspace loads the same bounded model bundle and worker protocol. Workstation Status distinguishes reachability from verified inference. The classic Atlas collection cycle is supported by the [Distributed overlay](../../../deploy/atlas-dispatch.md).
+The [standalone worker](../../../tools/atlas-bert) supplies LibTorch independently of the Fleetworks service host. The [classifier service](../../../services/api-host/src/classifier_service.rs) exposes authenticated private pin, validate, and inference routes for Distributed. A backend using the local workspace loads the same bounded model bundle and worker protocol. Workstation Status distinguishes reachability from verified inference. Registered native clients can read the persisted candidate model ID and activation revision through either transport. The declaration can be present before the worker verifies the checkpoint. The classic Atlas collection cycle is supported by the [Distributed overlay](../../../deploy/atlas-dispatch.md).
 
 A run pins the model assets, worker, six-domain contract, and threshold. The fine-tuned model also pins the frozen manifest and held-out report. Existing BERT runs resume against their saved pin, including after a later activation. Keep their immutable assets and the configured baseline available. Candidate corruption or a missing exact pin fails closed.
 
@@ -43,7 +43,7 @@ The operator command keeps the writer lease from the expected revision check thr
 
 ## Historical Natural records
 
-Existing Natural training and activation records keep their original engine, hashes and ownership. The gateway retains scoped historical reads. Both transports reject new Natural training and activation requests. Native setup validates and seeds the actor catalog and follows reader-visible index readiness. It does not stage an Atlas training file. [Workstation flow](native-connections.md)
+Existing Natural training and activation records keep their original engine, hashes and ownership. The gateway retains scoped historical reads. Shipped companions and service hosts exclude the Natural runner. Its vendored code and bundle generator remain available to the archived contract tests through a Cargo development feature. Both transports reject new Natural training and activation requests. Native setup validates and seeds the actor catalog and follows reader-visible index readiness. It does not stage an Atlas training file. [Workstation flow](native-connections.md)
 
 ## Linux deployment and retained standalone worker setup
 

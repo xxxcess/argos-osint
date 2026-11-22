@@ -420,6 +420,7 @@ version = "0.2.1"
 dependencies = [
  "aho-corasick",
  "anyhow",
+ "argos-osint-core",
  "chrono",
  "csv",
  "dirs",

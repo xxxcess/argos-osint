@@ -249,6 +249,28 @@ pub struct WorkstationReadiness {
     /// Fresh Atlas admission observations, scoped to authorized registered workstations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub atlas_preflight: Option<AtlasCyclePreflight>,
+    /// Operator-selected Atlas BERT candidate, read back without starting inference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_atlas_bert_candidate: Option<DeclaredAtlasBertCandidate>,
+}
+
+/// Declared candidate identity from the selected backend's classifier workspace.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct DeclaredAtlasBertCandidate {
+    pub model_id: String,
+    pub activation_revision: String,
+}
+
+impl DeclaredAtlasBertCandidate {
+    /// Describes an operator-selected candidate and its exact activation revision.
+    #[must_use]
+    pub fn new(model_id: String, activation_revision: String) -> Self {
+        Self {
+            model_id,
+            activation_revision,
+        }
+    }
 }
 
 /// Presence of at least one saved primary or fallback provider slot. No provider call is made.
@@ -327,6 +349,7 @@ impl WorkstationReadiness {
             configured_inputs: Vec::new(),
             platform_identity: None,
             atlas_preflight: None,
+            declared_atlas_bert_candidate: None,
         }
     }
 

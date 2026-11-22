@@ -3,6 +3,9 @@
 #[allow(dead_code)]
 #[path = "../src/actor_index_worker.rs"]
 mod actor_index_worker;
+#[cfg(all(feature = "classifier", unix))]
+#[path = "../src/classifier_service.rs"]
+mod classifier_service;
 #[allow(dead_code)]
 #[path = "../src/native_worker.rs"]
 mod native_worker;
@@ -39,6 +42,7 @@ use argos_osint_api::classifier_activation::ActivationArtifacts;
 use argos_osint_api::datasets::DatasetStore;
 use argos_osint_api::network_router_with_private_services;
 use argos_osint_api::workstation::ReadinessOwners;
+use argos_osint_api::workstation::ReadinessProbe;
 use argos_osint_api::ApiState;
 use argos_osint_api::NetworkPolicy;
 use argos_osint_api::PrivateServices;
@@ -86,6 +90,7 @@ use fleetworks_contracts::ipc::LocalIpcClient;
 use fleetworks_contracts::operational_logs::LogQuery;
 use fleetworks_contracts::readiness::DatasetKind;
 use fleetworks_contracts::readiness::DatasetRef;
+use fleetworks_contracts::readiness::DeclaredAtlasBertCandidate;
 use fleetworks_contracts::readiness::MaintenanceOperation;
 use fleetworks_contracts::readiness::MaintenanceReceipt;
 use fleetworks_contracts::readiness::MaintenanceRequest;
@@ -322,6 +327,98 @@ fn companion_source_description() -> String {
     }
 }
 
+struct DeclaredClassifierHarness {
+    home: tempfile::TempDir,
+    expected: DeclaredAtlasBertCandidate,
+    probe: ReadinessProbe,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for DeclaredClassifierHarness {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+#[cfg(all(feature = "classifier", unix))]
+mod declared_classifier_fixture {
+    use argos_osint_core::atlas_taxonomy::{DomainId, DOMAIN_IDS};
+    use argos_osint_core::classifier::artifact;
+
+    mod candidate {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../crates/argos-osint-core/tests/fixtures/classifier/atlas_bert_candidate.rs"
+        ));
+    }
+
+    use super::*;
+    use argos_osint_core::classifier::bert_activation;
+    use argos_osint_core::classifier::readiness::ClassifierHome;
+    use argos_osint_core::classifier::WorkControl;
+    use std::os::unix::fs::PermissionsExt;
+
+    const CLASSIFIER_TOKEN: &str = "parity-test-private-classifier-0123456789abcdef";
+
+    pub(super) async fn start() -> DeclaredClassifierHarness {
+        let fixture = candidate::StagedCandidate::new(0.8);
+        let home = fixture.home.path();
+        std::fs::set_permissions(home, std::fs::Permissions::from_mode(0o700))
+            .expect("make classifier and companion fixture workspace private");
+        let prior = bert_activation::revision(home)
+            .await
+            .expect("baseline revision");
+        let activated = bert_activation::activate(
+            home,
+            &fixture.frozen_sha256,
+            &fixture.evaluation_sha256,
+            &prior,
+            &WorkControl::new(),
+        )
+        .await
+        .expect("activate synthetic fixture candidate");
+        let revision = bert_activation::revision(home)
+            .await
+            .expect("operator readback revision");
+        let expected = DeclaredAtlasBertCandidate::new(activated.snapshot.model_id, revision);
+        // The readback is intentionally independent of model bytes and runtime warming.
+        std::fs::write(
+            fixture.model_dir.join("rust_model.ot"),
+            "different fixture bytes",
+        )
+        .expect("change the candidate weights without changing the declaration");
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("private classifier listener");
+        let address = listener.local_addr().expect("private classifier address");
+        let policy = NetworkPolicy::new(&[address.to_string()], CLASSIFIER_TOKEN)
+            .expect("private classifier credential");
+        let app = argos_osint_api::guard_network(
+            classifier_service::router(ClassifierHome::new(home.to_owned())),
+            policy,
+            Arc::new(Vec::new()),
+            address.port(),
+        );
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve private classifier status");
+        });
+        let probe = ReadinessProbe::new(
+            ReadinessCheckId::Classifier,
+            &format!("http://{address}"),
+            CLASSIFIER_TOKEN,
+        )
+        .expect("private classifier probe");
+        DeclaredClassifierHarness {
+            home: fixture.home,
+            expected,
+            probe,
+            task,
+        }
+    }
+}
+
 struct HttpHarness {
     root: PathBuf,
     origin: String,
@@ -333,7 +430,7 @@ struct HttpHarness {
 }
 
 impl HttpHarness {
-    async fn start() -> Self {
+    async fn start(probes: Vec<ReadinessProbe>) -> Self {
         let root = create_private_dir("fleetworks-http-parity");
         let surreal_dir = root.join("surreal");
         let jobs_dir = root.join("jobs");
@@ -390,7 +487,7 @@ impl HttpHarness {
         );
 
         let dataset_store = DatasetStore::open(staged_dir).expect("open dataset store");
-        let readiness = ReadinessOwners::new(deployment.deployment_id.clone(), Vec::new())
+        let readiness = ReadinessOwners::new(deployment.deployment_id.clone(), probes)
             .expect("readiness owners");
         let services = PrivateServices::default()
             .with_search(SearchClient::from_local(Arc::new(LocalActorSearchBackend(
@@ -522,6 +619,7 @@ async fn run_shared_flow(
     unauthenticated_http_client: Option<&Client>,
     csv_path: &Path,
     transport: &str,
+    expected_candidate: Option<&DeclaredAtlasBertCandidate>,
     report: &mut ParityReport,
 ) -> SharedFlowResult {
     let record = |report: &mut ParityReport, op: &str, category: &str, summary: &str| {
@@ -1138,6 +1236,18 @@ async fn run_shared_flow(
         .await
         .expect("workstation readiness");
     assert_eq!(readiness.deployment_id, registered_context.deployment_id);
+    assert_eq!(
+        readiness.declared_atlas_bert_candidate.as_ref(),
+        expected_candidate,
+        "{transport}: operator and registered-client candidate revision must agree"
+    );
+    assert!(readiness.checks.iter().any(|check| {
+        check.id == ReadinessCheckId::ClassifierInference && check.state != ReadinessState::Ready
+    }));
+    if local {
+        assert!(readiness.atlas_preflight.is_none());
+    }
+
     assert!(readiness
         .checks
         .iter()
@@ -1155,11 +1265,20 @@ async fn run_shared_flow(
             && check.state == ReadinessState::NotApplicable
             && check.actions.is_empty()
     }));
+    let unregistered = base_client
+        .workstation_readiness()
+        .await
+        .expect("unregistered workstation may read general diagnostics");
+    assert!(
+        unregistered.declared_atlas_bert_candidate.is_none(),
+        "{transport}: a registered Native context is required for candidate readback"
+    );
+
     record(
         &mut *report,
         "workstation_readiness",
         "live_parity",
-        "post-seed/index readiness check parity",
+        "post-seed/index readiness and declared Atlas BERT candidate revision parity",
     );
 
     // Articles & cycle history & negative lifecycle parity checks.
@@ -1631,7 +1750,13 @@ async fn http_and_local_ipc_backends_satisfy_parity_and_intentional_exceptions()
     .expect("write fixture csv");
 
     // 1. Run full shared scenario suite against real Axum HTTP gateway + LocalNativeWorker.
-    let http = HttpHarness::start().await;
+    #[cfg(all(feature = "classifier", unix))]
+    let classifier = Some(declared_classifier_fixture::start().await);
+    #[cfg(not(all(feature = "classifier", unix)))]
+    let classifier: Option<DeclaredClassifierHarness> = None;
+    let expected_candidate = classifier.as_ref().map(|owner| &owner.expected);
+    let probes = classifier.iter().map(|owner| owner.probe.clone()).collect();
+    let http = HttpHarness::start(probes).await;
     let http_client = Client::new(&http.origin, Some(TOKEN)).expect("HTTP native client");
     let http_unauth = Client::new(&http.origin, None).expect("HTTP unauth client");
     let http_res = run_shared_flow(
@@ -1639,6 +1764,7 @@ async fn http_and_local_ipc_backends_satisfy_parity_and_intentional_exceptions()
         Some(&http_unauth),
         &csv_path,
         "http",
+        expected_candidate,
         &mut report,
     )
     .await;
@@ -1655,7 +1781,10 @@ async fn http_and_local_ipc_backends_satisfy_parity_and_intentional_exceptions()
     http.shutdown().await;
 
     // 2. Run exact same shared scenario suite against compiled `argos-api-host --role local-ipc`.
-    let ipc_root = create_private_dir("fleetworks-ipc-parity");
+    let ipc_root = classifier.as_ref().map_or_else(
+        || create_private_dir("fleetworks-ipc-parity"),
+        |owner| owner.home.path().to_owned(),
+    );
     let mut cmd1 = spawn_local_ipc_command(&ipc_root);
     let ipc1 = Arc::new(
         LocalIpcClient::spawn_command(&mut cmd1, "http-ipc-parity", "1.0.0")
@@ -1663,7 +1792,15 @@ async fn http_and_local_ipc_backends_satisfy_parity_and_intentional_exceptions()
             .expect("spawn argos-api-host --role local-ipc session 1"),
     );
     let ipc_client1 = Client::from_local_ipc(Arc::clone(&ipc1));
-    let ipc_res = run_shared_flow(&ipc_client1, None, &csv_path, "ipc", &mut report).await;
+    let ipc_res = run_shared_flow(
+        &ipc_client1,
+        None,
+        &csv_path,
+        "ipc",
+        expected_candidate,
+        &mut report,
+    )
+    .await;
 
     // Graceful IPC shutdown relinquishes leases and checkpoints local durable stores.
     drop(ipc_client1);
@@ -1695,6 +1832,16 @@ async fn http_and_local_ipc_backends_satisfy_parity_and_intentional_exceptions()
     let ipc_client2 = Client::from_local_ipc(Arc::clone(&ipc2))
         .with_registered_context(&ipc_res.registered_context)
         .expect("attach saved registered context after restart");
+
+    let restarted_readiness = ipc_client2
+        .workstation_readiness()
+        .await
+        .expect("workstation readiness across companion restart");
+    assert_eq!(
+        restarted_readiness.declared_atlas_bert_candidate.as_ref(),
+        expected_candidate
+    );
+    assert!(restarted_readiness.atlas_preflight.is_none());
 
     let assoc_after_restart = ipc_client2
         .request_detail(&WorkstationRequestDetailQuery::new(

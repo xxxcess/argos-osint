@@ -36,6 +36,7 @@ subtle = "2.6"
 libc = "0.2"
 
 [dev-dependencies]
+argos-osint-core = { path = "../argos-osint-core", default-features = false, features = ["legacy-natural-fixtures"] }
 surrealdb.workspace = true
 tempfile.workspace = true
 tower = { version = "0.5", features = ["util"] }

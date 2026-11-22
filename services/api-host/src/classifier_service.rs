@@ -79,6 +79,7 @@ async fn ready(State(engine): State<Engine>) -> Response {
     } else {
         "unavailable"
     };
+    let declared_model = checkpoint.as_ref().ok().and_then(Option::as_ref);
     let warm = engine.warm.lock().await;
     let active_model = warm.as_ref().and_then(|warm| match &checkpoint {
         Ok(Some(selected))
@@ -107,6 +108,7 @@ async fn ready(State(engine): State<Engine>) -> Response {
             "atlas_checkpoint_state": atlas_checkpoint_state,
             "model_state": model_state,
             "active_model": active_model,
+            "declared_model": declared_model,
         })),
     )
         .into_response()

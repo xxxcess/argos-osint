@@ -252,7 +252,7 @@ pub fn compiled_identity() -> Result<CompiledIdentity, ClassifierError> {
             "compiled bridge version mismatch".into(),
         ));
     }
-    Ok(CompiledIdentity {
+    let identity = CompiledIdentity {
         bundle_sha256: sha256_hex(BUNDLE_SRC.as_bytes()),
         bridge_sha256: sha256_hex(BRIDGE_SRC.as_bytes()),
         adapter_sha256: sha256_hex(ADAPT_SRC.as_bytes()),
@@ -260,7 +260,13 @@ pub fn compiled_identity() -> Result<CompiledIdentity, ClassifierError> {
         bridge_version: super::BRIDGE_VERSION.to_string(),
         natural_version: natural_ver,
         apparatus_version: apparatus_ver,
-    })
+    };
+    if identity != super::artifact::archived_identity() {
+        return Err(ClassifierError::Incompatible(
+            "compiled Natural archive identity differs from the pinned metadata".into(),
+        ));
+    }
+    Ok(identity)
 }
 
 pub(super) fn javascript_error(

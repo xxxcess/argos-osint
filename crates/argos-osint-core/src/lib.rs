@@ -82,6 +82,7 @@ pub mod iso3166;
 pub mod job_cleanup;
 pub mod job_registry;
 pub mod jobs_view;
+#[cfg(all(feature = "classifier", feature = "legacy-natural-fixtures"))]
 pub(crate) mod js_runtime_budget;
 pub mod memory_metadata;
 pub mod model_exec;

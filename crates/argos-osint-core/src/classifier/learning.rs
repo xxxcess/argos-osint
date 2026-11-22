@@ -48,7 +48,7 @@ pub(crate) fn pipeline_sha256() -> String {
             super::training::TRAINING_REPORT_SCHEMA_VERSION,
             super::calibration::CALIBRATION_VERSION,
             super::ADMISSION_POLICY_VERSION,
-            sha256_hex(include_str!("../../assets/classifier/source-manifest.json").as_bytes())
+            super::artifact::NATURAL_SOURCE_MANIFEST_SHA256
         )
         .as_bytes(),
     )

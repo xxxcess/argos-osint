@@ -212,9 +212,9 @@ fn actual_readiness_view_distinguishes_stale_ready_and_unverified_inference() {
     assert!(tree.contains("Gateway observation unsynced."));
     assert!(!tree.contains("Gateway: Ready"));
     assert!(!tree.contains("Synthetic previous gateway check"));
-    assert!(tree.contains("Classifier inference: Unknown"));
-    assert!(!tree.contains("Classifier inference: Ready"));
-    assert!(!tree.contains("Classifier inference: Passed"));
+    assert!(tree.contains("Atlas BERT inference: Unknown"));
+    assert!(!tree.contains("Atlas BERT inference: Ready"));
+    assert!(!tree.contains("Atlas BERT inference: Passed"));
     assert!(
         runtime.state.intents.is_empty(),
         "opening status never starts maintenance or inference"

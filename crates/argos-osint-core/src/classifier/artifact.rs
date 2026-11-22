@@ -77,10 +77,23 @@ include!(concat!(
     "/assets/classifier/bundle-identity.rs"
 ));
 
-/// Returns the SHA-256 of the Natural classifier bundle compiled into this build.
+/// Returns the pinned SHA-256 of the historical Natural classifier bundle.
 #[must_use]
 pub fn compiled_bundle_sha256() -> &'static str {
     COMPILED_BUNDLE_SHA256
+}
+
+#[cfg(feature = "classifier")]
+pub(super) fn archived_identity() -> super::CompiledIdentity {
+    super::CompiledIdentity {
+        bundle_sha256: COMPILED_BUNDLE_SHA256.into(),
+        bridge_sha256: NATURAL_BRIDGE_SHA256.into(),
+        adapter_sha256: NATURAL_ADAPTER_SHA256.into(),
+        source_manifest_sha256: NATURAL_SOURCE_MANIFEST_SHA256.into(),
+        bridge_version: NATURAL_BRIDGE_VERSION.into(),
+        natural_version: NATURAL_VERSION.into(),
+        apparatus_version: APPARATUS_VERSION.into(),
+    }
 }
 
 /// File name of the immutable identity manifest inside a model directory.
@@ -868,6 +881,9 @@ impl ArtifactStore {
         payload: &str,
         report: &TrainingReport,
     ) -> Result<ValidatedArtifact, ClassifierError> {
+        if !super::LEGACY_RUNTIME_AVAILABLE {
+            return Err(ClassifierError::Unavailable);
+        }
         self.validate_lease(lease)?;
         let _operation = lease
             .operation
@@ -931,6 +947,9 @@ impl ArtifactStore {
         authorization: &ActivationAuthorization,
         lease: &WriterLease,
     ) -> Result<ModelManifest, ClassifierError> {
+        if !super::LEGACY_RUNTIME_AVAILABLE {
+            return Err(ClassifierError::Unavailable);
+        }
         self.validate_lease(lease)?;
         let _operation = lease
             .operation
@@ -1091,7 +1110,7 @@ impl ArtifactStore {
     /// Returns [`ClassifierError::InvalidArtifact`] or [`ClassifierError::Incompatible`].
     pub fn validate_model(&self, id: &ModelId) -> Result<ValidatedArtifact, ClassifierError> {
         let artifact = self.validate_model_integrity(id)?;
-        #[cfg(feature = "classifier")]
+        #[cfg(all(feature = "classifier", feature = "legacy-natural-fixtures"))]
         super::engine::restore_smoke_check(&artifact.payload)?;
         Ok(artifact)
     }
@@ -1115,6 +1134,9 @@ impl ArtifactStore {
         id: &ModelId,
         lease: &WriterLease,
     ) -> Result<ModelManifest, ClassifierError> {
+        if !super::LEGACY_RUNTIME_AVAILABLE {
+            return Err(ClassifierError::Unavailable);
+        }
         self.validate_lease(lease)?;
         let _operation = lease
             .operation
@@ -1262,6 +1284,9 @@ impl ArtifactStore {
     /// no recorded previous model, or validation of the previous model
     /// fails.
     pub fn rollback(&self) -> Result<ModelManifest, ClassifierError> {
+        if !super::LEGACY_RUNTIME_AVAILABLE {
+            return Err(ClassifierError::Unavailable);
+        }
         let lease = self.try_writer()?;
         let current = self.read_active()?.ok_or_else(|| {
             ClassifierError::InvalidArtifact("no active classifier model to roll back".into())
@@ -1321,7 +1346,7 @@ impl ArtifactStore {
     /// bytes for the active pointer.
     fn validated_manifest(&self, id: &ModelId) -> Result<(ModelManifest, String), ClassifierError> {
         let (artifact, checksum) = self.validated_artifact_integrity(id)?;
-        #[cfg(feature = "classifier")]
+        #[cfg(all(feature = "classifier", feature = "legacy-natural-fixtures"))]
         super::engine::restore_smoke_check(&artifact.payload)?;
         Ok((artifact.manifest, checksum))
     }

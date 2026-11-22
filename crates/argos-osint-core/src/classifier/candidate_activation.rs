@@ -3,7 +3,7 @@
 //! cannot attribute another process's activation to this operation.
 
 mod effect;
-#[cfg(all(test, feature = "classifier"))]
+#[cfg(all(test, feature = "classifier", feature = "legacy-natural-fixtures"))]
 mod tests;
 
 use std::sync::atomic::AtomicBool;
@@ -143,7 +143,7 @@ pub fn preview(
     let (identity, _, synthetic) = candidate(store, training_job_id, model_id, false)?;
     let id = ModelId::parse(model_id).ok_or(ActivationFailure::Invalid)?;
     let previously_activated = effect::previously_activated(store, &id)?;
-    let supported = cfg!(feature = "classifier") && synthetic && !previously_activated;
+    let supported = super::LEGACY_RUNTIME_AVAILABLE && synthetic && !previously_activated;
     Ok(CandidatePreview::new(
         identity,
         active_revision(store)?,
@@ -181,7 +181,7 @@ pub fn execute(
     cancel: &AtomicBool,
 ) -> Result<ActivationResult, ActivationFailure> {
     request.validate().map_err(|_| ActivationFailure::Invalid)?;
-    if !cfg!(feature = "classifier") {
+    if !super::LEGACY_RUNTIME_AVAILABLE {
         return Err(ActivationFailure::Unsupported);
     }
     match reconcile(store, job_id, request) {

@@ -47,6 +47,27 @@ impl PinIdentity {
         Ok(())
     }
 
+    /// Returns the workspace compare-and-swap revision for this declared pin.
+    ///
+    /// The baseline's revision is its manifest hash. A candidate revision also
+    /// binds its activation time so reactivating the same bytes changes it.
+    ///
+    /// # Errors
+    /// Returns a classifier error for an invalid pin identity.
+    pub fn activation_revision(&self) -> Result<String, ClassifierError> {
+        self.validate()?;
+        Ok(match self.snapshot.provenance {
+            Provenance::ZeroShot => self.manifest_sha256.clone(),
+            _ => super::artifact::sha256_hex(
+                format!(
+                    "atlas-bert-active-revision-v1\n{}\n{}",
+                    self.manifest_sha256, self.snapshot.activated_at,
+                )
+                .as_bytes(),
+            ),
+        })
+    }
+
     /// Activation timestamps are preserved in receipts' owning cycle snapshot.
     /// They do not change which worker can serve the immutable bundle.
     pub fn matches_bundle(&self, pin: &PinnedClassifier) -> bool {

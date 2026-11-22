@@ -9,7 +9,9 @@ use crate::classifier::learning::LearningInput;
 use crate::classifier::readiness::ClassifierHome;
 use crate::classifier::training::{self, SyntheticActivation, TrainRequest};
 use crate::classifier::{ClassifierError, WorkControl};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+#[cfg(all(feature = "classifier", feature = "legacy-natural-fixtures"))]
+use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 pub(super) fn fit(
@@ -32,7 +34,7 @@ pub(super) fn fit(
             &input,
         ))
         .map_err(|_| ClassifierError::InvalidArtifact("learning_review_capture_changed".into()))?;
-    #[cfg(feature = "classifier")]
+    #[cfg(all(feature = "classifier", feature = "legacy-natural-fixtures"))]
     let prepared = match runtime.block_on(home.pin(None)) {
         Ok(baseline) => crate::classifier::promotion::prepare(&input, baseline, &store, &control)?,
         Err(ClassifierError::Unavailable) => None,
@@ -45,13 +47,13 @@ pub(super) fn fit(
         synthetic_activation: SyntheticActivation::RetainPrior,
     };
     let mut worker = crate::classifier::start_candidate_worker(&model, lease.clone(), &control)?;
-    #[cfg(feature = "classifier")]
+    #[cfg(all(feature = "classifier", feature = "legacy-natural-fixtures"))]
     let running = Arc::new(AtomicBool::new(true));
-    #[cfg(feature = "classifier")]
+    #[cfg(all(feature = "classifier", feature = "legacy-natural-fixtures"))]
     let peak = Arc::new(AtomicU64::new(0));
-    #[cfg(feature = "classifier")]
+    #[cfg(all(feature = "classifier", feature = "legacy-natural-fixtures"))]
     let (signal, ready) = std::sync::mpsc::channel();
-    #[cfg(feature = "classifier")]
+    #[cfg(all(feature = "classifier", feature = "legacy-natural-fixtures"))]
     let concurrent = prepared.as_ref().map(|prepared| {
         crate::classifier::promotion::concurrent(
             prepared,
@@ -61,7 +63,7 @@ pub(super) fn fit(
             peak.clone(),
         )
     });
-    #[cfg(feature = "classifier")]
+    #[cfg(all(feature = "classifier", feature = "legacy-natural-fixtures"))]
     let _ = signal.send(());
     let fitted = training::train_candidate(
         &mut *worker,
@@ -73,9 +75,9 @@ pub(super) fn fit(
         },
     );
     // Always join the comparative foreground work, including fit/cancel errors.
-    #[cfg(feature = "classifier")]
+    #[cfg(all(feature = "classifier", feature = "legacy-natural-fixtures"))]
     running.store(false, Ordering::Release);
-    #[cfg(feature = "classifier")]
+    #[cfg(all(feature = "classifier", feature = "legacy-natural-fixtures"))]
     let concurrent = concurrent
         .map(|handle| {
             runtime
@@ -83,7 +85,7 @@ pub(super) fn fit(
                 .map_err(|_| ClassifierError::WorkerStopped)
         })
         .transpose()?;
-    #[cfg(feature = "classifier")]
+    #[cfg(all(feature = "classifier", feature = "legacy-natural-fixtures"))]
     let training_stats = worker.performance();
     drop(worker);
     let candidate = fitted?;
@@ -108,7 +110,7 @@ pub(super) fn fit(
             Err(error) => return Err(error),
         };
     let prior = store.read_active_integrity()?;
-    #[cfg(feature = "classifier")]
+    #[cfg(all(feature = "classifier", feature = "legacy-natural-fixtures"))]
     let evidence = if let (Some(prepared), Some(Ok(concurrent)), Ok(training_stats)) =
         (prepared.as_ref(), concurrent, training_stats)
     {
@@ -133,7 +135,7 @@ pub(super) fn fit(
     } else {
         None
     };
-    #[cfg(not(feature = "classifier"))]
+    #[cfg(not(all(feature = "classifier", feature = "legacy-natural-fixtures")))]
     let evidence = None;
     control.check_active()?;
     // Recheck durable authority immediately before entering atomic activation.

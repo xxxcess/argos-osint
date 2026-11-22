@@ -9,6 +9,9 @@ use std::time::Duration;
 use std::time::Instant;
 
 use argos_osint_core::atlas::AtlasProvider;
+use argos_osint_core::classifier::readiness::ClassifierHome;
+use argos_osint_core::classifier::remote::PinIdentity;
+use argos_osint_core::classifier::Provenance;
 use argos_osint_core::provider::SettingsFile;
 use argos_osint_core::storage::actor_search_outbox;
 use argos_osint_core::storage::job_dispatch;
@@ -32,6 +35,7 @@ use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::context::RegisteredContext;
 use fleetworks_contracts::readiness::AtlasCyclePreflight;
 use fleetworks_contracts::readiness::AtlasKeyPresence;
+use fleetworks_contracts::readiness::DeclaredAtlasBertCandidate;
 use fleetworks_contracts::readiness::MaintenanceOperation;
 use fleetworks_contracts::readiness::ReadinessAction;
 use fleetworks_contracts::readiness::ReadinessActionId;
@@ -190,12 +194,14 @@ struct ProcessReady {
     ready: bool,
     model_state: Option<String>,
     atlas_checkpoint_state: Option<String>,
+    declared_model: Option<serde_json::Value>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct AtlasCheckpoint {
     state: ReadinessState,
     verified: bool,
+    declared_candidate: Option<DeclaredAtlasBertCandidate>,
 }
 
 #[derive(Default)]
@@ -251,11 +257,31 @@ impl AtlasCheckpoint {
             },
             None => ReadinessState::Unavailable,
         };
+        let declared_candidate = service
+            .filter(|service| service.ready)
+            .and_then(|service| service.declared_model.as_ref())
+            .and_then(|value| PinIdentity::deserialize(value).ok())
+            .and_then(declared_candidate);
         Self {
             state,
             verified: verified && state == ReadinessState::Ready,
+            declared_candidate,
         }
     }
+}
+
+fn declared_candidate(identity: PinIdentity) -> Option<DeclaredAtlasBertCandidate> {
+    if !matches!(
+        identity.snapshot.provenance,
+        Provenance::FineTunedAtlasBert { .. }
+    ) {
+        return None;
+    }
+    let revision = identity.activation_revision().ok()?;
+    Some(DeclaredAtlasBertCandidate::new(
+        identity.snapshot.model_id,
+        revision,
+    ))
 }
 
 struct Observations {
@@ -272,6 +298,7 @@ pub struct ReadinessOwners {
     platform_display_name: Option<String>,
     probes: Vec<ReadinessProbe>,
     local_nlp: Option<bool>,
+    local_classifier: Option<ClassifierHome>,
     configured_inputs: Vec<fleetworks_contracts::readiness::ConfiguredMaintenanceInput>,
     cache: Arc<Mutex<Option<Observations>>>,
 }
@@ -297,6 +324,7 @@ impl ReadinessOwners {
             platform_display_name: None,
             probes,
             local_nlp: None,
+            local_classifier: None,
             configured_inputs: Vec::new(),
             cache: Arc::new(Mutex::new(None)),
         })
@@ -307,6 +335,13 @@ impl ReadinessOwners {
         self.local_nlp = Some(ready);
         self
     }
+    /// Read the Embedded workspace's declared BERT candidate without starting inference.
+    #[must_use]
+    pub fn with_local_classifier(mut self, home: ClassifierHome) -> Self {
+        self.local_classifier = Some(home);
+        self
+    }
+
     /// Set the operator-chosen backend label read from deployment metadata at startup.
     /// An invalid stored label is an error, so a corrupt value is never shown.
     pub fn with_platform_display_name(mut self, name: Option<String>) -> anyhow::Result<Self> {
@@ -643,13 +678,22 @@ async fn collect(
 ) -> Observations {
     let at = Utc::now().to_rfc3339();
     let database_repo = state.repo.clone();
-    let (database, catalog, search, services) = tokio::join!(
+    let local_classifier = async {
+        let home = owners.local_classifier.as_ref()?;
+        tokio::time::timeout(DEADLINE, home.check_local_atlas_checkpoint())
+            .await
+            .ok()?
+            .ok()?
+            .and_then(declared_candidate)
+    };
+    let (database, catalog, search, services, local_candidate) = tokio::join!(
         crate::run_shielded_timeout(DEADLINE, async move {
             database_repo.db().query("RETURN 1").await?.check()
         }),
         catalog(state, &at),
         search(state, owners, client, &at),
         join_all(owners.probes.iter().map(|probe| probe.observe(&at))),
+        local_classifier,
     );
     let mut checks = vec![
         check(
@@ -684,6 +728,9 @@ async fn collect(
         if let Some(checkpoint) = checkpoint {
             atlas_checkpoint = checkpoint;
         }
+    }
+    if owners.local_classifier.is_some() {
+        atlas_checkpoint.declared_candidate = local_candidate;
     }
     if let Some(ready) = owners.local_nlp {
         checks.retain(|check| check.id != ReadinessCheckId::Nlp);
@@ -982,7 +1029,7 @@ pub(crate) async fn read_value(
     };
     let mut checks = observations.checks.clone();
     let observed_at = observations.at.clone();
-    let atlas_checkpoint = observations.atlas_checkpoint;
+    let atlas_checkpoint = observations.atlas_checkpoint.clone();
     drop(cache);
     let permitted = principal.permits(Permission::MaintainBackend);
     let context = context.filter(|context| {
@@ -990,10 +1037,10 @@ pub(crate) async fn read_value(
             && context.access_epoch == principal.access_epoch()
     });
     let registered = context.is_some();
-    let include_atlas = !embedded_setup
-        && registered
-        && principal.purpose() == fleetworks_contracts::context::CredentialPurpose::Native
-        && principal.permits(Permission::SubmitInteractive);
+    let registered_native = registered
+        && principal.purpose() == fleetworks_contracts::context::CredentialPurpose::Native;
+    let include_atlas =
+        !embedded_setup && registered_native && principal.permits(Permission::SubmitInteractive);
     if embedded_setup
         && registered
         && permitted
@@ -1108,6 +1155,9 @@ pub(crate) async fn read_value(
     }
     let mut response = WorkstationReadiness::new(owners.deployment_id.clone(), observed_at, checks);
     response.configured_inputs = configured_inputs;
+    if registered_native {
+        response.declared_atlas_bert_candidate = atlas_checkpoint.declared_candidate;
+    }
     if include_atlas {
         let worker = match atlas_worker {
             Some(AtlasWorkerAvailability::Ready) => ReadinessState::Ready,

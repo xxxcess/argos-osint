@@ -477,7 +477,10 @@ mod tests {
             resident_bytes: Some(limits.memory_resume_bytes + 1),
             ..healthy(&limits)
         };
-        policy.commit(Duration::from_millis(u64::from(limits.commit_resume_ms)), now);
+        policy.commit(
+            Duration::from_millis(u64::from(limits.commit_resume_ms)),
+            now,
+        );
         policy.query(Duration::from_millis(u64::from(limits.query_pause_ms)), now);
         assert_eq!(
             policy.observe(&limits, readings, now),

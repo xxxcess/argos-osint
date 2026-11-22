@@ -458,7 +458,10 @@ async fn handle(
     // terminal failure or consume a failure retry.
     let shutdown_reason = if relinquish_on_shutdown {
         Some("local_backend_shutdown")
-    } else if matches!(lease.task.pool.as_str(), setup_jobs::SEED_POOL | setup_jobs::REINDEX_POOL) {
+    } else if matches!(
+        lease.task.pool.as_str(),
+        setup_jobs::SEED_POOL | setup_jobs::REINDEX_POOL
+    ) {
         Some("native_worker_shutdown")
     } else {
         None

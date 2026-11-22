@@ -1,5 +1,9 @@
 #![cfg(feature = "embedded")]
 
+#[cfg(feature = "classifier")]
+#[allow(dead_code)]
+#[path = "../../../crates/argos-osint-core/tests/fixtures/classifier/activation_training.rs"]
+mod activation_training;
 #[allow(dead_code)]
 #[path = "../src/actor_index_worker.rs"]
 mod actor_index_worker;
@@ -12,10 +16,6 @@ mod queue_client;
 #[allow(dead_code)]
 #[path = "../src/setup_jobs.rs"]
 mod setup_jobs;
-#[cfg(feature = "classifier")]
-#[allow(dead_code)]
-#[path = "../../../crates/argos-osint-core/tests/fixtures/classifier/activation_training.rs"]
-mod activation_training;
 
 #[allow(dead_code)]
 mod fleetworks {
@@ -557,7 +557,11 @@ async fn await_classifier_job(client: &Client, transport: &str, id: &str) -> ser
 }
 
 #[cfg(feature = "classifier")]
-async fn exercise_classifier_lifecycle(client: &Client, context: &MutationContext, transport: &str) {
+async fn exercise_classifier_lifecycle(
+    client: &Client,
+    context: &MutationContext,
+    transport: &str,
+) {
     use fleetworks_contracts::classifier_activation::ActivationReceipt;
     use fleetworks_contracts::classifier_activation::ActivationResult;
     use fleetworks_contracts::classifier_activation::ActivationState;
@@ -606,7 +610,10 @@ async fn exercise_classifier_lifecycle(client: &Client, context: &MutationContex
     let model = result["candidate_model_id"]
         .as_str()
         .expect("candidate id from durable result");
-    let query = [("training_job_id", train.job_id.as_str()), ("model_id", model)];
+    let query = [
+        ("training_job_id", train.job_id.as_str()),
+        ("model_id", model),
+    ];
     let preview: CandidatePreview = client
         .get_with_query(CANDIDATE_DETAIL_PATH, &query)
         .await
@@ -638,13 +645,18 @@ async fn exercise_classifier_lifecycle(client: &Client, context: &MutationContex
     assert_eq!(repeated.job_id, activation.job_id);
     await_classifier_job(client, transport, &activation.job_id).await;
     let effect: ActivationResult = client
-        .get_with_query(ACTIVATION_RESULT_PATH, &[("job_id", activation.job_id.as_str())])
+        .get_with_query(
+            ACTIVATION_RESULT_PATH,
+            &[("job_id", activation.job_id.as_str())],
+        )
         .await
         .expect("operation-owned activation outcome");
     assert_eq!(effect.job_id, activation.job_id);
     assert_eq!(effect.candidate, preview.candidate);
     assert_eq!(effect.state, ActivationState::Activated);
-    let revision = effect.activated_revision.expect("proof of activated revision");
+    let revision = effect
+        .activated_revision
+        .expect("proof of activated revision");
     let after: CandidatePreview = client
         .get_with_query(CANDIDATE_DETAIL_PATH, &query)
         .await
@@ -1690,8 +1702,15 @@ async fn run_shared_flow(
     );
     #[cfg(feature = "classifier")]
     {
-        Box::pin(exercise_classifier_lifecycle(&client, &stale_mutation, transport)).await;
-        report.classifier_lifecycle_verified.insert(transport.to_owned());
+        Box::pin(exercise_classifier_lifecycle(
+            &client,
+            &stale_mutation,
+            transport,
+        ))
+        .await;
+        report
+            .classifier_lifecycle_verified
+            .insert(transport.to_owned());
     }
 
     let logs_follow_op = IpcOperation::from_get_with_query(LOGS_FOLLOW_PATH, &LogQuery::default())

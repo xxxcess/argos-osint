@@ -24,6 +24,7 @@ agent Cargo cache. Preserve unrelated work and all persistent index evidence.
 - Internal results are candidates. Gateway code must authorize current canonical
   actors before exposing labels/results and fetch dossiers separately. Scores are
   retrieval ranking, never identity confidence or evidence strength.
+- During Nightly GSD, run affected checks, tests and image builds in [GitHub Actions](../../.agents/skills/gsd/SKILL.md#github-ci-first).
 - Tests use synthetic actors/credentials and owned temporary disk roots. Preserve
   real index/worker/gateway/recovery evidence separately from mocks and native
   PNGs. No live providers, user home/volumes or local mutation tests.

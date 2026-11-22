@@ -6,6 +6,8 @@ Detailed agent rules, loaded before editing or running checks.
 
 ## Build and test
 
+For Nightly GSD, use [GitHub Actions first](../../../.agents/skills/gsd/SKILL.md#github-ci-first). Apply this to scoped checks and retries as well as full gates. Use the local recipes below only for necessary host-specific evidence within the authorized scope.
+
 Before running verification tests, ask the user to choose the scope once unless it is already authorized in the session: (1) verify feature functionality through scoped checks, then hand off native review on the user's local machine, or (2) run all applicable verification checks until implementation issues are resolved. Scope (1) has three phases: static formatting/contract checks, targeted feature tests through the real affected code path, and a handoff listing exact native review steps plus any unrun Docker, embedded, installed-app or platform gates. Confirm where builds and tests run. When the user selects GitHub CI, push a task branch and inspect checks for its exact revision; do not compile locally until a requested native review requires it. Scope (2) continues through all applicable gates under the resource and platform rules below. The gate commands below describe authorized verification; they do not override this scope choice.
 
 For first-pass native UI changes, review the exact-head Linux app package and inspect the Rune captures in the CI artifact. Record the visual verdict on the PR. The [visual review workflow](native-verification.md#dispatchable-ui-visual-review) supplies additional selected captures after the first pass. Record durable evidence in the affected docs or an exact-head release.

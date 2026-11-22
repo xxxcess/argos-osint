@@ -155,6 +155,8 @@ Only trusted integration pushes get publication writes, with packages permission
 
 ## Nightly gsd order
 
+Run affected checks, tests, builds, smoke runs and captures in GitHub Actions whenever supported. Reuse exact-head artifacts for review. Use a scoped dispatch when the normal jobs lack a required capture, and keep local execution for authorized host-specific evidence GitHub cannot supply. [GSD verification policy](../../../.agents/skills/gsd/SKILL.md#github-ci-first)
+
 [GSD Nightly: Core](../../../.github/workflows/gsd-nightly-core.yml) covers functional application logic across the Cargo workspace. [GSD Nightly: UI](../../../.github/workflows/gsd-nightly-ui.yml) focuses on review, polish, and refinement of Rune, Rune Kit, and React Native Web production views. The shared planner dispatches the selected work to each reusable workflow and keeps one required result per pass.
 
 | Changed scope | Core | UI |

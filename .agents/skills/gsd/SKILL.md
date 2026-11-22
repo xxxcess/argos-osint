@@ -18,6 +18,12 @@ Use the CI path plan to identify affected checks for the exact PR head. Mixed ch
 
 Before a comment or push, read the PR with `gh api repos/xxxcess/argos-osint/pulls/<n>` and check that its state is open, its base is `nightly`, and its head still matches the reviewed revision. Refresh evidence if the head moves. Use the newly verified head for replies posted after a push.
 
+### GitHub CI first
+
+Use GitHub Actions for every applicable check, test, build, image or Compose smoke, benchmark, and Rune or Playwright capture that can run there. Plan the affected lanes, push the scoped changes, and verify evidence on the exact PR head. Use an existing scoped dispatch when the regular lane lacks a required test or capture. Reuse successful results when the relevant inputs still match.
+
+Apply this to Core, UI, integration owners, and subagents. Local work covers source inspection, edits, formatting, Git and commit-policy preflight, and inspecting hosted artifacts. Use a passing hosted build for an authorized live native review. Run a local check or build only for necessary evidence GitHub CI cannot supply and within the user's authorized scope. Report missing coverage as pending with the reason.
+
 ### GSD Nightly: Core
 
 Review every unresolved thread and actionable discussion item, including UI feedback. Reply under the operator’s authorization. Core owns verified fixes, tests, commits and pushes within the authorized task on the exact PR head. Follow the [review authority rules](#review-authority) before assigning or acting on a request.
@@ -68,7 +74,7 @@ Run these steps in order. UI uses the visual review routine below.
 2. **Work in the PR worktree.** For each PR requiring code changes, use `.agent-scratch/worktrees/pr-<n>` at the verified head. The PR head branch is the only push target.
 3. **Track requirements and review feedback.** Record actionable items under `prs.<n>.requirements` with their comment or thread IDs and status. Review outdated threads against the original diff and current code. Record a fixing SHA, evidence that the current head already addresses the finding, or the reason follow-up is blocked.
 4. **Iterate on the first pass.** Fix affected Core and UI regressions. Record which checks were selected, which were skipped by scope, and any pending Linux review.
-5. **Cheap local checks only.** CI is the test runner. Run locally only: `rustfmt --check --edition 2021 apps/fleetworks-desktop/src/lib.rs` (it follows the module tree) or `cargo fmt --check`, `prettier --check` on changed web and Markdown files, `python3 scripts/fleetworks_doc_links.py` (0 broken), and `node scripts/release_check.mjs message --file <msg>` with `node scripts/release_check.mjs versions`. No full builds, no full test suites and no mutation runs ([root rules](../../../AGENTS.md)).
+5. **Run checks in GitHub Actions.** Use the affected hosted lanes for functional checks and builds. For authoring and pre-push checks needed before Actions can run, use `rustfmt --check --edition 2021 apps/fleetworks-desktop/src/lib.rs` (it follows the module tree) or `cargo fmt --check`, `prettier --check` on changed web and Markdown files, `python3 scripts/fleetworks_doc_links.py` (0 broken), and `node scripts/release_check.mjs message --file <msg>` with `node scripts/release_check.mjs versions`. Use the [CI-first policy](#github-ci-first) for any local-only evidence.
 6. **Commit and push.** Stage exact paths, use Conventional Commits and one small commit per slice. Before the first push of a run, check `git merge-tree --write-tree origin/<base> HEAD`. Recheck the open PR, `nightly` base, expected remote head, and write access. Use a fast-forward push with the full branch name and a literal SHA. For a same-repository PR, use `git push origin <sha>:refs/heads/<headRefName>`. For an operator-authorized fork, use the remote matching the verified head repository after confirming write access to that ref. Report blocked pushes and respond to the review feedback under the operator’s reply authorization.
 7. **Read failed CI once.** After a push, read each failed job log once (`gh api --allow-escape-sequences repos/xxxcess/argos-osint/actions/jobs/<id>/logs`) instead of waiting in a loop; the owner or the next scheduled wake reports CI events. Plain `gh pr view` can fail, so read PRs through `gh api repos/xxxcess/argos-osint/pulls/<n>`.
 8. **Fix in priority order.**
@@ -173,8 +179,8 @@ For each eligible spec, give the dedicated PR lead the verified scope before it 
 3. **Decompose, implement & document**:
    - Break multi-component specs into parallel research/implementation subagents with disjoint `OWNED_FILES` inside `.agent-scratch/worktrees/pr-<num>`, then integrate cleanly.
    - Update affected docs under `docs/wiki/` and paired `docs/diagrams/*.{html,svg}` if behavior, APIs, or architecture changed, and verify with `python3 scripts/fleetworks_doc_links.py`.
-4. **Scoped local checks & policy validation**:
-   - Run targeted unit/integration checks, linters, container log checks (when a runtime stack is exercised), simulated backend-log `Runtime` tests (when native log/readiness/jobs UI or contracts change), and performance/security edge-case tests covering the changed stack. Leave full hosted matrices to GitHub CI.
+4. **Hosted verification and commit policy**:
+   - Select affected GitHub Actions jobs for unit and integration tests, linters, container logs, simulated backend-log Runtime tests, and performance or security cases. Use the same revision for the resulting evidence.
    - Validate Conventional Commit formatting and shared versions before committing:
      ```sh
      node scripts/release_check.mjs message --file <msg_file>
@@ -201,7 +207,7 @@ For each eligible tracked PR:
    - Fetch failed job logs via `gh run view <run_id> -R xxxcess/argos-osint --log-failed` (and inspect image/Compose smoke service logs for container `ERROR`s or semantically harmful `WARN`s).
    - Distinguish **transient runner/infra issues** (e.g. runner lost communication, macOS capacity timeout, GitHub API 502/rate limit) from **real code/lint/test/service-log failures**.
    - For transient failures: rerun failed jobs with `gh api -X POST repos/xxxcess/argos-osint/actions/runs/<run_id>/rerun-failed-jobs` after the run completes (at most twice per commit SHA before flagging as blocked; do not change code for a runner or toolchain problem).
-   - For real failures or backend container errors / actionable semantic warnings: dispatch or wake that PR's subagent in `.agent-scratch/worktrees/pr-<num>` to fix the root cause cleanly, verify with the affected local test, validate commit message & versions, and push back by full branch name and literal sha. Fix in the [priority order](#nightly-workflow-canonical).
+   - For real failures or backend container errors / actionable semantic warnings: dispatch or wake that PR's subagent in `.agent-scratch/worktrees/pr-<num>` to fix the root cause cleanly, verify with the affected test in GitHub Actions, validate commit message & versions, and push back by full branch name and literal sha. Fix in the [priority order](#nightly-workflow-canonical).
 4. **Selected checks green, applicable Linux review recorded, responses posted, and actionable findings verified**:
    - Mark the PR's current `headRefOid` as `"complete"` in `.agent-scratch/gsd-state.json`.
    - **Do NOT merge the PR.** Leave merging to the user and note that the PR is green and ready for review/merge.

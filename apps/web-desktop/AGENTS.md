@@ -10,6 +10,8 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 
 Follow the shared [agent workflow](../../docs/wiki/code/agent-workflow.md) for execution and evidence. Reuse authorized scoped checks, preserve the active host's roles, and suggest evidence-backed reversible process improvements within assigned ownership.
 
+During Nightly GSD, run affected Web checks, tests, builds and visual capture generation in [GitHub Actions](../../.agents/skills/gsd/SKILL.md#github-ci-first).
+
 Keep work bounded by the shared [scope and finish line](../../docs/wiki/code/agent-workflow.md#scope-and-finish-line).
 
 Use the approved [Glass Canvas theme](../../docs/design/matte-canvas/theme.md) and [interaction-state contract](../../docs/design/matte-canvas/interaction-state.md) for shared paint and generic loading/continuous-scroll targets. Preserve existing web composition, typography, routes and topology/list behavior; do not graft native setup or service workflows onto Intel. Design targets and mockups are not claims about current runtime behavior. Connect v2 uses an opaque workstation ID; optional IP metadata never defines identity. Reject old workspace contexts/cookies/query narrowing and retain authoritative session/revision/epoch fences.

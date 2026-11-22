@@ -372,7 +372,7 @@ def managed_finetune(target, revision, env):
 
 
 def fine_tune(output, prepared, binary, commands, build_env, revision, evidence):
-    from finetune import EVALUATION_NAME, FROZEN_NAME
+    from finetune import EVALUATION_NAME, FROZEN_NAME, calibration_receipt_path
 
     fitting_env = output / "fitting-venv"
     venv.EnvBuilder(system_site_packages=True, with_pip=True).create(fitting_env)
@@ -402,10 +402,13 @@ def fine_tune(output, prepared, binary, commands, build_env, revision, evidence)
                                            "--baseline", prepared / "model"], env=env, timeout=12 * 60)
         report["status"] = "passed"
     finally:
-        for key, name in (("frozen", FROZEN_NAME), ("held_out", EVALUATION_NAME)):
-            path = candidate / name
+        for key, path in (("calibration", calibration_receipt_path(candidate)),
+                          ("frozen", candidate / FROZEN_NAME), ("held_out", candidate / EVALUATION_NAME)):
             if path.is_file():
-                report[key] = {"sha256": sha(path), "report": json.loads(path.read_text())}
+                value = json.loads(path.read_text())
+                report[key] = {"sha256": sha(path), "report": value}
+                if key == "calibration" and value.get("status") == "rejected":
+                    report["status"] = "rejected"
     return candidate
 
 

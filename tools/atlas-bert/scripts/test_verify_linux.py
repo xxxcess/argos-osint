@@ -259,6 +259,60 @@ class FineTuningContract(unittest.TestCase):
         self.assertTrue(finetune.regression_passes(unsafe, safe))
         self.assertFalse(finetune.regression_passes(safe, unsafe))
 
+    def test_calibration_excludes_higher_f1_threshold_with_extra_false_admission(self):
+        articles = [finetune.Article(f"positive {index}", frozenset({"governance"})) for index in range(3)]
+        articles.append(finetune.Article("out of scope", frozenset()))
+        baseline = [[score, .1, .1, .1, .1, .1] for score in (.9, .9, .1, .1)]
+        candidate = [[score, .1, .1, .1, .1, .1] for score in (.975, .954, .704, .724)]
+        report = finetune.select_threshold(articles, baseline, candidate)
+        self.assertEqual(report["status"], "qualified")
+        self.assertEqual(report["baseline_threshold"], .8)
+        self.assertEqual(report["tested_thresholds"], 50)
+        self.assertEqual(report["best_overall"]["threshold"], .7)
+        self.assertGreater(report["best_overall"]["metrics"]["micro_f1"], report["baseline"]["micro_f1"])
+        self.assertEqual(report["best_overall"]["metrics"]["false_out_of_scope_admissions"], 1)
+        self.assertEqual(report["selected"]["threshold"], .95)
+        self.assertTrue(finetune.regression_passes(report["baseline"], report["selected"]["metrics"]))
+
+    def test_rejected_calibration_writes_evidence_and_never_freezes_candidate(self):
+        articles = [finetune.Article("positive", frozenset({"governance"})),
+                    finetune.Article("out of scope", frozenset())]
+        baseline = [[.9, .1, .1, .1, .1, .1], [.1, .1, .1, .1, .1, .1]]
+        candidate = [[.7, .1, .1, .1, .1, .1], [.9, .1, .1, .1, .1, .1]]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination, checkpoint, worker = (root / name for name in ("candidate", "model", "worker"))
+            checkpoint.mkdir()
+            worker.write_bytes(b"worker")
+            for name in finetune.MODEL_FILES:
+                (checkpoint / name).write_text(name)
+
+            def train(*args):
+                args[-1].write_bytes(b"pytorch weights")
+
+            def convert(command, **options):
+                command[3].with_name("rust_model.ot").write_bytes(b"converted weights")
+
+            phase = {"train": [], "development": [], "calibration": articles}
+            with (
+                patch.object(finetune, "validate_prepared", return_value=(checkpoint, root)),
+                patch.object(finetune, "read_corpus", return_value=b"test data"),
+                patch.object(finetune, "read_articles", return_value=phase) as read,
+                patch.object(finetune, "train_checkpoint", side_effect=train),
+                patch.object(finetune.subprocess, "run", side_effect=convert),
+                patch.object(finetune, "score_with_worker", side_effect=(baseline, candidate)) as score,
+            ):
+                self.assertIsNone(finetune.fit(root, destination, worker, REVISION))
+            read.assert_called_once_with(b"test data", ("train", "development", "calibration"))
+            self.assertEqual(score.call_count, 2)
+            self.assertEqual(score.call_args_list[0].args[:3], (worker, checkpoint, articles))
+            self.assertEqual(score.call_args_list[1].args[2], articles)
+            report = json.loads(finetune.calibration_receipt_path(destination).read_text())
+            self.assertEqual(report["status"], "rejected")
+            self.assertEqual(report["qualifying_thresholds"], 0)
+            self.assertIsNone(report["selected"])
+            self.assertFalse(destination.exists())
+
     def test_malformed_worker_responses_are_rejected(self):
         first = '{"protocol":"argos-atlas-bert-v1"}\n'
         for response in ('{"scores":[[true,0,0,0,0,0]]}', '{"scores":[[NaN,0,0,0,0,0]]}',
@@ -277,7 +331,8 @@ class FineTuningContract(unittest.TestCase):
                 directory.mkdir()
                 for name in finetune.MODEL_FILES:
                     (directory / name).write_text(name)
-            finetune.write_new(candidate / finetune.FROZEN_NAME, {
+            path = candidate / finetune.FROZEN_NAME
+            frozen = {
                 "schema_version": "atlas-bert-frozen-v1",
                 "dataset_sha256": finetune.DATASET_SHA256,
                 "split_counts": finetune.SPLIT_COUNTS,
@@ -289,13 +344,51 @@ class FineTuningContract(unittest.TestCase):
                     "runtime_contract": finetune.runtime_contract(),
                     "calibration_worker_sha256": verify.sha(worker),
                 },
-            })
+            }
+            finetune.write_new(path, frozen)
             finetune.load_frozen(candidate, baseline, worker)
             (candidate / "rust_model.ot").write_bytes(b"mutated")
             with patch.object(finetune, "read_corpus") as corpus:
                 with self.assertRaisesRegex(verify.VerifyError, "Frozen model"):
                     finetune.evaluate(candidate, baseline, worker)
                 corpus.assert_not_called()
+
+    def test_frozen_calibration_qualification_binds_policy_identity_and_selected_metrics(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate, baseline, worker = (root / name for name in ("candidate", "baseline", "worker"))
+            worker.write_bytes(b"worker")
+            for directory in (candidate, baseline):
+                directory.mkdir()
+                for name in finetune.MODEL_FILES:
+                    (directory / name).write_text(name)
+            candidate_assets, baseline_assets = map(finetune.model_assets, (candidate, baseline))
+            articles = [finetune.Article("fixture", frozenset({"governance"}))] * 230
+            scores = [[.945, .1, .1, .1, .1, .1]] * 230
+            qualification = finetune.select_threshold(articles, scores, scores)
+            qualification.update({"dataset_sha256": finetune.DATASET_SHA256, "source_revision": REVISION,
+                                  "worker_sha256": verify.sha(worker), "baseline_assets": baseline_assets,
+                                  "candidate_assets": candidate_assets})
+            frozen = {
+                "schema_version": "atlas-bert-frozen-v1", "dataset_sha256": finetune.DATASET_SHA256,
+                "split_counts": finetune.SPLIT_COUNTS, "base_checkpoint_revision": finetune.MODEL_COMMIT,
+                "assets": candidate_assets, "threshold": qualification["selected"]["threshold"],
+                "provenance": {
+                    "baseline_assets": baseline_assets, "runtime_contract": finetune.runtime_contract(),
+                    "calibration_worker_sha256": verify.sha(worker), "source_revision": REVISION,
+                    "calibration": copy.deepcopy(qualification["selected"]["metrics"]),
+                    "calibration_qualification": qualification,
+                },
+            }
+            path = candidate / finetune.FROZEN_NAME
+            verify.save(path, frozen)
+            finetune.load_frozen(candidate, baseline, worker)
+            for key, value in (("status", "rejected"), ("worker_sha256", "mismatch"), ("qualifying_thresholds", 0)):
+                changed = copy.deepcopy(frozen)
+                changed["provenance"]["calibration_qualification"][key] = value
+                verify.save(path, changed)
+                with self.subTest(key=key), self.assertRaisesRegex(verify.VerifyError, "calibration qualification"):
+                    finetune.load_frozen(candidate, baseline, worker)
 
 
 if __name__ == "__main__":

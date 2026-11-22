@@ -34,6 +34,8 @@ FROZEN_NAME = "atlas-bert-frozen.json"
 EVALUATION_NAME = "atlas-bert-evaluation.json"
 BASELINE_THRESHOLD = .8
 REGRESSION_POLICY = "atlas-bert-synthetic-noninferiority-v1"
+CALIBRATION_SCHEMA = "atlas-bert-calibration-v1"
+THRESHOLD_GRID = range(50, 100)
 SEED = 1701
 EPOCHS = 3
 TRAIN_BATCH = 24
@@ -256,15 +258,37 @@ def score_with_worker(worker, model, articles, contract):
     return parse_worker_scores(output, [len(chunk) for chunk in texts], contract["protocol"])
 
 
-def select_threshold(calibration, scores):
-    best = None
-    for integer in range(50, 100):
+def select_threshold(calibration, baseline_scores, candidate_scores):
+    baseline = metrics(calibration, baseline_scores, BASELINE_THRESHOLD)
+    best_overall = best_qualified = None
+    qualifying_thresholds = 0
+    for integer in THRESHOLD_GRID:
         gate = integer / 100
-        report = metrics(calibration, scores, gate)
+        report = metrics(calibration, candidate_scores, gate)
         key = (*quality(report), gate)
-        if best is None or key > best[0]:
-            best = (key, gate, report)
-    return best[1:]
+        trial = (key, {"threshold": gate, "metrics": report})
+        if best_overall is None or key > best_overall[0]:
+            best_overall = trial
+        if regression_passes(baseline, report):
+            qualifying_thresholds += 1
+            if best_qualified is None or key > best_qualified[0]:
+                best_qualified = trial
+    return {
+        "schema_version": CALIBRATION_SCHEMA,
+        "status": "qualified" if best_qualified else "rejected",
+        "regression_policy": REGRESSION_POLICY,
+        "calibration_rows": len(calibration),
+        "baseline_threshold": BASELINE_THRESHOLD,
+        "baseline": baseline,
+        "tested_thresholds": len(THRESHOLD_GRID),
+        "qualifying_thresholds": qualifying_thresholds,
+        "best_overall": best_overall[1],
+        "selected": best_qualified[1] if best_qualified else None,
+    }
+
+
+def calibration_receipt_path(candidate):
+    return candidate.with_name(f"{candidate.name}-calibration.json")
 
 
 def validate_prepared(prepared):
@@ -404,6 +428,9 @@ def write_new(path, value):
 def fit(prepared, destination, worker, revision):
     if destination.exists() or destination.is_symlink():
         raise VerifyError("Choose a new candidate directory")
+    receipt_path = calibration_receipt_path(destination)
+    if receipt_path.exists() or receipt_path.is_symlink():
+        raise VerifyError("Candidate already has a calibration receipt")
     checkpoint, converter = validate_prepared(prepared)
     runtime = runtime_contract()
     articles = read_articles(read_corpus(), ("train", "development", "calibration"))
@@ -421,20 +448,37 @@ def fit(prepared, destination, worker, revision):
             ["bash", preparer, "--convert", weights, converter], check=True, timeout=300, env=conversion_env,
         )
         weights.unlink()
-        calibration_scores = score_with_worker(worker, staging, articles["calibration"], runtime)
-        selected_threshold, report = select_threshold(articles["calibration"], calibration_scores)
+        calibration = articles["calibration"]
+        baseline_scores = score_with_worker(worker, checkpoint, calibration, runtime)
+        candidate_scores = score_with_worker(worker, staging, calibration, runtime)
+        qualification = select_threshold(calibration, baseline_scores, candidate_scores)
+        candidate_assets = model_assets(staging)
+        baseline_assets = model_assets(checkpoint)
+        worker_sha = sha(worker)
+        qualification.update({
+            "dataset_sha256": DATASET_SHA256,
+            "source_revision": revision,
+            "worker_sha256": worker_sha,
+            "baseline_assets": baseline_assets,
+            "candidate_assets": candidate_assets,
+        })
+        write_new(receipt_path, qualification)
+        selected = qualification["selected"]
+        if selected is None:
+            return None
         frozen = {
             "schema_version": "atlas-bert-frozen-v1", "dataset_sha256": DATASET_SHA256,
             "base_checkpoint_revision": MODEL_COMMIT, "split_counts": SPLIT_COUNTS,
-            "threshold": selected_threshold, "assets": model_assets(staging),
+            "threshold": selected["threshold"], "assets": candidate_assets,
             "provenance": {
-                "kind": "synthetic", "training": training, "calibration": report,
+                "kind": "synthetic", "training": training, "calibration": selected["metrics"],
+                "calibration_qualification": qualification,
                 "runtime_contract": runtime, "source_revision": revision,
                 "trainer_sha256": sha(Path(__file__).resolve()),
                 "converter_source_sha256": sha(converter / "rust-bert.crate"),
                 "conversion_script_sha256": sha(preparer),
-                "calibration_worker_sha256": sha(worker),
-                "baseline_assets": model_assets(checkpoint),
+                "calibration_worker_sha256": worker_sha,
+                "baseline_assets": baseline_assets,
             },
         }
         write_new(staging / FROZEN_NAME, frozen)
@@ -463,6 +507,28 @@ def load_frozen(candidate, baseline, worker=None):
     ):
         raise VerifyError("Frozen model, baseline, worker, corpus or runtime contract differs")
     threshold(frozen["threshold"])
+    provenance = frozen["provenance"]
+    if "calibration_qualification" in provenance:
+        qualification = provenance["calibration_qualification"]
+        selected = qualification.get("selected") or {}
+        if (
+            qualification["schema_version"] != CALIBRATION_SCHEMA
+            or qualification["status"] != "qualified"
+            or qualification["regression_policy"] != REGRESSION_POLICY
+            or qualification["calibration_rows"] != SPLIT_COUNTS["calibration"]
+            or qualification["baseline_threshold"] != BASELINE_THRESHOLD
+            or qualification["tested_thresholds"] != len(THRESHOLD_GRID)
+            or not 1 <= qualification["qualifying_thresholds"] <= len(THRESHOLD_GRID)
+            or qualification["dataset_sha256"] != frozen["dataset_sha256"]
+            or qualification["source_revision"] != provenance["source_revision"]
+            or qualification["worker_sha256"] != provenance["calibration_worker_sha256"]
+            or qualification["baseline_assets"] != provenance["baseline_assets"]
+            or qualification["candidate_assets"] != frozen["assets"]
+            or selected.get("threshold") != frozen["threshold"]
+            or selected.get("metrics") != provenance["calibration"]
+            or not regression_passes(qualification["baseline"], selected["metrics"])
+        ):
+            raise VerifyError("Frozen candidate calibration qualification differs")
     return frozen, hashlib.sha256(frozen_bytes).hexdigest()
 
 
@@ -521,6 +587,9 @@ def main(argv=None):
             if args.revision != revision:
                 raise VerifyError("Checked-out trainer source differs from the requested SHA")
             result = fit(args.prepared.resolve(strict=True), candidate, worker, args.revision)
+            if result is None:
+                print("Atlas BERT candidate rejected by the calibration regression gate", file=sys.stderr)
+                return 1
             print(json.dumps({"threshold": result["threshold"], "assets": result["assets"]}))
         else:
             result = evaluate(candidate, args.baseline.resolve(strict=True), worker)

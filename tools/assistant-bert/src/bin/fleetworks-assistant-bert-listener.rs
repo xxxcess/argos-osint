@@ -43,6 +43,7 @@ use protocol::qa_frame_len;
 use protocol::QaWorkerCommand;
 use protocol::QaWorkerEvent;
 use protocol::QaWorkerReply;
+use protocol::QA_CONTEXT_USAGE_ENV;
 use protocol::QA_MAX_FRAME_BYTES;
 use protocol::QA_MODEL_REVISION;
 use protocol::QA_WORKER_PROTOCOL;
@@ -414,11 +415,12 @@ fn supervise(
 
 fn serve(stream: UnixStream, worker: &Path, model: &Path, libraries: &Path) -> Result<()> {
     stream.set_nonblocking(true)?;
-    match opening_command(&stream)? {
+    let report_context = match opening_command(&stream)? {
         QaWorkerCommand::Shutdown => return confirm_stopped(&stream),
-        QaWorkerCommand::Open => {}
+        QaWorkerCommand::Open => false,
+        QaWorkerCommand::OpenWithContext => true,
         _ => return Err(anyhow!("invalid QA executor handshake")),
-    }
+    };
 
     // Relay rather than passing the executor FD to the worker so a stuck worker cannot hold
     // its own lease open. Each direction holds at most one bounded frame awaiting delivery.
@@ -431,22 +433,24 @@ fn serve(stream: UnixStream, worker: &Path, model: &Path, libraries: &Path) -> R
     } else {
         "LD_LIBRARY_PATH"
     };
-    let mut child = ModelChild(
-        Command::new(worker)
-            .arg("--model-dir")
-            .arg(model)
-            .current_dir(model)
-            .env_clear()
-            .env(library_variable, libraries)
-            .env("OMP_NUM_THREADS", "1")
-            .env("MKL_NUM_THREADS", "1")
-            .env("RAYON_NUM_THREADS", "1")
-            .stdin(Stdio::from(input))
-            .stdout(Stdio::from(output))
-            .stderr(Stdio::null())
-            .process_group(0)
-            .spawn()?,
-    );
+    let mut command = Command::new(worker);
+    command
+        .arg("--model-dir")
+        .arg(model)
+        .current_dir(model)
+        .env_clear()
+        .env(library_variable, libraries)
+        .env("OMP_NUM_THREADS", "1")
+        .env("MKL_NUM_THREADS", "1")
+        .env("RAYON_NUM_THREADS", "1")
+        .stdin(Stdio::from(input))
+        .stdout(Stdio::from(output))
+        .stderr(Stdio::null())
+        .process_group(0);
+    if report_context {
+        command.env(QA_CONTEXT_USAGE_ENV, "1");
+    }
+    let mut child = ModelChild(command.spawn()?);
     supervise(&stream, &model_io, &mut child, EXECUTOR_LEASE)
 }
 

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 896" role="img" aria-labelledby="inbox-prompt-flow-title inbox-prompt-flow-desc">
   <title id="inbox-prompt-flow-title">Inbox prompt flow</title>
-  <desc id="inbox-prompt-flow-desc">The native Inbox composer submits a registered turn to the Embedded companion over a private Unix socket or to the paired Distributed gateway over HTTPS. Both use shared QA admission to check permissions and capture fresh, scoped readiness, host metrics and Jobs counts. Exact facts, guidance and context requests answer immediately. Readiness summaries use a durable queue and a sandboxed BERT worker that receives bounded passages. The coordinator verifies cited selections against the snapshot and can use complete fresh readiness observations when a summary returns no usable selection. The backend commits the canonical turn and ordered events. Inbox resumes from a cursor or fetches the latest turn, with timestamped citations under a collapsed Sources control.</desc>
+  <desc id="inbox-prompt-flow-desc">The native Inbox composer submits a registered turn to the Embedded companion over a private Unix socket or to the paired Distributed gateway over HTTPS. Both use shared QA admission to check permissions and capture fresh, scoped readiness, host metrics and Jobs counts. Exact facts, guidance and context requests answer immediately. Readiness summaries use a durable queue and a sandboxed BERT worker that receives bounded passages. The coordinator verifies cited selections against the snapshot and can use complete fresh readiness observations when a summary returns no usable selection. The backend commits the canonical turn and ordered events. Inbox resumes from a cursor or fetches the latest turn, with a context-window dial and timestamped citations under a collapsed Sources control.</desc>
   <style>
     text{font-family:Geist,Arial,sans-serif;fill:#242424}
     .label{font-size:22px;font-weight:600}
@@ -72,7 +72,7 @@
     <text x="612" y="536" class="label">Sandboxed BERT worker</text>
     <text x="612" y="560" class="note">Selects bounded spans from supplied passages</text>
     <text x="612" y="580" class="note">Embedded pipes or Distributed private socket</text>
-    <text x="612" y="600" class="note">Network access disabled</text>
+    <text x="612" y="600" class="note">Offline model reports context-window usage</text>
   </g>
 
   <g data-card="true">
@@ -87,6 +87,6 @@
     <rect x="240" y="788" width="640" height="84" rx="6" class="node"/>
     <text x="260" y="816" class="label">Inbox transcript</text>
     <text x="260" y="840" class="note">Resume from the event cursor or recover the latest turn</text>
-    <text x="260" y="864" class="note">Sources starts collapsed. Each citation keeps its timestamp.</text>
+    <text x="260" y="864" class="note">Context dial and collapsible timestamped Sources</text>
   </g>
 </svg>

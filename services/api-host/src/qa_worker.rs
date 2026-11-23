@@ -35,6 +35,7 @@ use fleetworks_contracts::qa_worker::QaWorkerEvent;
 use fleetworks_contracts::qa_worker::QaWorkerReply;
 use fleetworks_contracts::qa_worker::QaWorkerRequest;
 use fleetworks_contracts::qa_worker::QaWorkerSequence;
+use fleetworks_contracts::qa_worker::QA_CONTEXT_USAGE_ENV;
 use fleetworks_contracts::qa_worker::QA_MODEL_FILES;
 use fleetworks_contracts::qa_worker::QA_MODEL_REVISION;
 use fleetworks_contracts::qa_worker::QA_WORKER_PROTOCOL;
@@ -198,14 +199,7 @@ impl QaWorkerSupervisor {
     async fn connect(&self, progress: &(dyn Fn(QaStartupStage) + Sync)) -> Result<WorkerSession> {
         match &self.target {
             WorkerTarget::Distributed(socket) => {
-                let mut session = WorkerSession::socket(socket)
-                    .await
-                    .map_err(|error| warm_error("worker_socket", error))?;
-                session
-                    .send(&QaWorkerCommand::Open)
-                    .await
-                    .map_err(|error| warm_error("worker_socket_open", error))?;
-                Ok(session)
+                WorkerSession::open_socket(socket, QaWorkerCommand::OpenWithContext).await
             }
             WorkerTarget::EmbeddedState(state_dir) => {
                 let state_dir = state_dir.clone();
@@ -257,12 +251,21 @@ impl QaWorkerSupervisor {
         };
         let child_pid = session.child_id();
         let mut stage = WarmStage::new("worker_ready_frame");
+        let readiness = async {
+            if let WorkerTarget::Distributed(socket) = &self.target {
+                if session.ready_after_context_open().await? {
+                    return Ok(());
+                }
+                session = WorkerSession::open_socket(socket, QaWorkerCommand::Open).await?;
+            }
+            session.ready().await
+        };
         let (ready, failure_stage) = tokio::select! {
             biased;
             _ = stopped.changed() => (Err(anyhow!("QA worker is stopping")), None),
             _ = cancel.cancelled() => (Err(anyhow!("QA request was canceled")), None),
             error = guard_resident(child_pid) => (Err(error), Some("worker_memory_limit")),
-            result = timeout(WARM_LIMIT, session.ready()) => match result {
+            result = timeout(WARM_LIMIT, readiness) => match result {
                 Ok(result) => (result, Some("worker_ready_frame")),
                 Err(_) => (Err(anyhow!("QA worker did not load in time")), Some("worker_ready_timeout")),
             },
@@ -426,6 +429,7 @@ impl WorkerSession {
             .arg("--model-dir")
             .arg(&model)
             .current_dir(&model)
+            .env(QA_CONTEXT_USAGE_ENV, "1")
             .env("OMP_NUM_THREADS", "1")
             .env("MKL_NUM_THREADS", "1")
             .env("RAYON_NUM_THREADS", "1")
@@ -455,6 +459,17 @@ impl WorkerSession {
 
     fn child_id(&self) -> Option<u32> {
         self.child.as_ref().and_then(Child::id)
+    }
+
+    async fn open_socket(socket: &Path, command: QaWorkerCommand) -> Result<Self> {
+        let mut session = Self::socket(socket)
+            .await
+            .map_err(|error| warm_error("worker_socket", error))?;
+        session
+            .send(&command)
+            .await
+            .map_err(|error| warm_error("worker_socket_open", error))?;
+        Ok(session)
     }
 
     async fn socket(socket: &Path) -> Result<Self> {
@@ -495,13 +510,35 @@ impl WorkerSession {
     async fn receive(&mut self) -> Result<QaWorkerReply> {
         let mut header = [0; 4];
         self.output.read_exact(&mut header).await?;
+        self.receive_payload(header).await
+    }
+
+    async fn receive_payload(&mut self, header: [u8; 4]) -> Result<QaWorkerReply> {
         let mut payload = vec![0; qa_frame_len(header)?];
         self.output.read_exact(&mut payload).await?;
         serde_json::from_slice(&payload).map_err(|_| anyhow!("invalid QA worker response"))
     }
 
+    async fn ready_after_context_open(&mut self) -> Result<bool> {
+        let mut header = [0; 4];
+        // Older listeners close the socket as soon as they reject the unknown command.
+        // Once a peer sends any frame bytes, handle it as an ordinary readiness reply.
+        let received = match self.output.read(&mut header).await {
+            Ok(0) => return Ok(false),
+            Err(error) if error.kind() == io::ErrorKind::ConnectionReset => return Ok(false),
+            read => read?,
+        };
+        self.output.read_exact(&mut header[received..]).await?;
+        Self::validate_ready(self.receive_payload(header).await?)?;
+        Ok(true)
+    }
+
     async fn ready(&mut self) -> Result<()> {
-        match self.receive().await? {
+        Self::validate_ready(self.receive().await?)
+    }
+
+    fn validate_ready(reply: QaWorkerReply) -> Result<()> {
+        match reply {
             QaWorkerReply::Ready {
                 protocol,
                 model_revision,
@@ -882,8 +919,10 @@ fn host_target() -> String {
 mod tests {
     use std::os::unix::fs::PermissionsExt;
 
+    use fleetworks_contracts::qa_worker::QaContextUsage;
     use fleetworks_contracts::qa_worker::QaPassage;
     use fleetworks_contracts::qa_worker::QaWorkerOutcome;
+    use fleetworks_contracts::qa_worker::QA_CONTEXT_WINDOW_TOKENS;
     use tokio::net::UnixListener;
     use tokio::sync::oneshot;
 
@@ -924,6 +963,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn opens_a_legacy_listener_after_an_empty_context_handshake() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = directory.path().join("qa.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let peer = async {
+            let (mut unsupported, _) = listener.accept().await.unwrap();
+            assert!(matches!(
+                read_command(&mut unsupported).await,
+                QaWorkerCommand::OpenWithContext
+            ));
+            drop(unsupported);
+
+            let (mut legacy, _) = listener.accept().await.unwrap();
+            assert!(matches!(
+                read_command(&mut legacy).await,
+                QaWorkerCommand::Open
+            ));
+            write_reply(
+                &mut legacy,
+                QaWorkerReply::Ready {
+                    protocol: QA_WORKER_PROTOCOL,
+                    model_revision: QA_MODEL_REVISION.into(),
+                },
+            )
+            .await;
+            assert!(matches!(
+                read_command(&mut legacy).await,
+                QaWorkerCommand::Shutdown
+            ));
+            write_reply(&mut legacy, QaWorkerReply::Stopped).await;
+        };
+        let supervisor = QaWorkerSupervisor::new(WorkerTarget::Distributed(socket));
+        let executor = async {
+            supervisor.warm().await.unwrap();
+            supervisor.shutdown().await.unwrap();
+        };
+        timeout(PING_LIMIT, async { tokio::join!(peer, executor) })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn streams_first_finding_before_next_batch_and_confirms_stop() {
         let directory = tempfile::tempdir().unwrap();
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -935,7 +1019,7 @@ mod tests {
             let (mut peer, _) = listener.accept().await.unwrap();
             assert!(matches!(
                 read_command(&mut peer).await,
-                QaWorkerCommand::Open
+                QaWorkerCommand::OpenWithContext
             ));
             let ready = || QaWorkerReply::Ready {
                 protocol: QA_WORKER_PROTOCOL,
@@ -987,6 +1071,7 @@ mod tests {
                         turn_id,
                         sequence: 3,
                         outcome: QaWorkerOutcome::Answered,
+                        context: Some(QaContextUsage::new(QA_CONTEXT_WINDOW_TOKENS, 58, 2)),
                     },
                 },
             )
@@ -1022,7 +1107,11 @@ mod tests {
             ));
             assert!(matches!(
                 stream.recv().await,
-                Some(QaWorkerEvent::Complete { sequence: 3, .. })
+                Some(QaWorkerEvent::Complete {
+                    sequence: 3,
+                    context: Some(context),
+                    ..
+                }) if context == QaContextUsage::new(QA_CONTEXT_WINDOW_TOKENS, 58, 2)
             ));
         };
         let (result, ()) = timeout(PING_LIMIT, async { tokio::join!(ask, consume) })

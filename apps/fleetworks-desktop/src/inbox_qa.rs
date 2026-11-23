@@ -23,6 +23,7 @@ use fleetworks_contracts::chat::MAX_INPUT_BYTES;
 use fleetworks_contracts::context::MutationContext;
 use fleetworks_contracts::context::Permission;
 use fleetworks_contracts::context::RegisteredContext;
+use fleetworks_contracts::qa_worker::QaContextUsage;
 use fleetworks_contracts::Client;
 use fleetworks_contracts::ClientError;
 use fleetworks_workstation::native::BackendKind;
@@ -33,12 +34,14 @@ use rune::LiveRegion;
 use rune::TextEdit;
 use rune::Tx;
 use rune_kit::Kit;
+use rune_kit::ProgressCircle;
 
 use crate::accessibility::ViewPreferences;
 use crate::assistant;
 use crate::chat_ui;
 use crate::connection::GatewayEffects;
 use crate::connection::RequestTask;
+use crate::icons;
 use crate::material::{self, GlassSurface, MetalFinish};
 use crate::theme;
 use crate::theme::StatusTone;
@@ -51,6 +54,7 @@ const MIN_EVENT_INTERVAL: f64 = 0.2;
 const COMPOSER: &str = "inbox-qa-composer";
 const SOURCES_TOGGLE: &str = "inbox-qa-sources-toggle";
 const SOURCES_CONTENT: &str = "inbox-qa-sources";
+const CONTEXT_DIAL: &str = "inbox-qa-context";
 const SETTINGS_CONTROL: &str = "inbox-qa-toggle";
 #[cfg(test)]
 const REPLY: &str = "chat-message-inbox-qa-answer";
@@ -1013,12 +1017,79 @@ fn answer_sources(turn_id: &str, citations: &[chat_ui::Citation], expanded: bool
         }))
 }
 
+fn context_dial(usage: Option<QaContextUsage>, kit: &Kit) -> El {
+    let row = rune::row().key(CONTEXT_DIAL).gap(5.0).center_y();
+    let usage = usage.filter(|usage| {
+        usage.window_tokens > 0
+            && usage.peak_input_tokens <= usage.window_tokens
+            && (usage.model_windows == 0) == (usage.peak_input_tokens == 0)
+    });
+    let (row, fraction, tone, tokens, percentage) = if let Some(usage) = usage {
+        let used = usage.peak_input_tokens;
+        let capacity = usage.window_tokens;
+        let fraction = f32::from(used) / f32::from(capacity);
+        let percentage = format!("{:.0}%", fraction * 100.0);
+        let tone = match fraction {
+            _ if usage.model_windows == 0 => StatusTone::Neutral,
+            value if value >= 0.95 => StatusTone::Err,
+            value if value >= 0.85 => StatusTone::Warn,
+            _ => StatusTone::Info,
+        };
+        let value = if usage.model_windows == 0 {
+            format!("{used} of {capacity} tokens, {percentage}, model bypassed")
+        } else {
+            format!("{used} of {capacity} tokens, {percentage} peak usage")
+        };
+        (
+            row.role("meter")
+                .label("Model context window")
+                .range_value(f64::from(used), 0.0, f64::from(capacity))
+                .a11y_value(value),
+            fraction,
+            tone,
+            format!("{used}/{capacity} tokens"),
+            Some(percentage),
+        )
+    } else {
+        (
+            row.role("group")
+                .label("Model context window, usage unavailable"),
+            0.0,
+            StatusTone::Neutral,
+            "—".into(),
+            None,
+        )
+    };
+    let ink = tone.fg();
+    let mut dial_kit = kit.clone();
+    dial_kit.c.icon_muted = ink;
+    row.child(
+        ProgressCircle::new(fraction)
+            .size(14.0)
+            .build(&dial_kit)
+            .a11y_hidden(),
+    )
+    .child(rune::icon(&icons::MODELS, 12.0).color(ink).a11y_hidden())
+    .child(
+        rune::text(tokens)
+            .font(kit.ty.text_xsmall)
+            .color(kit.c.text_muted)
+            .a11y_hidden(),
+    )
+    .children(percentage.map(|text| {
+        rune::text(text)
+            .font(kit.ty.text_xsmall_medium)
+            .color(ink)
+            .a11y_hidden()
+    }))
+}
+
 pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -> Option<El> {
     if !state.inbox_qa_visible() {
         return None;
     }
     let qa = &state.inbox_qa;
-    let (question, stage, detail, findings, request_id, turn_id) =
+    let (question, stage, detail, findings, request_id, turn_id, usage) =
         if let Some(pending) = &qa.pending {
             (
                 pending.request.question.as_str(),
@@ -1026,6 +1097,7 @@ pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -
                 "",
                 &[][..],
                 pending.request.request_id.as_str(),
+                None,
                 None,
             )
         } else if let Some(turn) = &qa.latest {
@@ -1037,6 +1109,7 @@ pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -
                 turn.findings.as_slice(),
                 turn.request_id.as_str(),
                 Some(turn.turn_id.as_str()),
+                turn.context,
             )
         } else {
             return None;
@@ -1085,7 +1158,8 @@ pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -
             chat_ui::bubble_with_sources(&answer, sources, kit)
                 .key("inbox-qa-live-answer")
                 .live_region(LiveRegion::Polite),
-        );
+        )
+        .child(context_dial(usage, kit));
     // Admission and streaming keep the same request key as the queued draft.
     let turn = crate::inbox::enter_from_below(
         rune::col()
@@ -1342,6 +1416,60 @@ mod tests {
                 .flatten()
                 .map(|child| accessibility_nodes_with_key(child, key))
                 .sum::<usize>()
+    }
+
+    #[test]
+    fn context_dial_uses_the_response_usage_and_distinguishes_bypass_from_unknown() {
+        use fleetworks_contracts::qa_worker::QA_CONTEXT_WINDOW_TOKENS;
+
+        let mut runtime = active_drawer((640.0, 480.0));
+        let assert_unknown = |runtime: &Runtime<State>| {
+            let tree = runtime.accessibility_json();
+            assert_eq!(accessibility_nodes_with_key(&tree, CONTEXT_DIAL), 1);
+            let rendered = tree.to_string();
+            assert!(rendered.contains("Model context window, usage unavailable"));
+            assert!(!rendered.contains("model bypassed"));
+        };
+        assert_unknown(&runtime);
+
+        runtime.update(|state, _| {
+            let mut modeled = turn(QaTurnState::Answered, 2);
+            modeled.context = Some(QaContextUsage::new(QA_CONTEXT_WINDOW_TOKENS, 224, 3));
+            state.inbox_qa.adopt(Some(modeled));
+        });
+        runtime.frame(1.0);
+        let tree = runtime.accessibility_json();
+        assert_eq!(accessibility_nodes_with_key(&tree, CONTEXT_DIAL), 1);
+        assert!(tree
+            .to_string()
+            .contains("224 of 256 tokens, 88% peak usage"));
+        assert!(runtime.elements().iter().any(|element| {
+            !element.exiting && element.text.as_deref() == Some("224/256 tokens")
+        }));
+        let (reply, _) = runtime.presented(REPLY).unwrap();
+        let (dial, _) = runtime.presented(CONTEXT_DIAL).unwrap();
+        assert!(dial[1] >= reply[1] + reply[3]);
+
+        runtime.update(|state, _| {
+            let mut direct = turn(QaTurnState::Answered, 2);
+            direct.turn_id = "fixture-direct".into();
+            direct.request_id = "fixture-direct-request".into();
+            direct.context = Some(QaContextUsage::new(QA_CONTEXT_WINDOW_TOKENS, 0, 0));
+            state.inbox_qa.adopt(Some(direct));
+        });
+        runtime.frame(1.5);
+        let rendered = runtime.accessibility_json().to_string();
+        assert!(rendered.contains("0 of 256 tokens, 0%, model bypassed"));
+        assert!(!rendered.contains("224 of 256 tokens"));
+
+        runtime.update(|state, _| {
+            let mut stopped = turn(QaTurnState::Canceled, 3);
+            stopped.turn_id = "fixture-stopped".into();
+            stopped.request_id = "fixture-stopped-request".into();
+            state.inbox_qa.adopt(Some(stopped));
+        });
+        runtime.frame(2.0);
+        assert_unknown(&runtime);
     }
 
     #[test]

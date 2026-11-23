@@ -6,6 +6,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::context::MutationContext;
+use crate::qa_worker::QaContextUsage;
 
 use super::identity;
 use super::request_id;
@@ -379,6 +380,8 @@ pub struct QaTurn {
     pub notice: Option<QaTurnNotice>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation: Option<QaConversationReply>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<QaContextUsage>,
     pub cursor: u64,
 }
 
@@ -403,6 +406,7 @@ impl QaTurn {
             findings: Vec::new(),
             notice: None,
             conversation: None,
+            context: None,
             cursor: 0,
         }
     }

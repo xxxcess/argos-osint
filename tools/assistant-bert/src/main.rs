@@ -37,6 +37,7 @@ use sha2::Digest;
 use sha2::Sha256;
 use tch::Device;
 
+use protocol::QaContextUsage;
 use protocol::QaPassage;
 use protocol::QaWorkerCommand;
 use protocol::QaWorkerEvent;
@@ -46,6 +47,8 @@ use protocol::QaWorkerPanicSource;
 use protocol::QaWorkerReply;
 use protocol::QaWorkerRequest;
 use protocol::QaWorkerSequence;
+use protocol::QA_CONTEXT_USAGE_ENV;
+use protocol::QA_CONTEXT_WINDOW_TOKENS;
 use protocol::QA_MAX_FINDINGS;
 use protocol::QA_MAX_FRAME_BYTES;
 use protocol::QA_MAX_VISIBLE_WORDS;
@@ -55,7 +58,8 @@ use protocol::QA_WORKER_PROTOCOL;
 
 const MAX_QUERY_TOKENS: usize = 96;
 const MAX_PASSAGE_TOKENS: usize = 384;
-const MAX_SEQUENCE_TOKENS: usize = 256;
+const MAX_SEQUENCE_TOKENS: usize = QA_CONTEXT_WINDOW_TOKENS as usize;
+const BERT_PAIR_SPECIAL_TOKENS: usize = 3;
 const WINDOW_OVERLAP: usize = 32;
 const MAX_ANSWER_TOKENS: usize = 36;
 const PASSAGES_PER_BATCH: usize = 2;
@@ -201,10 +205,31 @@ fn best_span<'a>(passage: &QaPassage, candidates: &'a [Answer]) -> Option<&'a An
     }
 }
 
+fn passage_context_usage(query_tokens: usize, passage_tokens: usize) -> (usize, usize) {
+    // Mirror rust-bert 0.22.0's QA generate_features loop for the pinned BERT pair
+    // encoding: [CLS], question, [SEP], passage window, [SEP].
+    let fixed_tokens = query_tokens + BERT_PAIR_SPECIAL_TOKENS;
+    let capacity = MAX_SEQUENCE_TOKENS - fixed_tokens;
+    let mut start = 0;
+    let mut peak_input_tokens = 0;
+    let mut windows = 0;
+    while windows * WINDOW_OVERLAP < passage_tokens {
+        let end = (start + capacity).min(passage_tokens);
+        peak_input_tokens = peak_input_tokens.max(fixed_tokens + end - start);
+        windows += 1;
+        if end == passage_tokens {
+            break;
+        }
+        start = end - WINDOW_OVERLAP;
+    }
+    (peak_input_tokens, windows)
+}
+
 /// Stream at most one independently supported extraction per opaque source ID.
 fn answer(
     model: &QuestionAnsweringModel,
     request: QaWorkerRequest,
+    report_context: bool,
     output: &mut impl FnMut(QaWorkerReply) -> io::Result<()>,
     stopping: &AtomicBool,
 ) -> Result<()> {
@@ -213,6 +238,8 @@ fn answer(
     let mut sequence = QaWorkerSequence::default();
     let mut found = 0;
     let mut words = 0;
+    let mut peak_input_tokens = 0;
+    let mut model_windows = 0;
     let mut unique_answers = BTreeSet::new();
     let query_tokens = tokenizer
         .tokenize_with_offsets(&request.question)
@@ -225,14 +252,16 @@ fn answer(
             }
             let passages = batch
                 .iter()
-                .filter(|passage| {
+                .filter_map(|passage| {
                     let tokens = tokenizer.tokenize_with_offsets(&passage.text).tokens.len();
-                    (1..=MAX_PASSAGE_TOKENS).contains(&tokens)
+                    (1..=MAX_PASSAGE_TOKENS)
+                        .contains(&tokens)
+                        .then_some((passage, tokens))
                 })
                 .collect::<Vec<_>>();
             let inputs = passages
                 .iter()
-                .map(|passage| QaInput {
+                .map(|(passage, _)| QaInput {
                     question: request.question.clone(),
                     context: passage.text.clone(),
                 })
@@ -241,10 +270,17 @@ fn answer(
                 continue;
             }
             let predicted = model.predict(&inputs, CANDIDATES_PER_PASSAGE, MAX_PHYSICAL_BATCH);
+            if report_context {
+                for &(_, tokens) in &passages {
+                    let (peak, windows) = passage_context_usage(query_tokens, tokens);
+                    peak_input_tokens = peak_input_tokens.max(peak);
+                    model_windows += windows;
+                }
+            }
             if stopping.load(Ordering::Acquire) {
                 return Ok(());
             }
-            for (passage, candidates) in passages.into_iter().zip(&predicted) {
+            for ((passage, _), candidates) in passages.into_iter().zip(&predicted) {
                 let Some(best) = best_span(passage, candidates) else {
                     continue;
                 };
@@ -282,6 +318,15 @@ fn answer(
             QaWorkerOutcome::InsufficientContext
         } else {
             QaWorkerOutcome::Answered
+        },
+        context: if report_context {
+            Some(QaContextUsage::new(
+                QA_CONTEXT_WINDOW_TOKENS,
+                u16::try_from(peak_input_tokens)?,
+                u16::try_from(model_windows)?,
+            ))
+        } else {
+            None
         },
     };
     sequence.accept(&request, &event)?;
@@ -337,6 +382,8 @@ pub(crate) fn run(mut output: impl FnMut(QaWorkerReply) -> io::Result<()>) -> Re
         .ok_or_else(|| anyhow!("missing QA model directory"))?;
     ensure!(args.next().is_none(), "unexpected QA worker arguments");
 
+    // Older launchers reject unknown fields in a terminal event.
+    let report_context = env::var_os(QA_CONTEXT_USAGE_ENV).as_deref() == Some("1".as_ref());
     let stopping = Arc::new(AtomicBool::new(false));
     let commands = receive_commands(stopping.clone())?;
     let model = match panic::catch_unwind(|| load_model(&dir)) {
@@ -362,9 +409,13 @@ pub(crate) fn run(mut output: impl FnMut(QaWorkerReply) -> io::Result<()>) -> Re
         }
         match command {
             QaWorkerCommand::Ping => output(ready())?,
-            QaWorkerCommand::Ask { request } => answer(&model, request, &mut output, &stopping)?,
+            QaWorkerCommand::Ask { request } => {
+                answer(&model, request, report_context, &mut output, &stopping)?;
+            }
             QaWorkerCommand::Shutdown => return Ok(()),
-            QaWorkerCommand::Open => return Err(anyhow!("unexpected QA worker handshake")),
+            QaWorkerCommand::Open | QaWorkerCommand::OpenWithContext => {
+                return Err(anyhow!("unexpected QA worker handshake"));
+            }
         }
     }
     Ok(())
@@ -391,6 +442,16 @@ mod tests {
             end,
             answer: answer.into(),
         }
+    }
+
+    #[test]
+    fn measures_bert_sequence_limit_and_overlapping_windows() {
+        assert_eq!(passage_context_usage(8, 0), (0, 0));
+        assert_eq!(passage_context_usage(8, 12), (23, 1));
+        assert_eq!(passage_context_usage(96, 157), (256, 1));
+        assert_eq!(passage_context_usage(96, 158), (256, 2));
+        assert_eq!(passage_context_usage(96, 282), (256, 2));
+        assert_eq!(passage_context_usage(96, 283), (256, 3));
     }
 
     #[test]

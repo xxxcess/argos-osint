@@ -10,6 +10,8 @@ use serde::Deserialize;
 use serde::Serialize;
 
 pub const QA_WORKER_PROTOCOL: u16 = 1;
+pub const QA_CONTEXT_WINDOW_TOKENS: u16 = 256;
+pub const QA_CONTEXT_USAGE_ENV: &str = "FLEETWORKS_QA_CONTEXT_USAGE";
 pub const QA_MODEL_REVISION: &str = "564e9b582944a57a3e586bbb98fd6f0a4118db7f";
 pub const QA_MODEL_FILES: [(&str, &str); 3] = [
     (
@@ -35,6 +37,33 @@ pub const QA_MAX_FINDINGS: usize = 3;
 pub const QA_MAX_VISIBLE_WORDS: usize = 60;
 const MAX_ANSWER_BYTES: usize = 32 * 1024;
 const MAX_OPAQUE_ID_BYTES: usize = 128;
+const MAX_WINDOWS_PER_PASSAGE: usize = 3;
+
+/// Model input usage for one turn. Peak excludes batch padding.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct QaContextUsage {
+    pub window_tokens: u16,
+    pub peak_input_tokens: u16,
+    pub model_windows: u16,
+}
+
+impl QaContextUsage {
+    pub const fn new(window_tokens: u16, peak_input_tokens: u16, model_windows: u16) -> Self {
+        Self {
+            window_tokens,
+            peak_input_tokens,
+            model_windows,
+        }
+    }
+
+    fn is_valid_for(self, request: &QaWorkerRequest) -> bool {
+        self.window_tokens == QA_CONTEXT_WINDOW_TOKENS
+            && self.peak_input_tokens <= self.window_tokens
+            && (self.model_windows == 0) == (self.peak_input_tokens == 0)
+            && usize::from(self.model_windows) <= request.passages.len() * MAX_WINDOWS_PER_PASSAGE
+    }
+}
 
 /// One immutable authorized passage. IDs identify distinct facts within a snapshot.
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
@@ -132,6 +161,8 @@ pub enum QaWorkerEvent {
         turn_id: String,
         sequence: u32,
         outcome: QaWorkerOutcome,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<QaContextUsage>,
     },
 }
 
@@ -141,6 +172,7 @@ pub enum QaWorkerEvent {
 #[non_exhaustive]
 pub enum QaWorkerCommand {
     Open,
+    OpenWithContext,
     Ping,
     Ask { request: QaWorkerRequest },
     Shutdown,
@@ -257,9 +289,11 @@ impl QaWorkerSequence {
                 turn_id,
                 sequence,
                 outcome,
+                context,
             } => {
                 if turn_id != &request.turn_id
                     || *sequence != expected
+                    || context.is_some_and(|usage| !usage.is_valid_for(request))
                     || (*outcome == QaWorkerOutcome::Answered && self.sources.is_empty())
                     || (*outcome == QaWorkerOutcome::InsufficientContext
                         && !self.sources.is_empty())
@@ -354,12 +388,21 @@ mod tests {
             turn_id: "turn-b".into(),
             sequence: 2,
             outcome: QaWorkerOutcome::Answered,
+            context: None,
         };
         assert!(sequence.accept(&request, &foreign).is_err());
+        let oversized_context = QaWorkerEvent::Complete {
+            turn_id: request.turn_id.clone(),
+            sequence: 2,
+            outcome: QaWorkerOutcome::Answered,
+            context: Some(QaContextUsage::new(256, 257, 1)),
+        };
+        assert!(sequence.accept(&request, &oversized_context).is_err());
         let terminal = QaWorkerEvent::Complete {
             turn_id: request.turn_id.clone(),
             sequence: 2,
             outcome: QaWorkerOutcome::Answered,
+            context: Some(QaContextUsage::new(256, 18, 1)),
         };
         assert!(sequence.accept(&request, &terminal).unwrap());
         assert!(sequence.accept(&request, &terminal).is_err());

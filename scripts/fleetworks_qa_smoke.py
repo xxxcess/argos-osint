@@ -30,6 +30,7 @@ QA = "/api/v2/workstation/chat/"
 EVIDENCE_HEADER = "X-Fleetworks-Inbox-Evidence"
 TERMINAL = {"answered", "insufficient_context", "canceled", "failed"}
 SUMMARY_QUESTION = "What is the current workstation readiness?"
+CONTEXT_WINDOW_TOKENS = 256
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 DIAGNOSTIC = re.compile(r'\b(qa_(?:warm|replica|queue|turn|settings)_stage)="?([a-z0-9_]{1,40})\b')
 DIAGNOSTIC_DETAIL = re.compile(
@@ -181,12 +182,25 @@ def legacy_turn(turn):
     return {**turn, "findings": [legacy_finding(finding) for finding in turn["findings"]]}
 
 
+def require_context(turn, *, inferred):
+    usage = turn.get("context")
+    require(isinstance(usage, dict) and usage.get("window_tokens") == CONTEXT_WINDOW_TOKENS,
+            "terminal turn lacks its model context window")
+    peak = usage.get("peak_input_tokens")
+    windows = usage.get("model_windows")
+    require(type(peak) is int and type(windows) is int
+            and (0 < peak <= CONTEXT_WINDOW_TOKENS and 0 < windows <= 48 if inferred else peak == windows == 0),
+            "terminal turn has incorrect model context usage")
+    return usage
+
+
 def grounded_turn(request, context, case, question, *, legacy_request=None, source=None):
     payload = {"request_id": f"inbox-qa-smoke-{case}", "context": context, "question": question}
     if source is not None:
         payload["source"] = source
     accepted = request("turns", payload, expected=(200, 201, 202))
     require(accepted["state"] in TERMINAL, f"{case} did not finish within admission")
+    require_context(accepted, inferred=False)
     query = {"turn_id": accepted["turn_id"], "after": 0, "wait_seconds": 0}
     page = request("events", query=query)
     require(page["turn"] == accepted and not page["gap"], f"{case} admission differed from its event snapshot")
@@ -353,6 +367,7 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
     require(terminal_events == 1 and snapshot["cursor"] == cursor, "terminal delivery was not exactly once")
     require(snapshot["state"] == "answered" and first_finding_ms is not None,
             "real local checkpoint did not return a cited answer")
+    model_context = require_context(snapshot, inferred=True)
     require(1 <= len(snapshot["findings"]) <= 3, "QA finding count exceeds its contract")
     for finding in snapshot["findings"]:
         require(0 <= finding["start"] < finding["end"]
@@ -377,6 +392,7 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
         lambda: request("events", query={"turn_id": follow_up_id, "after": 0, "wait_seconds": 0})["turn"],
         lambda value: value["state"] in TERMINAL, "fresh-evidence turn did not finish")
     require(next_turn["state"] == "answered" and next_turn["findings"], "fresh evidence did not support the follow-up")
+    require_context(next_turn, inferred=True)
 
     def observed(finding):
         return datetime.fromisoformat(finding["observed_at"].replace("Z", "+00:00"))
@@ -462,6 +478,7 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
     return {"model_warm_ms": ready_ms, "admission_ms": admission_ms, "first_cited_finding_ms": first_finding_ms,
             "completion_ms": completed_ms, "unload_ms": round((time.monotonic() - started) * 1000, 1),
             "model_pid_count": len(active), "warm_model_rss_bytes": worker_rss_bytes,
+            "model_context": model_context,
             "fresh_observation": True, "terminal_events": terminal_events, "terminal_state": snapshot["state"],
             "grounded_readiness": True, "live_metrics": True, "unsupported_context": True,
             "resource_snapshot": True, "greeting": True, "conversational_follow_ups": True,

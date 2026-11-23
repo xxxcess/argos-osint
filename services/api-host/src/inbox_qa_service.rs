@@ -18,7 +18,9 @@ use fleetworks_contracts::chat::ChatSourceKind;
 use fleetworks_contracts::chat::QA_MAX_FINDINGS;
 use fleetworks_contracts::chat::QA_MAX_WORDS;
 use fleetworks_contracts::chat::{QaAvailabilityReason, QaFinding, QaStartupStage, QaTurnState};
-use fleetworks_contracts::qa_worker::{QaWorkerEvent, QaWorkerOutcome, QaWorkerSequence};
+use fleetworks_contracts::qa_worker::{
+    QaContextUsage, QaWorkerEvent, QaWorkerOutcome, QaWorkerSequence, QA_CONTEXT_WINDOW_TOKENS,
+};
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout, Instant};
@@ -691,6 +693,7 @@ async fn grounded_events(
             turn_id: turn_id.clone(),
             sequence,
             outcome,
+            context: Some(QaContextUsage::new(QA_CONTEXT_WINDOW_TOKENS, 0, 0)),
         })
         .await?;
     Ok(())
@@ -811,7 +814,7 @@ impl Publication {
         event: QaWorkerEvent,
     ) -> Result<RunResult> {
         self.sequence.accept(&evidence.request, &event)?;
-        let (state, finding) = match event {
+        let (state, finding, context) = match event {
             QaWorkerEvent::Finding {
                 source_id,
                 start,
@@ -822,9 +825,11 @@ impl Publication {
                 let Some(finding) = cited_finding(evidence, &source_id, start, end, text)? else {
                     return Ok(RunResult::More);
                 };
-                (QaTurnState::Running, Some(finding))
+                (QaTurnState::Running, Some(finding), None)
             }
-            QaWorkerEvent::Complete { outcome, .. } => {
+            QaWorkerEvent::Complete {
+                outcome, context, ..
+            } => {
                 let had_finding = self.has_finding;
                 if !had_finding
                     && matches!(
@@ -863,12 +868,12 @@ impl Publication {
                     QaWorkerOutcome::Cancelled => QaTurnState::Canceled,
                     _ => return Err(anyhow!("unsupported Inbox QA outcome")),
                 };
-                (state, None)
+                (state, None, context)
             }
             _ => return Err(anyhow!("unsupported Inbox QA event")),
         };
         self.has_finding |= finding.is_some();
-        if !store::publish(repo, lease, state, finding).await? {
+        if !store::publish_with_context(repo, lease, state, finding, context).await? {
             return Ok(RunResult::Fenced);
         }
         Ok(if state.is_terminal() {
@@ -1008,8 +1013,8 @@ mod tests {
             terminal,
             QaWorkerEvent::Complete {
                 outcome: QaWorkerOutcome::Answered,
-                ..
-            }
+                context: Some(context), ..
+            } if context == QaContextUsage::new(QA_CONTEXT_WINDOW_TOKENS, 0, 0)
         ));
 
         let (sender, mut receiver) = mpsc::channel(2);
@@ -1022,8 +1027,8 @@ mod tests {
             terminal,
             QaWorkerEvent::Complete {
                 outcome: QaWorkerOutcome::InsufficientContext,
-                ..
-            }
+                context: Some(context), ..
+            } if context == QaContextUsage::new(QA_CONTEXT_WINDOW_TOKENS, 0, 0)
         ));
         assert!(receiver.recv().await.is_none());
     }

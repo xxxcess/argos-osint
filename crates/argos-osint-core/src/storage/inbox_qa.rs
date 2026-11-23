@@ -13,7 +13,9 @@ use fleetworks_contracts::chat::QaTurnState;
 use fleetworks_contracts::chat::QA_MAX_FINDINGS;
 use fleetworks_contracts::chat::QA_MAX_WORDS;
 use fleetworks_contracts::context::RegisteredContext;
+use fleetworks_contracts::qa_worker::QaContextUsage;
 use fleetworks_contracts::qa_worker::QaWorkerRequest;
+use fleetworks_contracts::qa_worker::QA_CONTEXT_WINDOW_TOKENS;
 use futures_util::{Stream, StreamExt};
 use serde::Deserialize;
 use serde::Serialize;
@@ -728,6 +730,7 @@ pub async fn admit(
                     }
                     QaTurnState::Answered
                 };
+                exchange.turn.context = Some(QaContextUsage::new(QA_CONTEXT_WINDOW_TOKENS, 0, 0));
                 append_in(&tx, key, state.generation, &mut exchange, terminal, None).await?;
                 return Ok(exchange.turn);
             }
@@ -986,6 +989,17 @@ pub async fn publish(
     state: QaTurnState,
     finding: Option<QaFinding>,
 ) -> Result<bool, TxError> {
+    publish_with_context(repo, lease, state, finding, None).await
+}
+
+/// Commit model usage with the same terminal transition and execution lease as the answer.
+pub async fn publish_with_context(
+    repo: &Repository,
+    lease: &job_dispatch::DeliveryLease,
+    state: QaTurnState,
+    finding: Option<QaFinding>,
+    context: Option<QaContextUsage>,
+) -> Result<bool, TxError> {
     Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| {
         let finding = finding.clone();
         async move {
@@ -994,6 +1008,9 @@ pub async fn publish(
             };
             if state == QaTurnState::Answered && exchange.turn.findings.is_empty() {
                 return Err(abort("invalid_part"));
+            }
+            if state.is_terminal() {
+                exchange.turn.context = context;
             }
             append_in(
                 &tx,

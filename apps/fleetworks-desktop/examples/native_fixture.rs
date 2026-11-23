@@ -19,8 +19,6 @@ mod native {
     use fleetworks_contracts::chat::ChatSourceReference;
     use fleetworks_contracts::chat::QaAvailabilityReason;
     use fleetworks_contracts::chat::QaFinding;
-    use fleetworks_contracts::chat::QaMeasurement;
-    use fleetworks_contracts::chat::QaMeasurementUnit;
     use fleetworks_contracts::chat::QaPhase;
     use fleetworks_contracts::chat::QaSettings;
     use fleetworks_contracts::chat::QaTurn;
@@ -30,6 +28,8 @@ mod native {
     use fleetworks_contracts::context::OriginSource;
     use fleetworks_contracts::context::Permission;
     use fleetworks_contracts::context::RegisteredContext;
+    use fleetworks_contracts::qa_worker::QaContextUsage;
+    use fleetworks_contracts::qa_worker::QA_CONTEXT_WINDOW_TOKENS;
     use fleetworks_contracts::readiness::DatasetKind;
     use fleetworks_contracts::readiness::DatasetRef;
     use fleetworks_contracts::readiness::MaintenanceOperation;
@@ -638,7 +638,7 @@ mod native {
         registered(state);
         state.seed_inbox_qa_drawer_fixture();
         let question = if stage == QaTurnState::Answered {
-            "What is the current memory usage?"
+            "Summarize workstation readiness."
         } else {
             "Is actor search ready?"
         };
@@ -649,25 +649,7 @@ mod native {
         );
         turn.state = stage;
         turn.cursor = 1;
-        if stage == QaTurnState::Answered {
-            let answer = "The connected gateway host memory usage is 42.5%.";
-            let mut finding = QaFinding::new(
-                ChatSourceReference::new(ChatSourceKind::HostMetric, "memory".into())
-                    .expect("fixture host metric source"),
-                "Connected gateway host memory usage".into(),
-                answer.into(),
-                0,
-                answer.len() as u32,
-                "2026-01-01T00:00:00Z".into(),
-            );
-            finding.measurement = Some(QaMeasurement::new(
-                425,
-                QaMeasurementUnit::PercentTenths,
-                "connected gateway host".into(),
-            ));
-            turn.findings.push(finding);
-            turn.cursor = 2;
-        } else if stage == QaTurnState::Canceled {
+        if matches!(stage, QaTurnState::Answered | QaTurnState::Canceled) {
             let answer = "Actor search is ready.";
             turn.findings.push(QaFinding::new(
                 ChatSourceReference::new(ChatSourceKind::Readiness, "actor-search".into())
@@ -679,6 +661,9 @@ mod native {
                 "2026-01-01T00:00:00Z".into(),
             ));
             turn.cursor = 3;
+        }
+        if stage == QaTurnState::Answered {
+            turn.context = Some(QaContextUsage::new(QA_CONTEXT_WINDOW_TOKENS, 224, 3));
         }
         state.seed_inbox_qa_fixture(
             QaSettings::new(true, QaPhase::Ready, 2, 1, true),

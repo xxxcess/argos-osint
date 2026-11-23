@@ -21,6 +21,8 @@ The Embedded worker requires Linux Landlock ABI 3 or newer, or macOS Seatbelt. T
 
 The app and companion are released independently of the optional QA archive. Pack construction uses CPU Torch 2.1.0, Rust-BERT 0.22.0, and the cased DistilBERT SQuAD checkpoint. Prepare dependencies on a connected build host. The release smoke runs with an empty model cache and disabled networking.
 
+The companion requests context-window counts from compatible packs. Older packs continue to answer, and turns from those workers show an empty usage indicator when counts are unavailable.
+
 ## Distributed review deployment
 
 Use the QA model image for the gateway’s Linux architecture. Prepare one empty socket directory with mode `0700` for the executor/model pair, owned by the isolated deployment UID. Select it with `FLEETWORKS_QA_SOCKET_DIR` and set `FLEETWORKS_QA_IMAGE` to the verified local image tag. Apply [`compose.inbox-qa.yml`](compose.inbox-qa.yml) after [`compose.native-review.yml`](compose.native-review.yml).

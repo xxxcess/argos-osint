@@ -1443,8 +1443,10 @@ def native_main(args):
         if companion_command:
             _progress(f"Building {COMPANION_BINARY} ({target}, {args.profile})")
             _progress(shlex.join(companion_command))
+            # A cold optimized Intel macOS companion can still be compiling after an hour.
+            companion_timeout = 5400 if target == "x86_64-apple-darwin" and args.profile == "release" else 3600
             companion_binary = cargo_executable(
-                _run_cargo(companion_command, environment=environment, timeout=3600),
+                _run_cargo(companion_command, environment=environment, timeout=companion_timeout),
                 name=COMPANION_BINARY, package=COMPANION_PACKAGE,
             )
         else:

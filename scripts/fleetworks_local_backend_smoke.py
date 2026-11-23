@@ -429,14 +429,14 @@ class LocalIpcSession:
                 continue
             if frame.get("frame") == "shutdown_ack":
                 self.last_shutdown_ack = frame.get("body")
-                self.socket.shutdown(socket.SHUT_WR)
-                exit_code = self.proc.wait(timeout=10)
-                self._stderr_thread.join(timeout=2)
                 if (
                     not isinstance(self.last_shutdown_ack, dict)
                     or self.last_shutdown_ack.get("checkpointed") is not True
                 ):
                     raise ValueError("Companion did not acknowledge a checkpointed shutdown")
+                # The companion closes its side after writing the final ack.
+                exit_code = self.proc.wait(timeout=10)
+                self._stderr_thread.join(timeout=2)
                 return self.last_shutdown_ack, exit_code
         raise TimeoutError("Timed out waiting for shutdown_ack")
 

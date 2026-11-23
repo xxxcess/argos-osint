@@ -3,7 +3,6 @@
 import io
 import json
 import os
-import socket
 import stat
 import struct
 import subprocess
@@ -166,8 +165,6 @@ while True:
                 job["state"] = "completed"
         STATE_FILE.write_text(json.dumps(state))
         write_f({{"frame": "shutdown_ack", "body": {{"checkpointed": True, "relinquished_leases": 1}}}})
-        if reader.read(1) != b"":
-            sys.exit(3)
         break
     req_id = frame["body"]["request_id"]
     op = frame["body"]["op"]["op"]
@@ -244,7 +241,7 @@ while True:
             session = LocalIpcSession(self.root / "synthetic-companion", self.root)
 
             def wait(*, timeout):
-                endpoint.shutdown.assert_called_once_with(socket.SHUT_WR)
+                endpoint.shutdown.assert_not_called()
                 self.assertEqual(session.last_shutdown_ack, acknowledgement)
                 raise subprocess.TimeoutExpired("synthetic-companion", timeout)
 

@@ -10,7 +10,8 @@ Open a file under `docs/diagrams/` in a browser for the HTML page. Matching `.sv
 | --- | --- | --- | --- |
 | Backend NLP preprocessing | Data flow | [nlp-preprocessing.html](diagrams/nlp-preprocessing.html) | [nlp-preprocessing.svg](diagrams/nlp-preprocessing.svg) |
 | Fleetworks service boundaries | Architecture | [fleetworks.html](diagrams/fleetworks.html) | [fleetworks.svg](diagrams/fleetworks.svg) |
-| Native app and bundled stdio companion | Architecture | [local-ipc-companion.html](diagrams/local-ipc-companion.html) | [local-ipc-companion.svg](diagrams/local-ipc-companion.svg) |
+| Native app and bundled Unix socket companion | Architecture | [local-ipc-companion.html](diagrams/local-ipc-companion.html) | [local-ipc-companion.svg](diagrams/local-ipc-companion.svg) |
+| Inbox prompt, evidence, and inference | Data flow | [inbox-prompt-flow.html](diagrams/inbox-prompt-flow.html) | [inbox-prompt-flow.svg](diagrams/inbox-prompt-flow.svg) |
 | Native shell, context rail and settings | Layout | [native-workstation-layout.html](diagrams/native-workstation-layout.html) | [native-workstation-layout.svg](diagrams/native-workstation-layout.svg) |
 | Native identity and shared backend | Architecture | [workspace.html](diagrams/workspace.html) | [workspace.svg](diagrams/workspace.svg) |
 | Backend resources and workstation origin | Architecture | [workspace-scope.html](diagrams/workspace-scope.html) | [workspace-scope.svg](diagrams/workspace-scope.svg) |

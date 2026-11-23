@@ -1,6 +1,6 @@
 # Deploy Inbox QA
 
-Inbox QA starts Off for every target. Native exposes the setting during setup and in **Settings → Gateway**. Embedded runs the worker under the local companion using private framed pipes. Distributed runs the worker behind the selected gateway and needs a provisioned executor and model pair. [QA API](../docs/wiki/code/assistant-chat-contract.md#inbox-qa-v2)
+Inbox QA starts Off for every target. The native app exposes the setting during setup and under **Backend inference** in **Settings → Connection**. Embedded runs the worker under the local companion using private framed pipes. Distributed runs the worker behind the selected gateway and needs a provisioned executor and model pair. [Prompt flow](../docs/wiki/code/assistant-chat-contract.md#prompt-flow) · [QA API](../docs/wiki/code/assistant-chat-contract.md#inbox-qa-v2)
 
 ## Embedded packs
 
@@ -15,7 +15,7 @@ python3 scripts/fleetworks_qa_pack.py install \
 
 Use the Embedded companion’s state directory for the selected installation. The pack parent and the state directory must be owned by the current user. The state directory is private. Enable inference after import. To replace a pack, turn inference Off first, import into a new version directory, and then turn it on.
 
-The Embedded worker requires Linux Landlock ABI 3 or newer, or macOS Seatbelt. The companion starts it with access to the verified pack and the system loader. If the host lacks the required sandbox, Inbox and Gateway settings report that Embedded inference is unsupported on that host. Expand the details for the Landlock requirement. Missing packs, invalid packs, and worker startup failures have their own messages.
+The Embedded worker requires Linux Landlock ABI 3 or newer, or macOS Seatbelt. The companion starts it with access to the verified pack and the system loader. If the host lacks the required sandbox, Inbox and Connection settings report that Embedded inference is unsupported on that host. Expand the details for the Landlock requirement. Missing packs, invalid packs, and worker startup failures have their own messages.
 
 The app and companion are released independently of the optional QA archive. Pack construction uses CPU Torch 2.1.0, Rust-BERT 0.22.0, and the cased DistilBERT SQuAD checkpoint. Prepare dependencies on a connected build host. The release smoke runs with an empty model cache and disabled networking.
 

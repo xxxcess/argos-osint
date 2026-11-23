@@ -43,6 +43,18 @@ Turn states are `queued`, `running`, `retrying`, `final` and `failed`. V1 is a s
 
 The native Inbox uses the separate [V2 types](../../../crates/fleetworks-contracts/src/chat/qa.rs) when the selected backend advertises `inbox-qa-v2`. Embedded uses the companion’s framed IPC. Distributed uses the paired gateway, including loopback gateways. Settings, the latest exchange, and transcript access follow the current registration and selected backend. The transcript sits above the composer and follows new answers while the reader is at the bottom. Scrolling up preserves the reading position. Each notification group has its own mark-as-read button. In an expanded group, a dot identifies each unread item. Collapsing an open notification marks that item read.
 
+### Prompt flow
+
+[![Native Inbox prompt flow from the composer to the selected backend and back](../../diagrams/inbox-prompt-flow.svg)](../../diagrams/inbox-prompt-flow.html)
+
+1. The Rune composer submits the prompt, a request ID, the current registration context and an optional selected source. Embedded sends `qa_turn_submit` through the inherited Unix socket to the bundled API companion. Distributed sends the registered request to the paired gateway over HTTP(S). Both handlers call the same admission logic. [Native Inbox](../../../apps/fleetworks-desktop/src/inbox_qa.rs) · [Shared client](../../../crates/fleetworks-contracts/src/client/inbox_qa.rs) · [Embedded transport](native-connections.md#backend-types-and-parity)
+2. Admission checks the registration, permissions and inference state, then builds a fresh, bounded snapshot. Readiness probes provide service and data checks. The selected backend samples CPU, memory and disk on its own host. Jobs contributes aggregate counts for the registered workstation when its credential permits activity reads. An exact request-ID replay returns its original exchange. [Admission and evidence](../../../crates/argos-osint-api/src/inbox_qa.rs)
+3. The backend routes the prompt. Greetings and scope replies use fixed text. Specific status and metrics questions use complete cited observations. The admission transaction can finish these turns immediately. A workstation readiness summary stores its frozen passages and queues a durable Inbox QA job. [Intent routing](../../../crates/argos-osint-api/src/inbox_qa/question.rs) · [Turn and event store](../../../crates/argos-osint-core/src/storage/inbox_qa.rs)
+4. The Inbox QA executor claims a queued summary. Embedded supervises its offline BERT child through private framed pipes. Distributed runs an executor behind the gateway and communicates with the offline model container through a private Unix socket. The model receives the question and authorized evidence passages. The executor verifies selected spans before publishing them and can cite complete fresh readiness facts if the worker completes without a usable selection. [Executor](../../../services/api-host/src/inbox_qa_service.rs) · [Worker placement and isolation](../../../deploy/inbox-qa.md)
+5. The native app renders the canonical turn and polls for committed events by cursor while work is active. The latest turn and canonical event pages let it recover after a pause or missed update. Each answer exposes its observation timestamps through the collapsible **Sources** control. Stop seals the turn with any citations already published. [Native transcript](../../../apps/fleetworks-desktop/src/inbox_qa.rs) · [Event contract](../../../crates/fleetworks-contracts/src/chat/qa.rs)
+
+### Inbox QA routes
+
 | Method | Path | Permission |
 | --- | --- | --- |
 | GET | `/api/v2/workstation/chat/settings` | Registered Native backend read |

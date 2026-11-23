@@ -56,6 +56,10 @@ import fleetworks_qa_pack as qa
 
 REPO = "xxxcess/argos-osint"
 DEFAULT_OUTPUT = ROOT / ".agent-scratch" / "native-quick-start"
+APP_ARTIFACT_FAMILIES = {
+    "debug": ("Fleetworks-macOS-Desktop-App-debug",),
+    "release": ("Fleetworks-macOS-Desktop-App-release", "Fleetworks-macOS-Desktop-App"),
+}
 COMPANION = "Contents/MacOS/argos-api-host"
 DESKTOP = "Contents/MacOS/fleetworks-desktop"
 SOURCE_WORKFLOW = "Fleetworks quick start (source)"
@@ -129,7 +133,7 @@ def build_inputs_match(revision, *, local_desktop=False):
     return all(path.startswith(NON_APP_DIRECTORIES) or path in CI_ROUTING_INPUTS for path in paths)
 
 
-def artifact_metadata(identity, target, family):
+def artifact_metadata(identity, target, families):
     require(identity > 0, "An Actions artifact ID must be a positive integer")
     artifact = gh_json(f"actions/artifacts/{identity}")
     require(not artifact["expired"], "The selected Actions artifact expired")
@@ -140,8 +144,9 @@ def artifact_metadata(identity, target, family):
             and run["status"] == "completed" and run["conclusion"] == "success"
             and run["head_sha"] == run_info["head_sha"],
             "Select an artifact from a successful Fleetworks run in the upstream repository")
-    prefix = f"{family}-{target}-{run['head_sha']}-{run['id']}."
-    match = re.fullmatch(re.escape(prefix) + r"([1-9][0-9]*)", artifact["name"])
+    family_pattern = "|".join(re.escape(family) for family in families)
+    suffix = f"-{target}-{run['head_sha']}-{run['id']}."
+    match = re.fullmatch(f"(?:{family_pattern})" + re.escape(suffix) + r"([1-9][0-9]*)", artifact["name"])
     require(match is not None and int(match[1]) <= run["run_attempt"],
             "The artifact does not match the current Mac architecture and Fleetworks run")
     require(re.fullmatch(r"sha256:[0-9a-f]{64}", artifact.get("digest") or ""),
@@ -185,13 +190,14 @@ def copy_member(zipped, name, destination, limit):
         shutil.copyfileobj(source, output, length=1024**2)
 
 
-def check_bundle(app, manifest, target, *, checkout_pin=True):
+def check_bundle(app, manifest, target, *, profile=None, checkout_pin=True):
     require(app.is_dir() and not app.is_symlink(), "A regular macOS app bundle is required")
     rune_revision = manifest.get("rune_revision", "")
     require(manifest["format"] in native.SUPPORTED_NATIVE_FORMATS
-            and manifest["target"] == target and manifest["profile"] == "debug"
+            and manifest["target"] == target and manifest["profile"] in APP_ARTIFACT_FAMILIES
+            and (profile is None or manifest["profile"] == profile)
             and re.fullmatch(r"[0-9a-f]{40}", rune_revision),
-            "The app does not match the host debug profile")
+            "The app does not match the host target and selected build profile")
     if checkout_pin:
         require(rune_revision == native.locked_rune_revision(),
                 "The app does not match the workspace Rune pin")
@@ -273,31 +279,31 @@ def share_agent_cache(shared):
     require(cache.samefile(main_cache), "This worktree has a separate Cargo cache; use the main checkout")
 
 
-def rebuild_desktop(companion, info, target, output, shared):
+def rebuild_desktop(companion, info, target, output, shared, profile):
     require(shutil.disk_usage(output.parent).free >= 3 * 1024**3,
             "The local desktop rebuild needs 3 GiB of free disk for linking; use the hosted desktop")
     share_agent_cache(shared)
     revision, dirty = native.repository_identity()
     toolchain = native.validate_toolchain(info)
-    build = native.cargo_native_command(target, "debug", agent=True, implicit_host=True)
+    build = native.cargo_native_command(target, profile, agent=True, implicit_host=True)
     binary = native.cargo_executable(native._run_cargo(build))
     catalog_size = (ROOT / "datasets" / "argos_actors.csv").stat().st_size
     reserve_space(output.parent, binary.stat().st_size + companion.stat().st_size + catalog_size)
     native.package_native(
         output, binary, ROOT / "apps" / "fleetworks-desktop" / "resources",
-        version=native.artifact_version(), target=target, revision=revision, profile="debug",
+        version=native.artifact_version(), target=target, revision=revision, profile=profile,
         rune_revision=native.locked_rune_revision(), toolchain=toolchain, dirty=dirty,
         cargo_lock_sha256=native.sha256(ROOT / "Cargo.lock"), companion_binary=companion,
         workflow=DESKTOP_WORKFLOW,
     )
 
 
-def build_source(output, revision, shared):
+def build_source(output, revision, shared, profile):
     share_agent_cache(shared)
     reserve_space(output.parent, native.MAX_NATIVE_UNPACKED_BYTES)
     subprocess.run(
         [sys.executable, "-B", str(ROOT / "scripts" / "fleetworks_candidate.py"),
-         "build-native", "--agent", "--target", "host", "--profile", "debug",
+         "build-native", "--agent", "--target", "host", "--profile", profile,
          "--with-companion", "--revision", revision, "--workflow", SOURCE_WORKFLOW,
          "--run-id", f"local-{time.time_ns()}", "--run-attempt", "1", "--output", str(output)],
         cwd=ROOT, stdout=subprocess.DEVNULL, check=True,
@@ -335,25 +341,27 @@ def publish_app(staged, output, app, current, target):
     return app
 
 
-def prepare_source(target, output, app, current, shared):
+def prepare_source(target, output, app, current, shared, profile):
     revision, dirty = native.repository_identity()
     if not dirty and current is not None and current.get("workflow") == SOURCE_WORKFLOW \
             and current.get("dirty") is False and current.get("revision") == revision \
+            and current.get("profile") == profile \
             and current.get("version") == native.artifact_version() \
             and current.get("dependency_provenance", {}).get("cargo_lock_sha256") == native.sha256(ROOT / "Cargo.lock"):
-        check_bundle(app, current, target)
+        check_bundle(app, current, target, profile=profile)
         return app
     ensure_replaceable(output, app, current, target)
     with tempfile.TemporaryDirectory(prefix=".native-quick-start-", dir=output.parent) as temp:
         staged = Path(temp) / "bundle"
-        build_source(staged, revision, shared)
+        build_source(staged, revision, shared, profile)
         return publish_app(staged, output, app, current, target)
 
 
 def prepare_artifact(args, info, target, output, app, current, shared):
     if args.rebuild_desktop:
         ensure_replaceable(output, app, current, target)
-    artifact, run, attempt = artifact_metadata(args.app_artifact, target, "Fleetworks-macOS-Desktop-App-debug")
+    profile = args.profile
+    artifact, run, attempt = artifact_metadata(args.app_artifact, target, APP_ARTIFACT_FAMILIES[profile])
     require(build_inputs_match(run["head_sha"], local_desktop=args.rebuild_desktop),
             "The selected artifact's build inputs differ from this checkout. Use a compatible Actions artifact")
     with tempfile.TemporaryDirectory(prefix=".native-quick-start-", dir=output.parent) as temp:
@@ -362,7 +370,7 @@ def prepare_artifact(args, info, target, output, app, current, shared):
             manifest = read_json_member(outer, native.NATIVE_MANIFEST)
             require(manifest["revision"] == run["head_sha"] and manifest["run_id"] == str(run["id"])
                     and manifest["run_attempt"] == attempt and manifest["target"] == target
-                    and manifest["profile"] == "debug" and manifest["dirty"] is False
+                    and manifest["profile"] == profile and manifest["dirty"] is False
                     and manifest["rune_revision"] == native.locked_rune_revision()
                     and manifest["dependency_provenance"]["cargo_lock_sha256"] == native.sha256(ROOT / "Cargo.lock")
                     and manifest.get("companion", {}).get("relative_path") == COMPANION,
@@ -371,7 +379,7 @@ def prepare_artifact(args, info, target, output, app, current, shared):
             require(sorted(outer.namelist()) == sorted([name, name + ".sha256", native.NATIVE_MANIFEST]),
                     "The Actions app artifact contains unexpected files")
             if not args.rebuild_desktop and current == manifest:
-                check_bundle(app, current, target)
+                check_bundle(app, current, target, profile=profile)
                 return app
             if args.rebuild_desktop:
                 companion = temporary / "argos-api-host"
@@ -390,7 +398,7 @@ def prepare_artifact(args, info, target, output, app, current, shared):
                 copy_member(outer, name + ".sha256", archive.with_name(name + ".sha256"), 1024)
         staged = temporary / "bundle"
         if args.rebuild_desktop:
-            rebuild_desktop(companion, info, target, staged, shared)
+            rebuild_desktop(companion, info, target, staged, shared, profile)
         else:
             with ZipFile(archive) as inner_zip:
                 reserve_space(temporary, sum(entry.file_size for entry in inner_zip.infolist()))
@@ -400,7 +408,7 @@ def prepare_artifact(args, info, target, output, app, current, shared):
             _, inner = native.extract_native(
                 archive, staged, expected_digest=checksum[0], version=manifest["version"], target=target,
                 revision=run["head_sha"], rune_revision=native.locked_rune_revision(),
-                profile="debug", require_clean=True,
+                profile=profile, require_clean=True,
             )
             require(inner == manifest and "actor_catalog" in manifest["default_datasets"]["datasets"],
                     "The extracted app is missing required manifest data")
@@ -414,11 +422,11 @@ def prepare_app(args, info, target, output, shared):
         require(current is not None and current.get("dirty") is False
                 and build_inputs_match(current["revision"]),
                 "The installed clean bundle does not match this checkout. Run the source quick start to update it")
-        check_bundle(app, current, target)
+        check_bundle(app, current, target, profile=args.profile)
         return app
     if args.app_artifact is not None:
         return prepare_artifact(args, info, target, output, app, current, shared)
-    return prepare_source(target, output, app, current, shared)
+    return prepare_source(target, output, app, current, shared, args.profile)
 
 
 def process_table():
@@ -515,7 +523,7 @@ def install_inbox(identity, target, profile, state):
                 "This profile already points to a different Inbox pack; use a separate profile")
         qa.verify_directory(pack, target, config["manifest_sha256"])
         return
-    artifact, run, attempt = artifact_metadata(identity, target, "Fleetworks-Inbox-QA-Pack")
+    artifact, run, attempt = artifact_metadata(identity, target, ("Fleetworks-Inbox-QA-Pack",))
     require(build_inputs_match(run["head_sha"], local_desktop=True), "The Inbox worker inputs differ from this checkout")
     installed = profile / f"qa-pack-{artifact['id']}"
     with tempfile.TemporaryDirectory(prefix=".inbox-quick-start-", dir=profile) as temp:
@@ -538,16 +546,18 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--source-dir", type=Path,
                         help="Build from this local worktree of the same repository")
+    parser.add_argument("--profile", choices=tuple(APP_ARTIFACT_FAMILIES), default="debug",
+                        help="Use the debug or optimized release build profile (default: debug)")
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--app-artifact", type=int, help="Open this verified macOS debug app Actions artifact")
+    mode.add_argument("--app-artifact", type=int, help="Open this verified macOS app Actions artifact for the selected profile")
     mode.add_argument("--reuse-bundle", action="store_true",
                       help="Open a matching installed clean bundle without building or downloading an app")
     parser.add_argument("--rebuild-desktop", action="store_true",
-                        help="Build only the desktop in the shared debug cache and reuse the verified companion")
+                        help="Build only the desktop in the shared Cargo cache and reuse the verified companion")
     parser.add_argument("--start-embedded", action="store_true",
                         help="Select and start Embedded through the app's macOS accessibility controls")
     parser.add_argument("--inbox-artifact", type=int, help="Install a verified offline Inbox model pack")
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--output", type=Path, help="Managed output directory for the app bundle")
     parser.add_argument("--profile-dir", type=Path, default=DEFAULT_OUTPUT.with_name("native-quick-start-profile"))
     args = parser.parse_args()
     if args.rebuild_desktop and args.app_artifact is None:
@@ -556,8 +566,10 @@ def main():
         info = native.detect()
         target = info.native_target
         require(target in native.DARWIN_NATIVE_TARGETS, "This quick start supports Intel and Apple Silicon macOS")
-        require(not args.output.expanduser().is_symlink(), "The app output cannot be a symlink")
-        output = native.native_output(args.output, target, "debug")
+        default_output = DEFAULT_OUTPUT if args.profile == "debug" else DEFAULT_OUTPUT.with_name("native-quick-start-release")
+        requested_output = args.output or default_output
+        require(not requested_output.expanduser().is_symlink(), "The app output cannot be a symlink")
+        output = native.native_output(requested_output, target, args.profile)
         require(not args.profile_dir.expanduser().is_symlink(), "The isolated profile cannot be a symlink")
         profile = args.profile_dir.expanduser().resolve()
         home = Path.home().resolve()

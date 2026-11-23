@@ -39,6 +39,11 @@ on:
         type: choice
         options: [auto, buildx, depot]
         default: auto
+      native_profile:
+        description: Native package profile for an exact-head, native-only review
+        type: choice
+        options: [debug, release]
+        default: debug
       native_embedded_image:
         description: Build a Linux x86_64 Embedded development image from the native package
         type: boolean
@@ -53,7 +58,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: fleetworks-${{ github.event_name }}-${{ github.event_name == 'push' && github.ref != 'refs/heads/nightly' && 'stable' || github.event.pull_request.number || github.ref }}-${{ inputs.depot_linux_native_pilot && 'depot-linux-native-pilot' || inputs.stage || 'standard' }}
+  group: fleetworks-${{ github.event_name }}-${{ github.event_name == 'push' && github.ref != 'refs/heads/nightly' && 'stable' || github.event.pull_request.number || github.ref }}-${{ inputs.native_profile == 'release' && 'optimized-native' || inputs.depot_linux_native_pilot && 'depot-linux-native-pilot' || inputs.stage || 'standard' }}
   cancel-in-progress: ${{ github.event_name != 'push' }}
 
 env:
@@ -68,7 +73,7 @@ env:
 jobs:
   linux_native_depot_pilot:
     name: Linux native Depot pilot
-    if: github.event_name == 'workflow_dispatch' && inputs.depot_linux_native_pilot
+    if: github.event_name == 'workflow_dispatch' && inputs.depot_linux_native_pilot && inputs.native_profile != 'release'
     uses: ./.github/workflows/fleetworks-native-linux-depot-pilot.yml
     with:
       expected-head: ${{ inputs.head }}
@@ -77,7 +82,7 @@ jobs:
 
   scope:
     name: Select verification scopes
-    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.depot_linux_native_pilot) }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.depot_linux_native_pilot && inputs.native_profile != 'release') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -132,6 +137,24 @@ jobs:
           REPOSITORY_CI_PROVIDER: ${{ vars.FLEETWORKS_CI_PROVIDER }}
           REQUESTED_IMAGE_BUILDER: ${{ inputs.image_builder }}
         run: python3 .github/scripts/fleetworks_ci.py providers --output "$GITHUB_OUTPUT"
+      - name: Validate the optimized native review
+        if: inputs.native_profile == 'release'
+        env:
+          EXPECTED_HEAD: ${{ inputs.head }}
+          MODE: ${{ inputs.mode }}
+          COMPONENTS: ${{ inputs.components }}
+          EMBEDDED_IMAGE: ${{ inputs.native_embedded_image }}
+          DEPOT_PILOT: ${{ inputs.depot_linux_native_pilot }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" != workflow_dispatch || "$GITHUB_REF" != refs/heads/* ||
+                "$EXPECTED_HEAD" != "$FLEETWORKS_HEAD" || "$FLEETWORKS_STAGE" != standard ||
+                "$MODE" != full || "$COMPONENTS" != native || "$EMBEDDED_IMAGE" == true || "$DEPOT_PILOT" == true ]]; then
+            echo '::error::Optimized native review requires an exact branch head and a standard full dispatch with components=native. Use a separate run for the development image or Depot pilot.'
+            exit 1
+          fi
+
       - name: Validate explicitly requested image build
         if: github.event_name == 'workflow_dispatch' && (inputs.image_builder != 'auto' || inputs.native_embedded_image)
         env:
@@ -377,6 +400,7 @@ jobs:
       - name: Select jobs for the current pass
         id: verification
         env:
+          INBOX_QA_NATIVE_REVIEW: ${{ inputs.native_profile == 'release' }}
           INBOX_QA_ELIGIBLE: >-
             ${{ (github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'nightly') ||
                 (github.event_name == 'workflow_dispatch' && inputs.stage == 'second' && steps.promotion.outputs.base_ref == 'nightly') ||
@@ -467,6 +491,7 @@ jobs:
       full: ${{ needs.scope.outputs.full == 'true' }}
       publish: ${{ needs.scope.outputs.publish == 'true' }}
       release-version: ${{ needs.scope.outputs.publish == 'true' && needs.scope.outputs.release_version || '' }}
+      native-profile: ${{ inputs.native_profile || 'debug' }}
       linux-native: ${{ needs.scope.outputs.desktop_linux == 'true' && needs.scope.outputs.core_native_linux != 'true' }}
       macos: ${{ needs.scope.outputs.desktop_macos == 'true' }}
       web: ${{ needs.scope.outputs.web == 'true' }}
@@ -509,6 +534,7 @@ jobs:
       runner: ${{ matrix.runner }}
       arch: ${{ matrix.arch }}
       runtime: embedded
+      review-profile: ${{ inputs.native_profile || 'debug' }}
       release-version: ${{ needs.scope.outputs.publish == 'true' && needs.scope.outputs.release_version || '' }}
       release-asset: ${{ fromJson(needs.scope.outputs.release_plan).inbox_qa == true }}
 
@@ -725,6 +751,7 @@ jobs:
         env:
           SCOPE_RESULT: ${{ needs.scope.result }}
           PUBLISH_SELECTED: ${{ needs.scope.outputs.publish }}
+          NATIVE_PROFILE: ${{ inputs.native_profile || 'debug' }}
           MAC_SELECTED: ${{ needs.scope.outputs.desktop_macos }}
           CORE_LINUX_SELECTED: ${{ needs.scope.outputs.core_native_linux }}
           UI_LINUX_SELECTED: ${{ needs.scope.outputs.desktop_linux == 'true' && needs.scope.outputs.core_native_linux != 'true' }}
@@ -794,7 +821,7 @@ jobs:
             true:true|false:true|false:false) ;;
             *) echo '::error::Development browser scope needs the web gate'; failed=1 ;;
           esac
-          if [[ "$PUBLISH_SELECTED" == true || "$FLEETWORKS_STAGE" != standard ]]; then
+          if [[ "$PUBLISH_SELECTED" == true || "$FLEETWORKS_STAGE" != standard || "$NATIVE_PROFILE" == release ]]; then
             verify desktop "$MAC_SELECTED" "$DESKTOP_RESULT" || failed=1
           else
             report desktop "$MAC_SELECTED" "$DESKTOP_RESULT"

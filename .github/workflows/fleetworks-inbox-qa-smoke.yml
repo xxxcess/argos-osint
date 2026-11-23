@@ -21,6 +21,9 @@ on:
       image-builder:
         type: string
         default: buildx
+      review-profile:
+        type: string
+        default: debug
       release-version:
         type: string
         default: ""
@@ -36,6 +39,7 @@ env:
   FLEETWORKS_HEAD: ${{ inputs.head }}
   QA_TARGET: ${{ inputs.target }}
   RELEASE_VERSION: ${{ inputs.release-version }}
+  REVIEW_PROFILE: ${{ inputs.review-profile }}
   PYTHONDONTWRITEBYTECODE: 1
 
 jobs:
@@ -85,12 +89,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          profile=debug
+          profile="$REVIEW_PROFILE"
           if [[ -n "$RELEASE_VERSION" ]]; then profile=release; fi
-          case "$QA_TARGET:$profile" in
-            x86_64-unknown-linux-gnu:*) family="Fleetworks-Linux-Desktop-App-x86_64-$profile" ;;
-            *-apple-darwin:release) family="Fleetworks-macOS-Desktop-App-$QA_TARGET" ;;
-            *-apple-darwin:debug) family="Fleetworks-macOS-Desktop-App-debug-$QA_TARGET" ;;
+          case "$profile" in
+            debug|release) ;;
+            *) echo 'Unrecognized Native app profile'; exit 1 ;;
+          esac
+          case "$QA_TARGET" in
+            x86_64-unknown-linux-gnu) family="Fleetworks-Linux-Desktop-App-x86_64-$profile" ;;
+            *-apple-darwin)
+              if [[ -n "$RELEASE_VERSION" ]]; then
+                family="Fleetworks-macOS-Desktop-App-$QA_TARGET"
+              else
+                family="Fleetworks-macOS-Desktop-App-$profile-$QA_TARGET"
+              fi
+              ;;
             *) echo 'Unrecognized Native app target'; exit 1 ;;
           esac
           printf 'profile=%s\n' "$profile" >> "$GITHUB_OUTPUT"

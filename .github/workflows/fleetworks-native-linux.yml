@@ -63,7 +63,7 @@ jobs:
   native_linux:
     name: Build, verify and package Linux native (${{ inputs.profile }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: ${{ inputs.profile == 'release' && inputs.release-version == '' && 110 || 60 }}
     strategy:
       fail-fast: false
       matrix:
@@ -448,7 +448,7 @@ jobs:
           retention-days: 14
 
       - name: Compare distributed HTTP and packaged embedded IPC
-        if: inputs.profile == 'debug'
+        if: inputs.profile == 'debug' || inputs.release-version == ''
         env:
           ARGOS_SURREAL_MODE: embedded
           ARGOS_SURREAL_REQUIRED: "1"

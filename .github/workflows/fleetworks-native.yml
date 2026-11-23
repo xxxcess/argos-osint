@@ -6,8 +6,12 @@ on:
       expected-head:
         type: string
         required: true
+      review-profile:
+        description: Profile for an unpublished review package
+        type: string
+        default: debug
       release-version:
-        description: Empty for PR debug checks; exact artifact version for trusted publication
+        description: Exact artifact version for trusted publication
         type: string
         default: ''
       target:
@@ -39,6 +43,7 @@ env:
   FLEETWORKS_HEAD: ${{ inputs.expected-head }}
   NATIVE_TARGET: ${{ inputs.target }}
   RELEASE_VERSION: ${{ inputs.release-version }}
+  REVIEW_PROFILE: ${{ inputs.review-profile }}
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   CARGO_TERM_COLOR: never
   CARGO_INCREMENTAL: 0
@@ -50,7 +55,7 @@ jobs:
   package:
     name: Native app and real-view fixtures
     runs-on: ${{ inputs.runner }}
-    timeout-minutes: ${{ inputs.target == 'x86_64-apple-darwin' && 100 || 60 }}
+    timeout-minutes: ${{ inputs.review-profile == 'release' && 120 || inputs.target == 'x86_64-apple-darwin' && 100 || 60 }}
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
       artifact-url: ${{ steps.upload.outputs.artifact-url }}
@@ -175,17 +180,17 @@ jobs:
             --scene inbox-qa-worker-start-failed \
             --scene gateway-qa-sandbox-unsupported \
             --size 1280x800 --size 640x480 --scale 1
-      - name: Build, archive, extract-verify and smoke-test the debug app for pull-request review
+      - name: Build, archive, extract-verify and smoke-test the review app
         if: inputs.release-version == ''
         shell: bash
         run: |
           set -euo pipefail
-          dist="$RUNNER_TEMP/fleetworks-native-debug"
-          extracted="$RUNNER_TEMP/fleetworks-native-debug-extracted"
+          dist="$RUNNER_TEMP/fleetworks-native-review"
+          extracted="$RUNNER_TEMP/fleetworks-native-review-extracted"
           evidence="$RUNNER_TEMP/fleetworks-native-evidence"
           mkdir -p "$evidence"
           python3 scripts/fleetworks_candidate.py build-native --agent \
-            --target "$NATIVE_TARGET" --profile debug \
+            --target "$NATIVE_TARGET" --profile "$REVIEW_PROFILE" \
             --output "$dist" \
             --revision "$FLEETWORKS_HEAD" \
             --workflow "${{ github.workflow }}" --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}" \
@@ -202,7 +207,7 @@ jobs:
           dist = Path(os.environ["DIST_DIR"])
           archives = list(dist.glob("Fleetworks-*.zip"))
           if len(archives) != 1:
-              raise SystemExit(f"Expected 1 debug macOS archive, found {len(archives)}")
+              raise SystemExit(f"Expected 1 macOS review archive, found {len(archives)}")
           archive = archives[0]
           manifest = json.loads((dist / "Fleetworks.app.manifest.json").read_text(encoding="utf-8"))
           bundle = dist / "Fleetworks.app"
@@ -211,7 +216,7 @@ jobs:
           unpacked_bytes = sum(path.stat().st_size for path in bundle.rglob("*") if path.is_file())
           sizes = {
               "target": os.environ["NATIVE_TARGET"],
-              "profile": "debug",
+              "profile": os.environ["REVIEW_PROFILE"],
               "archive_name": archive.name,
               "archive_bytes": archive.stat().st_size,
               "archive_mib": round(archive.stat().st_size / (1024 * 1024), 2),
@@ -225,7 +230,7 @@ jobs:
           if summary:
               with open(summary, "a", encoding="utf-8") as handle:
                   print(
-                      f"- `{sizes['target']}` (`debug`): archive `{sizes['archive_name']}` = "
+                      f"- `{sizes['target']}` (`{sizes['profile']}`): archive `{sizes['archive_name']}` = "
                       f"`{sizes['archive_mib']} MiB` ({sizes['archive_bytes']} B), unpacked = "
                       f"`{sizes['unpacked_mib']} MiB` ({sizes['unpacked_bytes']} B), "
                       f"desktop = `{sizes['executable_bytes']} B`, companion = `{sizes['companion_bytes']} B`",
@@ -237,7 +242,7 @@ jobs:
               "--sha256", sha256(archive),
               "--revision", os.environ["FLEETWORKS_HEAD"],
               "--target", os.environ["NATIVE_TARGET"],
-              "--profile", "debug",
+              "--profile", sizes["profile"],
               "--rune-revision", locked_rune_revision(),
               "--version", manifest["version"],
               "--directory", os.environ["EXTRACT_DIR"],
@@ -253,15 +258,15 @@ jobs:
             FLEETWORKS_PARITY_REPORT_PATH="$evidence/http-ipc-parity-$NATIVE_TARGET.json" \
             python3 scripts/agent_cargo.py test --locked --target "$NATIVE_TARGET" \
             -p argos-api-host --features embedded --test http_ipc_parity -- --nocapture --test-threads=1
-      - name: Retain the verified debug app for the offline Inbox QA smoke
-        if: inputs.inbox-qa && inputs.release-version == ''
+      - name: Retain the verified review app
+        if: inputs.release-version == '' && (inputs.inbox-qa || inputs.review-profile == 'release')
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: Fleetworks-macOS-Desktop-App-debug-${{ inputs.target }}-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}
+          name: Fleetworks-macOS-Desktop-App-${{ inputs.review-profile }}-${{ inputs.target }}-${{ inputs.expected-head }}-${{ github.run_id }}.${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/fleetworks-native-debug/Fleetworks-*.zip
-            ${{ runner.temp }}/fleetworks-native-debug/Fleetworks-*.zip.sha256
-            ${{ runner.temp }}/fleetworks-native-debug/Fleetworks.app.manifest.json
+            ${{ runner.temp }}/fleetworks-native-review/Fleetworks-*.zip
+            ${{ runner.temp }}/fleetworks-native-review/Fleetworks-*.zip.sha256
+            ${{ runner.temp }}/fleetworks-native-review/Fleetworks.app.manifest.json
           if-no-files-found: error
           compression-level: 0
           retention-days: 14

@@ -221,11 +221,27 @@ impl Inbox {
     fn toggle_group(&mut self, topic: &Topic) {
         if !self.expanded.remove(topic) {
             self.expanded.insert(topic.clone());
+            return;
+        }
+        let Some(id) = self.selected else {
+            return;
+        };
+        if let Some(item) = self
+            .items
+            .iter_mut()
+            .find(|item| item.id == id && &item.topic == topic)
+        {
+            item.read = true;
+            self.selected = None;
         }
     }
 
     fn select(&mut self, id: u64) {
-        self.selected = (self.selected != Some(id)).then_some(id);
+        let previous = self.selected.take();
+        if let Some(previous) = previous {
+            self.mark_read(previous);
+        }
+        self.selected = (previous != Some(id)).then_some(id);
     }
 
     fn mark_read(&mut self, id: u64) {
@@ -1035,12 +1051,12 @@ fn row(item: &Item, state: &State, kit: &Kit) -> El {
         .border_sides([1.0, 0.0, 0.0, 0.0], theme::hex(theme::BORDER_SUBTLE))
         .child(
             rune::row()
-                .key(row_key.clone())
+                .key(row_key)
                 .role("button")
                 .focusable(true)
                 .label(format!(
-                    "{}{}, {}",
-                    if item.read { "" } else { "Unread, " },
+                    "{}, {}, {}",
+                    if item.read { "Read" } else { "Unread" },
                     item.title,
                     age
                 ))
@@ -1057,7 +1073,14 @@ fn row(item: &Item, state: &State, kit: &Kit) -> El {
                     state.inbox.select(id);
                     tx.keep_on_screen(toggle_key.clone());
                 })
-                .child(status_dot(item.tone))
+                .child(
+                    rune::el()
+                        .size(6.0, 6.0)
+                        .a11y_hidden()
+                        .children((!item.read).then(|| {
+                            status_dot(StatusTone::Accent).key(format!("inbox-item-{id}-unread"))
+                        })),
+                )
                 .child(
                     rune::text(item.title.clone())
                         .font(if item.read {
@@ -1081,33 +1104,13 @@ fn row(item: &Item, state: &State, kit: &Kit) -> El {
     if !expanded {
         return entry;
     }
-    let mut actions = rune::row().gap(6.0);
-    if !item.read {
-        let topic = item.topic.clone();
-        actions = actions.child(
-            rune_kit::Button::new("Mark read")
-                .variant(rune_kit::ButtonVariant::Ghost)
-                .on_press_tx(move |state: &mut State, tx| {
-                    let before = state.inbox.filtered_group_position(&topic);
-                    state.inbox.mark_read(id);
-                    if state.inbox.filtered_group_position(&topic) == before {
-                        tx.focus(row_key.clone(), tx.focus_visible());
-                        tx.keep_on_screen(row_key.clone());
-                    } else {
-                        // Keep the scroll viewport where the reader was when this group moves.
-                        tx.focus("inbox-close", tx.focus_visible());
-                    }
-                })
-                .build(kit)
-                .key(format!("inbox-item-{id}-mark")),
-        );
-    }
-    if let Some(label) = item.topic.action().filter(|_| {
+    let action = item.topic.action().filter(|_| {
         !matches!(item.topic, Topic::Job(_))
             || (state.connected() && state.registration.context.is_some())
-    }) {
+    });
+    let action = action.map(|label| {
         let topic = item.topic.clone();
-        actions = actions.child(
+        rune::row().child(
             rune_kit::Button::new(label)
                 .variant(rune_kit::ButtonVariant::Ghost)
                 .label_with(move |font, _| {
@@ -1141,8 +1144,8 @@ fn row(item: &Item, state: &State, kit: &Kit) -> El {
                 })
                 .build(kit)
                 .key(format!("inbox-item-{id}-action")),
-        );
-    }
+        )
+    });
     entry = entry.child(
         rune::col()
             .key(format!("inbox-item-{id}-detail"))
@@ -1155,7 +1158,7 @@ fn row(item: &Item, state: &State, kit: &Kit) -> El {
                     .color(theme::hex(theme::TEXT_SECONDARY))
                     .wrap(),
             )
-            .child(actions),
+            .children(action),
     );
     entry
 }
@@ -1346,15 +1349,23 @@ mod tests {
         assert!(earliest.at < latest.at);
         assert_eq!(earliest.at, groups[1].items[0].at);
         let earliest_id = earliest.id;
-        inbox.mark_read(earliest_id);
-        inbox.mark_read(earliest_id);
+        let latest_id = latest.id;
+        inbox.toggle_group(&actor);
+        assert_eq!(inbox.selected, None);
         assert_eq!(inbox.unread(), 2);
         let groups = inbox.groups();
         assert_eq!(groups[0].topic, &job);
         assert_eq!(groups[1].topic, &actor);
         assert_eq!(groups[1].unread, 1);
+        assert!(!groups[1].items[1].read);
 
-        inbox.mark_group_read(&actor);
+        inbox.toggle_group(&actor);
+        inbox.select(latest_id);
+        inbox.toggle_group(&job);
+        assert_eq!(inbox.selected, Some(latest_id));
+        assert_eq!(inbox.unread(), 2);
+        inbox.select(earliest_id);
+        assert_eq!(inbox.selected, Some(earliest_id));
         assert_eq!(inbox.unread(), 1);
         assert_eq!(inbox.groups()[0].topic, &job);
         inbox.mark_group_read(&job);
@@ -1717,7 +1728,8 @@ mod tests {
         let mut runtime = runtime(state, (640.0, 480.0));
         let row = "inbox-item-2-row";
         let later_row = "inbox-item-4-row";
-        let mark = "inbox-item-2-mark";
+        let unread = "inbox-item-2-unread";
+        let later_unread = "inbox-item-4-unread";
         let status = "inbox-item-2-action";
         let group = "inbox-group-job-fixture-index-job-toggle";
         let mark_job = "inbox-group-job-fixture-index-job-mark-read";
@@ -1733,17 +1745,21 @@ mod tests {
         assert_eq!(label(&runtime, "inbox-toggle-close"), "Inbox, 3 unread");
         assert_eq!(label(&runtime, status), "View status");
         assert!(label(&runtime, group).contains("1 unread"));
+        assert!(label(&runtime, row).starts_with("Unread, "));
+        assert!(runtime.find(unread).is_some());
+        assert!(runtime.find("inbox-item-2-mark").is_none());
 
-        click(&mut runtime, mark, 1.0);
+        click(&mut runtime, row, 1.0);
         runtime.frame(1.3);
         assert_eq!(label(&runtime, "inbox-toggle-close"), "Inbox, 2 unread");
-        assert!(focused(&runtime, "inbox-close"));
         assert_eq!(
             runtime.state.inbox.groups()[0].topic,
             &Topic::Job("fixture-index-job".into())
         );
-        assert!(runtime.find("inbox-item-2-detail").is_some());
-        assert!(runtime.find(mark).is_none());
+        assert!(runtime.find("inbox-item-2-detail").is_none());
+        assert!(label(&runtime, row).starts_with("Read, "));
+        assert!(runtime.find(unread).is_none());
+        assert!(runtime.find(later_unread).is_some());
 
         runtime.update(|state, tx| {
             tx.focus(row, true);
@@ -1759,11 +1775,18 @@ mod tests {
         runtime.frame(1.5);
         assert_eq!(label(&runtime, "inbox-toggle-close"), "Inbox, 3 unread");
         assert!(focused(&runtime, row));
-        assert!(runtime.find("inbox-item-2-detail").is_some());
+        assert!(runtime.find(later_unread).is_some());
 
         click(&mut runtime, later_row, 1.6);
-        click(&mut runtime, "inbox-item-4-mark", 1.7);
-        assert!(focused(&runtime, "inbox-close"));
+        assert!(runtime.find("inbox-item-4-detail").is_some());
+        assert!(runtime.find(later_unread).is_some());
+        click(
+            &mut runtime,
+            "inbox-group-readiness-Actor search-toggle",
+            1.7,
+        );
+        assert!(runtime.find(later_row).is_none());
+        assert_eq!(label(&runtime, "inbox-toggle-close"), "Inbox, 2 unread");
         assert_eq!(
             label(&runtime, mark_connection),
             "Mark Connection notifications as read"

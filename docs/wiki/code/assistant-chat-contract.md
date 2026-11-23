@@ -41,7 +41,7 @@ Turn states are `queued`, `running`, `retrying`, `final` and `failed`. V1 is a s
 
 ## Inbox QA V2
 
-The native Inbox uses the separate [V2 types](../../../crates/fleetworks-contracts/src/chat/qa.rs) when the selected backend advertises `inbox-qa-v2`. Embedded uses the companion’s framed IPC. Distributed uses the paired gateway, including loopback gateways. Settings, the latest exchange, and transcript access follow the current registration and selected backend. The transcript sits above the composer and follows new answers while the reader is at the bottom. Scrolling up preserves the reading position. Each notification group has its own mark-as-read button.
+The native Inbox uses the separate [V2 types](../../../crates/fleetworks-contracts/src/chat/qa.rs) when the selected backend advertises `inbox-qa-v2`. Embedded uses the companion’s framed IPC. Distributed uses the paired gateway, including loopback gateways. Settings, the latest exchange, and transcript access follow the current registration and selected backend. The transcript sits above the composer and follows new answers while the reader is at the bottom. Scrolling up preserves the reading position. Each notification group has its own mark-as-read button. In an expanded group, a dot identifies each unread item. Collapsing an open notification marks that item read.
 
 | Method | Path | Permission |
 | --- | --- | --- |

@@ -22,16 +22,19 @@ python3 scripts/fleetworks_candidate.py build-native --agent --target host --pro
 
 ### macOS quick start
 
-Use the [quick-start script](../../scripts/fleetworks_quick_start.py) to open Intel or Apple Silicon Fleetworks in a private local profile. Supply the macOS debug app and matching Inbox pack artifact IDs from a successful Fleetworks GitHub Actions run. The IDs are the numbers at the end of the artifact links.
+Use the [quick-start script](../../scripts/fleetworks_quick_start.py) from the repository root after installing the pinned Rust toolchain and Xcode Command Line Tools.
 
 ```sh
-python3 scripts/fleetworks_quick_start.py \
-  --app-artifact "$app_artifact_id" --inbox-artifact "$inbox_artifact_id"
+python3 scripts/fleetworks_quick_start.py
 ```
 
-The script checks the source revision, architecture and digests before using the bundle. It retains the desktop, Embedded companion, app resources and pinned actor CSV. With the Inbox pack selected, it uses the app's usual Embedded startup controls through macOS Accessibility, then imports the matching worker, libraries and model into the isolated profile. Enable **Backend inference** in Gateway settings when you want to use the installed model. The app still connects to a provisioned Distributed gateway for features such as news cycles.
+The script builds Fleetworks Desktop and its Embedded companion from the current checkout for Intel or Apple Silicon macOS. It uses locked dependencies and the shared `target/agents/debug` cache. It reuses its own validated source bundle at the same clean revision. It keeps one app under `.agent-scratch/native-quick-start/` and opens it with a private profile under `.agent-scratch/native-quick-start-profile/`. Updates preserve that profile. Close the app before replacing its bundle.
 
-The default uses the verified hosted desktop. Add `--rebuild-desktop` to compile local desktop changes in the shared `target/agents/debug` cache and reuse the companion when its build inputs match. The quick start keeps one unpacked bundle under `.agent-scratch/native-quick-start/` and its state in the separate `.agent-scratch/native-quick-start-profile/`. The temporary downloads are discarded. Later launches can reuse that bundle without either artifact ID. Omit `--inbox-artifact` when you only need the base app, and use **Embedded → Start Embedded Backend** in the window or pass `--start-embedded`.
+- Use `--reuse-bundle` to open a validated, compatible clean bundle without an app build or download. Use `--output` and `--profile-dir` to select existing paths.
+- Use `--app-artifact ID` to verify and open a specific macOS debug app from a successful matching Fleetworks GitHub Actions run. Add `--rebuild-desktop` to build the desktop from source and use the verified hosted companion.
+- Use `--inbox-artifact ID` to install the verified matching Inbox worker, libraries and model in the isolated profile. The script uses macOS accessibility controls to start Embedded and discards temporary downloads. Enable **Backend inference** in Gateway settings to use the installed model.
+
+Artifact IDs are the numbers at the ends of the GitHub Actions artifact links. Select **Embedded → Start Embedded Backend** in the window or pass `--start-embedded` to start it through the accessibility controls. News cycles use a provisioned Distributed gateway.
 
 For a fresh or existing Distributed review using a loopback gateway, run:
 

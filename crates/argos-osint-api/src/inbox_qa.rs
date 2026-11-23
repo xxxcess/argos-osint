@@ -24,8 +24,8 @@ use fleetworks_contracts::chat::{
     ChatSourceKind, ChatSourceReference, QaAvailabilityReason, QaCancelRequest,
     QaConversationReply, QaEventPage, QaEventQuery, QaFinding, QaPhase, QaSettings,
     QaSettingsUpdate, QaStartupStage, QaTurn, QaTurnNotice, QaTurnRequest, QA_CANCEL_PATH,
-    QA_EVENTS_PATH, QA_EVIDENCE_HEADER, QA_EVIDENCE_VERSION, QA_LATEST_PATH, QA_SETTINGS_PATH,
-    QA_TURNS_PATH,
+    QA_EVENTS_PATH, QA_EVIDENCE_HEADER, QA_EVIDENCE_VERSION, QA_LATEST_PATH, QA_MAX_FINDINGS,
+    QA_MAX_WORDS, QA_SETTINGS_PATH, QA_TURNS_PATH,
 };
 use fleetworks_contracts::context::{CredentialPurpose, MutationContext, Permission};
 use fleetworks_contracts::qa_worker::{QaPassage, QaWorkerEvent, QaWorkerRequest};
@@ -691,6 +691,7 @@ pub(crate) async fn submit_request(
                     question::classify(previous),
                     Question::Readiness(_)
                         | Question::ReadinessExplanation(_)
+                        | Question::StatusChecks(_)
                         | Question::Metric(_)
                         | Question::HostResources
                         | Question::JobsSummary
@@ -854,6 +855,49 @@ async fn snapshot(
                     None,
                     false,
                 );
+            }
+        }
+        Question::StatusChecks(selection) => {
+            if let Some((sample, (summary, details))) = health.as_ref().and_then(|sample| {
+                readiness::status_check_summary(&sample.facts, selection)
+                    .map(|report| (sample, report))
+            }) {
+                let at = chrono::DateTime::from_timestamp_millis(sample.sampled_at_ms)
+                    .ok_or_else(current_health_unavailable)?;
+                let reference = ChatSourceReference::new(
+                    ChatSourceKind::Readiness,
+                    "workstation_status_checks".to_owned(),
+                )
+                .map_err(|_| crate::bad())?;
+                let mut remaining_words =
+                    QA_MAX_WORDS.saturating_sub(summary.split_whitespace().count());
+                push(
+                    reference,
+                    "Workstation status checks".to_owned(),
+                    summary,
+                    at,
+                    None,
+                    false,
+                );
+                for fact in details.into_iter().take(QA_MAX_FINDINGS - 1) {
+                    let text = readiness::answer(fact);
+                    let words = text.split_whitespace().count();
+                    if words > remaining_words {
+                        continue;
+                    }
+                    remaining_words -= words;
+                    let reference =
+                        ChatSourceReference::new(ChatSourceKind::Readiness, fact.id.clone())
+                            .map_err(|_| crate::bad())?;
+                    push(
+                        reference,
+                        readiness::label(fact).to_owned(),
+                        text,
+                        at,
+                        None,
+                        false,
+                    );
+                }
             }
         }
         Question::Metric(_) | Question::HostResources | Question::JobsSummary => {

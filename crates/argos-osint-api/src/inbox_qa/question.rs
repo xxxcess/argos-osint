@@ -10,12 +10,20 @@ pub(super) enum Question {
     ExplainSelected,
     Readiness(ReadinessCheckId),
     ReadinessExplanation(ReadinessCheckId),
+    StatusChecks(StatusChecks),
     Metric(Metric),
     HostResources,
     JobsSummary,
     ContextStatus(ChatSourceKind),
     Summary,
     Unsupported,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum StatusChecks {
+    All,
+    Unresolved,
+    Failed,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -125,6 +133,9 @@ pub(super) fn classify(question: &str) -> Question {
     if let Some(metric) = metric(current_query) {
         return Question::Metric(metric);
     }
+    if let Some(checks) = status_checks(current_query) {
+        return Question::StatusChecks(checks);
+    }
     if let Some(check) = readiness(question, query) {
         return Question::Readiness(check);
     }
@@ -206,6 +217,45 @@ fn conversational_intent(question: &str) -> Option<Question> {
 
 fn trim_sentence_end(value: &str) -> &str {
     value.trim_end_matches(['?', '.', '!']).trim_end()
+}
+
+fn status_checks(query: &str) -> Option<StatusChecks> {
+    let query = strip_any_prefix(
+        query,
+        &[
+            "list ",
+            "summarize ",
+            "summarise ",
+            "explain ",
+            "which ",
+            "why are ",
+        ],
+    )
+    .unwrap_or(query);
+    let query = strip_article(query);
+    let query = strip_any_prefix(query, &["current ", "live "]).unwrap_or(query);
+    let query = strip_any_suffix(query, &[" on this workstation", " for this workstation"])
+        .unwrap_or(query);
+    let query = query.strip_suffix(" about").unwrap_or(query);
+    Some(match query {
+        "status checks" | "workstation status checks" | "backend status checks" => {
+            StatusChecks::All
+        }
+        "unresolved status checks"
+        | "unresolved checks"
+        | "unresolved workstation status checks"
+        | "status checks are unresolved"
+        | "checks are unresolved"
+        | "status checks unresolved"
+        | "status checks still need attention"
+        | "checks still need attention" => StatusChecks::Unresolved,
+        "failed status checks"
+        | "failed checks"
+        | "failed workstation status checks"
+        | "status checks failed"
+        | "checks failed" => StatusChecks::Failed,
+        _ => return None,
+    })
 }
 
 fn metric(query: &str) -> Option<Metric> {
@@ -767,6 +817,32 @@ mod tests {
     }
 
     #[test]
+    fn routes_workstation_status_checks_to_a_scoped_direct_answer() {
+        for (prompt, selection) in [
+            (
+                "what are the current unresolved status checks about?",
+                StatusChecks::Unresolved,
+            ),
+            (
+                "Which status checks are unresolved?",
+                StatusChecks::Unresolved,
+            ),
+            (
+                "Explain the unresolved status checks on this workstation.",
+                StatusChecks::Unresolved,
+            ),
+            ("Which checks failed?", StatusChecks::Failed),
+            ("Show me the workstation status checks.", StatusChecks::All),
+        ] {
+            assert_eq!(
+                classify(prompt),
+                Question::StatusChecks(selection),
+                "{prompt}"
+            );
+        }
+    }
+
+    #[test]
     fn leaves_unsupported_or_mixed_requests_without_a_grounding_source() {
         for question in [
             "How many jobs failed?",
@@ -785,6 +861,7 @@ mod tests {
             "Is the workstation registered?",
             "Is the gateway or datastore ready?",
             "Summarize backend health and CPU usage.",
+            "List unresolved status checks for all workstations.",
             "What is CPU, memory, and disk usage on my laptop?",
             "What is CPU, memory, and disk usage by user?",
             "What is CPU, memory, disk, and GPU usage?",

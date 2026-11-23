@@ -925,6 +925,7 @@ fn qa_fact(check: &ReadinessCheck) -> Option<QaReadinessFact> {
     let id = check.id.as_str();
     let label = qa_readiness_label(id)?;
     let status = match check.state {
+        ReadinessState::NotReady if check.reason_code == "process_not_ready" => "failed",
         ReadinessState::NotReady => "not ready",
         ReadinessState::NotApplicable => "not applicable",
         state => state.as_str(),
@@ -1258,7 +1259,7 @@ mod tests {
         );
         assert_eq!(
             qa_fact(&classifier),
-            Some(("classifier", "Classifier service", "not ready", "")),
+            Some(("classifier", "Classifier service", "failed", "")),
         );
     }
 

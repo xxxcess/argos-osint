@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 896" role="img" aria-labelledby="inbox-prompt-flow-title inbox-prompt-flow-desc">
   <title id="inbox-prompt-flow-title">Inbox prompt flow</title>
-  <desc id="inbox-prompt-flow-desc">The native Inbox composer submits a registered turn to the Embedded companion over a private Unix socket or to the paired Distributed gateway over HTTPS. Both use shared QA admission to check permissions and capture fresh, scoped readiness, host metrics and Jobs counts. Exact facts, guidance and context requests answer immediately. Readiness summaries use a durable queue and a sandboxed BERT worker that receives bounded passages. The coordinator verifies cited selections against the snapshot and can use complete fresh readiness observations when a summary returns no usable selection. The backend commits the canonical turn and ordered events. Inbox resumes from a cursor or fetches the latest turn, with a context-window dial and timestamped citations under a collapsed Sources control.</desc>
+  <desc id="inbox-prompt-flow-desc">The native Inbox composer submits a registered turn to the Embedded companion over a private Unix socket or to the paired Distributed gateway over HTTPS. Shared QA admission checks permissions and captures fresh, scoped readiness, host metrics and Jobs counts for every new accepted turn. Follow-ups can reuse the previous answered topic and take new observations. Specific facts and summaries of failed or unresolved checks use current counts, check names and timestamped evidence. Broad readiness summaries use a durable queue and a sandboxed BERT worker with a 256-token input window. The coordinator verifies cited selections against the snapshot and can use complete fresh readiness observations when a summary returns no usable selection. The backend commits the canonical turn and ordered events. Inbox resumes from a cursor or fetches the latest turn. The mini dial sits under the reply, and Sources reveals the timestamped citations.</desc>
   <style>
     text{font-family:Geist,Arial,sans-serif;fill:#242424}
     .label{font-size:22px;font-weight:600}
@@ -22,8 +22,8 @@
     <path d="M 596 88 V 104 H 800 V 124"/>
     <path d="M 320 212 V 228 H 420 V 248"/>
     <path d="M 800 212 V 228 H 700 V 248"/>
-    <path d="M 420 344 V 364 H 304 V 384"/>
-    <path d="M 700 344 V 364 H 816 V 384"/>
+    <path d="M 420 360 V 372 H 304 V 384"/>
+    <path d="M 700 360 V 372 H 816 V 384"/>
     <path d="M 304 472 V 644"/>
     <path d="M 816 472 V 508"/>
     <path d="M 816 608 V 644"/>
@@ -49,21 +49,22 @@
   </g>
 
   <g data-card="true">
-    <rect x="252" y="248" width="616" height="96" rx="6" class="focus"/>
+    <rect x="252" y="248" width="616" height="112" rx="6" class="focus"/>
     <text x="272" y="280" class="label">Shared Inbox QA admission</text>
     <text x="272" y="304" class="note">Check workstation registration, permissions and inference readiness</text>
-    <text x="272" y="328" class="note">Freeze fresh, scoped readiness checks, host metrics and Jobs counts</text>
+    <text x="272" y="326" class="note">Freeze fresh, scoped readiness checks, host metrics and Jobs counts</text>
+    <text x="272" y="348" class="note">Follow-ups reuse the topic and take new observations</text>
   </g>
 
   <g data-card="true">
     <rect x="80" y="384" width="448" height="88" rx="6" class="node"/>
     <text x="100" y="412" class="label">Immediate answer</text>
-    <text x="100" y="436" class="note">Grounded facts from the scoped snapshot</text>
-    <text x="100" y="460" class="note">Small talk, help or context request</text>
+    <text x="100" y="436" class="note">Failed or unresolved check counts and names</text>
+    <text x="100" y="460" class="note">Specific metrics, help and context requests</text>
   </g>
   <g data-card="true">
     <rect x="592" y="384" width="448" height="88" rx="6" class="node"/>
-    <text x="612" y="412" class="label">Durable readiness summary queue</text>
+    <text x="612" y="412" class="label">Broad readiness summary queue</text>
     <text x="612" y="436" class="note">The QA executor claims the registered turn</text>
     <text x="612" y="460" class="note">Uses the frozen evidence snapshot</text>
   </g>
@@ -72,7 +73,7 @@
     <text x="612" y="536" class="label">Sandboxed BERT worker</text>
     <text x="612" y="560" class="note">Selects bounded spans from supplied passages</text>
     <text x="612" y="580" class="note">Embedded pipes or Distributed private socket</text>
-    <text x="612" y="600" class="note">Offline model reports context-window usage</text>
+    <text x="612" y="600" class="note">Reports peak usage of the 256-token window</text>
   </g>
 
   <g data-card="true">
@@ -87,6 +88,6 @@
     <rect x="240" y="788" width="640" height="84" rx="6" class="node"/>
     <text x="260" y="816" class="label">Inbox transcript</text>
     <text x="260" y="840" class="note">Resume from the event cursor or recover the latest turn</text>
-    <text x="260" y="864" class="note">Context dial and collapsible timestamped Sources</text>
+    <text x="260" y="864" class="note">Mini dial below the reply and collapsible Sources</text>
   </g>
 </svg>

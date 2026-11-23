@@ -50,7 +50,7 @@ jobs:
   package:
     name: Native app and real-view fixtures
     runs-on: ${{ inputs.runner }}
-    timeout-minutes: 60
+    timeout-minutes: ${{ inputs.target == 'x86_64-apple-darwin' && 100 || 60 }}
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
       artifact-url: ${{ steps.upload.outputs.artifact-url }}

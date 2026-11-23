@@ -11,7 +11,6 @@ from pathlib import Path
 import re
 import secrets
 import shutil
-import signal
 import socket
 import stat
 import subprocess
@@ -242,30 +241,36 @@ def cited_running_jobs(turn, active_jobs):
 
 
 def cancel_running_embedded_turn(request, registration, model):
-    active = model()
-    require(len(active) == 1, "Expected one isolated model process before cancellation")
-    worker, = active
-    # Keep the actual packaged worker alive without letting it finish the separate turn.
-    os.kill(worker, signal.SIGSTOP)
-    try:
-        context = authorize(registration)
-        stopped = request("turns", {"request_id": "inbox-qa-smoke-cancel-running", "context": context,
-                                    "question": SUMMARY_QUESTION}, expected=(200, 201, 202))
-        turn_id = stopped["turn_id"]
+    require(len(model()) == 1, "Expected one isolated model process before cancellation")
+    context = authorize(registration)
+    attempts = set()
+    for attempt in range(1, 4):
+        admitted = request("turns", {"request_id": f"inbox-qa-smoke-cancel-running-{attempt}",
+                                     "context": context, "question": SUMMARY_QUESTION}, expected=(200, 201, 202))
+        turn_id = admitted["turn_id"]
+        require(turn_id not in attempts, "Cancellation retry reused a prior turn")
+        attempts.add(turn_id)
         query = {"turn_id": turn_id, "after": 0, "wait_seconds": 0}
-        running = until(lambda: request("events", query=query),
-                        lambda page: page["turn"]["state"] == "running",
-                        "QA turn did not enter Running before Stop", timeout=16)
-        require(not running["gap"] and running["turn"]["turn_id"] == turn_id,
-                "Running event belonged to a different turn or a gapped cursor")
-        require(model() == [worker], "The isolated worker changed before Stop")
+        page = until(lambda: request("events", query=query),
+                     lambda value: value["turn"]["state"] in TERMINAL | {"running"},
+                     "QA turn did not enter Running before Stop", timeout=16, interval=0.02)
+        require(not page["gap"] and page["turn"]["turn_id"] == turn_id
+                and any(event["state"] == "running" for event in page["events"]),
+                "Expected this turn's Running event in a consecutive cursor")
+        state = page["turn"]["state"]
+        if state == "answered":
+            continue
+        require(state == "running", "Model turn failed before Stop")
+        # Keep the real worker available to the coordinator heartbeat. Cancel as
+        # soon as the durable Running event appears, before making another probe.
         canceled = request("cancel", {"context": context, "turn_id": turn_id})
-    finally:
-        if worker in model():
-            try:
-                os.kill(worker, signal.SIGCONT)
-            except ProcessLookupError:
-                pass
+        require(canceled["turn_id"] == turn_id, "Stop returned a different turn")
+        if canceled["state"] == "answered":
+            continue
+        require(canceled["state"] == "canceled", "Stop did not cancel the Running turn")
+        break
+    else:
+        raise ValueError("The model answered before Stop on all three distinct turns")
     result = request("events", query=query)
     terminal = [event for event in result["events"] if event["state"] in TERMINAL]
     require(not result["gap"] and result["turn"] == canceled and canceled["turn_id"] == turn_id

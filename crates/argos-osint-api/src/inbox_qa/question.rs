@@ -213,7 +213,7 @@ fn host_resources(query: &str) -> bool {
 
 fn host_usage(query: &str) -> Option<Metric> {
     let host_query = host_resource_query(query);
-    if let Some(usage) = strip_any_suffix(
+    if let Some(metric) = strip_any_suffix(
         host_query,
         &[
             " usage",
@@ -222,8 +222,10 @@ fn host_usage(query: &str) -> Option<Metric> {
             " utilisation",
             " consumption",
         ],
-    ) {
-        return host_resource(usage);
+    )
+    .and_then(host_resource)
+    {
+        return Some(metric);
     }
 
     let usage = strip_any_prefix(
@@ -486,6 +488,7 @@ mod tests {
             ("Hi! What is the memory usage?", Metric::Memory),
             ("how much memory consumption we are at", Metric::Memory),
             ("What's our RAM consumption right now?", Metric::Memory),
+            ("How much memory is in use?", Metric::Memory),
             ("What percentage of memory is in use?", Metric::Memory),
             ("What is the disk usage on the backend host?", Metric::Disk),
             (

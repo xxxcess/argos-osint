@@ -13,7 +13,6 @@ use rune_kit::Kit;
 
 use crate::accessibility::ViewPreferences;
 use crate::app::Page;
-use crate::icons;
 use crate::material;
 use crate::material::GlassSurface;
 use crate::theme;

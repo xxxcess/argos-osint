@@ -32,7 +32,7 @@ For trusted publication, the [release planner](../../../scripts/fleetworks_relea
 | React Native Web | Second pass. Locked dependencies, types, Hooks/compiler lint, units, Next build guard, live relay and Chromium contracts, with the development profile when selected |
 | Rust-BERT | Native AMD64 first, ARM64 second. Debian bookworm build, pinned real checkpoint inference and extracted bundle checks |
 
-`Fleetworks source checks` (`source_checks`) rejects failed planning, missing/failed/cancelled selected jobs and unexpected skips. The event and pass determine which lanes are selected. First-pass results cover the Linux app and affected AMD64 backend lanes. The second pass consumes a successful first-pass run for the same open PR, base and head. Its **Fleetworks second pass** result covers the deferred selected lanes. A trusted publication independently verifies its selected targets, including Mac ZIPs when the native release scope is selected. Trusted image staging (`release_images` or `release_images_depot` in [fleetworks.yml](../../../.github/workflows/fleetworks.yml) via [release_images.py](../../../.github/scripts/release_images.py)) then builds, smokes, pushes exact digests and exports `fleetworks-images-linux-{amd64,arm64}.tar.gz` archives once. `prepublish` gates trusted publication (`publish` via [publish_release.py](../../../.github/scripts/publish_release.py)), which attaches selected macOS app ZIPs, Linux image archives, Atlas BERT Linux worker bundles and `release.json`, and final **Fleetworks required** (`required`) requires every selected check and publication step to succeed. An unselected lane must skip intentionally.
+`Fleetworks source checks` (`source_checks`) rejects failed planning, missing/failed/cancelled selected jobs and unexpected skips. The event and pass determine which lanes are selected. First-pass results cover the Linux app and affected AMD64 backend lanes. The second pass consumes a successful first-pass run for the same open PR, base and head. Its **Fleetworks second pass** result covers the deferred selected lanes. A trusted publication independently verifies its selected targets, including Mac ZIPs when the native release scope is selected. Trusted image staging (`release_images` or `release_images_nightly` in [fleetworks.yml](../../../.github/workflows/fleetworks.yml) via [release_images.py](../../../.github/scripts/release_images.py)) then builds, smokes, pushes exact digests and exports `fleetworks-images-linux-{amd64,arm64}.tar.gz` archives once. `prepublish` gates trusted publication (`publish` via [publish_release.py](../../../.github/scripts/publish_release.py)), which attaches selected macOS app ZIPs, Linux image archives, Atlas BERT Linux worker bundles and `release.json`, and final **Fleetworks required** (`required`) requires every selected check and publication step to succeed. An unselected lane must skip intentionally.
 
 ```sh
 base="$(git rev-parse HEAD^)"
@@ -47,17 +47,32 @@ python3 scripts/fleetworks_verify.py dispatch pr --ref <branch> --base <full-bas
 python3 scripts/fleetworks_verify.py dispatch full --ref <branch>
 ```
 
-## Docker image builds on Depot
+## GitHub Actions and Depot build routing
 
-The [image helper](../../../.github/scripts/release_images.py) builds and loads all CI Docker images from the [shared Bake file](../../../deploy/docker-bake.hcl). The verification matrix uses the same helper for scoped images and Compose-only changes. The backend closure is `runtime`, `search-index` and `surrealdb`, with `web` added when selected. A full review also verifies the preloaded development Web image when the development scope is selected. Both Compose profiles run with `--no-build` against the loaded image IDs. Web-only packaging retains its standalone smoke. GitHub Actions runs smoke and release promotion on the matching architecture.
+GitHub-hosted runners are the default. They build Docker images with Buildx and run the selected smoke and publication checks on the matching architecture. This covers review images, Distributed Inbox QA, nightly release images and the optional Embedded desktop image. Linux desktop packaging also uses a GitHub-hosted runner by default.
 
-Use `--builder depot --depot-project <id>` to run the build remotely. The runner receives the images under the same tags before smoke starts. GitHub Actions schedules the review check and runs smoke after the Depot build is loaded. A selected Depot build fails its check if configuration, authentication, building or loading fails. Buildx is available for local development and explicit manual benchmarks.
+The [image helper](../../../.github/scripts/release_images.py) builds and loads CI images from the [shared Bake file](../../../deploy/docker-bake.hcl). The backend closure is `runtime`, `search-index` and `surrealdb`, with `web` added when selected. A full review also verifies the preloaded development Web image when selected. The Compose profiles run with `--no-build` against the loaded image IDs, and Web-only packaging retains its standalone smoke. Both builders produce images under the same tags for smoke, digest verification and release staging.
 
-### Nightly review and release configuration
+### Switch the default provider
 
-- **Review.** Configure GitHub OIDC trust for this repository in a dedicated review project and keep public fork PR access disabled. Set `DEPOT_REVIEW_PROJECT_ID` for same-repository reviews targeting `nightly`, their validated second passes, and standard nightly dispatches. Those selected image checks require Depot. An exact-head manual dispatch can select Depot on another branch. Fork PRs skip image builds and retain their other checks. Use `image_builder=buildx` only for an explicit manual comparison. [Depot GitHub OIDC](https://depot.dev/docs/container-builds/integrations/github-actions#authentication)
-- **Release.** Create a separate Depot project with a project-scoped token. Keep the repository-wide GitHub OIDC relationship confined to the review project. In GitHub, create the `fleetworks-release-images` environment, restrict deployments to the `nightly` branch with a branch rule and store the release project token as the environment secret `DEPOT_RELEASE_TOKEN`. Keep this token out of repository secrets and Depot CI imports. The current Depot GitHub trust configuration is scoped to a repository, so the protected environment keeps release credentials separate from same-repository review jobs. [Depot project tokens](https://depot.dev/docs/cli/authentication#project-tokens) · [GitHub deployment branch rules](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments#deployment-branches-and-tags)
-- **Cutover.** Set `DEPOT_RELEASE_PROJECT_ID` to the release project ID before enabling nightly publication. A trusted `nightly` push requires Depot for every selected release Docker image. Missing credentials or a missing or shared project fail the selected release check. Dev and main release builds use Buildx. GitHub Actions stages the exact smoked image digest and publishes the verified archive and checksum.
+Set the repository variable `FLEETWORKS_CI_PROVIDER` in **Settings → Secrets and variables → Actions → Variables** or use the GitHub CLI. An unset variable selects GitHub. Start a fresh workflow after a change so its scope plan selects the intended provider.
+
+Select Depot for eligible nightly builds.
+
+```sh
+gh variable set FLEETWORKS_CI_PROVIDER --repo xxxcess/argos-osint --body depot
+```
+
+Return to GitHub-hosted builds.
+
+```sh
+gh variable set FLEETWORKS_CI_PROVIDER --repo xxxcess/argos-osint --body github
+```
+
+Configure Depot billing and access before selecting it. The `depot` setting restores the nightly Depot routes using the projects and tokens below. A selected Depot route fails its gate if its credentials, build or load fail. Standard manual dispatches can override the image builder with `image_builder=depot` or `image_builder=buildx`. GitHub-hosted macOS jobs continue to verify the Intel and Apple Silicon packages.
+
+- **Review.** Set `DEPOT_REVIEW_PROJECT_ID` to a dedicated project with GitHub OIDC trust for this repository. Keep public fork PR access disabled. The project serves same-repository reviews targeting `nightly`, validated second passes, standard nightly dispatches and explicit Depot dispatches. Fork PRs skip the protected image lanes. [Depot GitHub OIDC](https://depot.dev/docs/container-builds/integrations/github-actions#authentication)
+- **Release.** Set `DEPOT_RELEASE_PROJECT_ID` to a different project. The selected nightly release image build uses the GitHub `fleetworks-release-images` environment with either provider. Restrict its deployments to `nightly` and store a project-scoped token there as `DEPOT_RELEASE_TOKEN` for Depot. Keep the token out of repository secrets and Depot CI imports. Dev and main release images use Buildx. [Depot project tokens](https://depot.dev/docs/cli/authentication#project-tokens) · [GitHub deployment branch rules](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments#deployment-branches-and-tags)
 
 ### Compare build times
 
@@ -83,18 +98,18 @@ gh workflow run fleetworks.yml --ref "$review_branch" \
   -f head="$review_head" -f depot_linux_native_pilot=true
 ```
 
-Set `DEPOT_NIGHTLY_NATIVE_ENABLED=true` after verifying the Depot CI token and the release build. Selected `nightly` Linux x86_64 release builds then execute the canonical verification job on Depot. GitHub Actions checks the result for the same commit and republishes the package, UI captures and verification files in the current Actions run. The manual pilot runs the cold and warm debug comparison on demand.
+To route selected nightly Linux x86_64 release builds through Depot, set `FLEETWORKS_CI_PROVIDER=depot` and `DEPOT_NIGHTLY_NATIVE_ENABLED=true` after verifying the Depot CI token and the release build. GitHub Actions checks the result for the same commit and republishes the package, UI captures and verification files in the current Actions run. The manual pilot runs the cold and warm debug comparison on demand.
 
 Depot CI supports Linux on x86_64 and Arm64. GitHub’s macOS jobs provide real Intel and Apple Silicon package verification for a personally owned repository. [Depot CI sandbox types](https://depot.dev/docs/ci/overview#depot-ci-sandboxes) · [Depot GitHub Actions runner requirements](https://depot.dev/docs/github-actions/overview)
 
 ## Embedded desktop Docker image
 
-A standard manual Fleetworks run with `native_embedded_image=true` builds a Linux x86_64 development image from its verified Linux app package. It uses the shared Depot Bake command, verifies the loaded image with the Embedded stdio smoke, and uploads `Fleetworks-Embedded-Desktop-Docker-Archive-*` with a loadable compressed image and checksum. It requires an exact commit, an enabled Depot review project, and `components=native` or `components=all`. This optional image belongs to the development loop and does not publish to GHCR.
+A standard manual Fleetworks run with `native_embedded_image=true` builds a Linux x86_64 development image from its verified Linux app package. It uses the selected builder, verifies the loaded image with the Embedded Unix-socket smoke, and uploads `Fleetworks-Embedded-Desktop-Docker-Archive-*` with a loadable compressed image and checksum. Supply the exact commit and `components=native` or `components=all`. This optional image belongs to the development loop and does not publish to GHCR.
 
 ```sh
 gh workflow run fleetworks.yml --ref "$review_branch" \
   -f mode=full -f components=native -f head="$review_head" \
-  -f image_builder=depot -f native_embedded_image=true
+  -f image_builder=buildx -f native_embedded_image=true
 ```
 
 ### Find the right Actions artifact

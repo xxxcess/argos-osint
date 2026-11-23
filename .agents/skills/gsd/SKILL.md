@@ -22,6 +22,8 @@ Before a comment or push, read the PR with `gh api repos/xxxcess/argos-osint/pul
 
 Use GitHub Actions for every applicable check, test, build, image or Compose smoke, benchmark, and Rune or Playwright capture that can run there. Plan the affected lanes, push the scoped changes, and verify evidence on the exact PR head. Use an existing scoped dispatch when the regular lane lacks a required test or capture. Reuse successful results when the relevant inputs still match.
 
+Follow the repository's [build provider selection](../../../docs/wiki/code/ci.md#switch-the-default-provider) for image and Linux native jobs. GitHub-hosted builds are the default. Select Depot for a manual comparison when the task calls for it.
+
 Apply this to Core, UI, integration owners, and subagents. Local work covers source inspection, edits, formatting, Git and commit-policy preflight, and inspecting hosted artifacts. Use a passing hosted build for an authorized live native review. Run a local check or build only for necessary evidence GitHub CI cannot supply and within the user's authorized scope. Report missing coverage as pending with the reason.
 
 ### GSD Nightly: Core

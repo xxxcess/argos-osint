@@ -264,6 +264,16 @@ def verification(stage, plan, *, inbox_qa=False):
     }
 
 
+def build_providers(repository_provider, requested_builder):
+    """Resolve the automatic route and any explicit manual image override."""
+    if repository_provider not in ("", "github", "depot"):
+        raise ValueError("FLEETWORKS_CI_PROVIDER must be github, depot, or unset")
+    if requested_builder not in ("", "auto", "buildx", "depot"):
+        raise ValueError("Image builder must be auto, buildx, or depot")
+    automatic = "depot" if repository_provider == "depot" else "buildx"
+    return automatic, automatic if requested_builder in ("", "auto") else requested_builder
+
+
 def exact_revision(value):
     return isinstance(value, str) and bool(re.fullmatch(r"(?!0{40}$)[a-f0-9]{40}", value))
 
@@ -319,6 +329,8 @@ def main():
     compare_parser.add_argument("--output", required=True, type=Path)
     promote_parser = commands.add_parser("promote")
     promote_parser.add_argument("--output", required=True, type=Path)
+    providers_parser = commands.add_parser("providers")
+    providers_parser.add_argument("--output", required=True, type=Path)
     select_parser = commands.add_parser("select")
     select_parser.add_argument("--stage", choices=("first", "second", "standard"), required=True)
     select_parser.add_argument("--plan", required=True, type=Path)
@@ -346,6 +358,15 @@ def main():
             print(f"base_ref={base_ref}", file=output)
         with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
             print(f"Second pass follows successful first-pass run {first_run}.", file=summary)
+    elif args.command == "providers":
+        try:
+            automatic, selected = build_providers(os.environ["REPOSITORY_CI_PROVIDER"],
+                                                  os.environ["REQUESTED_IMAGE_BUILDER"])
+        except ValueError as error:
+            raise SystemExit(str(error)) from error
+        with args.output.open("a", encoding="utf-8") as output:
+            print(f"automatic={automatic}", file=output)
+            print(f"selected={selected}", file=output)
     else:
         plan = json.loads(args.plan.read_text(encoding="utf-8"))
         inbox_qa = os.environ.get("INBOX_QA_ELIGIBLE") == "true" and inbox_qa_affected(plan["scope"])

@@ -31,7 +31,8 @@ jobs:
     name: Depot Linux native release build and verification
     if: >-
       github.event_name == 'push' && github.ref == 'refs/heads/nightly' &&
-      inputs.profile == 'release' && vars.DEPOT_NIGHTLY_NATIVE_ENABLED == 'true'
+      inputs.profile == 'release' && vars.FLEETWORKS_CI_PROVIDER == 'depot' &&
+      vars.DEPOT_NIGHTLY_NATIVE_ENABLED == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 85
     env:

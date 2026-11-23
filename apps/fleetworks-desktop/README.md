@@ -20,6 +20,19 @@ Build flow: live Cargo progress/diagnostics and stage markers on stderr → pack
 python3 scripts/fleetworks_candidate.py build-native --agent --target host --profile debug
 ```
 
+### macOS quick start
+
+Use the [quick-start script](../../scripts/fleetworks_quick_start.py) to open Intel or Apple Silicon Fleetworks in a private local profile. Supply the macOS debug app and matching Inbox pack artifact IDs from a successful Fleetworks GitHub Actions run. The IDs are the numbers at the end of the artifact links.
+
+```sh
+python3 scripts/fleetworks_quick_start.py \
+  --app-artifact "$app_artifact_id" --inbox-artifact "$inbox_artifact_id"
+```
+
+The script checks the source revision, architecture and digests before using the bundle. It retains the desktop, Embedded companion, app resources and pinned actor CSV. With the Inbox pack selected, it uses the app's usual Embedded startup controls through macOS Accessibility, then imports the matching worker, libraries and model into the isolated profile. Enable **Backend inference** in Gateway settings when you want to use the installed model. The app still connects to a provisioned Distributed gateway for features such as news cycles.
+
+The default uses the verified hosted desktop. Add `--rebuild-desktop` to compile local desktop changes in the shared `target/agents/debug` cache and reuse the companion when its build inputs match. The quick start keeps one unpacked bundle under `.agent-scratch/native-quick-start/` and its state in the separate `.agent-scratch/native-quick-start-profile/`. The temporary downloads are discarded. Later launches can reuse that bundle without either artifact ID. Omit `--inbox-artifact` when you only need the base app, and use **Embedded → Start Embedded Backend** in the window or pass `--start-embedded`.
+
 For a fresh or existing Distributed review using a loopback gateway, run:
 
 ```sh
@@ -44,7 +57,7 @@ Add `--provision-gateway-credential` to save a protected exact-origin file refer
 
 ## Embedded desktop in Docker
 
-Use the Linux x86_64 development image when you want the Rune app and its Embedded companion in one container. The desktop opens its usual backend chooser. Select **Embedded**, then choose **Start Embedded Backend**. The app starts its packaged companion over private stdio, so the container needs no published backend port.
+Use the Linux x86_64 development image when you want the Rune app and its Embedded companion in one container. The desktop opens its usual backend chooser. Select **Embedded**, then choose **Start Embedded Backend**. The app starts its packaged companion over a private Unix socket, so the container needs no published backend port.
 
 Download the `Fleetworks-Embedded-Desktop-Docker-Archive-*` artifact from an [opt-in image run](../../docs/wiki/code/ci.md#embedded-desktop-docker-image), verify its checksum, then load the image.
 

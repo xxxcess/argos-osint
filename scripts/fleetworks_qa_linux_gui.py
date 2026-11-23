@@ -7,7 +7,6 @@ import os
 from pathlib import Path
 import re
 import shlex
-import shutil
 import signal
 import socket
 import subprocess
@@ -15,7 +14,7 @@ import tempfile
 import time
 
 from fleetworks_local_backend_smoke import check_zero_bound_sockets, resolve_companion_binary
-from fleetworks_qa_pack import MANIFEST, WORKER, install, sha256, verify_directory
+from fleetworks_qa_pack import install_gated_fixture
 
 SUMMARY_QUESTION = "What is the current workstation readiness?"
 TERMINAL = {"answered", "insufficient_context", "failed", "canceled"}
@@ -64,21 +63,8 @@ def descendants(root):
 def install_gated_pack(home, args):
     digests = json.loads(args.digests.read_text())
     require(digests["target"] == "x86_64-unknown-linux-gnu", "expected a Linux x86_64 worker pack")
-    fixture = home / "inbox-qa-pack"
-    install(argparse.Namespace(
-        archive=args.archive, output=fixture, state_dir=None, target=digests["target"],
-        archive_sha256=digests["archive_sha256"], manifest_sha256=digests["manifest_sha256"],
-    ))
-    worker = fixture / WORKER
-    shutil.copyfile(args.gated_worker, worker)
-    worker.chmod(0o700)
-    manifest = fixture / MANIFEST
-    contents = json.loads(manifest.read_text())
-    contents["files"][WORKER] = sha256(worker)
-    manifest.write_text(json.dumps(contents, sort_keys=True) + "\n")
-    digest = sha256(manifest)
-    verify_directory(fixture, digests["target"], digest)
-    return worker, {"root": str(fixture), "manifest_sha256": digest}, digests
+    worker, pointer = install_gated_fixture(args.archive, home / "inbox-qa-pack", args.gated_worker, digests)
+    return worker, pointer, digests
 
 
 def companion_proxy(home, app):

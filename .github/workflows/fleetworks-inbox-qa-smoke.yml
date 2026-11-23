@@ -98,7 +98,23 @@ jobs:
           artifact-ids: ${{ steps.app.outputs.id }}
           path: ${{ runner.temp }}/inbox-qa-native
           digest-mismatch: error
-      - name: Exercise real inference through the packaged companion
+      - name: Select the exact streaming fixture worker
+        id: stream_gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACK_ATTEMPT: ${{ steps.pack.outputs.attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B .github/scripts/inbox_qa_artifact.py --family "Fleetworks-Inbox-QA-Stream-Gate-$QA_TARGET"
+          grep -Fx "attempt=$PACK_ATTEMPT" "$GITHUB_OUTPUT"
+      - name: Download the fixture worker with a verified Actions digest
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ steps.stream_gate.outputs.id }}
+          path: ${{ runner.temp }}/inbox-qa-stream-gate
+          digest-mismatch: error
+      - name: Exercise real inference and cancellation through the packaged companion
         env:
           PACK_ATTEMPT: ${{ steps.pack.outputs.attempt }}
           APP_ATTEMPT: ${{ steps.app.outputs.attempt }}
@@ -113,6 +129,10 @@ jobs:
           pack="$RUNNER_TEMP/inbox-qa-pack"
           extracted="$RUNNER_TEMP/inbox-qa-extracted"
           evidence="$RUNNER_TEMP/inbox-qa-evidence"
+          gate="$RUNNER_TEMP/inbox-qa-stream-gate/qa_stream_gate"
+          test -f "$gate"
+          test ! -L "$gate"
+          chmod 0755 "$gate"
           mkdir -p "$evidence" "$RUNNER_TEMP/inbox-qa-empty-home"
           archives=("$native"/Fleetworks-*.tar.gz "$native"/Fleetworks-*.zip)
           manifests=("$native"/*.manifest.json)
@@ -149,7 +169,7 @@ jobs:
           "${offline[@]}" HOME="$RUNNER_TEMP/inbox-qa-empty-home" PYTHONDONTWRITEBYTECODE=1 \
             python3 -B scripts/fleetworks_qa_smoke.py embedded --app "$app" \
             --archive "$pack/Fleetworks-Inbox-QA-Pack-$QA_TARGET.tar.gz" --digests "$pack/digests.json" \
-            | tee "$evidence/embedded-$QA_TARGET.json"
+            --gated-worker "$gate" | tee "$evidence/embedded-$QA_TARGET.json"
           python3 -B .github/scripts/inbox_qa_smoke_receipt.py \
             --evidence "$evidence/embedded-$QA_TARGET.json" --target "$QA_TARGET" --head "$FLEETWORKS_HEAD"
           cp "$pack/digests.json" "$evidence/pack-digests-$QA_TARGET.json"
@@ -168,24 +188,6 @@ jobs:
             ' "$pack/digests.json" > "$release/$archive.digests.json"
             ln "$pack/$archive" "$release/$archive"
           fi
-      - name: Select the exact Linux streaming fixture worker
-        if: inputs.target == 'x86_64-unknown-linux-gnu' && inputs.release-version == ''
-        id: stream_gate
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PACK_ATTEMPT: ${{ steps.pack.outputs.attempt }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 -B .github/scripts/inbox_qa_artifact.py --family "Fleetworks-Inbox-QA-Stream-Gate-$QA_TARGET"
-          grep -Fx "attempt=$PACK_ATTEMPT" "$GITHUB_OUTPUT"
-      - name: Download the fixture worker with a verified Actions digest
-        if: inputs.target == 'x86_64-unknown-linux-gnu' && inputs.release-version == ''
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          artifact-ids: ${{ steps.stream_gate.outputs.id }}
-          path: ${{ runner.temp }}/inbox-qa-stream-gate
-          digest-mismatch: error
       - name: Verify visible Embedded streaming in the packaged Linux window
         if: inputs.target == 'x86_64-unknown-linux-gnu' && inputs.release-version == ''
         shell: bash
@@ -197,7 +199,6 @@ jobs:
             libvulkan1 mesa-vulkan-drivers libxkbcommon-x11-0
           pack="$RUNNER_TEMP/inbox-qa-pack"
           gate="$RUNNER_TEMP/inbox-qa-stream-gate/qa_stream_gate"
-          chmod 0755 "$gate"
           sudo -- unshare --net --setgid "$(id -g)" --setuid "$(id -u)" -- /usr/bin/env \
             HOME="$RUNNER_TEMP/inbox-qa-empty-home" PYTHONDONTWRITEBYTECODE=1 \
             dbus-run-session -- xvfb-run --auto-servernum --server-args='-screen 0 1440x900x24 -nolisten tcp' \

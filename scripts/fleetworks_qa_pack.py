@@ -260,6 +260,28 @@ def install(args: argparse.Namespace) -> dict:
                 "manifest_sha256": args.manifest_sha256}
 
 
+def install_gated_fixture(archive: Path, output: Path, gated_worker: Path, digests: dict) -> tuple[Path, dict]:
+    """Re-pin a separate smoke-only installation with the exact gated worker."""
+    info = gated_worker.lstat()
+    check(stat.S_ISREG(info.st_mode) and 0 < info.st_size <= MAX_UNPACKED,
+          "gated fixture must be a bounded regular executable")
+    gate_digest = sha256(gated_worker)
+    install(argparse.Namespace(archive=archive, output=output, state_dir=None, target=digests["target"],
+                               archive_sha256=digests["archive_sha256"], manifest_sha256=digests["manifest_sha256"]))
+    directory = output.resolve(strict=True)
+    worker = directory / WORKER
+    shutil.copyfile(gated_worker, worker)
+    worker.chmod(0o700)
+    check(sha256(worker) == gate_digest, "gated worker copy differs from the verified fixture artifact")
+    manifest = directory / MANIFEST
+    contents = json.loads(manifest.read_text())
+    contents["files"][WORKER] = gate_digest
+    manifest.write_text(json.dumps(contents, sort_keys=True) + "\n")
+    digest = sha256(manifest)
+    verify_directory(directory, digests["target"], digest)
+    return worker, {"root": str(directory), "manifest_sha256": digest}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)

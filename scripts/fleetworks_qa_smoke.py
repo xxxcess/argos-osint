@@ -2,6 +2,7 @@
 """Exercise a real Inbox QA pack through a packaged companion or paired gateway."""
 
 import argparse
+from contextlib import contextmanager
 from datetime import datetime
 import hashlib
 from itertools import islice
@@ -11,6 +12,7 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -241,36 +243,36 @@ def cited_running_jobs(turn, active_jobs):
 
 
 def cancel_running_embedded_turn(request, registration, model):
-    require(len(model()) == 1, "Expected one isolated model process before cancellation")
     context = authorize(registration)
-    attempts = set()
-    for attempt in range(1, 4):
-        admitted = request("turns", {"request_id": f"inbox-qa-smoke-cancel-running-{attempt}",
-                                     "context": context, "question": SUMMARY_QUESTION}, expected=(200, 201, 202))
-        turn_id = admitted["turn_id"]
-        require(turn_id not in attempts, "Cancellation retry reused a prior turn")
-        attempts.add(turn_id)
-        query = {"turn_id": turn_id, "after": 0, "wait_seconds": 0}
-        page = until(lambda: request("events", query=query),
-                     lambda value: value["turn"]["state"] in TERMINAL | {"running"},
-                     "QA turn did not enter Running before Stop", timeout=16, interval=0.02)
-        require(not page["gap"] and page["turn"]["turn_id"] == turn_id
-                and any(event["state"] == "running" for event in page["events"]),
-                "Expected this turn's Running event in a consecutive cursor")
-        state = page["turn"]["state"]
-        if state == "answered":
-            continue
-        require(state == "running", "Model turn failed before Stop")
-        # Keep the real worker available to the coordinator heartbeat. Cancel as
-        # soon as the durable Running event appears, before making another probe.
-        canceled = request("cancel", {"context": context, "turn_id": turn_id})
-        require(canceled["turn_id"] == turn_id, "Stop returned a different turn")
-        if canceled["state"] == "answered":
-            continue
-        require(canceled["state"] == "canceled", "Stop did not cancel the Running turn")
-        break
-    else:
-        raise ValueError("The model answered before Stop on all three distinct turns")
+    before = request("settings")
+    require(not before["enabled"] and before["phase"] == "off", "Gated fixture must start with QA off")
+    request("settings", {"context": context, "expected_revision": before["revision"], "enabled": True})
+    until(lambda: request("settings"), lambda value: value["phase"] == "ready",
+          "Gated worker did not warm", timeout=110)
+    active = model()
+    require(len(active) == 1, "Expected one isolated gated worker")
+    worker, = active
+    turn = request("turns", {"request_id": "inbox-qa-smoke-cancel-running", "context": context,
+                             "question": SUMMARY_QUESTION}, expected=(200, 201, 202))
+    turn_id = turn["turn_id"]
+    query = {"turn_id": turn_id, "after": 0, "wait_seconds": 0}
+    page = until(lambda: request("events", query=query),
+                 lambda value: bool(value["turn"]["findings"]) or value["turn"]["state"] in TERMINAL,
+                 "Gated worker did not deliver a finding before Stop", timeout=90)
+    held = page["turn"]
+    require(not page["gap"] and held["state"] == "running" and held["turn_id"] == turn_id
+            and len(held["findings"]) == 1 and any(event["state"] == "running" for event in page["events"])
+            and model() == [worker], "Expected one retained finding from the held Running turn")
+    canceled = request("cancel", {"context": context, "turn_id": turn_id})
+    require(canceled["turn_id"] == turn_id and canceled["state"] == "canceled"
+            and canceled["cursor"] == held["cursor"] + 1 and canceled["findings"] == held["findings"],
+            "Stop did not seal the held turn and preserve its finding")
+    if model() == [worker]:
+        try:
+            os.kill(worker, signal.SIGUSR1)
+        except ProcessLookupError:
+            # The coordinator may already have reaped the canceled worker.
+            pass
     result = request("events", query=query)
     terminal = [event for event in result["events"] if event["state"] in TERMINAL]
     require(not result["gap"] and result["turn"] == canceled and canceled["turn_id"] == turn_id
@@ -418,7 +420,6 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
             "unsupported measurement received an answer")
     if verify_other_jobs is not None:
         verify_other_jobs()
-    cancellation = cancel_running_embedded_turn(request, registration, model) if embedded_mode else {}
 
     started = time.monotonic()
     manage("settings", {"context": authorize(manager), "expected_revision": current["revision"], "enabled": False})
@@ -436,23 +437,25 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
             "model_pid_count": len(active), "warm_model_rss_bytes": worker_rss_bytes,
             "fresh_observation": True, "terminal_events": terminal_events, "terminal_state": snapshot["state"],
             "grounded_readiness": True, "live_metrics": True, "unsupported_context": True,
-            "frozen_samples": readings, "legacy_http_evidence": legacy_request is not None, **cancellation}
+            "frozen_samples": readings, "legacy_http_evidence": legacy_request is not None}
 
 
-def embedded_tree(parent):
+def embedded_tree(parent, *, worker_path=None):
     rows = subprocess.check_output(["ps", "-ww", "-axo", "pid=,ppid=,args="], text=True, timeout=10)
     members = {parent}
     processes = []
     for row in rows.splitlines():
         pid, ppid, command = row.split(maxsplit=2)
         program = command.split(" --model-dir ", 1)[0]
-        processes.append((int(pid), int(ppid), Path(program).name))
+        processes.append((int(pid), int(ppid), Path(program)))
     while True:
         seen = members | {pid for pid, ppid, _ in processes if ppid in members}
         if seen == members:
             break
         members = seen
-    children = [pid for pid, _, name in processes if pid in members and name == Path(pack.WORKER).name]
+    children = [pid for pid, _, program in processes if pid in members and (
+        program == worker_path if worker_path is not None else program.name == Path(pack.WORKER).name
+    )]
     for pid in {parent, *children}:
         embedded.check_zero_bound_sockets(pid)
     return children
@@ -1172,6 +1175,49 @@ def run_catalog(args):
     }
 
 
+@contextmanager
+def embedded_qa_session(binary, state):
+    session = embedded.LocalIpcSession(binary, state, client_name="fleetworks-qa-smoke")
+    try:
+        session.hello()
+        ensured, _ = session.request_json({"op": "registration_ensure", "args": {
+            "request_id": "qa-smoke-registration", "workstation_ip": None,
+            "installation_marker": secrets.token_hex(32),
+        }})
+        response, _ = session.request_json({"op": "registration_context", "args": {
+            "registration_id": ensured["registration_id"], "expected_revision": ensured["revision"],
+        }})
+        registration = response["context"]
+
+        def request(path, payload=None, *, query=None, expected=200):
+            operation = {"settings": "qa_settings", "turns": "qa_turn_submit", "latest": "qa_latest",
+                         "events": "qa_events", "cancel": "qa_cancel"}[path]
+            if path == "settings" and payload is not None:
+                operation = "qa_settings_update"
+            request = {"op": operation}
+            if payload is not None or query is not None:
+                request["args"] = payload if payload is not None else query
+            result, _ = session.request(request, registration=registration)
+            data = result["data"]
+            statuses = (expected,) if isinstance(expected, int) else expected
+            if result["outcome"] == "ok":
+                require(200 in statuses, f"IPC {operation} unexpectedly succeeded")
+                return data["value"]
+            reason = SAFE_REJECTION.get(data.get("message"), "unclassified")
+            require(data["status"] in statuses,
+                    f"IPC {operation} received {data['status']} ({reason})")
+            return None
+
+        yield session, registration, request
+        _, exit_code = session.shutdown()
+        require(exit_code == 0, "companion shutdown failed after QA")
+    except Exception:
+        report_diagnostics(session.stderr_excerpt())
+        raise
+    finally:
+        session.close_unconditionally()
+
+
 def run_embedded(args):
     # Run this program inside a network-denied environment for release verification.
     require(not any((Path.home() / path).exists() for path in (
@@ -1185,36 +1231,7 @@ def run_embedded(args):
         pack.install(argparse.Namespace(archive=args.archive, output=root / "pack", state_dir=state,
                                         target=digests["target"], archive_sha256=digests["archive_sha256"],
                                         manifest_sha256=digests["manifest_sha256"]))
-        session = embedded.LocalIpcSession(binary, state, client_name="fleetworks-qa-smoke")
-        try:
-            session.hello()
-            ensured, _ = session.request_json({"op": "registration_ensure", "args": {
-                "request_id": "qa-smoke-registration", "workstation_ip": None,
-                "installation_marker": secrets.token_hex(32),
-            }})
-            response, _ = session.request_json({"op": "registration_context", "args": {
-                "registration_id": ensured["registration_id"], "expected_revision": ensured["revision"],
-            }})
-            registration = response["context"]
-
-            def request(path, payload=None, *, query=None, expected=200):
-                operation = {"settings": "qa_settings", "turns": "qa_turn_submit", "latest": "qa_latest",
-                             "events": "qa_events", "cancel": "qa_cancel"}[path]
-                if path == "settings" and payload is not None:
-                    operation = "qa_settings_update"
-                request = {"op": operation}
-                if payload is not None or query is not None:
-                    request["args"] = payload if payload is not None else query
-                result, _ = session.request(request, registration=registration)
-                data = result["data"]
-                statuses = (expected,) if isinstance(expected, int) else expected
-                if result["outcome"] == "ok":
-                    require(200 in statuses, f"IPC {operation} unexpectedly succeeded")
-                    return data["value"]
-                reason = SAFE_REJECTION.get(data.get("message"), "unclassified")
-                require(data["status"] in statuses,
-                        f"IPC {operation} received {data['status']} ({reason})")
-                return None
+        with embedded_qa_session(binary, state) as (session, registration, request):
 
             def model():
                 return embedded_tree(session.proc.pid)
@@ -1231,17 +1248,24 @@ def run_embedded(args):
 
             result = exercise(request, request, registration, registration, model, readiness, running_jobs,
                               embedded_mode=True)
-            _, exit_code = session.shutdown()
-            require(exit_code == 0, "companion shutdown failed after unloading QA")
-        except Exception:
-            report_diagnostics(session.stderr_excerpt())
-            raise
-        finally:
-            session.close_unconditionally()
+            attestation = session.transport_attestation
 
-        return {"runtime": session.transport_attestation["transport"],
-                "transport_attestation": session.transport_attestation, "target": digests["target"],
-                "source_sha": digests["source_sha"], **result}
+    with tempfile.TemporaryDirectory(prefix="fleetworks-embedded-qa-stop-") as temporary:
+        root = Path(temporary)
+        state = root / "state"
+        state.mkdir(mode=0o700)
+        worker, pointer = pack.install_gated_fixture(args.archive, root / "pack", args.gated_worker, digests)
+        descriptor = os.open(state / "qa-pack.json", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(descriptor, "w") as file:
+            json.dump(pointer, file)
+        with embedded_qa_session(binary, state) as (session, registration, request):
+            require(session.transport_attestation == attestation, "Stop fixture did not negotiate the same socket")
+            cancellation = cancel_running_embedded_turn(
+                request, registration, lambda: embedded_tree(session.proc.pid, worker_path=worker),
+            )
+
+    return {"runtime": attestation["transport"], "transport_attestation": attestation, "target": digests["target"],
+            "source_sha": digests["source_sha"], **result, **cancellation}
 
 
 def run_distributed(args):
@@ -1415,6 +1439,7 @@ def main():
     local.add_argument("--app", type=Path, required=True)
     local.add_argument("--archive", type=Path, required=True)
     local.add_argument("--digests", type=Path, required=True)
+    local.add_argument("--gated-worker", type=Path, required=True)
     catalog = modes.add_parser("catalog", help="Run the offline bundled catalog smoke for the verified Linux PR package")
     catalog.add_argument("--app", type=Path, required=True)
     catalog.add_argument("--revision", required=True)

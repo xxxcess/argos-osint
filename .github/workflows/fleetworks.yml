@@ -479,7 +479,7 @@ jobs:
       head: ${{ needs.scope.outputs.head }}
       target: ${{ matrix.target }}
       runner: ${{ matrix.runner }}
-      streaming-test: ${{ needs.scope.outputs.publish != 'true' && matrix.target == 'x86_64-unknown-linux-gnu' }}
+      streaming-test: ${{ matrix.target == 'x86_64-unknown-linux-gnu' || endsWith(matrix.target, '-apple-darwin') }}
 
   inbox_qa_embedded:
     name: Inbox QA Embedded / ${{ matrix.target }}

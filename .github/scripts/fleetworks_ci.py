@@ -203,7 +203,7 @@ def review_image_matrix(stage, images, scopes, *, publish, full):
     return entries
 
 
-def verification(stage, plan, *, inbox_qa=False):
+def verification(stage, plan, *, inbox_qa=False, inbox_qa_native_review=False):
     """Apply the pass to checks while leaving release publication inputs intact."""
     scope = plan["scope"]
     scopes = set(scope["scopes"])
@@ -225,11 +225,12 @@ def verification(stage, plan, *, inbox_qa=False):
     if not images:
         scopes.discard("images")
     inbox_qa_release = stage == "standard" and plan.get("inbox_qa", False)
-    need_qa_packs = inbox_qa or inbox_qa_release
+    native_review = stage == "standard" and inbox_qa_native_review
+    need_qa_packs = inbox_qa or inbox_qa_release or native_review
     desktop = "desktop" in scopes or need_qa_packs
     companion = "local_backend" in scopes or need_qa_packs
     desktop_linux = (desktop or companion) and stage != "second"
-    qa_arches = arches if inbox_qa else ["amd64"] if inbox_qa_release else []
+    qa_arches = arches if inbox_qa else ["amd64"] if need_qa_packs else []
     qa_packs = [{
         "runner": ARCHITECTURES[arch][0],
         "target": f"{ARCHITECTURES[arch][1]}-unknown-linux-gnu",
@@ -370,7 +371,10 @@ def main():
     else:
         plan = json.loads(args.plan.read_text(encoding="utf-8"))
         inbox_qa = os.environ.get("INBOX_QA_ELIGIBLE") == "true" and inbox_qa_affected(plan["scope"])
-        selected = verification(args.stage, plan, inbox_qa=inbox_qa)
+        selected = verification(
+            args.stage, plan, inbox_qa=inbox_qa,
+            inbox_qa_native_review=os.environ.get("INBOX_QA_NATIVE_REVIEW") == "true",
+        )
         with args.output.open("a", encoding="utf-8") as output:
             for key, value in selected.items():
                 encoded = value if isinstance(value, str) else json.dumps(value, separators=(",", ":"))

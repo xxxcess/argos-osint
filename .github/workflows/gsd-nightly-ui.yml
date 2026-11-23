@@ -14,6 +14,9 @@ on:
         required: true
       release-version:
         type: string
+      native-profile:
+        type: string
+        default: debug
       linux-native:
         type: boolean
         required: true
@@ -62,6 +65,7 @@ jobs:
       expected-head: ${{ inputs.head }}
       target: ${{ matrix.target }}
       runner: ${{ matrix.runner }}
+      review-profile: ${{ inputs.native-profile }}
       release-version: ${{ inputs.release-version }}
       inbox-qa: ${{ inputs.inbox-qa }}
 
@@ -72,7 +76,7 @@ jobs:
     with:
       expected-head: ${{ inputs.head }}
       mode: ${{ inputs.full && 'full' || 'pr' }}
-      profile: ${{ inputs.publish && 'release' || 'debug' }}
+      profile: ${{ inputs.publish && 'release' || inputs.native-profile }}
       release-version: ${{ inputs.release-version }}
     secrets:
       depot-ci-token: ${{ secrets.depot-ci-token }}

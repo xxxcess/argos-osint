@@ -71,6 +71,22 @@ class VerificationPassTests(unittest.TestCase):
         self.assertEqual(selected["inbox_qa_packs"], selected["inbox_qa_embedded"])
         self.assertEqual(selected["inbox_qa_images"], [])
 
+    def test_optimized_native_review_selects_only_its_packaged_inbox_runtimes(self):
+        plan = self.scopes("apps/fleetworks-desktop/src/startup.rs")
+        selected = ci.verification("standard", plan, inbox_qa_native_review=True)
+
+        self.assertTrue(selected["desktop_linux"])
+        self.assertTrue(selected["desktop_macos"])
+        self.assertTrue(selected["inbox_qa"])
+        self.assertEqual([entry["target"] for entry in selected["inbox_qa_packs"]], [
+            "x86_64-unknown-linux-gnu", "x86_64-apple-darwin", "aarch64-apple-darwin",
+        ])
+        self.assertEqual(selected["inbox_qa_packs"], selected["inbox_qa_embedded"])
+        self.assertFalse(selected["inbox_qa_distributed"])
+        self.assertEqual(selected["inbox_qa_images"], [])
+        self.assertFalse(ci.verification("first", plan, inbox_qa_native_review=True)["inbox_qa"])
+        self.assertFalse(ci.verification("second", plan, inbox_qa_native_review=True)["inbox_qa"])
+
     def test_native_implementation_and_artwork_use_only_native_linux_first(self):
         plan = self.scopes(
             "apps/fleetworks-desktop/src/startup.rs",

@@ -20,6 +20,28 @@ Build flow: live Cargo progress/diagnostics and stage markers on stderr → pack
 python3 scripts/fleetworks_candidate.py build-native --agent --target host --profile debug
 ```
 
+### macOS quick start
+
+Use the [quick-start script](../../scripts/fleetworks_quick_start.py) from the repository root after installing the pinned Rust toolchain and Xcode Command Line Tools.
+
+```sh
+python3 scripts/fleetworks_quick_start.py
+```
+
+The script builds Fleetworks Desktop and its Embedded companion from the current checkout for Intel or Apple Silicon macOS. It uses locked dependencies and the shared `target/agents/debug` cache. It reuses its own validated source bundle at the same clean revision. It keeps one app under `.agent-scratch/native-quick-start/` and opens it with a private profile under `.agent-scratch/native-quick-start-profile/`. Updates preserve that profile. Close the app before replacing its bundle. Pass `--source-dir PATH` to build another local worktree of this repository, including its uncommitted source edits. A build to a separate output can finish while the older app is open.
+
+Use the optimized profile for runtime performance review or regular installed use. It builds both binaries in the shared `target/agents/release` cache and stages the app in `.agent-scratch/native-quick-start-release/`.
+
+```sh
+python3 scripts/fleetworks_quick_start.py --profile release --start-embedded
+```
+
+- Use `--reuse-bundle` to open a validated, compatible clean bundle without an app build or download. Use `--output` and `--profile-dir` to select existing paths.
+- Use `--app-artifact ID` to verify and open a specific macOS app from a successful matching Fleetworks GitHub Actions run. Use `--profile release` for an optimized artifact. Add `--rebuild-desktop` to build the desktop from source and use the verified hosted companion.
+- Use `--inbox-artifact ID` to install the verified matching Inbox worker, libraries and model in the isolated profile. The script uses macOS accessibility controls to start Embedded and discards temporary downloads. Enable **Backend inference** in Gateway settings to use the installed model.
+
+Artifact IDs are the numbers at the ends of the GitHub Actions artifact links. Select **Embedded → Start Embedded Backend** in the window or pass `--start-embedded` to start it through the accessibility controls. News cycles use a provisioned Distributed gateway.
+
 For a fresh or existing Distributed review using a loopback gateway, run:
 
 ```sh

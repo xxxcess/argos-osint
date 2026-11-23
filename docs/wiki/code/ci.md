@@ -132,6 +132,21 @@ gh workflow run fleetworks.yml --ref "$review_branch" \
 
 App assets are unsigned. Fixture generation and downloaded-byte verification do not establish human visual approval, installed GUI/input/accessibility, minimum-OS behavior, signing or notarization. Those remain separate evidence. Actions evidence expires; verified GitHub Release assets persist.
 
+### Optimized native packages for review
+
+Use a release-profile candidate for installed-app performance and runtime review of a pushed commit.
+
+```sh
+review_head="$(git rev-parse HEAD)"
+gh workflow run fleetworks.yml --repo xxxcess/argos-osint --ref "<branch>" \
+  -f stage=standard -f mode=full -f components=native \
+  -f native_profile=release -f head="$review_head"
+```
+
+This run builds optimized Linux x86_64, Intel macOS and Apple Silicon macOS desktop and Embedded binaries. It runs scoped unit tests and Rune captures in debug, then verifies the optimized archive and exercises its packaged companion through HTTP/IPC parity and offline Inbox inference. The Linux review also verifies visible Inbox streaming. Download the matching `Fleetworks-Linux-Desktop-App-x86_64-release-*` or `Fleetworks-macOS-Desktop-App-release-*` artifact from the successful Actions run.
+
+The first and second PR passes use debug packages for iteration. Trusted channel pushes use the existing publication and versioning gates.
+
 ## `embedded.yml` — affected storage compatibility
 
 [Embedded compatibility](../../../.github/workflows/embedded.yml) is reusable for selected Linux storage changes. It runs format, Clippy with warnings denied, workspace tests, and required in-process storage contracts via `scripts/local_matrix.sh --storage embedded`. The workspace tests check role help on the built service-host binary. CI enforces Jobs-only direct SQLite ownership and rejects LanceDB.

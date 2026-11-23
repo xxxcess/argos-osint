@@ -2,7 +2,7 @@
 """Build and open Fleetworks and its Embedded companion on macOS."""
 
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import fcntl
 import json
 import os
@@ -528,7 +528,9 @@ def install_inbox(identity, target, profile, state):
     installed = profile / f"qa-pack-{artifact['id']}"
     with tempfile.TemporaryDirectory(prefix=".inbox-quick-start-", dir=profile) as temp:
         temporary = Path(temp)
-        with download_artifact(artifact, temporary, qa.MAX_COMPRESSED + 1024**2) as outer:
+        progress = getattr(qa, "pack_progress", None)
+        stage = progress(state, "downloading_pack") if progress else nullcontext()
+        with stage, download_artifact(artifact, temporary, qa.MAX_COMPRESSED + 1024**2) as outer:
             evidence = read_json_member(outer, "digests.json")
             require(evidence["source_sha"] == run["head_sha"] and str(evidence["run_id"]) == str(run["id"])
                     and str(evidence["run_attempt"]) == attempt and evidence["target"] == target,
@@ -592,7 +594,7 @@ def main():
             if args.inbox_artifact is not None:
                 require(embedded_running(app, pid, state), "The profile's Embedded companion must be running to add Inbox support")
                 install_inbox(args.inbox_artifact, target, profile, state)
-                print("Offline Inbox pack installed. Enable Backend inference in Gateway settings when desired.")
+                print("Offline Inbox pack installed. Enable Backend inference in Settings → Connection.")
             if embedded_running(app, pid, state):
                 print(f"Embedded is running in {state}")
             else:

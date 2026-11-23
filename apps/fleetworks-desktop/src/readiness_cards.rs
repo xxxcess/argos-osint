@@ -42,7 +42,12 @@ impl State {
 
 pub(crate) fn workstation_section(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {
     let open = state.workstation_status_checks_open;
-    let summary = summary_label(state);
+    let connected = state.connected();
+    let summary = if connected {
+        summary_label(state)
+    } else {
+        "Status checks · offline".to_owned()
+    };
     rune::col()
         .key("status-checks-toggle")
         .w_full()
@@ -56,7 +61,13 @@ pub(crate) fn workstation_section(state: &State, preferences: ViewPreferences, k
                     state.workstation_status_checks_open = !state.workstation_status_checks_open;
                 }),
         )
-        .children(open.then(|| checks(state, preferences, kit)))
+        .children(open.then(|| {
+            if connected {
+                checks(state, preferences, kit)
+            } else {
+                quiet("Connect a backend to see status checks.", kit)
+            }
+        }))
 }
 
 pub(crate) fn setup_section(state: &State, preferences: ViewPreferences, kit: &Kit) -> El {

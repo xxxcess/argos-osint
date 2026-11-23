@@ -1,9 +1,9 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Native workstation shell and settings composition</title>
-<style>body{margin:0;padding:32px;color:#242424;background:#fff;font:16px/1.6 Geist,Arial,sans-serif}main{max-width:1200px;margin:auto}h1{font:36px/1.2 "Instrument Serif",Georgia,serif;margin:0 0 16px}p{max-width:88ch}svg{display:block;width:100%;height:auto;margin:24px 0}a{color:#a14b24}</style></head><body><main><h1>Native workstation shell and settings composition</h1><p>On wide windows, the native app pairs a compact operations sidebar with the selected destination and a read-only context rail. The toolbar holds telemetry, the Inbox bell and the optional Assistant toggle. Select the brand avatar to open Workstation Status. The Assistant is off by default; when on, it docks where the rail is, with a pinned context, a history and a glass composer. The Inbox popover opens below the toolbar bell and preserves the selected destination and Assistant. Jobs and Logs shows a paged list beside the selected job. Settings opens a centered category-and-content dialog. Narrow windows keep the selected destination and hide the right panel. This diagram is not installed-app verification.</p>
+<style>body{margin:0;padding:32px;color:#242424;background:#fff;font:16px/1.6 Geist,Arial,sans-serif}main{max-width:1200px;margin:auto}h1{font:36px/1.2 "Instrument Serif",Georgia,serif;margin:0 0 16px}p{max-width:88ch}svg{display:block;width:100%;height:auto;margin:24px 0}a{color:#a14b24}</style></head><body><main><h1>Native workstation shell and settings composition</h1><p>The native shell pairs a compact operations sidebar with the selected destination. On wide operations pages it can show a read-only context rail. The toolbar holds telemetry, the Inbox bell and the optional Assistant toggle. Select the brand avatar to open Workstation Status. The Assistant is off by default; when on, it docks where the rail is, with a pinned context, a history and a glass composer. The Inbox popover opens below the toolbar bell and preserves the selected destination and Assistant. Jobs and Logs shows a paged list beside the selected job. Settings opens a centered category-and-content dialog. Narrow windows keep the selected destination and hide the right panel. Installed-app evidence is tracked in native verification.</p>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" role="img" aria-labelledby="native-workstation-layout-title native-workstation-layout-desc">
 <title id="native-workstation-layout-title">Native workstation shell and settings composition</title>
-<desc id="native-workstation-layout-desc">A toolbar with telemetry, an Inbox bell and an optional Assistant toggle. The brand avatar opens Workstation Status from the rail. The central scroll area groups Services, Status checks and Diagnostics. On wide windows a read-only context rail sits at the right; when the Assistant is turned on it docks there instead, with a pinned context, history and a glass composer. The Inbox popover opens below the toolbar bell and preserves the selected destination and Assistant. Jobs and Logs shows a paged list beside the selected job. Workstation Settings opens a centered category and content dialog. Narrow windows hide the right panel while keeping the same controls.</desc>
+<desc id="native-workstation-layout-desc">A toolbar with telemetry, an Inbox bell and an optional Assistant toggle. The brand avatar opens Workstation Status from the rail. The central scroll area groups Services, Status checks and Diagnostics. Operations pages can show a read-only context rail on wide windows. The optional Assistant can dock there with a pinned context, history and composer. The Inbox popover opens below the toolbar bell and preserves the selected destination and Assistant. Jobs and Logs shows a paged list beside the selected job. Workstation Settings opens a centered category and content dialog. Narrow windows hide the right panel while keeping the same controls.</desc>
 <style>text{font-family:Geist,Arial,sans-serif;fill:#242424}.zone{font-size:13px;letter-spacing:1.2px;fill:#666}.label{font-size:20px;font-weight:600}.note{font-size:15px;fill:#444}.small{font-size:13px;fill:#666}.node{fill:#fff;stroke:#aaa;stroke-width:1}.focus{fill:#fff4ee;stroke:#eb6c36;stroke-width:2}.lane{fill:#fafafa;stroke:#ddd;stroke-width:1}.pill{fill:#f4f4f4;stroke:#ccc;stroke-width:1}</style>
 <rect width="1200" height="720" fill="#fff"/>
 <rect x="32" y="38" width="1136" height="624" rx="6" fill="#fff" stroke="#777"/>
@@ -36,7 +36,7 @@
 <text x="302" y="468" class="small">Gateway · Ready</text>
 <text x="302" y="506" class="small">Open a check for the observation and next action</text>
 <text x="302" y="574" class="label">Diagnostics</text>
-<text x="966" y="129" class="zone">CONTEXT RAIL OR ASSISTANT</text>
+<text x="966" y="129" class="zone">OPTIONAL RIGHT PANEL</text>
 <rect x="958" y="144" width="194" height="280" rx="6" class="lane"/>
 <text x="974" y="178" class="label">Overview</text>
 <text x="974" y="214" class="note">Destination</text>
@@ -45,9 +45,9 @@
 <text x="974" y="308" class="small">Visible records</text>
 <path d="M 974 330 H 1136" stroke="#ddd"/>
 <text x="974" y="359" class="small">Read-only context</text>
-<text x="958" y="463" class="small">Hidden on narrow windows</text>
-<text x="958" y="492" class="small">Assistant (off by default) docks here:</text>
-<text x="958" y="512" class="small">pinned context, history, glass composer</text>
+<text x="958" y="463" class="small">Overview on wide operations pages</text>
+<text x="958" y="492" class="small">Assistant can dock here</text>
+<text x="958" y="512" class="small">Context, history and composer</text>
 <text x="958" y="554" class="small">Inbox overlays this edge</text>
 <rect x="328" y="602" width="548" height="44" rx="6" class="focus"/>
 <text x="346" y="630" class="note">Settings dialog: category rail + compact scrollable rows</text>

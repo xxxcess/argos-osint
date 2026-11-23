@@ -1159,13 +1159,11 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
         );
     }
     body = body.child(services);
-    if state.connected() {
-        body = body.child(crate::readiness_cards::workstation_section(
-            state,
-            preferences,
-            kit,
-        ));
-    }
+    body = body.child(crate::readiness_cards::workstation_section(
+        state,
+        preferences,
+        kit,
+    ));
 
     let mut diagnostics = rune::col()
         .gap(8.0)
@@ -2252,10 +2250,13 @@ mod tests {
                 "Workstation Status",
                 "Transport: Disconnected",
                 "Unregistered",
+                "Status checks · offline",
             ] {
                 assert!(tree.contains(label), "missing {label} at {size:?}");
             }
             assert!(runtime.find("workstation-diagnostics/trigger").is_some());
+            assert!(runtime.find("status-checks-toggle/trigger").is_some());
+            assert!(runtime.find("backend-readiness-checks").is_none());
             assert!(runtime.find("gateway-backend-card").is_none());
             assert!(runtime.find("workstation-services").is_some());
             assert!(runtime.find("workstation-jobs-counts").is_none());

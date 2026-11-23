@@ -1094,8 +1094,15 @@ fn workstation(state: &State, cx: &Cx<State>, kit: &Kit, layers: &mut Vec<El>) -
                 preferences,
                 kit,
             );
+            let show_actor_action = issue.is_none() && active_operation.is_none();
             body = body
-                .child(actor_search_summary_card(state, preferences, kit, actor))
+                .child(actor_search_summary_card(
+                    state,
+                    preferences,
+                    kit,
+                    actor,
+                    show_actor_action,
+                ))
                 .children(issue.or(active_operation));
         }
         if state.confirm_maintenance_dialog {
@@ -1809,6 +1816,7 @@ fn actor_search_summary_card(
     preferences: ViewPreferences,
     kit: &Kit,
     summary: ActorSearchSummary,
+    show_actor_action: bool,
 ) -> El {
     let pointer_ref = (!preferences.matte()).then_some(&state.pointer_offset);
     let disabled_reason = state.maintenance_disabled_reason(MaintenanceOperation::ReindexActors);
@@ -1910,7 +1918,12 @@ fn actor_search_summary_card(
                 .flex_wrap()
                 .child(heading("Actor search", kit).min_w(104.0))
                 .child(status_slot)
-                .child(primary)
+                .child(
+                    rune::row()
+                        .w(146.0)
+                        .h(32.0)
+                        .children(show_actor_action.then_some(primary)),
+                )
                 .child(details_toggle),
         );
     if state.maintenance.reindex_details_open {

@@ -35,33 +35,36 @@ pub(super) fn answer(fact: &HealthFact) -> String {
 }
 
 /// Summarize the same fresh status groups used by the Workstation view.
-pub(super) fn status_check_summary(
-    facts: &[HealthFact],
+pub(super) fn status_check_summary<'a>(
+    facts: impl Iterator<Item = &'a HealthFact>,
     selection: StatusChecks,
-) -> Option<(String, Vec<&HealthFact>)> {
-    if facts.is_empty() {
-        return None;
-    }
+) -> Option<(String, Vec<&'a HealthFact>)> {
+    let mut facts = facts.peekable();
+    facts.peek()?;
     let (mut passed, mut failed, mut unresolved) = (0, 0, 0);
     let mut relevant = Vec::new();
-    for fact in facts.iter().filter(|fact| {
-        fact.id != ReadinessCheckId::ClassifierTraining.as_str()
-            && crate::workstation::qa_readiness_label(&fact.id).is_some()
+    for fact in facts.filter(|fact| {
+        fact.id == ReadinessCheckId::Registration.as_str()
+            || (fact.id != ReadinessCheckId::ClassifierTraining.as_str()
+                && crate::workstation::qa_readiness_label(&fact.id).is_some())
     }) {
-        match fact.status.as_str() {
+        let status = match fact.status.as_str() {
             "not applicable" | "not_applicable" => continue,
             "ready" => {
                 passed += 1;
-                continue;
+                StatusChecks::Passed
             }
-            "failed" => failed += 1,
-            _ => unresolved += 1,
-        }
-        if match selection {
-            StatusChecks::All => true,
-            StatusChecks::Failed => fact.status == "failed",
-            StatusChecks::Unresolved => fact.status != "failed",
-        } {
+            "failed" => {
+                failed += 1;
+                StatusChecks::Failed
+            }
+            _ => {
+                unresolved += 1;
+                StatusChecks::Unresolved
+            }
+        };
+        if selection == status || (selection == StatusChecks::All && status != StatusChecks::Passed)
+        {
             relevant.push(fact);
         }
     }
@@ -74,16 +77,17 @@ pub(super) fn status_check_summary(
     });
     let summary = match selection {
         StatusChecks::All if passed + failed + unresolved == 0 => {
-            "No backend status checks apply in the latest observation.".into()
+            "No status checks apply in the latest observation.".into()
         }
         StatusChecks::All => format!(
-            "The current backend status checks show {passed} passed, {failed} failed, and {unresolved} unresolved."
+            "The current status checks show {passed} passed, {failed} failed, and {unresolved} unresolved."
         ),
         selection => {
-            let group = if selection == StatusChecks::Failed {
-                "failed"
-            } else {
-                "unresolved"
+            let group = match selection {
+                StatusChecks::Passed => "passed",
+                StatusChecks::Failed => "failed",
+                StatusChecks::Unresolved => "unresolved",
+                StatusChecks::All => unreachable!(),
             };
             match relevant.as_slice() {
                 [] => format!("No {group} status checks were observed."),
@@ -195,7 +199,8 @@ mod tests {
             fact("classifier_inference", "not applicable", None),
             fact("classifier_training", "not ready", None),
         ];
-        let (summary, details) = status_check_summary(&facts, StatusChecks::Unresolved).unwrap();
+        let (summary, details) =
+            status_check_summary(facts.iter(), StatusChecks::Unresolved).unwrap();
         assert_eq!(
             summary,
             "2 unresolved status checks cover Actor catalog, Actor search."
@@ -207,11 +212,24 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["actor_catalog", "actor_search"]
         );
-        let (summary, details) = status_check_summary(&facts, StatusChecks::Failed).unwrap();
+        let (summary, details) = status_check_summary(facts.iter(), StatusChecks::Failed).unwrap();
         assert_eq!(summary, "One failed status check covers Jobs service.");
         assert_eq!(details.len(), 1);
-        let (summary, _) = status_check_summary(&facts[..2], StatusChecks::Unresolved).unwrap();
+        let (summary, _) =
+            status_check_summary(facts[..2].iter(), StatusChecks::Unresolved).unwrap();
         assert_eq!(summary, "No unresolved status checks were observed.");
+        let registration = HealthFact {
+            label: "Registration".into(),
+            ..fact("registration", "ready", None)
+        };
+        let (summary, details) =
+            status_check_summary(facts.iter().chain([&registration]), StatusChecks::Passed)
+                .unwrap();
+        assert_eq!(
+            summary,
+            "2 passed status checks cover Gateway, Registration."
+        );
+        assert_eq!(details.len(), 2);
     }
 
     fn selected<'a>(passage: &'a str, label: &str, text: &str) -> Option<&'a str> {

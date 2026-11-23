@@ -29,6 +29,7 @@ use fleetworks_contracts::chat::{
 };
 use fleetworks_contracts::context::{CredentialPurpose, MutationContext, Permission};
 use fleetworks_contracts::qa_worker::{QaPassage, QaWorkerEvent, QaWorkerRequest};
+use fleetworks_contracts::readiness::{ReadinessCheckId, ReadinessState};
 use futures_util::StreamExt;
 use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::time::Instant;
@@ -858,9 +859,20 @@ async fn snapshot(
             }
         }
         Question::StatusChecks(selection) => {
+            // This observation belongs to the validated caller, not the shared health sample.
+            let registration = store::HealthFact {
+                id: ReadinessCheckId::Registration.as_str().to_owned(),
+                label: "Registration".into(),
+                status: ReadinessState::Ready.as_str().to_owned(),
+                reason: None,
+                explanation: String::new(),
+            };
             if let Some((sample, (summary, details))) = health.as_ref().and_then(|sample| {
-                readiness::status_check_summary(&sample.facts, selection)
-                    .map(|report| (sample, report))
+                readiness::status_check_summary(
+                    sample.facts.iter().chain([&registration]),
+                    selection,
+                )
+                .map(|report| (sample, report))
             }) {
                 let at = chrono::DateTime::from_timestamp_millis(sample.sampled_at_ms)
                     .ok_or_else(current_health_unavailable)?;

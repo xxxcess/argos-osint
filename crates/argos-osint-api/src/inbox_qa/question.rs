@@ -22,6 +22,7 @@ pub(super) enum Question {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum StatusChecks {
     All,
+    Passed,
     Unresolved,
     Failed,
 }
@@ -229,31 +230,47 @@ fn status_checks(query: &str) -> Option<StatusChecks> {
             "explain ",
             "which ",
             "why are ",
+            "how many ",
+            "are there any ",
         ],
     )
     .unwrap_or(query);
-    let query = strip_article(query);
+    let query = strip_any_prefix(query, &["the ", "tthe "]).unwrap_or(query);
     let query = strip_any_prefix(query, &["current ", "live "]).unwrap_or(query);
     let query = strip_any_suffix(query, &[" on this workstation", " for this workstation"])
         .unwrap_or(query);
-    let query = query.strip_suffix(" about").unwrap_or(query);
-    Some(match query {
-        "status checks" | "workstation status checks" | "backend status checks" => {
-            StatusChecks::All
+    let query = strip_any_suffix(query, &[" about", " are there"]).unwrap_or(query);
+    for subject in [
+        "workstation status checks",
+        "workstation status check",
+        "backend status checks",
+        "backend status check",
+        "status checks",
+        "status check",
+        "checks",
+        "check",
+    ] {
+        if query == subject && subject.contains("status") {
+            return Some(StatusChecks::All);
         }
-        "unresolved status checks"
-        | "unresolved checks"
-        | "unresolved workstation status checks"
-        | "status checks are unresolved"
-        | "checks are unresolved"
-        | "status checks unresolved"
-        | "status checks still need attention"
-        | "checks still need attention" => StatusChecks::Unresolved,
-        "failed status checks"
-        | "failed checks"
-        | "failed workstation status checks"
-        | "status checks failed"
-        | "checks failed" => StatusChecks::Failed,
+        let group = query
+            .strip_suffix(subject)
+            .and_then(|group| group.strip_suffix(' '))
+            .or_else(|| query.strip_prefix(subject)?.strip_prefix(' '));
+        if let Some(group) = group.and_then(status_check_group) {
+            return Some(group);
+        }
+    }
+    None
+}
+
+fn status_check_group(group: &str) -> Option<StatusChecks> {
+    let group = strip_any_prefix(group, &["are ", "is ", "have ", "has "]).unwrap_or(group);
+    let group = group.strip_prefix("still ").unwrap_or(group);
+    Some(match group {
+        "green" | "passed" | "passing" | "ready" => StatusChecks::Passed,
+        "red" | "failed" | "failing" => StatusChecks::Failed,
+        "unresolved" | "need attention" | "needs attention" => StatusChecks::Unresolved,
         _ => return None,
     })
 }
@@ -834,6 +851,10 @@ mod tests {
             ),
             ("Which checks failed?", StatusChecks::Failed),
             ("Show me the workstation status checks.", StatusChecks::All),
+            ("what are tthe green status check?", StatusChecks::Passed),
+            ("Which status checks have passed?", StatusChecks::Passed),
+            ("How many green checks are there?", StatusChecks::Passed),
+            ("Which backend status checks are red?", StatusChecks::Failed),
         ] {
             assert_eq!(
                 classify(prompt),
@@ -863,6 +884,7 @@ mod tests {
             "Is the gateway or datastore ready?",
             "Summarize backend health and CPU usage.",
             "List unresolved status checks for all workstations.",
+            "Which status checks are green on my laptop?",
             "What is CPU, memory, and disk usage on my laptop?",
             "What is CPU, memory, and disk usage by user?",
             "What is CPU, memory, disk, and GPU usage?",

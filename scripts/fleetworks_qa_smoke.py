@@ -406,43 +406,54 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
         return grounded_turn(request, context, case, question,
                              legacy_request=legacy_request if check_legacy else None)
 
+    def check_status_group(question, group, prior_observation):
+        status_turn = ask(f"{group}-status-checks", question, check_legacy=True)
+        findings = status_turn["findings"]
+        require(status_turn["state"] == "answered" and status_turn["question"] == question
+                and 1 <= len(findings) <= 3,
+                f"{group} status checks did not return a bounded readiness answer")
+        summary = findings[0]
+        require(summary["source"] == {"kind": "readiness", "id": "workstation_status_checks"}
+                and group in summary["text"].casefold(),
+                f"{group} status checks omitted the aggregate readiness finding")
+        for finding in findings:
+            observed_at = observed(finding)
+            require(finding["source"]["kind"] == "readiness"
+                    and 0 <= finding["start"] < finding["end"]
+                    and finding["end"] - finding["start"] == len(finding["text"])
+                    and observed_at.tzinfo is not None
+                    and observed_at > prior_observation,
+                    f"{group} status checks lacked fresh, valid readiness evidence")
+        return findings
+
     gateway = grounded_turn(
         request, context, "gateway", "What does this mean?",
         source={"kind": "readiness", "id": "gateway"},
     )
-    prior_readiness = cited_finding(gateway, "readiness", "gateway")
-    require(prior_readiness["text"]
+    gateway_finding = cited_finding(gateway, "readiness", "gateway")
+    require(gateway_finding["text"]
             == "Gateway is ready. An authenticated gateway request succeeded.",
             "gateway answer did not report the observed ready state")
-    if embedded_mode:
-        catalog = ask("catalog", "Why is the actor catalog not ready?")
-        prior_readiness = cited_finding(catalog, "readiness", "actor_catalog")
-        require(prior_readiness["text"]
-                == "Actor catalog is not ready. No completed seed was verified, and existing records may remain.",
-                "the catalog answer did not preserve its actual seed status")
 
-    status_checks = ask(
-        "unresolved-status-checks", "what are the current unresolved status checks about?", check_legacy=True,
+    unresolved = check_status_group(
+        "what are the current unresolved status checks about?", "unresolved", observed(gateway_finding),
     )
-    status_findings = status_checks["findings"]
-    require(status_checks["state"] == "answered" and 1 <= len(status_findings) <= 3,
-            "unresolved status checks did not return a bounded readiness answer")
-    status_summary = status_findings[0]
-    require(status_summary["source"] == {"kind": "readiness", "id": "workstation_status_checks"}
-            and "unresolved" in status_summary["text"].casefold(),
-            "unresolved status checks omitted the aggregate readiness finding")
     if embedded_mode:
-        require("Actor catalog" in status_summary["text"] and len(status_findings) > 1,
-                "unresolved status checks omitted the unseeded Actor catalog or readiness details")
-    prior_observation = observed(prior_readiness)
-    for finding in status_findings:
-        observed_at = observed(finding)
-        require(finding["source"]["kind"] == "readiness"
-                and 0 <= finding["start"] < finding["end"]
-                and finding["end"] - finding["start"] == len(finding["text"])
-                and observed_at.tzinfo is not None
-                and observed_at > prior_observation,
-                "unresolved status checks lacked fresh, valid readiness evidence")
+        catalog_finding = next((finding for finding in unresolved[1:]
+                                if finding["source"]["id"] == "actor_catalog"), None)
+        require("Actor catalog" in unresolved[0]["text"] and catalog_finding is not None
+                and catalog_finding["text"]
+                == "Actor catalog is not ready. No completed seed was verified, and existing records may remain.",
+                "unresolved status checks did not preserve the actual Actor catalog seed status")
+    passed = check_status_group(
+        "what are tthe green status check?", "passed", max(map(observed, unresolved)),
+    )
+    passed_summary = passed[0]["text"].casefold()
+    require("gateway" in passed_summary and "registration" in passed_summary,
+            "passed status checks omitted the ready gateway or verified registration")
+    if embedded_mode:
+        require("actor catalog" not in passed_summary,
+                "passed status checks included the unseeded Actor catalog")
 
     active_jobs = running_jobs()
     jobs = ask("jobs", "How many jobs are running?", check_legacy=True)
@@ -505,7 +516,7 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
             "model_pid_count": len(active), "warm_model_rss_bytes": worker_rss_bytes,
             "model_context": model_context,
             "fresh_observation": True, "terminal_events": terminal_events, "terminal_state": snapshot["state"],
-            "grounded_readiness": True, "unresolved_status_checks": True,
+            "grounded_readiness": True, "unresolved_status_checks": True, "passed_status_checks": True,
             "live_metrics": True, "unsupported_context": True,
             "resource_snapshot": True, "greeting": True, "conversational_follow_ups": True,
             "frozen_samples": readings, "legacy_http_evidence": legacy_request is not None}

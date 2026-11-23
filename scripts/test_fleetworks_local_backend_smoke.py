@@ -219,7 +219,7 @@ while True:
                 session.shutdown()
             process.wait.assert_called_once_with(timeout=10)
 
-    def test_packaged_smoke_requires_an_explicit_full_catalog_request(self):
+    def test_packaged_linux_pr_smoke_stages_catalog_and_requires_opt_in_for_seed(self):
         app = self.root / "app"
         output = self.root / "report.json"
         args = ["smoke", "--app", str(app), "--output", str(output)]
@@ -228,6 +228,7 @@ while True:
             mock.patch.object(smoke, "run_smoke", return_value={"status": "pass"}),
             mock.patch.object(smoke, "run_ci_bundled_catalog") as full_catalog,
             mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "false"}),
         ):
             with mock.patch.object(sys, "argv", args):
                 self.assertEqual(smoke.main(), 0)
@@ -235,6 +236,16 @@ while True:
             with mock.patch.object(sys, "argv", [*args, "--full-bundled-catalog"]):
                 self.assertEqual(smoke.main(), 0)
             full_catalog.assert_called_once_with(app, output)
+            full_catalog.reset_mock()
+            with (
+                mock.patch.object(sys, "argv", args),
+                mock.patch.dict(os.environ, {
+                    "GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "pull_request",
+                    "LINUX_TARGET": "x86_64-unknown-linux-gnu", "LINUX_PROFILE": "debug",
+                }),
+            ):
+                self.assertEqual(smoke.main(), 0)
+            full_catalog.assert_called_once_with(app, output, stage_only=True)
 
     def test_validate_native_contract_enforces_required_fields(self):
         valid = {

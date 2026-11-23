@@ -145,6 +145,35 @@ enum ClientTransport {
     LocalIpc(Arc<LocalIpcClient>),
 }
 
+struct PendingLocalUpload {
+    ipc: Arc<LocalIpcClient>,
+    registration: Option<crate::context::RegisteredContext>,
+    upload_id: Option<String>,
+}
+
+impl Drop for PendingLocalUpload {
+    fn drop(&mut self) {
+        let (Some(upload_id), Ok(runtime)) =
+            (self.upload_id.take(), tokio::runtime::Handle::try_current())
+        else {
+            return;
+        };
+        let ipc =
+            self.ipc.as_ref().clone().with_backpressure_policy(
+                crate::ipc::BackpressurePolicy::Wait(Duration::from_secs(5)),
+            );
+        let registration = self.registration.take();
+        runtime.spawn(async move {
+            let _ = ipc
+                .request_payload(
+                    registration,
+                    IpcOperation::DatasetUploadCancel { upload_id },
+                )
+                .await;
+        });
+    }
+}
+
 /// A transport-neutral client pinned to one public API origin or local IPC stream.
 ///
 /// For HTTP, authorization stays on that origin and redirects/proxies are disabled.
@@ -518,6 +547,11 @@ impl Client {
                     .and_then(|suffix| suffix.strip_prefix('/'))
                     .ok_or(ClientError::InvalidResponse)?
                     .to_owned();
+                let mut pending = PendingLocalUpload {
+                    ipc: Arc::clone(ipc),
+                    registration: self.registered_context.clone(),
+                    upload_id: Some(upload_id.clone()),
+                };
                 let mut offset = 0_u64;
                 let mut buffer = vec![0_u8; crate::ipc::MAX_IPC_CHUNK_BYTES];
                 loop {
@@ -550,11 +584,14 @@ impl Client {
                         .await?;
                     offset = next_offset;
                 }
-                ipc.request_json(
-                    self.registered_context.clone(),
-                    IpcOperation::DatasetUploadFinish { upload_id },
-                )
-                .await?
+                let uploaded = ipc
+                    .request_json(
+                        self.registered_context.clone(),
+                        IpcOperation::DatasetUploadFinish { upload_id },
+                    )
+                    .await?;
+                pending.upload_id = None;
+                uploaded
             }
         };
 

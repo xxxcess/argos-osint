@@ -264,13 +264,15 @@ pub async fn list_datasets(
 #[derive(Clone, Debug, SurrealValue)]
 pub struct ExpiredUpload {
     pub dataset_id: String,
+    /// A durable dataset record identifies the final file as a published artifact.
+    pub registered: bool,
 }
 
 /// Claim a bounded expired/unpinned set. Dataset-row writes fence simultaneous
 /// admission pinning; accepted inputs are retained independently of upload TTL.
 pub async fn claim_expired_uploads(repo: &Repository) -> Result<Vec<ExpiredUpload>, TxError> {
     let result=run_tx(repo.db(),RetryPolicy::default(),|tx|async move {
-        let mut result=jobs::run(&tx,tx.query("SELECT dataset_id FROM setup_upload WHERE expires_at<=time::now() AND state IN ['partial','validated','cleanup_pending'] ORDER BY dataset_id LIMIT 32")).await?;
+        let mut result=jobs::run(&tx,tx.query("SELECT dataset_id, record::exists(type::record('setup_dataset',dataset_id)) AS registered FROM setup_upload WHERE expires_at<=time::now() AND state IN ['partial','validated','cleanup_pending'] ORDER BY dataset_id LIMIT 32")).await?;
         let candidates:Vec<ExpiredUpload>=jobs::take(&mut result,0)?;
         let mut selected=Vec::new();
         for candidate in candidates {

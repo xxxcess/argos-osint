@@ -13,6 +13,7 @@ import re
 import secrets
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -45,6 +46,7 @@ SAFE_REJECTION = {
     "Inbox inference is busy": "busy",
 }
 CATALOG_TIMEOUT_SECONDS = 43 * 60
+CATALOG_STAGE_TIMEOUT_SECONDS = 4 * 60
 CHECKPOINT_POLL_SECONDS = 10
 INDEX_PROGRESS_POLL_SECONDS = 20
 CATALOG_PROGRESS_MILESTONES = 6
@@ -676,7 +678,66 @@ def persisted_rocksdb_options(state):
     return options
 
 
-def stage_bundled_csv(call, directory, kind, pin, rows):
+def staged_files(directory):
+    files = {}
+    for path in directory.iterdir():
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            # Publication can unlink the old name during a sample.
+            continue
+        if stat.S_ISREG(metadata.st_mode):
+            files[path.name] = ((metadata.st_dev, metadata.st_ino), metadata.st_size)
+    return files
+
+
+def finish_bundled_stage(call, upload_id, staging, size, evidence):
+    before = staged_files(staging)
+    require(len(before) == 1, "bundled upload did not stage one private file")
+    name, (inode, received_bytes) = next(iter(before.items()))
+    # The last acknowledged chunk can still be buffered before Finish flushes it.
+    require(name.endswith(".part") and 0 <= received_bytes <= size,
+            "private upload file differs from its size pin")
+
+    done = threading.Event()
+    peak = received_bytes
+    samples = 0
+    sampling_error = None
+
+    def sample():
+        nonlocal peak, samples, sampling_error
+        try:
+            while not done.wait(0.005):
+                sizes = dict(staged_files(staging).values())
+                peak = max(peak, sum(sizes.values()))
+                samples += 1
+        except OSError as error:
+            sampling_error = error
+
+    sampler = threading.Thread(target=sample, daemon=True)
+    sampler.start()
+    started = time.monotonic()
+    try:
+        upload = call("dataset_upload_finish", {"upload_id": upload_id})
+    finally:
+        elapsed_ms = round((time.monotonic() - started) * 1000)
+        done.set()
+        sampler.join()
+        evidence.update(peak_sampled_distinct_inode_bytes=peak, publication_samples=samples,
+                        validation_publish_ms=elapsed_ms)
+    if sampling_error is not None:
+        raise sampling_error
+    published = f'{upload["dataset"]["id"]}.csv'
+    require(staged_files(staging) == {published: (inode, size)},
+            "bundled publication did not preserve the private upload inode")
+    peak = max(peak, size)
+    evidence["peak_sampled_distinct_inode_bytes"] = peak
+    require(peak == size, "bundled validation staged more than one copy of the dataset")
+    evidence["same_inode_published"] = True
+    return upload
+
+
+def stage_bundled_csv(call, directory, kind, pin, rows, *, staging, evidence):
     path = directory / pin["filename"]
     require(path.stat().st_size == pin["size_bytes"], "bundled dataset byte count changed")
     ticket = call("dataset_upload_start", {
@@ -684,19 +745,25 @@ def stage_bundled_csv(call, directory, kind, pin, rows):
     })
     upload_id = ticket["upload_path"].rstrip("/").rsplit("/", 1)[-1]
     offset = 0
+    started = time.monotonic()
     with path.open("rb") as file:
         while chunk := file.read(256 * 1024):
             call("dataset_upload_chunk", {
                 "upload_id": upload_id, "offset": offset, "data_b64": base64.b64encode(chunk).decode("ascii"),
             }, allow_non_json=True)
             offset += len(chunk)
-    upload = call("dataset_upload_finish", {"upload_id": upload_id})
-    require(upload["row_count"] == rows and upload["dataset"]["sha256"] == pin["sha256"],
+    evidence.update(transfer_bytes=offset, transfer_ms=round((time.monotonic() - started) * 1000))
+    upload = finish_bundled_stage(call, upload_id, staging, pin["size_bytes"], evidence)
+    dataset = upload["dataset"]
+    require(upload["row_count"] == rows and dataset["size_bytes"] == pin["size_bytes"]
+            and dataset["sha256"] == pin["sha256"]
+            and pack.sha256(staging / f'{dataset["id"]}.csv') == pin["sha256"],
             "backend validation did not match the bundled digest and row count")
-    return upload["dataset"]
+    evidence.update(sha256=dataset["sha256"], validated_rows=upload["row_count"])
+    return dataset
 
 
-def exercise_bundled_catalog(session, state, app, evidence):
+def exercise_bundled_catalog(session, state, app, evidence, *, stage_only):
     phase_started = time.monotonic()
 
     def next_stage(stage):
@@ -705,6 +772,17 @@ def exercise_bundled_catalog(session, state, app, evidence):
         evidence["elapsed_by_stage_ms"][evidence["stage"]] = round((now - phase_started) * 1000)
         evidence["stage"] = stage
         phase_started = now
+
+    def shutdown():
+        next_stage("shutdown")
+        embedded.check_zero_bound_sockets(session.proc.pid)
+        ack, exit_code = session.shutdown("bundled_catalog_smoke_complete")
+        evidence["shutdown_ack"] = sanitized_shutdown_ack(ack)
+        evidence["shutdown_exit_code"] = exit_code
+        require(evidence["shutdown_ack"] is not None and evidence["shutdown_ack"].get("checkpointed") is True,
+                "bundled catalog companion did not acknowledge a checkpointed shutdown")
+        require(exit_code == 0, "bundled catalog companion did not shut down cleanly")
+        next_stage("complete")
 
     require(session.hello()["compatible"], "packaged companion rejected the fixture protocol")
     embedded.check_zero_bound_sockets(session.proc.pid)
@@ -833,9 +911,14 @@ def exercise_bundled_catalog(session, state, app, evidence):
     directory = app / "share/fleetworks/resources/datasets"
     require(check("actor_catalog")["state"] != "ready", "fresh catalog reported ready without a seed")
     next_stage("actor_csv_validation")
-    dataset = stage_bundled_csv(call, directory, "actor_catalog", pins["actor_catalog"], CATALOG_ROWS)
+    evidence["actor_staging"] = {}
+    dataset = stage_bundled_csv(call, directory, "actor_catalog", pins["actor_catalog"], CATALOG_ROWS,
+                                staging=state / "staged-datasets", evidence=evidence["actor_staging"])
     evidence["actor_validated_rows"] = CATALOG_ROWS
     require(check("actor_catalog")["state"] != "ready", "staged catalog reported ready without a seed")
+    if stage_only:
+        shutdown()
+        return
 
     next_stage("actor_seed")
     receipt = call("seed_actors", {
@@ -943,19 +1026,12 @@ def exercise_bundled_catalog(session, state, app, evidence):
     require(not any(row["operation"] == "classifier_train" for row in jobs()),
             "a retired Natural training operation was accepted")
 
-    next_stage("shutdown")
-    embedded.check_zero_bound_sockets(session.proc.pid)
-    ack, exit_code = session.shutdown("bundled_catalog_smoke_complete")
-    evidence["shutdown_ack"] = sanitized_shutdown_ack(ack)
-    evidence["shutdown_exit_code"] = exit_code
-    require(evidence["shutdown_ack"] is not None and evidence["shutdown_ack"].get("checkpointed") is True,
-            "bundled catalog companion did not acknowledge a checkpointed shutdown")
-    require(exit_code == 0, "bundled catalog companion did not shut down cleanly")
-    next_stage("complete")
+    shutdown()
 
 
-def packaged_catalog_smoke(binary, app, state):
+def packaged_catalog_smoke(binary, app, state, *, stage_only):
     evidence = {"status": "failed", "stage": "startup", "resources_by_stage": {}, "elapsed_by_stage_ms": {}}
+    evidence["scope"] = "stage_only" if stage_only else "full_catalog"
     require([name for _, name in socket.if_nameindex()] == ["lo"], "bundled catalog smoke needs an offline namespace")
     state.mkdir(mode=0o700)
     started = time.monotonic()
@@ -967,17 +1043,18 @@ def packaged_catalog_smoke(binary, app, state):
             evidence["timed_out"] = True
             session.proc.kill()
 
-    timeout = threading.Timer(CATALOG_TIMEOUT_SECONDS, expire)
+    timeout = threading.Timer(CATALOG_STAGE_TIMEOUT_SECONDS if stage_only else CATALOG_TIMEOUT_SECONDS, expire)
     timeout.daemon = True
     timeout.start()
     sampler = threading.Thread(target=sample_catalog_resources, args=(session, state, evidence, stop), daemon=True)
     sampler.start()
     failure_type = None
     try:
-        exercise_bundled_catalog(session, state, app, evidence)
-        require(evidence.get("peak_sampled_rss_bytes", 0) > 0
-                and evidence["resources_by_stage"].get("actor_seed", {}).get("samples", 0) > 0,
-                "bundled catalog smoke did not collect seed resource observations")
+        exercise_bundled_catalog(session, state, app, evidence, stage_only=stage_only)
+        if not stage_only:
+            require(evidence.get("peak_sampled_rss_bytes", 0) > 0
+                    and evidence["resources_by_stage"].get("actor_seed", {}).get("samples", 0) > 0,
+                    "bundled catalog smoke did not collect seed resource observations")
         evidence["status"] = "passed"
     except (OSError, ValueError, KeyError, StopIteration, subprocess.SubprocessError) as error:
         failure_type = type(error).__name__
@@ -1040,7 +1117,7 @@ def run_catalog(args):
     companion_sha = pack.sha256(binary)
     require(companion_sha == manifest["companion"]["sha256"], "catalog companion checksum differs from its manifest")
     with tempfile.TemporaryDirectory(prefix="fleetworks-bundled-catalog-") as temporary:
-        result = packaged_catalog_smoke(binary, app, Path(temporary) / "state")
+        result = packaged_catalog_smoke(binary, app, Path(temporary) / "state", stage_only=args.stage_only)
     return {
         "runtime": "embedded-stdio", "target": manifest["target"], "source_sha": args.revision,
         "run_id": args.run_id, "run_attempt": args.run_attempt, "companion_sha256": companion_sha,
@@ -1294,6 +1371,7 @@ def main():
     catalog.add_argument("--revision", required=True)
     catalog.add_argument("--run-id", required=True)
     catalog.add_argument("--run-attempt", required=True)
+    catalog.add_argument("--stage-only", action="store_true", help="Verify single-copy bundled staging without seeding")
     remote = modes.add_parser("distributed")
     remote.add_argument("--name", required=True)
     remote.add_argument("--image", required=True)

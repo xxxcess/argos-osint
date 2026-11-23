@@ -740,18 +740,24 @@ def run_smoke(binary, *, state_dir=None, check_sockets=True, run_rust_probe=True
             cleanup_dir.cleanup()
 
 
-def run_ci_bundled_catalog(app, output):
-    # The Linux native package step has already verified and extracted this exact archive.
+def is_ci_bundled_catalog_app(app, output):
     environment = os.environ
-    if (app is None or output is None or environment.get("GITHUB_ACTIONS") != "true"
-            or environment.get("GITHUB_EVENT_NAME") != "pull_request"
-            or environment.get("LINUX_TARGET") != "x86_64-unknown-linux-gnu"
-            or environment.get("LINUX_PROFILE") != "debug"):
+    return (app is not None and output is not None and environment.get("GITHUB_ACTIONS") == "true"
+            and environment.get("GITHUB_EVENT_NAME") == "pull_request"
+            and environment.get("LINUX_TARGET") == "x86_64-unknown-linux-gnu"
+            and environment.get("LINUX_PROFILE") == "debug")
+
+
+def run_ci_bundled_catalog(app, output, *, stage_only=False):
+    # The Linux native package step has already verified and extracted this exact archive.
+    if not is_ci_bundled_catalog_app(app, output):
         raise ValueError("Full bundled catalog verification requires a Linux x86-64 debug PR package and output path")
+    environment = os.environ
     revision = environment["EXPECTED_HEAD"]
     run_id = environment["GITHUB_RUN_ID"]
     run_attempt = environment["GITHUB_RUN_ATTEMPT"]
-    evidence = output.with_name("bundled-catalog-x86_64-unknown-linux-gnu.json")
+    stem = "bundled-catalog-stage" if stage_only else "bundled-catalog"
+    evidence = output.with_name(f"{stem}-x86_64-unknown-linux-gnu.json")
     script = Path(__file__).resolve().with_name("fleetworks_qa_smoke.py")
     result = None
     try:
@@ -763,11 +769,15 @@ def run_ci_bundled_catalog(app, output):
                 "/usr/bin/python3", "-B", str(script), "catalog", "--app", str(app.resolve()),
                 "--revision", revision, "--run-id", run_id, "--run-attempt", run_attempt,
             ]
-            completed = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=report, timeout=45 * 60, check=False)
+            if stage_only:
+                command.append("--stage-only")
+            completed = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=report,
+                                       timeout=(5 if stage_only else 45) * 60, check=False)
         result = json.loads(evidence.read_text())
         if (completed.returncode != 0 or not isinstance(result, dict)
                 or result.get("source_sha") != revision or result.get("run_id") != run_id
                 or result.get("run_attempt") != run_attempt or not isinstance(result.get("bundled_catalog"), dict)
+                or result["bundled_catalog"].get("scope") != ("stage_only" if stage_only else "full_catalog")
                 or result["bundled_catalog"].get("status") != "passed"):
             raise ValueError("offline bundled catalog smoke did not pass")
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
@@ -806,9 +816,12 @@ def main():
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered + "\n", encoding="utf-8")
     print(rendered, flush=True)
-    if args.full_bundled_catalog:
+    if args.full_bundled_catalog or is_ci_bundled_catalog_app(args.app, args.output):
         try:
-            run_ci_bundled_catalog(args.app, args.output)
+            if args.full_bundled_catalog:
+                run_ci_bundled_catalog(args.app, args.output)
+            else:
+                run_ci_bundled_catalog(args.app, args.output, stage_only=True)
         except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
             print(f"fleetworks-local-backend-smoke: {error}", file=sys.stderr)
             return 1

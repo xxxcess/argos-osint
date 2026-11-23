@@ -109,6 +109,7 @@ const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const EVENT_CHANNEL_CAPACITY: usize = 64;
 
 const DATASET_UPLOAD_CHUNK_PATH: &str = "/api/v1/workstation/datasets/uploads/chunk";
+const DATASET_UPLOAD_CANCEL_PATH: &str = "/api/v1/workstation/datasets/uploads/cancel";
 const DATASET_UPLOAD_FINISH_PATH: &str = "/api/v1/workstation/datasets/uploads/finish";
 const HOST_METRICS_PATH: &str = "/api/v1/host/metrics";
 const WORKSTATION_DATASETS_PATH: &str = "/api/v1/workstation/datasets";
@@ -692,6 +693,9 @@ pub enum IpcOperation {
     DatasetUploadFinish {
         upload_id: String,
     },
+    DatasetUploadCancel {
+        upload_id: String,
+    },
     SeedActors(MaintenanceRequest),
     TrainClassifier(MaintenanceRequest),
     ReindexActors(MaintenanceRequest),
@@ -772,6 +776,10 @@ impl fmt::Debug for IpcOperation {
                 .finish(),
             Self::DatasetUploadFinish { upload_id } => f
                 .debug_struct("DatasetUploadFinish")
+                .field("upload_id", upload_id)
+                .finish(),
+            Self::DatasetUploadCancel { upload_id } => f
+                .debug_struct("DatasetUploadCancel")
                 .field("upload_id", upload_id)
                 .finish(),
             Self::SeedActors(r) => f.debug_tuple("SeedActors").field(r).finish(),
@@ -908,6 +916,7 @@ impl IpcOperation {
             Self::DatasetUploadStart(_) => "dataset_upload_start",
             Self::DatasetUploadChunk { .. } => "dataset_upload_chunk",
             Self::DatasetUploadFinish { .. } => "dataset_upload_finish",
+            Self::DatasetUploadCancel { .. } => "dataset_upload_cancel",
             Self::SeedActors(_) => "seed_actors",
             Self::TrainClassifier(_) => "train_classifier",
             Self::ReindexActors(_) => "reindex_actors",
@@ -967,6 +976,7 @@ impl IpcOperation {
             Self::DatasetUploadStart(_) => (IpcMethod::Post, DATASET_UPLOADS_PATH),
             Self::DatasetUploadChunk { .. } => (IpcMethod::Post, DATASET_UPLOAD_CHUNK_PATH),
             Self::DatasetUploadFinish { .. } => (IpcMethod::Post, DATASET_UPLOAD_FINISH_PATH),
+            Self::DatasetUploadCancel { .. } => (IpcMethod::Post, DATASET_UPLOAD_CANCEL_PATH),
             Self::SeedActors(_) => (IpcMethod::Post, ACTOR_SEED_PATH),
             Self::TrainClassifier(_) => (IpcMethod::Post, CLASSIFIER_TRAIN_PATH),
             Self::ReindexActors(_) => (IpcMethod::Post, ACTOR_REINDEX_PATH),

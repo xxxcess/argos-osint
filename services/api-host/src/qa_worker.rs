@@ -30,12 +30,17 @@ use argos_osint_api::inbox_qa::QaInferenceFuture;
 use fleetworks_contracts::chat::QaAvailabilityReason;
 use fleetworks_contracts::chat::QaStartupStage;
 use fleetworks_contracts::qa_worker::qa_frame_len;
+use fleetworks_contracts::qa_worker::QaContextUsage;
 use fleetworks_contracts::qa_worker::QaWorkerCommand;
 use fleetworks_contracts::qa_worker::QaWorkerEvent;
+use fleetworks_contracts::qa_worker::QaWorkerOutcome;
 use fleetworks_contracts::qa_worker::QaWorkerReply;
 use fleetworks_contracts::qa_worker::QaWorkerRequest;
 use fleetworks_contracts::qa_worker::QaWorkerSequence;
 use fleetworks_contracts::qa_worker::QA_CONTEXT_USAGE_ENV;
+use fleetworks_contracts::qa_worker::QA_CONTEXT_WINDOW_TOKENS;
+use fleetworks_contracts::qa_worker::QA_DIALOGUE_ENV;
+use fleetworks_contracts::qa_worker::QA_GENERATOR_FILES;
 use fleetworks_contracts::qa_worker::QA_MODEL_FILES;
 use fleetworks_contracts::qa_worker::QA_MODEL_REVISION;
 use fleetworks_contracts::qa_worker::QA_WORKER_PROTOCOL;
@@ -64,6 +69,7 @@ const SOCKET_LISTENER_BINARY: &str = "bin/fleetworks-assistant-bert-listener";
 const MAX_POINTER_BYTES: u64 = 4 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_PACK_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_GENERATOR_BYTES: u64 = 310_000_000;
 const MAX_PACK_FILES: usize = 32;
 const WARM_LIMIT: Duration = Duration::from_secs(45);
 const TURN_LIMIT: Duration = Duration::from_secs(25);
@@ -418,6 +424,7 @@ struct WorkerSession {
     input: Box<dyn AsyncWrite + Send + Unpin>,
     output: Box<dyn AsyncRead + Send + Unpin>,
     child: Option<Child>,
+    dialogue: bool,
 }
 
 impl WorkerSession {
@@ -430,6 +437,7 @@ impl WorkerSession {
             .arg(&model)
             .current_dir(&model)
             .env(QA_CONTEXT_USAGE_ENV, "1")
+            .env(QA_DIALOGUE_ENV, "1")
             .env("OMP_NUM_THREADS", "1")
             .env("MKL_NUM_THREADS", "1")
             .env("RAYON_NUM_THREADS", "1")
@@ -454,6 +462,7 @@ impl WorkerSession {
             input: Box::new(input),
             output: Box::new(output),
             child: Some(child),
+            dialogue: false,
         })
     }
 
@@ -493,6 +502,7 @@ impl WorkerSession {
             input: Box::new(input),
             output: Box::new(output),
             child: None,
+            dialogue: false,
         })
     }
 
@@ -529,20 +539,35 @@ impl WorkerSession {
             read => read?,
         };
         self.output.read_exact(&mut header[received..]).await?;
-        Self::validate_ready(self.receive_payload(header).await?)?;
+        let reply = self.receive_payload(header).await?;
+        self.validate_ready(reply)?;
         Ok(true)
     }
 
     async fn ready(&mut self) -> Result<()> {
-        Self::validate_ready(self.receive().await?)
+        let reply = self.receive().await?;
+        self.validate_ready(reply)
     }
 
-    fn validate_ready(reply: QaWorkerReply) -> Result<()> {
+    fn validate_ready(&mut self, reply: QaWorkerReply) -> Result<()> {
         match reply {
             QaWorkerReply::Ready {
                 protocol,
                 model_revision,
-            } if protocol == QA_WORKER_PROTOCOL && model_revision == QA_MODEL_REVISION => Ok(()),
+            } if protocol == QA_WORKER_PROTOCOL && model_revision == QA_MODEL_REVISION => {
+                self.dialogue = false;
+                Ok(())
+            }
+            QaWorkerReply::ReadyWithDialogue {
+                protocol,
+                model_revision,
+            } if self.child.is_some()
+                && protocol == QA_WORKER_PROTOCOL
+                && model_revision == QA_MODEL_REVISION =>
+            {
+                self.dialogue = true;
+                Ok(())
+            }
             QaWorkerReply::StartupFailed {
                 source,
                 line,
@@ -573,6 +598,19 @@ impl WorkerSession {
         request: QaWorkerRequest,
         events: mpsc::Sender<QaWorkerEvent>,
     ) -> Result<()> {
+        if request.dialogue.is_some() && !self.dialogue {
+            let event = QaWorkerEvent::Complete {
+                turn_id: request.turn_id,
+                sequence: 1,
+                outcome: QaWorkerOutcome::InsufficientContext,
+                context: Some(QaContextUsage::new(QA_CONTEXT_WINDOW_TOKENS, 0, 0)),
+                reply: None,
+            };
+            return events
+                .send(event)
+                .await
+                .map_err(|_| anyhow!("QA event receiver closed"));
+        }
         self.send(&QaWorkerCommand::Ask {
             request: request.clone(),
         })
@@ -812,11 +850,28 @@ fn verify_pack(pointer: &PackPointer) -> Result<PathBuf> {
             "QA pack contains the wrong model"
         );
     }
+    if manifest
+        .files
+        .keys()
+        .any(|name| name.starts_with("model/generator/"))
+    {
+        for (name, digest) in QA_GENERATOR_FILES {
+            ensure!(
+                manifest
+                    .files
+                    .get(&format!("model/generator/{name}"))
+                    .map(String::as_str)
+                    == Some(digest),
+                "QA pack contains an incomplete or incompatible generator"
+            );
+        }
+    }
 
     // The directory inventory rejects an unverified file anywhere in the loader path.
     let mut pending = vec![root.clone()];
     let mut count = 0;
     let mut total_bytes = 0;
+    let mut generator_bytes = 0;
     let mut seen = 0;
     while let Some(dir) = pending.pop() {
         for entry in fs::read_dir(&dir)? {
@@ -855,7 +910,12 @@ fn verify_pack(pointer: &PackPointer) -> Result<PathBuf> {
                 .get(relative)
                 .ok_or_else(|| anyhow!("unverified QA pack file"))?;
             ensure!(valid_sha(expected), "invalid QA pack file digest");
-            let file = open_pack_file(&path, MAX_PACK_BYTES - total_bytes)?;
+            let (used, limit) = if relative.starts_with("model/generator/") {
+                (&mut generator_bytes, MAX_GENERATOR_BYTES)
+            } else {
+                (&mut total_bytes, MAX_PACK_BYTES)
+            };
+            let file = open_pack_file(&path, limit - *used)?;
             if matches!(relative, WORKER_BINARY | SOCKET_LISTENER_BINARY) {
                 ensure!(
                     file.metadata()?.mode() & 0o100 != 0,
@@ -863,14 +923,8 @@ fn verify_pack(pointer: &PackPointer) -> Result<PathBuf> {
                 );
             }
             let mut digest = Sha256::new();
-            total_bytes += io::copy(
-                &mut file.take(MAX_PACK_BYTES - total_bytes + 1),
-                &mut digest,
-            )?;
-            ensure!(
-                total_bytes <= MAX_PACK_BYTES,
-                "QA pack exceeds its size limit"
-            );
+            *used += io::copy(&mut file.take(limit - *used + 1), &mut digest)?;
+            ensure!(*used <= limit, "QA pack exceeds its size limit");
             ensure!(
                 format!("{:x}", digest.finalize()) == *expected,
                 "QA pack digest mismatch"
@@ -890,6 +944,9 @@ fn allowed_pack_file(name: &str) -> bool {
         || QA_MODEL_FILES
             .iter()
             .any(|(file, _)| name.strip_prefix("model/") == Some(*file))
+        || QA_GENERATOR_FILES
+            .iter()
+            .any(|(file, _)| name.strip_prefix("model/generator/") == Some(*file))
         || name
             .strip_prefix("lib/")
             .is_some_and(|file| !file.contains('/'))
@@ -919,10 +976,7 @@ fn host_target() -> String {
 mod tests {
     use std::os::unix::fs::PermissionsExt;
 
-    use fleetworks_contracts::qa_worker::QaContextUsage;
     use fleetworks_contracts::qa_worker::QaPassage;
-    use fleetworks_contracts::qa_worker::QaWorkerOutcome;
-    use fleetworks_contracts::qa_worker::QA_CONTEXT_WINDOW_TOKENS;
     use tokio::net::UnixListener;
     use tokio::sync::oneshot;
 
@@ -1072,6 +1126,7 @@ mod tests {
                         sequence: 3,
                         outcome: QaWorkerOutcome::Answered,
                         context: Some(QaContextUsage::new(QA_CONTEXT_WINDOW_TOKENS, 58, 2)),
+                        reply: None,
                     },
                 },
             )

@@ -962,6 +962,7 @@ fn answer_state(turn: &QaTurn) -> (chat_ui::TurnState, &'static str) {
         Some(QaConversationReply::FollowUpNeedsTopic) => {
             "What would you like me to check again? Try “What’s the current memory usage?” or select the job you mean."
         }
+        Some(QaConversationReply::RecallNeedsHistory) => "Ask me a question first, then I can recap our recent exchange.",
         _ => match turn.notice {
             Some(QaTurnNotice::Greeting) => {
                 "Hi! How can I help? You can ask about actor search, memory usage, or running jobs."
@@ -1087,12 +1088,12 @@ pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -
         return None;
     }
     let qa = &state.inbox_qa;
-    let (question, stage, detail, findings, request_id, turn_id, usage) =
+    let (question, stage, answer, findings, request_id, turn_id, usage) =
         if let Some(pending) = &qa.pending {
             (
                 pending.request.question.as_str(),
                 chat_ui::TurnState::Queued,
-                "",
+                String::new(),
                 &[][..],
                 pending.request.request_id.as_str(),
                 None,
@@ -1100,10 +1101,25 @@ pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -
             )
         } else if let Some(turn) = &qa.latest {
             let (stage, detail) = answer_state(turn);
+            let reply = match turn.state {
+                QaTurnState::Answered | QaTurnState::InsufficientContext => turn
+                    .reply
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|reply| !reply.is_empty()),
+                _ => None,
+            };
+            let fallback = (reply.is_none() && !detail.is_empty()).then_some(detail);
+            let answer = reply
+                .into_iter()
+                .chain(turn.findings.iter().map(|finding| finding.text.as_str()))
+                .chain(fallback)
+                .collect::<Vec<_>>()
+                .join("\n");
             (
                 turn.question.as_str(),
                 stage,
-                detail,
+                answer,
                 turn.findings.as_slice(),
                 turn.request_id.as_str(),
                 Some(turn.turn_id.as_str()),
@@ -1119,17 +1135,6 @@ pub(crate) fn exchange(state: &State, kit: &Kit, preferences: ViewPreferences) -
         text: question.to_owned(),
         citations: Vec::new(),
     };
-    let mut answer = findings
-        .iter()
-        .map(|finding| finding.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    if !detail.is_empty() {
-        if !answer.is_empty() {
-            answer.push('\n');
-        }
-        answer.push_str(detail);
-    }
     let answer = chat_ui::ChatMessage {
         id: "inbox-qa-answer".into(),
         role: chat_ui::Role::Assistant,
@@ -1448,15 +1453,24 @@ mod tests {
 
         runtime.update(|state, _| {
             let mut modeled = turn(QaTurnState::Answered, 2);
+            modeled.reply = Some("Here’s what I found.".into());
+            modeled.notice = Some(QaTurnNotice::Greeting);
+            modeled.conversation = Some(QaConversationReply::Help);
             modeled.context = Some(QaContextUsage::new(QA_CONTEXT_WINDOW_TOKENS, 224, 3));
             state.inbox_qa.adopt(Some(modeled));
         });
         runtime.frame(1.0);
         let tree = runtime.accessibility_json();
+        assert_eq!(accessibility_nodes_with_key(&tree, REPLY), 1);
         assert_eq!(accessibility_nodes_with_key(&tree, CONTEXT_DIAL), 1);
-        assert!(tree
-            .to_string()
-            .contains("224 of 256 tokens, 88% peak usage"));
+        let rendered = tree.to_string();
+        assert!(rendered.contains("Here’s what I found."));
+        assert!(rendered.contains(FINDING));
+        assert!(!rendered.contains("How can I help?"));
+        assert!(!rendered.contains("Select a job to ask about its status"));
+        assert!(runtime.find(SOURCES_TOGGLE).is_some());
+        assert!(runtime.find("chat-citation-0").is_none());
+        assert!(rendered.contains("224 of 256 tokens, 88% peak usage"));
         assert!(runtime.elements().iter().any(|element| {
             !element.exiting && element.text.as_deref() == Some("224/256 tokens")
         }));

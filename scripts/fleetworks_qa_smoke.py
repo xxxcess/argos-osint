@@ -194,14 +194,23 @@ def require_context(turn, *, inferred):
     return usage
 
 
-def grounded_turn(request, context, case, question, *, legacy_request=None, source=None):
+def settled_turn(request, context, case, question, *, legacy_request=None, source=None, generated=False):
     payload = {"request_id": f"inbox-qa-smoke-{case}", "context": context, "question": question}
     if source is not None:
         payload["source"] = source
     accepted = request("turns", payload, expected=(200, 201, 202))
-    require(accepted["state"] in TERMINAL, f"{case} did not finish within admission")
-    require_context(accepted, inferred=False)
     query = {"turn_id": accepted["turn_id"], "after": 0, "wait_seconds": 0}
+    if generated:
+        accepted = until(lambda: request("events", query=query)["turn"],
+                         lambda turn: turn["state"] in TERMINAL,
+                         f"{case} did not complete the local dialogue turn", timeout=45)
+        require(accepted["state"] == "answered" and accepted.get("reply") and not accepted["findings"],
+                f"{case} did not produce bounded conversational text")
+    else:
+        require(accepted["state"] in TERMINAL, f"{case} did not finish within admission")
+    usage = require_context(accepted, inferred=generated)
+    if generated:
+        require(usage["model_windows"] == 1, f"{case} did not use a single model input window")
     page = request("events", query=query)
     require(page["turn"] == accepted and not page["gap"], f"{case} admission differed from its event snapshot")
     require([event["sequence"] for event in page["events"]] == list(range(1, accepted["cursor"] + 1)),
@@ -402,9 +411,9 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
 
     context = authorize(registration)
 
-    def ask(case, question, *, check_legacy=False):
-        return grounded_turn(request, context, case, question,
-                             legacy_request=legacy_request if check_legacy else None)
+    def ask(case, question, *, check_legacy=False, generated=False):
+        return settled_turn(request, context, case, question,
+                            legacy_request=legacy_request if check_legacy else None, generated=generated)
 
     def check_status_group(question, group, prior_observation):
         status_turn = ask(f"{group}-status-checks", question, check_legacy=True)
@@ -426,7 +435,7 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
                     f"{group} status checks lacked fresh, valid readiness evidence")
         return findings
 
-    gateway = grounded_turn(
+    gateway = settled_turn(
         request, context, "gateway", "What does this mean?",
         source={"kind": "readiness", "id": "gateway"},
     )
@@ -472,6 +481,13 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
     require(datetime.fromisoformat(readings["memory_follow_up"]["observed_at"])
             > datetime.fromisoformat(readings["memory"]["observed_at"]),
             "memory follow-up reused the previous observation timestamp")
+    greeting = ask("greeting", "hi", check_legacy=True, generated=embedded_mode)
+    require(greeting.get("notice") == "greeting" and not greeting["findings"],
+            "greeting did not receive a friendly reply without citations")
+    dialogue_rss_bytes = None
+    if embedded_mode:
+        worker, = model()
+        dialogue_rss_bytes = embedded.read_process_rss_bytes(worker)
     preceding = readings["memory_follow_up"]
     for index, question in enumerate(("And now?", "Has that changed?"), start=1):
         turn = ask(f"conversational-follow-up-{index}", question, check_legacy=True)
@@ -486,10 +502,7 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
             and all(part["source"]["kind"] == "host_metric" and part.get("measurement")
                     for part in resources["findings"]),
             "resource summary did not cite exact CPU, memory and disk observations")
-    greeting = ask("greeting", "hi", check_legacy=True)
-    require(greeting.get("notice") == "greeting" and not greeting["findings"],
-            "greeting did not receive a friendly reply without citations")
-    help_turn = ask("help", "What can you help with?", check_legacy=True)
+    help_turn = ask("help", "What can you help with?", check_legacy=True, generated=embedded_mode)
     require(help_turn.get("conversation") == "help" and not help_turn["findings"],
             "the assistant did not explain how to start a task")
     unsupported = ask("general-context", "What is the capital of Japan?", check_legacy=True)
@@ -519,6 +532,8 @@ def exercise(request, manage, registration, manager, model, readiness, running_j
             "grounded_readiness": True, "unresolved_status_checks": True, "passed_status_checks": True,
             "live_metrics": True, "unsupported_context": True,
             "resource_snapshot": True, "greeting": True, "conversational_follow_ups": True,
+            "local_dialogue": embedded_mode,
+            "local_dialogue_rss_bytes": dialogue_rss_bytes,
             "frozen_samples": readings, "legacy_http_evidence": legacy_request is not None}
 
 
@@ -1493,7 +1508,7 @@ def run_distributed(args):
 
         def verify_other_jobs():
             expected = running_jobs(other_token, other)
-            observed = grounded_turn(other_client, authorize(other), "other-jobs", "How many jobs are running?")
+            observed = settled_turn(other_client, authorize(other), "other-jobs", "How many jobs are running?")
             cited_running_jobs(observed, expected)
             native("events", query={"turn_id": observed["turn_id"], "after": 0, "wait_seconds": 0}, expected=404)
 

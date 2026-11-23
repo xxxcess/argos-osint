@@ -645,6 +645,20 @@ impl Executor {
             }
             let _ = timeout(STOP_TIMEOUT, inference).await;
         }
+        if matches!(result, RunResult::Error)
+            && evidence.request.dialogue.is_some()
+            && !stop.is_cancelled()
+            && matches!(
+                timeout(
+                    AUTH_TIMEOUT,
+                    store::publish(&self.repo, lease, QaTurnState::InsufficientContext, None),
+                )
+                .await,
+                Ok(Ok(true))
+            )
+        {
+            return RunResult::Completed;
+        }
         result
     }
 
@@ -694,6 +708,7 @@ async fn grounded_events(
             sequence,
             outcome,
             context: Some(QaContextUsage::new(QA_CONTEXT_WINDOW_TOKENS, 0, 0)),
+            reply: None,
         })
         .await?;
     Ok(())
@@ -814,7 +829,7 @@ impl Publication {
         event: QaWorkerEvent,
     ) -> Result<RunResult> {
         self.sequence.accept(&evidence.request, &event)?;
-        let (state, finding, context) = match event {
+        let (state, finding, context, reply) = match event {
             QaWorkerEvent::Finding {
                 source_id,
                 start,
@@ -825,10 +840,13 @@ impl Publication {
                 let Some(finding) = cited_finding(evidence, &source_id, start, end, text)? else {
                     return Ok(RunResult::More);
                 };
-                (QaTurnState::Running, Some(finding), None)
+                (QaTurnState::Running, Some(finding), None, None)
             }
             QaWorkerEvent::Complete {
-                outcome, context, ..
+                outcome,
+                context,
+                reply,
+                ..
             } => {
                 let had_finding = self.has_finding;
                 if !had_finding
@@ -857,7 +875,9 @@ impl Publication {
                     }
                 }
                 let state = match outcome {
-                    QaWorkerOutcome::Answered if self.has_finding => QaTurnState::Answered,
+                    QaWorkerOutcome::Answered if self.has_finding || reply.is_some() => {
+                        QaTurnState::Answered
+                    }
                     QaWorkerOutcome::InsufficientContext if !had_finding && self.has_finding => {
                         QaTurnState::Answered
                     }
@@ -868,12 +888,12 @@ impl Publication {
                     QaWorkerOutcome::Cancelled => QaTurnState::Canceled,
                     _ => return Err(anyhow!("unsupported Inbox QA outcome")),
                 };
-                (state, None, context)
+                (state, None, context, reply)
             }
             _ => return Err(anyhow!("unsupported Inbox QA event")),
         };
         self.has_finding |= finding.is_some();
-        if !store::publish_with_context(repo, lease, state, finding, context).await? {
+        if !store::publish_with_model_result(repo, lease, state, finding, context, reply).await? {
             return Ok(RunResult::Fenced);
         }
         Ok(if state.is_terminal() {

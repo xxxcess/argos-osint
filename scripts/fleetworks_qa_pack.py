@@ -23,6 +23,14 @@ MODEL = {
     "model/vocab.txt": "eeaa9875b23b04b4c54ef759d03db9d1ba1554838f8fb26c5d96fa551df93d02",
     "model/rust_model.ot": "8a9f9b2f153ac9ff230aca4548fa3286be9d2f9ea4eb7e9169665b1a8e983f44",
 }
+GENERATOR_REVISION = "0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab"
+GENERATOR = {
+    "model/generator/config.json": (1401, "439aa0fecf5a5546a1def68b1fc45e538e2c94528ce805378daf091e2bf6e4de"),
+    "model/generator/model.safetensors": (
+        307867048, "495fa51e204676f1a857a9fc13c4c89f3f5ba9f480b898cebca02add25e6d749",
+    ),
+    "model/generator/spiece.model": (791656, "d60acb128cf7b7f2536e8f38a5b18a05535c9e14c7a355904270e15b0945ea86"),
+}
 TARGETS = {
     "x86_64-unknown-linux-gnu": ("elf", 62, ".so"),
     "aarch64-unknown-linux-gnu": ("elf", 183, ".so"),
@@ -33,8 +41,11 @@ WORKER = "bin/fleetworks-assistant-bert"
 LISTENER = "bin/fleetworks-assistant-bert-listener"
 EXECUTABLES = {WORKER, LISTENER}
 MANIFEST = "manifest.json"
-MAX_COMPRESSED = 512 * 1024 * 1024
-MAX_UNPACKED = 1024 * 1024 * 1024
+MAX_BASE_COMPRESSED = 512 * 1024 * 1024
+MAX_BASE_UNPACKED = 1024 * 1024 * 1024
+MAX_GENERATOR_BYTES = 310_000_000
+MAX_COMPRESSED = MAX_BASE_COMPRESSED + MAX_GENERATOR_BYTES
+MAX_UNPACKED = MAX_BASE_UNPACKED + MAX_GENERATOR_BYTES
 MAX_FILES = 32
 MAX_MANIFEST = 64 * 1024
 
@@ -102,7 +113,7 @@ def is_digest(value: object) -> bool:
 
 
 def allowed_file(path: str, target: str) -> bool:
-    if path in MODEL or path in EXECUTABLES:
+    if path in MODEL or path in GENERATOR or path in EXECUTABLES:
         return True
     if path == "licenses/torch-LICENSE" or re.fullmatch(r"licenses/torch-NOTICE[a-zA-Z0-9_.-]*", path):
         return True
@@ -129,6 +140,19 @@ def unique_pairs(pairs: list[tuple[str, object]]) -> dict:
     return result
 
 
+def count_base_bytes(name: str, size: int, remaining: int) -> int:
+    if name in GENERATOR:
+        check(size == GENERATOR[name][0], f"{name} does not match the pinned generator size")
+        return 0
+    limit = min(remaining, MAX_MANIFEST) if name == MANIFEST else remaining
+    check(0 < size <= limit, "unpacked QA pack exceeds its size limit")
+    return size
+
+
+def compressed_limit(files: dict) -> int:
+    return MAX_COMPRESSED if GENERATOR.keys() <= files.keys() else MAX_BASE_COMPRESSED
+
+
 def verify_directory(root: Path, target: str, expected_manifest: str) -> dict:
     check(is_digest(expected_manifest), "a trusted manifest SHA-256 is required")
     check(root.is_dir() and not root.is_symlink(), "pack directory is missing or linked")
@@ -148,31 +172,39 @@ def verify_directory(root: Path, target: str, expected_manifest: str) -> dict:
           "pack file inventory is incomplete or too large")
     for name, expected in MODEL.items():
         check(files[name] == expected, f"{name} does not match the pinned QA checkpoint")
-    listed = {MANIFEST, *files}
-    total = len(raw)
+    generator_files = GENERATOR.keys() & files.keys()
+    check(not generator_files or generator_files == GENERATOR.keys(), "generator inventory is incomplete")
+    generator_bytes = sum(GENERATOR[name][0] for name in generator_files)
+    check(generator_bytes <= MAX_GENERATOR_BYTES, "generator exceeds its size limit")
+    for name in generator_files:
+        check(files[name] == GENERATOR[name][1], f"{name} does not match the pinned generator digest")
+
+    inventory = {Path("."): {MANIFEST}}
     for name, expected in files.items():
         check(allowed_file(name, target) and is_digest(expected), "invalid pack file record")
+        component = Path(name)
+        while component.name:
+            inventory.setdefault(component.parent, set()).add(component.name)
+            component = component.parent
+    for directory in sorted(inventory, key=lambda path: len(path.parts)):
+        directory_path = root / directory
+        check(directory_path.is_dir() and not directory_path.is_symlink(), "pack component directory is linked")
+        check({entry.name for entry in directory_path.iterdir()} == inventory[directory],
+              "pack contains unexpected component files")
+
+    total = len(raw)
+    for name, expected in files.items():
         path = root / name
-        check(path.parent.is_dir() and not path.parent.is_symlink(), "pack component directory is linked")
         check(path.is_file() and not path.is_symlink(), f"{name} is missing or linked")
         mode = path.stat().st_mode
         check(not mode & (stat.S_IWGRP | stat.S_IWOTH | stat.S_ISUID | stat.S_ISGID),
               f"{name} permissions are unsafe")
-        size = path.stat().st_size
-        check(0 < size <= MAX_UNPACKED - total, "unpacked QA pack exceeds its size limit")
-        total += size
+        total += count_base_bytes(name, path.stat().st_size, MAX_BASE_UNPACKED - total)
         check(sha256(path) == expected, f"{name} SHA-256 mismatch")
         if name.startswith(("bin/", "lib/")):
             native_architecture(path, target)
         if name in EXECUTABLES:
             check(bool(mode & stat.S_IXUSR), f"{name} is not executable")
-    actual = {entry.name for entry in root.iterdir()}
-    directories = {Path(name).parts[0] for name in files}
-    check(actual == {MANIFEST, *directories}, "pack contains unexpected entries")
-    for name in directories:
-        check({f"{name}/{entry.name}" for entry in (root / name).iterdir()}
-              == {item for item in listed if item.startswith(name + "/")},
-              "pack contains unexpected component files")
     check(f"lib/libtorch_cpu{TARGETS[target][2]}" in files
           and f"lib/libc10{TARGETS[target][2]}" in files, "Torch CPU libraries are missing")
     return data
@@ -197,6 +229,15 @@ def build(args: argparse.Namespace) -> dict:
     with tempfile.TemporaryDirectory(prefix=".qa-pack-", dir=args.output.parent) as staging:
         root = Path(staging)
         install = {name: args.model / Path(name).name for name in MODEL}
+        generator = args.model / "generator"
+        if generator.exists() or generator.is_symlink():
+            check(generator.is_dir() and not generator.is_symlink(), "generator source directory is linked")
+            check({entry.name for entry in generator.iterdir()} == {Path(name).name for name in GENERATOR},
+                  "generator source inventory is incomplete or unexpected")
+            for name in GENERATOR:
+                source = generator / Path(name).name
+                check(not source.is_symlink(), "generator source file is linked")
+                install[name] = source
         install[WORKER] = args.worker
         if args.listener:
             install[LISTENER] = args.listener
@@ -207,27 +248,36 @@ def build(args: argparse.Namespace) -> dict:
                 install[name] = path
         check(len(install) <= MAX_FILES, "pack contains too many files")
         files = {}
-        total = 0
+        base_bytes = 0
         for name, source in install.items():
             check(source.is_file(), f"missing input {name}")
-            total += source.stat().st_size
-            check(total < MAX_UNPACKED - MAX_MANIFEST, "unpacked QA pack exceeds its size limit")
+            base_bytes += count_base_bytes(name, source.stat().st_size,
+                                           MAX_BASE_UNPACKED - MAX_MANIFEST - base_bytes)
             dest = root / name
-            dest.parent.mkdir(exist_ok=True)
+            dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, dest)
             dest.chmod(0o755 if name in EXECUTABLES else 0o644)
             files[name] = sha256(dest)
         manifest = {"protocol": 1, "model_revision": MODEL_REVISION, "target": args.target, "files": files}
-        (root / MANIFEST).write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-        manifest_digest = sha256(root / MANIFEST)
+        manifest_path = root / MANIFEST
+        manifest_path.write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        manifest_digest = sha256(manifest_path)
         verify_directory(root, args.target, manifest_digest)
         temporary = root / "archive.tar.gz"
         write_archive(root, temporary, files)
-        check(temporary.stat().st_size <= MAX_COMPRESSED, "compressed QA pack exceeds its size limit")
+        archive_bytes = temporary.stat().st_size
+        check(archive_bytes <= compressed_limit(files), "compressed QA pack exceeds its size limit")
         archive_digest = sha256(temporary)
         os.link(temporary, args.output)
-        return {"target": args.target, "model_revision": MODEL_REVISION,
-                "manifest_sha256": manifest_digest, "archive_sha256": archive_digest}
+        generator_bytes = sum(GENERATOR[name][0] for name in GENERATOR.keys() & files.keys())
+        receipt = {"target": args.target, "model_revision": MODEL_REVISION,
+                   "manifest_sha256": manifest_digest, "archive_sha256": archive_digest,
+                   "archive_bytes": archive_bytes,
+                   "unpacked_bytes": sum((root / name).stat().st_size for name in (MANIFEST, *files)),
+                   "generator_bytes": generator_bytes}
+        if generator_bytes:
+            receipt["generator_revision"] = GENERATOR_REVISION
+        return receipt
 
 
 def extract(archive: Path, root: Path, target: str) -> None:
@@ -239,13 +289,13 @@ def extract(archive: Path, root: Path, target: str) -> None:
             check(len(seen) <= MAX_FILES and name not in seen and entry.isfile()
                   and not entry.pax_headers and (name == MANIFEST or allowed_file(name, target)),
                   "pack contains an invalid, duplicate, or excessive archive entry")
-            member_limit = MAX_MANIFEST if name == MANIFEST else MAX_UNPACKED
-            check(0 < entry.size <= min(member_limit, MAX_UNPACKED - total),
-                  "pack archive entry exceeds its size limit")
+            total += count_base_bytes(name, entry.size, MAX_BASE_UNPACKED - total)
             seen.add(name)
-            total += entry.size
             dest = root / name
-            dest.parent.mkdir(mode=0o700, exist_ok=True)
+            parent = root
+            for component in Path(name).parts[:-1]:
+                parent = parent / component
+                parent.mkdir(mode=0o700, exist_ok=True)
             source = tar.extractfile(entry)
             check(source is not None, "regular pack entry could not be read")
             with source, dest.open("xb") as output:
@@ -280,6 +330,7 @@ def install(args: argparse.Namespace) -> dict:
         root.mkdir(mode=0o700)
         extract(archive, root, args.target)
         data = verify_directory(root, args.target, args.manifest_sha256)
+        check(archive.stat().st_size <= compressed_limit(data["files"]), "compressed QA pack exceeds its size limit")
         check(not target.exists() and not target.is_symlink(), "QA pack destination already exists")
         root.rename(target)
         if state is not None:
@@ -304,7 +355,7 @@ def install(args: argparse.Namespace) -> dict:
 def install_gated_fixture(archive: Path, output: Path, gated_worker: Path, digests: dict) -> tuple[Path, dict]:
     """Re-pin a separate smoke-only installation with the exact gated worker."""
     info = gated_worker.lstat()
-    check(stat.S_ISREG(info.st_mode) and 0 < info.st_size <= MAX_UNPACKED,
+    check(stat.S_ISREG(info.st_mode) and 0 < info.st_size <= MAX_BASE_UNPACKED,
           "gated fixture must be a bounded regular executable")
     gate_digest = sha256(gated_worker)
     install(argparse.Namespace(archive=archive, output=output, state_dir=None, target=digests["target"],

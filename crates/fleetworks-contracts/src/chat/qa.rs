@@ -291,6 +291,7 @@ pub enum QaConversationReply {
     Help,
     ContextNeeded,
     FollowUpNeedsTopic,
+    RecallNeedsHistory,
     #[serde(other)]
     Unknown,
 }
@@ -382,6 +383,8 @@ pub struct QaTurn {
     pub conversation: Option<QaConversationReply>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<QaContextUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<String>,
     pub cursor: u64,
 }
 
@@ -407,6 +410,7 @@ impl QaTurn {
             notice: None,
             conversation: None,
             context: None,
+            reply: None,
             cursor: 0,
         }
     }

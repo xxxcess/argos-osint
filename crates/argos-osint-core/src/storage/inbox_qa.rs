@@ -13,9 +13,14 @@ use fleetworks_contracts::chat::QaTurnState;
 use fleetworks_contracts::chat::QA_MAX_FINDINGS;
 use fleetworks_contracts::chat::QA_MAX_WORDS;
 use fleetworks_contracts::context::RegisteredContext;
+use fleetworks_contracts::qa_worker::valid_dialogue_reply;
 use fleetworks_contracts::qa_worker::QaContextUsage;
+use fleetworks_contracts::qa_worker::QaDialogueExchange;
+use fleetworks_contracts::qa_worker::QaDialogueKind;
 use fleetworks_contracts::qa_worker::QaWorkerRequest;
 use fleetworks_contracts::qa_worker::QA_CONTEXT_WINDOW_TOKENS;
+use fleetworks_contracts::qa_worker::QA_MAX_DIALOGUE_HISTORY;
+use fleetworks_contracts::qa_worker::QA_MAX_DIALOGUE_MESSAGE_BYTES;
 use futures_util::{Stream, StreamExt};
 use serde::Deserialize;
 use serde::Serialize;
@@ -629,6 +634,77 @@ fn grounded_findings(evidence: &FrozenEvidence) -> Result<Vec<QaFinding>, TxErro
         .collect()
 }
 
+fn dialogue_line(text: &str) -> &str {
+    text[..text.floor_char_boundary(QA_MAX_DIALOGUE_MESSAGE_BYTES.min(text.len()))].trim()
+}
+
+async fn recent_completed_in(
+    tx: &Tx,
+    owner: &str,
+    generation: i64,
+    now: i64,
+    limit: i64,
+) -> Result<Vec<ExchangeRow>, TxError> {
+    let mut reply = jobs::run(
+        tx,
+        tx.query(
+            "SELECT generation,owner,active,completed_at,payload FROM inbox_qa_exchange
+         WHERE owner=$owner AND generation=$generation AND active=false AND completed_at>$cutoff
+         ORDER BY completed_at DESC LIMIT $limit;",
+        )
+        .bind(("owner", owner.to_owned()))
+        .bind(("generation", generation))
+        .bind(("cutoff", now - EXCHANGE_TTL_MS))
+        .bind(("limit", limit)),
+    )
+    .await?;
+    jobs::take(&mut reply, 0)
+}
+
+async fn recent_dialogue_in(
+    tx: &Tx,
+    owner: &str,
+    generation: i64,
+    now: i64,
+) -> Result<Vec<QaDialogueExchange>, TxError> {
+    let retained = recent_completed_in(tx, owner, generation, now, MAX_PER_REGISTRATION).await?;
+    let mut history = Vec::with_capacity(QA_MAX_DIALOGUE_HISTORY);
+    for row in retained {
+        let turn = decode(&row.payload)?.turn;
+        let answer = if let Some(reply) = turn.reply {
+            reply
+        } else if turn.state == QaTurnState::Answered && !turn.findings.is_empty() {
+            turn.findings
+                .into_iter()
+                .map(|finding| finding.text)
+                .collect::<Vec<_>>()
+                .join(" ")
+        } else if turn.notice == Some(QaTurnNotice::Greeting) {
+            match turn.conversation {
+                Some(QaConversationReply::Acknowledgement) => {
+                    "Of course. What else can I help with?"
+                }
+                Some(QaConversationReply::Help) => {
+                    "I can answer questions about workstation status and resources."
+                }
+                _ => "Hi! How can I help?",
+            }
+            .to_owned()
+        } else {
+            continue;
+        };
+        history.push(QaDialogueExchange {
+            question: dialogue_line(&turn.question).to_owned(),
+            reply: dialogue_line(&answer).to_owned(),
+        });
+        if history.len() == QA_MAX_DIALOGUE_HISTORY {
+            break;
+        }
+    }
+    history.reverse();
+    Ok(history)
+}
+
 /// Atomically accept evidence, latest exchange and the work needed to answer it.
 pub async fn admit(
     repo: &Repository,
@@ -694,12 +770,16 @@ pub async fn admit(
             {
                 return Err(abort("busy"));
             }
+            let mut frozen = evidence.clone();
+            if let Some(dialogue) = frozen.request.dialogue.as_mut() {
+                dialogue.history = recent_dialogue_in(&tx, key, state.generation, timestamp).await?;
+            }
             let mut exchange = Exchange {
                 actor: actor.clone(),
                 source: request.source.clone(),
                 turn: QaTurn::queued(id.clone(), request.request_id.clone(), request.question.clone()),
                 events: Vec::new(),
-                evidence: Some(evidence.clone()),
+                evidence: Some(frozen),
                 resolved_question: (request.question != evidence.request.question)
                     .then(|| evidence.request.question.clone()),
             };
@@ -764,17 +844,43 @@ pub async fn latest(
         .map(|exchange| (exchange.turn, exchange.events)))
 }
 
-/// Use the last cited question's resolved topic, never its old observations.
+/// Use the most recent cited topic within the short conversation window.
 pub async fn last_answered_prompt(
     repo: &Repository,
     actor: &Actor,
 ) -> Result<Option<String>, TxError> {
-    Ok(latest_exchange(repo, actor)
-        .await?
-        .filter(|exchange| {
-            exchange.turn.state == QaTurnState::Answered && !exchange.turn.findings.is_empty()
-        })
-        .map(|exchange| exchange.resolved_question.unwrap_or(exchange.turn.question)))
+    let key = actor.key()?;
+    Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| {
+        let key = &key;
+        async move {
+            actor.validate_in(&tx).await?;
+            let setting = settings_in(&tx).await?;
+            if !setting.enabled {
+                return Ok(None);
+            }
+            for row in recent_completed_in(
+                &tx,
+                key,
+                setting.generation,
+                now_ms(),
+                QA_MAX_DIALOGUE_HISTORY as i64,
+            )
+            .await?
+            {
+                let exchange = decode(&row.payload)?;
+                if exchange.turn.state == QaTurnState::Answered
+                    && !exchange.turn.findings.is_empty()
+                {
+                    return Ok(Some(
+                        exchange.resolved_question.unwrap_or(exchange.turn.question),
+                    ));
+                }
+            }
+            Ok(None)
+        }
+    })
+    .await?
+    .value)
 }
 
 async fn latest_exchange(repo: &Repository, actor: &Actor) -> Result<Option<Exchange>, TxError> {
@@ -989,28 +1095,65 @@ pub async fn publish(
     state: QaTurnState,
     finding: Option<QaFinding>,
 ) -> Result<bool, TxError> {
-    publish_with_context(repo, lease, state, finding, None).await
+    publish_with_model_result(repo, lease, state, finding, None, None).await
 }
 
 /// Commit model usage with the same terminal transition and execution lease as the answer.
-pub async fn publish_with_context(
+pub async fn publish_with_model_result(
     repo: &Repository,
     lease: &job_dispatch::DeliveryLease,
     state: QaTurnState,
     finding: Option<QaFinding>,
     context: Option<QaContextUsage>,
+    reply: Option<String>,
 ) -> Result<bool, TxError> {
     Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| {
         let finding = finding.clone();
+        let reply = reply.clone();
         async move {
             let Some((row, mut exchange)) = live_exchange_in(&tx, lease).await? else {
                 return Ok(false);
             };
-            if state == QaTurnState::Answered && exchange.turn.findings.is_empty() {
+            let dialogue_evidence = exchange
+                .evidence
+                .as_ref()
+                .filter(|evidence| evidence.request.dialogue.is_some());
+            if reply.as_deref().is_some_and(|text| {
+                dialogue_evidence.is_none()
+                    || state != QaTurnState::Answered
+                    || !valid_dialogue_reply(text)
+            }) || (state == QaTurnState::Answered
+                && exchange.turn.findings.is_empty()
+                && reply.is_none())
+            {
                 return Err(abort("invalid_part"));
             }
             if state.is_terminal() {
                 exchange.turn.context = context;
+                exchange.turn.reply = reply;
+                if let Some(evidence) = dialogue_evidence.filter(|_| {
+                    matches!(
+                        state,
+                        QaTurnState::Answered | QaTurnState::InsufficientContext
+                    )
+                }) {
+                    exchange.turn.notice = evidence.notice;
+                    exchange.turn.conversation = evidence.conversation;
+                    if exchange.turn.reply.is_none() {
+                        if let Some(dialogue) = evidence
+                            .request
+                            .dialogue
+                            .as_ref()
+                            .filter(|dialogue| dialogue.kind == QaDialogueKind::Recall)
+                        {
+                            exchange.turn.reply = dialogue
+                                .history
+                                .last()
+                                .map(|exchange| format!("You asked “{}”", exchange.question))
+                                .filter(|text| valid_dialogue_reply(text));
+                        }
+                    }
+                }
             }
             append_in(
                 &tx,

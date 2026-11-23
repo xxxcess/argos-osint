@@ -7,6 +7,7 @@ pub(super) enum Question {
     Acknowledgement,
     Help,
     FollowUp,
+    Recall,
     ExplainSelected,
     Readiness(ReadinessCheckId),
     ReadinessExplanation(ReadinessCheckId),
@@ -199,6 +200,12 @@ fn conversational_intent(question: &str) -> Option<Question> {
         | "check again"
         | "can you check again"
         | "could you check again" => Question::FollowUp,
+        "what did i just ask"
+        | "what did i ask you"
+        | "what did i just say"
+        | "what were we talking about"
+        | "what were we just talking about"
+        | "recap our conversation" => Question::Recall,
         "what does this mean"
         | "what does this status mean"
         | "what is this"

@@ -23,6 +23,8 @@ The app and companion are released independently of the optional QA archive. Pac
 
 The companion requests context-window counts from compatible packs. Older packs continue to answer, and turns from those workers show an empty usage indicator when counts are unavailable.
 
+Embedded packs can also carry the pinned FLAN-T5-small dialogue model under `model/generator`. The installer and companion verify the complete file group against pinned digests. The worker advertises dialogue only for a verified group. Conversational turns use up to two recent exchanges from the current registration and a 256-token input budget. The worker loads one engine at a time, so the first turn after changing engines includes a model load. Packs with the extractor alone keep the existing conversational replies. The Distributed model container continues to serve extractive QA.
+
 ## Distributed review deployment
 
 Use the QA model image for the gateway’s Linux architecture. Prepare one empty socket directory with mode `0700` for the executor/model pair, owned by the isolated deployment UID. Select it with `FLEETWORKS_QA_SOCKET_DIR` and set `FLEETWORKS_QA_IMAGE` to the verified local image tag. Apply [`compose.inbox-qa.yml`](compose.inbox-qa.yml) after [`compose.native-review.yml`](compose.native-review.yml).

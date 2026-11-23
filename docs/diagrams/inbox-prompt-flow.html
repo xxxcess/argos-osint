@@ -21,7 +21,7 @@
   <figure tabindex="0" aria-label="Scrollable prompt flow diagram">
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 896" role="img" aria-labelledby="inbox-prompt-flow-title inbox-prompt-flow-desc">
   <title id="inbox-prompt-flow-title">Inbox prompt flow</title>
-  <desc id="inbox-prompt-flow-desc">The native Inbox composer submits a registered turn to the Embedded companion over a private Unix socket or to the paired Distributed gateway over HTTPS. Shared QA admission checks permissions and captures fresh, scoped readiness, host metrics and Jobs counts for every new accepted turn. Follow-ups can reuse the previous answered topic and take new observations. Specific facts and summaries of passed, failed, or unresolved checks use current counts, check names and timestamped evidence. Broad readiness summaries use a durable queue and a sandboxed BERT worker with a 256-token input window. The coordinator verifies cited selections against the snapshot and can use complete fresh readiness observations when a summary returns no usable selection. The backend commits the canonical turn and ordered events. Inbox resumes from a cursor or fetches the latest turn. The mini dial sits under the reply, and Sources reveals the timestamped citations.</desc>
+  <desc id="inbox-prompt-flow-desc">The native Inbox composer submits a registered turn to the Embedded companion over a private Unix socket or to the paired Distributed gateway over HTTPS. Shared QA admission checks permissions and captures fresh, scoped readiness, host metrics and Jobs counts for every new accepted turn. Follow-ups can reuse the previous answered topic and take new observations. Specific facts and summaries of passed, failed, or unresolved checks use current counts, check names and timestamped evidence. Broad readiness summaries and local conversation use a durable queue and a sandboxed Rust-BERT worker with a 256-token input window. The Embedded generator receives up to two earlier exchanges scoped to the registration. The coordinator verifies cited selections against the snapshot and can use complete fresh readiness observations when a summary returns no usable selection. The backend commits the canonical turn and ordered events. Inbox resumes from a cursor or fetches the latest turn. The mini dial sits under the reply, and Sources reveals the timestamped citations.</desc>
   <style>
     text{font-family:Geist,Arial,sans-serif;fill:#242424}
     .label{font-size:22px;font-weight:600}
@@ -87,19 +87,19 @@
     <rect x="592" y="384" width="448" height="88" rx="6" class="node"/>
     <text x="612" y="412" class="label">Broad readiness summary queue</text>
     <text x="612" y="436" class="note">The QA executor claims the registered turn</text>
-    <text x="612" y="460" class="note">Uses the frozen evidence snapshot</text>
+    <text x="612" y="460" class="note">Frozen evidence or two earlier exchanges</text>
   </g>
   <g data-card="true">
     <rect x="592" y="508" width="448" height="100" rx="6" class="isolated"/>
-    <text x="612" y="536" class="label">Sandboxed BERT worker</text>
-    <text x="612" y="560" class="note">Selects bounded spans from supplied passages</text>
+    <text x="612" y="536" class="label">Sandboxed Rust-BERT worker</text>
+    <text x="612" y="560" class="note">Selects evidence or writes conversational replies</text>
     <text x="612" y="580" class="note">Embedded pipes or Distributed private socket</text>
     <text x="612" y="600" class="note">Reports peak usage of the 256-token window</text>
   </g>
 
   <g data-card="true">
     <rect x="192" y="644" width="736" height="108" rx="6" class="focus"/>
-    <text x="212" y="672" class="label">Validate citations and commit</text>
+    <text x="212" y="672" class="label">Validate and commit</text>
     <text x="212" y="696" class="note">Verify cited spans and preserve source IDs and original observation times</text>
     <text x="212" y="720" class="note">Use eligible fresh readiness facts when a summary returns no usable selection</text>
     <text x="212" y="744" class="note">Persist the canonical turn and ordered events</text>

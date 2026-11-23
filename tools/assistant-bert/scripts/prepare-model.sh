@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
-# Stage and check the pinned, cased SQuAD checkpoint before publishing it locally.
+# Stage and check the pinned QA checkpoints before publishing them locally.
 set -euo pipefail
 
+with_generator=false
+if [[ ${1:-} == --with-generator ]]; then
+  with_generator=true
+  shift
+fi
 if [[ $# != 1 || -z "$1" ]]; then
-  echo "usage: bash tools/assistant-bert/scripts/prepare-model.sh <new-model-dir>" >&2
+  echo "usage: bash tools/assistant-bert/scripts/prepare-model.sh [--with-generator] <new-model-dir>" >&2
   exit 2
 fi
 
@@ -29,6 +34,31 @@ eeaa9875b23b04b4c54ef759d03db9d1ba1554838f8fb26c5d96fa551df93d02  vocab.txt
 8a9f9b2f153ac9ff230aca4548fa3286be9d2f9ea4eb7e9169665b1a8e983f44  rust_model.ot
 CHECKSUMS
 )
+if "$with_generator"; then
+  script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+  python3 -B - "$script_dir/../../../scripts" "$staging/generator" <<'PY'
+from pathlib import Path
+import subprocess
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from fleetworks_qa_pack import GENERATOR, GENERATOR_REVISION, MAX_GENERATOR_BYTES, check, sha256
+
+generator = Path(sys.argv[2])
+check(sum(size for size, _ in GENERATOR.values()) <= MAX_GENERATOR_BYTES,
+      "pinned generator exceeds its size limit")
+generator.mkdir(mode=0o700)
+model_url = f"https://huggingface.co/google/flan-t5-small/resolve/{GENERATOR_REVISION}"
+for relative, (size, digest) in GENERATOR.items():
+    path = generator / Path(relative).name
+    subprocess.run(["curl", "--fail", "--silent", "--show-error", "--location", "--retry", "3",
+                    "--proto", "=https", "--proto-redir", "=https",
+                    "--retry-max-time", "300", "--max-time", "300", "--max-filesize", str(size),
+                    f"{model_url}/{path.name}", "--output", str(path)], check=True, timeout=320)
+    check(path.stat().st_size == size and sha256(path) == digest,
+          f"{path.name} does not match the pinned generator")
+PY
+fi
 python3 - "$staging" "$model_dir" <<'PY'
 import os
 import sys

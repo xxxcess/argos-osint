@@ -1,5 +1,8 @@
 pub(crate) mod frame;
 
+#[path = "dialogue.rs"]
+mod dialogue;
+
 // Share the private frame contract without pulling the application into the model process.
 #[allow(dead_code)]
 #[path = "../../../crates/fleetworks-contracts/src/qa_worker.rs"]
@@ -33,6 +36,7 @@ use rust_bert::pipelines::question_answering::QaInput;
 use rust_bert::pipelines::question_answering::QuestionAnsweringConfig;
 use rust_bert::pipelines::question_answering::QuestionAnsweringModel;
 use rust_bert::resources::LocalResource;
+use rust_bert::t5::T5Generator;
 use sha2::Digest;
 use sha2::Sha256;
 use tch::Device;
@@ -40,6 +44,7 @@ use tch::Device;
 use protocol::QaContextUsage;
 use protocol::QaPassage;
 use protocol::QaWorkerCommand;
+use protocol::QaWorkerDialogue;
 use protocol::QaWorkerEvent;
 use protocol::QaWorkerOutcome;
 use protocol::QaWorkerPanicCause;
@@ -49,6 +54,7 @@ use protocol::QaWorkerRequest;
 use protocol::QaWorkerSequence;
 use protocol::QA_CONTEXT_USAGE_ENV;
 use protocol::QA_CONTEXT_WINDOW_TOKENS;
+use protocol::QA_DIALOGUE_ENV;
 use protocol::QA_MAX_FINDINGS;
 use protocol::QA_MAX_FRAME_BYTES;
 use protocol::QA_MAX_VISIBLE_WORDS;
@@ -127,17 +133,17 @@ fn startup_panic(info: &panic::PanicHookInfo<'_>) {
     let _ = STARTUP_PANIC.set((source, line, cause));
 }
 
-fn load_model(dir: &Path) -> Result<QuestionAnsweringModel> {
+fn verify_model_files(dir: &Path, files: &[(&str, &str)], max_file_bytes: u64) -> Result<()> {
     ensure!(dir.is_absolute(), "QA model directory must be absolute");
-    for (name, expected) in QA_MODEL_FILES {
+    for &(name, expected) in files {
         let path = dir.join(name);
         let metadata = fs::symlink_metadata(&path)?;
         // Validate the exact contents before the parser or LibTorch sees the file.
         ensure!(
-            metadata.is_file() && (1..=261_000_000).contains(&metadata.len()),
+            metadata.is_file() && (1..=max_file_bytes).contains(&metadata.len()),
             "invalid QA model resource"
         );
-        let mut file = fs::File::open(path)?.take(261_000_001);
+        let mut file = fs::File::open(path)?.take(max_file_bytes + 1);
         let mut digest = Sha256::new();
         io::copy(&mut file, &mut digest)?;
         ensure!(
@@ -145,6 +151,22 @@ fn load_model(dir: &Path) -> Result<QuestionAnsweringModel> {
             "QA model digest mismatch"
         );
     }
+    Ok(())
+}
+
+fn configure_torch() -> Result<()> {
+    // The launcher's OpenMP and MKL limits apply before LibTorch initializes. The
+    // explicit intra-op setter also initializes an unrelated native thread pool.
+    tch::set_num_interop_threads(1);
+    ensure!(
+        tch::get_num_threads() == 1 && tch::get_num_interop_threads() == 1,
+        "QA model did not honor its Torch thread limits"
+    );
+    Ok(())
+}
+
+fn load_model(dir: &Path) -> Result<QuestionAnsweringModel> {
+    verify_model_files(dir, &QA_MODEL_FILES, 261_000_000)?;
 
     let resource = |name: &str| -> Result<LocalResource> {
         let local_path = dir.join(name);
@@ -154,13 +176,6 @@ fn load_model(dir: &Path) -> Result<QuestionAnsweringModel> {
         );
         Ok(LocalResource { local_path })
     };
-    // The launcher's OpenMP and MKL limits apply before LibTorch initializes. The
-    // explicit intra-op setter also initializes an unrelated native thread pool.
-    tch::set_num_interop_threads(1);
-    ensure!(
-        tch::get_num_threads() == 1 && tch::get_num_interop_threads() == 1,
-        "QA model did not honor its Torch thread limits"
-    );
     QuestionAnsweringModel::new(QuestionAnsweringConfig {
         model_resource: ModelResource::Torch(Box::new(resource("rust_model.ot")?)),
         config_resource: Box::new(resource("config.json")?),
@@ -178,6 +193,74 @@ fn load_model(dir: &Path) -> Result<QuestionAnsweringModel> {
         kind: None,
     })
     .map_err(|_| anyhow!("could not load the pinned QA model"))
+}
+
+enum ResidentModel {
+    Unloaded,
+    Extractive(Box<QuestionAnsweringModel>),
+    Dialogue(Box<T5Generator>),
+}
+
+impl ResidentModel {
+    fn extractive(&mut self, dir: &Path) -> Result<&QuestionAnsweringModel> {
+        if !matches!(self, Self::Extractive(_)) {
+            *self = Self::Unloaded;
+            *self = Self::Extractive(Box::new(load_model(dir)?));
+        }
+        let Self::Extractive(model) = self else {
+            unreachable!("extractive model was loaded");
+        };
+        Ok(model)
+    }
+
+    fn dialogue(
+        &mut self,
+        dir: Option<&Path>,
+        question: &str,
+        request: &QaWorkerDialogue,
+        stopping: &AtomicBool,
+    ) -> (Option<String>, Option<QaContextUsage>) {
+        let skipped = (
+            None,
+            Some(QaContextUsage::new(QA_CONTEXT_WINDOW_TOKENS, 0, 0)),
+        );
+        let Some(dir) = dir else {
+            return skipped;
+        };
+        if !matches!(self, Self::Dialogue(_)) {
+            // Drop the extractor before allocating the generator's weights.
+            *self = Self::Unloaded;
+            let Ok(Ok(generator)) = panic::catch_unwind(|| dialogue::load(dir)) else {
+                return skipped;
+            };
+            *self = Self::Dialogue(Box::new(generator));
+        }
+        if stopping.load(Ordering::Acquire) {
+            return skipped;
+        }
+        let Self::Dialogue(generator) = self else {
+            unreachable!("dialogue model was loaded");
+        };
+        let generated = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            dialogue::generate(generator, question, request)
+        }));
+        match generated {
+            Ok(Ok(Some(generation))) => (
+                generation.reply,
+                Some(QaContextUsage::new(
+                    QA_CONTEXT_WINDOW_TOKENS,
+                    generation.input_tokens,
+                    1,
+                )),
+            ),
+            Ok(Ok(None)) => skipped,
+            Ok(Err(_)) | Err(_) => {
+                // A failed native call cannot attest how much of the input was processed.
+                *self = Self::Unloaded;
+                (None, None)
+            }
+        }
+    }
 }
 
 /// Adjacent nested variants of the same extraction aren't competing answers. Disjoint spans
@@ -233,7 +316,6 @@ fn answer(
     output: &mut impl FnMut(QaWorkerReply) -> io::Result<()>,
     stopping: &AtomicBool,
 ) -> Result<()> {
-    request.validate()?;
     let tokenizer = model.get_tokenizer();
     let mut sequence = QaWorkerSequence::default();
     let mut found = 0;
@@ -328,8 +410,38 @@ fn answer(
         } else {
             None
         },
+        reply: None,
     };
     sequence.accept(&request, &event)?;
+    output(QaWorkerReply::Event { event })?;
+    Ok(())
+}
+
+fn answer_dialogue(
+    model: &mut ResidentModel,
+    model_dir: Option<&Path>,
+    request: &QaWorkerRequest,
+    dialogue: &QaWorkerDialogue,
+    report_context: bool,
+    output: &mut impl FnMut(QaWorkerReply) -> io::Result<()>,
+    stopping: &AtomicBool,
+) -> Result<()> {
+    let (reply, context) = model.dialogue(model_dir, &request.question, dialogue, stopping);
+    if stopping.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    let event = QaWorkerEvent::Complete {
+        turn_id: request.turn_id.clone(),
+        sequence: 1,
+        outcome: if reply.is_some() {
+            QaWorkerOutcome::Answered
+        } else {
+            QaWorkerOutcome::InsufficientContext
+        },
+        context: if report_context { context } else { None },
+        reply,
+    };
+    QaWorkerSequence::default().accept(request, &event)?;
     output(QaWorkerReply::Event { event })?;
     Ok(())
 }
@@ -361,10 +473,18 @@ fn receive_commands(stopping: Arc<AtomicBool>) -> io::Result<mpsc::Receiver<QaWo
     Ok(receiver)
 }
 
-fn ready() -> QaWorkerReply {
-    QaWorkerReply::Ready {
-        protocol: QA_WORKER_PROTOCOL,
-        model_revision: QA_MODEL_REVISION.into(),
+fn ready(dialogue: bool) -> QaWorkerReply {
+    let model_revision = QA_MODEL_REVISION.into();
+    if dialogue {
+        QaWorkerReply::ReadyWithDialogue {
+            protocol: QA_WORKER_PROTOCOL,
+            model_revision,
+        }
+    } else {
+        QaWorkerReply::Ready {
+            protocol: QA_WORKER_PROTOCOL,
+            model_revision,
+        }
     }
 }
 
@@ -384,9 +504,13 @@ pub(crate) fn run(mut output: impl FnMut(QaWorkerReply) -> io::Result<()>) -> Re
 
     // Older launchers reject unknown fields in a terminal event.
     let report_context = env::var_os(QA_CONTEXT_USAGE_ENV).as_deref() == Some("1".as_ref());
+    let enable_dialogue = env::var_os(QA_DIALOGUE_ENV).as_deref() == Some("1".as_ref());
     let stopping = Arc::new(AtomicBool::new(false));
     let commands = receive_commands(stopping.clone())?;
-    let model = match panic::catch_unwind(|| load_model(&dir)) {
+    let model = match panic::catch_unwind(|| {
+        configure_torch()?;
+        load_model(&dir)
+    }) {
         Ok(model) => model?,
         Err(_) => {
             let (source, line, cause) = STARTUP_PANIC.get().copied().unwrap_or((
@@ -402,15 +526,35 @@ pub(crate) fn run(mut output: impl FnMut(QaWorkerReply) -> io::Result<()>) -> Re
             return Err(anyhow!("QA model process panicked during startup"));
         }
     };
-    output(ready())?;
+    let mut model = ResidentModel::Extractive(Box::new(model));
+    let generator_dir = dir.join("generator");
+    let generator_dir =
+        (enable_dialogue && dialogue::verify(&generator_dir).is_ok()).then_some(generator_dir);
+    output(ready(generator_dir.is_some()))?;
     for command in commands {
         if stopping.load(Ordering::Acquire) {
             break;
         }
         match command {
-            QaWorkerCommand::Ping => output(ready())?,
+            QaWorkerCommand::Ping => output(ready(generator_dir.is_some()))?,
             QaWorkerCommand::Ask { request } => {
-                answer(&model, request, report_context, &mut output, &stopping)?;
+                request.validate()?;
+                if let Some(dialogue) = &request.dialogue {
+                    answer_dialogue(
+                        &mut model,
+                        generator_dir.as_deref(),
+                        &request,
+                        dialogue,
+                        report_context,
+                        &mut output,
+                        &stopping,
+                    )?;
+                } else {
+                    let extractive = model.extractive(&dir)?;
+                    if !stopping.load(Ordering::Acquire) {
+                        answer(extractive, request, report_context, &mut output, &stopping)?;
+                    }
+                }
             }
             QaWorkerCommand::Shutdown => return Ok(()),
             QaWorkerCommand::Open | QaWorkerCommand::OpenWithContext => {

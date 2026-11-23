@@ -12,6 +12,7 @@ use serde::Serialize;
 pub const QA_WORKER_PROTOCOL: u16 = 1;
 pub const QA_CONTEXT_WINDOW_TOKENS: u16 = 256;
 pub const QA_CONTEXT_USAGE_ENV: &str = "FLEETWORKS_QA_CONTEXT_USAGE";
+pub const QA_DIALOGUE_ENV: &str = "FLEETWORKS_QA_DIALOGUE";
 pub const QA_MODEL_REVISION: &str = "564e9b582944a57a3e586bbb98fd6f0a4118db7f";
 pub const QA_MODEL_FILES: [(&str, &str); 3] = [
     (
@@ -27,6 +28,20 @@ pub const QA_MODEL_FILES: [(&str, &str); 3] = [
         "8a9f9b2f153ac9ff230aca4548fa3286be9d2f9ea4eb7e9169665b1a8e983f44",
     ),
 ];
+pub const QA_GENERATOR_FILES: [(&str, &str); 3] = [
+    (
+        "config.json",
+        "439aa0fecf5a5546a1def68b1fc45e538e2c94528ce805378daf091e2bf6e4de",
+    ),
+    (
+        "spiece.model",
+        "d60acb128cf7b7f2536e8f38a5b18a05535c9e14c7a355904270e15b0945ea86",
+    ),
+    (
+        "model.safetensors",
+        "495fa51e204676f1a857a9fc13c4c89f3f5ba9f480b898cebca02add25e6d749",
+    ),
+];
 
 /// Room for bounded evidence, JSON escaping, and the envelope.
 pub const QA_MAX_FRAME_BYTES: usize = 512 * 1024;
@@ -35,6 +50,8 @@ pub const QA_MAX_EVIDENCE_BYTES: usize = 64 * 1024;
 pub const QA_MAX_PASSAGES: usize = 16;
 pub const QA_MAX_FINDINGS: usize = 3;
 pub const QA_MAX_VISIBLE_WORDS: usize = 60;
+pub const QA_MAX_DIALOGUE_HISTORY: usize = 2;
+pub const QA_MAX_DIALOGUE_MESSAGE_BYTES: usize = 1_024;
 const MAX_ANSWER_BYTES: usize = 32 * 1024;
 const MAX_OPAQUE_ID_BYTES: usize = 128;
 const MAX_WINDOWS_PER_PASSAGE: usize = 3;
@@ -58,10 +75,15 @@ impl QaContextUsage {
     }
 
     fn is_valid_for(self, request: &QaWorkerRequest) -> bool {
+        let max_windows = if request.dialogue.is_some() {
+            1
+        } else {
+            request.passages.len() * MAX_WINDOWS_PER_PASSAGE
+        };
         self.window_tokens == QA_CONTEXT_WINDOW_TOKENS
             && self.peak_input_tokens <= self.window_tokens
             && (self.model_windows == 0) == (self.peak_input_tokens == 0)
-            && usize::from(self.model_windows) <= request.passages.len() * MAX_WINDOWS_PER_PASSAGE
+            && usize::from(self.model_windows) <= max_windows
     }
 }
 
@@ -89,6 +111,8 @@ pub struct QaWorkerRequest {
     pub snapshot_id: String,
     pub question: String,
     pub passages: Vec<QaPassage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dialogue: Option<QaWorkerDialogue>,
 }
 
 impl QaWorkerRequest {
@@ -103,6 +127,7 @@ impl QaWorkerRequest {
             snapshot_id,
             question,
             passages,
+            dialogue: None,
         }
     }
 
@@ -112,6 +137,14 @@ impl QaWorkerRequest {
             || !opaque_id(&self.snapshot_id)
             || !bounded_text(&self.question, QA_MAX_QUESTION_BYTES)
             || self.passages.len() > QA_MAX_PASSAGES
+            || self.dialogue.as_ref().is_some_and(|dialogue| {
+                !self.passages.is_empty()
+                    || dialogue.history.len() > QA_MAX_DIALOGUE_HISTORY
+                    || dialogue.history.iter().any(|exchange| {
+                        !bounded_text(&exchange.question, QA_MAX_DIALOGUE_MESSAGE_BYTES)
+                            || !bounded_text(&exchange.reply, QA_MAX_DIALOGUE_MESSAGE_BYTES)
+                    })
+            })
         {
             return Err(invalid("invalid QA worker request"));
         }
@@ -131,6 +164,36 @@ impl QaWorkerRequest {
         }
         Ok(())
     }
+}
+
+/// A conversational request and at most two earlier exchanges in chronological order.
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct QaWorkerDialogue {
+    pub kind: QaDialogueKind,
+    pub history: Vec<QaDialogueExchange>,
+}
+
+#[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QaDialogueKind {
+    Greeting,
+    Acknowledgement,
+    Help,
+    Recall,
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct QaDialogueExchange {
+    pub question: String,
+    pub reply: String,
+}
+
+pub fn valid_dialogue_reply(reply: &str) -> bool {
+    bounded_text(reply, QA_MAX_DIALOGUE_MESSAGE_BYTES)
+        && reply.split_whitespace().count() <= QA_MAX_VISIBLE_WORDS
+        && !reply.chars().any(char::is_control)
 }
 
 /// The last event a worker emits for one request.
@@ -163,6 +226,8 @@ pub enum QaWorkerEvent {
         outcome: QaWorkerOutcome,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context: Option<QaContextUsage>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply: Option<String>,
     },
 }
 
@@ -184,6 +249,10 @@ pub enum QaWorkerCommand {
 #[non_exhaustive]
 pub enum QaWorkerReply {
     Ready {
+        protocol: u16,
+        model_revision: String,
+    },
+    ReadyWithDialogue {
         protocol: u16,
         model_revision: String,
     },
@@ -272,6 +341,7 @@ impl QaWorkerSequence {
                 let words = self.words + text.split_whitespace().count();
                 let bytes = self.bytes + text.len();
                 if turn_id != &request.turn_id
+                    || request.dialogue.is_some()
                     || *sequence != expected
                     || self.sources.len() == QA_MAX_FINDINGS
                     || self.sources.contains(source_id)
@@ -290,11 +360,19 @@ impl QaWorkerSequence {
                 sequence,
                 outcome,
                 context,
+                reply,
             } => {
                 if turn_id != &request.turn_id
                     || *sequence != expected
                     || context.is_some_and(|usage| !usage.is_valid_for(request))
-                    || (*outcome == QaWorkerOutcome::Answered && self.sources.is_empty())
+                    || reply.as_deref().is_some_and(|text| {
+                        request.dialogue.is_none()
+                            || *outcome != QaWorkerOutcome::Answered
+                            || !valid_dialogue_reply(text)
+                    })
+                    || (*outcome == QaWorkerOutcome::Answered
+                        && self.sources.is_empty()
+                        && reply.is_none())
                     || (*outcome == QaWorkerOutcome::InsufficientContext
                         && !self.sources.is_empty())
                 {
@@ -389,6 +467,7 @@ mod tests {
             sequence: 2,
             outcome: QaWorkerOutcome::Answered,
             context: None,
+            reply: None,
         };
         assert!(sequence.accept(&request, &foreign).is_err());
         let oversized_context = QaWorkerEvent::Complete {
@@ -396,6 +475,7 @@ mod tests {
             sequence: 2,
             outcome: QaWorkerOutcome::Answered,
             context: Some(QaContextUsage::new(256, 257, 1)),
+            reply: None,
         };
         assert!(sequence.accept(&request, &oversized_context).is_err());
         let terminal = QaWorkerEvent::Complete {
@@ -403,9 +483,40 @@ mod tests {
             sequence: 2,
             outcome: QaWorkerOutcome::Answered,
             context: Some(QaContextUsage::new(256, 18, 1)),
+            reply: None,
         };
         assert!(sequence.accept(&request, &terminal).unwrap());
         assert!(sequence.accept(&request, &terminal).is_err());
+    }
+
+    #[test]
+    fn only_dialogue_requests_accept_a_bounded_generated_reply() {
+        let mut request =
+            QaWorkerRequest::new("turn".into(), "snapshot".into(), "Hi".into(), vec![]);
+        let event = QaWorkerEvent::Complete {
+            turn_id: request.turn_id.clone(),
+            sequence: 1,
+            outcome: QaWorkerOutcome::Answered,
+            context: Some(QaContextUsage::new(QA_CONTEXT_WINDOW_TOKENS, 80, 1)),
+            reply: Some("Hello! How can I help?".into()),
+        };
+        assert!(QaWorkerSequence::default()
+            .accept(&request, &event)
+            .is_err());
+        let earlier = QaDialogueExchange {
+            question: "What can you check?".into(),
+            reply: "Workstation status.".into(),
+        };
+        request.dialogue = Some(QaWorkerDialogue {
+            kind: QaDialogueKind::Greeting,
+            history: vec![earlier.clone(); QA_MAX_DIALOGUE_HISTORY],
+        });
+        assert!(request.validate().is_ok());
+        assert!(QaWorkerSequence::default()
+            .accept(&request, &event)
+            .unwrap());
+        request.dialogue.as_mut().unwrap().history.push(earlier);
+        assert!(request.validate().is_err());
     }
 
     #[test]

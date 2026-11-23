@@ -28,7 +28,9 @@ use fleetworks_contracts::chat::{
     QA_MAX_WORDS, QA_SETTINGS_PATH, QA_TURNS_PATH,
 };
 use fleetworks_contracts::context::{CredentialPurpose, MutationContext, Permission};
-use fleetworks_contracts::qa_worker::{QaPassage, QaWorkerEvent, QaWorkerRequest};
+use fleetworks_contracts::qa_worker::{
+    QaDialogueKind, QaPassage, QaWorkerDialogue, QaWorkerEvent, QaWorkerRequest,
+};
 use fleetworks_contracts::readiness::{ReadinessCheckId, ReadinessState};
 use futures_util::StreamExt;
 use tokio::sync::{mpsc, watch, Semaphore};
@@ -1036,6 +1038,10 @@ async fn snapshot(
             notice = Some(QaTurnNotice::OutOfScope);
             conversation = Some(QaConversationReply::FollowUpNeedsTopic);
         }
+        Question::Recall => {
+            notice = Some(QaTurnNotice::OutOfScope);
+            conversation = Some(QaConversationReply::RecallNeedsHistory);
+        }
         Question::Unsupported => {
             notice = Some(QaTurnNotice::OutOfScope);
             conversation = Some(QaConversationReply::ContextNeeded);
@@ -1043,11 +1049,27 @@ async fn snapshot(
     }
     let sampled_at_ms = earliest.unwrap_or_else(chrono::Utc::now).timestamp_millis();
     let turn_id = store::accepted_turn_id(actor, request, generation).map_err(storage_error)?;
+    let dialogue = match intent {
+        Question::Greeting if target.embedded => Some(QaDialogueKind::Greeting),
+        Question::Acknowledgement if target.embedded => Some(QaDialogueKind::Acknowledgement),
+        Question::Help if target.embedded => Some(QaDialogueKind::Help),
+        Question::Recall => Some(QaDialogueKind::Recall),
+        _ => None,
+    };
+    let mut worker_request =
+        QaWorkerRequest::new(turn_id.clone(), turn_id, request.question.clone(), passages);
+    if let Some(kind) = dialogue {
+        answer_mode = store::AnswerMode::Model;
+        worker_request.dialogue = Some(QaWorkerDialogue {
+            kind,
+            history: Vec::new(),
+        });
+    }
     Ok(store::FrozenEvidence {
         answer_mode,
         notice,
         conversation,
-        request: QaWorkerRequest::new(turn_id.clone(), turn_id, request.question.clone(), passages),
+        request: worker_request,
         sources,
         sampled_at_ms,
     })
